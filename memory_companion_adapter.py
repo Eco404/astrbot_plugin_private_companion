@@ -856,6 +856,122 @@ class MemoryCompanionAdapterMixin:
                 return
             logger.debug("[PrivateCompanion] MemoryCompanion 图片观察写入失败: %s", _single_line(exc, 120))
 
+    async def _memory_companion_record_photo_generation(
+        self,
+        event: Any | None,
+        *,
+        prompt: str,
+        kind: str = "",
+        intent_kind: str = "",
+        backend: str = "",
+        image_path: str = "",
+        note: str = "",
+        sent: bool = False,
+        trigger: str = "",
+        scene_preset: str = "",
+        reference_image_path: str = "",
+    ) -> None:
+        prompt_text = _single_line(prompt, 900)
+        if not prompt_text and not image_path:
+            return
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_event", None) if bridge is not None else None
+        if not callable(recorder):
+            recorder = getattr(bridge, "record_persona_life", None) if bridge is not None else None
+        if not callable(recorder):
+            return
+        is_private = False
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = False
+        scope = "private" if is_private else "group"
+        session_id = _single_line(getattr(event, "unified_msg_origin", "") if event is not None else "", 180)
+        platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        user_id = ""
+        user_name = ""
+        if event is not None:
+            try:
+                user_id = _single_line(event.get_sender_id(), 80)
+            except Exception:
+                user_id = ""
+            try:
+                user_name = _single_line(self._sender_display_name(event), 80)
+            except Exception:
+                user_name = ""
+        kind_text = _single_line(intent_kind or kind, 40) or "图片"
+        backend_text = _single_line(backend, 80)
+        scene_text = _single_line(scene_preset, 80)
+        ref_text = _single_line(reference_image_path, 260)
+        status = "生成并发送" if sent else "生成"
+        content = (
+            f"Bot 通过生图能力{status}了一张{kind_text}。"
+            f"画面要求：{prompt_text or '未记录'}。"
+            f"{' 场景预设：' + scene_text + '。' if scene_text else ''}"
+            f"{' 后端：' + backend_text + '。' if backend_text else ''}"
+            f"{' 使用了参考图。' if ref_text and '已使用' in str(note or '') else ''}"
+            f"{' 图片路径：' + _single_line(image_path, 260) + '。' if image_path else ''}"
+        )
+        memory_key = uuid.uuid4().hex[:12]
+        try:
+            await recorder(
+                content=content,
+                memory_type="photo_generation",
+                scope=scope,
+                session_id=session_id,
+                platform=platform,
+                message_id=f"private_companion_photo_{memory_key}",
+                memory_id=f"private_companion_photo_{memory_key}",
+                subject={"kind": "bot", "id": "self", "name": "Bot", "role": "bot_self"},
+                object={"kind": "user", "id": user_id, "name": user_name, "role": "conversation_partner"},
+                visibility="private_pair" if scope == "private" else "group_public",
+                sayability="direct",
+                reality_level="bot_action",
+                lifecycle="recent",
+                confidence=0.86,
+                importance=0.52,
+                review_status="auto",
+                tags=[
+                    "photo_generation",
+                    "image",
+                    "bot_action",
+                    "private_companion",
+                    _single_line(kind_text, 40),
+                    _single_line(trigger, 40),
+                ],
+                metadata={
+                    "date": self._memory_companion_now_iso()[:10],
+                    "event_type": "photo_generation",
+                    "action_label": "生图/拍照",
+                    "trigger": _single_line(trigger, 40),
+                    "kind": _single_line(kind, 40),
+                    "intent_kind": _single_line(intent_kind, 40),
+                    "backend": backend_text,
+                    "prompt": prompt_text,
+                    "image_path": _single_line(image_path, 260),
+                    "note": _single_line(note, 220),
+                    "sent": bool(sent),
+                    "scene_preset": scene_text,
+                    "reference_image_path": ref_text,
+                    "used_reference": bool(ref_text and "已使用" in str(note or "")),
+                    "query_anchors": [
+                        "刚才生成了什么图",
+                        "刚才发了什么图",
+                        "刚才画了什么",
+                        "表情包",
+                        "自拍",
+                        "生图",
+                        "图片生成",
+                    ],
+                },
+                source_plugin="private_companion",
+                occurred_at=self._memory_companion_now_iso(),
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_photo_generation"):
+                return
+            logger.debug("[PrivateCompanion] MemoryCompanion 生图记录写入失败: %s", _single_line(exc, 120))
+
     async def _memory_companion_record_user_habit(
         self,
         *,

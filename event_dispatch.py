@@ -3007,6 +3007,114 @@ class EventDispatchMixin:
             group["active_bot_conversation"] = active
         return active
 
+    def _group_air_guard_trim_bot_replies(self, group: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:
+        current = _now_ts() if now is None else float(now)
+        window = max(30, _safe_int(getattr(self, "group_air_guard_window_seconds", 180), 180, 30, 1800))
+        raw = group.get("recent_bot_replies") if isinstance(group.get("recent_bot_replies"), list) else []
+        kept = [
+            item for item in raw[-40:]
+            if isinstance(item, dict) and current - _safe_float(item.get("ts"), 0) <= window
+        ]
+        group["recent_bot_replies"] = kept[-20:]
+        return kept
+
+    def _group_air_guard_is_polite_terminal(self, text: Any) -> bool:
+        cleaned = _single_line(text, 80).lower()
+        if not cleaned:
+            return False
+        compact = re.sub(r"[\s，,。.!！?？~～…、（）()\[\]【】<>《》'\"“”‘’]+", "", cleaned)
+        if not compact:
+            return False
+        polite_words = (
+            "晚安", "安安", "睡了", "睡觉", "早点睡", "早安", "午安", "拜拜", "再见",
+            "886", "88", "谢谢", "感谢", "辛苦了", "好梦", "做个好梦", "goodnight", "gn",
+        )
+        if any(word in compact for word in polite_words):
+            return len(compact) <= 24
+        return False
+
+    def _group_air_guard_has_new_work_signal(self, text: Any) -> bool:
+        cleaned = _single_line(text, 220)
+        if not cleaned:
+            return False
+        compact = re.sub(r"\s+", "", cleaned)
+        task_markers = (
+            "帮我", "能不能", "可以", "怎么", "为什么", "咋", "如何", "看看", "查一下", "解释", "总结",
+            "翻译", "写", "改", "发", "生成", "搜索", "谁", "哪里", "什么时候", "吗", "？", "?",
+        )
+        repair_markers = ("不对", "错了", "不是", "我说的是", "刚才", "你说", "你漏", "重新")
+        return any(marker in compact for marker in task_markers) or any(marker in compact for marker in repair_markers)
+
+    async def _group_air_reply_guard_decision(
+        self,
+        group: dict[str, Any],
+        *,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        scene: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not bool(getattr(self, "enable_group_air_reply_guard", True)):
+            return {"block": False, "reason": "disabled"}
+        if str(scene.get("talking_to") or "") != "bot":
+            return {"block": False, "reason": "not_to_bot"}
+        now = _now_ts()
+        recent_bot = self._group_air_guard_trim_bot_replies(group, now=now)
+        max_replies = max(1, _safe_int(getattr(self, "group_air_guard_max_bot_replies", 3), 3, 1, 20))
+        has_new_work = self._group_air_guard_has_new_work_signal(text)
+        if len(recent_bot) >= max_replies and not has_new_work:
+            return {"block": True, "reason": "hard_limit", "recent_bot_replies": len(recent_bot)}
+
+        current_polite = self._group_air_guard_is_polite_terminal(text)
+        if current_polite:
+            polite_limit = max(1, _safe_int(getattr(self, "group_air_guard_polite_loop_limit", 2), 2, 1, 10))
+            polite_replies = [item for item in recent_bot if self._group_air_guard_is_polite_terminal(item.get("text"))]
+            if len(polite_replies) >= polite_limit:
+                return {"block": True, "reason": "polite_loop", "recent_polite_replies": len(polite_replies)}
+
+        should_judge = current_polite or len(recent_bot) >= max(1, max_replies - 1)
+        if not should_judge:
+            return {"block": False, "reason": "low_risk"}
+        provider_id = self._task_provider(getattr(self, "group_followup_judge_provider_id", ""), getattr(self, "response_review_provider_id", ""), getattr(self, "mai_style_provider_id", ""))
+        if not provider_id:
+            return {"block": False, "reason": "no_provider"}
+        flow_formatter = getattr(self, "_format_group_recent_flow_for_review", None)
+        recent_flow = flow_formatter(group, sender_id=sender_id, text=text, max_lines=12, max_chars=1200) if callable(flow_formatter) else ""
+        recent_bot_lines = "\n".join(
+            f"- {self._format_ts_for_display(_safe_float(item.get('ts'), 0)) if hasattr(self, '_format_ts_for_display') else int(_safe_float(item.get('ts'), 0))}: {_single_line(item.get('text'), 120)}"
+            for item in recent_bot[-6:]
+        ) or "（无）"
+        prompt = f"""
+判断群聊里 Bot 现在是否应该继续回复。只回答 REPLY 或 SILENCE，不要解释。
+
+优先 SILENCE 的情况：
+- 群里多个机器人/账号正在互相 @、互相引用或礼貌收尾，继续回只会循环。
+- 当前只是“晚安/早安/谢谢/拜拜/辛苦了”等收尾寒暄，而且 Bot 近期已经回过类似内容。
+- 话题已经自然结束、没有新的问题、任务或需要 Bot 承接的信息。
+
+可以 REPLY 的情况：
+- 当前明确提出新问题、给出新任务、纠正 Bot 事实错误，或需要 Bot 做具体处理。
+
+当前发言者：{self._group_member_identity_label(sender_id, sender_name, limit=24)}
+当前消息：{_single_line(text, 180)}
+场景：trigger={_single_line(scene.get('trigger'), 40)} reason={_single_line(scene.get('reason'), 80)}
+窗口内 Bot 已回复次数：{len(recent_bot)}
+Bot 近期回复：
+{recent_bot_lines}
+
+最近群聊：
+{recent_flow or '（无）'}
+""".strip()
+        try:
+            raw = await self._llm_call(prompt, max_tokens=8, provider_id=provider_id, task="group_air_reply_guard")
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群聊读空气判断失败: %s", _single_line(exc, 120))
+            return {"block": False, "reason": "judge_failed"}
+        answer = str(raw or "").strip().upper()
+        if answer.startswith("SILENCE") or answer.startswith("NO") or answer.startswith("否") or answer.startswith("沉默"):
+            return {"block": True, "reason": "air_judge", "answer": answer[:40]}
+        return {"block": False, "reason": "air_judge_reply", "answer": answer[:40]}
+
     async def _group_followup_llm_judge(
         self,
         group: dict[str, Any],

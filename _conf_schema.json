@@ -795,6 +795,30 @@
     "default": 1,
     "invisible": true
   },
+  "enable_group_air_reply_guard": {
+    "description": "Legacy flat config: 启用群聊读空气防互刷",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "group_air_guard_window_seconds": {
+    "description": "Legacy flat config: 群聊读空气检测窗口秒数",
+    "type": "int",
+    "default": 180,
+    "invisible": true
+  },
+  "group_air_guard_max_bot_replies": {
+    "description": "Legacy flat config: 群聊读空气窗口内最大 Bot 回复数",
+    "type": "int",
+    "default": 3,
+    "invisible": true
+  },
+  "group_air_guard_polite_loop_limit": {
+    "description": "Legacy flat config: 群聊礼貌收尾循环上限",
+    "type": "int",
+    "default": 2,
+    "invisible": true
+  },
   "idle_minutes": {
     "description": "Legacy flat config: 空闲多久后可主动问候（分钟）",
     "type": "int",
@@ -1213,6 +1237,16 @@
     "description": "Legacy flat config: 启用智能沉默",
     "type": "bool",
     "default": true,
+    "invisible": true
+  },
+  "smart_silence_judge_mode": {
+    "description": "Legacy flat config: 智能沉默判断模式",
+    "type": "string",
+    "default": "boundary_only",
+    "options": [
+      "boundary_only",
+      "contextual"
+    ],
     "invisible": true
   },
   "smart_silence_min_confidence": {
@@ -2479,19 +2513,30 @@
     "invisible": true
   },
   "enable_natural_language_photo_generation": {
-    "description": "Legacy flat config: 自然语言生图/改图",
+    "description": "Legacy flat config: 允许规则快判生图/改图",
     "type": "bool",
     "default": false,
     "invisible": true
   },
+  "natural_language_photo_generation_mode": {
+    "description": "Legacy flat config: 非指令生图处理方式",
+    "type": "string",
+    "default": "tool_first",
+    "options": [
+      "tool_first",
+      "rule_fast",
+      "off"
+    ],
+    "invisible": true
+  },
   "natural_language_photo_generation_max_daily": {
-    "description": "Legacy flat config: 自然语言生图/改图每日上限",
+    "description": "Legacy flat config: 规则快判生图/改图每日上限",
     "type": "int",
     "default": 2,
     "invisible": true
   },
   "natural_language_photo_extra_prompt": {
-    "description": "Legacy flat config: 自然语言生图附加提示词",
+    "description": "Legacy flat config: 规则快判生图附加提示词",
     "type": "text",
     "default": "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
     "invisible": true
@@ -4021,6 +4066,51 @@
         "default": 1,
         "condition": "enable_group_conversation_followup"
       },
+      "enable_group_air_reply_guard": {
+        "description": "启用群聊读空气防互刷",
+        "type": "bool",
+        "hint": "开启后，群聊明确 @/引用 Bot 也会先过一层防线：Bot 近期已多次回复，或话题进入晚安/谢谢/拜拜等收尾循环时，会静默不回，防止多个机器人互相引用刷屏。",
+        "default": true,
+        "condition": {
+          "enable_group_companion": true
+        }
+      },
+      "group_air_guard_window_seconds": {
+        "description": "读空气检测窗口秒数",
+        "type": "int",
+        "hint": "统计最近多少秒内 Bot 在本群回复过。建议 120-300 秒；越短越宽松。",
+        "slider": {
+          "min": 30,
+          "max": 1800,
+          "step": 10
+        },
+        "default": 180,
+        "condition": "enable_group_air_reply_guard"
+      },
+      "group_air_guard_max_bot_replies": {
+        "description": "窗口内最大 Bot 回复数",
+        "type": "int",
+        "hint": "窗口内 Bot 回复达到该次数后，后续明确唤醒也会硬拦截。建议 3，可有效压住机器人互刷。",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 3,
+        "condition": "enable_group_air_reply_guard"
+      },
+      "group_air_guard_polite_loop_limit": {
+        "description": "礼貌收尾循环上限",
+        "type": "int",
+        "hint": "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到类似消息就静默。建议 1-2。",
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 2,
+        "condition": "enable_group_air_reply_guard"
+      },
       "idle_minutes": {
         "description": "空闲多久后可主动问候（分钟）",
         "type": "int",
@@ -4798,10 +4888,23 @@
       "enable_smart_silence": {
         "description": "启用智能沉默",
         "type": "bool",
-        "hint": "开启后，用户明确表达“不想继续这个话题、别问了、换个话题、不用回复”等边界时，会调用小模型判断是否直接取消本轮回复，而不是继续发一句确认或解释。",
+        "hint": "开启后，会在发送前调用小模型判断是否直接取消本轮回复，而不是继续发一句确认、追问或解释。默认只在用户明确表达边界时触发；可切到上下文模型判断。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
+        }
+      },
+      "smart_silence_judge_mode": {
+        "description": "智能沉默判断模式",
+        "type": "string",
+        "hint": "boundary_only：仅在用户明确说别聊、别问、换话题、不用回复等边界时调用模型。contextual：短句收尾、忙了/睡了、敷衍回应、群聊普通反应等也可进入模型判断，更智能但更依赖模型质量。",
+        "default": "boundary_only",
+        "options": [
+          "boundary_only",
+          "contextual"
+        ],
+        "condition": {
+          "enable_smart_silence": true
         }
       },
       "smart_silence_min_confidence": {
@@ -7340,18 +7443,32 @@
         }
       },
       "enable_natural_language_photo_generation": {
-        "description": "自然语言生图/改图",
+        "description": "允许规则快判生图/改图",
         "type": "bool",
-        "hint": "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/重新画张图片/生成图片/来张图/用插件能力画”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
+        "hint": "只在“非指令生图处理方式”为 rule_fast 时生效。开启后，插件会在主链前直接接管高置信图片请求；默认建议使用 tool_first，让主链模型调用 pc_generate_photo。",
         "default": false,
         "condition": {
           "enable_photo_text_action": true
         }
       },
+      "natural_language_photo_generation_mode": {
+        "description": "非指令生图处理方式",
+        "type": "string",
+        "hint": "可填：tool_first、rule_fast、off。tool_first 表示普通聊天先进主链，由模型调用 pc_generate_photo；rule_fast 表示插件在主链前用规则直接接管；off 表示不做非指令生图前置处理。",
+        "default": "tool_first",
+        "options": [
+          "tool_first",
+          "rule_fast",
+          "off"
+        ],
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
       "natural_language_photo_generation_max_daily": {
-        "description": "自然语言生图/改图每日上限",
+        "description": "规则快判生图/改图每日上限",
         "type": "int",
-        "hint": "独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭自然语言生图/改图。",
+        "hint": "只作用于 rule_fast 规则快判入口。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭规则快判生图/改图。",
         "slider": {
           "min": 0,
           "max": 100,
@@ -7364,9 +7481,9 @@
         }
       },
       "natural_language_photo_extra_prompt": {
-        "description": "自然语言生图附加提示词",
+        "description": "规则快判生图附加提示词",
         "type": "text",
-        "hint": "只作用于自然语言生图/改图入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
+        "hint": "只作用于 rule_fast 规则快判入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
         "default": "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
         "condition": {
           "enable_photo_text_action": true,

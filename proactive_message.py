@@ -4550,7 +4550,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         today = _today_key()
         async with self._data_lock:
             existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
-            if existing.get("date") == today:
+            if not force and existing.get("date") == today:
                 return dict(existing)
         if not self.enable_photo_text_action:
             return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
@@ -4830,6 +4830,49 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         except Exception as exc:
             logger.debug("[PrivateCompanion] 记录最近生图提示词失败: %s", _single_line(exc, 120))
 
+    def _annotate_recent_photo_generation(
+        self,
+        *,
+        image_path: str = "",
+        session_key: str = "",
+        trigger: str = "",
+        intent_kind: str = "",
+        sent: bool | None = None,
+        caption: str = "",
+        scene_preset: str = "",
+        tool_name: str = "",
+    ) -> None:
+        try:
+            raw = self.data.get("recent_photo_generations")
+            if not isinstance(raw, list):
+                return
+            target_path = _single_line(image_path, 260)
+            target_session = _single_line(session_key, 100)
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                same_path = bool(target_path and _single_line(item.get("path"), 260) == target_path)
+                same_session = bool(target_session and _single_line(item.get("session"), 100) == target_session)
+                if not same_path and not same_session:
+                    continue
+                if trigger:
+                    item["trigger"] = _single_line(trigger, 40)
+                if intent_kind:
+                    item["intent_kind"] = _single_line(intent_kind, 30)
+                if sent is not None:
+                    item["sent"] = bool(sent)
+                if caption:
+                    item["caption"] = _single_line(caption, 120)
+                if scene_preset:
+                    item["scene_preset"] = _single_line(scene_preset, 80)
+                if tool_name:
+                    item["tool_name"] = _single_line(tool_name, 60)
+                item["annotated_at"] = _now_ts()
+                self._save_data_sync()
+                return
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 标注最近生图记录失败: %s", _single_line(exc, 120))
+
     def _apply_photo_generation_fixed_prompt(self, prompt_text: str) -> str:
         prompt = str(prompt_text or "").strip()
         fixed = _single_line(getattr(self, "photo_generation_fixed_prompt", ""), 500)
@@ -4992,7 +5035,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         text = _single_line(prompt_text, 1200).lower()
         names: list[str] = []
         if kind in {"selfie", "portrait", "自拍", "人像"}:
-            if re.search(r"\bcos\b|cosplay|角色扮演|扮成|神灯|制服|女仆|巫女|魔法少女", text, flags=re.I):
+            if any(token in text for token in ("表情包", "贴纸", "sticker", "meme")):
+                names.append("表情包场景")
+            elif re.search(r"\bcos\b|cosplay|角色扮演|扮成|神灯|制服|女仆|巫女|魔法少女", text, flags=re.I):
                 names.append("COS自拍")
             elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "镜前")):
                 names.append("镜前穿搭")
@@ -5106,6 +5151,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             )
             return backend, image_path, note
 
+        if reference_image_path and not reference_exists:
+            return finish("参考图", "", f"参考图路径不可用或文件不存在：{_single_line(reference_image_path, 160)}")
+
         if preferred == "comfyui":
             if not self._comfyui_photo_available():
                 return finish("ComfyUI", "", "ComfyUI 后端不可用或未配置")
@@ -5125,6 +5173,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if preferred == "sdgen":
             if not self._sdgen_photo_available():
                 return finish("SDGen", "", "SDGen 插件不可用或未配置")
+            if reference_image_path:
+                return finish("SDGen", "", "SDGen 后端不支持参考图输入，请改用在线参考图接口或 ComfyUI images=1 自拍工作流")
             busy_state = self._local_photo_generation_busy_state(force_refresh=True)
             if busy_state:
                 return finish("SDGen", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）")
@@ -5182,7 +5232,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         else:
             comfyui_note = "ComfyUI 后端不可用或未配置"
             logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=comfyui note=%s", trace_id, comfyui_note)
-        if self._sdgen_photo_available():
+        if reference_image_path:
+            sdgen_note = "本次需要参考图，已跳过不支持参考图输入的 SDGen 纯文生图"
+            logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=sdgen note=%s", trace_id, sdgen_note)
+        elif self._sdgen_photo_available():
             busy_state = self._local_photo_generation_busy_state(force_refresh=True)
             if busy_state:
                 sdgen_note = f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
@@ -5434,6 +5487,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                         workflow_name,
                         image_count=1,
                     )
+                if not workflow_file:
+                    return "", (
+                        f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 不接收图片输入。"
+                        "请配置 images=1 的自拍/改图工作流，避免回退成不使用参考图的纯文生图。"
+                    )
             if not workflow_file:
                 workflow_file = module.find_workflow_file(
                     workflow_name,
@@ -5475,7 +5533,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if input_images:
                 reference_note = "；已使用本地人设参考图"
             elif use_reference_image:
-                reference_note = "；自拍工作流未接收图片输入,已回退纯文生图"
+                return "", (
+                    f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 实际没有接收图片输入。"
+                    "请检查工作流 images 参数数量。"
+                )
             prompt_id = await workflow.submit_only(
                 input_images,
                 [prompt_text] * max(1, text_count),
@@ -6425,11 +6486,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if image_path:
                 return image_path, note
             logger.info(
-                "[PrivateCompanion] 在线图片 API 参考图生图失败,回退纯文生图: %s",
+                "[PrivateCompanion] 在线图片 API 参考图生图失败,停止纯文回退: %s",
                 _single_line(note, 180),
             )
-            if "超时" in str(note or ""):
-                return "", note
+            return "", f"参考图接口失败：{_single_line(note, 180)}"
         try:
             import aiohttp
 

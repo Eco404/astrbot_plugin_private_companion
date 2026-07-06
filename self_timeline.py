@@ -328,18 +328,31 @@ class SelfTimelineMixin:
                 continue
             ts = _safe_float(item.get("ts"), 0)
             kind = _single_line(item.get("kind"), 40)
+            intent_kind = _single_line(item.get("intent_kind"), 40)
             prompt = _single_line(item.get("prompt"), 220)
             note = _single_line(item.get("note"), 140)
+            trigger = _single_line(item.get("trigger"), 40)
+            scene_preset = _single_line(item.get("scene_preset"), 60)
+            caption = _single_line(item.get("caption"), 100)
+            sent = bool(item.get("sent"))
             ok = bool(item.get("ok"))
+            label = intent_kind or kind or "图片"
+            detail_parts = [
+                note or prompt,
+                f"触发:{trigger}" if trigger else "",
+                f"预设:{scene_preset}" if scene_preset else "",
+                f"附言:{caption}" if caption else "",
+                "已发送" if sent else "",
+            ]
             entries.append(
                 {
                     "source": "生图/拍照",
                     "ts": ts,
                     "date": self._self_timeline_date_from_ts(ts),
                     "when": self._self_timeline_when_from_ts(ts),
-                    "summary": f"{'生成了' if ok else '尝试生成'}{kind or '图片'}",
-                    "detail": note or prompt,
-                    "keywords": "图片 生图 拍照 自拍 画了什么 生成了什么 " + " ".join([kind, prompt, note]),
+                    "summary": f"{'生成并发送了' if ok and sent else ('生成了' if ok else '尝试生成')}{label}",
+                    "detail": "；".join(part for part in detail_parts if part),
+                    "keywords": "图片 生图 拍照 自拍 表情包 贴纸 画了什么 生成了什么 发了什么图 " + " ".join([kind, intent_kind, prompt, note, trigger, scene_preset]),
                 }
             )
         return entries

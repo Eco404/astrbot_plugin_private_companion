@@ -2599,6 +2599,39 @@ target 只能是 bot/self/other/ambiguous/none。
                 return "topic_boundary"
         return ""
 
+    def _smart_silence_contextual_trigger_reason(
+        self,
+        inbound_text: str,
+        response_text: str = "",
+        *,
+        session_kind: str = "",
+    ) -> str:
+        boundary = self._smart_silence_trigger_reason(inbound_text)
+        if boundary:
+            return boundary
+        mode = str(getattr(self, "smart_silence_judge_mode", "boundary_only") or "boundary_only").strip().lower()
+        if mode != "contextual":
+            return ""
+        inbound = _single_line(inbound_text, 260)
+        response = _single_line(response_text, 600)
+        compact = re.sub(r"\s+", "", inbound)
+        response_compact = re.sub(r"\s+", "", response)
+        if not compact or not response_compact:
+            return ""
+        if len(compact) <= 16 and re.fullmatch(r"(嗯+|恩+|哦+|噢+|喔+|行|好|好吧|可以|算了|没事|不用了|随便|先这样|就这样|知道了|了解了|收到|ok|OK|嗯嗯|啊这|呃|em+|额)", compact, flags=re.I):
+            if re.search(r"(吗|呢|吧|要不要|需不需要|可以.*吗|要是|如果|我可以|我帮你|继续|再|还|解释|分析|建议|聊|说)", response_compact):
+                return "short_disengage"
+        if re.search(r"(算了|没事|不用了|先这样|就这样|不管了|随便吧|无所谓了)", compact):
+            if re.search(r"(那我|我来|我帮|可以继续|继续|再说|要不要|需不需要|解释|分析|建议|追问|为什么|怎么)", response_compact):
+                return "soft_disengage"
+        if re.search(r"(困了|睡了|睡觉|去睡|先睡|晚安|下了|走了|忙去了|开会|上课|工作了|不方便)", compact):
+            if re.search(r"(吗|呢|要不要|继续|再聊|我陪|我等|说说|聊聊|解释|分析|建议)", response_compact):
+                return "leaving_or_busy"
+        if session_kind == "group" and len(compact) <= 12 and re.fullmatch(r"(哈哈+|草+|笑死|乐|绷|6+|？+|\\?+|啊？|啥|什么鬼|不是吧|好家伙)", compact):
+            if len(response_compact) >= 18 and re.search(r"(我觉得|可能|其实|要不|建议|可以|因为|所以|解释|分析)", response_compact):
+                return "group_reaction_not_request"
+        return ""
+
     async def _decide_smart_silence(
         self,
         *,
@@ -2612,7 +2645,11 @@ target 只能是 bot/self/other/ambiguous/none。
             return {"decision": "send", "reason": "disabled", "confidence": 0.0, "source": "disabled"}
         inbound = _single_line(inbound_text, 320)
         response = _single_line(response_text, 600)
-        trigger = self._smart_silence_trigger_reason(inbound)
+        trigger = self._smart_silence_contextual_trigger_reason(
+            inbound,
+            response,
+            session_kind=session_kind,
+        )
         if not trigger:
             return {"decision": "send", "reason": "no_boundary_trigger", "confidence": 0.0, "source": "prefilter"}
         if not response:
@@ -2652,14 +2689,16 @@ target 只能是 bot/self/other/ambiguous/none。
             if line:
                 recent_lines.append(f"- {line}")
         prompt = f"""
-你是聊天回复发送前的智能沉默判定器。判断用户是否在表达“不要继续这个话题/不要再追问/先别回复/换掉当前话题”，从而应该直接不发这条待发送回复。
+你是聊天回复发送前的智能沉默判定器。判断用户是否在表达“不要继续这个话题/不要再追问/先别回复/换掉当前话题”，或上下文已经明显适合安静收住，从而应该直接不发这条待发送回复。
 
 只输出 JSON：{{"decision":"send|silent","confidence":0-1,"reason":"不超过20字"}}
 
 判定原则：
 - 用户明确说别聊、别问、别继续、到此为止、算了别说了、换个话题，且待发送回复仍在确认、安慰、解释、追问或继续这个话题，decision=silent。
+- 当触发词是 short_disengage、soft_disengage、leaving_or_busy 或 group_reaction_not_request 时，要结合上下文判断：用户只是短促收尾、要离开、忙了、敷衍回应，且待发送回复还在追问、解释、建议、延长话题，才 silent。
 - 如果用户同一句已经开启了新请求或新问题，例如“算了，帮我看这个”“换个话题，今天吃什么”，且待发送回复是在处理新请求，decision=send。
 - 如果待发送回复只是“好，那不聊这个了”“嗯我闭嘴了”这类对边界的重复确认，通常 silent；真实聊天里安静退开更自然。
+- 如果待发送回复是必要的信息回答、用户明确提问的答案、工具结果、约定确认或安全提醒，decision=send。
 - 不要因为用户说“算了”两个字就一定沉默，要看它是不是结束当前话题，而不是普通口头禅。
 - 不确定时 send。
 

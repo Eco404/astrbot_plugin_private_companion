@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from typing import Any
@@ -15,7 +16,7 @@ try:
 except ImportError:
     from astrbot.api.message_components import At, Plain
 
-from .helpers import _now_ts, _safe_float, _safe_int, _single_line
+from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line
 from .qzone_selection import parse_qzone_post_selection
 
 
@@ -57,6 +58,334 @@ class LlmToolActionsMixin:
 - 发布内容必须服从当前人格与世界观,但不要泄露私聊隐私、内部状态数值、关系网资料或插件实现。
 - 工具失败时简短说明失败原因,不要假装已经发布或点赞。
 """.strip()
+
+    def _photo_generation_tool_instruction(self) -> str:
+        if not (self.enabled and getattr(self, "enable_photo_text_action", False)):
+            return ""
+        mode = _single_line(getattr(self, "natural_language_photo_generation_mode", "tool_first"), 40).lower()
+        if mode == "off":
+            return ""
+        return """
+【生图/自拍工具】
+当用户明确要求你生成图片、画图、出图、自拍、拍照、头像、表情包，或要求基于参考图改图时，可以使用 `pc_generate_photo`。
+- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。
+- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/镜前穿搭/头像特写”；未传参考图时会自动使用配置的人设参考图或今日穿搭参考图。
+- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。
+- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。
+- 默认 `send=true`，工具会把生成图片发送到当前会话；如果只想拿路径再决定，可传 `send=false`。
+- 工具返回 `sent=true` 时，图片已经发出，后续只需要很短地承接，不要复述本地路径或再假装发送一次。
+- 如果工具返回失败，按失败原因说明，不要假装图片已生成。
+""".strip()
+
+    async def _pc_generate_photo_impl(
+        self,
+        event: AstrMessageEvent,
+        prompt: str = "",
+        kind: str = "text2img",
+        reference_image_path: str = "",
+        image_size: str = "",
+        send: bool = True,
+        caption: str = "",
+        scene_preset: str = "",
+        **kwargs,
+    ) -> str:
+        mode = _single_line(getattr(self, "natural_language_photo_generation_mode", "tool_first"), 40).lower()
+        if mode == "off":
+            return json.dumps({"status": "disabled", "message": "非指令生图/改图已关闭；显式指令仍可使用“陪伴 生图/自拍/改图”。"}, ensure_ascii=False)
+        if not getattr(self, "enable_photo_text_action", False):
+            return json.dumps({"status": "disabled", "message": "主动拍照/生图能力未启用"}, ensure_ascii=False)
+        if not callable(getattr(self, "_generate_photo_image", None)):
+            return json.dumps({"status": "disabled", "message": "缺少生图入口 _generate_photo_image"}, ensure_ascii=False)
+        if not self._photo_text_available():
+            return json.dumps({"status": "unavailable", "message": "当前没有可用生图后端，或已被负载/token 保护临时延后"}, ensure_ascii=False)
+
+        content = _single_line(prompt or kwargs.get("text") or kwargs.get("description") or kwargs.get("prompt_text"), 900)
+        raw_kind = _single_line(kind or kwargs.get("workflow_kind") or kwargs.get("type"), 40).lower()
+        if raw_kind in {"sticker", "emoji", "meme", "表情包", "贴纸"}:
+            workflow_kind = "selfie"
+            intent_kind = "sticker"
+        elif raw_kind in {"selfie", "portrait", "自拍", "人像", "拍照", "头像", "avatar", "cos", "cosplay", "穿搭"}:
+            workflow_kind = "selfie"
+            intent_kind = "selfie"
+        elif raw_kind in {"edit", "改图", "修图", "重绘", "p图", "P图"}:
+            workflow_kind = "selfie"
+            intent_kind = "edit"
+        else:
+            workflow_kind = "text2img"
+            intent_kind = "text2img"
+        if not content:
+            return json.dumps(
+                {
+                    "status": "need_prompt",
+                    "message": "缺少 prompt。请把要生成的画面或修改要求传入 prompt。",
+                },
+                ensure_ascii=False,
+            )
+        compact_prompt = re.sub(r"\s+", "", content)
+        if intent_kind == "text2img" and any(token in compact_prompt for token in ("表情包", "贴纸", "sticker", "meme")):
+            workflow_kind = "selfie"
+            intent_kind = "sticker"
+        elif intent_kind == "text2img" and any(
+            token in compact_prompt
+            for token in ("自拍", "拍照", "头像", "人像", "角色本人", "本人出镜", "露脸", "穿搭", "镜前", "cos", "COS", "cosplay")
+        ):
+            workflow_kind = "selfie"
+            intent_kind = "selfie"
+
+        def bool_arg(value: Any, default: bool = True) -> bool:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return default
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "y", "on", "发送", "发出", "是"}:
+                return True
+            if text in {"0", "false", "no", "n", "off", "不发送", "否"}:
+                return False
+            return default
+
+        send_image = bool_arg(send, True)
+        reference_path = _single_line(
+            reference_image_path
+            or kwargs.get("reference")
+            or kwargs.get("image")
+            or kwargs.get("image_path")
+            or kwargs.get("image_url"),
+            1000,
+        ).strip().strip('"').strip("'")
+        if reference_path:
+            resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
+            if callable(resolver):
+                try:
+                    stable = await resolver(reference_path, stem="tool", event=event)
+                    if stable:
+                        reference_path = stable
+                except Exception as exc:
+                    return json.dumps(
+                        {"status": "error", "message": f"参考图解析失败：{_single_line(exc, 160)}"},
+                        ensure_ascii=False,
+                    )
+        if intent_kind == "edit" and not reference_path:
+            context_resolver = getattr(self, "_photo_reference_image_from_command_context", None)
+            if callable(context_resolver):
+                try:
+                    try:
+                        user_id = str(event.get_sender_id())
+                    except Exception:
+                        user_id = ""
+                    resolved_path, resolved_label, saw_image = await context_resolver(event, user_id)
+                    if resolved_path:
+                        reference_path = resolved_path
+                    elif saw_image:
+                        return json.dumps(
+                            {
+                                "status": "need_reference",
+                                "message": "看到了图片，但没能保存成可用参考图；请让用户重新发送图片，或用“陪伴 参考图 查看”检查平台是否能取到原图。",
+                            },
+                            ensure_ascii=False,
+                        )
+                except Exception as exc:
+                    missing = _missing_optional_model_dependency(exc)
+                    if missing:
+                        return json.dumps(
+                            {
+                                "status": "need_reference",
+                                "message": f"改图参考图解析缺少可选依赖 {missing}，请让用户直接提供本地图片路径或图片 URL。",
+                            },
+                            ensure_ascii=False,
+                        )
+                    return json.dumps(
+                        {"status": "error", "message": f"改图参考图解析失败：{_single_line(exc, 160)}"},
+                        ensure_ascii=False,
+                    )
+            if not reference_path:
+                return json.dumps(
+                    {
+                        "status": "need_reference",
+                        "message": "改图/重绘需要参考图。可以让用户把图片和要求一起发，或引用近期图片再说“改成……”。",
+                    },
+                    ensure_ascii=False,
+                )
+        if not reference_path and intent_kind in {"selfie", "sticker"}:
+            wants_context_reference = any(
+                token in compact_prompt
+                for token in ("这张", "这图", "这幅", "这份", "参考图", "用图", "按图", "照着", "根据图", "根据这张", "用这张")
+            )
+            if wants_context_reference:
+                context_resolver = getattr(self, "_photo_reference_image_from_command_context", None)
+                if callable(context_resolver):
+                    try:
+                        try:
+                            user_id = str(event.get_sender_id())
+                        except Exception:
+                            user_id = ""
+                        resolved_path, resolved_label, saw_image = await context_resolver(event, user_id)
+                        if resolved_path:
+                            reference_path = resolved_path
+                        elif saw_image:
+                            return json.dumps(
+                                {
+                                    "status": "need_reference",
+                                    "message": "看到了图片，但没能保存成可用参考图；请让用户重新发送图片，或用“陪伴 参考图 查看”检查平台是否能取到原图。",
+                                },
+                                ensure_ascii=False,
+                            )
+                    except Exception as exc:
+                        missing = _missing_optional_model_dependency(exc)
+                        if missing:
+                            return json.dumps(
+                                {
+                                    "status": "need_reference",
+                                    "message": f"参考图解析缺少可选依赖 {missing}，将改用已配置的人设参考图或今日穿搭图。",
+                                },
+                                ensure_ascii=False,
+                            )
+                        return json.dumps(
+                            {"status": "error", "message": f"参考图解析失败：{_single_line(exc, 160)}"},
+                            ensure_ascii=False,
+                        )
+        if reference_path and not os.path.exists(reference_path):
+            return json.dumps(
+                {"status": "error", "message": f"参考图路径不可用：{_single_line(reference_path, 180)}"},
+                ensure_ascii=False,
+            )
+
+        prompt_builder = getattr(self, "_build_natural_language_photo_prompt", None)
+        if callable(prompt_builder):
+            prompt_text = prompt_builder(
+                prompt=content,
+                kind="selfie" if intent_kind == "sticker" else intent_kind,
+                has_reference=bool(reference_path),
+                memory_context="",
+            )
+        else:
+            prompt_text = content
+        preset_text = _single_line(scene_preset or kwargs.get("preset") or kwargs.get("scene"), 80)
+        if intent_kind == "sticker" and not preset_text:
+            preset_text = "表情包场景"
+        if preset_text:
+            preset_lines = [preset_text]
+            preset_getter = getattr(self, "_photo_generation_scene_presets", None)
+            if callable(preset_getter):
+                try:
+                    presets = preset_getter()
+                    if isinstance(presets, dict):
+                        preset_detail = _single_line(presets.get(preset_text), 900)
+                        if preset_detail:
+                            preset_lines.append(preset_detail)
+                except Exception:
+                    pass
+            prompt_text = _single_line(
+                f"{prompt_text}\n\n【指定生图场景预设】\n" + "\n".join(preset_lines),
+                6500,
+            )
+
+        session_key = _single_line(getattr(event, "unified_msg_origin", ""), 120) or "tool_photo"
+        generation_session_key = f"tool_photo_{session_key}"
+        backend_name, image_path, note = await self._generate_photo_image(
+            workflow_kind=workflow_kind,
+            prompt_text=prompt_text,
+            session_key=generation_session_key,
+            reference_image_path=reference_path,
+            image_size=_single_line(image_size or kwargs.get("size"), 40),
+        )
+        ok = bool(image_path and os.path.exists(image_path))
+        annotator = getattr(self, "_annotate_recent_photo_generation", None)
+        if callable(annotator):
+            annotator(
+                image_path=image_path,
+                session_key=generation_session_key,
+                trigger="llm_tool",
+                intent_kind=intent_kind,
+                sent=False,
+                caption=caption,
+                scene_preset=preset_text,
+                tool_name="pc_generate_photo",
+            )
+        if ok:
+            try:
+                user_id = str(event.get_sender_id())
+            except Exception:
+                user_id = ""
+            if user_id and callable(getattr(self, "_command_photo_quota_left", None)):
+                async with self._data_lock:
+                    user = self._get_user(user_id)
+                    if self._is_target_private_user(user_id, user):
+                        self._note_command_photo_generation_attempt(user, image_path=image_path)
+                        self._save_data_sync()
+        sent = False
+        if ok and send_image:
+            try:
+                message = _single_line(caption, 120) or ("" if intent_kind == "sticker" else "生成好了。")
+                chain = self._build_outbound_chain(message, image_path)
+                await event.send(self._build_result_from_chain(chain))
+                sent = True
+            except Exception as exc:
+                if callable(annotator):
+                    annotator(
+                        image_path=image_path,
+                        session_key=generation_session_key,
+                        trigger="llm_tool",
+                        intent_kind=intent_kind,
+                        sent=False,
+                        caption=caption,
+                        scene_preset=preset_text,
+                        tool_name="pc_generate_photo",
+                    )
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "success": False,
+                        "message": f"图片已生成但发送失败：{_single_line(exc, 160)}",
+                        "backend": backend_name,
+                        "path": image_path,
+                        "note": note,
+                    },
+                    ensure_ascii=False,
+                )
+        if callable(annotator):
+            annotator(
+                image_path=image_path,
+                session_key=generation_session_key,
+                trigger="llm_tool",
+                intent_kind=intent_kind,
+                sent=sent,
+                caption=caption,
+                scene_preset=preset_text,
+                tool_name="pc_generate_photo",
+            )
+        if ok:
+            memory_recorder = getattr(self, "_memory_companion_record_photo_generation", None)
+            if callable(memory_recorder):
+                await memory_recorder(
+                    event,
+                    prompt=content,
+                    kind=workflow_kind,
+                    intent_kind=intent_kind,
+                    backend=backend_name,
+                    image_path=image_path,
+                    note=note,
+                    sent=sent,
+                    trigger="llm_tool",
+                    scene_preset=preset_text,
+                    reference_image_path=reference_path,
+                )
+        return json.dumps(
+            {
+                "status": "success" if ok else "error",
+                "success": ok,
+                "message": "图片已生成并发送" if sent else ("图片已生成" if ok else (_single_line(note, 220) or "生图失败")),
+                "backend": _single_line(backend_name, 80),
+                "path": _single_line(image_path, 260),
+                "kind": workflow_kind,
+                "intent_kind": intent_kind,
+                "used_reference": bool(reference_path and "已使用" in str(note or "")),
+                "reference_image_path": _single_line(reference_path, 260),
+                "sent": sent,
+                "note": _single_line(note, 220),
+            },
+            ensure_ascii=False,
+        )
 
     async def _pc_qzone_view_feed_impl(
         self,

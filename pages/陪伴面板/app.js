@@ -693,7 +693,7 @@ const featureMeta = {
   enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
   enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息发送前判断是否值得现在发送、是否需要改写或延后。"],
-  enable_smart_silence: ["智能沉默", "用户明确不想继续话题时，让小模型决定本轮是否直接不回复。"],
+  enable_smart_silence: ["智能沉默", "发送前判断用户是否想收住话题；可选择只看明确边界，或交给小模型结合上下文判断。"],
   enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
@@ -729,18 +729,22 @@ const featureMeta = {
   enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
   enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
   enable_yesterday_screen_diary_context: ["昨日屏幕日记", "每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景，不读取实时屏幕。"],
-  enable_group_companion: ["群聊总开关", "控制是否处理群聊观察、黑话和上下文注入。"],
+  enable_group_companion: ["群聊启用范围", "总开关、白名单/黑名单范围；某个群没反应时先看这里。"],
+  group_access_mode: "群聊启用模式",
+  group_whitelist_ids: "群聊白名单",
+  group_blacklist_ids: "群聊黑名单",
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
-  enable_group_member_profiles: ["群内成员观察", "记录成员在当前群里的近期发言、短句和活跃痕迹。"],
-  enable_group_context_injection: ["群上下文注入", "在群聊回复时加入群氛围、话题和成员信息。"],
-  enable_group_injection_guard: ["群聊防注入", "拦截群友通过改称呼、改语气、改设定或改输出格式污染群聊上下文和长期观察。"],
+  enable_group_member_profiles: ["群聊观察学习", "学习群成员、关系网身份、黑话、话题线和群片段。"],
+  enable_group_context_injection: ["群聊回复理解", "回复时参考近期群聊、场景对象和合并消息转述。"],
+  enable_group_injection_guard: ["群聊安全保护", "防注入、隐私隔离、公共群聊语气降噪和现实承诺保护。"],
   enable_group_persona_denoise: ["群聊人格降噪", "降低群聊里的私聊腔、状态汇报和私聊关系外溢。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
   enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
   enable_group_reality_promise_guard: ["阻止群聊现实承诺", "群聊里避免承诺自己能拉人、修网、开房间或操作现实设备；私聊扮演不受影响。"],
-  enable_group_wakeup_enhancement: ["群聊唤醒强化", "通过强唤醒词、弱相关唤醒词和兴趣关键词，让 Bot 在群里被自然叫到或碰到感兴趣话题时进入回复链。"],
-  enable_group_high_intensity_mode: ["群聊高强度收口", "短时间连续被 @、引用或增强唤醒后，按配置合并后续唤醒消息；冷却残留只降载，不延迟单条明确消息。"],
-  enable_group_conversation_followup: ["连续对话保持", "群里叫过 Bot 后，短时间内判断同一用户没继续 @ 的话是否仍在对 Bot 说。"],
+  enable_group_wakeup_enhancement: ["群聊主动唤醒", "包含唤醒与插话：被叫到、兴趣/问题/冷群接话，以及低频主动插话。"],
+  enable_group_high_intensity_mode: ["高压消息合并", "多人或多条消息连续叫 Bot 时，先收口合并再回复。"],
+  enable_group_conversation_followup: ["连续对话保持", "用户叫过 Bot 后，没继续 @ 时判断是否仍在续话。"],
+  enable_group_air_reply_guard: ["群聊读空气", "互刷、晚安/谢谢/拜拜等收尾循环、话题结束时自动沉默。"],
   enable_group_interjection: ["群主动插话", "允许 Bot 在群聊里主动插一句。谨慎开启。"],
   enable_group_repeat_follow: ["复读处理", "同一句话连续复读达到阈值时，可跟读一次或打断一次。"],
   enable_group_topic_threads: ["群话题线", "维护当前群聊正在聊什么，以及话题如何变化。"],
@@ -751,8 +755,8 @@ const featureMeta = {
   enable_group_relationship_graph: ["群友互动图", "记录成员之间近期谁常互相接话、玩梗或争论。"],
   enable_group_privacy_guard: ["群隐私保护", "保护私聊信息。"],
   enable_worldbook_member_recognition: ["群聊关系网", "以 QQ 号确认稳定身份，关系备注和重要记忆都放在这里。"],
-  enable_cross_user_memory_bridge: ["跨用户记忆互通", "主人可在私聊中查询 Bot 与某个用户或群聊的近期互动摘要；只读，不发送消息。"],
-  enable_atrelay_tools: ["跨群转述与 @ 群友", "整合艾特群友能力，可让模型查询群成员、按关系网解析 @ 对象并发送群聊/私聊消息。"],
+  enable_cross_user_memory_bridge: ["跨用户记忆", "主人可查询 Bot 与其他用户/群聊的近期互动摘要；只读，不发送消息。"],
+  enable_atrelay_tools: ["跨群转述", "查询群成员、按关系网解析 @ 对象，并转述到群聊或私聊。"],
   enable_livingmemory_integration: ["LivingMemory 协同", "引导模型按需调用长期记忆工具，避免重复造轮子。"],
   enable_bilibili_integration: ["B站 AI Bot 联动", "读取 B站 AI Bot 观看日志，并在合适节点私聊分享。"],
   enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档看视频。"],
@@ -823,28 +827,20 @@ const featureGroups = [
     ],
   },
   {
-    title: "群聊观察",
-    note: "群氛围、黑话、话题线、插话和隐私边界。",
+    title: "群聊功能",
+    note: "按要解决的问题找开关：启用范围、续话、读空气、合并、理解、安全、唤醒、学习、复读、转述和跨用户记忆。",
     keys: [
       "enable_group_companion",
+      "enable_group_conversation_followup",
+      "enable_group_air_reply_guard",
+      "enable_group_high_intensity_mode",
       "enable_group_context_injection",
       "enable_group_injection_guard",
-      "enable_group_persona_denoise",
-      "enable_group_scene_awareness",
-      "enable_group_reality_promise_guard",
       "enable_group_wakeup_enhancement",
-      "enable_group_high_intensity_mode",
-      "enable_group_conversation_followup",
-      "enable_group_slang_learning",
-      "enable_group_slang_meanings",
       "enable_group_member_profiles",
-      "enable_group_topic_threads",
-      "enable_group_episode_memory",
-      "enable_group_relationship_graph",
-      "enable_group_interjection",
       "enable_group_repeat_follow",
-      "enable_group_interjection_feedback",
-      "enable_group_privacy_guard",
+      "enable_atrelay_tools",
+      "enable_cross_user_memory_bridge",
     ],
   },
   {
@@ -864,11 +860,8 @@ const featureGroups = [
   },
   {
     title: "身份与记忆联动",
-    note: "QQ 关系网、外部长期记忆和身份稳定识别。",
+    note: "外部长期记忆联动；群聊关系网、跨群转述和跨用户记忆已归入群聊功能。",
     keys: [
-      "enable_worldbook_member_recognition",
-      "enable_cross_user_memory_bridge",
-      "enable_atrelay_tools",
       "enable_livingmemory_integration",
     ],
   },
@@ -921,14 +914,19 @@ const embeddedFeatureParentByKey = {
   enable_lunar_perception: "enable_environment_perception",
   enable_solar_term_perception: "enable_environment_perception",
   enable_almanac_perception: "enable_environment_perception",
-  enable_group_context_injection: "enable_group_companion",
-  enable_group_injection_guard: "enable_group_companion",
-  enable_group_persona_denoise: "enable_group_companion",
-  enable_group_reality_promise_guard: "enable_group_companion",
-  enable_group_high_intensity_mode: "enable_group_wakeup_enhancement",
-  enable_group_conversation_followup: "enable_group_scene_awareness",
+  enable_group_persona_denoise: "enable_group_injection_guard",
+  enable_group_reality_promise_guard: "enable_group_injection_guard",
+  enable_group_wakeup_question: "enable_group_wakeup_enhancement",
+  enable_group_wakeup_cold_group: "enable_group_wakeup_enhancement",
+  enable_group_interjection: "enable_group_wakeup_enhancement",
+  enable_group_interjection_feedback: "enable_group_wakeup_enhancement",
+  enable_group_slang_learning: "enable_group_member_profiles",
   enable_group_slang_meanings: "enable_group_slang_learning",
-  enable_group_interjection_feedback: "enable_group_interjection",
+  enable_group_slang_web_search: "enable_group_slang_learning",
+  enable_group_topic_threads: "enable_group_member_profiles",
+  enable_group_episode_memory: "enable_group_member_profiles",
+  enable_group_relationship_graph: "enable_group_member_profiles",
+  enable_worldbook_member_recognition: "enable_group_member_profiles",
   group_repeat_trigger_threshold: "enable_group_repeat_follow",
   group_repeat_count_distinct_users_only: "enable_group_repeat_follow",
   enable_bilibili_boredom_watch: "enable_bilibili_integration",
@@ -1094,6 +1092,7 @@ const configLabels = {
   qzone_emotional_vent_probability: "心情动态触发概率",
   enable_food_menu_recommendation: "吃什么候选",
   response_review_mode: "回复/主动复核模式",
+  smart_silence_judge_mode: "智能沉默判断模式",
   SMART_SILENCE_PROVIDER_ID: "智能沉默小模型",
   smart_silence_min_confidence: "智能沉默置信度",
   smart_silence_model_timeout_seconds: "智能沉默超时秒数",
@@ -1188,6 +1187,10 @@ const configLabels = {
   group_conversation_followup_seconds: "群聊续接判断秒数",
   group_conversation_followup_max_turns: "群聊连续续接上限",
   enable_group_conversation_followup: "启用连续对话保持",
+  enable_group_air_reply_guard: "启用读空气防互刷",
+  group_air_guard_window_seconds: "读空气检测窗口秒数",
+  group_air_guard_max_bot_replies: "窗口内最大 Bot 回复数",
+  group_air_guard_polite_loop_limit: "礼貌收尾循环上限",
   enable_group_context_injection: "群上下文注入",
   enable_group_injection_guard: "群聊防注入",
   enable_group_persona_denoise: "群聊人格降噪",
@@ -1365,9 +1368,10 @@ const configLabels = {
   photo_persona_reference_image_path: "人设参考图路径",
   enable_daily_outfit_photo: "每日穿搭照片",
   daily_outfit_photo_prompt: "每日穿搭提示词",
-  enable_natural_language_photo_generation: "自然语言生图/改图",
-  natural_language_photo_generation_max_daily: "自然语言生图上限",
-  natural_language_photo_extra_prompt: "自然语言生图附加提示词",
+  enable_natural_language_photo_generation: "允许规则快判生图/改图",
+  natural_language_photo_generation_mode: "非指令生图处理方式",
+  natural_language_photo_generation_max_daily: "规则快判生图上限",
+  natural_language_photo_extra_prompt: "规则快判附加提示词",
   comfyui_photo_wait_seconds: "本地生图等待秒数",
   enable_local_photo_load_guard: "电脑高负荷保护",
   local_photo_cpu_busy_percent: "CPU 忙碌阈值",
@@ -1556,8 +1560,15 @@ const configDescriptions = {
   segmented_proactive_interval_min: "两段消息之间的最小等待秒数；普通 LLM 回复只影响后台补发片段。",
   segmented_proactive_interval_max: "两段消息之间的最大等待秒数；普通 LLM 回复只影响后台补发片段。",
   segmented_proactive_log_base: "对数间隔的底数。数值越小，长句间隔增长越明显。",
+  group_access_mode: "决定群聊功能按白名单还是黑名单生效。白名单模式只处理白名单里的群；黑名单模式默认处理所有群，但会跳过黑名单里的群。初次使用建议白名单模式。",
+  group_whitelist_ids: "白名单模式下允许插件参与的群号列表。可填写数组，也可在输入框里一行一个或用逗号分隔；只影响群聊功能，不影响私聊对象。",
+  group_blacklist_ids: "黑名单模式下禁止插件参与的群号列表。可填写数组，也可在输入框里一行一个或用逗号分隔；适合临时屏蔽机器人多、话题敏感或不想观察的群。",
   group_conversation_followup_seconds: "群里用户叫过 Bot 后，后续未 @ 的消息在多久内可能被判断为仍在对 Bot 说。",
   group_conversation_followup_max_turns: "一次群聊连续对话最多自动续接几轮，防止 Bot 一直卷进对话。",
+  enable_group_air_reply_guard: "开启后，明确 @ 或引用 Bot 也会先过一层“读空气”防线；当窗口内 Bot 已多次回复、或话题进入晚安/谢谢/拜拜等收尾循环时，会静默不回。",
+  group_air_guard_window_seconds: "统计最近多少秒内 Bot 在本群的回复次数。建议 120-300 秒；越短越宽松。",
+  group_air_guard_max_bot_replies: "窗口内 Bot 回复达到该次数后，后续明确唤醒也会硬拦截，防止机器人互相引用刷屏。建议 3。",
+  group_air_guard_polite_loop_limit: "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到类似消息就静默。建议 1-2。",
   enable_group_context_injection: "开启后，群聊回复会参考最近群消息、当前话题、活跃成员和群内氛围；关闭后只按当前单条消息理解。",
   enable_group_injection_guard: "开启后，会识别群里试图改称呼、改语气、改设定或改输出格式的注入话术；这些内容不会写进群观察、黑话、话题线或后续 prompt。",
   enable_group_persona_denoise: "开启后，会主动压低群聊里的私聊腔、状态汇报和过于贴身的关系投射，让群聊发言更像在公共场合说话。",
@@ -1670,9 +1681,10 @@ const configDescriptions = {
   photo_persona_reference_image_path: "png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。仅在自拍/人像类主动生图时使用。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口，不支持时回退纯文生图；SDGen 仍按提示词生成。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
   daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
-  enable_natural_language_photo_generation: "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/重新画张图片/生成图片/来张图/用插件能力画”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
-  natural_language_photo_generation_max_daily: "独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭自然语言生图/改图。",
-  natural_language_photo_extra_prompt: "只作用于自然语言生图/改图入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
+  enable_natural_language_photo_generation: "只控制“规则快判”模式是否允许插件在主链前直接接管生图。默认建议用工具优先，让主链模型调用 pc_generate_photo；工具不稳定时再切到规则快判。",
+  natural_language_photo_generation_mode: "tool_first：普通聊天先进主链，由模型调用 pc_generate_photo；rule_fast：插件在主链前用规则直接接管高置信生图请求；off：不做非指令生图前置处理。",
+  natural_language_photo_generation_max_daily: "只作用于 rule_fast 规则快判入口，独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭规则快判生图/改图。",
+  natural_language_photo_extra_prompt: "只作用于 rule_fast 规则快判入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
   comfyui_photo_wait_seconds: "本地 ComfyUI 工作流最多等待多久。超时后不会假装已经拍照。",
   enable_local_photo_load_guard: "开启后，本地 ComfyUI/SDGen 生图前读取 CPU/内存负载；负载偏高时延后本次主动计划，或在 auto 模式下改走在线图片 API。",
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
@@ -1728,7 +1740,8 @@ const configDescriptions = {
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
   response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；被动侧只处理严重复读、泄露内部提示等保护性问题；full 会额外让较长被动回复参与模型改写，延迟更高。",
-  SMART_SILENCE_PROVIDER_ID: "用于用户表达“不想继续这个话题 / 别问了 / 换个话题 / 不用回复”时的发送前沉默判定。留空时跟随回复/主动复核模型。",
+  smart_silence_judge_mode: "boundary_only 只在明确边界语义时调用模型，最保守；contextual 会把短句收尾、忙了/睡了、敷衍回应、群聊普通反应等也交给模型判断，更智能但更依赖模型质量。",
+  SMART_SILENCE_PROVIDER_ID: "用于发送前沉默判定。留空时跟随回复/主动复核模型。",
   smart_silence_min_confidence: "小模型判定 silent 且达到该置信度才会真正吞掉回复。值越高越保守，按百分比填写。",
   smart_silence_model_timeout_seconds: "智能沉默判定最长等待时间。超时默认放行，避免正常回复被拖慢。",
   proactive_review_strength: "控制主动消息发送前复核的拦截力度。默认宽松，避免模型过度保守导致主动消息归零。",
@@ -1779,7 +1792,7 @@ const featureSettingGroups = {
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
-  enable_response_self_review: ["response_review_mode", "enable_smart_silence", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars"],
+  enable_response_self_review: ["response_review_mode", "enable_smart_silence", "smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
@@ -1812,66 +1825,17 @@ const featureSettingGroups = {
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
-  enable_group_companion: [
-    "max_group_recent_messages",
-    "max_group_slang_terms",
-    "enable_group_context_injection",
-    "enable_group_injection_guard",
-    "enable_group_persona_denoise",
-    "enable_group_scene_awareness",
-    "group_scene_recent_limit",
-    "enable_group_conversation_followup",
-    "group_conversation_followup_seconds",
-    "group_conversation_followup_max_turns",
-    "enable_group_reality_promise_guard",
-    "enable_group_wakeup_enhancement",
-    "group_wakeup_direct_words",
-    "group_wakeup_context_words",
-    "group_wakeup_interest_keywords",
-    "group_wakeup_interest_probability",
-    "enable_group_wakeup_question",
-    "group_wakeup_question_threshold",
-    "enable_group_wakeup_cold_group",
-    "group_wakeup_cold_group_threshold",
-    "group_wakeup_cold_group_idle_minutes",
-    "group_wakeup_cooldown_seconds",
-    "group_wakeup_generated_keyword_limit",
-    "group_wakeup_topic_interest_max_boost",
-    "group_wakeup_debounce_pending_penalty",
-    "group_wakeup_fatigue_limit",
-    "group_wakeup_fatigue_decay_minutes",
-    "group_wakeup_log_limit",
-    "group_wakeup_short_text_wait_seconds",
-    "enable_group_high_intensity_mode",
-    "group_high_intensity_wakeup_window_seconds",
-    "group_high_intensity_wakeup_threshold",
-    "group_high_intensity_cooldown_seconds",
-    "group_high_intensity_merge_seconds",
-    "group_high_intensity_max_merge_messages",
-    "group_high_intensity_merge_scope",
-    "enable_group_slang_learning",
-    "enable_group_slang_meanings",
-    "enable_group_member_profiles",
-    "enable_group_topic_threads",
-    "enable_group_episode_memory",
-    "enable_group_relationship_graph",
-    "enable_group_interjection",
-    "enable_group_interjection_feedback",
-    "enable_group_repeat_follow",
-    "enable_group_privacy_guard",
-  ],
-  enable_group_context_injection: ["max_group_recent_messages", "group_scene_recent_limit"],
-  enable_group_injection_guard: [],
-  enable_group_persona_denoise: [],
-  enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit"],
-  enable_group_scene_awareness: ["group_scene_recent_limit", "enable_group_conversation_followup", "group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
-  enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_debounce_pending_penalty", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_generated_keyword_limit", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "enable_group_high_intensity_mode", "group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope", "group_scene_recent_limit"],
+  enable_group_companion: ["group_access_mode", "group_whitelist_ids", "group_blacklist_ids"],
+  enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
+  enable_group_air_reply_guard: ["group_air_guard_window_seconds", "group_air_guard_max_bot_replies", "group_air_guard_polite_loop_limit"],
   enable_group_high_intensity_mode: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
-  enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
+  enable_group_context_injection: ["max_group_recent_messages", "enable_group_scene_awareness", "group_scene_recent_limit", "FORWARD_MESSAGE_PROVIDER_ID"],
+  enable_group_injection_guard: ["enable_group_privacy_guard", "enable_group_persona_denoise", "enable_group_reality_promise_guard"],
+  enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit", "group_wakeup_debounce_pending_penalty", "enable_group_interjection", "group_interject_min_interval_minutes", "group_interject_max_daily", "enable_group_interjection_feedback", "GROUP_INTERJECT_PROVIDER_ID"],
+  enable_group_member_profiles: ["enable_group_relationship_graph", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths", "enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_web_search_terms", "group_slang_web_search_results", "enable_group_topic_threads", "enable_group_episode_memory", "GROUP_SLANG_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID"],
   enable_group_slang_learning: ["max_group_slang_terms", "max_group_recent_messages", "enable_group_slang_meanings", "enable_group_slang_web_search", "group_slang_web_search_terms", "group_slang_web_search_results"],
   enable_group_slang_meanings: ["max_group_slang_terms", "enable_group_slang_web_search"],
   enable_group_slang_web_search: ["group_slang_web_search_terms", "group_slang_web_search_results"],
-  enable_group_member_profiles: ["max_group_recent_messages"],
   enable_group_topic_threads: ["max_group_recent_messages"],
   enable_group_episode_memory: ["max_group_recent_messages"],
   enable_group_relationship_graph: ["max_group_recent_messages"],
@@ -1896,7 +1860,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "external_image_api_custom_headers", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "external_image_api_custom_headers", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_backup_external_image_api: ["backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -2043,24 +2007,124 @@ const featureSettingSections = {
   ],
   enable_group_companion: [
     {
-      title: "基础群聊",
-      note: "控制群聊消息量、黑话容量和基础上下文。",
-      keys: ["max_group_recent_messages", "max_group_slang_terms", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_persona_denoise", "enable_group_privacy_guard"],
+      title: "群聊启用范围",
+      note: "总开关由当前功能控制；这里配置白名单/黑名单。",
+      keys: ["group_access_mode", "group_whitelist_ids", "group_blacklist_ids"],
+    },
+  ],
+  enable_group_conversation_followup: [
+    {
+      title: "续接窗口",
+      note: "控制同一用户无 @ 继续说话时，Bot 还能把它视为刚才对话的时间和轮数。",
+      keys: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
     },
     {
-      title: "场景与续接",
-      note: "判断谁在对谁说话，并维持短时间连续对话。",
-      keys: ["enable_group_scene_awareness", "group_scene_recent_limit", "enable_group_conversation_followup", "group_conversation_followup_seconds", "group_conversation_followup_max_turns", "enable_group_reality_promise_guard"],
+      title: "判断模型",
+      note: "用于复判后续消息是否仍在对 Bot 说；留空时按模型回退链路选择。",
+      keys: ["GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
+    },
+  ],
+  enable_group_air_reply_guard: [
+    {
+      title: "读空气限制",
+      note: "限制短时间连续回复和礼貌收尾循环，避免机器人互相引用、互道晚安停不下来。",
+      keys: ["group_air_guard_window_seconds", "group_air_guard_max_bot_replies", "group_air_guard_polite_loop_limit"],
+    },
+  ],
+  enable_group_high_intensity_mode: [
+    {
+      title: "高压判定",
+      note: "判断短时间内是否连续被叫到，并在高压期降低重复触发。",
+      keys: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds"],
     },
     {
-      title: "唤醒与高强度",
-      note: "控制被叫到、兴趣关键词和连续唤醒后的收口。",
-      keys: ["enable_group_wakeup_enhancement", "group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_cooldown_seconds", "group_wakeup_generated_keyword_limit", "group_wakeup_topic_interest_max_boost", "group_wakeup_debounce_pending_penalty", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "enable_group_high_intensity_mode", "group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
+      title: "合并策略",
+      note: "进入高压期后，先合并连续叫 Bot 的消息，再交给一轮回复。",
+      keys: ["group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
+    },
+  ],
+  enable_group_context_injection: [
+    {
+      title: "上下文范围",
+      note: "控制回复前能参考多少近期群聊，以及是否做场景/对象理解。",
+      keys: ["max_group_recent_messages", "enable_group_scene_awareness", "group_scene_recent_limit"],
     },
     {
-      title: "群记忆与互动",
-      note: "黑话、成员观察、话题线、群片段、插话和复读。",
-      keys: ["enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_member_profiles", "enable_group_topic_threads", "enable_group_episode_memory", "enable_group_relationship_graph", "enable_group_interjection", "enable_group_interjection_feedback", "enable_group_repeat_follow"],
+      title: "合并消息模型",
+      note: "群里发合并转发/聊天记录时，用该模型整理摘要后再交给主回复。",
+      keys: ["FORWARD_MESSAGE_PROVIDER_ID"],
+    },
+  ],
+  enable_group_injection_guard: [
+    {
+      title: "群聊安全保护",
+      note: "防提示词污染、隐私串味、群聊私聊腔外溢和现实承诺失控。",
+      keys: ["enable_group_privacy_guard", "enable_group_persona_denoise", "enable_group_reality_promise_guard"],
+    },
+  ],
+  enable_group_wakeup_enhancement: [
+    {
+      title: "唤醒词与节流",
+      note: "被明确叫到或弱相关叫到时，控制识别词、等待、冷却、疲劳和记录量。",
+      keys: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit"],
+    },
+    {
+      title: "非明确接话",
+      note: "不只是 @：兴趣词、群友提问、冷群开场都在这里控制，越高越容易主动接话。",
+      keys: ["group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit", "group_wakeup_debounce_pending_penalty"],
+    },
+    {
+      title: "主动插话",
+      note: "没人明确叫 Bot 时，是否允许低频主动插一句，并指定插话判断/生成模型。",
+      keys: ["enable_group_interjection", "group_interject_min_interval_minutes", "group_interject_max_daily", "enable_group_interjection_feedback", "GROUP_INTERJECT_PROVIDER_ID"],
+    },
+  ],
+  enable_group_member_profiles: [
+    {
+      title: "成员与关系网",
+      note: "近期成员观察、群友互动边、关系网身份识别和自登记都在这里。",
+      keys: ["enable_group_relationship_graph", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
+    },
+    {
+      title: "黑话学习",
+      note: "记录群里特殊表达，并可生成释义或少量联网参考；黑话模型附在这里。",
+      keys: ["enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_web_search_terms", "group_slang_web_search_results", "GROUP_SLANG_PROVIDER_ID"],
+    },
+    {
+      title: "话题与片段",
+      note: "维护群聊话题线和阶段性群聊片段；群片段整理模型附在这里。",
+      keys: ["enable_group_topic_threads", "enable_group_episode_memory", "GROUP_EPISODE_PROVIDER_ID"],
+    },
+  ],
+  enable_group_repeat_follow: [
+    {
+      title: "复读触发",
+      note: "控制多少条相同内容算复读，以及是否只统计不同群友。",
+      keys: ["group_repeat_trigger_threshold", "group_repeat_count_distinct_users_only"],
+    },
+    {
+      title: "跟读与打断",
+      note: "控制 Bot 是跟读一次，还是用文本/图片打断复读链。",
+      keys: ["group_repeat_follow_probability", "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step", "group_repeat_interrupt_text", "group_repeat_interrupt_image_path"],
+    },
+  ],
+  enable_atrelay_tools: [
+    {
+      title: "目标解析",
+      note: "决定转述对象优先从关系网解析，群成员列表缓存多久。",
+      keys: ["atrelay_require_worldbook_first", "atrelay_member_cache_minutes"],
+    },
+    {
+      title: "发送保护与改写",
+      note: "跨群/跨人发送前的敏感确认、转述改写风格和多目标上限。",
+      keys: ["atrelay_sensitive_confirm", "enable_atrelay_llm_rewrite", "atrelay_default_relay_style", "atrelay_multi_target_limit"],
+    },
+  ],
+  enable_cross_user_memory_bridge: [
+    {
+      title: "查询权限",
+      note: "跨用户/跨群互动摘要只读查询，建议只允许主人使用。",
+      keys: ["cross_user_memory_owner_only"],
     },
   ],
   enable_group_slang_learning: [
@@ -2179,38 +2243,6 @@ const featureSettingSections = {
       keys: ["segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
     },
   ],
-  enable_group_wakeup_enhancement: [
-    {
-      title: "唤醒词",
-      note: "决定哪些群消息可能把 Bot 拉进回复链。",
-      keys: ["group_wakeup_direct_words", "group_wakeup_context_words"],
-    },
-    {
-      title: "兴趣唤醒",
-      note: "让 Bot 碰到自己感兴趣的话题时低概率接话。",
-      keys: ["group_wakeup_interest_keywords", "group_wakeup_interest_probability", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit"],
-    },
-    {
-      title: "解惑与冷群",
-      note: "开放疑问和冷群开场都会按强度阈值判断；冷群唤醒默认关闭，适合很安静的小群。",
-      keys: ["enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes"],
-    },
-    {
-      title: "节流与拟人感",
-      note: "控制冷却、收口等待和被频繁叫到后的疲劳感。",
-      keys: ["group_wakeup_cooldown_seconds", "group_wakeup_short_text_wait_seconds", "group_wakeup_debounce_pending_penalty", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes"],
-    },
-    {
-      title: "高强度收口",
-      note: "连续被叫到时，按配置合并后续唤醒消息，减少多次 LLM 调用和后台成本。",
-      keys: ["enable_group_high_intensity_mode", "group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
-    },
-    {
-      title: "记录与上下文",
-      note: "控制页面记录量和场景判断参考消息数。",
-      keys: ["group_wakeup_log_limit", "group_scene_recent_limit"],
-    },
-  ],
   enable_photo_text_action: [
     {
       title: "触发与额度",
@@ -2233,9 +2265,9 @@ const featureSettingSections = {
       keys: ["enable_daily_outfit_photo", "daily_outfit_photo_prompt"],
     },
     {
-      title: "自然语言生图/改图",
-      note: "私聊明确请求时直接调用生图后端；默认关闭，避免和独立生图插件抢触发。",
-      keys: ["enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"],
+      title: "非指令生图/改图",
+      note: "注册工具后建议工具优先；规则快判只作为工具调用不稳定时的前置接管兜底。",
+      keys: ["natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"],
     },
     {
       title: "电脑负载保护",
@@ -2297,11 +2329,15 @@ const featureSettingTypes = {
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   expression_learning_mode: { type: "select", options: [["light", "轻量：只学节奏"], ["balanced", "标准：当前行为"], ["aggressive", "激进：参考审核样本"]] },
   response_review_mode: { type: "select", options: [["severe_only", "主动统一复核"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  smart_silence_judge_mode: { type: "select", options: [["boundary_only", "明确边界才判断"], ["contextual", "上下文模型判断"]] },
   proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴：不省成本"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   smart_silence_min_confidence: { type: "number", min: 0, max: 100, step: 1 },
   smart_silence_model_timeout_seconds: { type: "number", min: 0.2, max: 5, step: 0.1 },
+  group_access_mode: { type: "select", options: [["whitelist", "白名单模式"], ["blacklist", "黑名单模式"]] },
+  group_whitelist_ids: { type: "textarea" },
+  group_blacklist_ids: { type: "textarea" },
   group_high_intensity_merge_scope: { type: "select", options: [["group", "全群连续叫 Bot 合并"], ["same_user", "只合并同一发送者补话"]] },
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
   SMART_SILENCE_PROVIDER_ID: { type: "provider" },
@@ -2336,6 +2372,7 @@ const featureSettingTypes = {
   segmented_proactive_split_mode: { type: "select", options: [["regex", "正则"], ["words", "分段词列表"]] },
   segmented_proactive_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
   segmented_proactive_content_cleanup_scope: { type: "select", options: [["all", "全段清理"], ["trailing", "仅句尾清理"]] },
+  natural_language_photo_generation_mode: { type: "select", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做非指令生图"]] },
   recall_forbidden_scope: { type: "select", options: [["bot_and_group", "Bot 自己 + 群聊"], ["bot_only", "仅 Bot 自己"], ["group_only", "仅群聊"]] },
   atrelay_default_relay_style: { type: "select", options: [["persona", "语气转译"], ["soft", "委婉转述"], ["original", "原话模式"]] },
   worldbook_config_paths: { type: "textarea" },
@@ -2349,6 +2386,7 @@ const featureSettingTypes = {
   QZONE_COOKIE: { type: "textarea" },
   news_sources: { type: "textarea" },
   news_hot_sources: { type: "textarea" },
+  ai_daily_sources: { type: "textarea" },
   web_exploration_interests: { type: "textarea" },
   external_image_api_custom_headers: { type: "textarea" },
   backup_external_image_api_custom_headers: { type: "textarea" },
@@ -2374,6 +2412,9 @@ const featureSettingTypes = {
   group_repeat_interrupt_text: { type: "text" },
   group_repeat_interrupt_image_path: { type: "text" },
   group_wakeup_cold_group_threshold: { type: "number", min: 0, max: 100, step: 1 },
+  group_air_guard_window_seconds: { type: "number", min: 30, max: 1800, step: 10 },
+  group_air_guard_max_bot_replies: { type: "number", min: 1, max: 20, step: 1 },
+  group_air_guard_polite_loop_limit: { type: "number", min: 1, max: 10, step: 1 },
 };
 
 const probabilitySettingKeys = new Set([
@@ -2388,6 +2429,7 @@ const probabilitySettingKeys = new Set([
   "proactive_review_hard_risk_threshold",
   "proactive_review_low_score_threshold",
   "proactive_review_pressure_threshold",
+  "smart_silence_min_confidence",
   "private_reading_share_probability",
   "private_reading_ask_probability",
   "creative_inspiration_probability",
@@ -3698,7 +3740,8 @@ const setupGuideAdvancedItems = {
       caution: "开太严格会显得不理人。首次建议标准阈值，发现漏回复再降低置信度。",
       kind: "feature",
       settings: [
-        { key: "smart_silence_min_confidence", type: "number", label: "沉默置信度", placeholder: "0.72", min: 0, max: 1, step: 0.01 },
+        { key: "smart_silence_judge_mode", type: "select", label: "判断模式", options: [["boundary_only", "明确边界才判断"], ["contextual", "上下文模型判断"]], description: "想让它判断短句收尾、忙了/睡了、敷衍回应时，选上下文模型判断。" },
+        { key: "smart_silence_min_confidence", type: "number", label: "沉默置信度（%）", placeholder: "72", min: 0, max: 100 },
         { key: "smart_silence_model_timeout_seconds", type: "number", label: "模型超时秒数", placeholder: "5", min: 1 },
       ],
     },
@@ -3729,7 +3772,7 @@ const setupGuideAdvancedItems = {
       settings: [
         { key: "tts_voice_language", type: "select", label: "语音语言", options: [["ja", "日语"], ["zh", "中文"], ["en", "英语"], ["default", "默认"]] },
         { key: "tts_frequency_control_mode", type: "select", label: "频率控制", options: [["global", "全局频控"], ["legacy", "旧版频控"]] },
-        { key: "tts_trigger_probability", type: "number", label: "自动语音概率", placeholder: "0.08", min: 0, max: 1, step: 0.01 },
+        { key: "tts_trigger_probability", type: "number", label: "自动语音概率（%）", placeholder: "8", min: 0, max: 100 },
         { key: "enable_tts_local_playback", type: "bool", label: "本机播放生成语音", description: "直播或本机陪伴场景再开。" },
       ],
     },
@@ -3830,104 +3873,173 @@ const setupGuideAdvancedItems = {
   group: [
     {
       key: "enable_group_companion",
-      title: "群聊陪伴总开关",
-      ask: "是否让插件参与群聊观察和回复判断？",
-      description: "开启后，插件会在白名单/黑名单允许的群里处理唤醒、上下文、群资料和部分主动能力。",
-      caution: "初次建议配白名单，只放确定允许观察的群。",
-      kind: "feature",
-    },
-    {
-      key: "enable_group_context_injection",
-      title: "群聊上下文注入",
-      ask: "是否把近期群聊、群资料和关系线索提供给回复模型？",
-      description: "Bot 更容易接上群里的话题、区分群友和理解前后文。",
-      caution: "群越活跃，注入越长；配合注入保护和隐私保护一起开更稳。",
+      title: "群聊启用范围",
+      ask: "先决定插件在哪些群生效。",
+      description: "总开关、白名单/黑名单都在这里。想找“为什么这个群没反应”，先看这里。",
+      caution: "初次建议白名单模式，只放确定允许观察和回复的群。",
       kind: "feature",
       settings: [
-        { key: "enable_group_injection_guard", type: "bool", kind: "feature", label: "群聊注入保护", description: "减少把内部资料原样说出来。" },
-        { key: "enable_group_privacy_guard", type: "bool", kind: "feature", label: "群聊隐私保护", description: "避免跨人泄漏私聊/关系资料。" },
-        { key: "max_group_recent_messages", type: "number", label: "近期群聊条数", placeholder: "20", min: 1 },
+        { key: "group_access_mode", type: "select", label: "启用模式", options: [["whitelist", "白名单模式"], ["blacklist", "黑名单模式"]] },
+        { key: "group_whitelist_ids", type: "textarea", label: "群白名单", placeholder: "一行一个群号" },
+        { key: "group_blacklist_ids", type: "textarea", label: "群黑名单", placeholder: "一行一个群号" },
       ],
     },
     {
-      key: "enable_worldbook_member_recognition",
-      title: "群关系网和成员识别",
-      ask: "是否用关系网把群友 QQ、昵称、身份和长期备注稳定对应起来？",
-      description: "开启后，Bot 不只看群昵称，还能把同一个人的自登记、关系备注、重要记忆和群内互动串起来。",
-      caution: "关系网是长期资料。建议允许自登记，但保留待确认观察，避免模型把临时玩笑写成稳定事实。",
+      key: "enable_group_conversation_followup",
+      title: "连续对话保持",
+      ask: "用户叫过 Bot 后，没继续 @ 时还要不要续接？",
+      description: "控制短时间内同一用户的后续消息是否仍视为对 Bot 说。想找“不 @ 也一直回/不续话”，看这里。",
+      caution: "群里机器人多时建议把连续续接上限保持 1 或 0。",
       kind: "feature",
       settings: [
-        { key: "worldbook_self_registration", type: "bool", label: "允许用户自登记", description: "群友可以按指令补充自己的称呼和资料。" },
-        { key: "worldbook_auto_pending_observations", type: "bool", label: "新观察先进入待确认", description: "推荐开启，避免误写长期设定。" },
-        { key: "worldbook_member_match_aliases", type: "bool", label: "用别名辅助匹配", description: "昵称经常变化的群更需要。" },
-        { key: "worldbook_member_inject_limit", type: "number", label: "每轮注入成员上限", placeholder: "6", min: 0 },
+        { key: "group_conversation_followup_seconds", type: "number", label: "续接判断秒数", placeholder: "120", min: 0 },
+        { key: "group_conversation_followup_max_turns", type: "number", label: "连续续接上限", placeholder: "1", min: 0 },
+        { key: "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", type: "provider", label: "续接/读空气判断模型", description: "连续对话复判和读空气复判共用；留空跟随默认/陪伴模型。" },
       ],
     },
     {
-      key: "enable_group_wakeup_enhancement",
-      title: "群聊唤醒增强",
-      ask: "是否让 Bot 不只靠 @，也能根据关键词、问题句和冷群场景判断要不要接话？",
-      description: "适合希望 Bot 在群里更自然地被叫出来，而不是必须每次都 @。",
-      caution: "默认别开太猛。词越泛、概率越高，越容易插进不该接的话。",
+      key: "enable_group_air_reply_guard",
+      title: "群聊读空气",
+      ask: "是否让 Bot 在互刷、收尾寒暄或话题结束时自动沉默？",
+      description: "解决机器人互相引用、晚安循环、谢谢/拜拜刷屏。想找“怎么让它闭嘴”，看这里。",
+      caution: "推荐开启。活跃群可把窗口最大回复数调低到 2。",
       kind: "feature",
       settings: [
-        { key: "group_wakeup_direct_words", type: "textarea", label: "强唤醒词", placeholder: "Bot 名字、昵称、固定称呼；一行一个或逗号分隔。" },
-        { key: "group_wakeup_interest_keywords", type: "textarea", label: "兴趣关键词", placeholder: "游戏, 日常, 学习" },
-        { key: "group_wakeup_interest_probability", type: "number", label: "兴趣唤醒概率", placeholder: "18", min: 0, max: 100 },
-        { key: "enable_group_wakeup_question", type: "bool", label: "解惑唤醒", description: "群友求助时可能接话。" },
-        { key: "enable_group_wakeup_cold_group", type: "bool", label: "冷群唤醒", description: "群安静很久后可低频接话。" },
+        { key: "group_air_guard_window_seconds", type: "number", label: "检测窗口秒数", placeholder: "180", min: 30 },
+        { key: "group_air_guard_max_bot_replies", type: "number", label: "窗口最大回复数", placeholder: "3", min: 1 },
+        { key: "group_air_guard_polite_loop_limit", type: "number", label: "收尾循环上限", placeholder: "2", min: 1 },
       ],
     },
     {
       key: "enable_group_high_intensity_mode",
-      title: "高强度收口",
-      ask: "是否在群里短时间多人叫 Bot 时先合并再回复？",
-      description: "多人连续唤醒时，Bot 会等几秒把问题收齐，避免同时回好几条。",
-      caution: "会增加等待感。活跃群可以开，普通群不必急着开。",
+      title: "高压消息合并",
+      ask: "多人或多条消息连续叫 Bot 时，是否先合并再回复？",
+      description: "解决群里同时 @、连续追问导致 Bot 一次回很多条的问题。想找“多人叫它怎么收口”，看这里。",
+      caution: "会增加等待感。活跃群推荐开启，普通群可保持默认。",
       kind: "feature",
       settings: [
-        { key: "group_high_intensity_merge_seconds", type: "number", label: "合并等待秒数", placeholder: "5", min: 0 },
-        { key: "group_high_intensity_max_merge_messages", type: "number", label: "最多合并消息", placeholder: "8", min: 1 },
+        { key: "group_high_intensity_wakeup_window_seconds", type: "number", label: "高压统计窗口秒数", placeholder: "60", min: 15 },
+        { key: "group_high_intensity_wakeup_threshold", type: "number", label: "高压唤醒阈值", placeholder: "3", min: 2 },
+        { key: "group_high_intensity_cooldown_seconds", type: "number", label: "高压冷却秒数", placeholder: "150", min: 30 },
+        { key: "group_high_intensity_merge_seconds", type: "number", label: "合并等待秒数", placeholder: "8", min: 1 },
+        { key: "group_high_intensity_max_merge_messages", type: "number", label: "最多合并消息", placeholder: "8", min: 0 },
+        { key: "group_high_intensity_merge_scope", type: "select", label: "合并范围", options: [["group", "全群"], ["same_user", "同一用户"]] },
       ],
     },
     {
-      key: "enable_group_slang_learning",
-      title: "群黑话学习",
-      ask: "是否让 Bot 记录和解释群里的黑话、梗和专有称呼？",
-      description: "它会观察重复出现的词，生成候选释义，后续可在群详情里校正。",
-      caution: "模型释义不一定准确，建议先观察再手动审核。联网参考会增加搜索调用。",
+      key: "enable_group_context_injection",
+      title: "群聊回复理解",
+      ask: "是否让 Bot 回复时参考近期群聊、场景和对话对象？",
+      description: "解决接不上话、看不懂谁在对谁说、回复缺上下文的问题。",
+      caution: "群越活跃，注入越长；可用最近消息上限控制成本。",
       kind: "feature",
       settings: [
-        { key: "enable_group_slang_meanings", type: "bool", label: "生成黑话释义", description: "推荐开启观察。" },
-        { key: "enable_group_slang_web_search", type: "bool", label: "联网参考黑话", description: "需要搜索能力，可能更慢。" },
-        { key: "max_group_slang_terms", type: "number", label: "最多保留词条", placeholder: "80", min: 0 },
+        { key: "max_group_recent_messages", type: "number", label: "近期群聊条数", placeholder: "80", min: 20 },
+        { key: "enable_group_scene_awareness", type: "bool", kind: "feature", label: "群聊场景感知", description: "判断当前话是对 Bot、群友还是全群。" },
+        { key: "group_scene_recent_limit", type: "number", label: "场景最近消息数", placeholder: "5", min: 1 },
+        { key: "FORWARD_MESSAGE_PROVIDER_ID", type: "provider", label: "合并消息转述模型", description: "群聊引用/合并消息需要转述时使用。" },
       ],
     },
     {
-      key: "enable_group_topic_threads",
-      title: "群话题线和片段记忆",
-      ask: "是否让 Bot 整理群里正在聊什么、谁参与了哪些小话题？",
-      description: "它会把群聊拆成话题线，帮助后续接话、关系理解和插话反馈。",
-      caution: "活跃群会有后台整理成本；如果只想简单被 @ 回复，可以先不开。",
+      key: "enable_group_injection_guard",
+      title: "群聊安全保护",
+      ask: "是否减少提示词污染、隐私泄漏、私聊腔外溢和现实承诺？",
+      description: "解决群友把设定带跑、泄露私聊记忆、回复太贴身或承诺现实行动的问题。",
+      caution: "推荐和群聊上下文注入一起开启。",
       kind: "feature",
       settings: [
-        { key: "enable_group_member_profiles", type: "bool", kind: "feature", label: "群成员短画像", description: "整理群友近期角色、常聊内容和互动习惯。" },
-        { key: "enable_group_episode_memory", type: "bool", kind: "feature", label: "群片段记忆", description: "把一段群聊整理成小事件。" },
-        { key: "enable_group_relationship_graph", type: "bool", kind: "feature", label: "群关系图", description: "帮助理解群友之间的互动。" },
-        { key: "enable_group_repeat_follow", type: "bool", kind: "feature", label: "跟随复读/打断复读", description: "群里复读时低频跟一句或打断。" },
+        { key: "enable_group_privacy_guard", type: "bool", kind: "feature", label: "群聊隐私保护", description: "避免跨人泄漏私聊/关系资料。" },
+        { key: "enable_group_persona_denoise", type: "bool", kind: "feature", label: "群聊人格降噪", description: "降低私聊腔、状态汇报和过度贴身表达。" },
+        { key: "enable_group_reality_promise_guard", type: "bool", kind: "feature", label: "现实承诺保护", description: "避免在群里承诺现实行动。" },
       ],
     },
     {
-      key: "enable_group_interjection",
-      title: "群聊主动插话",
-      ask: "是否允许 Bot 在没人直接叫它时，低频主动插一句？",
-      description: "适合希望 Bot 在群里更有存在感的场景。",
-      caution: "最容易打扰群友。建议先设置低频，并开启反馈学习。",
+      key: "enable_group_wakeup_enhancement",
+      title: "群聊主动唤醒",
+      ask: "是否让 Bot 更主动地被叫醒、接问题或低频插话？",
+      description: "包含唤醒与插话。想找“怎么叫醒它/为什么没叫也回/让它主动说话”，看这里。",
+      caution: "兴趣接话、冷群唤醒和主动插话会让 Bot 更活跃，建议谨慎调高。",
       kind: "feature",
       settings: [
+        { key: "group_wakeup_direct_words", type: "textarea", label: "强唤醒词", placeholder: "Bot 名字、昵称、固定称呼；一行一个或逗号分隔。" },
+        { key: "group_wakeup_context_words", type: "textarea", label: "弱相关唤醒词", placeholder: "机器人, bot" },
+        { key: "group_wakeup_short_text_wait_seconds", type: "number", label: "短唤醒等待秒数", placeholder: "15", min: 0 },
+        { key: "group_wakeup_cooldown_seconds", type: "number", label: "唤醒冷却秒数", placeholder: "90", min: 0 },
+        { key: "group_wakeup_interest_keywords", type: "textarea", label: "兴趣关键词", placeholder: "游戏, 日常, 学习" },
+        { key: "group_wakeup_interest_probability", type: "number", label: "兴趣唤醒概率", placeholder: "18", min: 0, max: 100 },
+        { key: "enable_group_wakeup_question", type: "bool", label: "解惑唤醒", description: "群友求助时可能接话。" },
+        { key: "enable_group_wakeup_cold_group", type: "bool", label: "冷群唤醒", description: "群安静很久后可低频接话。" },
+        { key: "enable_group_interjection", type: "bool", kind: "feature", label: "主动插话", description: "没人直接叫它时低频主动插一句。" },
         { key: "group_interject_min_interval_minutes", type: "number", label: "插话最小间隔分钟", placeholder: "180", min: 0 },
         { key: "group_interject_max_daily", type: "number", label: "每日插话上限", placeholder: "2", min: 0 },
         { key: "enable_group_interjection_feedback", type: "bool", kind: "feature", label: "插话反馈学习", description: "根据群友反应降低打扰。" },
+        { key: "GROUP_INTERJECT_PROVIDER_ID", type: "provider", label: "主动插话模型", description: "生成/判断群聊插话时使用。" },
+      ],
+    },
+    {
+      key: "enable_group_member_profiles",
+      title: "群聊观察学习",
+      ask: "是否让 Bot 学习群成员、黑话、话题线和群片段？",
+      description: "解决长期看懂这个群的问题，不直接决定当下是否回复。关系网身份识别也归在这里。",
+      caution: "活跃群会有后台整理成本；只想简单被 @ 回复时可以少开。",
+      kind: "feature",
+      settings: [
+        { key: "enable_group_relationship_graph", type: "bool", kind: "feature", label: "群聊关系图", description: "帮助理解群友之间的互动。" },
+        { key: "enable_worldbook_member_recognition", type: "bool", kind: "feature", label: "关系网成员识别", description: "把群友 QQ、昵称、身份和长期备注稳定对应。" },
+        { key: "worldbook_self_registration", type: "bool", label: "允许用户自登记", description: "群友可以按指令补充自己的称呼和资料。" },
+        { key: "worldbook_auto_pending_observations", type: "bool", label: "新观察先进入待确认", description: "推荐开启，避免误写长期设定。" },
+        { key: "enable_group_slang_learning", type: "bool", kind: "feature", label: "群黑话学习", description: "记录常见梗、简称和特殊表达。" },
+        { key: "enable_group_slang_meanings", type: "bool", label: "生成黑话释义", description: "为候选黑话生成解释。" },
+        { key: "enable_group_slang_web_search", type: "bool", label: "联网参考黑话", description: "需要搜索能力，可能更慢。" },
+        { key: "max_group_slang_terms", type: "number", label: "最多保留黑话", placeholder: "40", min: 0 },
+        { key: "enable_group_topic_threads", type: "bool", kind: "feature", label: "群聊话题线程", description: "跟踪群里正在聊的小话题。" },
+        { key: "enable_group_episode_memory", type: "bool", kind: "feature", label: "群片段记忆", description: "把一段群聊整理成小事件。" },
+        { key: "GROUP_SLANG_PROVIDER_ID", type: "provider", label: "黑话释义模型", description: "整理群黑话含义时使用。" },
+        { key: "GROUP_EPISODE_PROVIDER_ID", type: "provider", label: "群片段整理模型", description: "整理群聊片段/话题时使用。" },
+      ],
+    },
+    {
+      key: "enable_group_repeat_follow",
+      title: "复读处理",
+      ask: "群里复读时，Bot 是否跟一句或打断？",
+      description: "解决复读触发、不同用户计数、跟随概率和打断概率的问题。",
+      caution: "建议保持低概率，避免 Bot 变成刷屏的一部分。",
+      kind: "feature",
+      settings: [
+        { key: "group_repeat_trigger_threshold", type: "number", label: "复读触发阈值", placeholder: "4", min: 3 },
+        { key: "group_repeat_count_distinct_users_only", type: "bool", label: "只计不同用户", description: "同一个人刷屏不累计复读人数。" },
+        { key: "group_repeat_follow_probability", type: "number", label: "复读跟随概率", placeholder: "18", min: 0, max: 100 },
+        { key: "group_repeat_interrupt_probability", type: "number", label: "复读打断概率", placeholder: "10", min: 0, max: 100 },
+        { key: "group_repeat_interrupt_probability_step", type: "number", label: "打断概率递增", placeholder: "12", min: 0, max: 100 },
+        { key: "group_repeat_interrupt_text", type: "text", label: "打断文本", placeholder: "禁止复读" },
+        { key: "group_repeat_interrupt_image_path", type: "text", label: "打断图片路径", placeholder: "本地图片路径" },
+      ],
+    },
+    {
+      key: "enable_atrelay_tools",
+      title: "跨群转述",
+      ask: "是否允许 Bot 查询群成员并转述到群聊/私聊？",
+      description: "解决跨群传话、@ 群友、按关系网解析对象的问题。",
+      caution: "涉及跨群发送，建议开启敏感转述确认。",
+      kind: "feature",
+      settings: [
+        { key: "atrelay_require_worldbook_first", type: "bool", label: "优先关系网解析", description: "优先用长期关系网确定 @ 对象。" },
+        { key: "atrelay_member_cache_minutes", type: "number", label: "群成员缓存分钟", placeholder: "60", min: 1 },
+        { key: "atrelay_sensitive_confirm", type: "bool", label: "敏感转述确认", description: "敏感内容发送前确认。" },
+        { key: "enable_atrelay_llm_rewrite", type: "bool", label: "模型转述改写", description: "按人格或委婉方式改写转述内容。" },
+        { key: "atrelay_default_relay_style", type: "select", label: "默认转述风格", options: [["persona", "语气转译"], ["soft", "委婉转述"], ["original", "原话模式"]] },
+        { key: "atrelay_multi_target_limit", type: "number", label: "一次最多目标数", placeholder: "5", min: 1 },
+      ],
+    },
+    {
+      key: "enable_cross_user_memory_bridge",
+      title: "跨用户记忆",
+      ask: "是否允许主人查询 Bot 与其他用户/群聊的互动线索？",
+      description: "只读查询跨用户互动摘要，不负责发送消息。",
+      caution: "涉及跨会话信息，建议保持仅主人可查。",
+      kind: "feature",
+      settings: [
+        { key: "cross_user_memory_owner_only", type: "bool", label: "仅主人可查询", description: "推荐开启，避免普通群友查询他人互动。" },
       ],
     },
   ],
@@ -3986,9 +4098,10 @@ const setupGuideAdvancedItems = {
         { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
         { key: "photo_action_max_daily", type: "number", label: "每日主动带图上限", placeholder: "1", min: 0 },
         { key: "proactive_photo_text_probability", type: "number", label: "主动带图概率", placeholder: "12", min: 0, max: 100 },
-        { key: "enable_natural_language_photo_generation", type: "bool", kind: "feature", label: "允许用户自然语言生图/改图", description: "用户明确说想要图片时直接调用同一套生图后端；默认建议先不开，避免和独立生图插件抢触发。" },
-        { key: "natural_language_photo_generation_max_daily", type: "number", label: "自然语言生图每日上限", placeholder: "3", min: 0, showWhen: (draft) => Boolean(draft.enable_natural_language_photo_generation) },
-        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "自然语言生图附加提示词", placeholder: "例如：保持角色外观一致，不生成现实人物照片。", showWhen: (draft) => Boolean(draft.enable_natural_language_photo_generation) },
+        { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
+        { key: "enable_natural_language_photo_generation", type: "bool", kind: "feature", label: "允许规则快判生图/改图", description: "开启后，插件会在主链前直接接管高置信图片请求。", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" },
+        { key: "natural_language_photo_generation_max_daily", type: "number", label: "规则快判每日上限", placeholder: "3", min: 0, showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
+        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "例如：保持角色外观一致，不生成现实人物照片。", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
       ],
     },
     {
@@ -4075,7 +4188,7 @@ const setupGuideAdvancedItems = {
       caution: "创作会持续消耗模型调用。开启隐藏模式后，内容更偏后台，不一定主动展示。",
       kind: "feature",
       settings: [
-        { key: "creative_inspiration_probability", type: "number", label: "灵感触发概率", placeholder: "0.15", min: 0, max: 1, step: 0.01 },
+        { key: "creative_inspiration_probability", type: "number", label: "灵感触发概率（%）", placeholder: "15", min: 0, max: 100 },
         { key: "creative_chars_per_session", type: "number", label: "每次创作字数", placeholder: "1200", min: 100 },
         { key: "creative_hidden_mode", type: "bool", kind: "feature", label: "隐藏创作模式", description: "更少主动展示创作内容。" },
       ],
@@ -4204,6 +4317,7 @@ const setupGuideDynamicFields = new Set([
   "photo_generation_backend",
   "photo_generation_style",
   "enable_natural_language_photo_generation",
+  "natural_language_photo_generation_mode",
 ]);
 
 function setupRunStatusLabel(level) {
@@ -4267,7 +4381,7 @@ function setupGuideDraft() {
     setupGuideAdvancedItemKeys().forEach((key) => {
       if (!key || Object.prototype.hasOwnProperty.call(state.setupGuideDraft, key)) return;
       if (Object.prototype.hasOwnProperty.call(settings, key)) {
-        state.setupGuideDraft[key] = settings[key];
+        state.setupGuideDraft[key] = setupGuideDraftDisplayValue(key, settings[key]);
       } else if (Object.prototype.hasOwnProperty.call(features, key)) {
         state.setupGuideDraft[key] = features[key];
       } else if (Object.prototype.hasOwnProperty.call(providers, key)) {
@@ -4276,6 +4390,20 @@ function setupGuideDraft() {
     });
   }
   return state.setupGuideDraft;
+}
+
+function setupGuideDraftDisplayValue(key, value) {
+  return isPercentInputSetting(key) ? displaySettingValue(key, value) : value;
+}
+
+function setupGuidePayloadValue(key, value) {
+  if (!isPercentInputSetting(key)) return value;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  if (isFractionalPercentSetting(key)) {
+    return Math.max(0, Math.min(1, numeric / 100));
+  }
+  return numeric;
 }
 
 function setupGuidePercentValue(primary, fallback, defaultValue = 0) {
@@ -4528,7 +4656,7 @@ function setupGuideModeHomeHtml() {
   const intensity = overview.proactive_intensity || {};
 
   const targetUsers = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
-  const fastProvider = String(providers.FAST_RESPONSE_ID || "").trim();
+  const fastProvider = String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim();
   const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
   const proactiveMax = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
   const hasUsers = targetUsers.length > 0;
@@ -4754,7 +4882,7 @@ function setupGuideAdvancedPayload(blockId = state.setupGuideAdvancedBlock) {
     } else if (kind === "feature" || (!Object.prototype.hasOwnProperty.call(overviewSettings, key) && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key))) {
       features[key] = Boolean(value);
     } else if (kind === "setting" || Object.prototype.hasOwnProperty.call(overviewSettings, key) || !String(key).startsWith("enable_")) {
-      settings[key] = value;
+      settings[key] = setupGuidePayloadValue(key, value);
     } else {
       features[key] = Boolean(value);
     }
@@ -7440,6 +7568,10 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
               item.ok ? "成功" : "失败",
               item.backend || "",
               item.kind ? `类型 ${item.kind}` : "",
+              item.intent_kind ? `意图 ${item.intent_kind}` : "",
+              item.trigger ? `来源 ${item.trigger}` : "",
+              item.sent ? "已发送" : "",
+              item.scene_preset ? `预设 ${item.scene_preset}` : "",
               item.image_size ? `尺寸 ${item.image_size}` : "",
               item.reference ? "带参考图" : "",
               item.elapsed_ms ? `${item.elapsed_ms}ms` : "",
@@ -7450,6 +7582,7 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
               <div class="chain-test-preview-section">
                 <b>${escapeHtml(meta || "生图记录")}</b>
                 ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
+                ${item.caption ? `<small>附言：${escapeHtml(item.caption)}</small>` : ""}
                 ${item.path ? `<small class="path">${escapeHtml(item.path)}</small>` : ""}
                 ${item.reference_path ? `<small class="path">参考图：${escapeHtml(item.reference_path)}</small>` : ""}
                 <p>${escapeHtml(item.prompt || item.prompt_preview || "")}</p>
@@ -14984,6 +15117,7 @@ function featureRelatedSettings(key) {
       enable_smart_message_debounce: false,
       SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "",
       enable_smart_silence: true,
+      smart_silence_judge_mode: "boundary_only",
       SMART_SILENCE_PROVIDER_ID: "",
       smart_silence_min_confidence: 0.66,
       smart_silence_model_timeout_seconds: 1.2,
@@ -15040,7 +15174,7 @@ function featureRelatedSettings(key) {
             ? state.featureDraft[item]
             : fallbackValue(item),
       feature: Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item),
-      description: configDescriptions[item] || featureDescription(item) || "这个参数会影响该功能的触发频率、上下文范围或行为边界。",
+      description: configDescription(item),
     }));
 }
 
@@ -15112,6 +15246,9 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return true;
   }
   if (featureKey === "enable_response_self_review") {
+    if (["smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds"].includes(settingKey)) {
+      return boolSetting("enable_smart_silence");
+    }
     if (settingKey === "response_review_max_chars") {
       return String(valueSetting("response_review_mode", "severe_only")) === "full";
     }
@@ -15119,7 +15256,12 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_photo_text_action") {
     if (settingKey === "daily_outfit_photo_prompt") return boolSetting("enable_daily_outfit_photo");
-    if (["natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"].includes(settingKey)) return boolSetting("enable_natural_language_photo_generation");
+    if (settingKey === "enable_natural_language_photo_generation") {
+      return String(valueSetting("natural_language_photo_generation_mode", "tool_first")) === "rule_fast";
+    }
+    if (["natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"].includes(settingKey)) {
+      return String(valueSetting("natural_language_photo_generation_mode", "tool_first")) === "rule_fast" && boolSetting("enable_natural_language_photo_generation");
+    }
     return true;
   }
   if (featureKey === "enable_emotion_simulation") {
@@ -15928,11 +16070,19 @@ function featureImpactLines(key) {
 }
 
 function configLabel(name) {
-  const label = configLabels[name] || featureLabel(name) || name.replace(/^enable_/, "").replaceAll("_", " ");
+  const label = configLabels[name] || providerLabels[name] || featureLabel(name) || name.replace(/^enable_/, "").replaceAll("_", " ");
   if (isPercentInputSetting(name) && !/[（(]%[）)]/.test(label)) {
     return `${label}（%）`;
   }
   return label;
+}
+
+function configDescription(name) {
+  const guide = providerGuides[name];
+  if (guide) {
+    return [guide.purpose, guide.fit, guide.fallback].filter(Boolean).join(" ");
+  }
+  return configDescriptions[name] || featureDescription(name) || "这个参数会影响该功能的触发频率、上下文范围或行为边界。";
 }
 
 function featureDetailPage(key) {
@@ -16117,7 +16267,7 @@ function bindFeatureDetailActions() {
             renderFeatureSwitches();
           }
           if (
-            state.selectedFeatureKey === "enable_group_slang_learning"
+            ["enable_group_slang_learning", "enable_group_member_profiles"].includes(state.selectedFeatureKey)
             && ["enable_group_slang_meanings", "enable_group_slang_web_search"].includes(input.dataset.featureParam)
           ) {
             state.featureDraft[input.dataset.featureParam] = input.checked;
@@ -16127,7 +16277,16 @@ function bindFeatureDetailActions() {
           }
           if (
             state.selectedFeatureKey === "enable_group_wakeup_enhancement"
-            && ["enable_group_wakeup_question", "enable_group_wakeup_cold_group", "enable_group_high_intensity_mode"].includes(input.dataset.featureParam)
+            && ["enable_group_wakeup_question", "enable_group_wakeup_cold_group", "enable_group_interjection", "enable_group_interjection_feedback"].includes(input.dataset.featureParam)
+          ) {
+            state.featureDraft[input.dataset.featureParam] = input.checked;
+            state.overview.settings = state.overview.settings || {};
+            state.overview.settings[input.dataset.featureParam] = input.checked;
+            renderFeatureSwitches();
+          }
+          if (
+            state.selectedFeatureKey === "enable_group_high_intensity_mode"
+            && input.dataset.featureParam === "enable_group_high_intensity_mode"
           ) {
             state.featureDraft[input.dataset.featureParam] = input.checked;
             state.overview.settings = state.overview.settings || {};
@@ -17633,8 +17792,8 @@ document.getElementById("appearanceFontSelect")?.addEventListener("change", asyn
   state.pageFontFamily = value;
   applyPageFontFamily();
   try {
-    await postJson("/settings/update", { settings: { page_font_family: value } });
-    showToast("页面字体已保存");
+    const result = await postJson("/settings/update", { settings: { page_font_family: value } });
+    showToast(result?.config_saved === false ? "页面字体已应用，但配置持久化失败；重启后可能恢复旧值" : "页面字体已保存", result?.config_saved === false ? "error" : "success");
   } catch (error) {
     state.pageFontFamily = previous;
     applyPageFontFamily();
@@ -17648,8 +17807,8 @@ async function savePageTheme(theme) {
   applyPageTheme();
   renderAppearanceSettings();
   try {
-    await postJson("/settings/update", { settings: { page_theme: theme } });
-    showToast("主题已保存");
+    const result = await postJson("/settings/update", { settings: { page_theme: theme } });
+    showToast(result?.config_saved === false ? "主题已应用，但配置持久化失败；重启后可能恢复旧值" : "主题已保存", result?.config_saved === false ? "error" : "success");
   } catch (error) {
     state.pageTheme = previous;
     applyPageTheme();

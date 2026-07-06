@@ -83,9 +83,9 @@ class CommandHandlersMixin:
             f"消息收口：{self._feature_on_text(getattr(self, 'enable_message_debounce', False))}，智能文本收口 {self._feature_on_text(getattr(self, 'enable_smart_message_debounce', False))}，文本最长等待 {getattr(self, 'text_message_debounce_max_wait_seconds', 0)} 秒",
             f"群聊唤醒增强：{self._feature_on_text(getattr(self, 'enable_group_wakeup_enhancement', False))}，短唤醒补话等待 {getattr(self, 'group_wakeup_short_text_wait_seconds', 0)} 秒",
             f"休息回复闸门：{self._feature_on_text(getattr(self, 'enable_rest_reply_simulation', False))}，模式 {getattr(self, 'rest_reply_mode', 'probability')}，概率 {rest_probability_text}，模型阈值 {getattr(self, 'rest_reply_llm_threshold', 0)}，清醒宽限 {getattr(self, 'rest_reply_awake_grace_minutes', 0)} 分钟",
-            f"智能沉默：{self._feature_on_text(getattr(self, 'enable_smart_silence', True))}，置信度 {silence_confidence_text}，超时 {getattr(self, 'smart_silence_model_timeout_seconds', 0)} 秒",
+            f"智能沉默：{self._feature_on_text(getattr(self, 'enable_smart_silence', True))}，模式 {getattr(self, 'smart_silence_judge_mode', 'boundary_only')}，置信度 {silence_confidence_text}，超时 {getattr(self, 'smart_silence_model_timeout_seconds', 0)} 秒",
             f"回复复核：{self._feature_on_text(getattr(self, 'enable_response_self_review', True))}，模式 {getattr(self, 'response_review_mode', 'severe_only')}，被动长度阈值 {getattr(self, 'response_review_max_chars', 260)} 字",
-            f"自然语言生图：{self._feature_on_text(getattr(self, 'enable_natural_language_photo_generation', False))}，每日上限 {getattr(self, 'natural_language_photo_generation_max_daily', 0)}",
+            f"非指令生图：{_single_line(getattr(self, 'natural_language_photo_generation_mode', 'tool_first'), 24) or 'tool_first'}，规则快判{self._feature_on_text(getattr(self, 'enable_natural_language_photo_generation', False))}，每日上限 {getattr(self, 'natural_language_photo_generation_max_daily', 0)}",
             f"拟人状态：健康 {self._feature_on_text(getattr(self, 'enable_health_state', True))}，饥饿 {self._feature_on_text(getattr(self, 'enable_hunger_state', True))}，生理期 {self._feature_on_text(getattr(self, 'enable_cycle_state', True))}，强度 {getattr(self, 'humanized_state_intensity', 0)}",
             f"回复风格：{'已配置' if reply_style else '未配置'}，长度 {len(reply_style)} 字",
         ]
@@ -258,6 +258,20 @@ class CommandHandlersMixin:
             "text_message_debounce_max_wait_seconds": {"type": "float", "min": 0.0, "max": 30.0, "label": "文本最长等待秒数"},
             "message_debounce_max_merge_messages": {"type": "int", "min": 0, "max": 30, "label": "最大合并消息数"},
             "enable_smart_silence": {"type": "bool", "label": "智能沉默"},
+            "smart_silence_judge_mode": {
+                "type": "select",
+                "choices": {"boundary_only", "contextual"},
+                "aliases": {
+                    "边界": "boundary_only",
+                    "明确边界": "boundary_only",
+                    "保守": "boundary_only",
+                    "上下文": "contextual",
+                    "模型判断": "contextual",
+                    "更智能": "contextual",
+                    "智能": "contextual",
+                },
+                "label": "智能沉默判断模式",
+            },
             "smart_silence_min_confidence": {"type": "percent", "min": 0.0, "max": 1.0, "label": "智能沉默最低置信度"},
             "smart_silence_model_timeout_seconds": {"type": "float", "min": 0.2, "max": 5.0, "label": "智能沉默模型超时秒数"},
             "enable_response_self_review": {"type": "bool", "label": "回复/主动复核"},
@@ -307,9 +321,24 @@ class CommandHandlersMixin:
             "enable_hunger_state": {"type": "bool", "label": "饥饿/胃口状态"},
             "enable_cycle_state": {"type": "bool", "label": "生理期模拟"},
             "humanized_state_intensity": {"type": "int", "min": 0, "max": 100, "label": "拟人状态强度"},
-            "enable_natural_language_photo_generation": {"type": "bool", "label": "自然语言生图/改图"},
-            "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "自然语言生图每日上限"},
-            "natural_language_photo_extra_prompt": {"type": "string", "max_len": 5000, "label": "自然语言生图附加提示词"},
+            "natural_language_photo_generation_mode": {
+                "type": "select",
+                "choices": {"tool_first", "rule_fast", "off"},
+                "aliases": {
+                    "工具": "tool_first",
+                    "工具优先": "tool_first",
+                    "tool": "tool_first",
+                    "规则": "rule_fast",
+                    "规则快判": "rule_fast",
+                    "快判": "rule_fast",
+                    "关闭": "off",
+                    "关": "off",
+                },
+                "label": "非指令生图处理方式",
+            },
+            "enable_natural_language_photo_generation": {"type": "bool", "label": "允许规则快判生图/改图"},
+            "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "规则快判生图每日上限"},
+            "natural_language_photo_extra_prompt": {"type": "string", "max_len": 5000, "label": "规则快判生图附加提示词"},
             "enable_backup_external_image_api": {"type": "bool", "label": "启用备选在线图片 API"},
             "backup_external_image_api_platform": {
                 "type": "select",
@@ -353,6 +382,7 @@ class CommandHandlersMixin:
             "group_wakeup_interest_keywords": {"label": "群聊兴趣唤醒关键词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 兴趣唤醒"},
             "reply_style_prompt": {"label": "回复风格约束", "location": "拓展页 -> 世界知识/角色与表达 -> 回复风格约束；也可在配置页搜索 reply_style_prompt"},
             "enable_smart_silence": {"label": "智能沉默", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
+            "smart_silence_judge_mode": {"label": "智能沉默判断模式", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
             "smart_silence_min_confidence": {"label": "智能沉默最低置信度", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
             "smart_silence_model_timeout_seconds": {"label": "智能沉默模型超时秒数", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
             "enable_response_self_review": {"label": "回复/主动复核", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
@@ -381,7 +411,8 @@ class CommandHandlersMixin:
             "backup_external_image_api_size": {"label": "备选在线生图尺寸", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "backup_external_image_api_timeout_seconds": {"label": "备选在线生图超时秒数", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 本地 ComfyUI；也可用命令 陪伴 参考图 设置"},
-            "natural_language_photo_extra_prompt": {"label": "自然语言生图附加提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图"},
+            "natural_language_photo_generation_mode": {"label": "非指令生图处理方式", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
+            "natural_language_photo_extra_prompt": {"label": "规则快判生图附加提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
             "photo_generation_scene_presets": {"label": "生图场景预设", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "photo_generation_fixed_prompt": {"label": "全局固定生图提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "enable_qzone_integration": {"label": "QQ 空间联动", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动"},
@@ -421,6 +452,7 @@ class CommandHandlersMixin:
             "text_message_debounce_max_wait_seconds": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 补话等待",
             "message_debounce_max_merge_messages": "拓展页 -> 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 补话等待",
             "enable_smart_silence": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
+            "smart_silence_judge_mode": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
             "smart_silence_min_confidence": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
             "smart_silence_model_timeout_seconds": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
             "enable_response_self_review": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情",
@@ -442,9 +474,10 @@ class CommandHandlersMixin:
             "enable_hunger_state": "拓展页 -> 功能开关 -> 拟人状态 -> 身体状态",
             "enable_cycle_state": "拓展页 -> 功能开关 -> 拟人状态 -> 生理期模拟",
             "humanized_state_intensity": "拓展页 -> 功能开关 -> 拟人状态 -> 状态强度",
-            "enable_natural_language_photo_generation": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图",
-            "natural_language_photo_generation_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图",
-            "natural_language_photo_extra_prompt": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 自然语言生图/改图",
+            "natural_language_photo_generation_mode": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图",
+            "enable_natural_language_photo_generation": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图",
+            "natural_language_photo_generation_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图",
+            "natural_language_photo_extra_prompt": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图",
             "enable_qzone_comment_inbox": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
             "qzone_comment_inbox_interval_minutes": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
             "qzone_comment_inbox_recent_posts": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动详情 -> 评论收件箱",
@@ -511,6 +544,9 @@ class CommandHandlersMixin:
             "最大合并数": "message_debounce_max_merge_messages",
             "智能沉默": "enable_smart_silence",
             "智能静默": "enable_smart_silence",
+            "智能沉默模式": "smart_silence_judge_mode",
+            "沉默判断模式": "smart_silence_judge_mode",
+            "沉默模型判断": "smart_silence_judge_mode",
             "沉默置信度": "smart_silence_min_confidence",
             "智能沉默置信度": "smart_silence_min_confidence",
             "沉默模型超时": "smart_silence_model_timeout_seconds",
@@ -551,12 +587,17 @@ class CommandHandlersMixin:
             "生理期模拟": "enable_cycle_state",
             "拟人状态强度": "humanized_state_intensity",
             "身体状态强度": "humanized_state_intensity",
-            "自然语言生图": "enable_natural_language_photo_generation",
-            "自然语言改图": "enable_natural_language_photo_generation",
+            "非指令生图": "natural_language_photo_generation_mode",
+            "自然语言生图": "natural_language_photo_generation_mode",
+            "自然语言改图": "natural_language_photo_generation_mode",
+            "规则快判生图": "enable_natural_language_photo_generation",
+            "规则快判改图": "enable_natural_language_photo_generation",
             "自然生图上限": "natural_language_photo_generation_max_daily",
             "自然语言生图上限": "natural_language_photo_generation_max_daily",
+            "规则快判生图上限": "natural_language_photo_generation_max_daily",
             "自然生图附加提示词": "natural_language_photo_extra_prompt",
             "自然语言生图附加提示词": "natural_language_photo_extra_prompt",
+            "规则快判生图附加提示词": "natural_language_photo_extra_prompt",
             "备选生图api": "enable_backup_external_image_api",
             "备选生图API": "enable_backup_external_image_api",
             "备选在线api": "enable_backup_external_image_api",
@@ -1186,15 +1227,25 @@ class CommandHandlersMixin:
                 )
 
         if photo_mistouch:
+            if str(self._companion_manual_current_config_value("natural_language_photo_generation_mode") or "tool_first").strip().lower() == "rule_fast":
+                propose(
+                    "natural_language_photo_generation_mode",
+                    "tool_first",
+                    "把非指令生图改回工具优先，让普通聊天先进入主链，只有模型明确调用 pc_generate_photo 时才生图，可减少和闲聊或其他生图插件抢触发。",
+                    "非指令生图误触",
+                    condition="用户问题明确提到生图/改图误触，且当前使用规则快判前置接管。",
+                    strength="强建议",
+                    confidence=0.86,
+                )
             if current_bool("enable_natural_language_photo_generation", False):
                 propose(
                     "enable_natural_language_photo_generation",
                     False,
-                    "自然语言生图关闭后，只保留主动拍照/自拍链路，能避免和普通聊天或其他生图插件抢触发。",
-                    "自然语言生图误触",
-                    condition="用户问题明确提到生图/改图误触，且自然语言生图入口当前开启。",
-                    strength="强建议",
-                    confidence=0.84,
+                    "关闭规则快判后，插件不会在主链前直接抢高置信生图请求；显式指令和 pc_generate_photo 工具仍可正常使用。",
+                    "规则快判生图误触",
+                    condition="用户问题明确提到生图/改图误触，且规则快判入口当前开启。",
+                    strength="可尝试",
+                    confidence=0.78,
                 )
 
         if photo_behavior:
@@ -1202,21 +1253,22 @@ class CommandHandlersMixin:
                 propose(
                     "natural_language_photo_generation_max_daily",
                     100,
-                    "把自然语言生图每日上限放宽到 100，适合测试期观察触发和出图链路。",
-                    "自然语言生图上限",
-                    condition="用户问题提到自然语言生图上限，且当前上限低于 100。",
+                    "把规则快判每日上限放宽到 100，适合测试期观察插件前置接管和出图链路。",
+                    "规则快判生图上限",
+                    condition="用户问题提到规则快判/自然语言生图上限，且当前上限低于 100。",
                     strength="可尝试",
                     confidence=0.74,
                 )
-            if any(word in compact for word in ("呆", "好了", "没反应", "没有反应")) and not current_bool("enable_natural_language_photo_generation", False):
+            current_mode = str(self._companion_manual_current_config_value("natural_language_photo_generation_mode") or "tool_first").strip().lower()
+            if any(word in compact for word in ("呆", "好了", "没反应", "没有反应")) and current_mode == "off":
                 propose(
-                    "enable_natural_language_photo_generation",
-                    True,
-                    "如果就是想让普通自然语言触发生图，需要先打开自然语言生图入口。",
-                    "自然语言生图没有反应",
-                    condition="当前自然语言生图入口关闭。",
+                    "natural_language_photo_generation_mode",
+                    "tool_first",
+                    "如果希望普通聊天里说“画一张/发自拍”能触发生图，先用工具优先：主链理解意图后调用 pc_generate_photo，不会像规则快判那样抢普通对话。",
+                    "非指令生图没有反应",
+                    condition="当前非指令生图处理方式为 off。",
                     strength="可尝试",
-                    confidence=0.66,
+                    confidence=0.72,
                 )
 
         if qzone_repeat:
@@ -2083,9 +2135,10 @@ class CommandHandlersMixin:
             {
                 "title": "智能沉默和结束话题",
                 "keywords": ["智能沉默", "智能静默", "沉默", "静默", "不继续话题", "结束话题", "别回", "别说话", "不想聊", "停止回复"],
-                "summary": "智能沉默是在回复发送前工作的。主模型先生成回复，小模型再看用户是否明确表达“别回/别继续这个话题”，如果判定应沉默，会把待发送结果清空并记录被动未回复。",
+                "summary": "智能沉默是在回复发送前工作的。主模型先生成回复，小模型再判断这轮是否应该安静收住；默认只看明确边界，也可以切到上下文模型判断。",
                 "checks": [
                     "总开关：enable_smart_silence。",
+                    "判断模式：smart_silence_judge_mode，boundary_only 只看明确边界，contextual 会把短句收尾、忙了/睡了、敷衍回应等也交给模型判断。",
                     "阈值：smart_silence_min_confidence，越高越不容易沉默。",
                     "模型：SMART_SILENCE_PROVIDER_ID；留空时会走插件模型回退。",
                     "群聊场景会参考最近真实群聊上下文，不只看唤醒消息。",
@@ -2093,6 +2146,7 @@ class CommandHandlersMixin:
                 ],
                 "settings": [
                     "enable_smart_silence",
+                    "smart_silence_judge_mode",
                     "smart_silence_min_confidence",
                     "smart_silence_model_timeout_seconds",
                     "SMART_SILENCE_PROVIDER_ID",
@@ -2248,17 +2302,19 @@ class CommandHandlersMixin:
             {
                 "title": "生图/自拍/参考图问题",
                 "keywords": ["生图", "自拍", "参考图", "图片", "画图", "改图", "不出图", "脸", "分辨率", "没反应", "好了", "穿搭图", "提示词"],
-                "summary": "生图链路会优先使用配置的在线 API，失败后按配置回退；参考图支持本地路径或 URL。自然语言生图默认关闭，避免和其他生图插件冲突；自拍会尽量结合今天穿搭和当前日程地点。",
+                "summary": "生图链路会优先使用配置的在线 API，失败后按配置回退；参考图支持本地路径或 URL。非指令生图默认走工具优先，由主链模型调用 pc_generate_photo；规则快判只适合需要插件前置抢接单的场景。",
                 "checks": [
                     "确认 enable_photo_text_action 和生图后端配置可用。",
-                    "自然语言生图/改图要单独打开 enable_natural_language_photo_generation。",
-                    "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空>，也可带图或回复图片。",
-                    "自然语言生图上限：natural_language_photo_generation_max_daily。",
-                    "固定补充提示词：natural_language_photo_extra_prompt，可以配置不想每次重复写的画面要求。",
+                    "非指令生图模式：natural_language_photo_generation_mode，可选 tool_first / rule_fast / off。",
+                    "规则快判前置接管需要 enable_natural_language_photo_generation=true；显式指令和 pc_generate_photo 工具不依赖这个开关。",
+                    "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空|查看>，也可带图或回复图片；查看会把当前实际参考图发出来检查。",
+                    "规则快判上限：natural_language_photo_generation_max_daily，只作用于 rule_fast。",
+                    "规则快判补充提示词：natural_language_photo_extra_prompt，只作用于 rule_fast；全局固定提示词仍看 photo_generation_fixed_prompt。",
                     "排障页可看最近生图提示词、参考图数量、后端错误和任务状态。",
                 ],
                 "settings": [
                     "enable_photo_text_action",
+                    "natural_language_photo_generation_mode",
                     "enable_natural_language_photo_generation",
                     "natural_language_photo_generation_max_daily",
                     "natural_language_photo_extra_prompt",
@@ -2268,8 +2324,8 @@ class CommandHandlersMixin:
                     "photo_generation_scene_presets",
                 ],
                 "suggestions": [
-                    "如果误触多，关闭自然语言生图，只保留主动拍照/自拍。",
-                    "如果没反应，先确认自然语言生图开关、每日上限和是否被其他插件/主链工具抢走。",
+                    "如果误触多，先把 natural_language_photo_generation_mode 调回 tool_first，必要时改 off。",
+                    "如果没反应，先确认 enable_photo_text_action、生图后端、主链工具是否注册；只有 rule_fast 才看规则快判开关和每日上限。",
                     "如果出图后只回“好了”，重点看图片任务回调和结果说明模板，而不是聊天主模型。",
                     "在线 API 报模型错误时，确认图片模型不是普通聊天模型。",
                 ],
@@ -2944,12 +3000,17 @@ class CommandHandlersMixin:
             return False
 
     async def _photo_reference_command_text(self, event: AstrMessageEvent, user_id: str, value: str = "") -> str:
+        text, _ = await self._photo_reference_command_payload(event, user_id, value)
+        return text
+
+    async def _photo_reference_command_payload(self, event: AstrMessageEvent, user_id: str, value: str = "") -> tuple[str, str]:
         action = _single_line(value, 1000)
         if action in {"清空", "删除", "移除", "clear", "none", "空"}:
             saved = self._set_photo_reference_config_path("")
-            return "已清空主动自拍人设参考图。" + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
+            return "已清空主动自拍人设参考图。" + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。"), ""
         force_image = action in {"图片", "这张", "这张图", "引用", "引用图", "引用图片", "设置", "更换", "更新", "添加", "上传", "用这张", "使用这张"}
-        if action in {"查看", "状态", "当前", "current", "show"}:
+        preview_actions = {"查看", "状态", "当前", "预览", "检查", "发出来", "发图", "看看", "current", "show", "preview"}
+        if action in preview_actions:
             force_image = False
         if not action or force_image:
             image_path, image_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
@@ -2960,25 +3021,34 @@ class CommandHandlersMixin:
                     f"{image_path}\n"
                     "只会在 selfie/人像类主动生图里使用；ComfyUI 需要支持 images=1 的自拍工作流。"
                     + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
-                )
+                ), image_path
             if force_image:
                 if saw_image:
-                    return "找到了图片，但没能保存成参考图。参考图只支持 png、jpg、jpeg、webp；也可能是平台只给了图片 file id，拿不到原图。"
-                return "没有在这条消息或引用消息里找到图片。可以发送图片并附上“陪伴 参考图”，或回复一条近期图片消息发送“陪伴 参考图”。"
-        if not action or action in {"查看", "状态", "当前", "current", "show"}:
+                    return "找到了图片，但没能保存成参考图。参考图只支持 png、jpg、jpeg、webp；也可能是平台只给了图片 file id，拿不到原图。", ""
+                return "没有在这条消息或引用消息里找到图片。可以发送图片并附上“陪伴 参考图”，或回复一条近期图片消息发送“陪伴 参考图”。", ""
+        if not action or action in preview_actions:
             configured = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 260)
             resolved = self._photo_persona_reference_image_path() if callable(getattr(self, "_photo_persona_reference_image_path", None)) else ""
             if not configured:
-                return "当前没有设置主动自拍人设参考图。\n设置方式：陪伴 参考图 <本地图片路径或图片URL>；也可以发送图片并附上“陪伴 参考图”。"
+                return "当前没有设置主动自拍人设参考图。\n设置方式：陪伴 参考图 <本地图片路径或图片URL>；也可以发送图片并附上“陪伴 参考图”。", ""
+            if not resolved and re.match(r"^https?://", configured.strip(), flags=re.I):
+                async_resolver = getattr(self, "_photo_persona_reference_image_path_async", None)
+                if callable(async_resolver):
+                    try:
+                        resolved = _single_line(await async_resolver(), 260)
+                    except Exception as exc:
+                        logger.info("[PrivateCompanion] 参考图查看时 URL 下载失败: %s", _single_line(exc, 120))
+                        resolved = ""
             status = "可用" if resolved else "URL 待首次使用时下载" if re.match(r"^https?://", configured.strip(), flags=re.I) else "路径不可用或格式不支持"
             return (
                 "当前主动自拍人设参考图：\n"
                 f"{configured}\n"
                 f"状态：{status}"
-            )
+                + (f"\n实际使用文件：{resolved}" if resolved and resolved != configured else "")
+            ), resolved
         path, error = self._resolve_photo_reference_command_path(action)
         if error:
-            return error
+            return error, ""
         stable_path = await self._photo_reference_source_to_stable_path(path, stem="manual") or path
         saved = self._set_photo_reference_config_path(stable_path)
         return (
@@ -2986,7 +3056,7 @@ class CommandHandlersMixin:
             f"{stable_path}\n"
             "只会在 selfie/人像类主动生图里使用；ComfyUI 需要支持 images=1 的自拍工作流。"
             + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
-        )
+        ), stable_path
 
     def _natural_language_photo_explicit_plugin_request(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", str(text or ""))
@@ -3031,8 +3101,8 @@ class CommandHandlersMixin:
                 "位置：拓展页 -> 功能开关 -> 长线主动 -> 主动拍照/生图。"
             )
         return (
-            "插件的自然语言生图/改图入口现在没开，所以这句不会被插件接管。\n"
-            "位置：拓展页 -> 功能开关 -> 长线主动 -> 主动拍照/生图详情 -> 自然语言生图/改图。"
+            "插件的规则快判生图/改图入口现在没开，所以不会在主链前直接接管这句。\n"
+            "如果想让普通聊天触发生图，建议使用 tool_first 模式，由主链调用 pc_generate_photo；位置：拓展页 -> 功能开关 -> 长线主动 -> 主动拍照/生图详情 -> 非指令生图/改图。"
         )
 
     def _natural_language_photo_intent(
@@ -3166,6 +3236,28 @@ class CommandHandlersMixin:
         user["natural_photo_generated_today"] = _safe_int(user.get("natural_photo_generated_today"), 0) + 1
         user["last_natural_photo_path"] = _single_line(image_path, 260)
         user["last_natural_photo_at"] = _now_ts()
+
+    def _command_photo_quota_left(self, user: dict[str, Any]) -> int:
+        configured = _safe_int(getattr(self, "natural_language_photo_generation_max_daily", 0), 0)
+        limit = configured if configured > 0 else 3
+        today = self._environment_now().strftime("%Y-%m-%d") if callable(getattr(self, "_environment_now", None)) else ""
+        if not today:
+            today = str(getattr(self, "_today_key", lambda: "")() or "")
+        used = _safe_int(user.get("command_photo_generated_today"), 0)
+        if str(user.get("command_photo_generated_day") or "") != today:
+            used = 0
+        return max(0, limit - used)
+
+    def _note_command_photo_generation_attempt(self, user: dict[str, Any], image_path: str = "") -> None:
+        today = self._environment_now().strftime("%Y-%m-%d") if callable(getattr(self, "_environment_now", None)) else ""
+        if not today:
+            today = str(getattr(self, "_today_key", lambda: "")() or "")
+        if user.get("command_photo_generated_day") != today:
+            user["command_photo_generated_day"] = today
+            user["command_photo_generated_today"] = 0
+        user["command_photo_generated_today"] = _safe_int(user.get("command_photo_generated_today"), 0) + 1
+        user["last_command_photo_path"] = _single_line(image_path, 260)
+        user["last_command_photo_at"] = _now_ts()
 
     def _build_natural_language_photo_prompt(
         self,
@@ -3327,7 +3419,7 @@ class CommandHandlersMixin:
         if callable(rewriter):
             text = await rewriter(
                 self._natural_language_photo_ack_reference(kind=kind, has_reference=has_reference),
-                scene="自然语言生图/改图已接单，生成前短回执",
+                scene="规则快判生图/改图已接单，生成前短回执",
                 user=user,
                 event=event,
                 fallback_text="等我一下。",
@@ -3352,7 +3444,7 @@ class CommandHandlersMixin:
         if callable(rewriter):
             text = await rewriter(
                 self._natural_language_photo_done_reference(kind=kind, reference_label=reference_label),
-                scene="自然语言生图/改图已完成，随图短标题",
+                scene="规则快判生图/改图已完成，随图短标题",
                 user=user,
                 event=event,
                 fallback_text="好了，你看。",
@@ -3382,6 +3474,18 @@ class CommandHandlersMixin:
                 await self._reply(event, self._natural_language_photo_disabled_text("photo_off"))
                 event.stop_event()
                 return True
+            return False
+        mode = _single_line(getattr(self, "natural_language_photo_generation_mode", "tool_first"), 40).lower()
+        if mode not in {"tool_first", "rule_fast", "off"}:
+            mode = "tool_first"
+        if mode in {"tool_first", "off"}:
+            if explicit_plugin_request:
+                logger.info(
+                    "[PrivateCompanion] 非指令生图交给主链工具处理: mode=%s user=%s text=%s",
+                    mode,
+                    _single_line(user_id, 40),
+                    _single_line(text, 160),
+                )
             return False
         if not getattr(self, "enable_natural_language_photo_generation", False):
             if explicit_plugin_request:
@@ -3443,11 +3547,11 @@ class CommandHandlersMixin:
                     )
                 return False
             if self._private_user_role(user, user_id) == "friend":
-                await self._reply(event, "这个自然语言生图/改图入口只给主人开放。")
+                await self._reply(event, "这个规则快判生图/改图入口只给主人开放。")
                 event.stop_event()
                 return True
             if self._natural_language_photo_quota_left(user) <= 0:
-                await self._reply(event, "今天自然语言生图/改图额度用完了。")
+                await self._reply(event, "今天规则快判生图/改图额度用完了。")
                 event.stop_event()
                 return True
         if not self._photo_text_available():
@@ -3560,7 +3664,7 @@ class CommandHandlersMixin:
             await self._reply(
                 event,
                 f"这次没生成出来：{_single_line(note, 160) or '后端没有返回图片'}"
-                + ("\n这次已经计入自然语言生图额度，避免后端异常时反复请求。" if counted else ""),
+                + ("\n这次已经计入规则快判生图额度，避免后端异常时反复请求。" if counted else ""),
             )
             event.stop_event()
             return True
@@ -3651,11 +3755,7 @@ class CommandHandlersMixin:
                 await self._reply(event, "这个生图入口只对已启用的陪伴对象开放。")
                 event.stop_event()
                 return True
-            if self._private_user_role(user, user_id) == "friend":
-                await self._reply(event, "这个指令生图/改图入口只给主人开放。")
-                event.stop_event()
-                return True
-            if self._natural_language_photo_quota_left(user) <= 0:
+            if self._command_photo_quota_left(user) <= 0:
                 await self._reply(event, "今天指令生图/改图额度用完了。")
                 event.stop_event()
                 return True
@@ -3770,7 +3870,7 @@ class CommandHandlersMixin:
         if counted:
             async with self._data_lock:
                 user = self._get_user(user_id)
-                self._note_natural_language_photo_generation_attempt(user, image_path=image_path)
+                self._note_command_photo_generation_attempt(user, image_path=image_path)
                 self._save_data_sync()
         if not image_path:
             await self._reply(

@@ -1261,6 +1261,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         workflow_kind = self._single_line(payload.get("workflow_kind"), 20)
         if not workflow_kind:
             workflow_kind = "selfie" if has_reference_source else "text2img"
+        if workflow_kind in {"selfie", "portrait", "自拍", "人像"}:
+            async_reference_getter = getattr(self.plugin, "_photo_persona_reference_image_for_kind_async", None)
+            if callable(async_reference_getter):
+                try:
+                    reference_image_path = self._single_line(
+                        await async_reference_getter(workflow_kind, allow_daily_outfit=True),
+                        260,
+                    )
+                except Exception as exc:
+                    logger.info(
+                        "[PrivateCompanionPage] 自拍排障参考图解析失败: %s",
+                        self._single_line(exc, 160),
+                    )
         prompt_text = self._single_line(payload.get("prompt"), 600)
         if not prompt_text and workflow_kind in {"selfie", "portrait", "自拍", "人像"}:
             prompt_text = (
@@ -1299,6 +1312,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
                 session_key="private_companion_troubleshooting",
+                reference_image_path=reference_image_path,
             ),
             timeout=timeout,
         )
@@ -1332,7 +1346,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "prompt": self._single_line(prompt_text, 220),
             "workflow_kind": self._single_line(workflow_kind, 20),
             "reference_image": self._single_line(reference_image_path, 260),
-            "used_reference": bool(reference_image_path and workflow_kind in {"selfie", "portrait", "自拍", "人像"}),
+            "used_reference": bool(
+                reference_image_path
+                and workflow_kind in {"selfie", "portrait", "自拍", "人像"}
+                and "已使用" in str(note or "")
+            ),
             "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
             "elapsed_ms": elapsed_ms,
             "error": "" if image_path and exists else (self._single_line(note, 220) or "图片生成未返回有效文件"),
@@ -2610,6 +2628,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "reference_path": self._single_line(item.get("reference_path"), 260),
                     "image_size": self._single_line(item.get("image_size"), 40),
                     "elapsed_ms": self._int(item.get("elapsed_ms")),
+                    "trigger": self._single_line(item.get("trigger"), 40),
+                    "intent_kind": self._single_line(item.get("intent_kind"), 30),
+                    "sent": bool(item.get("sent")),
+                    "caption": self._single_line(item.get("caption"), 120),
+                    "scene_preset": self._single_line(item.get("scene_preset"), 80),
+                    "tool_name": self._single_line(item.get("tool_name"), 60),
                     "presets": [
                         self._single_line(name, 40)
                         for name in (item.get("presets") if isinstance(item.get("presets"), list) else [])
@@ -5355,7 +5379,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
             async with self.plugin._data_lock:
                 self.plugin.data["setup_guide_completed_at"] = time.time()
-                self.plugin.data["setup_guide_completed_version"] = "5.7.1-first-setup"
+                self.plugin.data["setup_guide_completed_version"] = "5.7.2-first-setup"
                 self.plugin._save_data_sync()
 
             config_saved = True
@@ -6757,6 +6781,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_wakeup_question",
             "enable_group_wakeup_cold_group",
             "enable_group_high_intensity_mode",
+            "enable_group_air_reply_guard",
             "enable_private_image_self_recognition",
             "enable_backup_external_image_api",
             "enable_private_image_gif_enhancement",
@@ -7988,6 +8013,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "quiet_hours",
             "passive_injection_position",
             "response_review_mode",
+            "smart_silence_judge_mode",
             "smart_silence_min_confidence",
             "smart_silence_model_timeout_seconds",
             "proactive_review_strength",
@@ -8085,6 +8111,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_daily_outfit_photo",
             "daily_outfit_photo_prompt",
             "enable_natural_language_photo_generation",
+            "natural_language_photo_generation_mode",
             "natural_language_photo_generation_max_daily",
             "natural_language_photo_extra_prompt",
             "comfyui_photo_wait_seconds",
@@ -9240,9 +9267,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key in {"page_font_family", "page_theme"}:
             self._set_schema_compat_value(config, key, value)
             return
-        if _set_into_config(config, key, value, allow_flat_fallback=False):
-            return
-        if self._set_schema_group_config_value(config, key, value):
+        updated_existing = _set_into_config(config, key, value, allow_flat_fallback=False)
+        updated_group = self._set_schema_group_config_value(config, key, value, create_group=True)
+        if updated_existing or updated_group:
             return
         _set_into_config(config, key, value)
         return
@@ -9423,6 +9450,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_wakeup_question",
             "enable_group_wakeup_cold_group",
             "enable_group_high_intensity_mode",
+            "enable_group_air_reply_guard",
             "enable_private_image_self_recognition",
             "enable_private_image_gif_enhancement",
             "enable_group_conversation_followup",
@@ -9535,6 +9563,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "default_style",
             "reply_style_prompt",
             "response_review_mode",
+            "smart_silence_judge_mode",
             "smart_silence_min_confidence",
             "smart_silence_model_timeout_seconds",
             "proactive_review_strength",
@@ -9634,6 +9663,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_daily_outfit_photo",
             "daily_outfit_photo_prompt",
             "enable_natural_language_photo_generation",
+            "natural_language_photo_generation_mode",
             "natural_language_photo_generation_max_daily",
             "natural_language_photo_extra_prompt",
             "comfyui_photo_wait_seconds",
@@ -10045,6 +10075,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return str(value or "").strip()[:1200]
         if key in {"natural_language_photo_extra_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"}:
             return str(value or "").strip()[:5000]
+        if key == "natural_language_photo_generation_mode":
+            mode = str(value or "tool_first").strip().lower()
+            aliases = {
+                "tool": "tool_first",
+                "工具": "tool_first",
+                "工具优先": "tool_first",
+                "规则": "rule_fast",
+                "规则快判": "rule_fast",
+                "快判": "rule_fast",
+                "关闭": "off",
+                "关": "off",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"tool_first", "rule_fast", "off"} else "tool_first"
         if key == "tts_conversion_provider_id":
             return str(value or "").strip()[:160]
         if key == "tts_session_min_interval_seconds":
@@ -10404,6 +10448,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._single_line(value, 160)
         if key == "SMART_SILENCE_PROVIDER_ID":
             return self._single_line(value, 160)
+        if key == "smart_silence_judge_mode":
+            mode = str(value or "boundary_only").strip().lower()
+            aliases = {
+                "边界": "boundary_only",
+                "明确边界": "boundary_only",
+                "保守": "boundary_only",
+                "上下文": "contextual",
+                "模型判断": "contextual",
+                "更智能": "contextual",
+                "智能": "contextual",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"boundary_only", "contextual"} else "boundary_only"
         if key == "smart_silence_model_timeout_seconds":
             try:
                 return max(0.2, min(5.0, float(value)))

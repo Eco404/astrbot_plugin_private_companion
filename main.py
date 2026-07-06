@@ -604,6 +604,10 @@ class PrivateCompanionPlugin(
         self.enable_group_conversation_followup = self._cfg_bool(c, "enable_group_conversation_followup", True)
         self.group_conversation_followup_seconds = self._cfg_int(c, "group_conversation_followup_seconds", 120, 0, 600)
         self.group_conversation_followup_max_turns = self._cfg_int(c, "group_conversation_followup_max_turns", 1, 0, 10)
+        self.enable_group_air_reply_guard = self._cfg_bool(c, "enable_group_air_reply_guard", True)
+        self.group_air_guard_window_seconds = self._cfg_int(c, "group_air_guard_window_seconds", 180, 30, 1800)
+        self.group_air_guard_max_bot_replies = self._cfg_int(c, "group_air_guard_max_bot_replies", 3, 1, 20)
+        self.group_air_guard_polite_loop_limit = self._cfg_int(c, "group_air_guard_polite_loop_limit", 2, 1, 10)
         self.quiet_hours = self._cfg_str(c, "quiet_hours", "23:00-08:30")
         self.default_style = self._cfg_str(c, "default_style", "温柔", "温柔")
         reply_style_raw = _flat_get(c, "reply_style_prompt", None)
@@ -839,6 +843,14 @@ class PrivateCompanionPlugin(
         self.enable_daily_outfit_photo = self._cfg_bool(c, "enable_daily_outfit_photo", False)
         self.daily_outfit_photo_prompt = self._cfg_str(c, "daily_outfit_photo_prompt", "")
         self.enable_natural_language_photo_generation = self._cfg_bool(c, "enable_natural_language_photo_generation", False)
+        self.natural_language_photo_generation_mode = self._cfg_str(
+            c,
+            "natural_language_photo_generation_mode",
+            "tool_first",
+            "tool_first",
+        ).strip().lower()
+        if self.natural_language_photo_generation_mode not in {"tool_first", "rule_fast", "off"}:
+            self.natural_language_photo_generation_mode = "tool_first"
         self.natural_language_photo_generation_max_daily = self._cfg_int(c, "natural_language_photo_generation_max_daily", 2, 0, 100)
         raw_natural_photo_extra = _flat_get(c, "natural_language_photo_extra_prompt", None)
         self.natural_language_photo_extra_prompt = (
@@ -901,6 +913,9 @@ class PrivateCompanionPlugin(
         if self.response_review_mode not in {"local_only", "severe_only", "full"}:
             self.response_review_mode = "severe_only"
         self.enable_smart_silence = self._cfg_bool(c, "enable_smart_silence", True)
+        self.smart_silence_judge_mode = self._cfg_str(c, "smart_silence_judge_mode", "boundary_only", "boundary_only").strip().lower()
+        if self.smart_silence_judge_mode not in {"boundary_only", "contextual"}:
+            self.smart_silence_judge_mode = "boundary_only"
         self.smart_silence_provider_id = self._cfg_str(c, "SMART_SILENCE_PROVIDER_ID", "")
         self.smart_silence_min_confidence = self._cfg_unit_interval(c, "smart_silence_min_confidence", 0.66, 0.0)
         self.smart_silence_model_timeout_seconds = self._cfg_float(c, "smart_silence_model_timeout_seconds", 1.2, 0.2)
@@ -2069,7 +2084,13 @@ class PrivateCompanionPlugin(
             getattr(event, "private_companion_group_text", "") or getattr(event, "message_str", ""),
             260,
         )
-        if not self._smart_silence_trigger_reason(inbound_text):
+        trigger_checker = getattr(self, "_smart_silence_contextual_trigger_reason", None)
+        trigger_reason = (
+            trigger_checker(inbound_text, reply_text, session_kind="group")
+            if callable(trigger_checker)
+            else self._smart_silence_trigger_reason(inbound_text)
+        )
+        if not trigger_reason:
             return
         recent_context: list[str] = []
         group_id = self._extract_group_id_from_event(event)
@@ -2414,6 +2435,22 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 return
             active["last_bot_reply"] = reply_text
             active["last_bot_reply_ts"] = _now_ts()
+            recent_bot = group.setdefault("recent_bot_replies", [])
+            if not isinstance(recent_bot, list):
+                recent_bot = []
+                group["recent_bot_replies"] = recent_bot
+            recent_bot.append(
+                {
+                    "ts": _now_ts(),
+                    "sender_id": sender_id,
+                    "text": reply_text,
+                    "talking_to_bot": bool(talking_to_bot),
+                }
+            )
+            del recent_bot[:-20]
+            trimmer = getattr(self, "_group_air_guard_trim_bot_replies", None)
+            if callable(trimmer):
+                trimmer(group)
             self._save_data_sync()
 
     def _friend_private_plain_result_allows_segmenting(self, event: AstrMessageEvent, chain: list[Any]) -> bool:
@@ -3038,6 +3075,44 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if use_latest_draft:
             kwargs["use_latest_draft"] = use_latest_draft
         return await self._pc_qzone_publish_feed_impl(event, text, **kwargs)
+
+    @filter.llm_tool(name="pc_generate_photo")
+    async def pc_generate_photo(
+        self,
+        event: AstrMessageEvent,
+        prompt: str = "",
+        kind: str = "text2img",
+        reference_image_path: str = "",
+        image_size: str = "",
+        send: bool = True,
+        caption: str = "",
+        scene_preset: str = "",
+        **kwargs,
+    ) -> str:
+        """调用 Private Companion 生图/自拍/改图能力。
+
+        Args:
+            prompt(string): 画面描述、自拍要求或改图要求。
+            kind(string): text2img/selfie/sticker/edit。自拍、头像、穿搭、COS、人像请用 selfie；角色表情包/贴纸用 sticker；普通场景、物件、风景用 text2img；改图用 edit。
+            reference_image_path(string): 可选，本地图片路径或图片 URL；edit 必填，selfie 可留空自动使用人设参考图/今日穿搭图。
+            image_size(string): 可选，在线图片 API 尺寸，如 1024x1024。
+            send(boolean): 是否生成后直接发送到当前会话，默认 true。
+            caption(string): 发送图片时附带的短文字。
+            scene_preset(string): 可选场景预设，如 角色自拍/COS自拍/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景。
+        """
+        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
+        return await self._pc_generate_photo_impl(
+            event,
+            prompt=prompt,
+            kind=kind,
+            reference_image_path=reference_image_path,
+            image_size=image_size,
+            send=send,
+            caption=caption,
+            scene_preset=scene_preset,
+            **kwargs,
+        )
 
     @filter.llm_tool(name="pc_get_group_id_by_name")
     async def pc_get_group_id_by_name(self, event: AstrMessageEvent, **kwargs) -> str:
@@ -3842,6 +3917,35 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     title="QQ 空间工具注入",
                     key="tools.qzone",
                     text=qzone_instruction,
+                    source="tools",
+                    mode="conditional",
+                    metadata={"注入位置": placement},
+                )
+        photo_instruction = self._photo_generation_tool_instruction()
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        photo_marker = "<!-- private_companion_photo_generation_tool_v1 -->"
+        if photo_instruction and photo_marker not in current_prompt and photo_marker not in current_turn_prompt:
+            if any(token in message_text for token in (
+                "生图", "画图", "绘图", "生成图片", "出图", "画一张", "画张", "来张图", "来一张图",
+                "自拍", "拍照", "头像", "表情包", "贴纸", "壁纸", "改图", "修图", "重绘", "P图", "p图",
+                "参考图", "穿搭图", "COS", "cosplay",
+            )):
+                placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                    req,
+                    photo_marker,
+                    photo_instruction,
+                    priority=88,
+                    source="tools",
+                ) else "system_prompt"
+                if placement == "system_prompt":
+                    current_prompt = f"{current_prompt}\n\n{photo_marker}\n{photo_instruction}".strip()
+                    req.system_prompt = current_prompt
+                await self._record_request_prompt_fragment(
+                    event,
+                    title="生图工具注入",
+                    key="tools.photo_generation",
+                    text=photo_instruction,
                     source="tools",
                     mode="conditional",
                     metadata={"注入位置": placement},
@@ -5760,6 +5864,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 priority=25,
                 source="daily_state",
             )
+        try:
+            sleeping, _sleep_runtime, _sleep_item, sleep_schedule_text = self._rest_reply_sleep_context()
+        except Exception:
+            sleeping, sleep_schedule_text = False, ""
+        if sleeping:
+            sleep_reply_boundary = (
+                "【休息中被叫醒回复边界】\n"
+                "当前处于睡眠/休息延续。用户如果只是短句叫醒、查岗、例行检查、确认在不在，回复要短、迷糊、低打扰，通常 1 句即可。\n"
+                "不要因为记忆里有相似旧话题就展开长段回忆、梦境、解释或连续追问；旧记忆只做语气底色，不要新编具体梦境内容。\n"
+                "如果用户没有明确提出新请求，回复后应自然收住，表现为可以睡回去。"
+                + (f"\n当前休息片段：{_single_line(sleep_schedule_text, 160)}" if sleep_schedule_text else "")
+            )
+            prompt_surface.add("rest.sleep_reply_boundary", sleep_reply_boundary, priority=32, source="daily_state")
         is_wake_event = bool(getattr(event, "is_wake", False)) or bool(
             getattr(event, "is_at_or_wake_command", False)
         )
@@ -6730,6 +6847,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         companion_manual_cancel_actions = {"答疑取消", "排障取消", "诊断取消", "取消答疑建议", "取消建议"}
         companion_manual_setting_actions = {"答疑设置", "排障设置", "诊断设置", "答疑修改", "排障修改", "诊断修改"}
         daily_outfit_view_actions = {"今日穿搭图", "今日穿搭", "查看穿搭图", "查看穿搭", "穿搭图", "每日穿搭图", "每日穿搭", "当前穿搭图", "当前穿搭", "展示穿搭图"}
+        daily_outfit_generate_actions = {
+            "生成穿搭", "刷新穿搭", "重置穿搭",
+            "生成穿搭图", "刷新穿搭图", "重置穿搭图",
+            "重新生成穿搭", "重新生成穿搭图", "重生穿搭", "重生穿搭图",
+            "生成今日穿搭", "生成今日穿搭图", "生成每日穿搭", "生成每日穿搭图",
+        }
         photo_command_actions = {"生图", "画图", "绘图", "生成图片", "出图", "自拍", "拍照", "拍一张", "改图", "修图", "重绘", "P图", "p图"}
         if action in companion_manual_query_actions:
             inline_value = value.strip()
@@ -6779,7 +6902,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "查看提示词", "提示词", "prompt",
             "重置细化",
             "重置日程", "生成日程", "刷新日程",
-            "生成穿搭", "刷新穿搭", "重置穿搭",
+            *daily_outfit_generate_actions,
             "生成状态", "刷新状态", "重生状态",
             "增添状态", "添加状态",
             "生成日记", "刷新日记",
@@ -6811,7 +6934,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "重置插件", "重置", "全部重置",
             "查看提示词", "提示词", "prompt",
             "重置细化", "重置日程", "生成日程", "刷新日程",
-            "生成穿搭", "刷新穿搭", "重置穿搭",
+            *daily_outfit_generate_actions,
             "生成状态", "刷新状态", "重生状态",
             "增添状态", "添加状态",
             "生成日记", "刷新日记",
@@ -6893,7 +7016,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             elif action in companion_manual_query_actions:
                 response = "正在结合说明书和当前运行状态做诊断。"
             elif action in {"参考图", "人设参考图", "自拍参考图"}:
-                response = await self._photo_reference_command_text(event, user_id, value)
+                response, response_image_path = await self._photo_reference_command_payload(event, user_id, value)
             elif action in daily_outfit_view_actions:
                 response, response_image_path = self._daily_outfit_command_payload()
             elif action in photo_command_actions:
@@ -6917,7 +7040,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = self._format_daily_plan(plan)
             elif action in {"重置日程", "生成日程", "刷新日程"}:
                 response = "正在生成今天的日程,我先把今天怎么过想清楚。"
-            elif action in {"生成穿搭", "刷新穿搭", "重置穿搭"}:
+            elif action in daily_outfit_generate_actions:
                 response = "正在按今日日程生成每日穿搭照片。"
             elif action in {"生成状态", "刷新状态", "重生状态"}:
                 response = "正在刷新今天的拟人状态。"
@@ -7102,7 +7225,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self.data["daily_story_plan"] = {}
                 self._save_data_sync()
             await self._reply(event, self._format_daily_plan(plan or {}))
-        if action in {"生成穿搭", "刷新穿搭", "重置穿搭"}:
+        if action in daily_outfit_generate_actions:
             await self._reply(event, "等我换身衣服哦")
             async with self._data_lock:
                 self.data.pop("daily_outfit_photo", None)
@@ -8283,6 +8406,45 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         high_intensity_state.get("merge_recent_floor"),
                         high_intensity_state.get("reason"),
                         self._group_high_intensity_merge_wait_seconds(),
+                        _single_line(text, 80),
+                    )
+                    event.stop_event()
+                    return
+            if talking_to_bot and not high_intensity_merge_active and not group_reference_media_with_text:
+                air_guard = await self._group_air_reply_guard_decision(
+                    group,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    text=text,
+                    scene=scene,
+                )
+                if isinstance(air_guard, dict) and air_guard.get("block"):
+                    self._update_group_observation(
+                        group,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        text=text,
+                        group_id=group_id,
+                        scene=scene,
+                        message_id=self._event_message_id(event),
+                        event=event,
+                    )
+                    group["last_air_guard_block"] = {
+                        "ts": _now_ts(),
+                        "sender_id": sender_id,
+                        "sender_name": _single_line(sender_name, 40),
+                        "text": _single_line(text, 120),
+                        "reason": _single_line(air_guard.get("reason"), 60),
+                        "answer": _single_line(air_guard.get("answer"), 60),
+                        "recent_bot_replies": _safe_int(air_guard.get("recent_bot_replies"), 0, 0, 99),
+                        "recent_polite_replies": _safe_int(air_guard.get("recent_polite_replies"), 0, 0, 99),
+                    }
+                    self._save_data_sync()
+                    logger.info(
+                        "[PrivateCompanion] 群聊读空气拦截回复: group=%s sender=%s reason=%s text=%s",
+                        group_id,
+                        sender_id,
+                        air_guard.get("reason"),
                         _single_line(text, 80),
                     )
                     event.stop_event()
