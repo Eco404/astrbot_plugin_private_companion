@@ -29,7 +29,10 @@ const state = {
   featureDraft: {},
   selectedFeatureKey: "",
   setupGuideOpen: false,
+  setupGuideMode: "home",
   setupGuideStep: 0,
+  setupGuideAdvancedBlock: "",
+  setupGuideAdvancedStep: 0,
   setupGuideDraft: null,
   setupGuideProviderTests: {},
   setupGuideRoleplayDraft: null,
@@ -771,7 +774,7 @@ const featureMeta = {
   enable_private_reading_preference_influence: ["私密偏好影响", "评分样本足够后，把稳定偏好作为私聊私密互动的弱背景。"],
   enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制、朗读文本清洗和主用户触发。"],
-  enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；复读跟读/打断不引用。"],
+  enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
 };
@@ -1151,6 +1154,7 @@ const configLabels = {
   semantic_message_debounce_seconds: "旧版文本等待秒数",
   enable_proactive_quote_trigger_message: "引用触发消息",
   enable_quote_group_reply: "群回复引用",
+  quote_group_reply_once_per_target: "连续同对象只首条引用",
   enable_quote_group_interjection: "群主动插话引用",
   enable_quote_private_proactive: "私聊主动引用",
   quote_skip_short_reply_chars: "短回复不引用阈值",
@@ -1523,6 +1527,7 @@ const configDescriptions = {
   semantic_message_debounce_seconds: "旧版兼容项，读取时会迁移为文本补话等待秒数。",
   enable_proactive_quote_trigger_message: "开启后，群聊被 @、引用、唤醒或连续对话保持时，Bot 的普通回复会引用当前触发消息；群聊主动插话会引用触发消息；模型预约的私聊主动若能追溯到同一私聊消息，也会引用。复读跟读/打断不会引用。",
   enable_quote_group_reply: "控制普通群聊回复是否自动带引用。只在总开关开启后生效。",
+  quote_group_reply_once_per_target: "开启后，同一群内连续回复同一个群友时只在首次带引用；换成回复其他群友，或间隔超过连续对话窗口后，会重新引用一次。",
   enable_quote_group_interjection: "控制群主动插话是否引用触发它的群消息。复读跟读/打断仍不会引用。",
   enable_quote_private_proactive: "控制可追溯到某条私聊消息的主动发送是否带引用。",
   quote_skip_short_reply_chars: "回复正文不超过该字数时不附带引用。0 表示不按长度跳过。",
@@ -1796,7 +1801,7 @@ const featureSettingGroups = {
   enable_recall_cancel_reply: ["recall_message_cache_ttl_seconds"],
   enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
-  enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
+  enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "quote_group_reply_once_per_target", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
   enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
   enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
@@ -1998,8 +2003,8 @@ const featureSettingSections = {
     },
     {
       title: "引用策略",
-      note: "控制短回复是否跳过引用，以及用户引用 Bot 旧消息追问时应该挂当前消息还是旧消息。",
-      keys: ["quote_skip_short_reply_chars", "quote_target_strategy"],
+      note: "控制短回复是否跳过引用、连续同对象是否重复引用，以及用户引用 Bot 旧消息追问时应该挂当前消息还是旧消息。",
+      keys: ["quote_group_reply_once_per_target", "quote_skip_short_reply_chars", "quote_target_strategy"],
     },
   ],
   enable_environment_perception: [
@@ -3423,67 +3428,99 @@ async function ensureTabData(tabName, force = false) {
   }
 }
 
+const setupGuideStepGroups = [
+  {
+    title: "目标用户与平台",
+    tag: "第 1 步 · 约 2 分钟",
+    body: "Bot 需要知道服务谁。填写目标用户 QQ，确认适配器类型和免打扰时段，以及管理命令是否只能在私聊执行。完成这一步后，Bot 就能正常触发被动回复了。",
+  },
+  {
+    title: "核心模型配置",
+    tag: "第 2 步 · 约 3 分钟",
+    body: "Bot 回复和主动都需要模型。首次配置只要求快速响应和复杂推理完成测试；创作和识图可以先选择，不强制测试，后续有需要时再补测即可。",
+  },
+  {
+    title: "主动功能与其他配置",
+    tag: "第 3 步 · 约 3 分钟",
+    body: "选择是否开启私聊主动、群聊观察、关系网、创作等能力。进阶细项（如新闻、搜索、空间、B 站、TTS 等）会在「进阶配置」单独处理，避免这里一次性堆太多配置。",
+  },
+  {
+    title: "主动消息测试",
+    tag: "第 4 步 · 约 1 分钟",
+    body: "最后跑一次主动消息测试。默认只生成候选、复核和发送闸结果；真实发送必须二次确认，避免首次配置时误发。测试通过即表示基础链路跑通。",
+  },
+];
+
 const setupGuideSteps = [
   {
     tab: "config",
+    groupIndex: 0,
     title: "基础连通",
-    tag: "第 1 步",
+    tag: "目标用户与平台",
     body: "先检查插件页面 API 是否可用；已有目标用户就沿用并预填，没有就立刻填写 QQ 号，同时确认 target_platform、免打扰时段和管理命令权限范围。",
     checks: ["检查插件基本连接", "填写或沿用目标用户 QQ 与 target_platform", "确认免打扰时段和管理命令权限"],
   },
   {
     tab: "models",
+    groupIndex: 1,
     title: "快捷模型配置",
-    tag: "第 2 步",
+    tag: "核心模型配置",
     body: "在这里配置四类插件模型。首次配置只要求快速响应和复杂推理完成测试；创作和识图可以先选择、不强制测试，后续需要相关功能时再补测也可以。",
     checks: ["选择快速响应模型并测试", "选择复杂推理模型并测试", "创作和识图模型可选测试"],
   },
   {
     tab: "roleplay",
+    groupIndex: 2,
     title: "人格与世界知识",
-    tag: "第 3 步",
+    tag: "主动功能与其他配置",
     body: "这里决定插件理解角色和生活背景的来源。首次配置推荐继承 AstrBot 当前人格，并生成一份只给插件使用的世界知识草稿；聊天回复的人格仍然由 AstrBot 本体控制。",
     checks: ["确认人格来源", "填写世界知识补充", "确认不会改动 AstrBot 聊天人格"],
   },
   {
     tab: "proactive",
+    groupIndex: 2,
     title: "主动功能选择",
-    tag: "第 4 步",
+    tag: "主动功能与其他配置",
     body: "这里只选择主动能力的大开关。首次配置需要开启私聊主动来跑通最后的主动消息测试；群聊主动可以按需开启，新闻、网页探索、空间、生图、TTS 等更细能力放到进阶配置。",
     checks: ["选择私聊主动", "选择群聊主动", "未选择的主动测试会自动跳过"],
   },
   {
     tab: "memory",
+    groupIndex: 2,
     title: "日程与观察",
-    tag: "第 5 步",
-    body: "这里初始化 Bot 的今日生活节奏。日程会影响状态、观察和主动动机；首次配置建议生成今日粗日程，并立即细化当前时段。",
-    checks: ["选择是否生成粗日程", "选择是否细化当前日程", "确认观察页和主动页分工"],
+    tag: "主动功能与其他配置",
+    body: "这里初始化 Bot 的今日生活节奏。首次配置只需要确认链路能跑通，详细日程以后到观察页慢慢看。",
+    checks: ["生成今日日程", "细化当前时段", "查看简要结果"],
   },
   {
     tab: "private",
+    groupIndex: 2,
     title: "私聊主动强度",
-    tag: "第 6 步",
+    tag: "主动功能与其他配置",
     body: "这里选择私聊主动的频率预设。强度只影响主动触达频率、空闲判定和发送边界，不会改变 AstrBot 被动回复的人格。",
     checks: ["选择主动强度", "确认免打扰仍生效", "确认私聊页用于查看对象和关系"],
   },
   {
     tab: "group",
+    groupIndex: 2,
     title: "群聊配置",
-    tag: "第 7 步",
+    tag: "主动功能与其他配置",
     body: "这里配置群聊的进入方式。首次配置建议先开启唤醒增强，让群里叫到 Bot 的路径清楚可控；主动插话先保持观察或低频。",
     checks: ["填写群聊唤醒词", "选择唤醒增强", "确认群主动插话策略"],
   },
   {
     tab: "worldbook",
+    groupIndex: 2,
     title: "关系网词条",
-    tag: "第 8 步",
+    tag: "主动功能与其他配置",
     body: "这里配置第一条关系网用户词条。字段尽量贴近关系网页的编辑体验，先把身份、别名、资料正文和互动边界写清楚。",
     checks: ["填写身份 QQ 与名称", "补充别名和关系资料", "确认自登记说明"],
   },
   {
     tab: "proactive",
+    groupIndex: 3,
     title: "主动消息测试",
-    tag: "第 9 步",
+    tag: "主动消息测试",
     body: "最后跑一次主动消息测试。默认只生成候选、复核和发送闸结果；真实发送必须二次确认，避免首次配置时误发。",
     checks: ["选择测试方式", "生成主动候选", "真实发送前二次确认"],
   },
@@ -3511,7 +3548,7 @@ const setupGuideDraftDefaults = {
   proactivePrivate: true,
   proactiveGroup: false,
   generateSchedule: true,
-  refineSchedule: true,
+  refineSchedule: false,
   privateIntensity: "off",
   privateMaxDailyMessages: 0,
   privateIdleMinutes: 0,
@@ -3557,6 +3594,512 @@ const setupGuideDraftDefaults = {
   worldbookDraftConfirmed: false,
   proactiveTestMode: "candidate",
 };
+
+const setupGuideAdvancedBlocks = [
+  {
+    id: "common",
+    title: "通用能力",
+    body: "配置所有场景都会用到的基础增强：环境感知、回复复核、静默判断、消息收口和语音。适合先把安全边界和回复体验调稳。",
+  },
+  {
+    id: "private",
+    title: "私聊增强",
+    body: "配置私聊里读图、合并转发、撤回、未回复跟进和夹层阅读。适合想让私聊更像长期陪伴，但要注意模型成本和隐私边界。",
+  },
+  {
+    id: "group",
+    title: "群聊增强",
+    body: "配置群聊观察、唤醒、黑话、话题线、关系图和主动插话。适合有固定群聊使用场景时开启，不建议一次性开满。",
+  },
+  {
+    id: "proactive",
+    title: "主动增强",
+    body: "配置主动消息之外的长线动作：主动带图、新闻、搜索、QQ 空间、B 站、创作和分段发送。适合核心主动链路稳定后逐项打开。",
+  },
+];
+
+const setupGuideAdvancedBlockMap = Object.fromEntries(setupGuideAdvancedBlocks.map((item) => [item.id, item]));
+
+const setupGuideAdvancedItems = {
+  common: [
+    {
+      key: "enable_environment_perception",
+      title: "环境感知",
+      ask: "是否让插件把时间、平台、消息类型和节日氛围作为回复背景？",
+      description: "开启后，Bot 更容易知道现在是早上、深夜、群聊还是私聊，也能判断图片/语音/视频等消息媒介。",
+      caution: "这不是联网获取现实环境，只是把当前会话和时间信息整理给模型。信息越多，提示词也会略长。",
+      kind: "feature",
+      settings: [
+        { key: "environment_perception_timezone", type: "text", label: "时区", placeholder: "Asia/Shanghai" },
+        { key: "enable_holiday_perception", type: "bool", label: "感知节假日/工作日", description: "需要相关依赖时更准确，缺依赖会退化。" },
+        { key: "enable_platform_perception", type: "bool", label: "感知平台和私聊/群聊", description: "通常建议开启。" },
+        { key: "enable_model_perception", type: "bool", label: "感知当前模型能力", description: "让 Bot 知道自己是否能读图、发图或语音。" },
+        { key: "enable_worldview_perception", type: "bool", label: "世界观适配", description: "人设世界观很强时再开，避免重复解释。" },
+      ],
+    },
+    {
+      key: "enable_companion_memory",
+      title: "长期画像与表达学习",
+      ask: "是否让 Bot 把长期偏好、边界、关系线索和说话习惯沉淀下来？",
+      description: "这会让它不只记住单条聊天，而是逐步形成用户画像、表达习惯和可复用的共同经历。",
+      caution: "记忆越多越需要定期清理。首次建议开启画像，但表达学习可以先保持人工审核或低频整理。",
+      kind: "feature",
+      settings: [
+        { key: "memory_refresh_interval_minutes", type: "number", label: "画像整理间隔分钟", placeholder: "120", min: 5 },
+        { key: "max_companion_memory_items", type: "number", label: "长期画像上限", placeholder: "80", min: 1 },
+        { key: "enable_expression_learning", type: "bool", kind: "feature", label: "学习表达习惯", description: "从对话里提炼口癖、偏好措辞和风格线索。" },
+        { key: "enable_expression_manual_review", type: "bool", label: "表达学习人工审核", description: "担心学错梗或误学阴阳怪气时建议开启。" },
+      ],
+    },
+    {
+      key: "enable_response_self_review",
+      title: "回复自检",
+      ask: "是否让部分回复发送前先做一次风险和质量复核？",
+      description: "它会拦一拦明显不合适、越界、压力过强或不该发的内容，尤其影响主动消息和敏感场景。",
+      caution: "会多一次模型调用，回复可能稍慢；模型配置不稳时可能误判得偏保守。",
+      kind: "feature",
+      settings: [
+        { key: "response_review_mode", type: "select", label: "复核模式", options: [["balanced", "标准"], ["strict", "严格"], ["lenient", "宽松"]] },
+        { key: "response_review_max_chars", type: "number", label: "最长复核文本", placeholder: "1800", min: 200 },
+      ],
+    },
+    {
+      key: "enable_relationship_state_machine",
+      title: "关系距离与久未回复降级",
+      ask: "是否让 Bot 根据亲近度、未回复时长和互动状态调整主动节奏？",
+      description: "朋友用户长时间不回、关系热度下降或互动变冷时，Bot 会逐步收敛念头和主动频率，而不是一直保持同样强度。",
+      caution: "太保守会显得突然疏远，太宽松又会打扰。建议先用默认值，再根据实际主动记录微调。",
+      kind: "feature",
+      settings: [
+        { key: "proactive_unanswered_slowdown_start", type: "number", label: "未回复多久开始降级", placeholder: "6", min: 0 },
+        { key: "proactive_unanswered_max_interval_multiplier", type: "number", label: "最大间隔倍率", placeholder: "3", min: 1, step: 0.1 },
+        { key: "friend_unanswered_max_cooldown_hours", type: "number", label: "朋友未回复最大冷却小时", placeholder: "24", min: 0 },
+      ],
+    },
+    {
+      key: "enable_emotion_simulation",
+      title: "情绪余波",
+      ask: "是否让 Bot 保留短期情绪余波，比如被刺到、缓和、恢复和短暂回避？",
+      description: "它能让回复不那么一键清空情绪，也能影响主动消息、空间说说和关系距离判断。",
+      caution: "这是扮演状态，不是真实心理判断。阈值过低会让 Bot 太容易受伤，建议先温和开启。",
+      kind: "feature",
+      settings: [
+        { key: "enable_llm_emotion_judgement", type: "bool", label: "使用模型判断情绪变化", description: "比规则更细，但会增加轻量模型调用。" },
+        { key: "emotion_judgement_mode", type: "select", label: "情绪判断模式", options: [["balanced", "标准"], ["strict", "谨慎"], ["sensitive", "敏感"]] },
+        { key: "emotional_gate_hurt_threshold", type: "number", label: "受伤阈值", placeholder: "0.62", min: 0, max: 1, step: 0.01 },
+        { key: "emotional_gate_recovery_per_hour", type: "number", label: "每小时恢复量", placeholder: "0.18", min: 0, max: 1, step: 0.01 },
+      ],
+    },
+    {
+      key: "enable_smart_silence",
+      title: "智能沉默",
+      ask: "是否允许 Bot 判断“这句话其实不用回复”？",
+      description: "比如用户只是自言自语、表情、收尾语或明显不想继续时，它会减少硬接话。",
+      caution: "开太严格会显得不理人。首次建议标准阈值，发现漏回复再降低置信度。",
+      kind: "feature",
+      settings: [
+        { key: "smart_silence_min_confidence", type: "number", label: "沉默置信度", placeholder: "0.72", min: 0, max: 1, step: 0.01 },
+        { key: "smart_silence_model_timeout_seconds", type: "number", label: "模型超时秒数", placeholder: "5", min: 1 },
+      ],
+    },
+    {
+      key: "enable_message_debounce",
+      title: "消息收口",
+      ask: "是否把用户连续发来的几句话合并后再回复？",
+      description: "用户连发短句、图片或转发时，Bot 会稍等一下，减少刚回一句用户又补一句导致答非所问。",
+      caution: "等待时间越长，回复越慢。群聊里尤其要避免设置过大。",
+      kind: "feature",
+      settings: [
+        { key: "enable_smart_message_debounce", type: "bool", label: "智能判断是否等补话", description: "更像人，但会多一次轻量判断。" },
+        { key: "text_message_debounce_seconds", type: "number", label: "文字等待秒数", placeholder: "3", min: 0 },
+        { key: "image_message_debounce_seconds", type: "number", label: "图片等待秒数", placeholder: "5", min: 0 },
+        { key: "message_debounce_max_merge_messages", type: "number", label: "最多合并条数", placeholder: "6", min: 1 },
+      ],
+    },
+    {
+      key: "enable_tts_enhancement",
+      title: "TTS 语音后处理",
+      ask: "是否允许 Bot 在合适时把文本转成语音？",
+      description: "开启后，模型可以用插件私有语音标签生成 Record 语音，也能做语种转换和可见文本补充。",
+      caution: "需要当前会话有可用 TTS Provider；语音频率建议先低一点，避免刷屏或成本过高。",
+      dependencies: [
+        { label: "前置", text: "AstrBot 当前会话必须已经配置可用的 TTS Provider；这里不负责安装语音后端。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "tts_voice_language", type: "select", label: "语音语言", options: [["ja", "日语"], ["zh", "中文"], ["en", "英语"], ["default", "默认"]] },
+        { key: "tts_frequency_control_mode", type: "select", label: "频率控制", options: [["global", "全局频控"], ["legacy", "旧版频控"]] },
+        { key: "tts_trigger_probability", type: "number", label: "自动语音概率", placeholder: "0.08", min: 0, max: 1, step: 0.01 },
+        { key: "enable_tts_local_playback", type: "bool", label: "本机播放生成语音", description: "直播或本机陪伴场景再开。" },
+      ],
+    },
+  ],
+  private: [
+    {
+      key: "enable_private_image_self_recognition",
+      title: "私聊图片识别",
+      ask: "是否让 Bot 能读私聊图片、表情包和引用图片？",
+      description: "开启后，图片会先经过视觉摘要，再进入回复、日程、主动和记忆相关判断。",
+      caution: "需要视觉模型；图片越多成本越高。没有可靠视觉摘要时，插件会尽量避免凭历史猜图。",
+      dependencies: [
+        { label: "前置", text: "需要 AstrBot 默认图片转述模型，或在模型配置里填好插件识图模型。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "enable_private_image_vision_cache", type: "bool", label: "重复图片缓存", description: "推荐开启，表情包和重复图不会反复读。" },
+        { key: "enable_private_image_gif_enhancement", type: "bool", label: "GIF 多帧增强", description: "会更懂动图，但更耗时。" },
+        { key: "private_image_self_recognition_hint", type: "textarea", label: "自我识别提示", placeholder: "例如：图片里出现某个固定角色/头像时如何判断是 Bot 自己。" },
+      ],
+    },
+    {
+      key: "enable_forward_message_adaptation",
+      title: "合并转发理解",
+      ask: "是否让 Bot 尝试读懂合并转发里的聊天和图片？",
+      description: "适合用户转发一串聊天记录让 Bot 总结、接话、判断关系或找重点。",
+      caution: "转发很长时会消耗更多 token；嵌套转发和图片转述都建议设上限。",
+      kind: "feature",
+      settings: [
+        { key: "forward_message_max_messages", type: "number", label: "最多读取消息数", placeholder: "40", min: 1 },
+        { key: "forward_message_max_chars", type: "number", label: "最多读取字数", placeholder: "6000", min: 500 },
+        { key: "forward_message_image_vision", type: "bool", label: "转发里的图片也识别", description: "需要视觉模型。" },
+      ],
+    },
+    {
+      key: "enable_recall_enhancement",
+      title: "撤回增强",
+      ask: "是否让 Bot 记录短时间内撤回的消息，用于答疑和避免误回？",
+      description: "用户撤回后，Bot 可以知道刚才发生过撤回，并按配置决定是否取消回复或提供撤回转写指令。",
+      caution: "这是敏感能力。建议只保留短缓存，避免把撤回内容长期保存。",
+      kind: "feature",
+      settings: [
+        { key: "enable_recall_cancel_reply", type: "bool", label: "用户撤回后取消待回复", description: "推荐开启。" },
+        { key: "enable_recall_message_cache", type: "bool", label: "短时间缓存撤回内容", description: "用于排障和撤回转写。" },
+        { key: "recall_message_cache_ttl_seconds", type: "number", label: "撤回缓存秒数", placeholder: "300", min: 0 },
+      ],
+    },
+    {
+      key: "enable_dialogue_episode_memory",
+      title: "私聊片段与未完话头",
+      ask: "是否让 Bot 把私聊整理成片段，并记住还没聊完的事？",
+      description: "它会把一段对话压成小事件，后续主动、日程和关系判断都能引用这些上下文。",
+      caution: "整理太频繁会增加后台调用；如果用户经常临时吐槽，建议先开未完话头但控制片段数量。",
+      kind: "feature",
+      settings: [
+        { key: "episode_memory_refresh_messages", type: "number", label: "多少条消息整理一次", placeholder: "18", min: 1 },
+        { key: "episode_memory_refresh_minutes", type: "number", label: "整理最小间隔分钟", placeholder: "30", min: 1 },
+        { key: "max_dialogue_episodes", type: "number", label: "最多保留片段", placeholder: "80", min: 1 },
+        { key: "enable_open_loop_tracking", type: "bool", kind: "feature", label: "追踪未完话头", description: "例如约好回头看、还没解释完、需要之后关心的事情。" },
+      ],
+    },
+    {
+      key: "enable_unanswered_screen_peek_followup",
+      title: "未回复后的识屏跟进",
+      ask: "是否允许用户长时间不回复后，Bot 低频看一眼屏幕再决定要不要跟进？",
+      description: "适合本机陪伴或直播场景，Bot 可以根据屏幕状态减少没话找话。",
+      caution: "这是强隐私功能。只有你明确接受本机识屏时再开，并设置较长冷却。",
+      dependencies: [
+        { label: "联动", text: "需要安装并启用 astrbot_plugin_screen_companion，且它能提供本机识屏入口。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "unanswered_screen_peek_after_minutes", type: "number", label: "多久未回复后可识屏", placeholder: "90", min: 1 },
+        { key: "unanswered_screen_peek_cooldown_minutes", type: "number", label: "识屏冷却分钟", placeholder: "180", min: 1 },
+      ],
+    },
+    {
+      key: "enable_private_reading_integration",
+      title: "夹层阅读",
+      ask: "是否让 Bot 能在空档读你的素材/书柜内容，并在合适时聊起？",
+      description: "它会从可用素材里读取图片或文本，生成读后感、偏好和后续话题。",
+      caution: "需要素材插件/数据可用。内容私密时要先整理来源和屏蔽词。",
+      dependencies: [
+        { label: "联动", text: "需要已有书柜/素材/JM-Cosmos 兼容数据源；没有素材时只会记录配置，不会凭空阅读。" },
+        { label: "模型", text: "阅读图片素材时还需要夹层阅读视觉模型或插件识图模型。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "enable_private_reading_boredom_read", type: "bool", label: "空档主动阅读", description: "Bot 无聊时自己读一点。" },
+        { key: "enable_private_reading_ask_recommendation", type: "bool", label: "主动征求推荐", description: "会问用户想让它看什么。" },
+        { key: "private_reading_min_interval_hours", type: "number", label: "阅读最小间隔小时", placeholder: "12", min: 1 },
+        { key: "private_reading_default_keywords", type: "textarea", label: "默认搜索关键词", placeholder: "纯爱, 恋爱, 同人", description: "素材源支持搜索时使用；多个词可用逗号或换行分隔。" },
+        { key: "private_reading_blocked_tags", type: "textarea", label: "过滤标签", placeholder: "連載中, 長篇, 青年漫", description: "匹配这些标签的素材会尽量跳过。" },
+        { key: "enable_private_reading_preference_influence", type: "bool", label: "阅读偏好影响后续选择", description: "越用越偏向用户喜欢的内容。" },
+      ],
+    },
+  ],
+  group: [
+    {
+      key: "enable_group_companion",
+      title: "群聊陪伴总开关",
+      ask: "是否让插件参与群聊观察和回复判断？",
+      description: "开启后，插件会在白名单/黑名单允许的群里处理唤醒、上下文、群资料和部分主动能力。",
+      caution: "初次建议配白名单，只放确定允许观察的群。",
+      kind: "feature",
+    },
+    {
+      key: "enable_group_context_injection",
+      title: "群聊上下文注入",
+      ask: "是否把近期群聊、群资料和关系线索提供给回复模型？",
+      description: "Bot 更容易接上群里的话题、区分群友和理解前后文。",
+      caution: "群越活跃，注入越长；配合注入保护和隐私保护一起开更稳。",
+      kind: "feature",
+      settings: [
+        { key: "enable_group_injection_guard", type: "bool", kind: "feature", label: "群聊注入保护", description: "减少把内部资料原样说出来。" },
+        { key: "enable_group_privacy_guard", type: "bool", kind: "feature", label: "群聊隐私保护", description: "避免跨人泄漏私聊/关系资料。" },
+        { key: "max_group_recent_messages", type: "number", label: "近期群聊条数", placeholder: "20", min: 1 },
+      ],
+    },
+    {
+      key: "enable_worldbook_member_recognition",
+      title: "群关系网和成员识别",
+      ask: "是否用关系网把群友 QQ、昵称、身份和长期备注稳定对应起来？",
+      description: "开启后，Bot 不只看群昵称，还能把同一个人的自登记、关系备注、重要记忆和群内互动串起来。",
+      caution: "关系网是长期资料。建议允许自登记，但保留待确认观察，避免模型把临时玩笑写成稳定事实。",
+      kind: "feature",
+      settings: [
+        { key: "worldbook_self_registration", type: "bool", label: "允许用户自登记", description: "群友可以按指令补充自己的称呼和资料。" },
+        { key: "worldbook_auto_pending_observations", type: "bool", label: "新观察先进入待确认", description: "推荐开启，避免误写长期设定。" },
+        { key: "worldbook_member_match_aliases", type: "bool", label: "用别名辅助匹配", description: "昵称经常变化的群更需要。" },
+        { key: "worldbook_member_inject_limit", type: "number", label: "每轮注入成员上限", placeholder: "6", min: 0 },
+      ],
+    },
+    {
+      key: "enable_group_wakeup_enhancement",
+      title: "群聊唤醒增强",
+      ask: "是否让 Bot 不只靠 @，也能根据关键词、问题句和冷群场景判断要不要接话？",
+      description: "适合希望 Bot 在群里更自然地被叫出来，而不是必须每次都 @。",
+      caution: "默认别开太猛。词越泛、概率越高，越容易插进不该接的话。",
+      kind: "feature",
+      settings: [
+        { key: "group_wakeup_direct_words", type: "textarea", label: "强唤醒词", placeholder: "Bot 名字、昵称、固定称呼；一行一个或逗号分隔。" },
+        { key: "group_wakeup_interest_keywords", type: "textarea", label: "兴趣关键词", placeholder: "游戏, 日常, 学习" },
+        { key: "group_wakeup_interest_probability", type: "number", label: "兴趣唤醒概率", placeholder: "18", min: 0, max: 100 },
+        { key: "enable_group_wakeup_question", type: "bool", label: "解惑唤醒", description: "群友求助时可能接话。" },
+        { key: "enable_group_wakeup_cold_group", type: "bool", label: "冷群唤醒", description: "群安静很久后可低频接话。" },
+      ],
+    },
+    {
+      key: "enable_group_high_intensity_mode",
+      title: "高强度收口",
+      ask: "是否在群里短时间多人叫 Bot 时先合并再回复？",
+      description: "多人连续唤醒时，Bot 会等几秒把问题收齐，避免同时回好几条。",
+      caution: "会增加等待感。活跃群可以开，普通群不必急着开。",
+      kind: "feature",
+      settings: [
+        { key: "group_high_intensity_merge_seconds", type: "number", label: "合并等待秒数", placeholder: "5", min: 0 },
+        { key: "group_high_intensity_max_merge_messages", type: "number", label: "最多合并消息", placeholder: "8", min: 1 },
+      ],
+    },
+    {
+      key: "enable_group_slang_learning",
+      title: "群黑话学习",
+      ask: "是否让 Bot 记录和解释群里的黑话、梗和专有称呼？",
+      description: "它会观察重复出现的词，生成候选释义，后续可在群详情里校正。",
+      caution: "模型释义不一定准确，建议先观察再手动审核。联网参考会增加搜索调用。",
+      kind: "feature",
+      settings: [
+        { key: "enable_group_slang_meanings", type: "bool", label: "生成黑话释义", description: "推荐开启观察。" },
+        { key: "enable_group_slang_web_search", type: "bool", label: "联网参考黑话", description: "需要搜索能力，可能更慢。" },
+        { key: "max_group_slang_terms", type: "number", label: "最多保留词条", placeholder: "80", min: 0 },
+      ],
+    },
+    {
+      key: "enable_group_topic_threads",
+      title: "群话题线和片段记忆",
+      ask: "是否让 Bot 整理群里正在聊什么、谁参与了哪些小话题？",
+      description: "它会把群聊拆成话题线，帮助后续接话、关系理解和插话反馈。",
+      caution: "活跃群会有后台整理成本；如果只想简单被 @ 回复，可以先不开。",
+      kind: "feature",
+      settings: [
+        { key: "enable_group_member_profiles", type: "bool", kind: "feature", label: "群成员短画像", description: "整理群友近期角色、常聊内容和互动习惯。" },
+        { key: "enable_group_episode_memory", type: "bool", kind: "feature", label: "群片段记忆", description: "把一段群聊整理成小事件。" },
+        { key: "enable_group_relationship_graph", type: "bool", kind: "feature", label: "群关系图", description: "帮助理解群友之间的互动。" },
+        { key: "enable_group_repeat_follow", type: "bool", kind: "feature", label: "跟随复读/打断复读", description: "群里复读时低频跟一句或打断。" },
+      ],
+    },
+    {
+      key: "enable_group_interjection",
+      title: "群聊主动插话",
+      ask: "是否允许 Bot 在没人直接叫它时，低频主动插一句？",
+      description: "适合希望 Bot 在群里更有存在感的场景。",
+      caution: "最容易打扰群友。建议先设置低频，并开启反馈学习。",
+      kind: "feature",
+      settings: [
+        { key: "group_interject_min_interval_minutes", type: "number", label: "插话最小间隔分钟", placeholder: "180", min: 0 },
+        { key: "group_interject_max_daily", type: "number", label: "每日插话上限", placeholder: "2", min: 0 },
+        { key: "enable_group_interjection_feedback", type: "bool", kind: "feature", label: "插话反馈学习", description: "根据群友反应降低打扰。" },
+      ],
+    },
+  ],
+  proactive: [
+    {
+      key: "enable_llm_proactive_message",
+      title: "LLM 主动私聊",
+      ask: "是否让 Bot 根据日程、关系和当前状态主动找目标用户？",
+      description: "这是私聊主动的核心开关。它会生成候选、复核，再通过发送闸决定是否真正发出。",
+      caution: "建议配合主动强度、免打扰和复核一起使用；不要把每日上限一开始调太高。",
+      kind: "feature",
+      settings: [
+        { key: "enable_llm_proactive_persona_judge", type: "bool", label: "人格发送判断", description: "让模型判断此刻是否符合人设和关系。" },
+        { key: "max_daily_messages", type: "number", label: "每日私聊主动上限", placeholder: "5", min: 0 },
+        { key: "idle_minutes", type: "number", label: "空闲多久后可主动", placeholder: "40", min: 0 },
+        { key: "min_interval_minutes", type: "number", label: "两次主动最小间隔", placeholder: "75", min: 0 },
+      ],
+    },
+    {
+      key: "enable_segmented_proactive_reply",
+      title: "主动消息分段",
+      ask: "是否允许主动消息像真人一样分几段发？",
+      description: "长主动消息会拆成多条，语气更自然，也可以配置间隔。",
+      caution: "分段太多会刷屏。建议限制最大段数。",
+      kind: "feature",
+      settings: [
+        { key: "segmented_proactive_max_segments", type: "number", label: "最多分段", placeholder: "3", min: 1 },
+        { key: "segmented_proactive_interval_min", type: "number", label: "最小间隔秒", placeholder: "1", min: 0 },
+        { key: "segmented_proactive_interval_max", type: "number", label: "最大间隔秒", placeholder: "4", min: 0 },
+      ],
+    },
+    {
+      key: "enable_photo_text_action",
+      title: "主动带图/拍照",
+      ask: "是否允许 Bot 主动生成或搭配图片一起发？",
+      description: "可用于生活照片、穿搭、自拍感配图或图文主动消息。这里会直接配置生图后端需要的关键信息。",
+      caution: "生图比纯文字更容易失败，也更耗时。建议先把后端跑通，再把每日上限和触发概率调高。",
+      dependencies: [
+        { label: "在线 API", text: "选择 external/auto 且想走在线生图时，需要填写图片 API 地址、Key 和图片模型名。" },
+        { label: "ComfyUI", text: "选择 comfyui/auto 且想走本地生图时，需要安装 astrbot_plugin_comfyui，并填写文生图/自拍工作流名。" },
+        { label: "SDGen", text: "选择 sdgen 时，需要安装 astrbot_plugin_SDGen 或 astrbot_plugin_sdgen，并在 SDGen 插件里配好 WebUI。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"]], description: "不知道选什么就先用自动；如果只配置了其中一种后端，也可以直接指定。" },
+        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]], description: "只有在线 API 或自动模式需要。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "EXTERNAL_IMAGE_API_BASE_URL", type: "text", label: "在线图片 API 地址", placeholder: "https://.../v1/images/generations", description: "可填完整生图接口，也可填平台根地址；留空则不会走在线 API。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "EXTERNAL_IMAGE_API_KEY", type: "password", label: "在线图片 API Key", placeholder: "sk-...", description: "只用于在线图片 API；不走在线后端可以留空。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / dall-e-3 / wanx2.1-t2i-turbo", description: "请填写图片模型，不要填聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "external_image_api_size", type: "text", label: "在线生图尺寸", placeholder: "1024x1024", description: "按平台支持的尺寸填写。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "COMFYUI_TEXT2IMG_WORKFLOW_NAME", type: "text", label: "ComfyUI 文生图工作流", placeholder: "text2img_workflow", description: "选择 ComfyUI 或自动模式时填写；对应 ComfyUI 插件里的工作流名称。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "COMFYUI_SELFIE_WORKFLOW_NAME", type: "text", label: "ComfyUI 自拍工作流", placeholder: "selfie_workflow", description: "用于自拍感/人设参考图场景；没有单独工作流可先填同一个。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "需要角色外观稳定时填写；本地路径和图片 URL 都可以。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
+        { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => String(draft.photo_generation_style || "") === "其他" },
+        { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
+        { key: "photo_action_max_daily", type: "number", label: "每日主动带图上限", placeholder: "1", min: 0 },
+        { key: "proactive_photo_text_probability", type: "number", label: "主动带图概率", placeholder: "12", min: 0, max: 100 },
+        { key: "enable_natural_language_photo_generation", type: "bool", kind: "feature", label: "允许用户自然语言生图/改图", description: "用户明确说想要图片时直接调用同一套生图后端；默认建议先不开，避免和独立生图插件抢触发。" },
+        { key: "natural_language_photo_generation_max_daily", type: "number", label: "自然语言生图每日上限", placeholder: "3", min: 0, showWhen: (draft) => Boolean(draft.enable_natural_language_photo_generation) },
+        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "自然语言生图附加提示词", placeholder: "例如：保持角色外观一致，不生成现实人物照片。", showWhen: (draft) => Boolean(draft.enable_natural_language_photo_generation) },
+      ],
+    },
+    {
+      key: "enable_news_integration",
+      title: "新闻阅读",
+      ask: "是否让 Bot 读每日热点或你配置的新闻源？",
+      description: "Bot 会整理新闻印象，作为主动话题、日记和聊天背景。",
+      caution: "新闻会消耗搜索/模型调用；不想让 Bot 聊现实新闻就不要开。",
+      dependencies: [
+        { label: "来源", text: "默认热点不够时，需要在这里填写 RSS/Atom、B站日报或其他可读取来源。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "enable_news_daily_hot_read", type: "bool", kind: "feature", label: "每日热点", description: "按配置来源读取热点。" },
+        { key: "enable_news_boredom_read", type: "bool", kind: "feature", label: "空档阅读新闻", description: "空闲时低频读。" },
+        { key: "enable_ai_daily_watch", type: "bool", kind: "feature", label: "AI 日报/早报", description: "读取指定 AI 信息源。" },
+        { key: "news_sources", type: "textarea", label: "普通新闻源", placeholder: "每行一个 RSS/Atom/可读取链接", description: "留空则只使用内置或热点来源。" },
+        { key: "ai_daily_sources", type: "textarea", label: "AI 日报/早报来源", placeholder: "每行一个来源链接或标识", description: "开启 AI 日报/早报时建议填写。" },
+        { key: "news_min_interval_hours", type: "number", label: "新闻最小间隔小时", placeholder: "8", min: 1 },
+        { key: "news_share_probability", type: "number", label: "读后主动分享概率", placeholder: "15", min: 0, max: 100 },
+      ],
+    },
+    {
+      key: "enable_web_exploration",
+      title: "主动搜索",
+      ask: "是否让 Bot 在空档根据兴趣主动搜索网页？",
+      description: "它会围绕兴趣词或当前状态找资料，再整理成见闻或主动话题。",
+      caution: "需要 AstrBot 搜索或自定义搜索接口。搜索结果质量不稳定，要保留复核边界。",
+      dependencies: [
+        { label: "搜索", text: "需要 AstrBot 全局网页搜索可用；或者填写下面的自定义搜索接口地址、Key 和模型。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "web_exploration_interests", type: "textarea", label: "探索兴趣", placeholder: "例如：AI 工具、游戏更新、天气生活、学习资料" },
+        { key: "enable_web_exploration_boredom_search", type: "bool", kind: "feature", label: "无聊时主动搜索", description: "不开则只保留手动或其他触发。" },
+        { key: "web_exploration_min_interval_hours", type: "number", label: "搜索最小间隔小时", placeholder: "12", min: 1 },
+        { key: "web_exploration_share_probability", type: "number", label: "探索后主动分享概率", placeholder: "12", min: 0, max: 100 },
+        { key: "web_exploration_max_results", type: "number", label: "每次最多读取结果", placeholder: "5", min: 1 },
+        { key: "WEB_EXPLORATION_API_BASE_URL", type: "text", label: "自定义搜索接口地址", placeholder: "https://...", description: "如果 AstrBot 全局搜索不可用，就在这里填写兼容接口。" },
+        { key: "WEB_EXPLORATION_API_KEY", type: "password", label: "自定义搜索接口 API Key", placeholder: "留空则只尝试 AstrBot 搜索" },
+        { key: "WEB_EXPLORATION_API_MODEL", type: "text", label: "自定义搜索接口模型", placeholder: "按你的搜索服务要求填写" },
+      ],
+    },
+    {
+      key: "enable_qzone_integration",
+      title: "QQ 空间",
+      ask: "是否让 Bot 读取/发布 QQ 空间相关内容？",
+      description: "可用于生活说说、自动配图、评论收件箱和情绪宣泄说说。",
+      caution: "这是外部账号动作，建议先只开总集成，不要马上开启自动发布。",
+      dependencies: [
+        { label: "内置", text: "QQ 空间动作已内置参考 astrbot_plugin_qzone，不需要再装同名插件。" },
+        { label: "凭据", text: "需要 OneBot/NapCat 能获取 Cookie；获取不到时必须手动填写 QZONE_COOKIE。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "QZONE_COOKIE", type: "textarea", label: "QZONE_COOKIE", placeholder: "uin=...; p_skey=...; skey=...", description: "自动获取失败或认证暂停时填写；需要包含 uin/p_uin 与 p_skey 或 skey。" },
+        { key: "enable_qzone_life_publish", type: "bool", kind: "feature", label: "生活说说发布", description: "会真实发布到空间，谨慎开启。" },
+        { key: "qzone_life_publish_min_interval_hours", type: "number", label: "生活说说最小间隔小时", placeholder: "12", min: 1 },
+        { key: "enable_qzone_generated_image_publish", type: "bool", kind: "feature", label: "说说自动配图", description: "发布前生成配图。" },
+        { key: "enable_qzone_comment_inbox", type: "bool", kind: "feature", label: "评论收件箱回复", description: "会处理空间评论。" },
+        { key: "qzone_comment_inbox_interval_minutes", type: "number", label: "评论检查间隔分钟", placeholder: "30", min: 1 },
+      ],
+    },
+    {
+      key: "enable_bilibili_integration",
+      title: "B 站联动",
+      ask: "是否让 Bot 读取 B 站内容作为见闻和话题？",
+      description: "Bot 可以在空档看视频信息或摘要，形成聊天素材。",
+      caution: "需要相关插件/能力可用；视频正文、字幕和评论质量会影响结果。",
+      dependencies: [
+        { label: "联动", text: "需要安装并启用 astrbot_plugin_bilibili_ai_bot；本插件只读取它的观看日志或 memory_api 记忆。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "enable_bilibili_boredom_watch", type: "bool", kind: "feature", label: "空档看 B 站", description: "无聊时低频读取。" },
+        { key: "bilibili_boredom_min_interval_hours", type: "number", label: "最小间隔小时", placeholder: "12", min: 1 },
+      ],
+    },
+    {
+      key: "enable_creative_writing",
+      title: "长线创作",
+      ask: "是否让 Bot 在空档推进日记、梦境、故事或其他创作？",
+      description: "它会把生活状态、关系和灵感整理成长期文本项目。",
+      caution: "创作会持续消耗模型调用。开启隐藏模式后，内容更偏后台，不一定主动展示。",
+      kind: "feature",
+      settings: [
+        { key: "creative_inspiration_probability", type: "number", label: "灵感触发概率", placeholder: "0.15", min: 0, max: 1, step: 0.01 },
+        { key: "creative_chars_per_session", type: "number", label: "每次创作字数", placeholder: "1200", min: 100 },
+        { key: "creative_hidden_mode", type: "bool", kind: "feature", label: "隐藏创作模式", description: "更少主动展示创作内容。" },
+      ],
+    },
+  ],
+};
+
+const setupGuideAdvancedDynamicFields = new Set(
+  Object.values(setupGuideAdvancedItems)
+    .flat()
+    .flatMap((item) => [item.key, ...(item.settings || []).map((setting) => setting.key)])
+);
+
+const setupGuideAdvancedToggleFields = new Set(
+  Object.values(setupGuideAdvancedItems)
+    .flat()
+    .map((item) => item.key)
+);
+
+function setupGuideAdvancedItemKeys() {
+  return Object.values(setupGuideAdvancedItems)
+    .flat()
+    .flatMap((item) => [item.key, ...(item.settings || []).map((setting) => setting.key)]);
+}
 
 const setupGuideIntensityPresets = {
   off: {
@@ -3658,6 +4201,9 @@ const setupGuideDynamicFields = new Set([
   "groupWakeQuestion",
   "groupWakeColdGroup",
   "worldbookSelfRegistration",
+  "photo_generation_backend",
+  "photo_generation_style",
+  "enable_natural_language_photo_generation",
 ]);
 
 function setupRunStatusLabel(level) {
@@ -3674,6 +4220,7 @@ function setupGuideDraft() {
   if (!state.setupGuideDraft) {
     const settings = state.overview?.settings || {};
     const providers = state.overview?.providers || {};
+    const features = state.overview?.features || {};
     const intensity = state.overview?.proactive_intensity || {};
     const effective = intensity.effective || {};
     const configured = intensity.configured || {};
@@ -3717,6 +4264,16 @@ function setupGuideDraft() {
       worldbookUserId: targetIds[0] || "",
       ...Object.fromEntries(setupGuideQuickProviderKeys.map((key) => [key, String(providers[key] || "").trim()])),
     };
+    setupGuideAdvancedItemKeys().forEach((key) => {
+      if (!key || Object.prototype.hasOwnProperty.call(state.setupGuideDraft, key)) return;
+      if (Object.prototype.hasOwnProperty.call(settings, key)) {
+        state.setupGuideDraft[key] = settings[key];
+      } else if (Object.prototype.hasOwnProperty.call(features, key)) {
+        state.setupGuideDraft[key] = features[key];
+      } else if (Object.prototype.hasOwnProperty.call(providers, key)) {
+        state.setupGuideDraft[key] = providers[key];
+      }
+    });
   }
   return state.setupGuideDraft;
 }
@@ -3776,7 +4333,7 @@ function setupGuideFieldValue(name) {
 function setupGuideOption(name, value, label, description) {
   const checked = String(setupGuideFieldValue(name) ?? "") === String(value);
   return `
-    <label class="setup-guide-choice ${checked ? "selected" : ""}">
+    <label class="setup-guide-choice setup-guide-option-choice ${checked ? "selected" : ""}">
       <input type="radio" name="${escapeHtml(name)}" value="${escapeHtml(value)}" data-setup-guide-field="${escapeHtml(name)}" ${checked ? "checked" : ""}>
       <span>
         <b>${escapeHtml(label)}</b>
@@ -3789,7 +4346,7 @@ function setupGuideOption(name, value, label, description) {
 function setupGuideCheck(name, label, description) {
   const checked = Boolean(setupGuideFieldValue(name));
   return `
-    <label class="setup-guide-choice ${checked ? "selected" : ""}">
+    <label class="setup-guide-choice setup-guide-toggle-choice ${checked ? "selected" : ""}">
       <input type="checkbox" data-setup-guide-field="${escapeHtml(name)}" ${checked ? "checked" : ""}>
       <span>
         <b>${escapeHtml(label)}</b>
@@ -3799,18 +4356,23 @@ function setupGuideCheck(name, label, description) {
   `;
 }
 
+function setupGuideHint(text, tone = "info") {
+  return `<p class="setup-guide-hint ${escapeHtml(tone)}">${escapeHtml(text)}</p>`;
+}
+
 function setupGuideText(name, label, placeholder = "", multiline = false, meta = {}) {
   const value = setupGuideFieldValue(name) ?? "";
   const required = Boolean(meta.required);
   const badge = meta.badge ? `<i class="${escapeHtml(meta.badgeTone || "info")}">${escapeHtml(meta.badge)}</i>` : "";
   const description = meta.description ? `<small>${escapeHtml(meta.description)}</small>` : "";
+  const inputType = ["text", "password", "url"].includes(String(meta.inputType || "")) ? String(meta.inputType) : "text";
   return `
     <label class="setup-guide-input ${required && !String(value).trim() ? "needs-value" : ""}">
       <span>${escapeHtml(label)}${badge}</span>
       ${description}
       ${multiline
         ? `<textarea rows="3" data-setup-guide-field="${escapeHtml(name)}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(value)}</textarea>`
-        : `<input type="text" data-setup-guide-field="${escapeHtml(name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">`}
+        : `<input type="${escapeHtml(inputType)}" data-setup-guide-field="${escapeHtml(name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">`}
     </label>
   `;
 }
@@ -3861,22 +4423,407 @@ function setupGuideStepSummaryHtml(items) {
   `;
 }
 
+function setupGuideAdvancedBlockHtml(block) {
+  const items = setupGuideAdvancedItems[block.id] || [];
+  const enabledCount = items.filter((item) => Boolean(setupGuideFieldValue(item.key))).length;
+  const selected = state.setupGuideAdvancedBlock === block.id;
+  const icons = {
+    common: "🔧",
+    private: "💬",
+    group: "👥",
+    proactive: "🌟",
+  };
+  const icon = icons[block.id] || "📋";
+  return `
+    <button type="button" class="setup-guide-advanced-block ${selected ? "selected" : ""}" data-setup-guide-advanced-block="${escapeHtml(block.id)}">
+      <div class="block-header">
+        <span class="block-icon">${icon}</span>
+        <span class="block-title">${escapeHtml(block.title)}</span>
+        <div class="block-status ${enabledCount > 0 ? "has-content" : "empty"}">
+          ${enabledCount > 0 ? `<b>${enabledCount}/${items.length}</b>` : `<b class="empty-badge">0</b>`}
+        </div>
+      </div>
+      <p class="block-desc">${escapeHtml(block.body)}</p>
+      ${enabledCount > 0 ? `
+        <div class="block-preview">
+          ${items.filter((item) => Boolean(setupGuideFieldValue(item.key))).slice(0, 3).map((item) => `
+            <span class="block-preview-tag">${escapeHtml(item.title)}</span>
+          `).join("")}
+          ${enabledCount > 3 ? `<span class="block-preview-more">+${enabledCount - 3}</span>` : ""}
+        </div>
+      ` : ""}
+    </button>
+  `;
+}
+
+function setupGuideAdvancedHomeHtml() {
+  return `
+    <div class="setup-guide-question">
+      <h4>选择要配置的板块</h4>
+      ${setupGuideHint("一次配置一个板块。选中后逐项决定是否开启，保存后再切换其他板块。")}
+      <div class="setup-guide-advanced-grid">
+        ${setupGuideAdvancedBlocks.map(setupGuideAdvancedBlockHtml).join("")}
+      </div>
+    </div>
+    <div class="setup-guide-question">
+      <h4>建议顺序</h4>
+      <div class="setup-guide-pill-row">
+        <span class="ok"><b>1</b> 通用能力</span>
+        <span class="info"><b>2</b> 私聊增强</span>
+        <span class="info"><b>3</b> 群聊增强</span>
+        <span class="warn"><b>4</b> 主动增强</span>
+      </div>
+      ${setupGuideHint("QQ 空间发布、主动带图、本机识屏会触发外部动作；建议基础链路稳定后再开。", "warn")}
+    </div>
+  `;
+}
+
+function setupGuideAdvancedStepIndex(blockId = state.setupGuideAdvancedBlock) {
+  const items = setupGuideAdvancedItems[blockId] || [];
+  if (!items.length) return 0;
+  const raw = Number(state.setupGuideAdvancedStep || 0);
+  const value = Number.isFinite(raw) ? raw : 0;
+  return Math.max(0, Math.min(items.length - 1, value));
+}
+
+function setupGuideAdvancedEnabledCount(blockId) {
+  return (setupGuideAdvancedItems[blockId] || []).filter((item) => Boolean(setupGuideFieldValue(item.key))).length;
+}
+
+function setupGuideAdvancedEnabledSummaryHtml(blockId) {
+  const items = setupGuideAdvancedItems[blockId] || [];
+  const enabledItems = items.filter((item) => Boolean(setupGuideFieldValue(item.key)));
+  return `
+    <div class="setup-guide-advanced-summary">
+      <span class="${enabledItems.length ? "ok" : "info"}"><b>已选择</b>${escapeHtml(enabledItems.length)} / ${escapeHtml(items.length)} 项</span>
+      ${enabledItems.length ? enabledItems.slice(0, 6).map((item) => `<i>${escapeHtml(item.title)}</i>`).join("") : `<i>还没有开启本板块功能</i>`}
+      ${enabledItems.length > 6 ? `<i>+${escapeHtml(enabledItems.length - 6)}</i>` : ""}
+    </div>
+  `;
+}
+
+function setupGuideAdvancedStepProgressHtml(blockId, activeIndex) {
+  const items = setupGuideAdvancedItems[blockId] || [];
+  return `
+    <div class="setup-guide-advanced-step-progress" aria-label="板块内问卷进度">
+      ${items.map((item, index) => {
+        const enabled = Boolean(setupGuideFieldValue(item.key));
+        return `<button type="button" class="${[index === activeIndex ? "active" : "", enabled ? "done" : ""].filter(Boolean).join(" ")}" data-setup-guide-advanced-step="${index}" title="${escapeHtml(item.title)}"><span>${escapeHtml(index + 1)}</span></button>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function setupGuideModeHomeHtml() {
+  const overview = state.overview || {};
+  const settings = overview.settings || {};
+  const providers = overview.providers || {};
+  const privateInfo = overview.private || {};
+  const group = overview.group || {};
+  const creative = overview.creative || {};
+  const features = overview.features || {};
+  const bili = overview.bilibili || {};
+  const qzone = overview.qzone || {};
+  const worldbook = overview.worldbook || {};
+  const intensity = overview.proactive_intensity || {};
+
+  const targetUsers = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+  const fastProvider = String(providers.FAST_RESPONSE_ID || "").trim();
+  const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
+  const proactiveMax = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
+  const hasUsers = targetUsers.length > 0;
+  const hasProviders = fastProvider && complexProvider;
+  const hasProactive = Number(proactiveMax || 0) > 0;
+  const hasGroup = Boolean(features.enable_group_companion);
+  const hasWorldbook = Boolean(features.enable_worldbook_member_recognition);
+  const hasCreative = Boolean(features.enable_creative_writing);
+  const hasNews = Boolean(features.enable_news_integration);
+  const hasBili = Boolean(features.enable_bilibili_integration);
+  const hasQzone = Boolean(features.enable_qzone_integration);
+  const hasMemory = Boolean(features.enable_companion_memory);
+
+  const firstGuideSteps = [
+    { title: "基础连通", icon: "🔗", done: hasUsers },
+    { title: "核心模型", icon: "🧠", done: hasProviders },
+    { title: "主动功能", icon: "🎯", done: hasProactive },
+    { title: "其他配置", icon: "⚙️", done: hasGroup || hasWorldbook || hasCreative },
+    { title: "主动测试", icon: "✅", done: false },
+  ];
+  const firstGuideDoneCount = firstGuideSteps.filter((s) => s.done).length;
+  const firstGuidePct = Math.round((firstGuideDoneCount / firstGuideSteps.length) * 100);
+
+  const advancedIcons = { common: "🔧", private: "💬", group: "👥", proactive: "🌟" };
+  const advancedBlocks = setupGuideAdvancedBlocks.map((block) => {
+    const items = setupGuideAdvancedItems[block.id] || [];
+    return {
+      id: block.id,
+      title: block.title,
+      icon: advancedIcons[block.id] || "📋",
+      desc: block.body,
+      total: items.length,
+      current: items.filter((item) => Boolean(features[item.key] ?? settings[item.key])).length,
+    };
+  });
+
+  const totalAdvanced = advancedBlocks.reduce((sum, b) => sum + b.total, 0);
+  const currentAdvanced = advancedBlocks.reduce((sum, b) => sum + b.current, 0);
+
+  return `
+    <div class="setup-guide-question">
+      <h4>选择引导类型</h4>
+    </div>
+    <div class="setup-guide-mode-choice-grid">
+      <button type="button" class="setup-guide-mode-choice ${state.setupGuideMode === "first" ? "active" : ""}" data-setup-guide-mode="first">
+        <div class="choice-topline">
+          <span class="choice-icon">🎯</span>
+          <div class="choice-status ${firstGuidePct === 100 ? "complete" : "incomplete"}">
+            <i>${firstGuidePct === 100 ? "✓" : "○"}</i>
+            <span>${firstGuidePct}%</span>
+          </div>
+        </div>
+        <div class="choice-copy">
+          <b>初次引导</b>
+          <p class="choice-desc">跑通基础链路：目标 QQ → 核心模型 → 主动测试</p>
+          <small>5 分钟内完成 4 个核心步骤，从零让 Bot 动起来</small>
+        </div>
+        <ul class="choice-checklist">
+          ${firstGuideSteps.map((s) => `<li class="${s.done ? "done" : "todo"}"><i>${s.icon}</i><span><b>${s.title}</b></span><em>${s.done ? "已完成" : "待配置"}</em></li>`).join("")}
+        </ul>
+      </button>
+      <button type="button" class="setup-guide-mode-choice ${state.setupGuideMode === "advanced" ? "active" : ""}" data-setup-guide-mode="advanced">
+        <div class="choice-topline">
+          <span class="choice-icon">🔧</span>
+          <div class="choice-status ${totalAdvanced > 0 && currentAdvanced === totalAdvanced ? "complete" : currentAdvanced > 0 ? "incomplete" : "fresh"}">
+            <i>${totalAdvanced > 0 && currentAdvanced === totalAdvanced ? "✓" : currentAdvanced > 0 ? "▸" : "○"}</i>
+            <span>${totalAdvanced > 0 ? `${currentAdvanced}/${totalAdvanced}` : "未开启"}</span>
+          </div>
+        </div>
+        <div class="choice-copy">
+          <b>进阶引导</b>
+          <p class="choice-desc">按板块开启更多能力：通用 · 私聊 · 群聊 · 主动</p>
+          <small>${totalAdvanced > 0 ? `已开启 ${currentAdvanced}/${totalAdvanced} 项` : "逐步开满新闻、TTS、读图、空间等能力"}</small>
+        </div>
+        <ul class="choice-checklist">
+          ${advancedBlocks.map((b) => `<li class="${b.current > 0 ? "done" : "todo"}"><i>${b.icon}</i><span><b>${b.title}</b><small>${b.desc}</small></span><em>${b.current > 0 ? `${b.current}/${b.total}` : "未开启"}</em></li>`).join("")}
+        </ul>
+      </button>
+    </div>
+    ${setupGuideHint("第一次先走「初次引导」跑通核心链路；之后再用「进阶引导」逐步加功能。")}
+  `;
+}
+
+function setupGuideAdvancedSettingHtml(setting) {
+  if (!setting || !setting.key) return "";
+  if (setting.type === "bool") {
+    return setupGuideCheck(setting.key, setting.label || configLabel(setting.key), setting.description || "开启后跟随该功能一起生效。");
+  }
+  if (setting.type === "number") {
+    return setupGuideNumber(setting.key, setting.label || configLabel(setting.key), setting.placeholder || "", {
+      min: setting.min,
+      max: setting.max,
+      step: setting.step,
+      description: setting.description,
+    });
+  }
+  if (setting.type === "select") {
+    return setupGuideSelect(setting.key, setting.label || configLabel(setting.key), setting.options || [], {
+      description: setting.description,
+    });
+  }
+  return setupGuideText(setting.key, setting.label || configLabel(setting.key), setting.placeholder || "", setting.type === "textarea", {
+    description: setting.description,
+    inputType: setting.type === "password" ? "password" : "text",
+  });
+}
+
+function setupGuideAdvancedSettingVisible(setting) {
+  if (!setting || typeof setting.showWhen !== "function") return true;
+  try {
+    return Boolean(setting.showWhen(setupGuideDraft()));
+  } catch (_) {
+    return true;
+  }
+}
+
+function setupGuideAdvancedDependenciesHtml(item) {
+  const dependencies = Array.isArray(item.dependencies) ? item.dependencies : [];
+  if (!dependencies.length) return "";
+  return `
+    <div class="setup-guide-advanced-deps">
+      ${dependencies.map((dependency) => {
+        const label = typeof dependency === "string" ? "前置" : dependency.label || "前置";
+        const text = typeof dependency === "string" ? dependency : dependency.text || "";
+        const tone = typeof dependency === "object" && dependency.tone ? dependency.tone : "info";
+        return `<span class="${escapeHtml(tone)}"><b>${escapeHtml(label)}</b>${escapeHtml(text)}</span>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function setupGuideAdvancedItemHtml(item) {
+  const enabled = Boolean(setupGuideFieldValue(item.key));
+  const settings = Array.isArray(item.settings) ? item.settings : [];
+  const visibleSettings = settings.filter(setupGuideAdvancedSettingVisible);
+  return `
+    <article class="setup-guide-advanced-item ${enabled ? "enabled" : "disabled"}">
+      <header>
+        <div>
+          <span>${escapeHtml(item.title)}</span>
+          <b>${escapeHtml(item.ask)}</b>
+        </div>
+      </header>
+      <div class="setup-guide-advanced-explain">
+        <p>${escapeHtml(item.description)}</p>
+        <small>${escapeHtml(item.caution)}</small>
+      </div>
+      ${setupGuideAdvancedDependenciesHtml(item)}
+      <div class="setup-guide-advanced-choice-row">
+        <label class="${enabled ? "selected" : ""}">
+          <input type="radio" name="advanced_${escapeHtml(item.key)}" value="true" data-setup-guide-advanced-toggle="${escapeHtml(item.key)}" ${enabled ? "checked" : ""}>
+          <span><b>需要</b><small>在本板块保存时开启，并应用下面参数。</small></span>
+        </label>
+        <label class="${!enabled ? "selected" : ""}">
+          <input type="radio" name="advanced_${escapeHtml(item.key)}" value="false" data-setup-guide-advanced-toggle="${escapeHtml(item.key)}" ${!enabled ? "checked" : ""}>
+          <span><b>暂不需要</b><small>保持关闭；已经填过的参数不会被清空。</small></span>
+        </label>
+      </div>
+      ${enabled && visibleSettings.length ? `
+        <div class="setup-guide-advanced-settings">
+          ${visibleSettings.map(setupGuideAdvancedSettingHtml).join("")}
+        </div>
+      ` : enabled ? `
+        ${setupGuideHint("本步没有必填项；保存板块后按当前全局设置运行。")}
+      ` : ""}
+    </article>
+  `;
+}
+
+function setupGuideAdvancedQuestionnaireHtml() {
+  const blockId = state.setupGuideAdvancedBlock || "";
+  const block = setupGuideAdvancedBlockMap[blockId];
+  if (!block) return setupGuideAdvancedHomeHtml();
+  const items = setupGuideAdvancedItems[blockId] || [];
+  if (!items.length) {
+    return `
+      <div class="setup-guide-question">
+        <div class="setup-guide-advanced-title">
+          <div>
+            <h4>${escapeHtml(block.title)}</h4>
+            <p>${escapeHtml(block.body)}</p>
+          </div>
+          <button type="button" data-setup-guide-advanced-home>返回板块选择</button>
+        </div>
+        ${setupGuideHint("这个板块暂时没有可配置的问卷项，可以返回选择其他板块。")}
+      </div>
+    `;
+  }
+  const stepIndex = setupGuideAdvancedStepIndex(blockId);
+  const item = items[stepIndex] || items[0];
+  const enabledCount = items.filter((item) => Boolean(setupGuideFieldValue(item.key))).length;
+  const nextTitle = stepIndex >= items.length - 1 ? "保存后返回板块选择" : `下一项：${items[stepIndex + 1]?.title || "继续配置"}`;
+  return `
+    <div class="setup-guide-advanced-rail">
+      <div>
+        <span>${escapeHtml(block.title)}</span>
+        <b>${escapeHtml(stepIndex + 1)} / ${escapeHtml(items.length)} · ${escapeHtml(item.title)}</b>
+        <small>已选 ${escapeHtml(enabledCount)} 项 · ${escapeHtml(nextTitle)}</small>
+      </div>
+      <button type="button" data-setup-guide-advanced-home>返回板块</button>
+    </div>
+    <div class="setup-guide-question setup-guide-question--compact">
+      ${setupGuideAdvancedStepProgressHtml(blockId, stepIndex)}
+      ${setupGuideAdvancedEnabledSummaryHtml(blockId)}
+    </div>
+    <div class="setup-guide-advanced-list single">
+      ${setupGuideAdvancedItemHtml(item)}
+    </div>
+  `;
+}
+
+function setupGuideAdvancedPayload(blockId = state.setupGuideAdvancedBlock) {
+  const overviewSettings = state.overview?.settings || {};
+  const items = setupGuideAdvancedItems[blockId] || [];
+  const draft = setupGuideDraft();
+  const features = {};
+  const settings = {};
+  const providers = {};
+  const putValue = (key, value, kind = "") => {
+    if (!key) return;
+    if (isProviderConfigKey(key)) {
+      providers[key] = String(value || "").trim();
+    } else if (kind === "feature" || (!Object.prototype.hasOwnProperty.call(overviewSettings, key) && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key))) {
+      features[key] = Boolean(value);
+    } else if (kind === "setting" || Object.prototype.hasOwnProperty.call(overviewSettings, key) || !String(key).startsWith("enable_")) {
+      settings[key] = value;
+    } else {
+      features[key] = Boolean(value);
+    }
+  };
+  items.forEach((item) => {
+    putValue(item.key, draft[item.key], item.kind);
+    (item.settings || []).forEach((setting) => {
+      if (Object.prototype.hasOwnProperty.call(draft, setting.key)) {
+        putValue(setting.key, draft[setting.key], setting.kind || "setting");
+      }
+    });
+  });
+  return { features, settings, providers };
+}
+
+async function saveSetupGuideAdvancedBlock(control = null) {
+  const blockId = state.setupGuideAdvancedBlock || "";
+  const block = setupGuideAdvancedBlockMap[blockId];
+  if (!block) {
+    showToast("请先选择一个进阶配置板块", "error");
+    return false;
+  }
+  state.setupGuideApplying = true;
+  renderSetupGuideOverlay();
+  try {
+    const result = await runAction(
+      () => postJson("/settings/update", setupGuideAdvancedPayload(blockId)),
+      `已保存${block.title}`,
+      control,
+    );
+    if (result) {
+      state.overview = result;
+      state.featureDraft = featureDraftFromOverview(result);
+      state.providerConfigMode = result.settings?.provider_config_mode || state.providerConfigMode;
+      showToast(result.config_saved === false ? "已写入运行态，但配置持久化可能失败" : `已保存${block.title}`);
+      return true;
+    }
+  } catch (error) {
+    showToast(`保存进阶配置失败：${error.message}`, "error");
+  } finally {
+    state.setupGuideApplying = false;
+    if (state.setupGuideOpen) renderSetupGuideOverlay();
+  }
+  return false;
+}
+
 function setupGuidePersonaSelectHtml() {
   const draft = setupGuideDraft();
   const current = String(draft.personaId || "");
-  const options = state.roleplayPersonas.length
-    ? state.roleplayPersonas.map((item) => {
+  const personas = state.roleplayPersonas || [];
+  const options = personas.length
+    ? personas.map((item) => {
       const id = String(item.id || "");
       const label = `${item.label || id}${item.source ? ` · ${item.source}` : ""}`;
       return `<option value="${escapeHtml(id)}" ${id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
     }).join("")
     : `<option value="">继承 AstrBot 当前配置人格</option>`;
+  const currentLabel = personas.length
+    ? (personas.find((p) => String(p.id || "") === current) || {}).label || (current ? current : "继承 AstrBot 当前配置人格")
+    : "继承 AstrBot 当前配置人格";
   return `
-    <label class="setup-guide-input">
-      <span>选择用于推导的人格<i class="required">必选</i></span>
-      <small>只用于读取人格文本并生成插件世界知识草稿；不会切换 AstrBot 当前对话人格。</small>
-      <select data-setup-guide-field="personaId">${options}</select>
-    </label>
+    <div class="wk-persona-select">
+      <label class="setup-guide-input">
+        <span>选择用于推导的人格</span>
+        <small>只读取人格文本生成草稿，不会切换 AstrBot 对话人格。</small>
+        <select data-setup-guide-field="personaId">${options}</select>
+      </label>
+      <div class="wk-persona-current">当前选择：<b>${escapeHtml(currentLabel)}</b></div>
+    </div>
   `;
 }
 
@@ -3940,7 +4887,7 @@ function setupGuideApplyRoleplayDraft(result) {
 function setupGuideWorldKnowledgeEditorHtml() {
   const draft = setupGuideDraft();
   if (!state.setupGuideRoleplayDraft) {
-    return `<div class="setup-guide-empty">尚未生成草稿。选择人格后点击“从人格推导世界知识草稿”。</div>`;
+    return `<div class="setup-guide-empty wk-empty-pending"><span class="wk-empty-icon">⏳</span>等待生成草稿。完成上方第 1 步后，草稿会自动显示在这里。</div>`;
   }
   const result = state.setupGuideRoleplayDraft?.result || {};
   const providerRoleLabel = (role) => {
@@ -3958,16 +4905,25 @@ function setupGuideWorldKnowledgeEditorHtml() {
     ? `；JSON 修复：${[providerRoleLabel(result.repair_provider_role), result.repair_provider_id].filter(Boolean).join(" · ")}`
     : "";
   const parseNote = String(result.parse_note || "").trim();
+  const personaText = String(draft.worldKnowledgePersona || "").trim();
+  const worldText = String(draft.worldKnowledgeWorld || "").trim();
+  const userText = String(draft.worldKnowledgeUser || "").trim();
+  const extraText = String(draft.worldKnowledgeExtra || "").trim();
+  const fieldCount = [personaText, worldText, userText, extraText].filter(Boolean).length;
   return `
     <div class="setup-guide-world-editor">
-      <div class="setup-guide-note">本次推导模型：${escapeHtml(providerText || "未返回模型信息")}${escapeHtml(repairText)}。世界知识推导优先使用快速响应模型；如果返回格式不可解析，会尝试用复杂推理/主模型修复。${parseNote ? ` ${escapeHtml(parseNote)}` : ""}</div>
-      ${setupGuideText("worldKnowledgePersona", "角色资料草稿", "这里会填入从人格整理出的角色资料。", true)}
-      ${setupGuideText("worldKnowledgeWorld", "世界观/生活背景草稿", "这里会填入世界观、生活背景、活动场景。", true)}
-      ${setupGuideText("worldKnowledgeUser", "用户关系草稿", "只保留人格中明确写出的用户关系，不做隐私推断。", true)}
-      ${setupGuideText("worldKnowledgeExtra", "其他插件补充", "识图自我识别、翻译词、生成备注等。", true)}
-      <div class="setup-guide-provider-test-actions">
-        <button type="button" data-setup-guide-world-confirm>${draft.worldKnowledgeConfirmed ? "已确认，重新确认" : "确认使用这份草稿"}</button>
-        <span>${draft.worldKnowledgeConfirmed ? "已确认。完成引导时会写入世界知识配置。" : "确认后继续后续首次配置；完成引导时写入世界知识配置。"}</span>
+      <div class="wk-draft-meta">
+        <span class="wk-draft-meta-item">模型：${escapeHtml(providerText || "未返回模型信息")}${escapeHtml(repairText)}</span>
+        ${parseNote ? `<span class="wk-draft-meta-item wk-draft-note">${escapeHtml(parseNote)}</span>` : ""}
+        <span class="wk-draft-meta-item wk-field-count">已提取 ${fieldCount}/4 项</span>
+      </div>
+      ${setupGuideText("worldKnowledgePersona", "① 角色资料", "角色外观、身份、性格等。可直接修改。", true)}
+      ${setupGuideText("worldKnowledgeWorld", "② 世界观 / 生活背景", "世界设定、时代、活动场景等。", true)}
+      ${setupGuideText("worldKnowledgeUser", "③ 用户关系", "只保留人格中明确写出的用户关系。", true)}
+      ${setupGuideText("worldKnowledgeExtra", "④ 其他补充", "识图自我识别、翻译词、生成备注等。", true)}
+      <div class="setup-guide-provider-test-actions wk-confirm-bar">
+        <button type="button" data-setup-guide-world-confirm>${draft.worldKnowledgeConfirmed ? "✓ 已确认，重新确认" : "确认使用这份草稿"}</button>
+        <span>${draft.worldKnowledgeConfirmed ? "已确认。完成引导时会写入世界知识配置。" : "确认是可选的——直接「下一步」也可以，草稿会自动保存。"}</span>
       </div>
     </div>
   `;
@@ -4302,7 +5258,9 @@ function updateSetupGuideStatusViews() {
   }
   const nextButton = modal.querySelector("[data-setup-guide-next]");
   if (nextButton instanceof HTMLButtonElement) {
-    if (setupGuideStepIndex() === 1) {
+    if (state.setupGuideMode === "advanced") {
+      nextButton.disabled = Boolean(state.setupGuideApplying) || !state.setupGuideAdvancedBlock;
+    } else if (setupGuideStepIndex() === 1) {
       nextButton.disabled = !setupGuideAllProviderTestsPassed();
     } else if (setupGuideStepIndex() >= setupGuideSteps.length - 1) {
       nextButton.disabled = !setupGuideProactiveTestPassed();
@@ -4353,10 +5311,21 @@ function setupGuideApplyIntensityPreset(presetValue) {
 function setupGuideDailyResultHtml() {
   const result = state.setupGuideDailyResult || {};
   if (result.loading) {
-    return `<div class="setup-guide-empty">正在生成今日日程并细化当前时段，完成后会在这里展示结果。</div>`;
+    const loadingDetail = result.mode === "detail";
+    return `
+      <div class="setup-guide-daily-simple is-loading">
+        <b>${loadingDetail ? "正在细化" : "正在生成"}</b>
+        <span>${loadingDetail ? "正在补充当前时段细化，这一步会比粗日程更慢。" : "正在快速生成今日日程；若模型较慢，会先用兜底粗日程放行，后台继续生成。"}</span>
+      </div>
+    `;
   }
   if (result.error) {
-    return `<div class="setup-guide-empty warn">生成失败：${escapeHtml(result.error)}</div>`;
+    return `
+      <div class="setup-guide-daily-simple is-error">
+        <b>生成失败</b>
+        <span>${escapeHtml(result.error)}</span>
+      </div>
+    `;
   }
   const plan = result.plan || state.overview?.daily_plan || {};
   const items = setupGuidePlanItems(plan);
@@ -4364,27 +5333,65 @@ function setupGuideDailyResultHtml() {
   const segments = Array.isArray(timeline.segments) ? timeline.segments : [];
   const currentSegments = setupGuideCurrentDetailSegments(segments);
   const currentText = String(result.current_detail_text || "").trim();
+  const usefulCurrentText = currentText && !/(还没有|没有生成|没有落地|暂无|未生成出可展示|当前时间段还没有)/.test(currentText)
+    ? currentText
+    : "";
   if (!items.length && !segments.length && !currentText) {
-    return `<div class="setup-guide-empty">还没有生成结果。点击上方按钮后，这里会展示今日粗日程和当前细化。</div>`;
+    return `<div class="setup-guide-empty">还没有生成结果。点击上方按钮后，只会先展示一条简要结果。</div>`;
   }
+  const currentSegment = currentSegments[0] || null;
+  const currentSummary = usefulCurrentText
+    ? usefulCurrentText.split(/\n+/).map((line) => line.trim()).filter(Boolean)[0]
+    : currentSegment
+      ? (currentSegment.summary || detailSegmentStatusLabel(currentSegment))
+      : "";
+  const planLabel = items.length ? `${items.length} 个日程点` : "粗日程无可展示条目";
+  const detailLabel = currentSummary ? "当前时段已细化" : segments.length ? `已生成 ${segments.length} 个细化片段` : "当前时段未细化";
+  const pending = Boolean(result.pending);
+  const statusClass = pending ? "is-warn" : currentSummary || segments.length || items.length ? "is-ok" : "is-warn";
+  const title = pending ? "已先生成兜底日程" : "日程生成完成";
+  const statusText = pending ? "正式日程仍在后台生成，首次配置可先继续" : "";
   return `
-    <div class="setup-guide-result-panel">
-      <h4>今日粗日程${plan.date ? ` · ${escapeHtml(plan.date)}` : ""}</h4>
-      <div class="setup-guide-mini-timeline">
-        ${items.length ? items.slice(0, 12).map((item) => `
-          <p><b>${escapeHtml(item.time || "-")}</b><span>${escapeHtml([item.activity, item.mood].filter(Boolean).join(" · ") || "未命名日程")}</span></p>
-        `).join("") : `<p><span>粗日程还没有可展示条目。</span></p>`}
-      </div>
-      <h4>当前细化</h4>
-      ${currentText ? `<pre class="setup-guide-detail-text">${escapeHtml(currentText)}</pre>` : `
-        <div class="setup-guide-mini-timeline">
-          ${currentSegments.length ? currentSegments.slice(0, 3).map((segment) => `
-            <p><b>${escapeHtml(segment.window || segment.key || "-")}</b><span>${escapeHtml(segment.summary || detailSegmentStatusLabel(segment))}</span></p>
-          `).join("") : `<p><span>${segments.length ? `当前时段还没有可展示细化；已生成 ${segments.length} 个其他时段片段。` : "当前时段还没有细化结果。"}</span></p>`}
+    <div class="setup-guide-daily-simple ${statusClass}">
+      <b>${escapeHtml(title)}</b>
+      <span>${escapeHtml([plan.date || "", planLabel, detailLabel, statusText].filter(Boolean).join(" · "))}</span>
+      ${currentSummary ? `<small>当前：${escapeHtml(currentSummary)}</small>` : ""}
+      <details>
+        <summary>查看详细日程和细化内容</summary>
+        <div class="setup-guide-result-panel compact">
+          <h4>今日粗日程${plan.date ? ` · ${escapeHtml(plan.date)}` : ""}</h4>
+          <div class="setup-guide-mini-timeline">
+            ${items.length ? items.slice(0, 8).map((item) => `
+              <p><b>${escapeHtml(item.time || "-")}</b><span>${escapeHtml([item.activity, item.mood].filter(Boolean).join(" · ") || "未命名日程")}</span></p>
+            `).join("") : `<p><span>粗日程还没有可展示条目。</span></p>`}
+          </div>
+          <h4>当前细化</h4>
+          ${usefulCurrentText ? `<pre class="setup-guide-detail-text">${escapeHtml(usefulCurrentText)}</pre>` : `
+            <div class="setup-guide-mini-timeline">
+              ${currentSegments.length ? currentSegments.slice(0, 3).map((segment) => `
+                <p><b>${escapeHtml(segment.window || segment.key || "-")}</b><span>${escapeHtml(segment.summary || detailSegmentStatusLabel(segment))}</span></p>
+              `).join("") : `<p><span>${segments.length ? `当前时段还没有可展示细化；已生成 ${segments.length} 个其他时段片段。` : "当前时段还没有细化结果。"}</span></p>`}
+            </div>
+          `}
         </div>
-      `}
+      </details>
     </div>
   `;
+}
+
+function setupGuideDailyRunLabel() {
+  const result = state.setupGuideDailyResult || {};
+  if (result.loading) return "生成中...";
+  if (result.ok) return "重新生成今日日程";
+  return "快速生成今日日程";
+}
+
+function setupGuideDailyRunHint() {
+  const result = state.setupGuideDailyResult || {};
+  if (result.loading) return "正在运行日程链路，完成后只显示简要结果。";
+  if (result.ok) return "已跑通日程链路；当前细化可选，不再阻塞首次配置。";
+  if (result.error) return "上次生成失败，修正模型或配置后可重试。";
+  return "只强制生成今日粗日程，通常比完整细化快很多。";
 }
 
 function setupGuidePrivateIntensityHtml() {
@@ -4400,7 +5407,7 @@ function setupGuidePrivateIntensityHtml() {
         ${setupGuideOption("privateIntensity", "high_group", "群聊活跃", "侧重群聊唤醒和插话，私聊轻度增强。")}
         ${setupGuideOption("privateIntensity", "live", "在线陪伴", "最高档，不省主动成本；仍受硬边界约束。")}
       </div>
-      <div class="setup-guide-note"><b>${escapeHtml(preset.label)}</b>：${escapeHtml(preset.description)} 完成引导时会保存当前预设和下方可持久化参数。</div>
+      ${setupGuideHint(`${preset.label}：${preset.description} 保存引导时会写入当前预设和下方参数。`)}
     </div>
     <div class="setup-guide-question">
       <h4>私聊影响参数</h4>
@@ -4617,13 +5624,13 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
       ${setupGuideStatusPills(overview)}
       <div class="setup-guide-question">
         <h4>插件基本连接</h4>
-        <div class="setup-guide-note">页面 API ${overview.plugin ? "已返回运行态，可以继续。" : "暂未返回运行态，请刷新拓展页或检查插件是否加载。"} 目标平台默认使用 OneBot/aiocqhttp；如果你的适配器不同，请在这里改成对应平台名。</div>
+        ${setupGuideHint(overview.plugin ? "页面 API 已连接。平台默认 aiocqhttp；不是 OneBot 时修改下方 target_platform。" : "页面 API 未连接。先刷新拓展页，或检查插件是否加载。", overview.plugin ? "ok" : "warn")}
       </div>
       <div class="setup-guide-question">
         <h4>目标用户</h4>
+        ${setupGuideHint(targetUsers.length ? `已预填 ${targetUsers.length} 个目标用户。检查 QQ 和平台后继续。` : "未找到目标用户。请先填写要陪伴的用户 QQ。", targetUsers.length ? "ok" : "warn")}
         ${setupGuideText("targetUserIds", "目标用户 QQ 号", "每行一个 QQ 号，例如：10001", true)}
         ${setupGuideText("targetPlatform", "target_platform", "aiocqhttp")}
-        <div class="setup-guide-note">${targetUsers.length ? `已检测到 ${targetUsers.length} 个 target_user_ids，已自动预填；确认无误后继续。` : "当前没有 target_user_ids，首次配置应在这里立刻填写目标用户 QQ。"} target_platform 默认使用 aiocqhttp。</div>
       </div>
       <div class="setup-guide-question">
         <h4>运行策略与权限</h4>
@@ -4639,39 +5646,56 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
     return `
       <div class="setup-guide-question">
         <h4>填写快捷模型</h4>
+        ${setupGuideHint(loadedProviderCount ? `已读取 ${loadedProviderCount} 个 Provider。分别选择模型，并完成必测项。` : "未读取到 Provider 列表。可先手动输入 Provider ID，再测试连通。", loadedProviderCount ? "ok" : "warn")}
         ${setupGuideQuickProviderGridHtml(providers)}
-        <div class="setup-guide-note">${loadedProviderCount ? `已读取到 ${loadedProviderCount} 个 AstrBot Provider。每个下拉框都会列出完整 Provider 列表，请分别选择适合该用途的模型。` : "暂未读取到 AstrBot Provider 列表；可以先手动输入 Provider ID，再进行连通测试。"} 完成引导时会保存为快捷模型配置。</div>
       </div>
       <div class="setup-guide-question">
         <h4>当前选择结果</h4>
         ${setupGuideModelSummaryHtml(providers)}
       </div>
-      <div class="setup-guide-note">以后需要更细的分工时，再到模型页切换为精准模式，为日程、记忆、复核、群聊、搜索等任务单独指定 Provider。</div>
+      ${setupGuideHint("需要更细分工时，之后到模型页切换为精准模式。")}
     `;
   }
   if (index === 2) {
+    const hasDraft = Boolean(state.setupGuideRoleplayDraft);
+    const draftConfirmed = Boolean(setupGuideDraft().worldKnowledgeConfirmed);
+    const stepDone = (label) => `<span class="wk-step-done">${escapeHtml(label)}</span>`;
     return `
-      <div class="setup-guide-boundary">
-        <b>世界知识只服务陪伴插件，不会注入普通对话。</b>
-        <span>实际对话使用的人格仍然是 AstrBot 配置的人格。这里生成的是插件用于日程、状态、主动、识图和关系判断的草稿。</span>
-        <span>如果生成结果满意，后续可以到世界知识页手动把适合长期保留的内容回填到 AstrBot 人格。</span>
+      <div class="setup-guide-boundary compact">
+        <b>世界知识 ≠ 聊天人格</b>
+        <span>这里生成的草稿只供陪伴插件的日程、状态、主动消息、识图等功能参考；实际聊天仍使用 AstrBot 配置的人格。</span>
       </div>
-      <div class="setup-guide-question">
-        <h4>选择人格并生成草稿</h4>
-        ${setupGuidePersonaSelectHtml()}
-        ${setupGuideText("worldKnowledgeNote", "额外补充给推导的提示", "例如：更重视校园日常、工作作息、现实关系边界；不希望主动聊太私密的话题。", true, {
-          badge: "可选",
-          description: "会参与本次推导；完成引导时会随草稿一起保存。",
-        })}
-        <div class="setup-guide-provider-test-actions">
-          <button type="button" data-setup-guide-roleplay-draft>从人格推导世界知识草稿</button>
-          <span>${state.setupGuideRoleplayDraft ? "已生成草稿，可以在下方直接修改并确认。" : "选择人格后点击按钮生成；不会自动写入配置。"}</span>
+      <div class="wk-step-flow">
+        <div class="wk-step-card ${hasDraft ? "done" : "active"}">
+          <div class="wk-step-card-head">
+            <span class="wk-step-num">${hasDraft ? "✓" : "1"}</span>
+            <h4>选择人格来源</h4>
+            ${hasDraft ? stepDone("已生成") : ""}
+          </div>
+          <div class="wk-step-card-body">
+            ${setupGuidePersonaSelectHtml()}
+            ${setupGuideText("worldKnowledgeNote", "补充推导提示（可选）", "例如：更重视校园日常、工作作息、现实关系边界；不希望主动聊太私密的话题。", true, {
+              badge: "可选",
+              description: "会参与本次推导；完成引导时随草稿保存。",
+            })}
+          </div>
+          <div class="wk-step-card-foot">
+            <button type="button" data-setup-guide-roleplay-draft>${hasDraft ? "重新生成草稿" : "从人格推导世界知识草稿"}</button>
+            <span class="wk-time-hint">⏱ 生成通常需要 1-2 分钟，请耐心等待</span>
+          </div>
+        </div>
+        <div class="wk-step-card ${hasDraft ? (draftConfirmed ? "done" : "active") : ""}">
+          <div class="wk-step-card-head">
+            <span class="wk-step-num">${draftConfirmed ? "✓" : "2"}</span>
+            <h4>${hasDraft ? "检查并确认草稿" : "等待生成草稿"}</h4>
+            ${draftConfirmed ? stepDone("已确认") : ""}
+          </div>
+          <div class="wk-step-card-body">
+            ${setupGuideWorldKnowledgeEditorHtml()}
+          </div>
         </div>
       </div>
-      <div class="setup-guide-question">
-        <h4>编辑并确认世界知识草稿</h4>
-        ${setupGuideWorldKnowledgeEditorHtml()}
-      </div>
+      ${hasDraft ? setupGuideHint("草稿已生成。确认内容无误后继续；改动较多时先点「确认使用这份草稿」。", "ok") : ""}
     `;
   }
   if (index === 3) {
@@ -4683,23 +5707,26 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
           ${setupGuideCheck("proactiveGroup", "群聊主动", "按需开启。允许群聊唤醒增强或主动插话；下一步会单独配置群聊边界。")}
         </div>
       </div>
-      <div class="setup-guide-note">首次配置只处理核心主动边界；新闻、网页探索、QQ 空间、生图、TTS 等会放入进阶配置。</div>
+      ${setupGuideHint("这里只配置核心主动边界；新闻、搜索、QQ 空间、生图、TTS 放到进阶引导。")}
     `;
   }
   if (index === 4) {
+    const dailyBusy = Boolean(state.setupGuideDailyResult?.loading);
+    const dailyReady = Boolean(state.setupGuideDailyResult?.ok || state.overview?.daily_plan?.date);
     return `
       <div class="setup-guide-question">
-        <h4>生成今日生活节奏</h4>
+        <h4>快速初始化今日生活节奏</h4>
         <div class="setup-guide-provider-test-actions">
-          <button type="button" data-setup-guide-daily-run ${state.setupGuideDailyResult?.loading ? "disabled" : ""}>${state.setupGuideDailyResult?.loading ? "生成中..." : "生成今日日程并细化当前时段"}</button>
-          <span>会实际调用日程生成和当前细化链路，并在下方展示与日程页、观察页一致的运行态结果。</span>
+          <button type="button" data-setup-guide-daily-run="plan" ${dailyBusy ? "disabled" : ""}>${setupGuideDailyRunLabel()}</button>
+          <button type="button" data-setup-guide-daily-run="detail" ${dailyBusy || !dailyReady ? "disabled" : ""}>补充当前细化</button>
+          <span>${escapeHtml(setupGuideDailyRunHint())} “补充当前细化”会多跑一次模型，慢一些，但不是首次配置必需。</span>
         </div>
       </div>
       <div class="setup-guide-question">
-        <h4>生成结果</h4>
+        <h4>运行结果</h4>
         ${setupGuideDailyResultHtml()}
       </div>
-      <div class="setup-guide-note">日程与观察页用于查看今日状态、时间段细化、用户介入影响；主动页用于查看候选、复核和发送闸。</div>
+      ${setupGuideHint("首次只要求今日粗日程可用；当前场景细化可稍后到观察页刷新。")}
     `;
   }
   if (index === 5) {
@@ -4708,17 +5735,17 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
   if (index === 6) {
     return `
       ${setupGuideGroupConfigHtml()}
-      <div class="setup-guide-note">群聊页后续用于查看群资料、话题线程、唤醒记录和群主动插话效果。</div>
+      ${setupGuideHint("保存后到群聊页查看群资料、话题线程、唤醒记录和插话效果。")}
     `;
   }
   if (index === 7) {
     return `
       <div class="setup-guide-question">
         <h4>关系网第一条用户词条</h4>
-        <div class="setup-guide-note">这里先填一个稳定识别的用户，让群聊关系网能把 QQ、昵称、群名片和关系备注对应到同一个人。</div>
+        ${setupGuideHint("先填一个稳定用户，用来对应 QQ、昵称、群名片和关系备注。")}
       </div>
       ${setupGuideWorldbookDraftHtml()}
-      <div class="setup-guide-note">关系网页后续用于导入、审核待确认观察、编辑重要记忆和管理群资料。</div>
+      ${setupGuideHint("保存后到关系网页继续导入资料、审核观察、编辑记忆。")}
     `;
   }
   return `
@@ -4726,7 +5753,7 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
       <h4>主动消息测试</h4>
       ${setupGuideProactiveTestHtml()}
     </div>
-    <div class="setup-guide-note">这个测试会真实走主动消息生成、复核、发送和历史归档链路。为避免首次配置马上触发，点击后先等待 15 秒再检查完整结果。</div>
+    ${setupGuideHint("测试会真实走主动生成、复核、发送和归档链路；点击后等待 15 秒再检查结果。", "warn")}
   `;
 }
 
@@ -4837,15 +5864,15 @@ function setupGuideStepBlockMessage(targetIndex) {
     const missing = setupGuideProviderTestMissingLabels();
     return `请先完成模型测试：${missing.join("、")}`;
   }
-  if (nextIndex > 2 && (!state.setupGuideRoleplayDraft || !draft.worldKnowledgeConfirmed)) {
-    return "请先从人格推导世界知识草稿，并确认使用这份草稿";
+  if (nextIndex > 2 && !state.setupGuideRoleplayDraft) {
+    return "请先生成世界知识草稿";
   }
   if (nextIndex > 3 && !draft.proactivePrivate) {
     return "首次配置需要开启私聊主动，才能完成最后的主动消息链路测试";
   }
   if (nextIndex > 4) {
     const result = state.setupGuideDailyResult || {};
-    if (!result.ok || result.loading || result.error) return "请先生成今日日程并细化当前时段";
+    if (!result.ok || result.loading || result.error) return "请先快速生成今日日程";
   }
   if (nextIndex > 7 && draft.worldbookEnabled) {
     if (!String(draft.worldbookUserId || "").trim() || !String(draft.worldbookNickname || "").trim()) {
@@ -4926,7 +5953,7 @@ async function generateSetupGuideRoleplayDraft(control = null) {
   const draft = setupGuideDraft();
   const personaId = String(draft.personaId || "").trim();
   if (control instanceof HTMLButtonElement) setActionBusy(control, true);
-  showToast("正在从人格推导世界知识草稿...");
+  showToast("正在从人格推导世界知识草稿，通常需要 1-2 分钟...");
   try {
     const result = await postJson("/roleplay/draft_from_persona", {
       persona_id: personaId,
@@ -4935,7 +5962,7 @@ async function generateSetupGuideRoleplayDraft(control = null) {
     });
     setupGuideApplyRoleplayDraft(result);
     renderSetupGuideOverlay();
-    showToast("世界知识草稿已生成，可在弹窗内修改确认");
+    showToast("世界知识草稿已生成，可直接进入下一步");
   } catch (error) {
     showToast(`生成失败：${error.message}`, "error");
   } finally {
@@ -4945,14 +5972,18 @@ async function generateSetupGuideRoleplayDraft(control = null) {
 
 async function runSetupGuideDailyGeneration(control = null) {
   const draft = setupGuideDraft();
-  state.setupGuideDailyResult = { loading: true };
+  const mode = control instanceof HTMLElement ? String(control.dataset.setupGuideDailyRun || "plan") : "plan";
+  const forceDetail = mode === "detail";
+  state.setupGuideDailyResult = { ...(state.setupGuideDailyResult || {}), loading: true, mode };
   rerenderSetupGuideOverlayPreserveScroll();
   if (control instanceof HTMLButtonElement) setActionBusy(control, true);
-  showToast("正在生成今日日程和当前细化...");
+  showToast(forceDetail ? "正在补充当前日程细化..." : "正在快速生成今日日程...");
   try {
     const result = await postJson("/setup/daily/run", {
-      generate_schedule: Boolean(draft.generateSchedule),
-      refine_schedule: Boolean(draft.refineSchedule),
+      generate_schedule: forceDetail ? false : Boolean(draft.generateSchedule),
+      refine_schedule: forceDetail ? true : false,
+      force_detail: forceDetail,
+      timeout_seconds: forceDetail ? 45 : 18,
     });
     if (!result?.ok) {
       state.setupGuideDailyResult = { error: result?.error || "生成失败" };
@@ -4968,7 +5999,7 @@ async function runSetupGuideDailyGeneration(control = null) {
       daily_plan: result.plan || state.overview?.daily_plan || {},
     };
     rerenderSetupGuideOverlayPreserveScroll();
-    showToast("今日日程和当前细化已生成");
+    showToast(forceDetail ? "当前日程细化已生成" : "今日日程已生成");
   } catch (error) {
     state.setupGuideDailyResult = { error: error.message || "请求失败" };
     rerenderSetupGuideOverlayPreserveScroll();
@@ -5130,42 +6161,65 @@ async function applySetupGuide({ close = true, advanced = false, control = null,
 
 function setupGuideModalHtml() {
   if (!state.setupGuideOpen) return "";
+  const mode = state.setupGuideMode === "advanced" ? "advanced" : state.setupGuideMode === "first" ? "first" : "home";
   const index = setupGuideStepIndex();
   const step = setupGuideSteps[index] || setupGuideSteps[0];
+  const advancedBlock = setupGuideAdvancedBlockMap[state.setupGuideAdvancedBlock || ""];
+  const advancedItems = setupGuideAdvancedItems[state.setupGuideAdvancedBlock || ""] || [];
+  const advancedStepIndex = setupGuideAdvancedStepIndex(state.setupGuideAdvancedBlock || "");
+  const advancedLastStep = advancedBlock && advancedItems.length ? advancedStepIndex >= advancedItems.length - 1 : false;
   const proactiveTestPassed = setupGuideProactiveTestPassed();
   const applying = Boolean(state.setupGuideApplying);
-  const nextDisabled = applying || (index === 1 && !setupGuideAllProviderTestsPassed()) || (index >= setupGuideSteps.length - 1 && !proactiveTestPassed);
-  const nextLabel = applying ? "保存中..." : index >= setupGuideSteps.length - 1 ? "保存并完成" : "下一步";
+  const firstNextDisabled = applying || (index === 1 && !setupGuideAllProviderTestsPassed()) || (index >= setupGuideSteps.length - 1 && !proactiveTestPassed);
+  const nextDisabled = mode === "advanced" ? applying || !advancedBlock : firstNextDisabled;
+  const nextLabel = mode === "advanced"
+    ? applying ? "保存中..." : advancedBlock ? (advancedLastStep ? "保存本板块" : "下一项") : "先选择板块"
+    : applying ? "保存中..." : index >= setupGuideSteps.length - 1 ? "保存并完成" : "下一步";
+  const advancedCurrentItem = advancedItems[advancedStepIndex] || null;
+  const title = mode === "home" ? "配置引导" : mode === "advanced" ? (advancedBlock ? `${advancedBlock.title} · ${advancedCurrentItem?.title || "问卷"}` : "选择进阶配置板块") : step.title;
+  const tag = mode === "home" ? "选择引导类型" : mode === "advanced" ? (advancedBlock ? `进阶配置 · ${advancedStepIndex + 1}/${advancedItems.length || 1}` : "进阶配置") : `首次配置 · ${step.tag}`;
+  const body = mode === "home"
+    ? "先选择本次要做初次引导还是进阶引导。初次引导负责把核心链路跑通；进阶引导负责按板块打开更多能力。"
+    : mode === "advanced"
+    ? (advancedCurrentItem?.ask || advancedBlock?.body || "先选择一个板块，然后按问卷逐项确认需要哪些功能。每个功能都会说明它做什么，以及开启后要注意什么。")
+    : step.body;
   return `
     <div class="setup-guide-overlay" role="presentation">
       <section class="setup-guide-modal" role="dialog" aria-modal="true" aria-label="配置引导">
-        <header class="setup-guide-modal-head">
+        <header class="setup-guide-modal-head ${mode === "advanced" ? "compact" : ""}">
           <div>
-            <span>首次配置 · ${escapeHtml(step.tag)}</span>
-            <h3>${escapeHtml(step.title)}</h3>
+            <span>${escapeHtml(tag)}</span>
+            <h3>${escapeHtml(title)}</h3>
           </div>
           <button type="button" data-setup-guide-close aria-label="关闭引导">×</button>
         </header>
         <div class="setup-guide-mode-tabs" aria-label="配置模式">
-          <button type="button" class="active">首次配置</button>
-          <button type="button" disabled>进阶配置（后续）</button>
+          <button type="button" class="${mode === "home" ? "active" : ""}" data-setup-guide-mode="home">选择引导</button>
+          <button type="button" class="${mode === "first" ? "active" : ""}" data-setup-guide-mode="first">首次配置</button>
+          <button type="button" class="${mode === "advanced" ? "active" : ""}" data-setup-guide-mode="advanced">进阶配置</button>
         </div>
-        <div class="setup-guide-progress" aria-label="引导进度">
-          ${setupGuideSteps.map((item, itemIndex) => {
+        ${mode === "home" || mode === "advanced" ? "" : `<div class="setup-guide-progress" aria-label="引导进度">
+          ${mode === "advanced" ? setupGuideAdvancedBlocks.map((item) => {
+            const active = item.id === state.setupGuideAdvancedBlock;
+            const done = (setupGuideAdvancedItems[item.id] || []).some((feature) => Boolean(setupGuideFieldValue(feature.key)));
+            return `
+            <button type="button" class="${[active ? "active" : "", done ? "done" : ""].filter(Boolean).join(" ")}" data-setup-guide-advanced-block="${escapeHtml(item.id)}" title="${escapeHtml(item.title)}"></button>
+          `;
+          }).join("") : setupGuideSteps.map((item, itemIndex) => {
             const done = itemIndex < index || (itemIndex === setupGuideSteps.length - 1 && proactiveTestPassed);
             return `
             <button type="button" class="${[itemIndex === index ? "active" : "", done ? "done" : ""].filter(Boolean).join(" ")}" data-setup-guide-step="${itemIndex}" title="${escapeHtml(item.title)}"></button>
           `;
           }).join("")}
-        </div>
-        <p>${escapeHtml(step.body)}</p>
+        </div>`}
+        ${mode === "advanced" ? "" : `<p>${escapeHtml(body)}</p>`}
         <form class="setup-guide-form" data-setup-guide-form>
-          ${setupGuideQuestionnaireHtml(index, state.overview || {})}
+          ${mode === "home" ? setupGuideModeHomeHtml() : mode === "advanced" ? setupGuideAdvancedQuestionnaireHtml() : setupGuideQuestionnaireHtml(index, state.overview || {})}
         </form>
-        <footer class="setup-guide-actions">
-          <button type="button" data-setup-guide-prev ${index <= 0 || applying ? "disabled" : ""}>上一步</button>
+        ${mode === "home" ? "" : `<footer class="setup-guide-actions">
+          <button type="button" data-setup-guide-prev ${mode === "first" ? (index <= 0 || applying ? "disabled" : "") : applying ? "disabled" : ""}>${mode === "advanced" ? (advancedBlock ? (advancedStepIndex > 0 ? "上一项" : "返回板块") : "返回选择") : "上一步"}</button>
           <button type="button" data-setup-guide-next ${nextDisabled ? "disabled" : ""}>${nextLabel}</button>
-        </footer>
+        </footer>`}
       </section>
     </div>
   `;
@@ -5196,6 +6250,38 @@ function renderStats() {
     statCard(energyLabel || "-", `心理能量${energyNumber ? ` ${energyNumber}` : ""} · ${mood}`, "memory"),
     statCard(`${enabledFeatures}/${featureKeys.length}`, "开启主开关 / 主开关总数", "config"),
   ].join("");
+  updateSetupGuideBadge(overview);
+}
+
+function updateSetupGuideBadge(overview) {
+  const btn = document.getElementById("setupGuideStartBtn");
+  if (!btn) return;
+  const settings = overview?.settings || {};
+  const providers = overview?.providers || {};
+  const privateInfo = overview?.private || {};
+  const intensity = overview?.proactive_intensity || {};
+  const proactiveMax = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
+  const targetUsers = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+  const fastProvider = String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim();
+  const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
+  const criticalMissing = [
+    !targetUsers.length,
+    !(fastProvider && complexProvider),
+    !Number(proactiveMax || 0),
+  ].filter(Boolean).length;
+  let badge = btn.querySelector(".setup-guide-badge");
+  if (criticalMissing > 0) {
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "setup-guide-badge";
+      btn.appendChild(badge);
+    }
+    badge.textContent = String(criticalMissing);
+    btn.classList.add("has-badge");
+  } else {
+    if (badge) badge.remove();
+    btn.classList.remove("has-badge");
+  }
 }
 
 function statCard(value, label, jumpTab = "") {
@@ -5205,7 +6291,7 @@ function statCard(value, label, jumpTab = "") {
 function renderDashboard() {
   renderDashboardPulse();
   renderStrategyOverview();
-  renderHealthPanel();
+  renderSetupProgress();
   renderUxReviewPanel();
   renderRelationshipChart();
   renderGroupBubbleChart();
@@ -5550,6 +6636,166 @@ function renderHealthPanel() {
       <span>${escapeHtml(item.text)}</span>
     </div>
   `).join("");
+}
+
+function renderSetupProgress() {
+  const overview = state.overview || {};
+  const settings = overview.settings || {};
+  const providers = overview.providers || {};
+  const features = overview.features || {};
+  const group = overview.group || {};
+  const privateInfo = overview.private || {};
+  const creative = overview.creative || {};
+  const bili = overview.bilibili || {};
+  const qzone = overview.qzone || {};
+  const worldbook = overview.worldbook || {};
+  const cache = overview.cache || {};
+  const imageCache = cache.private_image_vision || {};
+  const intensity = overview.proactive_intensity || {};
+  const intensityEnabled = Boolean(intensity.enabled);
+  const proactiveEffectiveMax = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
+  const targetUsers = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+  const fastProvider = String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim();
+  const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
+  const creativeProvider = String(providers.CREATIVE_MODEL_PROVIDER_ID || "").trim();
+  const visionProvider = String(providers.PLUGIN_VISION_PROVIDER_ID || "").trim();
+  const hasGroupObs = Boolean(features.enable_group_companion);
+  const hasWorldbook = Boolean(features.enable_worldbook_member_recognition);
+  const hasMemory = Boolean(features.enable_companion_memory);
+  const hasCreative = Boolean(features.enable_creative_writing);
+  const hasNews = Boolean(features.enable_news_integration);
+  const hasQzone = Boolean(features.enable_qzone_integration);
+  const hasBili = Boolean(features.enable_bilibili_integration);
+
+  const checklist = [
+    {
+      key: "target_users",
+      level: targetUsers.length ? "ok" : "warn",
+      title: targetUsers.length ? `目标用户已配置（${targetUsers.length} 人）` : "目标用户未配置",
+      hint: targetUsers.length ? "Bot 会在私聊中服务这些用户" : "至少填写一个 QQ 号，Bot 才知道服务谁",
+      tab: "modules",
+      action: "去配置",
+      critical: true,
+    },
+    {
+      key: "providers",
+      level: fastProvider && complexProvider ? "ok" : "warn",
+      title: fastProvider && complexProvider ? "核心模型已配置" : "核心模型未配置",
+      hint: fastProvider && complexProvider
+        ? `快速响应 + 复杂推理已就位`
+        : `快速响应${fastProvider ? "✓" : "✗"} · 复杂推理${complexProvider ? "✓" : "✗"}`,
+      tab: "models",
+      action: "去配置",
+      critical: true,
+    },
+    {
+      key: "proactive",
+      level: Number(proactiveEffectiveMax || 0) > 0 ? "ok" : "warn",
+      title: Number(proactiveEffectiveMax || 0) > 0 ? "私聊主动已开启" : "私聊主动未开启",
+      hint: Number(proactiveEffectiveMax || 0) > 0
+        ? `每日上限 ${intensity.effective?.max_daily_messages_text || proactiveEffectiveMax}`
+        : "Bot 不会主动找用户聊天；建议至少设为 1-3 条/天",
+      tab: "private",
+      action: "去配置",
+      critical: true,
+    },
+    {
+      key: "group",
+      level: hasGroupObs ? "ok" : "info",
+      title: hasGroupObs ? `群聊观察已开启（${group.enabled_group_count || 0} 个群）` : "群聊观察未开启",
+      hint: hasGroupObs
+        ? `已观测 ${group.enabled_group_count || 0}/${group.group_count || 0} 个群`
+        : "Bot 不会理解群聊上下文；需要时可以开启",
+      tab: "group",
+      action: hasGroupObs ? "管理" : "去配置",
+      critical: false,
+    },
+    {
+      key: "worldbook",
+      level: hasWorldbook ? "ok" : "info",
+      title: hasWorldbook ? `关系网已启用（${worldbook.enabled_member_count || 0} 个节点）` : "关系网未启用",
+      hint: hasWorldbook
+        ? "Bot 能稳定识别昵称、群名片和关系备注"
+        : "Bot 无法区分群成员身份；群聊功能多时建议开启",
+      tab: "worldbook",
+      action: hasWorldbook ? "管理" : "去配置",
+      critical: false,
+    },
+    {
+      key: "memory",
+      level: hasMemory ? "ok" : "info",
+      title: hasMemory ? "记忆学习已开启" : "记忆学习未开启",
+      hint: hasMemory
+        ? `每 ${settings.memory_refresh_interval_minutes ?? 0} 分钟整理一次画像`
+        : "Bot 不会沉淀长期记忆和相处细节",
+      tab: "memory",
+      action: hasMemory ? "查看" : "去配置",
+      critical: false,
+    },
+    {
+      key: "creative",
+      level: hasCreative ? "ok" : "info",
+      title: hasCreative ? `创作已开启（${creative.active_projects || 0} 个进行中）` : "创作未开启",
+      hint: hasCreative
+        ? "Bot 会自主推进写作项目"
+        : "Bot 不会自主创作；书柜会保持空置",
+      tab: "bookshelf",
+      action: hasCreative ? "看书柜" : "去配置",
+      critical: false,
+    },
+    {
+      key: "extra",
+      level: hasNews || hasQzone || hasBili ? "ok" : "info",
+      title: hasNews || hasQzone || hasBili ? "外部能力已展开" : "外部能力未展开",
+      hint: [
+        hasNews ? "新闻" : "",
+        hasQzone ? "空间" : "",
+        hasBili ? "B站" : "",
+      ].filter(Boolean).join(" · ") || "新闻、QQ空间、B站联动均未开启",
+      tab: "modules",
+      action: "去配置",
+      critical: false,
+    },
+  ];
+
+  const doneCount = checklist.filter((item) => item.level === "ok").length;
+  const totalCount = checklist.length;
+  const pct = Math.round((doneCount / totalCount) * 100);
+  const criticalDone = checklist.filter((item) => item.critical && item.level === "ok").length;
+  const criticalTotal = checklist.filter((item) => item.critical).length;
+  const allDone = doneCount === totalCount;
+  const criticalDone_all = criticalDone === criticalTotal;
+
+  const bar = $("#setupProgressBar");
+  if (bar) {
+    const tone = allDone ? "complete" : criticalDone_all ? "partial" : "initial";
+    bar.innerHTML = `
+      <div class="setup-progress-track">
+        <div class="setup-progress-fill ${tone}" style="width:${pct}%"></div>
+      </div>
+      <div class="setup-progress-meta">
+        <span class="setup-progress-pct">${pct}%</span>
+        <span class="setup-progress-label">${allDone ? "全部就绪" : criticalDone_all ? `核心配置已完成，还有 ${totalCount - doneCount} 项可选` : `${criticalDone}/${criticalTotal} 项核心配置待完成`}</span>
+        ${allDone ? "" : `<button type="button" class="setup-progress-guide-btn" data-setup-guide-open>打开配置引导</button>`}
+      </div>
+    `;
+  }
+
+  const listEl = $("#setupProgressList");
+  if (listEl) {
+    listEl.innerHTML = checklist.map((item) => `
+      <div class="setup-progress-item ${escapeHtml(item.level)} ${item.critical ? "critical" : ""}">
+        <div class="setup-progress-item-icon">
+          ${item.level === "ok" ? "✓" : item.level === "warn" ? "!" : "○"}
+        </div>
+        <div class="setup-progress-item-body">
+          <b>${escapeHtml(item.title)}</b>
+          <span>${escapeHtml(item.hint)}</span>
+        </div>
+        <button type="button" class="setup-progress-item-action" data-jump-tab="${escapeHtml(item.tab)}">${escapeHtml(item.action)}</button>
+      </div>
+    `).join("");
+  }
 }
 
 function livingMemoryHealthText(livingmemory) {
@@ -11678,6 +12924,7 @@ function renderModuleSettings() {
   setPrivateReadingConfigVisible(isPrivateReadingAvailable());
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
+  renderQuickStartStatus(settings);
   document.querySelectorAll(".module-form").forEach((form) => markModuleFormClean(form));
   updateMessageDebounceConfigVisibility();
   updateSegmentedConfigVisibility($("#privateModuleForm"));
@@ -11685,6 +12932,75 @@ function renderModuleSettings() {
   renderNewsSourceManager();
   renderExternalAbilities();
   renderPresetCards();
+}
+
+function renderQuickStartStatus(settings) {
+  const box = $("#quickStartStatus");
+  if (!box) return;
+  const overview = state.overview || {};
+  const providers = overview.providers || {};
+  const targetUsers = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+  const platform = String(settings.target_platform || "").trim();
+  const quietHours = String(settings.quiet_hours || "").trim();
+  const aliases = String(settings.private_user_delivery_aliases || "").trim();
+  const fastProvider = String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim();
+  const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
+  const proactiveMax = overview.proactive_intensity?.effective?.max_daily_messages ?? settings.max_daily_messages ?? 0;
+  const chips = [
+    {
+      label: "目标用户",
+      value: targetUsers.length ? `${targetUsers.length} 人` : "未配置",
+      ok: Boolean(targetUsers.length),
+      tab: null,
+    },
+    {
+      label: "运行平台",
+      value: platform || "未配置",
+      ok: Boolean(platform),
+      tab: null,
+    },
+    {
+      label: "核心模型",
+      value: fastProvider && complexProvider ? "快速+复杂" : "未配置",
+      ok: Boolean(fastProvider && complexProvider),
+      tab: "models",
+    },
+    {
+      label: "私聊主动",
+      value: Number(proactiveMax) > 0 ? `${proactiveMax} 条/天` : "未开启",
+      ok: Number(proactiveMax) > 0,
+      tab: "private",
+    },
+    {
+      label: "免打扰",
+      value: quietHours || "未设置",
+      ok: Boolean(quietHours),
+      tab: null,
+    },
+    {
+      label: "转发映射",
+      value: aliases ? "已配置" : "未配置",
+      ok: Boolean(aliases),
+      tab: null,
+    },
+  ];
+  const doneCount = chips.filter((c) => c.ok).length;
+  const pct = Math.round((doneCount / chips.length) * 100);
+  box.innerHTML = `
+    <div class="quick-start-progress">
+      <div class="quick-start-progress-track"><div class="quick-start-progress-fill" style="width:${pct}%"></div></div>
+      <span class="quick-start-progress-label">${doneCount}/${chips.length} 项就绪 · ${pct}%</span>
+    </div>
+    <div class="quick-start-chips">
+      ${chips.map((c) => `
+        <span class="quick-start-chip ${c.ok ? "ok" : "warn"}" ${c.tab ? `data-jump-tab="${escapeHtml(c.tab)}"` : ""}>
+          <i>${c.ok ? "✓" : "○"}</i>
+          <small>${escapeHtml(c.label)}</small>
+          <b>${escapeHtml(c.value)}</b>
+        </span>
+      `).join("")}
+    </div>
+  `;
 }
 
 function renderModuleWorkbench(settings) {
@@ -14537,9 +15853,9 @@ const featureDetailGuides = {
     disabled: "用户不回时不会因此额外识屏。",
   },
   enable_proactive_quote_trigger_message: {
-    summary: "回复或主动消息能追溯到触发消息时，自动带引用；可按场景拆分，并可跳过过短回复。",
+    summary: "回复或主动消息能追溯到触发消息时，自动带引用；可按场景拆分，也可避免连续回复同一群友时每条都引用。",
     trigger: "群聊被 @、引用、唤醒、连续对话保持、群主动插话，或模型预约的私聊主动能追溯触发消息时。",
-    enabled: "按子开关决定普通群回复、群主动插话和私聊主动是否引用。用户引用 Bot 旧消息追问时，可选择引用当前消息或被引用的旧消息。",
+    enabled: "按子开关决定普通群回复、群主动插话和私聊主动是否引用。普通群回复默认同一对象只首条引用；用户引用 Bot 旧消息追问时，可选择引用当前消息或被引用的旧消息。",
     disabled: "这些消息不主动附带引用，用户需要从上下文判断回复对象。",
   },
   enable_creative_writing: {
@@ -15489,6 +16805,9 @@ document.addEventListener("click", async (event) => {
   if (!target) return;
   if (target.closest("[data-setup-guide-open]")) {
     state.setupGuideOpen = true;
+    state.setupGuideMode = "home";
+    state.setupGuideAdvancedBlock = "";
+    state.setupGuideAdvancedStep = 0;
     renderSetupGuideOverlay();
     Promise.all([loadAvailableProviders(false), loadRoleplayPersonas(false)])
       .then(() => {
@@ -15505,7 +16824,45 @@ document.addEventListener("click", async (event) => {
     renderSetupGuideOverlay();
     return;
   }
+  const modeButton = target.closest("[data-setup-guide-mode]");
+  if (modeButton) {
+    const requestedMode = modeButton.dataset.setupGuideMode || "home";
+    state.setupGuideMode = requestedMode === "advanced" ? "advanced" : requestedMode === "first" ? "first" : "home";
+    if (state.setupGuideMode !== "advanced") {
+      state.setupGuideAdvancedBlock = "";
+      state.setupGuideAdvancedStep = 0;
+    }
+    renderSetupGuideOverlay();
+    return;
+  }
+  const advancedBlockButton = target.closest("[data-setup-guide-advanced-block]");
+  if (advancedBlockButton) {
+    state.setupGuideMode = "advanced";
+    state.setupGuideAdvancedBlock = advancedBlockButton.dataset.setupGuideAdvancedBlock || "";
+    state.setupGuideAdvancedStep = 0;
+    renderSetupGuideOverlay();
+    return;
+  }
+  if (target.closest("[data-setup-guide-advanced-home]")) {
+    state.setupGuideMode = "advanced";
+    state.setupGuideAdvancedBlock = "";
+    state.setupGuideAdvancedStep = 0;
+    renderSetupGuideOverlay();
+    return;
+  }
   if (target.closest("[data-setup-guide-prev]")) {
+    if (state.setupGuideMode === "advanced") {
+      if (state.setupGuideAdvancedBlock && setupGuideAdvancedStepIndex() > 0) {
+        state.setupGuideAdvancedStep = setupGuideAdvancedStepIndex() - 1;
+      } else if (state.setupGuideAdvancedBlock) {
+        state.setupGuideAdvancedBlock = "";
+        state.setupGuideAdvancedStep = 0;
+      } else {
+        state.setupGuideMode = "home";
+      }
+      renderSetupGuideOverlay();
+      return;
+    }
     state.setupGuideStep = Math.max(0, setupGuideStepIndex() - 1);
     state.setupGuideOpen = true;
     renderSetupGuideOverlay();
@@ -15557,10 +16914,35 @@ document.addEventListener("click", async (event) => {
   }
   if (target.closest("[data-setup-guide-advanced]")) {
     const button = target.closest("[data-setup-guide-advanced]");
-    await applySetupGuide({ close: true, advanced: true, control: button instanceof HTMLButtonElement ? button : null });
+    const saved = await applySetupGuide({ close: false, advanced: true, control: button instanceof HTMLButtonElement ? button : null, successMessage: "首次配置已保存，继续进阶配置" });
+    if (saved) {
+      state.setupGuideMode = "advanced";
+      state.setupGuideAdvancedBlock = "";
+      state.setupGuideAdvancedStep = 0;
+      state.setupGuideOpen = true;
+      renderSetupGuideOverlay();
+    }
     return;
   }
   if (target.closest("[data-setup-guide-next]")) {
+    if (state.setupGuideMode === "advanced") {
+      const button = target.closest("[data-setup-guide-next]");
+      const blockId = state.setupGuideAdvancedBlock || "";
+      const items = setupGuideAdvancedItems[blockId] || [];
+      const stepIndex = setupGuideAdvancedStepIndex(blockId);
+      if (items.length && stepIndex < items.length - 1) {
+        state.setupGuideAdvancedStep = stepIndex + 1;
+        renderSetupGuideOverlay();
+        return;
+      }
+      const saved = await saveSetupGuideAdvancedBlock(button instanceof HTMLButtonElement ? button : null);
+      if (saved) {
+        state.setupGuideAdvancedBlock = "";
+        state.setupGuideAdvancedStep = 0;
+        renderSetupGuideOverlay();
+      }
+      return;
+    }
     const index = setupGuideStepIndex();
     const blockMessage = setupGuideStepBlockMessage(index + 1);
     if (blockMessage) {
@@ -15580,6 +16962,17 @@ document.addEventListener("click", async (event) => {
       state.setupGuideOpen = true;
     }
     renderSetupGuideOverlay();
+    return;
+  }
+  const advancedStepTarget = target.closest("[data-setup-guide-advanced-step]");
+  if (advancedStepTarget) {
+    const blockId = state.setupGuideAdvancedBlock || "";
+    const items = setupGuideAdvancedItems[blockId] || [];
+    const index = Number(advancedStepTarget.dataset.setupGuideAdvancedStep || 0);
+    if (items.length) {
+      state.setupGuideAdvancedStep = Math.max(0, Math.min(items.length - 1, Number.isFinite(index) ? index : 0));
+      renderSetupGuideOverlay();
+    }
     return;
   }
   const stepTarget = target.closest("[data-setup-guide-step]");
@@ -15626,6 +17019,10 @@ document.addEventListener("input", (event) => {
     rerenderSetupGuideOverlayPreserveScroll();
     return;
   }
+  if (state.setupGuideMode === "advanced" && setupGuideAdvancedToggleFields.has(key) && String(previousValue || "") !== String(draft[key] || "")) {
+    rerenderSetupGuideOverlayPreserveScroll();
+    return;
+  }
   if (setupGuideDynamicFields.has(key) && String(previousValue || "") !== String(draft[key] || "")) {
     rerenderSetupGuideOverlayPreserveScroll();
     return;
@@ -15634,6 +17031,20 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const advancedToggle = event.target instanceof Element ? event.target.closest("[data-setup-guide-advanced-toggle]") : null;
+  if (advancedToggle) {
+    const key = advancedToggle.dataset.setupGuideAdvancedToggle || "";
+    if (!key) return;
+    const draft = setupGuideDraft();
+    const nextValue = String(advancedToggle.value || "").toLowerCase() === "true";
+    if (Boolean(draft[key]) !== nextValue) {
+      draft[key] = nextValue;
+      rerenderSetupGuideOverlayPreserveScroll();
+    } else {
+      updateSetupGuideSelectedStates(advancedToggle.closest(".setup-guide-form") || document);
+    }
+    return;
+  }
   const input = event.target instanceof Element ? event.target.closest("[data-setup-guide-field]") : null;
   if (!input) return;
   const key = input.dataset.setupGuideField || "";
@@ -15660,6 +17071,10 @@ document.addEventListener("change", (event) => {
   }
   if (key === "privateIntensity" && String(previousValue || "") !== String(draft[key] || "")) {
     setupGuideApplyIntensityPreset(String(draft[key] || "off"));
+    rerenderSetupGuideOverlayPreserveScroll();
+    return;
+  }
+  if (state.setupGuideMode === "advanced" && setupGuideAdvancedToggleFields.has(key) && String(previousValue || "") !== String(draft[key] || "")) {
     rerenderSetupGuideOverlayPreserveScroll();
     return;
   }

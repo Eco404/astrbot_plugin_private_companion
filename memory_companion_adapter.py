@@ -325,6 +325,8 @@ class MemoryCompanionAdapterMixin:
             "Bot 自我时间线",
             "最近主动消息",
             "最近阅读 创作 搜索 生图 QQ空间 说说 行动",
+            "最近吃了什么 今日穿搭 梦境碎片 主动私聊",
+            "刚刚发布的 QQ 空间说说 最近已发说说 公开动态余味 不要重复已发说说",
             "主人明确偏好 约定 边界",
             "避免把朋友用户互动写进 Bot 日程",
         ]
@@ -760,20 +762,28 @@ class MemoryCompanionAdapterMixin:
                     source="private_companion_proactive",
                     metadata=metadata,
                 )
-                return
-            await proactive_recorder(
-                content=f"Bot 主动向 {name or user_id} 发送：{content}",
-                scope="private",
-                session_id=umo,
-                platform=platform,
-                message_id=message_id,
-                subject={"kind": "bot", "id": "self", "name": "Bot", "role": "bot_self"},
-                object={"kind": "user", "id": str(user_id or ""), "name": name, "role": "private_companion_target"},
-                metadata=metadata,
-                source_plugin="private_companion",
-                confidence=0.92,
-                importance=0.58,
-            )
+            if callable(proactive_recorder):
+                await proactive_recorder(
+                    content=f"Bot 主动向 {name or user_id} 发送：{content}",
+                    scope="private",
+                    session_id=umo,
+                    platform=platform,
+                    message_id=message_id,
+                    subject={"kind": "bot", "id": "self", "name": "Bot", "role": "bot_self"},
+                    object={"kind": "user", "id": str(user_id or ""), "name": name, "role": "private_companion_target"},
+                    metadata={
+                        **metadata,
+                        "date": self._memory_companion_now_iso()[:10],
+                        "event_type": "proactive_message",
+                        "action_label": "主动私聊",
+                        "query_anchors": ["主动消息", "主动私聊", "刚才主动说了什么", "最近主动联系", "发送给用户"],
+                    },
+                    source_plugin="private_companion",
+                    confidence=0.92,
+                    importance=0.58,
+                    tags=["proactive", "proactive_message", "bot_action", "private_companion"],
+                    occurred_at=self._memory_companion_now_iso(),
+                )
         except Exception as exc:
             if self._memory_companion_optional_dependency_failed(exc, where="record_proactive_message"):
                 return
@@ -1098,7 +1108,9 @@ class MemoryCompanionAdapterMixin:
         if not content:
             return
         bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_persona_life", None) if bridge is not None else None
+        recorder = getattr(bridge, "record_qzone_action", None) if bridge is not None else None
+        if not callable(recorder):
+            recorder = getattr(bridge, "record_persona_life", None) if bridge is not None else None
         if not callable(recorder):
             return
         reason_text = _single_line(reason, 40) or "qzone_publish"
@@ -1112,6 +1124,11 @@ class MemoryCompanionAdapterMixin:
         verify_part = "；已反查确认" if verified else ""
         memory_content = f"Bot 刚刚发布了一条 QQ 空间说说：{content}{image_part}{verify_part}。"
         memory_key = _single_line(tid, 40) or uuid.uuid4().hex[:12]
+        date_text = ""
+        try:
+            date_text = self._environment_now().date().isoformat()
+        except Exception:
+            date_text = self._memory_companion_now_iso()[:10]
         try:
             await recorder(
                 content=memory_content,
@@ -1120,18 +1137,35 @@ class MemoryCompanionAdapterMixin:
                 platform=platform,
                 message_id=f"private_companion_qzone_{memory_key}",
                 memory_id=f"private_companion_qzone_{memory_key}",
+                memory_type="qzone_action",
+                reality_level="bot_action",
+                sayability="direct",
                 metadata={
+                    "date": date_text,
+                    "event_type": "qzone_publish",
+                    "action_label": "QQ 空间说说",
                     "reason": reason_text,
                     "tid": _single_line(tid, 80),
                     "text": content,
+                    "clean_visible_text": content,
                     "image_count": safe_image_count,
                     "verified": bool(verified) if verified is not None else None,
-                    "query_anchors": ["QQ空间", "说说", "刚才发了什么", "刚刚发了什么", "发了什么说说", "空间动态"],
+                    "query_anchors": [
+                        "QQ空间",
+                        "说说",
+                        "QQ 空间说说",
+                        "刚才发了什么",
+                        "刚刚发了什么",
+                        "发了什么说说",
+                        "最近已发说说",
+                        "空间动态",
+                        "公开动态余味",
+                    ],
                 },
                 source_plugin="private_companion",
                 confidence=0.84,
                 importance=0.58,
-                tags=["qzone", "qzone_publish", "persona_life", "说说", "QQ空间", reason_text],
+                tags=["qzone", "qzone_publish", "bot_action", "persona_life", "说说", "QQ空间", reason_text],
                 occurred_at=self._memory_companion_now_iso(),
             )
         except Exception as exc:

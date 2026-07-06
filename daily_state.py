@@ -5,6 +5,7 @@ DailyStateMixin — 日程、状态、天气、日记、技能成长和计时器
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import gc
 import hashlib
@@ -690,10 +691,13 @@ class DailyStateMixin:
                 metadata={
                     "date": date_text,
                     "time": time_text,
+                    "event_type": "self_meal",
+                    "action_label": "进食记录",
                     "meal": meal,
                     "food": food,
                     "evidence": _single_line(entry.get("evidence"), 180),
                     "source": _single_line(entry.get("source"), 40),
+                    "query_anchors": ["self_meal", "吃了什么", "刚才吃了什么", "午餐", "晚餐", "早餐", "夜宵", food],
                 },
                 source_plugin="private_companion",
                 confidence=0.78,
@@ -8612,8 +8616,59 @@ class DailyStateMixin:
         softened = softened.replace("想摔东西的烦躁", "有点烦,但努力收着")
         return _single_line(softened, 160)
 
+    @staticmethod
+    def _strip_json_payload_comments(text: str) -> str:
+        result: list[str] = []
+        index = 0
+        in_string = False
+        quote_char = ""
+        escaped = False
+        while index < len(text):
+            char = text[index]
+            nxt = text[index + 1] if index + 1 < len(text) else ""
+            if in_string:
+                result.append(char)
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote_char:
+                    in_string = False
+                    quote_char = ""
+                index += 1
+                continue
+            if char in {'"', "'"}:
+                in_string = True
+                quote_char = char
+                result.append(char)
+                index += 1
+                continue
+            if char == "/" and nxt == "/":
+                index += 2
+                while index < len(text) and text[index] not in "\r\n":
+                    index += 1
+                continue
+            if char == "/" and nxt == "*":
+                index += 2
+                while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
+                    index += 1
+                index = min(len(text), index + 2)
+                continue
+            result.append(char)
+            index += 1
+        return "".join(result)
+
+    def _repair_json_payload(self, text: str) -> str:
+        repaired = str(text or "").strip()
+        repaired = repaired.replace("\ufeff", "")
+        repaired = repaired.replace("“", '"').replace("”", '"')
+        repaired = repaired.replace("‘", "'").replace("’", "'")
+        repaired = self._strip_json_payload_comments(repaired)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        return repaired.strip()
+
     def _extract_json_payload(self, raw_text: str) -> Any:
-        text = raw_text.strip()
+        text = str(raw_text or "").strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
@@ -8624,11 +8679,27 @@ class DailyStateMixin:
         array_start, array_end = text.find("["), text.rfind("]")
         if array_start >= 0 and array_end > array_start:
             candidates.append(text[array_start : array_end + 1])
+        seen_candidates: set[str] = set()
         for candidate in candidates:
+            if candidate in seen_candidates:
+                continue
+            seen_candidates.add(candidate)
             try:
                 return json.loads(candidate)
             except json.JSONDecodeError:
-                continue
+                repaired = self._repair_json_payload(candidate)
+                if repaired and repaired not in seen_candidates:
+                    seen_candidates.add(repaired)
+                    try:
+                        return json.loads(repaired)
+                    except json.JSONDecodeError:
+                        pass
+                    try:
+                        parsed = ast.literal_eval(repaired)
+                    except (SyntaxError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, (dict, list)):
+                        return parsed
         return None
 
     def _get_current_plan_item(self, plan: dict[str, Any]) -> dict[str, str] | None:

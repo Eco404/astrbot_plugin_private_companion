@@ -915,6 +915,12 @@
     "default": true,
     "invisible": true
   },
+  "quote_group_reply_once_per_target": {
+    "description": "Legacy flat config: 连续同对象只首条引用",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "enable_quote_group_interjection": {
     "description": "Legacy flat config: 引用群主动插话触发消息",
     "type": "bool",
@@ -4216,6 +4222,12 @@
         "description": "引用普通群回复触发消息",
         "type": "bool",
         "hint": "总开关开启后生效。群聊中被 @、被引用、唤醒或连续对话保持触发的普通回复，会按策略引用当前触发消息或被引用的 Bot 旧消息。",
+        "default": true
+      },
+      "quote_group_reply_once_per_target": {
+        "description": "连续同对象只首条引用",
+        "type": "bool",
+        "hint": "总开关和群回复引用开启后生效。同一群内连续回复同一个群友时，只在首次带引用；换成回复其他群友，或间隔超过连续对话窗口后，会重新引用一次。",
         "default": true
       },
       "enable_quote_group_interjection": {

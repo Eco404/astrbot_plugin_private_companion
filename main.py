@@ -428,7 +428,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.7.0",
+    "5.7.1",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -745,6 +745,7 @@ class PrivateCompanionPlugin(
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
         self.enable_proactive_quote_trigger_message = self._cfg_bool(c, "enable_proactive_quote_trigger_message", False)
         self.enable_quote_group_reply = self._cfg_bool(c, "enable_quote_group_reply", True)
+        self.quote_group_reply_once_per_target = self._cfg_bool(c, "quote_group_reply_once_per_target", True)
         self.enable_quote_group_interjection = self._cfg_bool(c, "enable_quote_group_interjection", True)
         self.enable_quote_private_proactive = self._cfg_bool(c, "enable_quote_private_proactive", True)
         self.quote_skip_short_reply_chars = self._cfg_int(c, "quote_skip_short_reply_chars", 0, 0, 120)
@@ -752,6 +753,7 @@ class PrivateCompanionPlugin(
         if self.quote_target_strategy not in {"current", "quoted", "auto"}:
             self.quote_target_strategy = "current"
         self._reply_component_style_cache: dict[str, tuple[str, str]] = {}
+        self._group_reply_quote_target_cache: dict[str, dict[str, Any]] = {}
         self.enable_segmented_proactive_reply = self._cfg_bool(c, "enable_segmented_proactive_reply", False)
         self.segmented_proactive_scope = self._cfg_str(c, "segmented_proactive_scope", "proactive_only", "proactive_only")
         if self.segmented_proactive_scope not in {"proactive_only", "all_llm"}:

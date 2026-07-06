@@ -1972,10 +1972,89 @@ class QzoneMixin(QzoneMediaMixin):
                 verified=verified,
                 event=event,
             )
+        self._qzone_append_publish_to_current_detail(
+            clean,
+            reason=reason,
+            tid=tid,
+            image_count=image_count,
+            verified=verified,
+        )
+        invalidator = getattr(self, "_invalidate_detail_after_interaction", None)
+        if callable(invalidator):
+            try:
+                invalidator(now=now)
+            except Exception:
+                pass
         try:
             self._save_data_sync()
         except Exception as exc:
             logger.debug("[PrivateCompanion] QQ 空间发布记录保存失败: %s", _single_line(exc, 120))
+
+    def _qzone_append_publish_to_current_detail(
+        self,
+        text: Any,
+        *,
+        reason: str = "",
+        tid: str = "",
+        image_count: int = 0,
+        verified: bool | None = None,
+    ) -> bool:
+        segment_getter = getattr(self, "_current_detail_segment_for_update", None)
+        if not callable(segment_getter):
+            return False
+        try:
+            segment = segment_getter()
+        except Exception:
+            return False
+        if not isinstance(segment, dict):
+            return False
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return False
+        key = str(segment.get("key") or "")
+        snapshot = enhanced.get(key)
+        if not isinstance(snapshot, dict):
+            return False
+        clean = _single_line(text, 180)
+        if not clean:
+            return False
+        safe_image_count = _safe_int(image_count, 0, 0, 99)
+        image_part = f"；配图 {safe_image_count} 张" if safe_image_count > 0 else ""
+        verify_part = "；已反查确认" if verified else ""
+        event_text = _single_line(f"刚发布了一条 QQ 空间说说：{clean}{image_part}{verify_part}。", 220)
+        events = snapshot.setdefault("today_events", [])
+        if not isinstance(events, list):
+            events = []
+            snapshot["today_events"] = events
+        tid_text = _single_line(tid, 80)
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            if tid_text and _single_line(item.get("tid"), 80) == tid_text:
+                return False
+            if clean and clean in _single_line(item.get("event") or item.get("text"), 260):
+                return False
+        try:
+            at = self._environment_now().strftime("%H:%M")
+        except Exception:
+            at = ""
+        events.append(
+            {
+                "window": at,
+                "event": event_text,
+                "mood": "公开动态已发布",
+                "source": "qzone_publish",
+                "reason": _single_line(reason, 40),
+                "tid": tid_text,
+            }
+        )
+        del events[:-8]
+        summary = _single_line(snapshot.get("summary"), 140)
+        summary_tail = _single_line(f"刚发了一条 QQ 空间说说：{clean}", 80)
+        if summary_tail and summary_tail not in summary:
+            snapshot["summary"] = _single_line(f"{summary}；{summary_tail}" if summary else summary_tail, 160)
+        snapshot["updated_at"] = at or _single_line(snapshot.get("updated_at"), 20)
+        return True
 
     def _qzone_text_leaks_internal_state(self, text: str) -> bool:
         compact = str(text or "")

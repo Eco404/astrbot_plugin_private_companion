@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260706-v570-guide-entry" />
+  <link rel="stylesheet" href="./app.css?v=20260706-setup-daily-fast-api" />
   <script>
     (function () {
       try {
@@ -141,9 +141,13 @@
             <h2>长线主动</h2>
             <div id="longTermConfig"></div>
           </article>
-          <article class="wide">
-            <h2>配置健康检查</h2>
-            <div id="healthPanel" class="health-list"></div>
+          <article class="wide" id="setupProgressArticle">
+            <div class="section-head">
+              <h2>配置进度</h2>
+              <button type="button" class="setup-progress-toggle" data-setup-progress-toggle hidden>展开全部</button>
+            </div>
+            <div id="setupProgressBar" class="setup-progress-bar-container"></div>
+            <div id="setupProgressList" class="setup-progress-list"></div>
           </article>
           <article class="wide">
             <h2>拓展页自检</h2>
@@ -879,9 +883,11 @@ QQ空间 = 公开札记
               <div>
                 <span>Admin Setup</span>
                 <h3>快速启动</h3>
-                <p>设定 Bot 的运行平台、服务对象与转发策略，并配置免打扰时段和管理命令权限范围。面板仅管理员可见，以下配置项变更后立即生效。</p>
+                <p>设定运行平台、服务对象与权限边界。以下配置项变更后立即生效。</p>
               </div>
+              <button type="button" data-setup-guide-open>配置引导</button>
             </header>
+            <div id="quickStartStatus" class="quick-start-status"></div>
             <form id="quickModuleForm" class="module-form">
               <div class="module-subgroup">
                 <h3>部署与目标</h3>
@@ -1582,6 +1588,6 @@ QQ空间 = 公开札记
   <script src="./js/features/daily-outfit.js?v=20260702-outfit-preview"></script>
   <script src="./js/panels/provider-tree.js?v=20260702-provider-tree"></script>
   <script src="./js/panels/qzone-panel.js?v=20260704-qzone-stable-api"></script>
-  <script src="./app.js?v=20260706-v570-proactive-counts"></script>
+  <script src="./app.js?v=20260706-setup-daily-fast-api"></script>
 </body>
 </html>

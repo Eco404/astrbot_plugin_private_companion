@@ -1823,6 +1823,51 @@ class EventDispatchMixin:
             return f"short_reply:{length}<={threshold}"
         return ""
 
+    def _quote_group_reply_continuity_window_seconds(self) -> int:
+        followup_seconds = _safe_int(getattr(self, "group_conversation_followup_seconds", 120), 120, 0)
+        return max(300, followup_seconds)
+
+    def _quote_group_reply_should_skip_same_target(
+        self,
+        event: AstrMessageEvent,
+        quote_id: str,
+        *,
+        text_or_chain: Any = None,
+    ) -> bool:
+        if not bool(getattr(self, "quote_group_reply_once_per_target", True)):
+            return False
+        if text_or_chain is None:
+            return False
+        group_id = self._extract_group_id_from_event(event)
+        sender_id = self._event_sender_id(event)
+        if not group_id or not sender_id or not quote_id:
+            return False
+        cache = getattr(self, "_group_reply_quote_target_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._group_reply_quote_target_cache = cache
+        now = _now_ts()
+        window_seconds = self._quote_group_reply_continuity_window_seconds()
+        for key, item in list(cache.items()):
+            if not isinstance(item, dict) or now - _safe_float(item.get("ts"), 0) > max(600, window_seconds * 2):
+                cache.pop(key, None)
+        scope = f"group:{group_id}"
+        previous = cache.get(scope) if isinstance(cache.get(scope), dict) else {}
+        previous_ts = _safe_float(previous.get("ts"), 0)
+        previous_sender = str(previous.get("sender_id") or "")
+        if previous_sender == sender_id and previous_ts > 0 and now - previous_ts <= window_seconds:
+            previous["ts"] = now
+            previous["last_skipped_quote_id"] = _single_line(quote_id, 120)
+            cache[scope] = previous
+            setattr(event, "private_companion_quote_skip_reason", "same_group_reply_target")
+            return True
+        cache[scope] = {
+            "sender_id": sender_id,
+            "quote_id": _single_line(quote_id, 120),
+            "ts": now,
+        }
+        return False
+
     def _event_quoted_original_message_id(self, event: AstrMessageEvent) -> str:
         for message_id in self._event_reply_message_ids(event):
             if message_id and message_id != self._event_message_id(event):
@@ -1854,6 +1899,12 @@ class EventDispatchMixin:
         fixed_scene = _single_line(getattr(event, "private_companion_quote_scene", ""), 40)
         if fixed and not force_refresh and (not fixed_scene or fixed_scene == scene_name):
             if self._quote_skip_reason_for_short_reply(text_or_chain):
+                return ""
+            if scene_name == "group_reply" and self._quote_group_reply_should_skip_same_target(
+                event,
+                fixed,
+                text_or_chain=text_or_chain,
+            ):
                 return ""
             return fixed
         if scene_name in {"group_reply", "group_interjection"}:
@@ -1903,6 +1954,12 @@ class EventDispatchMixin:
         short_reason = self._quote_skip_reason_for_short_reply(text_or_chain)
         if short_reason:
             setattr(event, "private_companion_quote_skip_reason", short_reason)
+            return ""
+        if scene_name == "group_reply" and self._quote_group_reply_should_skip_same_target(
+            event,
+            quote_id,
+            text_or_chain=text_or_chain,
+        ):
             return ""
         setattr(event, "private_companion_quote_message_id", quote_id)
         setattr(event, "private_companion_quote_scene", scene_name)

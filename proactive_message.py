@@ -1218,6 +1218,18 @@ class ProactiveMessageMixin:
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
         unanswered_hint = f"这是第 {unanswered_count} 次主动后还没等到回复。" if unanswered_count > 0 else ""
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
+        recent_history_hint = ""
+        try:
+            recent_history_hint = await self._recent_private_conversation_for_proactive_review(user, limit=5)
+        except Exception:
+            recent_history_hint = ""
+        temporal_grounding_hint = (
+            "【时间锚定】\n"
+            f"- 当前真实时间：{current_time}。\n"
+            "- 优先贴今天最新私聊、当前日程和当前时段；旧记忆只能作背景，不要改写成今天/现在正在发生。\n"
+            "- 如果记忆或历史里是昨天、昨晚、之前的天气/通勤/身体状态，除非当前日程或最新私聊明确延续，否则不要拿来当本轮主动切口。\n"
+            "- 如果必须提旧事，要明确说“昨晚/昨天/那次”，不要写成“今天刚遇到/现在还在/刚才发生”。"
+        )
         prompt = self.proactive_prompt_template or self._default_proactive_prompt_template()
         worldview_adaptation = ""
         reason_text = _REASON_TEXT.get(reason, reason).replace("{name}", name)
@@ -1256,6 +1268,15 @@ class ProactiveMessageMixin:
         delivery_hint = self._proactive_natural_delivery_hint()
         if delivery_hint and "自然交付提醒" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
+        if "时间锚定" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{temporal_grounding_hint}"
+        if recent_history_hint and "最近私聊实况" not in prompt:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "【最近私聊实况】\n"
+                f"{recent_history_hint}\n"
+                "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
+            )
         if open_loops_hint and "没完成的事" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
@@ -1265,6 +1286,8 @@ class ProactiveMessageMixin:
                 part
                 for part in (
                     "主动消息正文生成",
+                    f"当前真实时间 {current_time}",
+                    "当前日期 最新私聊 当前日程 当前时段 旧日材料不能改写成当前事实",
                     reason,
                     action,
                     topic_hint,
@@ -2422,6 +2445,8 @@ class ProactiveMessageMixin:
 - 不要把内部动机、犹豫过程或发送理由写进正文，例如“本来想跟你说”“怕说太早”“绕了一圈还是来找你”；这类内容应 rewrite 成具体片段，或 drop。
 - 如果最近用户刚刚在聊正事或刚聊完，倾向 defer；如果候选本身没价值，drop。
 - 候选消息必须贴合“本轮主动来源”和“内在约束”：分享型要有分享落点，关心型要低压，续接型要有真实来源，虚由头要短。
+- 时间优先级：当前真实时间和最近私聊记录高于旧记忆。旧天气、通勤、身体状态可以作为回想、余波、吐槽或类比出现，但不要强行改写成今天刚发生。
+- 如果候选提到旧天气、通勤或身体状态，先判断它是否自然；只有在明显和当前时段、最近私聊矛盾到会误导用户时，才 rewrite。不要因为出现天气/通勤词就 drop。
 - 如果候选只是在汇报系统动作、发送状态或工具执行结果，而不是角色真正要说出口的聊天内容，decision=drop。
 - rewrite 只能轻改写，不能新增事实，不能添加工具、转述、查询、发图等承诺。
 

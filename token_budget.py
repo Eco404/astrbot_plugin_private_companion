@@ -525,6 +525,9 @@ class TokenBudgetMixin:
             "private_image_vision",
             "private_image_only_framework",
             "private_image_only_fallback",
+            "roleplay_draft_from_persona",
+            "roleplay_draft_json_repair",
+            "provider_test",
         }
 
     def _today_llm_token_total(self, *, include_budget_exempt: bool = False) -> int:
@@ -748,6 +751,8 @@ class TokenBudgetMixin:
         max_tokens: int = 600,
         provider_id: str | None = None,
         task: str | None = None,
+        *,
+        system_prompt: str | None = None,
     ) -> str | None:
         start = time.time()
         selected_provider = self._resolve_chat_provider_id(provider_id)
@@ -767,7 +772,11 @@ class TokenBudgetMixin:
         try:
             if not selected_provider:
                 raise RuntimeError("未找到可用的 AstrBot 默认模型 Provider")
-            kwargs = {"prompt": prompt, "chat_provider_id": selected_provider}
+            kwargs: dict[str, Any] = {"prompt": prompt, "chat_provider_id": selected_provider}
+            if max_tokens and max_tokens > 0:
+                kwargs["max_tokens"] = max_tokens
+            if system_prompt:
+                kwargs["system_prompt"] = system_prompt
             resp = await self.context.llm_generate(**kwargs)
             if resp and resp.completion_text:
                 completion = resp.completion_text.strip()

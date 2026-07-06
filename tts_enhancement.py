@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import random
@@ -198,6 +199,8 @@ class TtsEnhancementMixin:
             return "gemini"
         if "minimax" in text:
             return "minimax"
+        if "mimo" in text:
+            return "mimo_tts"
         if "aliyun" in text or "alibaba" in text or "阿里" in text:
             return "aliyun"
         if "volc" in text or "huoshan" in text or "火山" in text:
@@ -2425,6 +2428,19 @@ Provider 规则：{emotion_rule}
             pass
         return text
 
+    async def _tts_generate_audio_path(self, tts_provider: Any, text: str) -> str:
+        if hasattr(tts_provider, "get_audio"):
+            result = tts_provider.get_audio(text)
+        elif hasattr(tts_provider, "synthesize_text"):
+            result = tts_provider.synthesize_text(text)
+        else:
+            return ""
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, (list, tuple)):
+            result = result[0] if result else ""
+        return str(result or "")
+
     async def _tts_record_component(
         self,
         spoken: str,
@@ -2446,7 +2462,7 @@ Provider 规则：{emotion_rule}
                 _single_line(sanitized, 80),
             )
         try:
-            audio_path = await tts_provider.get_audio(sanitized)
+            audio_path = await self._tts_generate_audio_path(tts_provider, sanitized)
         except Exception as exc:
             logger.warning(
                 "[PrivateCompanion] TTS强化生成语音失败: provider=%s error_type=%s error=%s text=%s",

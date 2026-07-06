@@ -22,10 +22,12 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from quart import request, send_file
 
 from .constants import _REASON_TEXT
+from .constants import DEFAULT_DAILY_PLAN_ITEMS
 from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
+from .planning import generate_daily_plan
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -5072,20 +5074,43 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if callable(task_provider):
                 provider_id = task_provider(
                     getattr(self.plugin, "fast_response_provider_id", ""),
+                    getattr(self.plugin, "complex_reasoning_provider_id", ""),
                     getattr(self.plugin, "llm_provider_id", ""),
                 )
             else:
                 provider_id = str(
                     getattr(self.plugin, "fast_response_provider_id", "")
+                    or getattr(self.plugin, "complex_reasoning_provider_id", "")
                     or getattr(self.plugin, "llm_provider_id", "")
                     or ""
                 ).strip()
+            system_prompt, user_prompt = self._roleplay_draft_from_persona_prompt(persona_prompt, scopes, extra_prompt=extra_prompt)
             raw = await caller(
-                self._roleplay_draft_from_persona_prompt(persona_prompt, scopes, extra_prompt=extra_prompt),
-                max_tokens=1400,
+                user_prompt,
+                max_tokens=2000,
                 provider_id=provider_id,
                 task="roleplay_draft_from_persona",
+                system_prompt=system_prompt,
             )
+            if raw is None:
+                logger.warning("[PrivateCompanionPage] 人格草稿生成：LLM 返回 None（可能预算受限或 Provider 不可用），使用兜底草稿")
+                parsed = self._fallback_roleplay_draft_result(persona_prompt, scopes, "模型调用返回空结果（可能预算受限或 Provider 不可用）")
+                draft = self._normalize_roleplay_draft_result(parsed, scopes)
+                return self._ok(
+                    {
+                        "draft": draft,
+                        "scopes": scopes,
+                        "provider_id": provider_id,
+                        "provider_role": self._roleplay_provider_role(provider_id),
+                        "repair_provider_id": "",
+                        "repair_provider_role": "",
+                        "parse_note": "模型调用未返回结果，已生成可编辑的本地兜底草稿。请检查模型 Provider 配置或日预算设置。",
+                        "persona_id": effective_persona_id or self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120),
+                        "source_chars": len(persona_prompt),
+                        "source_preview": self._single_line(persona_prompt, 220),
+                        "raw_preview": "",
+                    }
+                )
             raw_preview_source = raw
             parse_note = ""
             repair_provider_id = ""
@@ -5095,12 +5120,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 repair_provider_id = self._roleplay_draft_repair_provider_id(provider_id)
                 if repair_provider_id:
                     try:
+                        repair_system, repair_user = self._roleplay_draft_json_repair_prompt(raw, scopes)
                         repair_raw = await caller(
-                            self._roleplay_draft_json_repair_prompt(raw, scopes),
-                            max_tokens=1400,
+                            repair_user,
+                            max_tokens=2000,
                             provider_id=repair_provider_id,
                             task="roleplay_draft_json_repair",
+                            system_prompt=repair_system,
                         )
+                        if repair_raw is None:
+                            raise ValueError("修复模型也返回空结果")
                         parsed = self._loads_json_object(repair_raw)
                         raw_preview_source = repair_raw
                         parse_note = f"初次返回无法解析，已使用 {repair_provider_id} 修复为 JSON。"
@@ -5326,7 +5355,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
             async with self.plugin._data_lock:
                 self.plugin.data["setup_guide_completed_at"] = time.time()
-                self.plugin.data["setup_guide_completed_version"] = "5.7.0-first-setup"
+                self.plugin.data["setup_guide_completed_version"] = "5.7.1-first-setup"
                 self.plugin._save_data_sync()
 
             config_saved = True
@@ -5344,36 +5373,140 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 首次配置落地失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    def _setup_guide_fallback_daily_plan(self, reason: str = "timeout") -> dict[str, Any]:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        plan = {
+            "date": _today_key(),
+            "generated_at": now,
+            "source": f"setup_fallback:{self._single_line(reason, 40) or 'fallback'}",
+            "provider_id": "",
+            "raw": "setup_fallback",
+            "items": [dict(item) for item in DEFAULT_DAILY_PLAN_ITEMS],
+        }
+        return plan
+
+    async def _setup_guide_generate_daily_plan_fast(self, timeout: float = 18.0) -> tuple[dict[str, Any], str, bool]:
+        today = _today_key()
+        task = getattr(self.plugin, "_setup_guide_daily_plan_task", None)
+        async with self.plugin._data_lock:
+            current_plan = self.plugin.data.get("daily_plan", {})
+            if (
+                isinstance(current_plan, dict)
+                and current_plan.get("date") == today
+                and (isinstance(current_plan.get("items"), list) or isinstance(current_plan.get("schedule"), list))
+            ):
+                source = str(current_plan.get("source") or "")
+                if source.startswith("setup_fallback:") and isinstance(task, asyncio.Task) and not task.done():
+                    return dict(current_plan), "background", True
+                if source.startswith("setup_fallback:"):
+                    pass
+                else:
+                    return dict(current_plan), "cached", False
+
+        async def _runner() -> dict[str, Any]:
+            state_getter = getattr(self.plugin, "_ensure_daily_state", None)
+            if callable(state_getter):
+                try:
+                    await state_getter(force=False, passive_fast=True)
+                except TypeError:
+                    await state_getter(force=False)
+            plan = await generate_daily_plan(self.plugin)
+            async with self.plugin._data_lock:
+                self.plugin.data["daily_plan"] = plan
+                refresher = getattr(self.plugin, "_refresh_daily_state_location_from_plan", None)
+                if callable(refresher):
+                    refresher(plan=plan)
+                self.plugin.data["detail_enhanced_day"] = str((plan or {}).get("date") or today)
+                self.plugin.data["detail_enhanced_segments"] = {}
+                self.plugin.data["daily_story_plan"] = {}
+                self.plugin._save_data_sync()
+            return plan
+
+        if not isinstance(task, asyncio.Task) or task.done():
+            task = asyncio.create_task(_runner())
+            def _consume_setup_daily_task(done_task: asyncio.Task) -> None:
+                try:
+                    done_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanionPage] 首次配置后台日程生成失败: %s",
+                        self._single_line(exc, 180),
+                        exc_info=True,
+                    )
+            task.add_done_callback(_consume_setup_daily_task)
+            setattr(self.plugin, "_setup_guide_daily_plan_task", task)
+
+        try:
+            plan = await asyncio.wait_for(asyncio.shield(task), timeout=max(3.0, float(timeout or 18.0)))
+            return dict(plan) if isinstance(plan, dict) else {}, "generated", False
+        except asyncio.TimeoutError:
+            async with self.plugin._data_lock:
+                current_plan = self.plugin.data.get("daily_plan", {})
+                if isinstance(current_plan, dict) and current_plan.get("date") == today:
+                    return dict(current_plan), "background", True
+                fallback = self._setup_guide_fallback_daily_plan("timeout")
+                self.plugin.data["daily_plan"] = fallback
+                refresher = getattr(self.plugin, "_refresh_daily_state_location_from_plan", None)
+                if callable(refresher):
+                    refresher(plan=fallback)
+                self.plugin.data["detail_enhanced_day"] = today
+                self.plugin.data["detail_enhanced_segments"] = {}
+                self.plugin.data["daily_story_plan"] = {}
+                self.plugin._save_data_sync()
+                return fallback, "fallback_timeout", True
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 首次配置快速日程生成失败，使用兜底日程: %s",
+                self._single_line(exc, 180),
+                exc_info=True,
+            )
+            fallback = self._setup_guide_fallback_daily_plan("error")
+            async with self.plugin._data_lock:
+                self.plugin.data["daily_plan"] = fallback
+                refresher = getattr(self.plugin, "_refresh_daily_state_location_from_plan", None)
+                if callable(refresher):
+                    refresher(plan=fallback)
+                self.plugin.data["detail_enhanced_day"] = today
+                self.plugin.data["detail_enhanced_segments"] = {}
+                self.plugin.data["daily_story_plan"] = {}
+                self.plugin._save_data_sync()
+            return fallback, "fallback_error", False
+
     async def run_setup_daily_generation(self) -> dict[str, Any]:
-        """Run today's schedule and current detail generation for the first setup guide."""
+        """Run setup-guide daily plan generation; current detail is optional because it is slow."""
         try:
             payload = await request.get_json(silent=True) or {}
         except Exception:
             payload = {}
         generate_schedule = self._normalize_bool_value(payload.get("generate_schedule", True))
         refine_schedule = self._normalize_bool_value(payload.get("refine_schedule", True))
+        force_detail = self._normalize_bool_value(payload.get("force_detail", False))
+        timeout_seconds = self._int(payload.get("timeout_seconds"), 18, 3, 60)
         plan: dict[str, Any] | None = None
         detail: dict[str, Any] | None = None
         current_detail_text = ""
+        generation_status = ""
+        pending = False
         try:
             if generate_schedule:
-                plan = await self.plugin._ensure_daily_plan(force=True)
-                async with self.plugin._data_lock:
-                    self.plugin.data["detail_enhanced_day"] = str((plan or {}).get("date") or _today_key())
-                    self.plugin.data["detail_enhanced_segments"] = {}
-                    self.plugin.data["daily_story_plan"] = {}
-                    self.plugin._save_data_sync()
+                plan, generation_status, pending = await self._setup_guide_generate_daily_plan_fast(timeout=timeout_seconds)
             else:
                 async with self.plugin._data_lock:
                     current_plan = self.plugin.data.get("daily_plan", {})
                     plan = dict(current_plan) if isinstance(current_plan, dict) else {}
+                generation_status = "current"
 
             if refine_schedule:
                 if not plan:
                     plan = await self.plugin._ensure_daily_plan(force=False)
                     if not plan:
                         plan = await self.plugin._ensure_daily_plan(force=True)
-                detail = await self.plugin._ensure_detail_enhancement(force=True)
+                if force_detail:
+                    detail = await self.plugin._ensure_detail_enhancement(force=True)
+                else:
+                    detail = await self.plugin._ensure_detail_enhancement(force=False)
 
             formatter = getattr(self.plugin, "_format_current_detail_view", None)
             if callable(formatter):
@@ -5397,6 +5530,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "current_detail_text": current_detail_text,
                     "daily_state": self._daily_state_summary(data.get("daily_state")),
                     "daily_timeline": self._daily_timeline_summary(data),
+                    "generation_status": generation_status,
+                    "pending": pending,
+                    "detail_skipped": bool(generate_schedule and not refine_schedule),
                 }
             )
         except Exception as exc:
@@ -5430,7 +5566,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 result.append(normalized)
         return result or ["persona"]
 
-    def _roleplay_draft_from_persona_prompt(self, persona_prompt: str, scopes: list[str] | None = None, *, extra_prompt: str = "") -> str:
+    def _roleplay_draft_from_persona_prompt(self, persona_prompt: str, scopes: list[str] | None = None, *, extra_prompt: str = "") -> tuple[str, str]:
+        """Return (system_prompt, user_prompt) for the roleplay draft generation."""
         source = str(persona_prompt or "").strip()
         if len(source) > 9000:
             source = source[:9000] + "\n（后文已截断）"
@@ -5443,24 +5580,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             f"- 主人/用户设定：{'生成' if 'user' in selected else '不要生成，字段留空'}",
         ]
         user_rule = (
-            "主人/用户设定只在原文明确写出对用户的称呼、用户身份或相处方式时抽取；"
-            "不要推断用户性别、生日、职业、权限、隐私偏好或亲密关系。"
+            "主人/用户设定：只在原文明确写出对用户的称呼、用户身份或相处方式时抽取；"
+            "可以保守推断用户性别和大概年龄范围（如原文有暗示），但不要推断隐私偏好或亲密关系。"
             if "user" in selected
             else "不要生成任何用户资料、主人资料、用户关系或用户偏好。"
         )
-        return (
-            "你要把一段 AstrBot 主回复人格文本谨慎整理成陪伴插件的角色/世界观设定草稿。\n"
-            + "\n".join(scope_lines)
-            + "\n"
-            "只允许从原文明确抽取或保守改写，不要扩写成新人格，不要补完缺失设定。\n"
-            "不确定、没有出现、只是氛围暗示的字段一律留空。\n"
-            f"{user_rule}\n"
-            "外貌线索只写角色自己的可视特征，方便识图，不要写回复策略。\n"
-            "世界观只写原文明确存在的背景；现代日常默认不需要硬写世界观。\n"
-            + (f"用户补充约束：\n{extra}\n这些补充只用于整理取舍和边界提醒，不要把未在原人格出现的新事实当成既定设定。\n" if extra else "")
+        system_prompt = (
+            "你是一个角色设定整理助手。你的任务是把一段 AstrBot 主回复人格文本整理成陪伴插件的角色/世界观设定草稿。\n"
+            + "\n".join(scope_lines) + "\n"
+            "整理规则：\n"
+            "1. 从原文中提取已有信息，可以适度改写为简洁的设定描述，但不要编造原文完全没有的新设定。\n"
+            "2. 如果原文有暗示但不确定的字段，可以基于原文内容做合理推断并填写，在 notes 里标注\"推断\"。\n"
+            "3. 外貌线索要写角色自己的可视特征（发型、瞳色、服饰等），方便识图，不要写回复策略。\n"
+            "4. 世界观只写原文明确存在的背景；如果是现代日常背景，world 填\"现代日常\"即可。\n"
+            "5. personality 字段要提取原文中体现的性格特点，即使只是从说话方式推断的也可以。\n"
+            "6. identity 字段要提取角色的职业、身份或社会角色。\n"
+            f"7. {user_rule}\n"
+            + (f"8. 用户补充约束：\n{extra}\n这些补充只用于整理取舍和边界提醒，不要把未在原人格出现的新事实当成既定设定。\n" if extra else "")
             + "翻译词只在原文有明确世界观替代表达时填写，否则留空。\n"
-            "所有字段尽量短，适合用户二次编辑。只输出 JSON 对象，不要 Markdown，不要解释。\n"
-            "JSON 结构如下，缺失字段也要保留为空字符串：\n"
+            "所有字段尽量简洁，适合用户二次编辑。\n"
+            "只输出 JSON 对象，不要 Markdown 代码块，不要解释。"
+        )
+        json_template = (
             "{\n"
             '  "persona_parts": {"name":"","species":"","age":"","gender":"","appearance":"","hair":"","eyes":"","clothing":"","identity":"","personality":"","desire":"","hobbies":"","taboo":"","key_lore":"","extra":""},\n'
             '  "world_parts": {"world":"","era":"","tone":"","rules":"","scenes":"","network":"","extra":""},\n'
@@ -5468,10 +5609,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             '  "translations": {"群聊":"","识屏":"","B站":"","QQ空间":"","书柜":""},\n'
             '  "image_self_recognition_hint": "",\n'
             '  "notes": []\n'
-            "}\n\n"
-            "主回复人格原文：\n"
-            f"{source}"
+            "}"
         )
+        user_prompt = (
+            "请把下面的主回复人格原文整理成 JSON 草稿。\n"
+            "缺失字段保留为空字符串，但尽量从原文中提取或合理推断。\n"
+            "只输出 JSON 对象，不要任何解释或 Markdown。\n\n"
+            f"JSON 结构（缺失字段也要保留为空字符串）：\n{json_template}\n\n"
+            f"主回复人格原文：\n{source}"
+        )
+        return system_prompt, user_prompt
 
     def _roleplay_provider_role(self, provider_id: Any) -> str:
         pid = str(provider_id or "").strip()
@@ -5500,19 +5647,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return pid
         return ""
 
-    def _roleplay_draft_json_repair_prompt(self, raw: Any, scopes: list[str] | None = None) -> str:
+    def _roleplay_draft_json_repair_prompt(self, raw: Any, scopes: list[str] | None = None) -> tuple[str, str]:
         text = str(raw or "").strip()
         if len(text) > 6500:
             text = text[:6500] + "\n（后文已截断）"
         selected = set(scopes or ["persona"])
-        return (
-            "下面是一段模型输出，它本应是 JSON，但可能混入了解释、Markdown、空字段遗漏或格式错误。\n"
+        system_prompt = (
+            "你是一个 JSON 修复助手。下面是一段模型输出，它本应是 JSON，但可能混入了解释、Markdown、空字段遗漏或格式错误。\n"
             "请只把其中能确认的信息整理成一个合法 JSON 对象，不要添加解释，不要使用 Markdown。\n"
             "没有信息的字段必须保留为空字符串；不要编造原文没有的事实。\n"
             f"角色设定：{'需要' if 'persona' in selected else '字段保留为空'}；"
             f"世界观设定：{'需要' if 'world' in selected else '字段保留为空'}；"
             f"用户关系：{'需要' if 'user' in selected else '字段保留为空'}。\n"
-            "必须输出这个结构：\n"
+            "只输出 JSON 对象，不要任何解释或 Markdown。"
+        )
+        json_template = (
             "{\n"
             '  "persona_parts": {"name":"","species":"","age":"","gender":"","appearance":"","hair":"","eyes":"","clothing":"","identity":"","personality":"","desire":"","hobbies":"","taboo":"","key_lore":"","extra":""},\n'
             '  "world_parts": {"world":"","era":"","tone":"","rules":"","scenes":"","network":"","extra":""},\n'
@@ -5520,26 +5669,36 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             '  "translations": {"群聊":"","识屏":"","B站":"","QQ空间":"","书柜":""},\n'
             '  "image_self_recognition_hint": "",\n'
             '  "notes": []\n'
-            "}\n\n"
-            "待修复输出：\n"
-            f"{text}"
+            "}"
         )
+        user_prompt = (
+            f"必须输出这个结构：\n{json_template}\n\n"
+            f"待修复输出：\n{text}"
+        )
+        return system_prompt, user_prompt
 
     def _fallback_roleplay_draft_result(self, persona_prompt: Any, scopes: list[str] | None, reason: Any = "") -> dict[str, Any]:
         selected = set(scopes or ["persona"])
         source = str(persona_prompt or "").strip()
         preview = self._multi_line(source, 620)
         reason_text = self._single_line(reason, 140)
+        reason_lower = reason_text.lower() if reason_text else ""
+        if "空结果" in reason_text or "none" in reason_lower or "provider" in reason_lower:
+            base_note = "模型调用未返回结果，已保留人格原文摘要供手动整理。"
+        elif "空草稿" in reason_text:
+            base_note = "模型返回了 JSON 但内容为空，已保留人格原文摘要供手动整理。"
+        else:
+            base_note = "模型没有返回可解析 JSON，已保留人格原文摘要供手动整理。"
         result: dict[str, Any] = {
             "persona_parts": {},
             "world_parts": {},
             "user_parts": {},
             "translations": {},
             "image_self_recognition_hint": "",
-            "notes": ["模型没有返回可解析 JSON，已保留人格原文摘要供手动整理。"],
+            "notes": [base_note],
         }
         if reason_text:
-            result["notes"].append(f"解析失败原因：{reason_text}")
+            result["notes"].append(f"原因：{reason_text}")
         if "persona" in selected and preview:
             result["persona_parts"] = {
                 "extra": f"请根据主回复人格原文手动整理。原文摘要：{preview}",
@@ -5562,10 +5721,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return True
         notes = draft.get("notes")
         if isinstance(notes, list) and any(str(item or "").strip() for item in notes):
+            fallback_markers = ("没有返回可解析 JSON", "模型调用未返回结果", "模型返回了 JSON 但内容为空", "已保留人格原文摘要")
             non_fallback_notes = [
                 str(item or "").strip()
                 for item in notes
-                if str(item or "").strip() and "没有返回可解析 JSON" not in str(item)
+                if str(item or "").strip() and not any(marker in str(item) for marker in fallback_markers)
             ]
             return bool(non_fallback_notes)
         return False
