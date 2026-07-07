@@ -1585,6 +1585,12 @@
     "default": 0.18,
     "invisible": true
   },
+  "qzone_publish_style_prompt": {
+    "description": "Legacy flat config: QQ 空间说说风格提示词",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
   "enable_qzone_generated_image_publish": {
     "description": "Legacy flat config: 主动说说可带生成图",
     "type": "bool",
@@ -1595,6 +1601,12 @@
     "description": "Legacy flat config: 主动说说带图概率",
     "type": "float",
     "default": 0.25,
+    "invisible": true
+  },
+  "qzone_publish_image_style_prompt": {
+    "description": "Legacy flat config: QQ 空间配图提示词",
+    "type": "text",
+    "default": "",
     "invisible": true
   },
   "enable_qzone_comment_inbox": {
@@ -2538,7 +2550,7 @@
   "natural_language_photo_extra_prompt": {
     "description": "Legacy flat config: 规则快判生图附加提示词",
     "type": "text",
-    "default": "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
+    "default": "clean clear image, natural composition, no unrelated text, no watermark, no logo, no explanatory panels",
     "invisible": true
   },
   "comfyui_photo_wait_seconds": {
@@ -5580,6 +5592,15 @@
           "enable_qzone_life_publish": true
         }
       },
+      "qzone_publish_style_prompt": {
+        "description": "说说风格提示词",
+        "type": "text",
+        "hint": "用于约束自动生活说说、心情说说和说说草稿测试的口吻。留空使用内置默认：更像随手生活碎片，避免哲理总结、人生感悟和文案腔。",
+        "default": "",
+        "condition": {
+          "enable_qzone_life_publish": true
+        }
+      },
       "enable_qzone_generated_image_publish": {
         "description": "主动说说可带生成图",
         "type": "bool",
@@ -5599,6 +5620,15 @@
           "step": 0.05
         },
         "default": 0.25,
+        "condition": {
+          "enable_qzone_generated_image_publish": true
+        }
+      },
+      "qzone_publish_image_style_prompt": {
+        "description": "空间配图提示词",
+        "type": "text",
+        "hint": "用于约束 QQ 空间自动配图的构图和画面选择。留空使用内置默认：按正文选择生活图，人物可自然入镜，但避免过度使用镜前自拍和手机挡脸自拍。",
+        "default": "",
         "condition": {
           "enable_qzone_generated_image_publish": true
         }
@@ -7484,7 +7514,7 @@
         "description": "规则快判生图附加提示词",
         "type": "text",
         "hint": "只作用于 rule_fast 规则快判入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
-        "default": "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。",
+        "default": "clean clear image, natural composition, no unrelated text, no watermark, no logo, no explanatory panels",
         "condition": {
           "enable_photo_text_action": true,
           "enable_natural_language_photo_generation": true

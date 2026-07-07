@@ -54,6 +54,7 @@ const state = {
   imageCacheLoaded: false,
   selectedImageCacheKey: "",
   troubleshootingFilter: "all",
+  tokenSource: "companion",
   tokenView: "today",
   tokenDate: "",
   worldbookLivingMemory: {},
@@ -1355,6 +1356,7 @@ const configLabels = {
   qzone_life_publish_probability: "说说触发概率",
   enable_qzone_generated_image_publish: "说说配图",
   qzone_generated_image_probability: "说说配图概率",
+  qzone_publish_image_style_prompt: "空间配图提示词",
   enable_qzone_comment_inbox: "空间评论收件箱",
   qzone_comment_inbox_interval_minutes: "评论检查间隔",
   qzone_comment_inbox_recent_posts: "扫描最近说说数",
@@ -1669,6 +1671,7 @@ const configDescriptions = {
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，按百分比填写。",
   enable_qzone_generated_image_publish: "开启后，生活说说或情绪说说发布前可按概率调用主动生图能力生成一张配图。需要同时启用 QQ 空间动态和可用的主动生图后端。",
   qzone_generated_image_probability: "满足发说说条件后尝试生成配图的概率，按百分比填写。",
+  qzone_publish_image_style_prompt: "约束 QQ 空间自动配图的构图和画面选择；留空使用内置默认，避免过度使用镜前自拍。",
   enable_qzone_comment_inbox: "默认关闭。开启后低频拉取自己最近说说详情，解析评论列表，首次只记录已见评论；后续新评论由模型判断是否需要公开追加回复。",
   qzone_comment_inbox_interval_minutes: "两次评论收件箱自动检查之间的最小间隔。",
   qzone_comment_inbox_recent_posts: "每次向前扫描多少条自己的最近说说详情。",
@@ -1684,7 +1687,7 @@ const configDescriptions = {
   enable_natural_language_photo_generation: "只控制“规则快判”模式是否允许插件在主链前直接接管生图。默认建议用工具优先，让主链模型调用 pc_generate_photo；工具不稳定时再切到规则快判。",
   natural_language_photo_generation_mode: "tool_first：普通聊天先进主链，由模型调用 pc_generate_photo；rule_fast：插件在主链前用规则直接接管高置信生图请求；off：不做非指令生图前置处理。",
   natural_language_photo_generation_max_daily: "只作用于 rule_fast 规则快判入口，独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭规则快判生图/改图。",
-  natural_language_photo_extra_prompt: "只作用于 rule_fast 规则快判入口，会接在用户要求后、风格与场景预设前。留空则不追加这段；全局固定附加提示词仍在所有生图最后追加。",
+  natural_language_photo_extra_prompt: "只作用于 rule_fast 规则快判入口，会作为英文 positive prompt 的附加短语接入。建议写英文画面短语，留空则不追加；全局固定附加提示词仍在所有生图最后追加。",
   comfyui_photo_wait_seconds: "本地 ComfyUI 工作流最多等待多久。超时后不会假装已经拍照。",
   enable_local_photo_load_guard: "开启后，本地 ComfyUI/SDGen 生图前读取 CPU/内存负载；负载偏高时延后本次主动计划，或在 auto 模式下改走在线图片 API。",
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
@@ -1760,6 +1763,7 @@ const configDescriptions = {
   qzone_emotional_vent_threshold: "触发公开心情动态所需的短期余波强度。",
   qzone_emotional_vent_cooldown_hours: "两次公开心情动态之间的最小间隔。",
   qzone_emotional_vent_probability: "达到条件后实际尝试公开心情动态的概率，按百分比填写。",
+  qzone_publish_style_prompt: "约束 QQ 空间说说口吻；留空使用内置轻量生活碎片风格，避免哲理化和文案腔。",
 };
 
 const featureSettingGroups = {
@@ -1856,9 +1860,9 @@ const featureSettingGroups = {
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
   enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
   enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
-  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
-  enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
+  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "qzone_publish_image_style_prompt", "enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
+  enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
+  enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "external_image_api_custom_headers", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_backup_external_image_api: ["backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers"],
@@ -2182,7 +2186,7 @@ const featureSettingSections = {
     {
       title: "生活说说",
       note: "根据状态、日程和日记余味低频发布公开生活动态。",
-      keys: ["enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
+      keys: ["enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
     },
     {
       title: "评论收件箱",
@@ -2382,6 +2386,8 @@ const featureSettingTypes = {
   tts_extra_prompt: { type: "textarea" },
   main_user_mention_voice_keywords: { type: "textarea" },
   main_user_mention_voice_prompt: { type: "textarea" },
+  qzone_publish_style_prompt: { type: "textarea" },
+  qzone_publish_image_style_prompt: { type: "textarea" },
   skill_growth_custom_skills: { type: "textarea" },
   QZONE_COOKIE: { type: "textarea" },
   news_sources: { type: "textarea" },
@@ -4116,7 +4122,7 @@ const setupGuideAdvancedItems = {
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
         { key: "enable_natural_language_photo_generation", type: "bool", kind: "feature", label: "允许规则快判生图/改图", description: "开启后，插件会在主链前直接接管高置信图片请求。", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" },
         { key: "natural_language_photo_generation_max_daily", type: "number", label: "规则快判每日上限", placeholder: "3", min: 0, showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
-        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "例如：保持角色外观一致，不生成现实人物照片。", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
+        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "keep character identity consistent, clean composition, no text, no watermark", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
       ],
     },
     {
@@ -4175,7 +4181,9 @@ const setupGuideAdvancedItems = {
         { key: "QZONE_COOKIE", type: "textarea", label: "QZONE_COOKIE", placeholder: "uin=...; p_skey=...; skey=...", description: "自动获取失败或认证暂停时填写；需要包含 uin/p_uin 与 p_skey 或 skey。" },
         { key: "enable_qzone_life_publish", type: "bool", kind: "feature", label: "生活说说发布", description: "会真实发布到空间，谨慎开启。" },
         { key: "qzone_life_publish_min_interval_hours", type: "number", label: "生活说说最小间隔小时", placeholder: "12", min: 1 },
+        { key: "qzone_publish_style_prompt", type: "textarea", label: "说说风格提示词", placeholder: "例如：像普通 QQ 空间碎碎念，短句、口语、少一点，不要哲理和总结人生。", description: "留空使用内置轻量生活碎片风格。" },
         { key: "enable_qzone_generated_image_publish", type: "bool", kind: "feature", label: "说说自动配图", description: "发布前生成配图。" },
+        { key: "qzone_publish_image_style_prompt", type: "textarea", label: "空间配图提示词", placeholder: "例如：不要频繁镜前自拍；优先生活物件、路上光影、第一视角手部、侧脸或背影随拍。", description: "留空使用内置多构图生活图策略。" },
         { key: "enable_qzone_comment_inbox", type: "bool", kind: "feature", label: "评论收件箱回复", description: "会处理空间评论。" },
         { key: "qzone_comment_inbox_interval_minutes", type: "number", label: "评论检查间隔分钟", placeholder: "30", min: 1 },
       ],
@@ -7490,7 +7498,7 @@ function troubleshootingChainStepsMarkup(stepsRaw) {
     <details class="chain-test-steps">
       <summary>查看链路阶段</summary>
       ${steps.map((step) => `
-        <div class="${escapeHtml(step.status || "info")}">
+        <div class="chain-test-step ${escapeHtml(step.status || "info")}">
           <b>${escapeHtml(step.name || "-")}</b>
           <span>${escapeHtml(step.detail || "")}</span>
         </div>
@@ -7565,7 +7573,7 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
     return `
       <section class="troubleshooting-chain-test info">
         <div>
-          <b>最近生图提示词</b>
+          <b>最近提交给生图后端的提示词</b>
           <p>暂无真实生图记录；运行一次主动拍照、每日穿搭、自然语言生图或生图排障后会显示。</p>
         </div>
       </section>
@@ -7574,9 +7582,9 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
   return `
     <section class="troubleshooting-chain-test info">
       <div>
-        <b>最近生图提示词</b>
-        <p>展示最近 ${escapeHtml(String(items.length))} 次真实生图调用，便于排查构图、模型、参考图和后端回退问题。</p>
-        <details class="chain-test-steps chain-test-preview">
+        <b>最近提交给生图后端的提示词</b>
+        <p>展示最近 ${escapeHtml(String(items.length))} 次真实生图调用；内容已包含场景预设、自拍场景约束和固定附加提示词，不是提示词模型的上游输入。</p>
+        <details class="chain-test-steps chain-test-preview photo-prompt-history">
           <summary>查看最近生图记录</summary>
           ${items.map((item) => {
             const meta = [
@@ -7592,16 +7600,19 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
               item.elapsed_ms ? `${item.elapsed_ms}ms` : "",
               item.time || "",
               item.trace ? `trace ${item.trace}` : "",
-            ].filter(Boolean).join(" · ");
+            ].filter(Boolean);
+            const promptText = String(item.prompt || item.prompt_preview || "").trim();
             return `
-              <div class="chain-test-preview-section">
-                <b>${escapeHtml(meta || "生图记录")}</b>
-                ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
-                ${item.caption ? `<small>附言：${escapeHtml(item.caption)}</small>` : ""}
-                ${item.path ? `<small class="path">${escapeHtml(item.path)}</small>` : ""}
-                ${item.reference_path ? `<small class="path">参考图：${escapeHtml(item.reference_path)}</small>` : ""}
-                <p>${escapeHtml(item.prompt || item.prompt_preview || "")}</p>
-              </div>
+              <article class="photo-prompt-record">
+                <div class="photo-prompt-meta">
+                  ${(meta.length ? meta : ["生图记录"]).map((part) => `<span>${escapeHtml(part)}</span>`).join("")}
+                </div>
+                ${item.note ? `<p class="photo-prompt-note">${escapeHtml(item.note)}</p>` : ""}
+                ${item.caption ? `<small class="photo-prompt-caption">附言：${escapeHtml(item.caption)}</small>` : ""}
+                ${item.path ? `<small class="path photo-prompt-path">输出：${escapeHtml(item.path)}</small>` : ""}
+                ${item.reference_path ? `<small class="path photo-prompt-path">参考图：${escapeHtml(item.reference_path)}</small>` : ""}
+                <pre class="photo-prompt-text">${escapeHtml(promptText || "暂无提示词内容")}</pre>
+              </article>
             `;
           }).join("")}
         </details>
@@ -8180,8 +8191,9 @@ function horizontalBars(data, total) {
 
 function renderTokens() {
   const stats = state.tokenStats || {};
-  const scope = tokenScopeData(stats);
-  const totals = scope.totals || {};
+  const source = tokenSelectedScope(stats);
+  const scope = source.scope || {};
+  const totals = source.totals || {};
   const totalTokens = Number(totals.total_tokens || 0);
   const calls = Number(totals.calls || 0);
   const errors = Number(totals.errors || 0);
@@ -8190,10 +8202,7 @@ function renderTokens() {
   const cacheReadTokens = Number(totals.cache_read_tokens || 0);
   const cacheWriteTokens = Number(totals.cache_write_tokens || 0);
   const cachedRatio = Number(totals.cached_ratio || 0);
-  const externalScope = externalTokenScopeData(stats, scope);
-  const memoryPluginScope = memoryPluginTokenScopeData(stats, scope);
-  const externalTokens = Number(externalScope?.totals?.total_tokens || 0);
-  const memoryPluginTokens = Number(memoryPluginScope?.totals?.total_tokens || 0);
+  const comparison = tokenSourceComparison(stats, source);
   const budget = stats.budget || {};
   const dailyLimit = Number(budget.limit || 0);
   const dailyUsed = Number(budget.used || 0);
@@ -8204,17 +8213,16 @@ function renderTokens() {
   const tokenLoadingNote = state.tokenStatsPartial
     ? `<div class="empty small">已先显示总览中的 Token 摘要，正在加载完整明细...</div>`
     : (!state.tokenStats && !state.lazyLoaded.tokenStats ? `<div class="empty small">正在加载 Token 统计...</div>` : "");
-  renderTokenToolbar(stats);
-  const showHourlyTrend = state.tokenView === "total";
+  renderTokenToolbar(stats, source.dateRows || []);
+  renderTokenSourceVisibility(source);
+  const showHourlyTrend = state.tokenView === "total" && (source.hours || []).length > 0;
   const hourlyPanel = $("#tokenHourlyPanel");
   if (hourlyPanel) hourlyPanel.hidden = !showHourlyTrend;
   $("#tokenSummary").innerHTML = `${tokenLoadingNote}${tokenSummaryBoard({
+    source,
     scope,
-    externalScope,
-    memoryPluginScope,
     totalTokens,
-    externalTokens,
-    memoryPluginTokens,
+    comparison,
     totals,
     calls,
     errors,
@@ -8234,33 +8242,233 @@ function renderTokens() {
     proactiveMessages: exemptUsed,
   })}`;
 
-  renderTokenChart("#tokenProviderChart", scope.providers || [], "暂无 Provider 消耗数据", (item) => item.key || "default");
-  renderTokenChart("#tokenTaskChart", scope.tasks || [], "暂无任务消耗数据", (item) => tokenTaskLabel(item.key));
+  renderTokenChart("#tokenProviderChart", source.providers || [], `暂无${source.shortLabel} Provider 消耗数据`, (item) => item.key || "default");
+  renderTokenChart(
+    "#tokenTaskChart",
+    source.chartSecondaryRows || source.tasks || [],
+    source.secondaryChartEmpty || `暂无${source.shortLabel}任务消耗数据`,
+    source.secondaryChartLabeler || ((item) => tokenTaskLabel(item.key)),
+  );
   if (showHourlyTrend) {
-    renderTokenHourlyChart(scope.hours || []);
+    renderTokenHourlyChart(source.hours || []);
   } else {
     $("#tokenHourlyChart").innerHTML = "";
   }
-  renderTokenDailyChart(stats.by_day || []);
-  renderTokenDailyTable(stats.by_day_detail || stats.by_day || []);
-  renderTokenProviderTable(scope.providers || []);
-  renderTokenTaskTable(scope.tasks || []);
-  renderTokenRecentTable(scope.recent || []);
-  renderTokenExternalSessionTable(externalScope.sessions || []);
-  renderTokenExternalRecentTable(externalScope.recent || []);
-  renderTokenMemoryPluginSummary(memoryPluginScope, stats.memory_plugin || {});
-  renderTokenMemoryPluginTaskTable(memoryPluginScope.tasks || [], memoryPluginScope.available !== false);
-  renderTokenMemoryPluginProviderTable(memoryPluginScope.providers || [], memoryPluginScope.available !== false);
-  renderTokenMemoryPluginRecentTable(memoryPluginScope.recent || [], memoryPluginScope.available !== false);
+  renderTokenDailyChart(source.dateRows || []);
+  renderTokenDailyTable(source.dateRows || []);
+  renderTokenProviderTable(source.providers || []);
+  renderTokenTaskTable(source.tasks || [], source.source);
+  renderTokenRecentTable(source.recent || [], source.source);
+  renderTokenExternalSessionTable(source.sessions || []);
+  renderTokenExternalRecentTable(source.recent || []);
+  renderTokenMemoryPluginSummary(source.source === "memory" ? scope : { available: false }, stats.memory_plugin || {});
+  renderTokenMemoryPluginTaskTable(source.source === "memory" ? (source.tasks || []) : [], source.source === "memory" && source.available !== false);
+  renderTokenMemoryPluginProviderTable(source.source === "memory" ? (source.providers || []) : [], source.source === "memory" && source.available !== false);
+  renderTokenMemoryPluginRecentTable(source.source === "memory" ? (source.recent || []) : [], source.source === "memory" && source.available !== false);
+}
+
+function normalizedTokenSource(value = state.tokenSource) {
+  const source = String(value || "companion").trim().toLowerCase();
+  return ["companion", "memory", "main"].includes(source) ? source : "companion";
+}
+
+function ensureTokenDateForRows(rows, today) {
+  const dates = (Array.isArray(rows) ? rows : []).map((item) => String(item.key || "")).filter(Boolean);
+  if (!state.tokenDate || !dates.includes(state.tokenDate)) {
+    state.tokenDate = dates.includes(today) ? today : (dates[dates.length - 1] || today);
+  }
+  return dates;
+}
+
+function tokenSelectedScope(stats) {
+  const source = normalizedTokenSource();
+  state.tokenSource = source;
+  const view = state.tokenView || "today";
+  const today = stats.budget?.day || todayKeyLocal();
+  if (source === "memory") return tokenMemorySourceScope(stats, view, today);
+  if (source === "main") return tokenMainSourceScope(stats, view, today);
+  return tokenCompanionSourceScope(stats, view, today);
+}
+
+function tokenCompanionSourceScope(stats, view, today) {
+  const dayRows = stats.by_day_detail || stats.by_day || [];
+  ensureTokenDateForRows(dayRows, today);
+  const scope = tokenScopeData(stats);
+  return {
+    source: "companion",
+    shortLabel: "陪伴插件",
+    title: "陪伴插件 Token",
+    description: "本页统计陪伴插件内部模型任务，今日限额只作用于这一侧。",
+    scope,
+    totals: scope.totals || {},
+    providers: scope.providers || [],
+    tasks: scope.tasks || [],
+    dateRows: dayRows,
+    hours: scope.hours || [],
+    recent: scope.recent || [],
+    available: true,
+  };
+}
+
+function tokenMemorySourceScope(stats, view, today) {
+  const plugin = stats.memory_plugin || {};
+  const displayName = plugin.display_name || "记忆插件";
+  const dayRows = plugin.by_day_detail || plugin.by_day || [];
+  ensureTokenDateForRows(dayRows, today);
+  const available = plugin.available !== false;
+  if (view === "total") {
+    return {
+      source: "memory",
+      shortLabel: displayName,
+      title: `${displayName} Token`,
+      description: "只读展示记忆插件自身模型消耗，不计入陪伴插件每日限额。",
+      scope: {
+        mode: "total",
+        label: `${displayName}累计`,
+        displayName,
+        available,
+        totals: plugin.totals || {},
+      },
+      totals: plugin.totals || {},
+      providers: plugin.by_provider || [],
+      tasks: plugin.by_task || [],
+      dateRows: dayRows,
+      hours: plugin.by_hour || [],
+      recent: plugin.recent || [],
+      available,
+      unavailableReason: plugin.reason || "",
+    };
+  }
+  const selectedDay = view === "date" ? state.tokenDate : today;
+  const day = dayRows.find((item) => String(item.key || "") === selectedDay) || { key: selectedDay };
+  return {
+    source: "memory",
+    shortLabel: displayName,
+    title: selectedDay === today ? `${displayName}今日 Token` : `${displayName} ${selectedDay}`,
+    description: "只读展示记忆插件自身模型消耗，不计入陪伴插件每日限额。",
+    scope: {
+      mode: view,
+      label: selectedDay === today ? `${displayName}今日` : `${displayName}同日`,
+      displayName,
+      available,
+      totals: day,
+    },
+    totals: day,
+    providers: day.providers || [],
+    tasks: day.tasks || [],
+    dateRows: dayRows,
+    hours: (plugin.by_hour || []).filter((item) => String(item.key || "").startsWith(`${selectedDay}T`)),
+    recent: (plugin.recent || []).filter((item) => recentItemDayKey(item) === selectedDay),
+    available,
+    unavailableReason: plugin.reason || "",
+  };
+}
+
+function tokenMainSourceScope(stats, view, today) {
+  const external = stats.external || {};
+  const dayRows = external.by_day_detail || external.by_day || [];
+  ensureTokenDateForRows(dayRows, today);
+  if (view === "total") {
+    return {
+      source: "main",
+      shortLabel: "LLM 主链",
+      title: "LLM 主链 Token",
+      description: "AstrBot 普通私聊/群聊主回复链路统计，独立于陪伴插件内部任务。",
+      scope: { mode: "total", label: "LLM 主链累计", totals: external.totals || {} },
+      totals: external.totals || {},
+      providers: external.by_provider || [],
+      tasks: external.by_task || [],
+      sessions: external.by_session || [],
+      dateRows: dayRows,
+      hours: external.by_hour || [],
+      recent: external.recent || [],
+      chartSecondaryRows: external.by_session || [],
+      secondaryChartEmpty: "暂无主链会话消耗数据",
+      secondaryChartLabeler: (item) => tokenSessionLabel(item.key),
+      available: true,
+    };
+  }
+  const selectedDay = view === "date" ? state.tokenDate : today;
+  const day = dayRows.find((item) => String(item.key || "") === selectedDay) || { key: selectedDay };
+  return {
+    source: "main",
+    shortLabel: "LLM 主链",
+    title: selectedDay === today ? "LLM 主链今日 Token" : `LLM 主链 ${selectedDay}`,
+    description: "AstrBot 普通私聊/群聊主回复链路统计，独立于陪伴插件内部任务。",
+    scope: { mode: view, label: selectedDay === today ? "LLM 主链今日" : "LLM 主链同日", totals: day },
+    totals: day,
+    providers: day.providers || [],
+    tasks: day.tasks || [],
+    sessions: day.sessions || [],
+    dateRows: dayRows,
+    hours: (external.by_hour || []).filter((item) => String(item.key || "").startsWith(`${selectedDay}T`)),
+    recent: (external.recent || []).filter((item) => recentItemDayKey(item) === selectedDay),
+    chartSecondaryRows: day.sessions || [],
+    secondaryChartEmpty: "暂无主链会话消耗数据",
+    secondaryChartLabeler: (item) => tokenSessionLabel(item.key),
+    available: true,
+  };
+}
+
+function tokenSourceComparison(stats, currentSource = {}) {
+  const memory = stats.memory_plugin || {};
+  const main = stats.external || {};
+  const view = state.tokenView || "today";
+  const today = stats.budget?.day || todayKeyLocal();
+  const selectedDay = view === "date" ? state.tokenDate : today;
+  const pickTotals = (root, dayRows) => {
+    if (view === "total") return root?.totals || {};
+    const rows = Array.isArray(dayRows) ? dayRows : [];
+    return rows.find((item) => String(item.key || "") === selectedDay) || { key: selectedDay };
+  };
+  return [
+    ["陪伴插件", pickTotals(stats, stats.by_day_detail || stats.by_day || [])],
+    [memory.display_name || "记忆插件", memory.available === false ? null : pickTotals(memory, memory.by_day_detail || memory.by_day || [])],
+    ["LLM 主链", pickTotals(main, main.by_day_detail || main.by_day || [])],
+  ].map(([label, totals]) => ({
+    label: currentSource.source === "companion" && label === "陪伴插件"
+      ? "当前来源"
+      : currentSource.source === "memory" && label === (memory.display_name || "记忆插件")
+        ? "当前来源"
+        : currentSource.source === "main" && label === "LLM 主链"
+          ? "当前来源"
+          : label,
+    value: totals ? Number(totals.total_tokens || 0) : null,
+  }));
+}
+
+function renderTokenSourceVisibility(source) {
+  const sourceKey = source.source || "companion";
+  document.querySelectorAll("[data-token-source]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.tokenSource === sourceKey);
+  });
+  const setText = (selector, text) => {
+    const node = $(selector);
+    if (node) node.textContent = text;
+  };
+  setText("#tokenProviderChartTitle", `${source.shortLabel} Provider 排行`);
+  setText("#tokenTaskChartTitle", sourceKey === "main" ? "主链会话排行" : `${source.shortLabel}任务排行`);
+  setText("#tokenDailyChartTitle", `${source.shortLabel}每日统计`);
+  setText("#tokenDailyTableTitle", `${source.shortLabel}每日明细`);
+  setText("#tokenProviderTableTitle", `${source.shortLabel} Provider 明细`);
+  setText("#tokenTaskTableTitle", sourceKey === "main" ? "主链任务明细" : `${source.shortLabel}任务明细`);
+  setText("#tokenRecentTableTitle", `${source.shortLabel}最近调用`);
+  const showMain = sourceKey === "main";
+  const showMemory = sourceKey === "memory";
+  $("#tokenTaskTableCard").hidden = false;
+  $("#tokenRecentTableCard").hidden = showMain;
+  $("#tokenExternalSessionCard").hidden = !showMain;
+  $("#tokenExternalRecentCard").hidden = !showMain;
+  $("#tokenMemoryPluginSummaryCard").hidden = !showMemory;
+  $("#tokenMemoryPluginDetailCard").hidden = true;
+  $("#tokenMemoryPluginRecentCard").hidden = true;
 }
 
 function tokenSummaryBoard({
+  source,
   scope,
-  externalScope,
-  memoryPluginScope,
   totalTokens,
-  externalTokens,
-  memoryPluginTokens,
+  comparison,
   totals,
   calls,
   errors,
@@ -8281,30 +8489,32 @@ function tokenSummaryBoard({
 }) {
   const avgTokens = Math.round(Number(totals.avg_tokens || 0));
   const avgLatency = Math.round(Number(totals.avg_latency_ms || 0));
+  const isCompanion = source?.source === "companion";
   const hardPercent = dailyLimit > 0 ? Math.min(100, Math.round((dailyUsed / Math.max(1, dailyLimit)) * 100)) : 0;
   const remainingValue = dailyRemaining == null
     ? (dailyLimit > 0 ? Math.max(0, dailyLimit - dailyUsed) : null)
     : dailyRemaining;
   const softUsed = softEnabled && softLimit > 0 && softRemaining != null ? Math.max(0, softLimit - softRemaining) : 0;
   const softPercent = softEnabled && softLimit > 0 ? Math.min(100, Math.round((softUsed / Math.max(1, softLimit)) * 100)) : 0;
-  const scopeNote = scope.isToday
+  const scopeNote = isCompanion && scope.isToday
     ? (dailyLimit > 0 ? `硬限额 ${formatCompactNumber(dailyLimit)} · 剩 ${formatCompactNumber(remainingValue)}` : "今日不限额")
     : `${scope.mode === "total" ? "全部历史" : "选定日期"} · ${formatNumber(calls)} 次调用`;
   const hasKnownCacheStats = totalTokens > 0 && estimatedRatio < 1;
   return `
     <section class="token-summary-board">
       <article class="token-primary-card">
-        <span>${escapeHtml(scope.label)}</span>
+        <span>${escapeHtml(source?.title || scope.label)}</span>
         <b>${escapeHtml(formatNumber(totalTokens))}</b>
+        <small>${escapeHtml(source?.description || scopeNote)}</small>
         <small>${escapeHtml(scopeNote)}</small>
-        ${scope.isToday && dailyLimit > 0 ? `<div class="token-progress"><i style="width:${hardPercent}%"></i></div>` : ""}
+        ${isCompanion && scope.isToday && dailyLimit > 0 ? `<div class="token-progress"><i style="width:${hardPercent}%"></i></div>` : ""}
       </article>
-      <article class="token-budget-card">
+      <article class="token-budget-card ${isCompanion ? "" : "is-source-note"}">
         <div class="token-budget-head">
-          <span>预算</span>
-          <b>${escapeHtml(scope.isToday && dailyLimit > 0 ? `${hardPercent}%` : "概览")}</b>
+          <span>${escapeHtml(isCompanion ? "预算" : "来源说明")}</span>
+          <b>${escapeHtml(isCompanion && scope.isToday && dailyLimit > 0 ? `${hardPercent}%` : source?.shortLabel || "概览")}</b>
         </div>
-        <div class="token-budget-lines">
+        ${isCompanion ? `<div class="token-budget-lines">
           ${tokenBudgetLine("今日上限", dailyLimit > 0 ? formatCompactNumber(dailyLimit) : "不限", hardPercent, scope.isToday && dailyLimit > 0)}
           ${tokenBudgetLine("今日剩余", remainingValue == null ? "不限" : formatCompactNumber(remainingValue), dailyLimit > 0 ? 100 - hardPercent : 0, scope.isToday && dailyLimit > 0)}
           ${tokenBudgetLine(
@@ -8314,12 +8524,11 @@ function tokenSummaryBoard({
             softEnabled && softLimit > 0,
             softActive ? "warn" : "",
           )}
-        </div>
+        </div>` : `<p class="token-source-note">${escapeHtml(source?.source === "memory" ? "记忆插件统计来自桥接接口，仅用于观察记忆整理、检索和索引成本。" : "LLM 主链统计来自 AstrBot 普通回复请求，不参与陪伴插件内部任务排行。")}</p>`}
       </article>
       <div class="token-metric-grid">
-        ${tokenMetricCard(externalScope.label, formatNumber(externalTokens))}
-        ${tokenMetricCard(memoryPluginScope.label, memoryPluginScope.available === false ? "未接入" : formatNumber(memoryPluginTokens))}
-        ${tokenMetricCard("主动消息", formatCompactNumber(proactiveMessages))}
+        ${(comparison || []).map((item) => tokenMetricCard(item.label, item.value == null ? "未接入" : formatNumber(item.value))).join("")}
+        ${isCompanion ? tokenMetricCard("主动消息", formatCompactNumber(proactiveMessages)) : ""}
         ${hasKnownCacheStats ? tokenMetricCard("缓存命中", `${formatCompactNumber(cachedTokens || cacheReadTokens)} · ${Math.round(cachedRatio * 100)}%`) : ""}
         ${cacheReadTokens > 0 || cacheWriteTokens > 0 ? tokenMetricCard("缓存读 / 写", `${formatCompactNumber(cacheReadTokens)} / ${formatCompactNumber(cacheWriteTokens)}`) : ""}
         ${tokenMetricCard("调用次数", formatNumber(calls))}
@@ -8442,8 +8651,8 @@ function tokenScopeData(stats) {
   };
 }
 
-function renderTokenToolbar(stats) {
-  const dayRows = stats.by_day_detail || stats.by_day || [];
+function renderTokenToolbar(stats, sourceDateRows = null) {
+  const dayRows = Array.isArray(sourceDateRows) ? sourceDateRows : (stats.by_day_detail || stats.by_day || []);
   const dates = dayRows.map((item) => String(item.key || "")).filter(Boolean);
   const fallbackDate = todayKeyLocal();
   const select = $("#tokenDateSelect");
@@ -8455,6 +8664,9 @@ function renderTokenToolbar(stats) {
   }
   document.querySelectorAll("[data-token-view]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.tokenView === state.tokenView);
+  });
+  document.querySelectorAll("[data-token-source]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.tokenSource === normalizedTokenSource());
   });
 }
 
@@ -8665,6 +8877,83 @@ function tokenTopList(rows, labeler) {
   return rows.slice(0, 3).map((item) => `${labeler(item.key)} ${formatCompactNumber(item.total_tokens)}`).join(" / ");
 }
 
+function tokenSessionLabel(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "-";
+  const parsed = parseTokenSessionId(text);
+  if (parsed.type === "private") {
+    const user = state.users.find((item) => tokenIdentityMatches(item, parsed.id, text, "user_id"));
+    const name = user?.display_name || user?.nickname || user?.name || parsed.id || compactTokenSession(text);
+    const suffix = parsed.id && !String(name).includes(parsed.id) ? ` · ${tailId(parsed.id)}` : "";
+    return `私聊 · ${name}${suffix}`;
+  }
+  if (parsed.type === "group") {
+    const group = state.groups.find((item) => tokenIdentityMatches(item, parsed.id, text, "group_id"));
+    const name = group?.display_name || group?.name || group?.group_name || group?.title || parsed.id || compactTokenSession(text);
+    const suffix = parsed.id && !String(name).includes(parsed.id) ? ` · ${tailId(parsed.id)}` : "";
+    return `群聊 · ${name}${suffix}`;
+  }
+  return compactTokenSession(text);
+}
+
+function parseTokenSessionId(text) {
+  const raw = String(text || "");
+  const privateMatch = raw.match(/(?:^|:)(?:FriendMessage|PrivateMessage|Friend|Private):([^:]+)/i);
+  if (privateMatch) return { type: "private", id: cleanTokenSessionId(privateMatch[1]) };
+  const groupMatch = raw.match(/(?:^|:)(?:GroupMessage|Group):([^:]+)/i);
+  if (groupMatch) return { type: "group", id: cleanTokenSessionId(groupMatch[1]) };
+  const lower = raw.toLowerCase();
+  const numbers = raw.match(/\d{5,}/g) || [];
+  if (lower.includes("friend") || lower.includes("private")) return { type: "private", id: numbers[numbers.length - 1] || "" };
+  if (lower.includes("group")) return { type: "group", id: numbers[numbers.length - 1] || "" };
+  return { type: "", id: numbers[numbers.length - 1] || "" };
+}
+
+function cleanTokenSessionId(value) {
+  const text = String(value || "").trim();
+  const decoded = (() => {
+    try {
+      return decodeURIComponent(text);
+    } catch {
+      return text;
+    }
+  })();
+  const numeric = decoded.match(/\d{5,}/);
+  if (numeric) return numeric[0];
+  return decoded.replace(/^[^\w]+|[^\w]+$/g, "").slice(0, 80);
+}
+
+function tokenIdentityMatches(item, id, rawSession, idKey) {
+  if (!item || typeof item !== "object") return false;
+  const target = String(id || "").trim();
+  const raw = String(rawSession || "").toLowerCase();
+  const primary = String(item[idKey] || "").trim();
+  if (target && primary && primary === target) return true;
+  if (target && String(item.umo || "").includes(target)) return true;
+  if (primary && raw.includes(primary.toLowerCase())) return true;
+  const aliases = Array.isArray(item.alias_user_ids) ? item.alias_user_ids : [];
+  return Boolean(target && aliases.some((alias) => String(alias || "").trim() === target));
+}
+
+function compactTokenSession(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "-";
+  const parsed = parseTokenSessionId(raw);
+  if (parsed.id) {
+    if (parsed.type === "private") return `私聊 · ${tailId(parsed.id)}`;
+    if (parsed.type === "group") return `群聊 · ${tailId(parsed.id)}`;
+  }
+  const parts = raw.split(":").filter(Boolean);
+  const tail = parts.slice(-2).join(":") || raw;
+  return tail.length > 30 ? `${tail.slice(0, 14)}...${tail.slice(-10)}` : tail;
+}
+
+function tailId(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.length > 8 ? `*${text.slice(-4)}` : text;
+}
+
 function renderTokenRecentTable(rows) {
   $("#tokenRecentTable").innerHTML = tokenTable(
     ["时间", "任务", "Provider", "Token", "缓存", "延迟", "状态"],
@@ -8687,7 +8976,7 @@ function renderTokenExternalSessionTable(rows) {
     ["会话", "总 Token", "缓存", "调用", "失败", "平均延迟"],
     rows,
     (item) => [
-      item.key || "-",
+      tokenSessionLabel(item.key),
       formatNumber(item.total_tokens),
       tokenCacheText(item),
       formatNumber(item.calls),
@@ -8704,7 +8993,7 @@ function renderTokenExternalRecentTable(rows) {
     rows,
     (item) => [
       formatRecentTime(item.ts, item.time),
-      item.session || "-",
+      tokenSessionLabel(item.session),
       item.sender || "-",
       item.message_type === "private" ? "私聊" : (item.message_type === "group" ? "群聊" : "-"),
       item.provider || "default",
@@ -17970,6 +18259,12 @@ $("#resetTokenStatsBtn").addEventListener("click", async () => {
 document.querySelectorAll("[data-token-view]").forEach((button) => {
   button.addEventListener("click", () => {
     state.tokenView = button.dataset.tokenView || "today";
+    renderTokens();
+  });
+});
+document.querySelectorAll("[data-token-source]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.tokenSource = normalizedTokenSource(button.dataset.tokenSource);
     renderTokens();
   });
 });

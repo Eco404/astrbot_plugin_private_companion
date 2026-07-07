@@ -11,7 +11,7 @@ DEFAULT_REPLY_STYLE_PROMPT = (
     "当你需要解决复杂问题或进行详细说明时，可以无视这一要求。"
 )
 
-DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT = "画面干净清晰，构图自然，不要加入无关文字、水印、Logo 或多余说明。"
+DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT = "clean clear image, natural composition, no unrelated text, no watermark, no logo, no explanatory panels"
 
 # 日常计划文案 - 生活化JK口语
 DEFAULT_DAILY_PLAN_ITEMS = [

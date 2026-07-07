@@ -4552,6 +4552,25 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
             if not force and existing.get("date") == today:
                 return dict(existing)
+        lock = getattr(self, "_daily_outfit_photo_generation_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._daily_outfit_photo_generation_lock = lock
+        async with lock:
+            async with self._data_lock:
+                existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
+                if not force and existing.get("date") == today:
+                    return dict(existing)
+            return await self._ensure_daily_outfit_photo_unlocked(diary, force=force, today=today)
+
+    async def _ensure_daily_outfit_photo_unlocked(
+        self,
+        diary: dict[str, Any] | None = None,
+        *,
+        force: bool = False,
+        today: str = "",
+    ) -> dict[str, Any] | None:
+        today = today or _today_key()
         if not self.enable_photo_text_action:
             return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
         if not self._photo_text_available():
@@ -4658,66 +4677,237 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
     def _build_daily_outfit_photo_prompt(self, diary: dict[str, Any], *, memory_context: str = "") -> str:
         persona = self._daily_outfit_role_appearance_text()
         style_name, style_instruction = self._get_photo_style_instruction()
+        style_prompt = self._photo_style_prompt_en(style_name, style_instruction)
         state = self.data.get("daily_state", {}) if isinstance(getattr(self, "data", {}), dict) else {}
         weather = self._format_weather_for_prompt() if callable(getattr(self, "_format_weather_for_prompt", None)) else ""
         schedule_hint = self._daily_outfit_schedule_text()
+        state_visual = self._daily_outfit_visual_state_text(state if isinstance(state, dict) else {})
+        outfit_hint = self._daily_outfit_outfit_hint(schedule_hint=schedule_hint, weather=weather)
+        scene_hint = self._daily_outfit_scene_hint(state if isinstance(state, dict) else {}, schedule_hint=schedule_hint, weather=weather)
         visual_memory = ""
         visual_memory_getter = getattr(self, "_visual_photo_memory_context", None)
         if callable(visual_memory_getter):
             try:
-                visual_memory = visual_memory_getter(memory_context, limit=520)
+                visual_memory = visual_memory_getter(memory_context, limit=260)
             except Exception:
                 visual_memory = ""
         diary_hint = _single_line(
             (diary or {}).get("summary")
             or (diary or {}).get("share_seed")
             or (diary or {}).get("body"),
-            180,
+            80,
         )
         custom = _single_line(getattr(self, "daily_outfit_photo_prompt", ""), 220)
-        parts = [
-            "在今日日程生成后,生成一张角色今天的自拍式穿搭照片,用于私人陪伴插件拓展页左上角封面。",
-            f"角色外貌与身份线索：{persona or '参考当前人格设定与人设参考图,保持角色外观稳定。'}",
-            f"今日状态：{self._format_state_for_prompt(state if isinstance(state, dict) else {})}",
-            f"天气与时令：{weather or '按当前日期和日常生活氛围处理。'}",
-            f"今日日程穿搭依据：{schedule_hint or '没有明确日程时,按普通居家日常处理。'}",
-            "穿搭决策：优先服从日程里明确出现的衣服、外套、校服、睡衣、发夹、饰品、出门、上课、运动、雨天或居家线索；如果一天有多段活动,选最能代表白天主要生活/外出安排的一套,不要只按深夜睡前状态生成睡衣。",
-            f"补充生活余味：{diary_hint or '暂无额外余味,主要服从今日日程、天气和状态来决定当天搭配。'}",
-            (
-                "视觉连续性参考："
-                f"{visual_memory}。只作为衣着、地点、角色外观或画面风格参考；不要在最终图片中出现任何文字、标签或说明栏。"
-                if visual_memory
-                else ""
-            ),
-            "画面要求：角色本人必须露脸,头部、脸、发型和表情完整入镜；可以是半身、七分身或全身,但绝不能裁掉头、遮住脸或只拍衣服。衣服搭配要清楚,姿态自然,像今天顺手拍下来的 selfie outfit photo。",
-            "尺寸与安全区：按 1:1 方形头像/封面构图生成,角色的脸、头发、肩颈和主要穿搭都要落在画面中央安全区内,四周留出足够边距,缩进方形卡片时也不能裁脸或裁身体主体。",
-            "构图要求：主体居中或略偏中,脸部位于画面上半部但要和画面上边缘保持明显留白,肩颈和上半身自然可见；不要极近自拍、手臂占据前景、无头构图、背影、低头挡脸、书本/手机/头发遮脸、只拍身体局部、只拍裙子或外套。",
-            "不要出现用户、其他人物、文字、水印、Logo、奇怪手指、暴露或色情内容。负面构图：cropped head, headless, faceless, face hidden, extreme close-up, arm in foreground, body only, outfit only, back view。",
-            f"风格：{style_name}；{style_instruction}",
+        positive = [
+            "single character",
+            "daily outfit selfie",
+            "selfie outfit photo",
+            "solo",
+            "visible face",
+            "complete head and hair",
+            "clear eyes",
+            "natural expression",
+            "upper body to three-quarter body portrait",
+            "centered composition",
+            "1:1 square cover composition",
+            "safe margins around head and body",
+            "natural phone snapshot",
+            "soft natural light",
+            "clean background",
+            "lifelike daily atmosphere",
+            persona or "keep the face, hairstyle, hair color, eye color, and key traits consistent with the reference image",
+            outfit_hint,
+            scene_hint,
+            state_visual or "relaxed natural mood",
+            style_prompt,
         ]
+        if diary_hint:
+            positive.append(f"daily mood cue: {diary_hint}")
+        if visual_memory:
+            positive.append(f"visual continuity reference: {visual_memory}")
         if custom:
-            parts.append(f"额外穿搭偏好：{custom}")
-        return _single_line(" ".join(parts), 1400)
+            positive.append(f"additional outfit preference: {custom}")
+        negative = [
+            "cropped head",
+            "headless",
+            "faceless",
+            "face hidden",
+            "extreme close-up",
+            "arm in foreground",
+            "body only",
+            "outfit only",
+            "back view",
+            "cut off face",
+            "bad hands",
+            "extra fingers",
+            "text",
+            "caption",
+            "label",
+            "watermark",
+            "logo",
+            "other people",
+            "user in frame",
+            "private screen",
+            "nsfw",
+            "revealing outfit",
+        ]
+        prompt = (
+            "Positive prompt: "
+            + ", ".join(_single_line(part, 220) for part in positive if _single_line(part, 220))
+            + ". Negative prompt: "
+            + ", ".join(negative)
+            + "."
+        )
+        return _single_line(prompt, 1400)
+
+    def _photo_style_prompt_en(self, style_name: str, style_instruction: str = "") -> str:
+        name = _single_line(style_name, 40)
+        instruction = _single_line(style_instruction, 220)
+        if name == "二次元":
+            return "anime illustration style, clean detailed character art, soft colors, slice-of-life feeling"
+        if name == "真实":
+            return "realistic photography style, believable phone photo, natural lighting, realistic fabric details"
+        if instruction:
+            return instruction
+        return "consistent visual style, natural daily-life feeling"
+
+    def _daily_outfit_visual_state_text(self, state: dict[str, Any]) -> str:
+        fragments: list[str] = []
+        energy = _safe_int((state or {}).get("energy"), 70, 0, 100)
+        if energy < 40:
+            fragments.append("slightly sleepy, soft expression")
+        elif energy > 82:
+            fragments.append("fresh and energetic, bright eyes")
+        mood = _single_line((state or {}).get("mood_bias"), 20).replace("黏人", "粘人")
+        mood_map = {
+            "开心": "gentle happy mood",
+            "轻快": "light cheerful mood",
+            "柔和": "soft gentle mood",
+            "安静": "quiet calm mood",
+            "疲惫": "tired but gentle mood",
+            "困": "sleepy mood",
+            "困倦": "sleepy mood",
+            "低落": "subdued mood",
+            "敏感": "delicate sensitive mood",
+            "粘人": "soft attached mood",
+        }
+        if mood and mood not in {"平稳", "中性"}:
+            fragments.append(mood_map.get(mood, f"{mood} mood"))
+        conditions = (state or {}).get("conditions")
+        visual_tokens = ("雨", "风", "冷", "热", "困", "疲", "生理期", "感冒", "发烧", "头痛", "胃", "睡", "醒")
+        if isinstance(conditions, list):
+            for cond in conditions[:6]:
+                if not isinstance(cond, dict):
+                    continue
+                label = _single_line(cond.get("label") or cond.get("title") or cond.get("kind"), 30)
+                if label and any(token in label for token in visual_tokens):
+                    fragments.append(self._daily_outfit_condition_hint_en(label))
+                if len(fragments) >= 3:
+                    break
+        return _single_line(", ".join(dict.fromkeys(item for item in fragments if item)), 140)
+
+    def _daily_outfit_condition_hint_en(self, text: str) -> str:
+        value = _single_line(text, 60).lower()
+        if any(token in value for token in ("雨", "rain", "淋")):
+            return "rainy-day softness"
+        if any(token in value for token in ("风", "wind")):
+            return "slight wind-blown hair"
+        if any(token in value for token in ("冷", "寒", "snow")):
+            return "cold-weather outfit"
+        if any(token in value for token in ("热", "暑", "hot")):
+            return "light breathable outfit"
+        if any(token in value for token in ("困", "疲", "睡", "醒")):
+            return "sleepy gentle expression"
+        if any(token in value for token in ("生理期", "胃", "感冒", "发烧", "头痛")):
+            return "soft low-energy expression"
+        return _single_line(text, 60)
+
+    def _daily_outfit_scene_hint(self, state: dict[str, Any], *, schedule_hint: str = "", weather: str = "") -> str:
+        location = ""
+        try:
+            location = _single_line(self._current_location_state_text(state), 60)
+            coarse = _single_line(self._coarse_roleplay_location_text(location), 40)
+            location = coarse or location
+        except Exception:
+            location = ""
+        text = f"{schedule_hint} {weather}".lower()
+        if not location:
+            if any(token in text for token in ("上课", "教室", "学校", "校门", "放学", "自习")):
+                location = "school or commute-to-school setting"
+            elif any(token in text for token in ("出门", "路上", "街", "公交", "地铁", "下班", "回家")):
+                location = "outdoor street or commute setting"
+            elif any(token in text for token in ("家", "房间", "卧室", "起床", "午休", "睡")):
+                location = "home or bedroom setting"
+            else:
+                location = "daily-life setting"
+        else:
+            location = self._daily_outfit_location_hint_en(location)
+        weather_hint = self._daily_outfit_weather_visual_hint(weather)
+        return _single_line(", ".join(part for part in [location, weather_hint, "simple background, lived-in daily atmosphere"] if part), 180)
+
+    def _daily_outfit_location_hint_en(self, location: str) -> str:
+        text = _single_line(location, 80).lower()
+        if any(token in text for token in ("学校", "教室", "上课", "school", "classroom")):
+            return "school or classroom setting"
+        if any(token in text for token in ("家", "房间", "卧室", "home", "room", "bedroom")):
+            return "home or bedroom setting"
+        if any(token in text for token in ("工作", "office", "公司")):
+            return "workplace or office setting"
+        if any(token in text for token in ("外面", "路", "街", "通勤", "outside", "street")):
+            return "outdoor street or commute setting"
+        return _single_line(location, 80)
+
+    def _daily_outfit_weather_visual_hint(self, weather: str) -> str:
+        text = _single_line(weather, 200).lower()
+        if not text:
+            return ""
+        hints: list[str] = []
+        if any(token in text for token in ("雨", "阵雨", "雷", "storm", "rain")):
+            hints.append("rainy-day atmosphere, umbrella or damp ground, light jacket")
+        if any(token in text for token in ("风", "大风", "强对流", "wind")):
+            hints.append("windy feeling, slightly wind-blown hair and hem")
+        if any(token in text for token in ("冷", "降温", "低温", "寒", "snow")):
+            hints.append("cold weather, warm outerwear")
+        if any(token in text for token in ("热", "高温", "闷", "暑", "hot")):
+            hints.append("hot weather, light breathable clothes")
+        return _single_line(", ".join(dict.fromkeys(hints)), 140)
+
+    def _daily_outfit_outfit_hint(self, *, schedule_hint: str = "", weather: str = "") -> str:
+        text = f"{schedule_hint} {weather}".lower()
+        hints: list[str] = []
+        if any(token in text for token in ("校服", "上课", "教室", "学校", "高一", "自习", "放学")):
+            hints.append("neat school outfit or school-uniform inspired outfit")
+        if any(token in text for token in ("上班", "工作", "会议", "通勤")):
+            hints.append("clean daily commute outfit")
+        if any(token in text for token in ("运动", "跑步", "健身", "体育")):
+            hints.append("light sporty outfit")
+        if any(token in text for token in ("家", "房间", "午休", "整理", "起床")) and not hints:
+            hints.append("soft casual home outfit")
+        if any(token in text for token in ("睡衣", "睡前", "入睡", "刚醒")) and not any(token in text for token in ("上课", "上班", "出门", "通勤")):
+            hints.append("comfortable pajamas or loungewear")
+        weather_hint = self._daily_outfit_weather_visual_hint(weather)
+        if weather_hint:
+            hints.append(weather_hint)
+        if not hints:
+            hints.append("natural daily outfit, coordinated colors, clear clothing layers")
+        return _single_line(", ".join(dict.fromkeys(hints)), 180)
 
     def _daily_outfit_role_appearance_text(self) -> str:
         persona = str(getattr(self, "schedule_persona_prompt", "") or "")
         recognition = str(getattr(self, "private_image_self_recognition_hint", "") or "")
         labels = {
-            "姓名",
-            "种族",
-            "性别",
-            "识别点",
-            "外貌",
-            "主要识别点",
-            "发型发色",
-            "发色",
-            "发型",
-            "瞳色",
-            "眼睛",
-            "服饰风格",
-            "服装",
-            "衣着",
-            "职业/身份",
+            "性别": "gender",
+            "识别点": "key visual traits",
+            "外貌": "appearance",
+            "主要识别点": "key visual traits",
+            "发型发色": "hairstyle and hair color",
+            "发色": "hair color",
+            "发型": "hairstyle",
+            "瞳色": "eye color",
+            "眼睛": "eyes",
+            "服饰风格": "clothing style",
+            "服装": "clothing",
+            "衣着": "outfit",
         }
         parts: list[str] = []
         for line in persona.replace("\r", "\n").split("\n"):
@@ -4727,10 +4917,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             label, value = text.split("：", 1) if "：" in text else text.split(":", 1)
             label = label.strip()
             value = _single_line(value, 160)
-            if label in labels and value:
-                parts.append(f"{label}：{value}")
+            english_label = labels.get(label)
+            if english_label and value:
+                parts.append(f"{english_label}: {value}")
         if recognition:
-            parts.append(f"补充识别线索：{_single_line(recognition, 180)}")
+            parts.append(f"additional visual recognition notes: {_single_line(recognition, 180)}")
         seen: set[str] = set()
         unique = []
         for item in parts:
@@ -4738,7 +4929,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 continue
             seen.add(item)
             unique.append(item)
-        return _single_line("；".join(unique), 620)
+        return _single_line(", ".join(unique), 620)
 
     def _choose_photo_workflow_name(self, kind: str) -> str:
         normalized = str(kind or "").strip().lower()
@@ -4784,7 +4975,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             f"backup_external={self._backup_external_photo_available()} "
             f"backup_platform={_single_line(getattr(self, 'backup_external_image_api_platform', ''), 30) or '-'} "
             f"backup_model={_single_line(getattr(self, 'backup_external_image_api_model', ''), 80) or '-'} "
-            f"backup_base={backup_base or '-'}"
+            f"backup_base={backup_base or '-'} "
+            f"backup_note={_single_line(self._backup_external_photo_unavailable_note(), 80) or '-'}"
         )
 
     def _record_recent_photo_generation(
@@ -4880,7 +5072,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return prompt
         if fixed in prompt:
             return _single_line(prompt, 1800)
-        return _single_line(f"{prompt}\n\n【固定生图提示词】\n{fixed}".strip(), 1800)
+        return _single_line(f"{prompt}\n\nAdditional fixed prompt: {fixed}".strip(), 1800)
 
     def _photo_generation_selfie_schedule_scene_hint(self) -> str:
         plan = self.data.get("daily_plan", {}) if isinstance(getattr(self, "data", {}), dict) else {}
@@ -4947,47 +5139,47 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return _single_line(prompt, 1800), ""
         outfit_reference = self._daily_outfit_reference_image_path()
         outfit_hint = (
-            "本次自拍参考图会优先使用今日穿搭图,画面中的衣服、配饰和整体穿搭要沿用今日穿搭。"
+            "use today's outfit reference image; keep the clothes, accessories, and overall outfit consistent"
             if outfit_reference
-            else "如已有今日穿搭或人设参考图,画面中的衣服、配饰和角色外观要保持一致。"
+            else "keep the character face, hairstyle, outfit, and accessories consistent with the available reference image"
         )
         extra = (
-            "【自拍当前场景约束】"
-            f"{outfit_hint}"
-            f"自拍必须发生在当前日程对应地点/场景中：{scene_hint}。"
-            "不要生成棚拍、无关房间、默认背景或与当前日程冲突的地点；除非当前日程确实在家里/房间,否则不要默认室内卧室。"
+            "Current selfie scene constraint: "
+            f"{outfit_hint}; "
+            f"place the selfie in the current schedule/location context: {scene_hint}; "
+            "avoid studio backdrops, unrelated bedrooms, default empty rooms, or locations that conflict with the current schedule."
         )
         return _single_line(f"{prompt}\n\n{extra}".strip(), 1800), scene_hint
 
     def _builtin_photo_generation_scene_presets(self) -> dict[str, str]:
         return {
             "角色自拍": (
-                "角色本人出镜的自然自拍；必须露脸,脸、头发、表情和肩颈完整清晰；"
-                "像手机随手拍,构图有生活感,避免裁头、遮脸、背影、只拍身体或手臂占据前景。"
+                "natural casual selfie, single character, face visible, clear face, hair, expression, neck and shoulders, "
+                "phone snapshot feeling, lifelike composition, no cropped head, no hidden face, no back view, no body-only framing"
             ),
             "COS自拍": (
-                "角色穿着用户要求的 cosplay / 主题服装自拍；保留角色自身脸部、发色、瞳色和主要识别点；"
-                "服装主题明确但不过度暴露,画面像线下活动或房间试装自拍。"
+                "cosplay themed selfie, keep the character's own face, hair color, eye color, and key visual traits, "
+                "clear costume theme, tasteful outfit, convention snapshot or room fitting photo feeling"
             ),
             "镜前穿搭": (
-                "镜前或半身穿搭照片；衣服、外套、饰品和配色要清楚,角色脸部完整可见；"
-                "主体在方形安全区内,不要只拍衣服局部。"
+                "mirror outfit photo or half-body outfit portrait, clear clothes, jacket, accessories and color palette, "
+                "complete visible face, subject inside square safe area, not outfit-only, not clothing close-up"
             ),
             "头像特写": (
-                "适合头像的脸部特写；头发、眼睛和表情清晰,背景简洁,脸部居中且四周留白；"
-                "不要加文字、水印或复杂道具。"
+                "avatar-ready face close-up, clear hair, eyes and expression, clean background, centered face, enough margin, "
+                "no text, no watermark, no cluttered props"
             ),
             "房间日常": (
-                "室内生活碎片照片；桌面、小物、书本、杯子、窗边或床边等具体物件自然入镜；"
-                "不要堆太多主体,只保留一个清楚的生活切口。"
+                "indoor slice-of-life photo, natural desk objects, books, cup, window side or bedside details, "
+                "one clear subject, calm lived-in atmosphere, avoid overcrowded composition"
             ),
             "可拍画面": (
-                "像随手拍给熟人的一张具体画面；主体明确,光线自然,不写成空泛风景或天气播报；"
-                "画面里不要出现隐私屏幕、真实个人信息、无关文字和水印。"
+                "casual photo shared with a close friend, concrete visual subject, natural lighting, not a vague landscape, "
+                "not a weather report, no private screen, no real personal information, no unrelated text, no watermark"
             ),
             "表情包场景": (
-                "聊天可用的单张表情包或贴纸感画面；情绪明确、构图简洁、角色可爱夸张但仍可识别；"
-                "如需文字,只使用用户明确要求的短中文。"
+                "single sticker-like image for chat, clear emotion, simple composition, cute exaggerated expression, "
+                "character remains recognizable, only include short text if the user explicitly requested it"
             ),
         }
 
@@ -5039,16 +5231,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 names.append("表情包场景")
             elif re.search(r"\bcos\b|cosplay|角色扮演|扮成|神灯|制服|女仆|巫女|魔法少女", text, flags=re.I):
                 names.append("COS自拍")
-            elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "镜前")):
+            elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "镜前", "outfit", "clothes", "jacket", "uniform", "skirt", "mirror")):
                 names.append("镜前穿搭")
-            elif any(token in text for token in ("头像", "特写", "大头")):
+            elif any(token in text for token in ("头像", "特写", "大头", "avatar", "close-up", "closeup", "profile picture")):
                 names.append("头像特写")
             else:
                 names.append("角色自拍")
         else:
             if any(token in text for token in ("表情包", "贴纸", "sticker", "meme")):
                 names.append("表情包场景")
-            elif any(token in text for token in ("房间", "桌", "书", "杯", "床", "窗边", "室内")):
+            elif any(token in text for token in ("房间", "桌", "书", "杯", "床", "窗边", "室内", "room", "desk", "book", "cup", "bed", "window", "indoor")):
                 names.append("房间日常")
             else:
                 names.append("可拍画面")
@@ -5064,11 +5256,22 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         for name in names:
             content = _single_line(presets.get(name), 900)
             if content and content not in prompt:
-                blocks.append(f"{name}: {content}")
+                blocks.append(f"{self._photo_generation_scene_preset_label_en(name)}: {content}")
         if not blocks:
             return _single_line(prompt, 1800), names
-        merged = f"{prompt}\n\n【生图场景预设】\n" + "\n".join(blocks)
+        merged = f"{prompt}\n\nScene preset: " + "; ".join(blocks)
         return _single_line(merged, 1800), names
+
+    def _photo_generation_scene_preset_label_en(self, name: str) -> str:
+        return {
+            "角色自拍": "casual character selfie",
+            "COS自拍": "cosplay selfie",
+            "镜前穿搭": "mirror outfit photo",
+            "头像特写": "avatar close-up",
+            "房间日常": "indoor slice-of-life",
+            "可拍画面": "casual shareable photo",
+            "表情包场景": "sticker scene",
+        }.get(_single_line(name, 40), _single_line(name, 40) or "scene preset")
 
     async def _generate_photo_image(
         self,
@@ -5294,7 +5497,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 输出 JSON：
 {{
   "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
-  "prompt": "给生图后端的中文生图提示词,包含主体、场景、光线、构图、情绪；不要写聊天口吻",
+  "prompt": "English image-generation prompt in this form: Positive prompt: subject, appearance, outfit, scene, lighting, camera, composition, style. Negative prompt: cropped head, faceless, text, watermark, logo, nsfw. Do not write chat tone or explanations.",
   "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
 }}
 
@@ -5302,9 +5505,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。
 2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。
 3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
-4. `prompt` 里要明确体现上面的风格要求。
-5. 不要包含 NSFW、隐私信息、用户真实电脑画面。
-6. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
+4. `prompt` 必须使用英文生图提示词形式,优先短语和逗号分隔标签；可以把必要中文专名作为 visual note 保留,但不要写任务说明。
+5. `prompt` 里要明确体现上面的风格要求。
+6. 不要包含 NSFW、隐私信息、用户真实电脑画面。
+7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
 """.strip()
         text = await self._llm_call(
             prompt,
@@ -6375,6 +6579,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if image_path:
                 return image_path, f"{backup_note}；已使用备选在线图片 API"
             return "", f"{primary_note}；备选在线图片 API 失败：{_single_line(backup_note, 220)}"
+        backup_note = self._backup_external_photo_unavailable_note()
+        if backup_note:
+            logger.info(
+                "[PrivateCompanion] 主在线图片 API 未成功,备选在线图片 API 不可用: primary_note=%s backup_note=%s",
+                _single_line(primary_note, 180),
+                _single_line(backup_note, 120),
+            )
         return "", primary_note
 
     async def _run_external_photo_generation_with_backup(

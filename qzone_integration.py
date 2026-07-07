@@ -648,35 +648,93 @@ class QzoneMixin(QzoneMediaMixin):
         )
 
     @staticmethod
+    def _qzone_response_object_candidates(raw: str) -> list[str]:
+        source = str(raw or "")
+        candidates: list[str] = []
+        for start, char in enumerate(source):
+            if char != "{":
+                continue
+            depth = 0
+            quote = ""
+            escaped = False
+            for index in range(start, len(source)):
+                current = source[index]
+                if quote:
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == quote:
+                        quote = ""
+                    continue
+                if current in {"'", '"'}:
+                    quote = current
+                    continue
+                if current == "{":
+                    depth += 1
+                    continue
+                if current == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(source[start : index + 1])
+                        break
+            if len(candidates) >= 24:
+                break
+        return candidates
+
+    @staticmethod
+    def _qzone_load_response_payload(payload: str) -> dict[str, Any]:
+        normalized = str(payload or "").replace("undefined", "null")
+        try:
+            parsed = json.loads(normalized)
+        except Exception:
+            try:
+                relaxed = re.sub(r",\s*([}\]])", r"\1", normalized)
+                relaxed = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', relaxed)
+                parsed = json.loads(relaxed)
+            except Exception:
+                import json5  # type: ignore
+
+                parsed = json5.loads(normalized)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"code": -1, "message": "接口响应不是对象"}
+
+    @staticmethod
     def _qzone_parse_response(text: str) -> dict[str, Any]:
         raw = str(text or "")
         if not raw.strip():
             return {"code": -1, "message": "接口返回空响应"}
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end < start:
+        candidates = QzoneMixin._qzone_response_object_candidates(raw)
+        if not candidates:
             return {"code": -1, "message": "接口响应缺少 JSON"}
-        payload = raw[start : end + 1].replace("undefined", "null")
-        try:
-            parsed = json.loads(payload)
-        except Exception:
-            try:
-                relaxed = re.sub(r",\s*([}\]])", r"\1", payload)
-                relaxed = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', relaxed)
-                parsed = json.loads(relaxed)
-            except Exception:
-                try:
-                    import json5  # type: ignore
 
-                    parsed = json5.loads(payload)
-                except Exception as exc:
-                    return {"code": -1, "message": f"JSON 解析失败：{_single_line(exc, 80)}"}
-        if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict):
-            nested = dict(parsed.get("data") or {})
-            nested.setdefault("_raw_code", parsed.get("code", parsed.get("ret")))
-            nested.setdefault("_raw_message", parsed.get("message") or parsed.get("msg"))
-            return nested
-        return parsed if isinstance(parsed, dict) else {"code": -1, "message": "接口响应不是对象"}
+        def normalize(parsed: dict[str, Any]) -> dict[str, Any]:
+            if isinstance(parsed.get("data"), dict):
+                nested = dict(parsed.get("data") or {})
+                nested.setdefault("_raw_code", parsed.get("code", parsed.get("ret")))
+                nested.setdefault("_raw_message", parsed.get("message") or parsed.get("msg"))
+                return nested
+            return parsed
+
+        first_object: dict[str, Any] | None = None
+        last_error = ""
+        response_keys = {"code", "ret", "message", "msg", "data", "subcode"}
+        for payload in candidates:
+            try:
+                parsed = QzoneMixin._qzone_load_response_payload(payload)
+            except Exception as exc:
+                last_error = _single_line(exc, 80)
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if first_object is None:
+                first_object = parsed
+            if response_keys & set(parsed):
+                return normalize(parsed)
+        if first_object is not None:
+            return normalize(first_object)
+        return {"code": -1, "message": f"JSON 解析失败：{last_error or '没有可解析对象'}"}
 
     async def _qzone_request(
         self,
@@ -2085,6 +2143,30 @@ class QzoneMixin(QzoneMediaMixin):
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,。；;")
         return _single_line(cleaned, 180)
 
+    def _qzone_publish_style_prompt(self, *, mood: str = "life") -> str:
+        base = (
+            "默认风格：像随手发的一条 QQ 空间生活碎片，贴着眼前具体事物、动作或天气写；"
+            "口语、轻一点、短一点，可以有小情绪但不要上价值。"
+            "避免哲理总结、人生感悟、诗化独白、宏大比喻、老成说教、文案腔和谜语感。"
+        )
+        if mood == "emotional_vent":
+            base += " 心情动态也要克制，只写公开可见的余味，不要写成控诉或伤感散文。"
+        custom = _single_line(getattr(self, "qzone_publish_style_prompt", ""), 500)
+        if custom:
+            return f"{base}\n自定义风格：{custom}"
+        return base
+
+    def _qzone_publish_image_style_prompt(self) -> str:
+        base = (
+            "默认配图策略：像 QQ 空间随手生活图，先贴合说说正文和当前日程选择画面。"
+            "人物可以自然入镜，但不要每次都做自拍；在生活物件、食物饮品、路上光影、桌面一角、窗边、背影、侧脸、第一视角手部之间轮换。"
+            "避免过度使用镜前自拍、手机挡脸自拍、固定半身自拍模板；只有正文或日程明确在整理穿搭、出门前照镜子、换衣服时才考虑镜前/镜中构图。"
+        )
+        custom = _single_line(getattr(self, "qzone_publish_image_style_prompt", ""), 600)
+        if custom:
+            return f"{base}\n自定义配图提示：{custom}"
+        return base
+
     async def _sanitize_qzone_life_post_text(self, text: str, *, prompt: str = "") -> str:
         cleaned = _single_line(text, 180)
         if not self._qzone_text_leaks_internal_state(cleaned):
@@ -2161,6 +2243,9 @@ class QzoneMixin(QzoneMediaMixin):
 - 禁止出现“能量”“心理能量”“/100”“状态变量”“当前状态”等内部汇报词。
 - 不要 @ 用户,不要泄露私聊内容,不要写得像营销文。
 - 写作角度：{theme_hint}
+
+【说说风格提示】
+{self._qzone_publish_style_prompt()}
 
 【当前时间与季节】
 {temporal_context}
@@ -2274,6 +2359,9 @@ class QzoneMixin(QzoneMediaMixin):
 - 像自然生活动态,最好包含一个能被画出来的具体场景或物件。
 - 不要 @ 用户,不要泄露私聊内容,不要出现插件、模型、系统提示、内部状态数值。
 - 写作角度：{self._qzone_publish_theme_hint()}
+
+【说说风格提示】
+{self._qzone_publish_style_prompt()}
 
 【当前时间与季节】
 {self._qzone_temporal_context()}
@@ -2566,9 +2654,9 @@ class QzoneMixin(QzoneMediaMixin):
         except (OSError, ValueError):
             qzone_selfie_reference_exists = False
         reference_text = (
-            "有可用参考图。优先选择 selfie，让人物成为画面主角；prompt 必须写明保持参考图中的人物身份、脸部、发色、瞳色、穿搭连续性。"
+            "有可用参考图。可以选择 selfie 让人物自然入镜，但不要默认镜前自拍；只有正文或日程明确需要穿搭/照镜子时才用镜前构图。选择 selfie 时 prompt 必须写明保持参考图中的人物身份、脸部、发色、瞳色、穿搭连续性。"
             if qzone_selfie_reference_path
-            else "当前没有可用自拍参考图。仍优先让人物自然入镜，人物外貌参考人格描述和公开状态；可用第一视角手部、侧脸、背影、镜中局部、肩颈半身等方式让人物成为主角，避免凭空追加人格里没有的脸部细节。"
+            else "当前没有可用自拍参考图。可以让人物自然入镜，人物外貌参考人格描述和公开状态；优先使用第一视角手部、侧脸、背影、肩颈半身、影子、随身小物等不强依赖精确脸部的方式，避免凭空追加人格里没有的脸部细节，也不要默认镜前自拍。"
         )
         prompt = f"""
 请为一条即将公开发布到 QQ 空间的说说生成一张配图提示词。
@@ -2597,15 +2685,18 @@ class QzoneMixin(QzoneMediaMixin):
 【自拍参考图状态】
 {reference_text}
 
+【空间配图风格提示】
+{self._qzone_publish_image_style_prompt()}
+
 【生图风格】
 {style_name}
 风格要求：{style_instruction}
 
 输出 JSON：
 {{
-  "kind": "selfie 或 text2img；优先 selfie，只有人物完全不适合入镜时才用 text2img",
-  "visual_anchor": "本图唯一视觉锚点，例如半身自拍/镜前穿搭/第一视角手部与饮品/侧脸看窗边光影/背影走在路上；必须具体",
-  "composition": "构图一句话，例如半身自拍/镜前中景/第一视角手部近景/侧脸三分构图/背影环境中景",
+  "kind": "selfie 或 text2img；按说说正文选择，不要固定优先镜前自拍",
+  "visual_anchor": "本图唯一视觉锚点，例如第一视角手部与饮品/桌面小物/路上夕光/侧脸看窗边光影/背影走在路上/餐盘与衣袖；必须具体",
+  "composition": "构图一句话，例如第一视角手部近景/桌面俯拍/侧脸三分构图/背影环境中景/路边半身随拍/窗边剪影；镜前自拍只能偶尔使用",
   "prompt": "给生图后端的中文提示词，包含唯一主体、场景、光线、构图、情绪和风格；不要写聊天口吻",
   "caption": "一句画面说明"
 }}
@@ -2613,12 +2704,13 @@ class QzoneMixin(QzoneMediaMixin):
 要求：
 1. 图片必须像公开动态配图，不要包含私聊、系统、插件、模型、内部状态数值。
 2. 先确定一个“唯一视觉锚点”，不要把多个主体拼在一张图里；画面要贴合说说正文和当前日程，不要为了配图硬画无关内容。
-3. 优先使用 selfie 自拍/人物入镜模式，人物是主角；即使没有明确自拍动机，也尽量让人物以第一视角手部、侧脸、背影、镜中局部、肩颈半身等自然方式入镜，避免纯景物照片。
-4. 如果有自拍参考图，选择 selfie 时必须写清“保留参考图人物身份和外观”“脸部完整清晰”“不要裁脸/遮脸/只拍身体局部”，并让场景来自当前日程。
-5. 如果没有自拍参考图，仍可选择 selfie；人物外貌以人格描述、公开状态和风格设定为准，不要追加人格里没有的脸部细节。优先使用不强依赖精确脸部的自然入镜方式，比如侧脸、背影、第一视角手部、肩颈半身、镜中远景。
-6. 如果选择 text2img：也要尽量保留人的存在感，如手边物件、脚步、背影、影子或随身小物；只有画面确实不适合人物入镜时才纯物件/纯风景。
-7. 不要包含 NSFW、真实用户隐私、聊天截图或电脑屏幕内容；避免文字、水印、UI、二维码、聊天气泡。
-8. prompt 必须体现上面的生图风格要求，且不能是泛泛的“好看的照片/生活记录/天气图”。
+3. 人物可以入镜，但不要每次都自拍；在第一视角手部、桌面小物、食物饮品、路上光影、窗边侧脸、背影、影子、随身小物和半身随拍之间轮换。
+4. 镜前自拍、镜中自拍、手机挡脸自拍不是默认模板；只有正文/日程明确涉及穿搭、整理仪容、出门前照镜子或房间镜子时才使用，且不要连续复用。
+5. 如果有自拍参考图，选择 selfie 时必须写清“保留参考图人物身份和外观”“脸部完整清晰”“不要裁脸/遮脸/只拍身体局部”，并让场景来自当前日程；但仍要优先考虑非镜前构图。
+6. 如果没有自拍参考图，仍可选择人物入镜；人物外貌以人格描述、公开状态和风格设定为准，不要追加人格里没有的脸部细节。优先使用不强依赖精确脸部的自然入镜方式，比如侧脸、背影、第一视角手部、肩颈半身、窗边剪影。
+7. 如果选择 text2img：也可以保留人的存在感，如手边物件、脚步、背影、影子或随身小物；只有画面确实不适合人物入镜时才纯物件/纯风景。
+8. 不要包含 NSFW、真实用户隐私、聊天截图或电脑屏幕内容；避免文字、水印、UI、二维码、聊天气泡。
+9. prompt 必须体现上面的生图风格要求，且不能是泛泛的“好看的照片/生活记录/天气图”。
 """.strip()
         try:
             text = await self._llm_call(
@@ -2661,7 +2753,7 @@ class QzoneMixin(QzoneMediaMixin):
                 else:
                     image_prompt = (
                         f"{image_prompt}。人物是画面主角，外貌参考人格描述、公开状态和风格设定；没有可用自拍参考图时不要追加人格里没有的脸部细节；"
-                        "优先使用第一视角手部、侧脸、背影、镜中局部、肩颈半身等自然入镜方式，保持公开动态随手拍质感。"
+                        "优先使用第一视角手部、侧脸、背影、肩颈半身、窗边剪影、随身小物等自然入镜方式；不要默认镜前自拍或手机挡脸自拍，保持公开动态随手拍质感。"
                     )
             else:
                 image_prompt = (
@@ -2836,6 +2928,9 @@ class QzoneMixin(QzoneMediaMixin):
 - 不要 @ 用户,不要泄露私聊内容,不要写得像营销文。
 - 写作角度：{theme_hint}
 
+【说说风格提示】
+{self._qzone_publish_style_prompt()}
+
 【当前时间与季节】
 {temporal_context}
 
@@ -2987,6 +3082,9 @@ class QzoneMixin(QzoneMediaMixin):
 - 不要 @ 用户,不要提到任何具体用户、私聊内容、聊天截图或“刚才谁说了什么”。
 - 不要出现“受伤分”“情绪分”“阈值”“插件”“模型”“Bot”“机器人”“/100”等内部词。
 - 可以写天气、夜色、窗边、散步、想安静一会儿这类公开可见的余味。
+
+【说说风格提示】
+{self._qzone_publish_style_prompt(mood="emotional_vent")}
 
 【公开可写的状态余味】
 {self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})}

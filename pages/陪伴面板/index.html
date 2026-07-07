@@ -714,6 +714,11 @@ QQ空间 = 公开札记
           </div>
         </div>
         <div class="token-toolbar">
+          <div class="token-source-switch" role="group" aria-label="Token 来源">
+            <button type="button" data-token-source="companion" class="is-active">陪伴插件</button>
+            <button type="button" data-token-source="memory">记忆插件</button>
+            <button type="button" data-token-source="main">LLM 主链</button>
+          </div>
           <div class="token-view-switch" role="group" aria-label="Token 统计视图">
             <button type="button" data-token-view="today" class="is-active">今日</button>
             <button type="button" data-token-view="total">总计</button>
@@ -727,11 +732,11 @@ QQ空间 = 公开札记
         <div class="token-summary" id="tokenSummary"></div>
         <div class="dashboard-grid token-grid">
           <article>
-            <h2>Provider 消耗排行</h2>
+            <h2 id="tokenProviderChartTitle">Provider 消耗排行</h2>
             <div id="tokenProviderChart" class="chart-box"></div>
           </article>
           <article>
-            <h2>任务消耗排行</h2>
+            <h2 id="tokenTaskChartTitle">任务消耗排行</h2>
             <div id="tokenTaskChart" class="chart-box"></div>
           </article>
           <article class="wide" id="tokenHourlyPanel">
@@ -739,45 +744,45 @@ QQ空间 = 公开札记
             <div id="tokenHourlyChart" class="token-bars"></div>
           </article>
           <article class="wide">
-            <h2>每日统计</h2>
+            <h2 id="tokenDailyChartTitle">每日统计</h2>
             <div id="tokenDailyChart" class="token-bars"></div>
           </article>
           <article class="wide">
-            <h2>每日明细</h2>
+            <h2 id="tokenDailyTableTitle">每日明细</h2>
             <div id="tokenDailyTable" class="table-wrap compact-table"></div>
           </article>
-          <article class="wide">
-            <h2>Provider 明细</h2>
+          <article class="wide" id="tokenProviderTableCard">
+            <h2 id="tokenProviderTableTitle">Provider 明细</h2>
             <div id="tokenProviderTable" class="table-wrap compact-table"></div>
           </article>
-          <article class="wide">
-            <h2>任务明细</h2>
+          <article class="wide" id="tokenTaskTableCard">
+            <h2 id="tokenTaskTableTitle">任务明细</h2>
             <div id="tokenTaskTable" class="table-wrap compact-table"></div>
           </article>
-          <article class="wide">
-            <h2>最近调用</h2>
+          <article class="wide" id="tokenRecentTableCard">
+            <h2 id="tokenRecentTableTitle">最近调用</h2>
             <div id="tokenRecentTable" class="table-wrap compact-table"></div>
           </article>
-          <article class="wide">
+          <article class="wide" id="tokenExternalSessionCard">
             <h2>AstrBot 主链会话</h2>
             <div id="tokenExternalSessionTable" class="table-wrap compact-table"></div>
           </article>
-          <article class="wide">
+          <article class="wide" id="tokenExternalRecentCard">
             <h2>AstrBot 主链最近对话</h2>
             <div id="tokenExternalRecentTable" class="table-wrap compact-table"></div>
           </article>
-          <article class="wide token-memory-plugin-card">
+          <article class="wide token-memory-plugin-card" id="tokenMemoryPluginSummaryCard">
             <h2>记忆插件消耗</h2>
             <div id="tokenMemoryPluginSummary" class="token-plugin-panel"></div>
           </article>
-          <article class="wide">
+          <article class="wide" id="tokenMemoryPluginDetailCard">
             <h2>记忆插件任务 / Provider</h2>
             <div class="token-plugin-split">
               <div id="tokenMemoryPluginTaskTable" class="table-wrap compact-table"></div>
               <div id="tokenMemoryPluginProviderTable" class="table-wrap compact-table"></div>
             </div>
           </article>
-          <article class="wide">
+          <article class="wide" id="tokenMemoryPluginRecentCard">
             <h2>记忆插件最近调用</h2>
             <div id="tokenMemoryPluginRecentTable" class="table-wrap compact-table"></div>
           </article>

@@ -3268,36 +3268,96 @@ class CommandHandlersMixin:
         memory_context: str = "",
     ) -> str:
         style_name, style_instruction = self._get_photo_style_instruction() if callable(getattr(self, "_get_photo_style_instruction", None)) else ("默认", "")
+        style_prompt = (
+            self._photo_style_prompt_en(style_name, style_instruction)
+            if callable(getattr(self, "_photo_style_prompt_en", None))
+            else (_single_line(style_instruction, 220) or _single_line(style_name, 40) or "natural image style")
+        )
         extra_prompt = str(
             getattr(self, "natural_language_photo_extra_prompt", DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT)
             or ""
         ).strip()
         visual_memory = self._visual_photo_memory_context(memory_context)
         if kind == "edit" and has_reference:
-            base = (
-                "基于用户提供或引用的参考图进行改图。"
-                f"用户要求：{prompt}。"
-                "尽量保留用户未要求修改的主体、构图和重要细节，只改变明确要求的部分。"
-            )
+            positive = [
+                "image edit based on the provided reference image",
+                f"user request: {_single_line(prompt, 420) or 'edit the reference image'}",
+                "preserve unchanged subjects, composition, identity, clothing, and important details",
+                "only modify the parts explicitly requested by the user",
+                style_prompt,
+            ]
+            negative = [
+                "unrequested identity change",
+                "unrequested outfit change",
+                "changed composition",
+                "extra people",
+                "text",
+                "watermark",
+                "logo",
+                "nsfw",
+            ]
         elif kind == "selfie":
-            base = (
-                "根据用户自然语言请求生成角色自拍。"
-                f"用户要求：{prompt or '拍一张自拍'}。"
-                "角色本人必须露脸，脸、发型、表情和上半身/穿搭要清楚；优先保持今天穿搭、人设参考图和角色外观一致。"
-            )
+            positive = [
+                "single character selfie",
+                "solo",
+                f"user request: {_single_line(prompt, 420) or 'take a selfie'}",
+                "visible face",
+                "complete head and hair",
+                "clear eyes",
+                "natural expression",
+                "upper body or outfit visible",
+                "keep today's outfit and character appearance consistent with the reference image",
+                "natural phone snapshot",
+                "centered composition",
+                "soft natural light",
+                style_prompt,
+            ]
+            negative = [
+                "cropped head",
+                "headless",
+                "faceless",
+                "face hidden",
+                "body only",
+                "outfit only",
+                "back view",
+                "bad hands",
+                "extra fingers",
+                "text",
+                "watermark",
+                "logo",
+                "other people",
+                "nsfw",
+            ]
         else:
-            base = f"根据用户自然语言请求生成图片。用户要求：{prompt}。"
+            positive = [
+                "generate an image from the user request",
+                f"user request: {_single_line(prompt, 520)}",
+                "clear main subject",
+                "concrete scene",
+                "natural lighting",
+                "clean composition",
+                "no private screen",
+                style_prompt,
+            ]
+            negative = [
+                "vague empty scene",
+                "unrelated subject",
+                "private information",
+                "text",
+                "watermark",
+                "logo",
+                "nsfw",
+            ]
+        if visual_memory:
+            positive.append(f"visual continuity reference: {_single_line(visual_memory, 360)}")
+        if extra_prompt:
+            positive.append(f"additional generation preference: {_single_line(extra_prompt, 420)}")
         return _single_line(
-            " ".join(
-                part
-                for part in [
-                    base,
-                    f"视觉连续性参考：{visual_memory}；只作为衣着、地点、角色外观或画面风格参考，不要生成任何文字、标签、说明栏或提示词内容。" if visual_memory else "",
-                    extra_prompt,
-                    f"风格：{style_name}；{style_instruction}",
-                ]
-                if str(part or "").strip()
-            ),
+            "Positive prompt: "
+            + ", ".join(part for part in positive if _single_line(part, 520))
+            + ". Negative prompt: "
+            + ", ".join(negative)
+            + ".",
             6500,
         )
 

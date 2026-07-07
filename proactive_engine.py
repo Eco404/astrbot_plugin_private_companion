@@ -5390,20 +5390,23 @@ class ProactiveEngineMixin:
                 return True
         return self._backup_external_photo_available()
 
-    def _backup_external_photo_available(self) -> bool:
+    def _backup_external_photo_unavailable_note(self) -> str:
         if not self.enable_photo_text_action:
-            return False
+            return "photo_action_disabled"
         if not bool(getattr(self, "enable_backup_external_image_api", False)):
-            return False
-        if not (
-            getattr(self, "backup_external_image_api_base_url", "")
-            and getattr(self, "backup_external_image_api_key", "")
-            and getattr(self, "backup_external_image_api_model", "")
-        ):
-            return False
+            return "disabled"
+        missing = []
+        if not getattr(self, "backup_external_image_api_base_url", ""):
+            missing.append("base_url")
+        if not getattr(self, "backup_external_image_api_key", ""):
+            missing.append("api_key")
+        if not getattr(self, "backup_external_image_api_model", ""):
+            missing.append("model")
+        if missing:
+            return "missing_" + ",".join(missing)
         checker = getattr(self, "_external_image_model_misconfiguration_note", None)
         if not callable(checker):
-            return True
+            return ""
         keys = (
             "external_image_api_platform",
             "external_image_api_base_url",
@@ -5424,12 +5427,16 @@ class ProactiveEngineMixin:
         try:
             for key, value in backup_values.items():
                 setattr(self, key, value)
-            return not bool(checker())
+            note = checker()
+            return _single_line(note, 120) if note else ""
         except Exception:
-            return True
+            return ""
         finally:
             for key, value in old_values.items():
                 setattr(self, key, value)
+
+    def _backup_external_photo_available(self) -> bool:
+        return not bool(self._backup_external_photo_unavailable_note())
 
     def _sdgen_photo_available(self) -> bool:
         if not self.enable_photo_text_action:

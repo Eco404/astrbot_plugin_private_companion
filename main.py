@@ -428,7 +428,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.7.1",
+    "5.7.5",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -1147,8 +1147,10 @@ class PrivateCompanionPlugin(
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
         self.qzone_life_publish_min_interval_hours = self._cfg_int(c, "qzone_life_publish_min_interval_hours", 24, 4, 168)
         self.qzone_life_publish_probability = self._cfg_unit_interval(c, "qzone_life_publish_probability", 0.18, 0.0)
+        self.qzone_publish_style_prompt = self._cfg_str(c, "qzone_publish_style_prompt", "")
         self.enable_qzone_generated_image_publish = self._cfg_bool(c, "enable_qzone_generated_image_publish", True)
         self.qzone_generated_image_probability = self._cfg_unit_interval(c, "qzone_generated_image_probability", 0.25, 0.0)
+        self.qzone_publish_image_style_prompt = self._cfg_str(c, "qzone_publish_image_style_prompt", "")
         self.enable_qzone_comment_inbox = self._cfg_bool(c, "enable_qzone_comment_inbox", False)
         self.qzone_comment_inbox_interval_minutes = self._cfg_int(c, "qzone_comment_inbox_interval_minutes", 60, 5, 1440)
         self.qzone_comment_inbox_recent_posts = self._cfg_int(c, "qzone_comment_inbox_recent_posts", 5, 1, 20)
@@ -7246,15 +7248,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._save_data_sync()
             await self._reply(event, self._format_daily_plan(plan or {}))
         if action in daily_outfit_generate_actions:
-            await self._reply(event, "等我换身衣服哦")
-            async with self._data_lock:
-                self.data.pop("daily_outfit_photo", None)
-                self._save_data_sync()
-            plan = await self._ensure_daily_plan(force=False)
-            if not plan:
-                plan = await self._ensure_daily_plan(force=True)
             outfit_generator = getattr(self, "_ensure_daily_outfit_photo", None)
-            outfit = await outfit_generator(force=True) if callable(outfit_generator) else None
+            outfit_lock = getattr(self, "_daily_outfit_photo_generation_lock", None)
+            wait_existing = bool(outfit_lock is not None and outfit_lock.locked())
+            if wait_existing:
+                await self._reply(event, "穿搭图已经在生成中了，我等这轮结果出来直接发给你。")
+                outfit = await outfit_generator(force=False) if callable(outfit_generator) else None
+            else:
+                await self._reply(event, "等我换身衣服哦")
+                async with self._data_lock:
+                    self.data.pop("daily_outfit_photo", None)
+                    self._save_data_sync()
+                plan = await self._ensure_daily_plan(force=False)
+                if not plan:
+                    plan = await self._ensure_daily_plan(force=True)
+                outfit = await outfit_generator(force=True) if callable(outfit_generator) else None
             if isinstance(outfit, dict) and outfit.get("path"):
                 image_path = _single_line(outfit.get("path"), 300)
                 if not os.path.exists(image_path):
