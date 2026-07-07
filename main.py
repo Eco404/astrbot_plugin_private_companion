@@ -428,7 +428,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.7.5",
+    "5.7.6",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -1688,6 +1688,13 @@ class PrivateCompanionPlugin(
             return
         if bool(getattr(event, "is_private_chat", lambda: False)()):
             self._stop_passive_input_status_loop(event)
+
+    @filter.on_decorating_result()
+    async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent):
+        """群级 LLM 熔断的发送前兜底。"""
+        if not self.enabled:
+            return
+        self._stop_group_llm_reply_if_blocked(event, source="decorating_result")
 
     @filter.on_decorating_result()
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent):
@@ -3526,8 +3533,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "百炼": "bailian",
             "阿里云百炼": "bailian",
             "通义万相": "bailian",
+            "modelscope": "modelscope",
+            "model_scope": "modelscope",
+            "魔搭": "modelscope",
+            "魔搭社区": "modelscope",
+            "api-inference": "modelscope",
         }
-        return aliases.get(text, text if text in {"auto", "openai", "bailian"} else "auto")
+        return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope"} else "auto")
 
     def _apply_quick_provider_defaults(self) -> None:
         fast = str(getattr(self, "fast_response_provider_id", "") or "").strip()
@@ -5151,6 +5163,68 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event.set_result(empty_result)
         event.stop_event()
 
+    def _is_private_companion_command_event(self, event: AstrMessageEvent) -> bool:
+        text = _single_line(getattr(event, "message_str", ""), 160)
+        if not text:
+            return False
+        stripped = text.lstrip()
+        if stripped.startswith(("/", "／", "!", "！", "#", "＃", ".", "。")):
+            return True
+        prefixes = (
+            "陪伴群", "/陪伴群", "群陪伴", "群聊陪伴",
+            "陪伴", "/陪伴", "私聊陪伴", "主动陪伴",
+        )
+        return any(text == prefix or re.match(rf"^{re.escape(prefix)}\s+", text) for prefix in prefixes)
+
+    def _group_llm_reply_block_for_event(self, event: AstrMessageEvent) -> dict[str, Any]:
+        if bool(getattr(event, "is_private_chat", lambda: False)()):
+            return {}
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id:
+            return {}
+        item = self._group_llm_reply_block_item(group_id)
+        if not bool(item.get("enabled")):
+            return {}
+        return item
+
+    def _stop_group_llm_reply_if_blocked(self, event: AstrMessageEvent, *, source: str) -> bool:
+        if self._is_private_companion_command_event(event):
+            return False
+        if source == "decorating_result" and not bool(getattr(event, "_private_companion_group_llm_reply_request_blocked", False)):
+            return False
+        item = self._group_llm_reply_block_for_event(event)
+        if not item:
+            return False
+        if bool(getattr(event, "_private_companion_group_llm_reply_blocked", False)):
+            return True
+        group_id = _single_line(item.get("group_id"), 80) or self._extract_group_id_from_event(event)
+        logger.info(
+            "[PrivateCompanion] 本群 LLM 回复已被单独关闭,拦截本轮回复: group=%s source=%s",
+            group_id or "-",
+            _single_line(source, 40),
+        )
+        self._record_passive_no_reply(
+            event,
+            source="群聊 LLM 熔断",
+            reason="本群所有 LLM 回复已关闭",
+            detail=f"group={group_id or '-'} source={_single_line(source, 40)}",
+            level="warn",
+        )
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        try:
+            setattr(event, "_private_companion_group_llm_reply_blocked", True)
+            if source.startswith("llm_request"):
+                setattr(event, "_private_companion_group_llm_reply_request_blocked", True)
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+        return True
+
     def _passive_no_reply_event_text(self, event: AstrMessageEvent | None, *, limit: int = 180) -> str:
         if event is None:
             return ""
@@ -5473,6 +5547,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """TTS 请求规则独立兜底，避免被状态注入链路早退顺手跳过。"""
         if not self.enabled:
             return
+        if self._stop_group_llm_reply_if_blocked(event, source="llm_request_tts_fallback"):
+            return
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         await self.apply_tts_enhancement_request(event, req)
@@ -5494,6 +5570,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             logger_func(reason, source_text, user if isinstance(user, dict) else None)
 
         if not self.enabled:
+            return
+        if self._stop_group_llm_reply_if_blocked(event, source="llm_request"):
             return
         if not hasattr(req, "system_prompt"):
             log_bookshelf_secret_skip("llm_request_no_system_prompt")
@@ -8090,6 +8168,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
             asyncio.create_task(self._maybe_refresh_group_episode(group_id, group_snapshot))
             asyncio.create_task(self._maybe_refresh_group_slang_meanings(group_id, group_snapshot))
+            return
+        if self._group_llm_reply_blocked(group_id):
+            logger.debug(
+                "[PrivateCompanion] 本群 LLM 回复已关闭,跳过群聊被动增强入口: group=%s text=%s",
+                group_id,
+                _single_line(text, 80),
+            )
             return
         try:
             signals = self._event_scene_signals(event)

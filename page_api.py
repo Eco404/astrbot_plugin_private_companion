@@ -1133,6 +1133,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     async def get_troubleshooting(self) -> dict[str, Any]:
         try:
+            await self._recover_stale_troubleshooting_proactive_test()
             async with self.plugin._data_lock:
                 data = deepcopy(self.plugin.data)
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
@@ -1157,6 +1158,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             checks = self._troubleshooting_checks(
                 data=data,
                 users=users,
+                groups=groups,
                 diagnostics=diagnostics,
                 proactive_tasks=proactive_tasks,
                 proactive_candidates=proactive_candidates,
@@ -1201,11 +1203,53 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 获取排障信息失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def _recover_stale_troubleshooting_proactive_test(self, *, max_age_seconds: int = 120) -> int:
+        recovered = 0
+        now = time.time()
+        async with self.plugin._data_lock:
+            users = self.plugin.data.get("users")
+            if not isinstance(users, dict):
+                return 0
+            for user_id, user in list(users.items()):
+                if not isinstance(user, dict):
+                    continue
+                if str(user.get("planned_proactive_source") or "") != "troubleshooting":
+                    continue
+                if not isinstance(user.get("troubleshooting_proactive_restore"), dict):
+                    continue
+                started = self._float(user.get("troubleshooting_proactive_started_at"))
+                if started <= 0 or now - started <= max_age_seconds:
+                    continue
+                self.plugin._append_troubleshooting_proactive_step(
+                    user,
+                    "等待结果",
+                    "error",
+                    f"超过 {max_age_seconds} 秒仍未完成，已停止等待并恢复原主动计划",
+                )
+                self.plugin._record_troubleshooting_proactive_result(
+                    str(user_id),
+                    user,
+                    ok=False,
+                    detail="主动消息测试等待超时，已恢复原主动计划",
+                    error=f"超过 {max_age_seconds} 秒仍未完成；请确认主动循环是否启动、目标用户是否有私聊会话、发送端是否可用",
+                    action=str(user.get("planned_proactive_action") or "message"),
+                    reason=str(user.get("planned_proactive_reason") or "check_in"),
+                )
+                user["proactive_sending"] = False
+                user["proactive_sending_started_at"] = 0
+                self.plugin._restore_troubleshooting_proactive_plan(user)
+                recovered += 1
+            if recovered:
+                self.plugin._save_data_sync()
+        return recovered
+
     async def run_troubleshooting_test(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         test_type = self._single_line(payload.get("type"), 40)
         start = time.time()
         try:
+            if test_type == "proactive_message":
+                await self._recover_stale_troubleshooting_proactive_test(max_age_seconds=120)
             if test_type in {"image_generation", "image_generation_text2img", "image_generation_selfie"}:
                 image_payload = dict(payload)
                 if test_type == "image_generation_text2img":
@@ -2595,11 +2639,31 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         raw = data.get("troubleshooting_test_results")
         if not isinstance(raw, dict):
             return {}
-        return {
-            key: self._sanitize_troubleshooting_test_result(value)
-            for key, value in raw.items()
-            if isinstance(value, dict)
-        }
+        results: dict[str, Any] = {}
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        active_proactive_test = any(
+            isinstance(user, dict)
+            and str(user.get("planned_proactive_source") or "") == "troubleshooting"
+            and isinstance(user.get("troubleshooting_proactive_restore"), dict)
+            for user in users.values()
+        )
+        for key, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            item = self._sanitize_troubleshooting_test_result(value)
+            if key == "proactive_message" and item.get("pending") and not active_proactive_test:
+                item.update(
+                    {
+                        "ok": False,
+                        "pending": False,
+                        "error": item.get("error") or "主动消息测试任务状态已丢失，请重新测试",
+                        "detail": item.get("detail") or "没有找到正在等待执行的临时主动任务",
+                        "ran_at": time.time(),
+                        "ran_at_text": self.plugin._format_timestamp_elapsed(time.time()),
+                    }
+                )
+            results[key] = item
+        return results
 
     def _recent_photo_generation_summary(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         raw = data.get("recent_photo_generations")
@@ -3290,6 +3354,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         *,
         data: dict[str, Any],
         users: dict[str, Any],
+        groups: dict[str, Any],
         diagnostics: list[dict[str, Any]],
         proactive_tasks: dict[str, Any],
         proactive_candidates: dict[str, Any],
@@ -3309,6 +3374,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "action": self._single_line(action, 180),
                     "jump": self._single_line(jump, 40),
                 }
+            )
+
+        llm_blocks = []
+        raw_llm_blocks = data.get("group_llm_reply_blocks")
+        if isinstance(raw_llm_blocks, dict):
+            for group_id, item in raw_llm_blocks.items():
+                if not isinstance(item, dict) or not bool(item.get("enabled")):
+                    continue
+                gid = self._single_line(item.get("group_id") or group_id, 80)
+                if not gid:
+                    continue
+                group = groups.get(gid) if isinstance(groups, dict) else None
+                name = self._single_line((group or {}).get("name") if isinstance(group, dict) else "", 40)
+                llm_blocks.append({"group_id": gid, "name": name, "updated_at": item.get("updated_at")})
+        if llm_blocks:
+            first = llm_blocks[0]
+            label = f"{first.get('name')}({first.get('group_id')})" if first.get("name") else str(first.get("group_id") or "-")
+            add(
+                "warn",
+                "存在群级 LLM 回复熔断",
+                f"{len(llm_blocks)} 个群已关闭所有 LLM 回复，首个：{label}。这是手动开关状态，不会被最近记录清理。",
+                "在对应群发送：陪伴群 开启LLM",
+                "troubleshooting",
             )
 
         enabled_users = [item for item in users.values() if isinstance(item, dict) and item.get("enabled", True)]
@@ -7945,6 +8033,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("火山引擎", ("volces.com", "volcengine", "huoshan", "火山", "doubao", "ark.cn-beijing")),
             ("DeepSeek", ("deepseek.com", "deepseek")),
             ("阿里云百炼", ("dashscope", "aliyuncs.com", "bailian", "百炼", "qwen", "tongyi")),
+            ("魔搭社区", ("modelscope", "api-inference", "魔搭")),
             ("OpenRouter", ("openrouter.ai", "openrouter")),
             ("硅基流动", ("siliconflow.cn", "siliconflow")),
             ("智谱", ("bigmodel.cn", "zhipu", "glm")),
@@ -9224,7 +9313,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 elif key in {"external_image_api_platform", "backup_external_image_api_platform"}:
                     normalizer = getattr(self.plugin, "_normalize_external_image_api_platform", None)
                     text = normalizer(text) if callable(normalizer) else text.lower()
-                    if text not in {"auto", "openai", "bailian"}:
+                    if text not in {"auto", "openai", "bailian", "modelscope"}:
                         text = "auto"
                 setattr(self.plugin, attr, text)
         timeout = self._config_get("external_image_api_timeout_seconds")
@@ -10125,9 +10214,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "百炼": "bailian",
                 "阿里云百炼": "bailian",
                 "dashscope": "bailian",
+                "modelscope": "modelscope",
+                "model_scope": "modelscope",
+                "魔搭": "modelscope",
+                "魔搭社区": "modelscope",
+                "api-inference": "modelscope",
             }
             mode = aliases.get(mode, mode)
-            return mode if mode in {"auto", "openai", "bailian"} else "auto"
+            return mode if mode in {"auto", "openai", "bailian", "modelscope"} else "auto"
         if key == "segmented_proactive_split_mode":
             mode = str(value or "regex").strip().lower()
             return mode if mode in {"regex", "words"} else "regex"

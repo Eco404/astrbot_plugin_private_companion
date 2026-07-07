@@ -342,8 +342,8 @@ class CommandHandlersMixin:
             "enable_backup_external_image_api": {"type": "bool", "label": "启用备选在线图片 API"},
             "backup_external_image_api_platform": {
                 "type": "select",
-                "choices": {"auto", "openai", "bailian"},
-                "aliases": {"百炼": "bailian", "阿里云百炼": "bailian", "openai兼容": "openai"},
+                "choices": {"auto", "openai", "bailian", "modelscope"},
+                "aliases": {"百炼": "bailian", "阿里云百炼": "bailian", "魔搭": "modelscope", "魔搭社区": "modelscope", "openai兼容": "openai"},
                 "label": "备选在线生图平台",
             },
             "backup_external_image_api_timeout_seconds": {"type": "int", "min": 20, "max": 600, "label": "备选在线生图超时秒数"},
@@ -3959,6 +3959,85 @@ class CommandHandlersMixin:
         if not group_id:
             yield event.plain_result("这条命令需要在群聊里使用。")
             return
+        message = str(event.message_str or "").strip()
+        action = ""
+        response_chain = None
+        parts = message.split(maxsplit=2)
+        if len(parts) >= 2:
+            action = parts[1].strip()
+        value = parts[2].strip() if len(parts) >= 3 else ""
+        action_compact = re.sub(r"\s+", "", f"{action}{value}").lower()
+        llm_block_on = action_compact in {
+            "关闭llm",
+            "关闭llm回复",
+            "关闭所有llm回复",
+            "禁用llm",
+            "禁用llm回复",
+            "停用llm",
+            "停用llm回复",
+            "禁止llm",
+            "禁止llm回复",
+            "关闭主链",
+            "关闭主链回复",
+        }
+        llm_block_off = action_compact in {
+            "开启llm",
+            "开启llm回复",
+            "开启所有llm回复",
+            "启用llm",
+            "启用llm回复",
+            "打开llm",
+            "打开llm回复",
+            "恢复llm",
+            "恢复llm回复",
+            "恢复主链",
+            "恢复主链回复",
+        }
+        llm_block_status = action_compact in {"llm状态", "主链状态", "llm回复状态"}
+        if (llm_block_on or llm_block_off or llm_block_status) and not self._can_manage_group_companion(event):
+            yield event.plain_result(self._management_denied_text())
+            return
+        if llm_block_on or llm_block_off or llm_block_status:
+            operator_id = ""
+            try:
+                operator_id = str(event.get_sender_id())
+            except Exception:
+                operator_id = ""
+            async with self._data_lock:
+                if llm_block_on:
+                    item = self._set_group_llm_reply_block(
+                        group_id,
+                        True,
+                        operator_id=operator_id,
+                        reason="group_command",
+                    )
+                    self._save_data_sync()
+                    ts_text = self._format_timestamp_elapsed(_safe_float(item.get("updated_at"), 0.0, 0.0)) if item else "刚刚"
+                    response = (
+                        "已关闭本群所有 LLM 回复。\n"
+                        f"群号：{group_id}\n"
+                        f"状态：拦截中（{ts_text}）\n"
+                        "恢复：陪伴群 开启LLM"
+                    )
+                elif llm_block_off:
+                    self._set_group_llm_reply_block(
+                        group_id,
+                        False,
+                        operator_id=operator_id,
+                        reason="group_command",
+                    )
+                    self._save_data_sync()
+                    response = "已恢复本群 LLM 回复。"
+                else:
+                    item = self._group_llm_reply_block_item(group_id)
+                    if bool(item.get("enabled")):
+                        ts_text = self._format_timestamp_elapsed(_safe_float(item.get("updated_at"), 0.0, 0.0))
+                        response = f"本群 LLM 回复当前关闭中，开启时间：{ts_text}。\n恢复：陪伴群 开启LLM"
+                    else:
+                        response = "本群 LLM 回复当前未被单独关闭。"
+            yield event.plain_result(response)
+            event.stop_event()
+            return
         if not self.enable_group_companion or not self._group_allowed_by_access_mode(group_id):
             if self.group_access_mode == "blacklist" and group_id in self._configured_group_blacklist_ids():
                 yield event.plain_result("这个群在群聊陪伴黑名单中，暂时不启用。")
@@ -3967,12 +4046,6 @@ class CommandHandlersMixin:
             else:
                 yield event.plain_result("这个群暂时不启用群聊陪伴。")
             return
-        message = str(event.message_str or "").strip()
-        action = ""
-        response_chain = None
-        parts = message.split(maxsplit=2)
-        if len(parts) >= 2:
-            action = parts[1].strip()
         if action in {"开启", "启用", "打开", "关闭", "停用", "关掉", "撤回消息", "防撤回", "转述撤回", "撤回转述"} and not self._can_manage_group_companion(event):
             yield event.plain_result(self._management_denied_text())
             return
@@ -4061,6 +4134,9 @@ class CommandHandlersMixin:
                     "陪伴群 插话反馈\n"
                     "陪伴群 关系网\n"
                     "陪伴群 撤回消息\n"
+                    "陪伴群 LLM状态\n"
+                    "陪伴群 关闭LLM\n"
+                    "陪伴群 开启LLM\n"
                     "陪伴群 开启\n"
                     "陪伴群 关闭"
                 )

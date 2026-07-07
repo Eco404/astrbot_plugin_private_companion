@@ -5883,10 +5883,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         normalizer = getattr(self, "_normalize_external_image_api_platform", None)
         configured = getattr(self, "external_image_api_platform", "auto")
         platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
-        if platform in {"openai", "bailian"}:
+        if platform in {"openai", "bailian", "modelscope"}:
             return platform
         base = self._normalized_external_image_api_base_url(platform=platform).lower()
         model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        if "modelscope" in base or "api-inference" in base:
+            return "modelscope"
         if any(token in base for token in ("dashscope.aliyuncs.com", "/services/aigc/", "/api/v1/tasks", "model-studio")):
             return "bailian"
         if model.startswith(("qwen-image", "wanx", "wan-", "wan2.", "wan2x", "wan")):
@@ -5959,6 +5961,17 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     return f"{parsed.scheme or 'https'}://{host}{api_root.group(1)}"
             return f"{parsed.scheme or 'https'}://{host}/api/v1"
 
+        if resolved_platform == "modelscope":
+            if host and "modelscope" in host:
+                scheme = parsed.scheme or "https"
+                if path.startswith("/v1"):
+                    api_root = re.match(r"^(.*?/v1)(?:/.*)?$", path, flags=re.I)
+                    if api_root:
+                        return f"{scheme}://{host}{api_root.group(1)}"
+                return f"{scheme}://{host}/v1"
+            if re.search(r"/v1(?:/(?:images|tasks).*)?$", raw, flags=re.I):
+                root = re.sub(r"/v1(?:/(?:images|tasks).*)?$", "/v1", raw, flags=re.I).rstrip("/")
+                return root
         if resolved_platform == "bailian":
             if "/compatible-mode/v1" in raw.lower():
                 return re.sub(r"/compatible-mode/v1(?:/.*)?$", "/api/v1", raw, flags=re.I).rstrip("/")
@@ -5976,6 +5989,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         resolved = str(platform or self._resolved_external_image_api_platform() or "").strip().lower()
         if resolved == "bailian":
             return "阿里云百炼"
+        if resolved == "modelscope":
+            return "魔搭社区"
         if resolved == "openai":
             return "OpenAI 兼容"
         return "在线图片 API"
@@ -6055,6 +6070,107 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
         return "qwen-image" in model or "image-edit" in model
 
+    def _modelscope_api_root(self) -> str:
+        base = self._normalized_external_image_api_base_url(platform="modelscope").rstrip("/")
+        if not base:
+            return ""
+        if base.endswith("/v1"):
+            return base
+        if re.match(r"^https?://[^/]+$", base, flags=re.I):
+            return f"{base}/v1"
+        return re.sub(r"/v1(?:/.*)?$", "/v1", base, flags=re.I).rstrip("/")
+
+    def _modelscope_generation_endpoint(self) -> str:
+        base = str(self.external_image_api_base_url or "").strip().rstrip("/")
+        if base.endswith("/v1/images/generations"):
+            return base
+        root = self._modelscope_api_root()
+        return f"{root}/images/generations" if root else ""
+
+    def _modelscope_task_endpoint(self, task_id: str) -> str:
+        root = self._modelscope_api_root()
+        safe_task_id = quote(str(task_id or "").strip(), safe="")
+        return f"{root}/tasks/{safe_task_id}" if root and safe_task_id else ""
+
+    def _external_payload_first_value(self, payload: Any, keys: tuple[str, ...], *, _depth: int = 0) -> Any:
+        if payload is None or _depth > 8:
+            return None
+        if isinstance(payload, dict):
+            for key in keys:
+                if key in payload and payload.get(key) not in (None, ""):
+                    return payload.get(key)
+            for value in payload.values():
+                found = self._external_payload_first_value(value, keys, _depth=_depth + 1)
+                if found not in (None, ""):
+                    return found
+        elif isinstance(payload, list):
+            for value in payload:
+                found = self._external_payload_first_value(value, keys, _depth=_depth + 1)
+                if found not in (None, ""):
+                    return found
+        return None
+
+    def _external_payload_image_values(self, payload: Any, *, _depth: int = 0) -> list[Any]:
+        if payload is None or _depth > 8:
+            return []
+        values: list[Any] = []
+        image_keys = (
+            "url",
+            "image",
+            "image_url",
+            "imageUrl",
+            "output_image",
+            "outputImage",
+            "result",
+            "b64_json",
+            "base64",
+            "base64_image",
+            "data_url",
+        )
+        image_list_keys = (
+            "data",
+            "images",
+            "image_urls",
+            "imageUrls",
+            "output_images",
+            "outputImages",
+            "results",
+            "outputs",
+        )
+        if isinstance(payload, dict):
+            for key in image_keys:
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    values.append(value)
+            for key in image_list_keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        values.extend(self._external_payload_image_values(item, _depth=_depth + 1))
+                elif isinstance(value, dict):
+                    values.extend(self._external_payload_image_values(value, _depth=_depth + 1))
+                elif isinstance(value, str) and value.strip():
+                    values.append(value)
+            for value in payload.values():
+                if isinstance(value, (dict, list)):
+                    values.extend(self._external_payload_image_values(value, _depth=_depth + 1))
+        elif isinstance(payload, list):
+            for item in payload:
+                values.extend(self._external_payload_image_values(item, _depth=_depth + 1))
+        elif isinstance(payload, str):
+            text = payload.strip()
+            if text.startswith(("http://", "https://", "data:image")) or len(text) > 128:
+                values.append(text)
+        deduped: list[Any] = []
+        seen: set[str] = set()
+        for value in values:
+            marker = str(value)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            deduped.append(value)
+        return deduped
+
     async def _reference_image_to_data_url(self, reference_image_path: str) -> str:
         path = Path(str(reference_image_path or ""))
         if not path.exists() or not path.is_file():
@@ -6080,7 +6196,20 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         success_note: str = "ok",
     ) -> tuple[str, str]:
         if isinstance(image_value, dict):
-            image_value = image_value.get("url") or image_value.get("image") or image_value.get("image_url") or ""
+            image_value = (
+                image_value.get("url")
+                or image_value.get("image")
+                or image_value.get("image_url")
+                or image_value.get("imageUrl")
+                or image_value.get("output_image")
+                or image_value.get("outputImage")
+                or image_value.get("result")
+                or image_value.get("b64_json")
+                or image_value.get("base64")
+                or image_value.get("base64_image")
+                or image_value.get("data_url")
+                or ""
+            )
         raw = str(image_value or "").strip()
         if not raw:
             return "", "图片结果为空"
@@ -6496,6 +6625,123 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             logger.warning(f"[PrivateCompanion] 百炼异步生图失败: {e}", exc_info=True)
             return "", str(e)
 
+    async def _run_modelscope_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        endpoint = self._modelscope_generation_endpoint()
+        if not endpoint:
+            return "", "未配置魔搭社区 API 地址"
+        try:
+            import aiohttp
+
+            headers = {
+                "Authorization": f"Bearer {self.external_image_api_key}",
+                "Content-Type": "application/json",
+                "X-ModelScope-Async-Mode": "true",
+                "X-ModelScope-Task-Type": "text-to-image-generation",
+            }
+            headers.update(self._external_image_custom_headers())
+            payload = {
+                "model": self.external_image_api_model,
+                "prompt": prompt_text,
+                "size": self._sanitize_external_image_size(image_size),
+            }
+            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                logger.info(
+                    "[PrivateCompanion] 魔搭异步生图提交: endpoint=%s model=%s size=%s prompt_preview=%s",
+                    _single_line(endpoint, 160),
+                    _single_line(self.external_image_api_model, 80),
+                    _single_line(payload["size"], 40),
+                    _single_line(prompt_text, 180),
+                )
+                async with session.post(endpoint, headers=headers, json=payload) as response:
+                    text = await response.text()
+                    logger.info(
+                        "[PrivateCompanion] 魔搭生图提交响应: status=%s chars=%s preview=%s",
+                        response.status,
+                        len(text or ""),
+                        _single_line(text, 220),
+                    )
+                    if response.status >= 400:
+                        return "", f"魔搭生图 HTTP {response.status}: {_single_line(text, 180)}"
+                data = self._extract_json_payload(text) if text else {}
+                if not isinstance(data, dict):
+                    return "", "魔搭生图返回格式无效"
+                for image_value in self._external_payload_image_values(data):
+                    return await self._materialize_external_image_value(
+                        image_value,
+                        session_key=session_key,
+                        success_note="ok",
+                    )
+                task_id = str(
+                    self._external_payload_first_value(data, ("task_id", "taskId", "id", "task"))
+                    or ""
+                ).strip()
+                if not task_id:
+                    message = self._external_payload_first_value(data, ("message", "msg", "error", "error_message"))
+                    return "", _single_line(message or "魔搭生图未返回任务 ID 或图片结果", 180)
+
+                task_endpoint = self._modelscope_task_endpoint(task_id)
+                if not task_endpoint:
+                    return "", "无法生成魔搭任务查询地址"
+                deadline = time.monotonic() + float(self.external_image_api_timeout_seconds)
+                while True:
+                    if time.monotonic() >= deadline:
+                        return "", self._external_image_timeout_note(label="魔搭异步生图任务轮询")
+                    async with session.get(task_endpoint, headers=headers) as response:
+                        poll_text = await response.text()
+                        logger.info(
+                            "[PrivateCompanion] 魔搭任务查询响应: status=%s task=%s chars=%s preview=%s",
+                            response.status,
+                            _single_line(task_id, 80),
+                            len(poll_text or ""),
+                            _single_line(poll_text, 220),
+                        )
+                        if response.status >= 400:
+                            return "", f"魔搭任务查询 HTTP {response.status}: {_single_line(poll_text, 180)}"
+                    poll_data = self._extract_json_payload(poll_text) if poll_text else {}
+                    if not isinstance(poll_data, dict):
+                        await asyncio.sleep(2)
+                        continue
+                    for image_value in self._external_payload_image_values(poll_data):
+                        return await self._materialize_external_image_value(
+                            image_value,
+                            session_key=session_key,
+                            success_note="ok",
+                        )
+                    status = str(
+                        self._external_payload_first_value(
+                            poll_data,
+                            ("task_status", "taskStatus", "status", "state"),
+                        )
+                        or ""
+                    ).strip().upper()
+                    if status in {"SUCCEED", "SUCCEEDED", "SUCCESS", "COMPLETED", "FINISHED", "DONE"}:
+                        return "", "魔搭任务成功但未返回图片地址"
+                    if status in {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED"}:
+                        message = self._external_payload_first_value(
+                            poll_data,
+                            ("message", "msg", "error", "error_message", "task_message"),
+                        )
+                        return "", _single_line(message or "魔搭异步生图任务失败", 180)
+                    await asyncio.sleep(2)
+        except asyncio.TimeoutError:
+            note = self._external_image_timeout_note(label="魔搭异步生图接口")
+            logger.info(
+                "[PrivateCompanion] 魔搭异步生图超时: model=%s timeout=%ss",
+                _single_line(self.external_image_api_model, 80),
+                _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
+            )
+            return "", note
+        except Exception as e:
+            logger.warning(f"[PrivateCompanion] 魔搭异步生图失败: {e}", exc_info=True)
+            return "", str(e)
+
     async def _run_external_photo_generation(
         self,
         prompt_text: str,
@@ -6640,6 +6886,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         endpoint = self._external_image_endpoint()
         if platform == "bailian":
             endpoint = self._bailian_multimodal_endpoint() or self._bailian_api_root()
+        elif platform == "modelscope":
+            endpoint = self._modelscope_generation_endpoint()
         if not endpoint:
             return "", f"未配置{self._external_image_platform_label(platform)} API 地址"
         if not self.external_image_api_key:
@@ -6679,6 +6927,14 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if bailian_note:
                 return "", f"{note}；多模态回退原因：{_single_line(bailian_note, 120)}"
             return "", note
+        if platform == "modelscope":
+            if reference_image_path:
+                return "", "魔搭社区文生图接口暂不支持参考图输入，请改用 OpenAI 兼容参考图接口或 ComfyUI images=1 工作流"
+            return await self._run_modelscope_photo_generation(
+                prompt_text,
+                session_key=session_key,
+                image_size=image_size,
+            )
         if reference_image_path and os.path.exists(reference_image_path):
             logger.info(
                 "[PrivateCompanion] 在线图片 API 尝试参考图接口: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",

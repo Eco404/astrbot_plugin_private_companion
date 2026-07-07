@@ -3,11 +3,11 @@
 `astrbot_plugin_private_companion` 是面向 AstrBot 的持续陪伴编排插件。它把人格连续性、生活状态、日程节奏、私聊关系、群聊观察、主动消息、图片/语音/转发理解、长期创作、模型 Provider 和扩展页排障组织到同一套体验里，让 Bot 不只是“收到消息后临时回复”，而是有状态、有记忆、有边界地生活和互动。
 
 - 插件名：`astrbot_plugin_private_companion`
-- 版本：`5.7.5`
+- 版本：`5.7.6`
 - 适配平台：`aiocqhttp`
 - AstrBot 版本：`>=4.22.0`
 - 编码要求：UTF-8
-- 维护状态：5.7.5 小幅优化 QQ 空间说说与配图生成；说说口吻和空间配图构图可单独配置，默认减少哲理化文案和镜前自拍模板复用。
+- 维护状态：5.7.6 小幅优化在线生图兼容；魔搭社区文生图 API 可直接选择并支持异步任务轮询。
 - **成本提醒：火山方舟协作计划免费额度已延期到 `2026-07-31` 左右；具体以火山方舟控制台/官方活动页为准。请继续检查 Provider、每日 Token 限额和后台任务开关，注意成本控制。**
 - 若有好的想法仍可联系我，QQ：995051631（代码小白），欢迎提交 Issues，目标是无愧“最强”之名，喜欢的话请点一个 Star。
 
@@ -141,6 +141,9 @@
 陪伴群 片段
 陪伴群 插话反馈
 陪伴群 关系网
+陪伴群 LLM状态
+陪伴群 关闭LLM
+陪伴群 开启LLM
 陪伴群 开启
 陪伴群 关闭
 ```
@@ -239,12 +242,13 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 
 昨日观察日记只作为“生活节奏背景”使用。插件会优先读取屏幕陪伴插件的结构化摘要，找不到时再尝试读取 `diary_YYYYMMDD.summary.json` 或同日 Markdown 日记；注入前会脱敏窗口标题、社交软件、账号和具体聊天内容，并限制最大字符数。
 
-### ComfyUI / SDGen 生图
+### ComfyUI / SDGen / 在线生图
 
 - 用途：支持主动图片分享，可根据日程、梦境、当前场景生成图片；也可在每日生成日程后额外生成一张角色当天穿搭照，替换拓展页左上角 Logo。
 - AstrBot ComfyUI 插件仓库：<https://github.com/cjxzdzh/astrbot_plugin_comfyui>
 - ComfyUI 官方仓库：<https://github.com/comfyanonymous/ComfyUI>
 - AstrBot SDGen 插件：`astrbot_plugin_SDGen` / 本地目录通常为 `astrbot_plugin_sdgen`
+- NovelAI / NAI 本地代理插件：<https://github.com/woakato/astrbot_plugin_nai_image>
 - 相关设置：主动图片分享、生图后端、在线生图模型平台、文生图工作流、自拍工作流、人设参考图（本地路径或图片 URL）、每日穿搭照片、自然语言生图/改图、自然语言生图附加提示词、生图场景预设、本地图片读取保护。
 - 电脑高负荷时可延后本地 ComfyUI/SDGen 生图；“自动后端”模式下会优先尝试在线图片 API，失败后再回退本地 ComfyUI / SDGen。
 
@@ -257,10 +261,18 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 
 在线生图模型平台可选值：
 
-- `auto`：根据地址和模型名自动识别；OpenAI 兼容接口继续走 `/images/generations`，百炼地址会改走 DashScope 原生接口。
+- `auto`：根据地址和模型名自动识别；OpenAI 兼容接口继续走 `/images/generations`，百炼地址会改走 DashScope 原生接口，魔搭地址会走 api-inference 异步任务轮询。
 - `openai`：固定按 OpenAI 兼容图片接口处理，支持 `/images/generations` 与 `/images/edits`。
 - `bailian`：固定按阿里云百炼 / DashScope 原生生图接口处理，模型会按能力自动走多模态同步返回或异步任务轮询。
-- 在线地址支持自动归一化：可直接填共享域名、专属域名、`/api/v1` 根地址、完整生图接口地址；常见百炼控制台页面链接也会尽量自动修正成可请求地址。
+- `modelscope`：固定按魔搭社区 `api-inference.modelscope.cn` 文生图接口处理，提交任务后轮询 `/v1/tasks/{task_id}`，兼容 `images`、`output_images`、`results` 等图片结果字段。
+- 在线地址支持自动归一化：可直接填共享域名、专属域名、`/api/v1` 或 `/v1` 根地址、完整生图接口地址；常见百炼控制台页面链接也会尽量自动修正成可请求地址。
+
+按能力选择后端：
+
+- 只需要普通文生图、主动配图、空间说说配图：OpenAI 兼容在线 API、魔搭社区、NAI 本地代理、SDGen、ComfyUI 通常都可以尝试。
+- 需要自拍、头像、今日穿搭、角色表情包或改图参考图：必须选择真正支持参考图输入的后端。在线 OpenAI 兼容后端需要可用的 `/images/edits` 或等价接口；ComfyUI 需要自拍工作流实际接收图片；不支持参考图的后端不会被当作“参考图已使用”。
+- `SDGen` 和 `modelscope` 当前按纯文生图链路使用，不适合作为参考图/改图后端。
+- `astrbot_plugin_nai_image` 会在 `127.0.0.1:8765` 提供 OpenAI Images 兼容代理，可把本插件的外部图片 API 地址填为 `http://127.0.0.1:8765`，API Key 和模型名可填占位值；但它的 `/v1/images/edits` 当前会丢弃上传参考图并降级为纯文生图，因此只建议用于普通文生图、主动配图和公开说说配图，不建议用于自拍一致性、今日穿搭参考图、头像、表情包或改图链路。
 
 SDGen 后端说明：
 
@@ -677,7 +689,7 @@ QQ 空间动态被视为公开生活札记，不等同于私聊记忆。用户�
 
 - 开发者：`menglimi`
 - 插件仓库：<https://github.com/menglimi/astrbot_plugin_private_companion>
-- 插件版本：`5.7.5`
+- 插件版本：`5.7.6`
 - 主要文件：
   - `main.py`：插件主体、主动判定、回复注入、群聊观察、能力执行。
   - `planning.py`：日程与规划相关逻辑。

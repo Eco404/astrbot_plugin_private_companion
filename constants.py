@@ -87,6 +87,7 @@ _DATA_STORE_KEYS = (
     "worldbook_import_state",
     "atrelay_send_log",
     "inbound_debounce_stats",
+    "group_llm_reply_blocks",
 )
 
 # 触发原因 - 真人化表达

@@ -77,6 +77,7 @@ const state = {
 };
 
 let setupGuideProactivePollTimer = null;
+const SETUP_GUIDE_PROACTIVE_TEST_TIMEOUT_MS = 120000;
 
 const hiddenCompatibilityConfigKeys = new Set([
   "enable_semantic_message_debounce",
@@ -1693,15 +1694,15 @@ const configDescriptions = {
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
   local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
   local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  external_image_api_platform: "可填 auto、openai、bailian。auto 会根据 API 地址和模型名自动判断。",
-  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口。",
+  external_image_api_platform: "可填 auto、openai、bailian、modelscope。auto 会根据 API 地址和模型名自动判断；魔搭社区会按异步任务提交并轮询。",
+  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口；魔搭可填 https://api-inference.modelscope.cn/v1 或完整 /v1/images/generations。",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
   EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写 gpt-5.5、deepseek、claude、qwen 等聊天/文本模型。填写后配合 API 地址和 Key 可作为 external 或 auto 的生图后端。",
   external_image_api_size: "在线生图尺寸，例如 1024x1024、768x1344。",
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
   external_image_api_custom_headers: "可选。每行一个请求头，格式：Key: Value。会追加到在线生图 API 请求；下载同源结果图时也会安全复用。",
   enable_backup_external_image_api: "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选 API，再回退本地 ComfyUI/SDGen。",
-  backup_external_image_api_platform: "可填 auto、openai、bailian。含义与主在线生图平台一致，只在备选 API 生效时使用。",
+  backup_external_image_api_platform: "可填 auto、openai、bailian、modelscope。含义与主在线生图平台一致，只在备选 API 生效时使用。",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线生图接口地址。主在线 API 失败后才会使用。",
   BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
   BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选平台的图片模型名，不要填写聊天/文本模型。",
@@ -2365,8 +2366,8 @@ const featureSettingTypes = {
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"]] },
-  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]] },
-  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]] },
+  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"]] },
+  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   WEB_EXPLORATION_API_KEY: { type: "password" },
@@ -4106,7 +4107,7 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"]], description: "不知道选什么就先用自动；如果只配置了其中一种后端，也可以直接指定。" },
-        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"]], description: "只有在线 API 或自动模式需要。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"]], description: "只有在线 API 或自动模式需要。魔搭社区会走异步任务轮询。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_BASE_URL", type: "text", label: "在线图片 API 地址", placeholder: "https://.../v1/images/generations", description: "可填完整生图接口，也可填平台根地址；留空则不会走在线 API。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_KEY", type: "password", label: "在线图片 API Key", placeholder: "sk-...", description: "只用于在线图片 API；不走在线后端可以留空。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / dall-e-3 / wanx2.1-t2i-turbo", description: "请填写图片模型，不要填聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
@@ -6183,6 +6184,22 @@ async function refreshSetupGuideProactiveTestResult() {
     showToast(result.ok ? "主动消息测试通过，首次配置可以完成" : `主动消息测试失败：${result.error || result.detail || "未返回有效结果"}`, result.ok ? "success" : "error");
     return result;
   }
+  const deadlineAt = Number(state.setupGuideProactiveTest?.deadlineAt || 0);
+  if (result.pending && deadlineAt > 0 && Date.now() >= deadlineAt) {
+    const errorText = "主动消息测试等待超时。请确认主动循环已启动、目标用户有私聊会话，或稍后重新测试。";
+    state.setupGuideProactiveTest = {
+      ...(state.setupGuideProactiveTest || {}),
+      status: "error",
+      result: { ...result, pending: false, ok: false, error: result.error || errorText },
+      countdown: 0,
+      error: result.error || errorText,
+      checkedAt: Date.now(),
+    };
+    clearSetupGuideProactivePoll();
+    rerenderSetupGuideOverlayPreserveScroll();
+    showToast(`主动消息测试失败：${result.error || errorText}`, "error");
+    return state.setupGuideProactiveTest.result;
+  }
   state.setupGuideProactiveTest = {
     ...(state.setupGuideProactiveTest || {}),
     status: "polling",
@@ -6224,6 +6241,8 @@ async function runSetupGuideProactiveTest(control = null) {
       result,
       countdown: result.pending && !String(result.detail || "").includes("已有一个排障临时主动任务") ? 15 : 0,
       startedAt: Date.now(),
+      deadlineAt: result.pending ? Date.now() + SETUP_GUIDE_PROACTIVE_TEST_TIMEOUT_MS : 0,
+      lastPollAt: 0,
     };
     rerenderSetupGuideOverlayPreserveScroll();
     if (!result.pending) {
@@ -6241,6 +6260,14 @@ async function runSetupGuideProactiveTest(control = null) {
       };
       rerenderSetupGuideOverlayPreserveScroll();
       if (nextCountdown <= 0) {
+        const now = Date.now();
+        const deadlineAt = Number((state.setupGuideProactiveTest || {}).deadlineAt || 0);
+        const lastPollAt = Number((state.setupGuideProactiveTest || {}).lastPollAt || 0);
+        if (lastPollAt && now - lastPollAt < 5000 && (!deadlineAt || now < deadlineAt)) return;
+        state.setupGuideProactiveTest = {
+          ...(state.setupGuideProactiveTest || {}),
+          lastPollAt: now,
+        };
         refreshSetupGuideProactiveTestResult().catch((error) => {
           state.setupGuideProactiveTest = {
             ...(state.setupGuideProactiveTest || {}),

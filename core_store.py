@@ -385,6 +385,7 @@ class CoreStoreMixin:
             "worldbook_import_state": {},
             "runtime_settings": {},
             "inbound_debounce_stats": {},
+            "group_llm_reply_blocks": {},
             "cache_metrics": {},
         }
 
@@ -441,6 +442,7 @@ class CoreStoreMixin:
         data.setdefault("runtime_settings", {})
         data.setdefault("atrelay_send_log", [])
         data.setdefault("inbound_debounce_stats", {})
+        data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("cache_metrics", {})
         return data
 
@@ -1128,4 +1130,65 @@ class CoreStoreMixin:
             if group_id not in configured:
                 return False
         return True
+
+    def _group_llm_reply_block_store(self) -> dict[str, Any]:
+        store = self.data.setdefault("group_llm_reply_blocks", {})
+        if not isinstance(store, dict):
+            store = {}
+            self.data["group_llm_reply_blocks"] = store
+        return store
+
+    def _group_llm_reply_block_item(self, group_id: str) -> dict[str, Any]:
+        group_id = _single_line(group_id, 80)
+        if not group_id:
+            return {}
+        item = self._group_llm_reply_block_store().get(group_id)
+        return item if isinstance(item, dict) else {}
+
+    def _group_llm_reply_blocked(self, group_id: str) -> bool:
+        item = self._group_llm_reply_block_item(group_id)
+        return bool(item.get("enabled"))
+
+    def _set_group_llm_reply_block(
+        self,
+        group_id: str,
+        enabled: bool,
+        *,
+        operator_id: str = "",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        group_id = _single_line(group_id, 80)
+        if not group_id:
+            return {}
+        store = self._group_llm_reply_block_store()
+        if enabled:
+            item = {
+                "group_id": group_id,
+                "enabled": True,
+                "updated_at": _now_ts(),
+                "operator_id": _single_line(operator_id, 80),
+                "reason": _single_line(reason, 160),
+            }
+            store[group_id] = item
+            return item
+        previous = store.get(group_id)
+        if isinstance(previous, dict):
+            previous["enabled"] = False
+            previous["cleared_at"] = _now_ts()
+            previous["cleared_by"] = _single_line(operator_id, 80)
+            previous["clear_reason"] = _single_line(reason, 160)
+            store.pop(group_id, None)
+            return previous
+        return {"group_id": group_id, "enabled": False}
+
+    def _active_group_llm_reply_blocks(self) -> list[dict[str, Any]]:
+        store = self._group_llm_reply_block_store()
+        items: list[dict[str, Any]] = []
+        for group_id, item in list(store.items()):
+            if not isinstance(item, dict) or not bool(item.get("enabled")):
+                continue
+            normalized = dict(item)
+            normalized["group_id"] = _single_line(normalized.get("group_id") or group_id, 80)
+            items.append(normalized)
+        return sorted(items, key=lambda item: _safe_float(item.get("updated_at"), 0.0), reverse=True)
 

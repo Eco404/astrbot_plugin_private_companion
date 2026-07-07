@@ -2210,10 +2210,13 @@ class GroupObservationMixin:
             f"{self._group_member_identity_name(str(item.get('user_id') or item.get('sender_id') or user_id), item.get('identity_name') or item.get('name'), limit=16)}({item.get('count', 0)})"
             for user_id, item in active_members
         )
+        group_id = _single_line(group.get("group_id"), 80)
+        llm_blocked = bool(group_id and self._group_llm_reply_blocked(group_id))
         return (
             f"群聊陪伴状态：{'开启' if group.get('enabled', True) else '关闭'}\n"
+            f"本群 LLM 回复：{'关闭' if llm_blocked else '开启'}\n"
             f"访问模式：{'黑名单' if self.group_access_mode == 'blacklist' else '白名单'}\n"
-            f"群号：{group.get('group_id', '')}\n"
+            f"群号：{group_id}\n"
             f"累计观察：{group.get('message_count', 0)} 条\n"
             f"气氛：{atmosphere.get('pace', '未知')}｜{atmosphere.get('mood', '平稳')}\n"
             f"常见词/梗：{'、'.join(top_terms) if top_terms else '暂无'}\n"
