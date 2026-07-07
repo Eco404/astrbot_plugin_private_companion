@@ -5434,6 +5434,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user["last_activity_at"] = received_ts
             self._note_private_inbound_activity(user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts)
+            if self._cancel_inbound_conflicting_greeting(user, now=received_ts):
+                logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
+                if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                    self._schedule_next_proactive(user, now=received_ts)
             if text:
                 safe_text = self._sanitize_orphan_tts_placeholders(text)
                 user["last_user_message"] = safe_text or text
@@ -6342,7 +6346,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         enabled = bool(self._get_user(user_id).get("enabled"))
                     if enabled:
                         prompt_surface.add("timer.scheduling", self._format_timer_scheduling_instruction(), priority=95, source="timer")
-        injection = prompt_surface.render()
+        static_fragment_keys = {"reply.style", "identity.anchor"}
+        static_injection, dynamic_injection = prompt_surface.render_partition(
+            lambda fragment: fragment.normalized_key() in static_fragment_keys
+        )
+        injection = "\n\n".join(part for part in (static_injection, dynamic_injection) if part)
+        static_marker = "<!-- private_companion_static_v1 -->"
         marker = "<!-- private_companion_state_v1 -->"
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -6355,15 +6364,26 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             log_bookshelf_secret_skip("empty_passive_injection", current_user, inbound_text)
             await self._append_conditional_tool_instructions_to_request(event, req)
             return
-        injection_placement = "prompt" if self._append_turn_prompt_fragment_by_position(
-            req,
-            marker,
-            injection,
-            priority=40,
-            source="passive_state",
-        ) else "system_prompt"
-        if injection_placement == "system_prompt":
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{injection}".strip()
+        static_placement = ""
+        dynamic_placement = ""
+        if static_injection and static_marker not in current_prompt and static_marker not in current_turn_prompt:
+            current_prompt = req.system_prompt or ""
+            req.system_prompt = f"{current_prompt}\n\n{static_marker}\n{static_injection}".strip()
+            static_placement = "system_prompt"
+        if dynamic_injection:
+            if not self._append_turn_prompt_fragment_by_position(
+                req,
+                marker,
+                dynamic_injection,
+                priority=40,
+                source="passive_state",
+            ):
+                dynamic_placement = "system_prompt"
+                current_prompt = req.system_prompt or ""
+                req.system_prompt = f"{current_prompt}\n\n{marker}\n{dynamic_injection}".strip()
+            else:
+                dynamic_placement = "prompt"
+        injection_placement = "+".join(part for part in (static_placement, dynamic_placement) if part) or "none"
         await self._append_conditional_tool_instructions_to_request(event, req)
         state_log_parts = [
             f"心理能量={state.get('energy', 70)}/100",
@@ -7517,6 +7537,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             fast_user["last_activity_at"] = received_ts
             self._note_private_inbound_activity(fast_user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(fast_user, activity_ts=received_ts)
+            if self._cancel_inbound_conflicting_greeting(fast_user, now=received_ts):
+                logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
+                if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
+                    self._schedule_next_proactive(fast_user, now=received_ts)
             safe_text = self._sanitize_orphan_tts_placeholders(text)
             fast_user["last_user_message"] = safe_text or text
             fast_user["last_user_message_at"] = received_ts
@@ -8098,6 +8122,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     target_user = self._get_user(sender_id)
                     target_user["last_activity_at"] = received_ts
                     self._mark_greetings_satisfied_by_recent_activity(target_user, activity_ts=received_ts)
+                    if self._cancel_inbound_conflicting_greeting(target_user, now=received_ts):
+                        logger.info("[PrivateCompanion] 目标用户已在群内交流,已取消冲突问候候选: group=%s user=%s", group_id, sender_id)
+                        if not self._simulation_active(target_user) and _safe_float(target_user.get("next_proactive_at"), 0) <= 0:
+                            self._schedule_next_proactive(target_user, now=received_ts)
                     self._maybe_schedule_group_ignore_complaint(
                         group_id,
                         group,

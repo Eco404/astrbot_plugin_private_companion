@@ -1876,7 +1876,11 @@ class UserMemoryMixin:
         item = candidates[0][2]
         category = _single_line(item.get("category"), 20)
         topic = _single_line(item.get("topic"), 70)
-        if self._habit_topic_is_greeting_like(topic or category) and self._recent_activity_suppresses_habit_greeting(user, now=now):
+        if self._habit_topic_is_greeting_like(topic or category) and self._recent_activity_suppresses_habit_greeting(
+            user,
+            now=now,
+            topic=topic or category,
+        ):
             return None
         bucket = _single_line(item.get("bucket"), 12)
         delay_minutes = random.randint(4, 28)
@@ -1899,13 +1903,31 @@ class UserMemoryMixin:
         compact = re.sub(r"\s+", "", _single_line(text, 80))
         if not compact:
             return False
-        return bool(re.fullmatch(r"(?:早|早安|早上好|上午好|午安|中午好|晚上好|晚安)", compact))
-
-    def _recent_activity_suppresses_habit_greeting(self, user: dict[str, Any], *, now: float) -> bool:
-        recent_at = self._latest_private_user_activity_ts(user)
-        if recent_at <= 0:
+        if re.fullmatch(r"(?:早|早安|早上好|上午好|午安|中午好|晚上好|晚安)", compact):
+            return True
+        if len(compact) > 16:
             return False
-        if now - recent_at < max(0, self._effective_user_greeting_idle_minutes(user)) * 60:
+        return bool(
+            re.search(r"(?:早安|早上好|上午好|午安|中午好|晚上好|晚安|早间|早晨|早上)", compact)
+            and re.search(r"(?:问候|打招呼|招呼|寒暄|开场|醒来|起床)", compact)
+        )
+
+    def _recent_activity_suppresses_habit_greeting(self, user: dict[str, Any], *, now: float, topic: str = "") -> bool:
+        compact_topic = re.sub(r"\s+", "", _single_line(topic, 80))
+        try:
+            current_minute = self._environment_fromtimestamp(now).hour * 60 + self._environment_fromtimestamp(now).minute
+        except Exception:
+            current_minute = datetime.fromtimestamp(now).hour * 60 + datetime.fromtimestamp(now).minute
+        if compact_topic in {"早", "早安", "早上好"} and current_minute >= 11 * 60:
+            return True
+        recent_at = self._latest_private_user_activity_ts(user)
+        recent_any = max(
+            recent_at,
+            _safe_float(user.get("last_user_message_at"), 0),
+            _safe_float(user.get("last_companion_message_at"), 0),
+            _safe_float(user.get("last_sent"), 0),
+        )
+        if recent_any > 0 and now - recent_any < max(90, self._effective_user_greeting_idle_minutes(user)) * 60:
             return True
         suppressed = user.get("greetings_suppressed_by_inbound", [])
         if not isinstance(suppressed, list):
@@ -3095,10 +3117,17 @@ target 只能是 bot/self/other/ambiguous/none。
         now = now or _now_ts()
         changed = False
         planned_reason = str(user.get("planned_proactive_reason") or "")
-        if self._inbound_satisfies_greeting(planned_reason, now=now):
+        planned_topic = _single_line(user.get("planned_proactive_topic"), 80)
+        planned_is_greeting_habit = (
+            planned_reason == "habit_awareness"
+            and self._habit_topic_is_greeting_like(planned_topic)
+            and self._recent_activity_suppresses_habit_greeting(user, now=now, topic=planned_topic)
+        )
+        if self._inbound_satisfies_greeting(planned_reason, now=now) or planned_is_greeting_habit:
             next_at = _safe_float(user.get("next_proactive_at"), 0)
             if next_at > 0:
-                changed = self._mark_greeting_satisfied_by_inbound(user, planned_reason) or changed
+                if self._inbound_satisfies_greeting(planned_reason, now=now):
+                    changed = self._mark_greeting_satisfied_by_inbound(user, planned_reason) or changed
                 self._clear_pending_proactive_plan(user)
                 changed = True
         raw_followup = user.get("pending_followup_event")

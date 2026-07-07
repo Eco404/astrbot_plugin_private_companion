@@ -2408,7 +2408,6 @@ class ProactiveEngineMixin:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 5))
             return False, "用户在该问候窗口内已经活跃过"
-
         self._reset_daily_counter_if_needed(user)
         sent_today = _safe_int(user.get("sent_today"), 0)
         if (

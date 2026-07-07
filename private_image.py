@@ -1481,6 +1481,7 @@ class PrivateImageMixin:
             "【角色识别线索】\n"
             "以下只用于给图片归属打三档标签,不要展开推理,不要复述规则。当前角色不是发图用户。\n"
             "“疑似当前角色”包括当前角色本人、头像、Q版、二创、表情包、聊天截图等,但必须命中核心外观或名字锚点。\n"
+            "如果图片是表情包/贴纸/GIF,归属只能作为附属标签；摘要重点仍是表情、动作、文字梗和用户借图表达的态度。\n"
             "核心发型、发色、瞳色、物种或标志性服饰明显冲突时,标为“非当前角色”或“无法判断”。\n"
             "视觉锚点过少、只能泛泛说可爱/少女/二次元时,标为“无法判断”；明显无关人物/物品时,标为“非当前角色”。\n"
             f"{context}\n"
@@ -1566,6 +1567,7 @@ class PrivateImageMixin:
         return (
             "归属判断只作辅助：当前角色/Bot 指回复者，用户指发图者。"
             "优先回应用户借图表达的意思；只有用户问归属或梗依赖身份时再轻带自我关联。"
+            "遇到当前角色相关表情包/贴纸/GIF时,不要把重点放在“这是我”,而要先接住表情、动作、文字梗和情绪。"
         )
 
     def _private_image_intent_line(self, text: str) -> str:
@@ -1657,7 +1659,7 @@ class PrivateImageMixin:
         text = _single_line(vision_text, 1400)
         reason = self._private_image_ownership_conflict_reason(text)
         if not reason:
-            return text
+            return self._private_image_rebalance_sticker_cache_summary(text)
         old_line = self._private_image_ownership_line(text)
         new_line = "图像归属判断：无法判断"
         if old_line and old_line in text:
@@ -1670,7 +1672,30 @@ class PrivateImageMixin:
             old_line or "无",
             new_line,
         )
-        return corrected
+        return self._private_image_rebalance_sticker_cache_summary(corrected)
+
+    def _private_image_rebalance_sticker_cache_summary(self, vision_text: str) -> str:
+        text = _single_line(vision_text, 1400)
+        if self._private_image_type_kind(text) != "sticker":
+            return text
+        intent_line = self._private_image_intent_line(text)
+        if not intent_line:
+            return text
+        compact_intent = re.sub(r"\s+", "", intent_line)
+        if not (
+            ("当前角色" in compact_intent or "bot" in compact_intent.lower() or "自己" in compact_intent)
+            and any(token in compact_intent for token in ("表情包", "贴纸", "sticker", "emoji", "gif", "动图"))
+        ):
+            return text
+        visible_line = self._private_image_visible_line(text)
+        visible_value = re.sub(r"^可见内容[：:]\s*", "", visible_line or "", flags=re.I)
+        visible_value = _single_line(visible_value, 90)
+        replacement = (
+            "图像表达意图：当前角色相关表情包；回复时优先接住"
+            + (f"“{visible_value}”里的" if visible_value else "")
+            + "表情、动作、文字梗或情绪，不要把重点放在认自己"
+        )
+        return text.replace(intent_line, replacement, 1)
 
     def _private_image_visible_line(self, text: str) -> str:
         segment = self._private_image_labeled_segment(text, "可见内容")
@@ -1716,12 +1741,14 @@ class PrivateImageMixin:
             return "mixed"
         if "非当前角色" in compact or "不是当前角色" in compact:
             return "unrelated"
-        if "疑似当前角色" in compact:
-            return "bot_self"
         if "当前角色的表情包" in compact or "bot的表情包" in compact:
             return "bot_sticker"
         if "当前角色的聊天截图" in compact or "bot的聊天截图" in compact:
             return "bot_chat"
+        if "疑似当前角色" in compact and re.search(r"(?:表情包|贴纸|sticker|emoji|gif|动图)", compact):
+            return "bot_sticker"
+        if "疑似当前角色" in compact:
+            return "bot_self"
         if "当前角色自己" in compact or "当前回复角色自己" in compact or "bot自己" in compact:
             return "bot_self"
         if "发图用户本人" in compact or "用户本人" in compact:
@@ -1785,7 +1812,12 @@ class PrivateImageMixin:
             return (
                 "回复目标：按普通图片/截图/漫画/聊天记录处理。先看主体、文字和场景，再回应用户的疑问、吐槽或分享意图。"
             )
-        if kind in {"bot_self", "bot_sticker", "bot_chat"}:
+        if kind == "bot_sticker":
+            return (
+                "回复目标：这是当前角色相关表情包/贴纸/GIF时,先接住它表达的情绪、动作、文字梗或调侃点；"
+                "归属只轻轻影响语气,不要把回复重点放在认自己。"
+            )
+        if kind in {"bot_self", "bot_chat"}:
             return (
                 "回复目标：直接回应用户这次借图调侃、吐槽、撒娇或分享的意思；"
                 "归属指向当前角色时只作语气辅助，不要主动把重点放在认自己。"
@@ -1841,10 +1873,11 @@ class PrivateImageMixin:
     def _private_image_vision_cache_prompt_signature(self, base_prompt: str, user_text: str = "", *, contextual: bool = False) -> str:
         """Keep cache keys stable when prompt wording changes, but refresh on core appearance changes."""
         role_sig = self._private_image_role_visual_cache_signature()
+        semantic_sig = "private_image_summary_semantics_v5"
         return (
-            "private_image_vision_v4|"
+            "private_image_vision_v5|"
             f"contextual={1 if contextual else 0}|"
-            f"base={hashlib.sha1(str(base_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:16]}|"
+            f"semantic={semantic_sig}|"
             f"role={role_sig}|"
             f"user={hashlib.sha1(_single_line(user_text, 240).encode('utf-8', errors='ignore')).hexdigest()[:16] if contextual and user_text else ''}"
         )
@@ -1918,12 +1951,13 @@ class PrivateImageMixin:
             "只输出下面 4 行,不要写标题、分析过程、帧列表或长篇描述。\n"
             "图片类型：<照片/截图/漫画/表情包/聊天记录/其他>\n"
             "可见内容：<客观画面主体、文字、动作或最关键细节,125字内；多张图要按顺序保留每张图的关键文字/结果,不要只概括第一张>\n"
-            "图像表达意图：<用户可能借图表达的情绪、态度、疑问、分享意图、动作变化或梗,125字内>\n"
-            "图像归属判断：<疑似当前角色/非当前角色/无法判断>\n"
+            "图像表达意图：<用户可能借图表达的情绪、态度、疑问、分享意图、动作变化或梗,125字内；表情包/贴纸/GIF必须优先写它在表达什么>\n"
+            "图像归属判断：<疑似当前角色/非当前角色/无法判断；只写标签,不要把归属当作表达意图>\n"
             f"{multi_ownership_hint}"
             "完整性规则：这是在原有基础上的增强,不是二选一。任何类型都要保留可见内容和表达意图；"
             "区别只是图片侧多给内容细节,表情包/GIF侧多给情绪、态度和梗点。"
             "使用规则：表情包/贴纸/GIF 的表达意图常来自文字、表情、动作和梗点；普通图片的表达意图常来自用户分享、询问、吐槽或展示的语境。"
+            "归属规则：即使表情包疑似当前角色,也不要在表达意图里反复强调“这是当前角色/这是你自己”；归属只放在最后一行标签。"
             f"{combo_hint}"
             "无法确定就写无法判断；不要为了归属判断反复比较。"
             "如果同一张动态 GIF 被抽成多帧,请按时间顺序综合动作、表情变化和文字变化,不要把它们当成多张无关图片。"

@@ -3250,11 +3250,26 @@ function applyOverviewData(overview) {
 }
 
 function applyPageFontFamily() {
-  const font = state.pageFontFamily === "cheng" ? "cheng" : "original";
-  document.documentElement.dataset.pageFont = font;
-  try { localStorage.setItem("pc_font", font); } catch (e) {}
-  const appearanceSelect = document.getElementById("appearanceFontSelect");
-  if (appearanceSelect) appearanceSelect.value = font;
+  return window.PrivateCompanionAppearance?.applyFontFamily(state.pageFontFamily) || normalizePageFontFamily(state.pageFontFamily);
+}
+
+function normalizePageFontFamily(value) {
+  return window.PrivateCompanionAppearance?.normalizeFontFamily(value) || (String(value || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original");
+}
+
+async function savePageFontFamily(value) {
+  const next = normalizePageFontFamily(value);
+  const previous = state.pageFontFamily;
+  state.pageFontFamily = next;
+  applyPageFontFamily();
+  try {
+    const result = await postJson("/settings/update", { settings: { page_font_family: next } });
+    showToast(result?.config_saved === false ? "页面字体已应用，但配置持久化失败；重启后可能恢复旧值" : "页面字体已保存", result?.config_saved === false ? "error" : "success");
+  } catch (error) {
+    state.pageFontFamily = previous;
+    applyPageFontFamily();
+    showToast(`字体保存失败：${error.message}`, "error");
+  }
 }
 
 const PAGE_THEMES = [
@@ -17785,20 +17800,12 @@ document.addEventListener("change", (event) => {
 
 $("#refreshBtn").addEventListener("click", loadAll);
 
-document.getElementById("appearanceFontSelect")?.addEventListener("change", async (event) => {
-  const select = event.currentTarget;
-  const value = String(select?.value || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
-  const previous = state.pageFontFamily;
-  state.pageFontFamily = value;
-  applyPageFontFamily();
-  try {
-    const result = await postJson("/settings/update", { settings: { page_font_family: value } });
-    showToast(result?.config_saved === false ? "页面字体已应用，但配置持久化失败；重启后可能恢复旧值" : "页面字体已保存", result?.config_saved === false ? "error" : "success");
-  } catch (error) {
-    state.pageFontFamily = previous;
-    applyPageFontFamily();
-    showToast(`字体保存失败：${error.message}`, "error");
-  }
+document.querySelectorAll("[data-page-font-select]").forEach((select) => {
+  select.addEventListener("change", (event) => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLSelectElement)) return;
+    savePageFontFamily(target.value);
+  });
 });
 
 async function savePageTheme(theme) {

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .helpers import _single_line
 
@@ -77,6 +77,19 @@ class PromptSurface:
         for fragment in self._rendered_fragments():
             parts.append(str(fragment.content or "").strip())
         return "\n\n".join(parts)
+
+    def render_partition(self, predicate: Callable[[PromptFragment], bool]) -> tuple[str, str]:
+        matched: list[str] = []
+        rest: list[str] = []
+        for fragment in self._rendered_fragments():
+            content = str(fragment.content or "").strip()
+            if not content:
+                continue
+            if predicate(fragment):
+                matched.append(content)
+            else:
+                rest.append(content)
+        return "\n\n".join(matched), "\n\n".join(rest)
 
     def __len__(self) -> int:
         return len(self._fragments)
