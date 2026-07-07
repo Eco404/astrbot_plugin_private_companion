@@ -714,10 +714,10 @@ class LlmToolActionsMixin:
             except Exception:
                 requester_is_owner = False
             allowed = requester_id in set(self._configured_target_ids()) or requester_is_owner
-            forbidden_message = "只有主人用户可以查询 Bot 与其他人的互动。"
+            forbidden_message = "只有主要用户可以查询 Bot 与其他人的互动。"
         else:
             allowed = self._can_manage_private_companion(event)
-            forbidden_message = "只有主人/管理员在私聊中可以查询 Bot 与其他人的互动。"
+            forbidden_message = "只有主要用户/管理员在私聊中可以查询 Bot 与其他人的互动。"
         if not is_private or not allowed:
             return json.dumps({"status": "forbidden", "message": forbidden_message}, ensure_ascii=False)
         scope = _single_line(kwargs.get("scope") or kwargs.get("type") or "auto", 20).lower()
@@ -763,7 +763,7 @@ class LlmToolActionsMixin:
                     "hours": hours,
                     "message_count": len(lines),
                     "recent_lines": lines,
-                    "reply_hint": "请用自然口吻向主人概括最近互动；可以提到对象和大致话题，不要大段复述原文。",
+                    "reply_hint": "请用自然口吻向主要用户概括最近互动；可以提到对象和大致话题，不要大段复述原文。",
                 },
                 ensure_ascii=False,
             )
@@ -807,7 +807,7 @@ class LlmToolActionsMixin:
                 "hours": hours,
                 "message_count": len(lines),
                 "recent_lines": lines,
-                "reply_hint": "请用自然口吻向主人概括 Bot 最近在这个群里的互动；不要把群聊原文整段搬出来。",
+                "reply_hint": "请用自然口吻向主要用户概括 Bot 最近在这个群里的互动；不要把群聊原文整段搬出来。",
             },
             ensure_ascii=False,
         )
@@ -905,7 +905,7 @@ class LlmToolActionsMixin:
         if not getattr(self, "enable_worldbook_member_recognition", False):
             return json.dumps({"status": "disabled", "message": "关系网未启用"}, ensure_ascii=False)
         if not self._relation_lookup_authorized(event):
-            return json.dumps({"status": "forbidden", "message": "关系网查询只允许主人/管理员在私聊中使用"}, ensure_ascii=False)
+            return json.dumps({"status": "forbidden", "message": "关系网查询只允许主要用户/管理员在私聊中使用"}, ensure_ascii=False)
         keyword = self._relation_lookup_clean_keyword(
             kwargs.get("keyword")
             or kwargs.get("name")

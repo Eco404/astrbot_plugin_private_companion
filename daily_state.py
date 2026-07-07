@@ -4922,7 +4922,7 @@ class DailyStateMixin:
                 continue
             name = _single_line(raw_user.get("nickname") or user_id, 30)
             source_note = "昨日对话" if dated_lines else "最近对话（history 无时间戳,作为昨日摘要候选）"
-            blocks.append(f"【主人:{name}｜{source_note}】\n" + "\n".join(selected))
+            blocks.append(f"【主要用户:{name}｜{source_note}】\n" + "\n".join(selected))
         return "\n\n".join(blocks).strip()[-18000:]
 
     def _load_conversation_history_items(self, conversation: Conversation | None) -> list[dict[str, Any]]:
@@ -7867,6 +7867,7 @@ class DailyStateMixin:
             "你",
             "用户",
             "主人",
+            "主要用户",
             "当前用户",
             "对方",
             "自己",

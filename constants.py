@@ -133,9 +133,9 @@ PROACTIVE_ABILITY_REGISTRY = [
         "module": "主动行为",
         "name": "screen_peek",
         "label": "轻窥屏",
-        "when": "仅主人/本机屏幕授权场景下,想确认主人电脑前是否还在忙",
-        "use_for": "主人 check_in、quiet_care、短空档里的本机屏幕试探",
-        "avoid": "用于朋友或非本机对象、复述屏幕内容、承认偷看、把观察写成分析报告",
+        "when": "仅主要用户/本机屏幕授权场景下,想确认主要用户电脑前是否还在忙",
+        "use_for": "主要用户 check_in、quiet_care、短空档里的本机屏幕试探",
+        "avoid": "用于次要用户或非本机对象、复述屏幕内容、承认偷看、把观察写成分析报告",
     },
     {
         "module": "主动行为",

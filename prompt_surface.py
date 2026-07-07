@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Iterable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable
 
 from .helpers import _single_line
 
@@ -14,6 +14,7 @@ class PromptFragment:
     priority: int = 100
     source: str = ""
     index: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def normalized_key(self) -> str:
         return _single_line(self.key or self.source or "fragment", 80)
@@ -26,17 +27,40 @@ class PromptSurface:
         self._fragments: list[PromptFragment] = []
         self._next_index = 0
 
-    def add(self, key: str, content: str, *, priority: int = 100, source: str = "") -> None:
+    def add(
+        self,
+        key: str,
+        content: str,
+        *,
+        priority: int = 100,
+        source: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         text = str(content or "").strip()
         if not text:
             return
-        self._fragments.append(PromptFragment(key=key, content=text, priority=priority, source=source, index=self._next_index))
+        self._fragments.append(
+            PromptFragment(
+                key=key,
+                content=text,
+                priority=priority,
+                source=source,
+                index=self._next_index,
+                metadata=dict(metadata or {}),
+            )
+        )
         self._next_index += 1
 
     def extend(self, fragments: Iterable[PromptFragment]) -> None:
         for fragment in fragments:
             if isinstance(fragment, PromptFragment):
-                self.add(fragment.key, fragment.content, priority=fragment.priority, source=fragment.source)
+                self.add(
+                    fragment.key,
+                    fragment.content,
+                    priority=fragment.priority,
+                    source=fragment.source,
+                    metadata=fragment.metadata,
+                )
 
     def _rendered_fragments(self) -> list[PromptFragment]:
         seen_keys: set[str] = set()
@@ -61,15 +85,16 @@ class PromptSurface:
         result: list[dict[str, object]] = []
         for fragment in self._rendered_fragments():
             content = str(fragment.content or "").strip()
-            result.append(
-                {
-                    "key": fragment.normalized_key(),
-                    "source": _single_line(fragment.source, 80),
-                    "priority": int(fragment.priority),
-                    "content": content,
-                    "chars": len(content),
-                }
-            )
+            item = {
+                "key": fragment.normalized_key(),
+                "source": _single_line(fragment.source, 80),
+                "priority": int(fragment.priority),
+                "content": content,
+                "chars": len(content),
+            }
+            if fragment.metadata:
+                item["metadata"] = dict(fragment.metadata)
+            result.append(item)
         return result
 
     def render(self) -> str:

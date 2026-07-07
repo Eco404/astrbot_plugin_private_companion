@@ -860,6 +860,7 @@ class CoreStoreMixin:
             "target": "owner",
             "主人": "owner",
             "主用户": "owner",
+            "主要用户": "owner",
             "目标用户": "owner",
             "friend": "friend",
             "social": "friend",
@@ -867,12 +868,13 @@ class CoreStoreMixin:
             "朋友": "friend",
             "好友": "friend",
             "普通朋友": "friend",
+            "次要用户": "friend",
         }
         return mapping.get(text, "")
 
     @staticmethod
     def _private_user_role_label(role: str) -> str:
-        return "主人" if role == "owner" else "朋友"
+        return "主要用户" if role == "owner" else "次要用户"
 
     def _protected_owner_nickname_tokens(self) -> set[str]:
         tokens: set[str] = set()
@@ -889,6 +891,8 @@ class CoreStoreMixin:
             "朋友",
             "主人",
             "主用户",
+            "主要用户",
+            "次要用户",
             "目标用户",
         }
 

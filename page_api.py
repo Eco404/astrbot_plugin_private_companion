@@ -2761,6 +2761,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 content = str(module.get("content") or "")[:6500]
                 if not content.strip():
                     continue
+                module_metadata = module.get("metadata") if isinstance(module.get("metadata"), dict) else {}
                 modules.append(
                     {
                         "key": self._single_line(module.get("key"), 100) or f"module.{index + 1}",
@@ -2772,6 +2773,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "truncated": bool(module.get("truncated")),
                         "preview": self._single_line(module.get("preview"), 220),
                         "content": content,
+                        "metadata": {
+                            self._single_line(key, 40): self._single_line(value, 120)
+                            for key, value in module_metadata.items()
+                            if self._single_line(key, 40) and self._single_line(value, 120)
+                        },
                     }
                 )
             return {
@@ -5663,6 +5669,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "master": "user",
             "主人": "user",
             "主人设定": "user",
+            "主要用户": "user",
+            "主要用户设定": "user",
             "用户": "user",
             "用户设定": "user",
         }
@@ -5689,13 +5697,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "本次需要整理的范围：",
             f"- 角色设定：{'生成' if 'persona' in selected else '不要生成，字段留空'}",
             f"- 世界观设定：{'生成' if 'world' in selected else '不要生成，字段留空'}",
-            f"- 主人/用户设定：{'生成' if 'user' in selected else '不要生成，字段留空'}",
+            f"- 主要用户/用户设定：{'生成' if 'user' in selected else '不要生成，字段留空'}",
         ]
         user_rule = (
-            "主人/用户设定：只在原文明确写出对用户的称呼、用户身份或相处方式时抽取；"
+            "主要用户/用户设定：只在原文明确写出对用户的称呼、用户身份或相处方式时抽取；"
             "可以保守推断用户性别和大概年龄范围（如原文有暗示），但不要推断隐私偏好或亲密关系。"
             if "user" in selected
-            else "不要生成任何用户资料、主人资料、用户关系或用户偏好。"
+            else "不要生成任何用户资料、主要用户资料、用户关系或用户偏好。"
         )
         system_prompt = (
             "你是一个角色设定整理助手。你的任务是把一段 AstrBot 主回复人格文本整理成陪伴插件的角色/世界观设定草稿。\n"
@@ -5958,7 +5966,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         umo = str(user.get("umo", "") or "")
         source = self._single_line(umo.split(":", 1)[0], 40) if ":" in umo else ""
         nickname = self._single_line(user.get("nickname"), 40)
-        generic_names = {"用户", "主人", "默认用户"}
+        generic_names = {"用户", "主人", "主要用户", "默认用户"}
         if is_qq_user:
             display_name = nickname if nickname and nickname not in generic_names else user_id_text
         else:
@@ -5992,7 +6000,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 relationship_stage = "陌生"
         role = self.plugin._private_user_role(user, user_id_text) if hasattr(self.plugin, "_private_user_role") else ""
         role_labeler = getattr(self.plugin, "_private_user_role_label", None)
-        role_label = role_labeler(role) if callable(role_labeler) else ("主人" if role == "owner" else "朋友")
+        role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
         return {
             "user_id": user_id_text,
             "display_name": display_name,
@@ -6819,6 +6827,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_llm_timer_scheduling",
             "enable_llm_proactive_message",
             "enable_llm_proactive_persona_judge",
+            "enable_maslow_motivation_experiment",
+            "enable_experimental_motivation_model",
+            "enable_personality_iteration_experiment",
             "enable_passive_topic_suppression",
             "enable_relationship_state_machine",
             "enable_emotion_simulation",
@@ -8727,8 +8738,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
         if features.get("enable_livingmemory_integration"):
             living_level = "ok" if self.plugin._livingmemory_available() else "warn"
-            living_text = "LivingMemory 插件可被调用" if living_level == "ok" else "已启用协同，但当前未检测到可用工具"
-            add(living_level, "LivingMemory 协同", living_text)
+            try:
+                companion_active = bool(self.plugin._memory_companion_bridge())  # type: ignore[attr-defined]
+            except Exception:
+                companion_active = False
+            if companion_active:
+                living_text = "我会牢牢记住你 桥接可用"
+                living_level = "ok"
+            elif living_level == "ok":
+                living_text = "LivingMemory 插件可被调用"
+            else:
+                living_text = "已启用协同，但当前未检测到可用记忆插件"
+            add(living_level, "记忆插件协同", living_text)
 
         if features.get("enable_bilibili_integration"):
             bili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
@@ -8849,7 +8870,212 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if refresh_minutes and refresh_minutes < 60:
             add("warn", "长期记忆整理过于频繁", f"当前 {refresh_minutes} 分钟，可能增加模型调用量", "建议设置为 120 分钟以上")
 
+        if features.get("enable_personality_iteration_experiment"):
+            suggestions = self._personality_iteration_suggestions(users, groups)
+            if suggestions:
+                for suggestion in suggestions:
+                    add(
+                        self._single_line(suggestion.get("level"), 12) or "info",
+                        f"角色贴合校准：{self._single_line(suggestion.get('dimension'), 40)}",
+                        self._single_line(suggestion.get("text"), 260),
+                        self._single_line(suggestion.get("action"), 160),
+                    )
+            else:
+                add(
+                    "ok",
+                    "角色贴合校准",
+                    "已启用理论检查，暂未从运行态观察到需要调整的角色贴合问题；该功能只帮助用户定位调整方向，不会自动修改 AstrBot 人格。",
+                )
+
         return items
+
+    def _personality_iteration_suggestions(self, users: dict[str, Any], groups: dict[str, Any]) -> list[dict[str, str]]:
+        data = getattr(self.plugin, "data", {}) if isinstance(getattr(self.plugin, "data", {}), dict) else {}
+        raw_candidates = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
+        recent_candidates = [item for item in raw_candidates[-80:] if isinstance(item, dict)]
+        suggestions: list[dict[str, str]] = []
+
+        def add(level: str, dimension: str, evidence: str, risk: str, suggestion: str, scope: str, confidence: str = "中") -> None:
+            text = f"校准依据：{dimension}；运行证据：{evidence}；可能不贴合：{risk}；调整位置：{scope}；建议写法：{suggestion}；置信度：{confidence}。"
+            suggestions.append(
+                {
+                    "level": level,
+                    "dimension": dimension,
+                    "text": text,
+                    "action": suggestion,
+                }
+            )
+
+        def candidate_text(item: dict[str, Any]) -> str:
+            parts = [
+                item.get("reason"),
+                item.get("action"),
+                item.get("topic"),
+                item.get("motive"),
+                item.get("note"),
+                item.get("semantic_kind"),
+                item.get("semantic_note"),
+            ]
+            return " ".join(self._single_line(part, 120) for part in parts if part)
+
+        candidate_texts = [candidate_text(item) for item in recent_candidates]
+        joined_candidates = "\n".join(candidate_texts[-40:])
+        generic_markers = (
+            "check_in",
+            "greeting",
+            "morning",
+            "evening",
+            "近况",
+            "问候",
+            "早安",
+            "晚安",
+            "在吗",
+            "忙不忙",
+            "还好吗",
+            "有没有空",
+        )
+        concrete_markers = (
+            "qzone",
+            "news",
+            "bilibili",
+            "reading",
+            "web",
+            "日程",
+            "空间",
+            "新闻",
+            "视频",
+            "阅读",
+            "创作",
+            "天气",
+            "通勤",
+            "图片",
+            "照片",
+            "说说",
+        )
+        generic_count = sum(1 for text in candidate_texts if any(marker in text.lower() for marker in generic_markers))
+        concrete_count = sum(1 for text in candidate_texts if any(marker in text.lower() for marker in concrete_markers))
+        pending_generic = [
+            item
+            for item in recent_candidates
+            if self._single_line(item.get("status"), 24).lower() in {"", "accepted", "deferred", "queued", "pending", "unknown"}
+            and any(marker in candidate_text(item).lower() for marker in generic_markers)
+        ]
+
+        enabled_user_items = [item for item in users.values() if isinstance(item, dict) and item.get("enabled", True)]
+        active_users: list[dict[str, Any]] = []
+        unanswered_users: list[dict[str, Any]] = []
+        high_sent_users: list[dict[str, Any]] = []
+        for user in enabled_user_items:
+            if bool(getattr(self.plugin, "_user_enabled_for_proactive", lambda uid, profile: bool(profile and profile.get("enabled", True)))(
+                str(user.get("user_id") or ""),
+                user,
+            )):
+                active_users.append(user)
+            ignored = self._int(user.get("ignored_streak"))
+            sent_today = self._int(user.get("sent_today"))
+            if ignored >= 2:
+                unanswered_users.append(user)
+            if sent_today >= 4:
+                high_sent_users.append(user)
+
+        effective_max_daily = self._int(getattr(self.plugin, "max_daily_messages", 0))
+        max_daily_getter = getattr(self.plugin, "_runtime_max_daily_messages", None)
+        if callable(max_daily_getter):
+            try:
+                effective_max_daily = self._int(max_daily_getter())
+            except Exception:
+                pass
+        idle_minutes = self._int(getattr(self.plugin, "idle_minutes", 0))
+        min_interval = self._int(getattr(self.plugin, "min_interval_minutes", 0))
+
+        if active_users and (effective_max_daily >= 10 or (idle_minutes and idle_minutes <= 30) or high_sent_users):
+            evidence_parts = []
+            if effective_max_daily >= 10:
+                evidence_parts.append(f"私聊主动上限 {effective_max_daily}")
+            if idle_minutes and idle_minutes <= 30:
+                evidence_parts.append(f"空闲 {idle_minutes} 分钟即可主动")
+            if high_sent_users:
+                labels = [self._single_line(item.get("nickname") or item.get("user_id"), 32) for item in high_sent_users[:3]]
+                evidence_parts.append(f"今日主动较多：{'、'.join(labels)}")
+            add(
+                "warn",
+                "艾森克 PEN：外向性表现偏高",
+                "，".join(evidence_parts) or "主动频率较高",
+                "如果角色基线不是高外向，容易从“自然有生活”变成“总想找人说话”。",
+                "主动靠近需要具体由头；连续无人回应时优先安静生活，不继续泛泛问候。",
+                "AstrBot 人格 / 主动策略",
+                "中",
+            )
+
+        if unanswered_users and (pending_generic or generic_count >= 3):
+            labels = [self._single_line(item.get("nickname") or item.get("user_id"), 32) for item in unanswered_users[:3]]
+            add(
+                "warn",
+                "依恋风格：焦虑型追问倾向",
+                f"{'、'.join(labels)} 未回应次数较高；近期仍存在 {len(pending_generic) or generic_count} 条问候/近况类主动候选",
+                "如果角色应当给人稳定感，沉默后追问会像在索取回应。",
+                "对方沉默时先降频；只在有明确事件、共同约定或用户关心的内容时再开口。",
+                "AstrBot 人格 / 私聊主动强度 / 关系策略",
+                "高" if len(unanswered_users) >= 2 else "中",
+            )
+
+        if unanswered_users and min_interval >= 360 and not pending_generic:
+            labels = [self._single_line(item.get("nickname") or item.get("user_id"), 32) for item in unanswered_users[:3]]
+            add(
+                "info",
+                "依恋风格：回避型收缩风险",
+                f"{'、'.join(labels)} 已有未回应记录；当前最小主动间隔 {min_interval} 分钟，且近期没有可解释的轻量候选",
+                "如果角色基线是亲近但有边界，完全退开会显得忽冷忽热。",
+                "保留低打扰入口：只在日程节点、共同约定或用户明确关心的事情上轻轻接一次。",
+                "私聊主动强度 / 关系策略",
+                "低",
+            )
+
+        if recent_candidates and generic_count >= 4 and concrete_count <= max(1, generic_count // 3):
+            add(
+                "warn",
+                "自我决定理论：动机质量偏低",
+                f"近期主动候选里泛问候约 {generic_count} 条，具体生活/外部事件锚点约 {concrete_count} 条",
+                "主动缺少关系感、能力感或自主感来源时，会像模板关心而不是角色自然想说。",
+                "主动来源优先写成三类：共同经历、用户正在做的事、角色自己的生活发现；没有锚点宁可不发。",
+                "世界知识 / 主动来源 / 日程细化",
+                "中",
+            )
+
+        if getattr(self.plugin, "enable_group_companion", False) and not bool(getattr(self.plugin, "enable_group_persona_denoise", False)):
+            add(
+                "info",
+                "大五人格：宜人性与公开边界",
+                "群聊陪伴已启用，但群聊人格去噪未开启",
+                "如果角色私聊很亲近，群聊里照搬亲密语气会破坏公开场合边界。",
+                "开启群聊人格去噪；或写明：私聊可亲近，群聊公开场合更克制、更少暧昧和私密称呼。",
+                "群聊页 / AstrBot 人格",
+                "低",
+            )
+
+        if bool(getattr(self.plugin, "enable_emotion_simulation", False)) and bool(getattr(self.plugin, "enable_qzone_emotional_vent_publish", False)):
+            add(
+                "info",
+                "艾森克 PEN：情绪稳定性外显",
+                "情绪模拟和 QQ 空间情绪宣泄动态同时开启",
+                "如果角色不是高敏感外显型，公开宣泄会显得比设定更戏剧化。",
+                "公开动态偏生活化；强烈情绪先私下整理，不把用户压力公开化。",
+                "QQ 空间配置 / 世界知识 / AstrBot 人格",
+                "低",
+            )
+
+        if joined_candidates and ("抱歉" in joined_candidates or "对不起" in joined_candidates) and generic_count >= 2:
+            add(
+                "info",
+                "依恋风格：讨好型修复倾向",
+                "近期主动候选同时出现道歉/修复表达和泛问候",
+                "角色可能把普通沉默解释成自己做错了，导致姿态过低。",
+                "只有用户明确不适或发生冲突时才道歉；日常沉默按对方忙处理。",
+                "AstrBot 人格 / 回复策略 / 主动策略",
+                "低",
+            )
+
+        return suggestions[:5]
 
     def _tts_runtime_summary(self, users: dict[str, Any]) -> dict[str, Any]:
         enabled_user = None
@@ -9492,6 +9718,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_llm_timer_scheduling",
             "enable_llm_proactive_message",
             "enable_llm_proactive_persona_judge",
+            "enable_maslow_motivation_experiment",
+            "enable_experimental_motivation_model",
+            "enable_personality_iteration_experiment",
             "enable_passive_topic_suppression",
             "enable_relationship_state_machine",
             "enable_emotion_simulation",
@@ -9675,7 +9904,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
             "proactive_persona_judge_cache_minutes",
+            "enable_experimental_motivation_model",
+            "enable_personality_iteration_experiment",
+            "enable_maslow_schedule_influence",
+            "maslow_motivation_strength",
             "proactive_photo_text_probability",
+            "memory_companion_context_timeout_seconds",
+            "enable_memory_companion_emotional_drift",
+            "enable_memory_companion_cross_window_emotion",
+            "enable_memory_companion_dream_fragment",
+            "enable_memory_companion_open_loop_search",
+            "enable_memory_companion_feature_context",
+            "memory_companion_context_top_k",
+            "memory_companion_context_max_chars",
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
@@ -10393,6 +10634,40 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(5, min(720, int(value)))
             except (TypeError, ValueError):
                 return 180
+        if key == "enable_maslow_schedule_influence":
+            return self._normalize_bool_value(value)
+        if key == "enable_experimental_motivation_model":
+            return self._normalize_bool_value(value)
+        if key == "enable_personality_iteration_experiment":
+            return self._normalize_bool_value(value)
+        if key == "maslow_motivation_strength":
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 35
+        if key == "memory_companion_context_timeout_seconds":
+            try:
+                return max(0.2, min(6.0, float(value)))
+            except (TypeError, ValueError):
+                return 1.2
+        if key in (
+            "enable_memory_companion_emotional_drift",
+            "enable_memory_companion_cross_window_emotion",
+            "enable_memory_companion_dream_fragment",
+            "enable_memory_companion_open_loop_search",
+            "enable_memory_companion_feature_context",
+        ):
+            return self._normalize_bool_value(value)
+        if key == "memory_companion_context_top_k":
+            try:
+                return max(1, min(10, int(value)))
+            except (TypeError, ValueError):
+                return 5
+        if key == "memory_companion_context_max_chars":
+            try:
+                return max(240, min(1800, int(value)))
+            except (TypeError, ValueError):
+                return 900
         if key == "max_proactive_plan_lag_minutes":
             try:
                 return max(5, min(1440, int(value)))
@@ -11191,13 +11466,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         try:
             status = self.plugin._format_livingmemory_status()
         except Exception:
-            status = "LivingMemory：状态探测失败，已跳过协同。"
+            status = "记忆插件：状态探测失败，已跳过协同。"
+        # Detect "我会牢牢记住你" (RememberYou) bridge availability
+        memory_companion_active = False
+        memory_companion_display_name = ""
+        try:
+            bridge = self.plugin._memory_companion_bridge()  # type: ignore[attr-defined]
+            if bridge is not None:
+                memory_companion_active = True
+                memory_companion_display_name = getattr(bridge, "display_name", "") or "我会牢牢记住你"
+        except Exception:
+            pass
         return {
             "enabled": bool(available and getattr(self.plugin, "enable_livingmemory_integration", False)),
             "available": available,
             "tool_name": getattr(self.plugin, "livingmemory_tool_name", ""),
             "plugin_dir": plugin_dir,
             "status": status,
+            "memory_companion_active": memory_companion_active,
+            "memory_companion_display_name": memory_companion_display_name,
         }
 
     def _screen_companion_available(self) -> bool:
@@ -12196,9 +12483,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return {"label": user_id or "未知用户", "role": "unknown", "role_label": "未知"}
             role = self.plugin._private_user_role(user, user_id) if hasattr(self.plugin, "_private_user_role") else ""
             role_labeler = getattr(self.plugin, "_private_user_role_label", None)
-            role_label = role_labeler(role) if callable(role_labeler) else ("主人" if role == "owner" else "朋友")
+            role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
             nickname = self._single_line(user.get("nickname"), 40)
-            generic_names = {"用户", "主人", "默认用户"}
+            generic_names = {"用户", "主人", "主要用户", "默认用户"}
             if str(user_id).isdigit():
                 label = nickname if nickname and nickname not in generic_names else user_id
             else:
@@ -12211,7 +12498,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             status = self._single_line(item.get("status"), 24) or "unknown"
             repeat_count = normalized_repeat(item, status)
             note = self._single_line(item.get("note"), 160)
-            if status == "blocked" and note == "朋友关系不接收敏感主动":
+            if status == "blocked" and note in {"朋友关系不接收敏感主动", "次要用户关系不接收敏感主动"}:
                 continue
             user_id = self._single_line(item.get("user_id"), 32)
             user = users.get(user_id) if isinstance(users, dict) else None

@@ -271,7 +271,7 @@ class ProactiveMixin:
         },
         "high_private": {
             "label": "私聊高频",
-            "description": "显著提高主人私聊主动频率，适合希望 Bot 更常来找的用户。",
+            "description": "显著提高主要用户私聊主动频率，适合希望 Bot 更常来找的用户。",
             "effects": {
                 "max_daily_messages": 15,
                 "idle_minutes": 14,
@@ -735,22 +735,22 @@ class ProactiveMixin:
     def _format_private_user_boundary_hint(self, user: dict[str, Any]) -> str:
         role = self._private_user_role(user)
         labeler = getattr(self, "_private_user_role_label", None)
-        label = labeler(role) if callable(labeler) else ("主人" if role == "owner" else "朋友")
+        label = labeler(role) if callable(labeler) else ("主要用户" if role == "owner" else "次要用户")
         note = _single_line(user.get("proactive_boundary_note"), 180)
         if role == "owner":
             text = (
                 "【当前私聊关系角色】\n"
                 f"- 当前用户角色：{label}。\n"
-                "- 可以延续人格中对主人的亲近、依赖和日常陪伴动机，但仍要尊重用户休息、忙碌和拒绝信号。"
+                "- 可以延续人格中对主要用户的亲近、依赖和日常陪伴动机，但仍要尊重用户休息、忙碌和拒绝信号。"
             )
         else:
             text = (
                 "【当前私聊关系角色】\n"
                 f"- 当前用户角色：{label}。\n"
-                "- 对方不是主人/恋人/专属陪伴目标。主动联系应像普通朋友：少量、具体、不过度亲密，不使用主人专属称呼、占有欲、撒娇索取或暧昧承诺。\n"
+                "- 对方不是主要用户/恋人/专属陪伴目标。主动联系应像普通朋友：少量、具体、不过度亲密，不使用主要用户专属称呼、占有欲、撒娇索取或暧昧承诺。\n"
                 "- 动机应以礼貌关心、共同话题、必要转告、轻分享为主；不要因为想贴近、想被哄、想确认对方在不在而频繁打扰。\n"
-                "- 不给朋友使用窥屏或主动生图能力；不要把主人或其他私聊对象的图片、生活碎片复用给朋友。"
-                "- 不对朋友发起本子/夹层阅读推荐、私密阅读分享、屏幕观察、群聊私下转述、私下创作分享或其他涉及隐私来源的主动。"
+                "- 不给次要用户使用窥屏或主动生图能力；不要把主要用户或其他私聊对象的图片、生活碎片复用给次要用户。"
+                "- 不对次要用户发起本子/夹层阅读推荐、私密阅读分享、屏幕观察、群聊私下转述、私下创作分享或其他涉及隐私来源的主动。"
             )
         if note:
             text += f"\n- 用户级边界备注：{note}"
@@ -835,7 +835,7 @@ class ProactiveMixin:
             normalized_motive = (
                 "作为普通朋友轻轻分享一个不指向第三方私聊互动的小片段,不要求立刻回复"
                 if str(reason or "") in {"", "check_in", "quiet_care", "state_share", "activity_share"}
-                else "按朋友关系做一次克制的普通文字分享,不写成和朋友用户聊天或约见"
+                else "按次要用户关系做一次克制的普通文字分享,不写成和次要用户聊天或约见"
             )
             return {
                 "reason": normalized_reason,
@@ -853,9 +853,9 @@ class ProactiveMixin:
         if not normalized_topic or any(token in normalized_topic for token in sensitive_markers):
             normalized_topic = "问一句近况"
         normalized_motive = (
-            "作为朋友想起对方可能正忙,只轻轻问一句,不要求立刻回复"
+            "作为次要用户关系想起对方可能正忙,只轻轻问一句,不要求立刻回复"
             if normalized_reason in {"", "check_in", "quiet_care", "state_share"}
-            else "按朋友关系顺手补一句,只做普通文字关心,不涉及屏幕观察"
+            else "按次要用户关系顺手补一句,只做普通文字关心,不涉及屏幕观察"
         )
         return {
             "reason": normalized_reason,
@@ -938,7 +938,7 @@ class ProactiveMixin:
             "reason": "quiet_care",
             "action": "message",
             "topic": "留出空间",
-            "motive": "连续没有回应时,朋友关系要主动退一步；如果还要发,只放一小句很轻的话,说完就把空间留给对方",
+            "motive": "连续没有回应时,次要用户关系要主动退一步；如果还要发,只放一小句很轻的话,说完就把空间留给对方",
         }
 
     @staticmethod
@@ -950,7 +950,7 @@ class ProactiveMixin:
             r"给.{0,16}(?:回了?消息|发了?消息|回信|回复了?|发私聊)",
             r"(?:回了?消息|发了?消息|回信|发私聊|私聊|聊天|互相吐槽|互相安慰)",
             r"(?:约饭|夜宵|见面|出门|一起(?:做|看|聊|吃|去|玩|散步|上课|写|打))",
-            r"(?:朋友用户|朋友边界|朋友那边|朋友私聊)",
+            r"(?:朋友用户|朋友边界|朋友那边|朋友私聊|次要用户|次要用户边界|次要用户那边|次要用户私聊)",
         )
         return any(re.search(pattern, cleaned) for pattern in patterns)
 
@@ -1153,13 +1153,149 @@ class ProactiveMixin:
         drive = self._bot_proactive_drive(user, now=now)
         temperature = self._relationship_proactive_temperature(user, now=now)
         score = _safe_float(drive.get("score"), 0.55) * 0.48 + _safe_float(temperature.get("score"), 0.55) * 0.52
+        motivation: dict[str, Any] = {}
+        if bool(getattr(self, "enable_experimental_motivation_model", False)):
+            motivation = self._experimental_proactive_motivation(user, now=now, drive=drive, temperature=temperature)
+            modifier = (_safe_float(motivation.get("score"), 0.5) - 0.5) * 0.16
+            score += modifier
         score = max(0.05, min(1.0, score))
-        return {
+        result = {
             "score": score,
             "label": f"{drive.get('label')}/{temperature.get('label')}",
             "detail": f"状态:{drive.get('detail')}; 关系:{temperature.get('detail')}",
             "drive": drive,
             "temperature": temperature,
+        }
+        if motivation:
+            result["motivation"] = motivation
+            result["detail"] = f"{result['detail']}; 动机:{motivation.get('label')} {motivation.get('detail')}"
+        return result
+
+    def _experimental_proactive_incentive(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+        reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
+        action = self._normalize_legacy_proactive_text(user.get("planned_proactive_action"), limit=40)
+        source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40)
+        topic = _single_line(user.get("planned_proactive_topic"), 100)
+        motive = _single_line(user.get("planned_proactive_motive"), 160)
+        semantics: dict[str, Any] = {}
+        semantic_getter = getattr(self, "_planned_proactive_semantics", None)
+        if callable(semantic_getter):
+            try:
+                semantics = semantic_getter(user)
+            except Exception:
+                semantics = {}
+        score = 0.5
+        reasons: list[str] = []
+        if reason in {"timer", "reminder", "pending_followup", "followup"} or source == "timer":
+            score += 0.18
+            reasons.append("任务/约定诱因")
+        if reason in {"creative_share", "diary_share", "dream_share", "activity_share", "news_share", "web_exploration_share", "qzone_life_publish"}:
+            score += 0.10
+            reasons.append("有内容可分享")
+        if reason in {"group_share", "atrelay_followup"}:
+            score += 0.12
+            reasons.append("外部互动线索")
+        if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+            sent_today = _safe_int(user.get("sent_today"), 0, 0, 100)
+            last_reply_at = _safe_float(user.get("last_reply_at"), 0)
+            check_now = _now_ts() if now is None else now
+            if sent_today > 0 or (last_reply_at > 0 and check_now - last_reply_at <= 3 * 3600):
+                score -= 0.16
+                reasons.append("问候诱因已释放")
+            else:
+                score += 0.04
+                reasons.append("时段问候")
+        if reason in {"check_in", "quiet_care", ""}:
+            score -= 0.03
+            reasons.append("泛关心诱因较弱")
+        if action in {"photo_text", "voice", "poke"}:
+            score += 0.04
+            reasons.append(f"{action}动作诱因")
+        if self._private_user_role(user) == "friend" and action in {"photo_text", "screen_peek"}:
+            score -= 0.18
+            reasons.append("次要用户能力边界")
+        concrete_text = f"{topic} {motive}"
+        if len(re.sub(r"\s+", "", concrete_text)) >= 18 and not any(token in concrete_text for token in ("问一句近况", "打个招呼", "在不在", "忙不忙")):
+            score += 0.07
+            reasons.append("切口具体")
+        semantic_score = _safe_float(semantics.get("score"), 0.5)
+        semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
+        score += (semantic_score - 0.5) * 0.10
+        score -= max(0.0, semantic_pressure - 0.55) * 0.16
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
+        if ignored:
+            score -= min(0.22, ignored * 0.055)
+            reasons.append(f"未回应{ignored}")
+        score = max(0.05, min(1.0, score))
+        label = "诱因强" if score >= 0.68 else "诱因弱" if score <= 0.38 else "诱因普通"
+        return {"score": score, "label": label, "detail": "；".join(reasons[:5]) or "无明显外部诱因"}
+
+    def _experimental_proactive_arousal(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+        state = self.data.get("daily_state", {})
+        if not isinstance(state, dict):
+            state = {}
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        mood = _single_line(state.get("mood_bias") or state.get("mood"), 24)
+        note = _single_line(state.get("note"), 160)
+        arousal = 0.38 + energy / 180.0
+        reasons = [f"energy={energy}"]
+        if mood in {"兴奋", "轻快", "活跃", "明亮"}:
+            arousal += 0.12
+            reasons.append(f"心情{mood}")
+        elif mood in {"疲惫", "困倦", "低落", "收声", "安静"}:
+            arousal -= 0.12
+            reasons.append(f"心情{mood}")
+        if any(token in note for token in ("高压", "赶", "急", "兴奋", "停不下来")):
+            arousal += 0.08
+            reasons.append("状态偏高")
+        if any(token in note for token in ("困", "疲惫", "低电量", "慢一点", "收声")):
+            arousal -= 0.08
+            reasons.append("状态偏低")
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
+        if ignored >= 2:
+            arousal -= 0.06
+            reasons.append("未回应降唤醒")
+        arousal = max(0.0, min(1.0, arousal))
+        fit = max(0.0, 1.0 - abs(arousal - 0.55) * 1.45)
+        if arousal >= 0.78:
+            label = "唤醒偏高"
+        elif arousal <= 0.30:
+            label = "唤醒偏低"
+        else:
+            label = "唤醒适中"
+        return {"score": fit, "level": arousal, "label": label, "detail": "；".join(reasons[:4])}
+
+    def _experimental_proactive_motivation(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+        drive: dict[str, Any] | None = None,
+        temperature: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        drive = drive if isinstance(drive, dict) else self._bot_proactive_drive(user, now=now)
+        temperature = temperature if isinstance(temperature, dict) else self._relationship_proactive_temperature(user, now=now)
+        incentive = self._experimental_proactive_incentive(user, now=now)
+        arousal = self._experimental_proactive_arousal(user, now=now)
+        drive_score = _safe_float(drive.get("score"), 0.55)
+        temp_score = _safe_float(temperature.get("score"), 0.55)
+        incentive_score = _safe_float(incentive.get("score"), 0.5)
+        arousal_fit = _safe_float(arousal.get("score"), 0.5)
+        score = drive_score * 0.25 + temp_score * 0.18 + incentive_score * 0.37 + arousal_fit * 0.20
+        score = max(0.05, min(1.0, score))
+        label = "适合行动" if score >= 0.66 else "先收住" if score <= 0.40 else "观望"
+        detail = (
+            f"驱力{drive_score:.2f} 诱因{incentive_score:.2f} "
+            f"唤醒{_safe_float(arousal.get('level'), 0.55):.2f}/适配{arousal_fit:.2f}"
+        )
+        return {
+            "score": score,
+            "label": label,
+            "detail": detail,
+            "drive": drive,
+            "temperature": temperature,
+            "incentive": incentive,
+            "arousal": arousal,
         }
 
     def _soft_daily_target(self, user: dict[str, Any]) -> float:

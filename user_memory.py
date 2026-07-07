@@ -341,10 +341,458 @@ class UserMemoryMixin:
         hurt_active = _safe_float(rel_state.get("hurt_until"), 0) > now
         hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 70), 70, 10, 100)
         refuse_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 90), 90, 20, 100)
+        regulation_hint = self._format_gross_emotion_regulation_hint(rel_state)
+        regulation = rel_state.get("emotion_regulation")
+        regulation_strategy = str(regulation.get("strategy") or "") if isinstance(regulation, dict) else ""
         if mode == "refusing" and hurt_active and abs(mood_score) >= refuse_threshold:
-            return "对用户刚才的言行还有些不满,表现得回避一点；回复短一些、安静一些,先别急着贴近。"
+            base = "对用户刚才的言行还有些不满,表现得回避一点；回复短一些、安静一些,先别急着贴近。"
+            return f"{base} {regulation_hint}" if regulation_hint and regulation_strategy != "response_modulation" else base
         if mode == "hurt" and hurt_active and abs(mood_score) >= hurt_threshold:
-            return "被用户刚才的言行伤到心里,还没有完全恢复；语气放轻、放慢一点,别急着热情贴近。"
+            base = "被用户刚才的言行伤到心里,还没有完全恢复；语气放轻、放慢一点,别急着热情贴近。"
+            return f"{base} {regulation_hint}" if regulation_hint and regulation_strategy != "response_modulation" else base
+        dimension_hint = self._format_izard_emotion_dimension_hint(rel_state)
+        plutchik_hint = self._format_plutchik_emotion_hint(rel_state)
+        return " ".join(item for item in (dimension_hint, plutchik_hint, regulation_hint) if item).strip()
+
+    def _emotion_dimension_baseline(self) -> dict[str, int]:
+        return {"pleasantness": 0, "tension": 12, "arousal": 20, "certainty": 60}
+
+    def _move_emotion_dimension_toward(self, value: int, target: int, amount: int) -> int:
+        if value < target:
+            return min(target, value + amount)
+        if value > target:
+            return max(target, value - amount)
+        return value
+
+    def _decay_izard_emotion_dimensions(self, state: dict[str, Any], *, now: float | None = None) -> dict[str, int]:
+        now = now or _now_ts()
+        baseline = self._emotion_dimension_baseline()
+        raw = state.get("emotion_dimensions")
+        dims = dict(raw) if isinstance(raw, dict) else {}
+        last_ts = _safe_float(dims.get("updated_ts"), _safe_float(state.get("mood_updated_ts"), now))
+        hours = max(0.0, (now - last_ts) / 3600.0) if last_ts > 0 else 0.0
+        recovery = max(1, _safe_int(getattr(self, "emotional_gate_recovery_per_hour", 24), 24, 1, 60))
+        steps = max(0, int(hours * recovery))
+        result: dict[str, int] = {}
+        for key, target in baseline.items():
+            minimum = -100 if key == "pleasantness" else 0
+            value = _safe_int(dims.get(key), target, minimum, 100)
+            if steps > 0:
+                amount = max(1, steps)
+                if key == "pleasantness":
+                    amount = max(1, int(steps * 0.75))
+                elif key == "certainty":
+                    amount = max(1, int(steps * 0.55))
+                result[key] = self._move_emotion_dimension_toward(value, target, amount)
+            else:
+                result[key] = value
+        result["updated_ts"] = int(now)
+        state["emotion_dimensions"] = result
+        return result
+
+    def _nudge_emotion_dimension(self, dims: dict[str, int], key: str, delta: int) -> None:
+        minimum = -100 if key == "pleasantness" else 0
+        dims[key] = max(minimum, min(100, _safe_int(dims.get(key), 0, minimum, 100) + int(delta)))
+
+    def _update_izard_emotion_dimensions(
+        self,
+        state: dict[str, Any],
+        *,
+        event: str,
+        intensity: int,
+        target: str,
+        confidence: float,
+        inbound_intent: str,
+        pressure: int,
+        mode: str,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        dims = self._decay_izard_emotion_dimensions(state, now=now)
+        event = str(event or "neutral")
+        target = str(target or "none")
+        intensity = _safe_int(intensity, 0, 0, 100)
+        confidence = max(0.0, min(1.0, _safe_float(confidence, 0.5, 0.0)))
+        if event == "hurt" and target in {"bot", "ambiguous"}:
+            self._nudge_emotion_dimension(dims, "pleasantness", -max(12, int(intensity * 0.65)))
+            self._nudge_emotion_dimension(dims, "tension", max(18, int(24 + intensity * 0.42)))
+            self._nudge_emotion_dimension(dims, "arousal", max(12, int(16 + intensity * 0.28)))
+            self._nudge_emotion_dimension(dims, "certainty", 8 if target == "bot" and confidence >= 0.82 else -18)
+        elif event == "apology":
+            self._nudge_emotion_dimension(dims, "pleasantness", max(14, int(intensity * 0.45)))
+            self._nudge_emotion_dimension(dims, "tension", -max(18, int(intensity * 0.48)))
+            self._nudge_emotion_dimension(dims, "arousal", -max(8, int(intensity * 0.22)))
+            self._nudge_emotion_dimension(dims, "certainty", max(12, int(intensity * 0.35)))
+        elif event == "comfort":
+            self._nudge_emotion_dimension(dims, "pleasantness", max(10, int(intensity * 0.36)))
+            self._nudge_emotion_dimension(dims, "tension", -max(12, int(intensity * 0.42)))
+            self._nudge_emotion_dimension(dims, "arousal", -max(6, int(intensity * 0.18)))
+            self._nudge_emotion_dimension(dims, "certainty", max(8, int(intensity * 0.28)))
+        elif event == "praise":
+            self._nudge_emotion_dimension(dims, "pleasantness", max(10, int(intensity * 0.5)))
+            self._nudge_emotion_dimension(dims, "tension", -max(5, int(intensity * 0.25)))
+            self._nudge_emotion_dimension(dims, "arousal", max(4, int(intensity * 0.18)))
+            self._nudge_emotion_dimension(dims, "certainty", max(6, int(intensity * 0.25)))
+        elif event == "comfort_need":
+            self._nudge_emotion_dimension(dims, "pleasantness", -14)
+            self._nudge_emotion_dimension(dims, "tension", max(10, int(intensity * 0.28)))
+            self._nudge_emotion_dimension(dims, "arousal", max(6, int(intensity * 0.16)))
+            self._nudge_emotion_dimension(dims, "certainty", 5)
+        elif event == "external_negative":
+            self._nudge_emotion_dimension(dims, "pleasantness", -8)
+            self._nudge_emotion_dimension(dims, "tension", max(8, int(intensity * 0.25)))
+            self._nudge_emotion_dimension(dims, "arousal", max(6, int(intensity * 0.22)))
+            self._nudge_emotion_dimension(dims, "certainty", 8)
+        elif inbound_intent == "boundary" or mode == "backoff":
+            self._nudge_emotion_dimension(dims, "pleasantness", -8)
+            self._nudge_emotion_dimension(dims, "tension", 18 if pressure >= 2 else 10)
+            self._nudge_emotion_dimension(dims, "arousal", -4)
+            self._nudge_emotion_dimension(dims, "certainty", 18)
+        elif inbound_intent in {"intimacy", "play"} and mode in {"warming", "attached"}:
+            self._nudge_emotion_dimension(dims, "pleasantness", 10 if mode == "warming" else 16)
+            self._nudge_emotion_dimension(dims, "tension", -8)
+            self._nudge_emotion_dimension(dims, "arousal", 6)
+            self._nudge_emotion_dimension(dims, "certainty", 8)
+        dims["updated_ts"] = int(now or _now_ts())
+        state["emotion_dimensions"] = dims
+        return dims
+
+    def _format_izard_emotion_dimension_hint(self, state: dict[str, Any]) -> str:
+        dims = self._decay_izard_emotion_dimensions(state)
+        pleasantness = _safe_int(dims.get("pleasantness"), 0, -100, 100)
+        tension = _safe_int(dims.get("tension"), 12, 0, 100)
+        arousal = _safe_int(dims.get("arousal"), 20, 0, 100)
+        certainty = _safe_int(dims.get("certainty"), 60, 0, 100)
+        if pleasantness <= -45 and tension >= 45:
+            if arousal >= 55:
+                return "情绪底色不愉快、紧张且激动度偏高；回复要短、慢、低刺激,先稳住,不要追问或开玩笑。"
+            return "情绪底色不愉快且紧张,但激动度不高；回复安静一点,先接住,别急着贴近。"
+        if tension >= 60 and certainty <= 38:
+            return "情绪紧张且确信度偏低；不要替用户下结论,多用试探和确认,少做强判断。"
+        if pleasantness >= 35 and tension <= 30 and certainty >= 55:
+            return "情绪底色较愉快且放松；可以自然一点、轻一点靠近,但仍不要突然过度热情。"
+        if arousal >= 65 and tension >= 40:
+            return "激动度和紧张度都偏高；回复节奏收住,避免长段解释和继续加压。"
+        if certainty <= 30:
+            return "当前确信度偏低；语气保留余地,不要把猜测说死。"
+        return ""
+
+    def _plutchik_emotion_labels(self) -> dict[str, str]:
+        return {
+            "joy": "喜悦",
+            "trust": "信任",
+            "fear": "恐惧",
+            "surprise": "惊讶",
+            "sadness": "悲伤",
+            "disgust": "厌恶",
+            "anger": "愤怒",
+            "anticipation": "期待",
+        }
+
+    def _decay_plutchik_emotions(self, state: dict[str, Any], *, now: float | None = None) -> dict[str, int]:
+        now = now or _now_ts()
+        labels = self._plutchik_emotion_labels()
+        raw = state.get("plutchik_emotions")
+        values = dict(raw) if isinstance(raw, dict) else {}
+        last_ts = _safe_float(values.get("updated_ts"), _safe_float(state.get("mood_updated_ts"), now))
+        hours = max(0.0, (now - last_ts) / 3600.0) if last_ts > 0 else 0.0
+        recovery = max(1, _safe_int(getattr(self, "emotional_gate_recovery_per_hour", 24), 24, 1, 60))
+        decay = max(0, int(hours * recovery))
+        result: dict[str, int] = {}
+        for key in labels:
+            value = _safe_int(values.get(key), 0, 0, 100)
+            result[key] = max(0, value - decay) if decay > 0 else value
+        result["updated_ts"] = int(now)
+        state["plutchik_emotions"] = result
+        state["plutchik_profile"] = self._plutchik_profile_from_basic(result, now=now)
+        return result
+
+    def _nudge_plutchik_emotion(self, emotions: dict[str, int], key: str, delta: int) -> None:
+        if key not in self._plutchik_emotion_labels():
+            return
+        emotions[key] = max(0, min(100, _safe_int(emotions.get(key), 0, 0, 100) + int(delta)))
+
+    def _update_plutchik_emotions(
+        self,
+        state: dict[str, Any],
+        *,
+        event: str,
+        intensity: int,
+        target: str,
+        inbound_intent: str,
+        pressure: int,
+        mode: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        now = now or _now_ts()
+        emotions = self._decay_plutchik_emotions(state, now=now)
+        event = str(event or "neutral")
+        intensity = _safe_int(intensity, 0, 0, 100)
+        if event == "hurt" and target in {"bot", "ambiguous"}:
+            self._nudge_plutchik_emotion(emotions, "sadness", max(16, int(intensity * 0.42)))
+            self._nudge_plutchik_emotion(emotions, "anger", max(14, int(intensity * 0.36)))
+            self._nudge_plutchik_emotion(emotions, "disgust", max(8, int(intensity * 0.22)))
+            self._nudge_plutchik_emotion(emotions, "trust", -max(10, int(intensity * 0.25)))
+        elif event == "apology":
+            self._nudge_plutchik_emotion(emotions, "trust", max(16, int(intensity * 0.48)))
+            self._nudge_plutchik_emotion(emotions, "joy", max(8, int(intensity * 0.24)))
+            self._nudge_plutchik_emotion(emotions, "sadness", -max(12, int(intensity * 0.36)))
+            self._nudge_plutchik_emotion(emotions, "anger", -max(12, int(intensity * 0.42)))
+            self._nudge_plutchik_emotion(emotions, "disgust", -max(8, int(intensity * 0.28)))
+        elif event == "comfort":
+            self._nudge_plutchik_emotion(emotions, "trust", max(12, int(intensity * 0.42)))
+            self._nudge_plutchik_emotion(emotions, "joy", max(6, int(intensity * 0.2)))
+            self._nudge_plutchik_emotion(emotions, "sadness", -max(8, int(intensity * 0.24)))
+            self._nudge_plutchik_emotion(emotions, "fear", -max(6, int(intensity * 0.18)))
+        elif event == "praise":
+            self._nudge_plutchik_emotion(emotions, "joy", max(12, int(intensity * 0.52)))
+            self._nudge_plutchik_emotion(emotions, "trust", max(8, int(intensity * 0.32)))
+            self._nudge_plutchik_emotion(emotions, "anticipation", max(4, int(intensity * 0.18)))
+        elif event == "comfort_need":
+            self._nudge_plutchik_emotion(emotions, "sadness", max(14, int(intensity * 0.35)))
+            self._nudge_plutchik_emotion(emotions, "fear", max(8, int(intensity * 0.2)))
+            self._nudge_plutchik_emotion(emotions, "trust", 6)
+        elif event == "external_negative":
+            self._nudge_plutchik_emotion(emotions, "anger", max(10, int(intensity * 0.3)))
+            self._nudge_plutchik_emotion(emotions, "disgust", max(8, int(intensity * 0.24)))
+            self._nudge_plutchik_emotion(emotions, "surprise", 4)
+        elif inbound_intent == "boundary" or mode == "backoff":
+            self._nudge_plutchik_emotion(emotions, "fear", 12 if pressure >= 2 else 7)
+            self._nudge_plutchik_emotion(emotions, "sadness", 8)
+            self._nudge_plutchik_emotion(emotions, "trust", -8)
+        elif inbound_intent in {"intimacy", "play"} and mode in {"warming", "attached"}:
+            self._nudge_plutchik_emotion(emotions, "joy", 12 if mode == "attached" else 8)
+            self._nudge_plutchik_emotion(emotions, "trust", 14 if mode == "attached" else 9)
+            self._nudge_plutchik_emotion(emotions, "anticipation", 6)
+        emotions["updated_ts"] = int(now)
+        state["plutchik_emotions"] = emotions
+        profile = self._plutchik_profile_from_basic(emotions, now=now)
+        state["plutchik_profile"] = profile
+        return profile
+
+    def _plutchik_profile_from_basic(self, emotions: dict[str, int], *, now: float | None = None) -> dict[str, Any]:
+        labels = self._plutchik_emotion_labels()
+        ordered = sorted(
+            ((key, _safe_int(emotions.get(key), 0, 0, 100)) for key in labels),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        dominant_key, dominant_value = ordered[0] if ordered else ("", 0)
+        secondary_key, secondary_value = ordered[1] if len(ordered) > 1 else ("", 0)
+        primary_dyads = {
+            frozenset(("joy", "trust")): ("love", "亲近/喜欢"),
+            frozenset(("trust", "fear")): ("submission", "依赖/顺从"),
+            frozenset(("fear", "surprise")): ("awe", "敬畏/惊住"),
+            frozenset(("surprise", "sadness")): ("disapproval", "失望/不认可"),
+            frozenset(("sadness", "disgust")): ("remorse", "懊悔/难受"),
+            frozenset(("disgust", "anger")): ("contempt", "轻蔑/反感"),
+            frozenset(("anger", "anticipation")): ("aggressiveness", "进攻/顶回去"),
+            frozenset(("anticipation", "joy")): ("optimism", "期待/乐观"),
+        }
+        blend_key = ""
+        blend_label = ""
+        if dominant_value >= 28 and secondary_value >= 22:
+            blend = primary_dyads.get(frozenset((dominant_key, secondary_key)))
+            if blend:
+                blend_key, blend_label = blend
+        active = [
+            {"key": key, "label": labels.get(key, key), "value": value}
+            for key, value in ordered
+            if value >= 18
+        ][:4]
+        return {
+            "dominant": dominant_key if dominant_value >= 18 else "",
+            "dominant_label": labels.get(dominant_key, "") if dominant_value >= 18 else "",
+            "dominant_value": dominant_value if dominant_value >= 18 else 0,
+            "secondary": secondary_key if secondary_value >= 18 else "",
+            "secondary_label": labels.get(secondary_key, "") if secondary_value >= 18 else "",
+            "secondary_value": secondary_value if secondary_value >= 18 else 0,
+            "blend": blend_key,
+            "blend_label": blend_label,
+            "active": active,
+            "updated_ts": int(now or _now_ts()),
+        }
+
+    def _format_plutchik_emotion_hint(self, state: dict[str, Any]) -> str:
+        emotions = self._decay_plutchik_emotions(state)
+        profile = self._plutchik_profile_from_basic(emotions)
+        blend = str(profile.get("blend") or "")
+        dominant = str(profile.get("dominant") or "")
+        if blend == "love":
+            return "她现在更容易被亲近感带软；可以自然靠近一点,但别突然过度黏。"
+        if blend == "optimism":
+            return "她现在有一点期待感；语气可以轻快些,适合留一个小期待或轻松收尾。"
+        if blend in {"contempt", "aggressiveness"}:
+            return "她现在有反感或想顶回去的倾向；避免讽刺、争辩和升级,先短答降压。"
+        if blend in {"disapproval", "remorse"}:
+            return "她现在偏失望或难受；回复放慢,承认感受,不要用玩笑盖过去。"
+        if blend in {"submission", "awe"}:
+            return "她现在有点不安、像被压住；语气放稳,不要继续压迫或替用户强决策。"
+        if dominant == "anger":
+            return "她现在火气比较明显；回复避免顶撞,少解释,先让压力降下来。"
+        if dominant == "sadness":
+            return "她现在有点难过；回复温和一点,不要急着活跃气氛。"
+        if dominant == "fear":
+            return "她现在不安感更强；回复要给边界和确定感,少催促。"
+        if dominant == "joy":
+            return "她现在更轻松开心；可以自然一点,但仍保持角色分寸。"
+        return ""
+
+    def _gross_regulation_strategy_labels(self) -> dict[str, str]:
+        return {
+            "situation_selection": "避开高压",
+            "situation_modification": "换低压问法",
+            "attentional_deployment": "转移注意",
+            "cognitive_change": "重新理解",
+            "response_modulation": "短答降压",
+        }
+
+    def _derive_gross_emotion_regulation(
+        self,
+        state: dict[str, Any],
+        *,
+        event: str | None = None,
+        intensity: int | None = None,
+        target: str | None = None,
+        inbound_intent: str | None = None,
+        pressure: int | None = None,
+        mode: str | None = None,
+        mood_score: int | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        now = now or _now_ts()
+        labels = self._gross_regulation_strategy_labels()
+        dims = self._decay_izard_emotion_dimensions(state, now=now)
+        emotions = self._decay_plutchik_emotions(state, now=now)
+        event = str(event if event is not None else state.get("last_emotion_event") or "neutral")
+        target = str(target if target is not None else state.get("last_emotion_target") or "none")
+        inbound_intent = str(inbound_intent if inbound_intent is not None else state.get("last_intent") or "chat")
+        mode = str(mode if mode is not None else state.get("mode") or "normal")
+        intensity_value = _safe_int(intensity if intensity is not None else state.get("last_emotion_intensity"), 0, 0, 100)
+        pressure_value = _safe_int(pressure if pressure is not None else state.get("last_pressure"), 0, 0, 5)
+        mood_value = _safe_int(mood_score if mood_score is not None else state.get("mood_score"), 0, -100, 100)
+        pleasantness = _safe_int(dims.get("pleasantness"), 0, -100, 100)
+        tension = _safe_int(dims.get("tension"), 12, 0, 100)
+        arousal = _safe_int(dims.get("arousal"), 20, 0, 100)
+        certainty = _safe_int(dims.get("certainty"), 60, 0, 100)
+        unpleasant = max(0, -pleasantness)
+        uncertainty = max(0, 60 - certainty)
+        anger_like = max(
+            _safe_int(emotions.get("anger"), 0, 0, 100),
+            _safe_int(emotions.get("disgust"), 0, 0, 100),
+        )
+        vulnerable = max(
+            _safe_int(emotions.get("sadness"), 0, 0, 100),
+            _safe_int(emotions.get("fear"), 0, 0, 100),
+        )
+        surprise = _safe_int(emotions.get("surprise"), 0, 0, 100)
+        pressure_load = pressure_value * 14
+        hurt_active = _safe_float(state.get("hurt_until"), 0) > now
+        backoff_active = _safe_float(state.get("backoff_until"), 0) > now
+        candidates: list[dict[str, Any]] = []
+
+        def add_candidate(strategy: str, score: int, reason_text: str) -> None:
+            if strategy not in labels:
+                return
+            score = max(0, min(100, int(score)))
+            if score < 36:
+                return
+            candidates.append({
+                "strategy": strategy,
+                "strategy_label": labels[strategy],
+                "intensity": score,
+                "reason": reason_text,
+            })
+
+        add_candidate(
+            "situation_selection",
+            max(
+                78 if mode in {"refusing", "backoff"} else 0,
+                68 if hurt_active and mode == "hurt" else 0,
+                72 if backoff_active or inbound_intent == "boundary" else 0,
+                unpleasant + pressure_load,
+            ),
+            "边界或受伤余波较强",
+        )
+        add_candidate(
+            "situation_modification",
+            max(
+                54 if pressure_value >= 2 and mode not in {"refusing", "backoff"} else 0,
+                int(tension * 0.72 + max(0, intensity_value - 30) * 0.28),
+                50 if event in {"comfort", "apology"} and mood_value < 0 else 0,
+            ),
+            "话题还能继续但需要降压改法",
+        )
+        add_candidate(
+            "attentional_deployment",
+            max(
+                66 if event in {"comfort_need", "external_negative"} else 0,
+                int(vulnerable * 0.85 + tension * 0.22),
+                52 if inbound_intent in {"help", "comfort"} else 0,
+            ),
+            "更适合把注意力落到眼前小事",
+        )
+        add_candidate(
+            "cognitive_change",
+            max(
+                int(uncertainty * 1.35 + surprise * 0.35),
+                58 if target == "ambiguous" and event != "neutral" else 0,
+                50 if certainty <= 36 and tension >= 38 else 0,
+            ),
+            "理解仍有不确定性",
+        )
+        add_candidate(
+            "response_modulation",
+            max(
+                int(arousal * 0.76 + tension * 0.34),
+                anger_like + int(pressure_load * 0.45),
+                70 if mode in {"hurt", "refusing"} else 0,
+            ),
+            "外显反应需要先收住",
+        )
+        candidates.sort(key=lambda item: _safe_int(item.get("intensity"), 0, 0, 100), reverse=True)
+        if not candidates:
+            regulation = {
+                "strategy": "none",
+                "strategy_label": "无需额外调节",
+                "reason": "",
+                "intensity": 0,
+                "strategy_stack": [],
+                "updated_ts": int(now),
+            }
+            state["emotion_regulation"] = regulation
+            return regulation
+        primary = dict(candidates[0])
+        stack = candidates[:3]
+        regulation = {
+            "strategy": primary.get("strategy") or "",
+            "strategy_label": primary.get("strategy_label") or "",
+            "reason": primary.get("reason") or "",
+            "intensity": _safe_int(primary.get("intensity"), 0, 0, 100),
+            "strategy_stack": stack,
+            "updated_ts": int(now),
+        }
+        state["emotion_regulation"] = regulation
+        return regulation
+
+    def _format_gross_emotion_regulation_hint(self, state: dict[str, Any]) -> str:
+        regulation = state.get("emotion_regulation")
+        now = _now_ts()
+        if not isinstance(regulation, dict) or now - _safe_float(regulation.get("updated_ts"), 0) > 900:
+            regulation = self._derive_gross_emotion_regulation(state, now=now)
+        strategy = str(regulation.get("strategy") or "")
+        intensity = _safe_int(regulation.get("intensity"), 0, 0, 100)
+        if not strategy or strategy == "none" or intensity < 42:
+            return ""
+        if strategy == "situation_selection":
+            return "这轮更适合先避开高压点；不要继续追着刺痛处聊,必要时轻轻退开。"
+        if strategy == "situation_modification":
+            return "话题可以继续,但要换成低压问法；短句、少追问,给用户容易接的台阶。"
+        if strategy == "attentional_deployment":
+            return "更适合把注意力带回眼前小事；先接住情绪,再给一个具体、可做的小落点。"
+        if strategy == "cognitive_change":
+            return "先给对方留解释空间；少做定性判断,用试探语气,不要把猜测说死。"
+        if strategy == "response_modulation":
+            return "先控制外显反应；短一点、慢一点、少解释,避免顶回去或连续补充。"
         return ""
 
     def _relationship_approach_hint(self, user: dict[str, Any]) -> str:
@@ -527,7 +975,7 @@ class UserMemoryMixin:
             return ""
         if re.search(r"<[^>]{1,120}>|@[A-Za-z0-9_\-\u4e00-\u9fff]{1,32}|QQ|群聊|群友|私聊", text, re.IGNORECASE):
             return ""
-        if re.search(r"(你是|我是|他是|她是|叫我|叫你|名字|主人|朋友|同学|老师|室友|父母|妈妈|爸爸|哥哥|姐姐|弟弟|妹妹)", text):
+        if re.search(r"(你是|我是|他是|她是|叫我|叫你|名字|主人|主要用户|次要用户|朋友|同学|老师|室友|父母|妈妈|爸爸|哥哥|姐姐|弟弟|妹妹)", text):
             return ""
         return text
 
@@ -2463,10 +2911,55 @@ target 只能是 bot/self/other/ambiguous/none。
             current = "normal"
         if current not in {"hurt", "refusing"} and _safe_int(state.get("silence_turns"), 0, 0, 5) > 0:
             state["silence_turns"] = max(0, _safe_int(state.get("silence_turns"), 0, 0, 5) - 1)
+        emotion_dimensions = (
+            self._update_izard_emotion_dimensions(
+                state,
+                event=emotion_event,
+                intensity=intensity,
+                target=target,
+                confidence=emotion_confidence,
+                inbound_intent=inbound_intent,
+                pressure=pressure,
+                mode=current,
+                now=now,
+            )
+            if emotion_enabled
+            else {}
+        )
+        plutchik_profile = (
+            self._update_plutchik_emotions(
+                state,
+                event=emotion_event,
+                intensity=intensity,
+                target=target,
+                inbound_intent=inbound_intent,
+                pressure=pressure,
+                mode=current,
+                now=now,
+            )
+            if emotion_enabled
+            else {}
+        )
+        emotion_regulation = (
+            self._derive_gross_emotion_regulation(
+                state,
+                event=emotion_event,
+                intensity=intensity,
+                target=target,
+                inbound_intent=inbound_intent,
+                pressure=pressure,
+                mode=current,
+                mood_score=mood_score,
+                now=now,
+            )
+            if emotion_enabled
+            else {}
+        )
         state["mode"] = current
         state["mood_score"] = mood_score
         state["mood_updated_ts"] = now
         state["last_intent"] = inbound_intent
+        state["last_pressure"] = pressure
         state["last_emotion"] = str(intent.get("emotion") or "neutral")
         state["last_emotion_event"] = emotion_event
         state["last_emotion_intensity"] = intensity
@@ -2489,6 +2982,28 @@ target 只能是 bot/self/other/ambiguous/none。
                 _safe_int(state.get("silence_turns"), 0, 0, 5),
                 reason or "-",
                 _single_line(intent.get("text"), 120),
+            )
+        if emotion_event != "neutral" and emotion_dimensions:
+            logger.debug(
+                "[PrivateCompanion] 情绪四维: pleasantness=%s tension=%s arousal=%s certainty=%s",
+                emotion_dimensions.get("pleasantness"),
+                emotion_dimensions.get("tension"),
+                emotion_dimensions.get("arousal"),
+                emotion_dimensions.get("certainty"),
+            )
+        if emotion_event != "neutral" and plutchik_profile:
+            logger.debug(
+                "[PrivateCompanion] 基本/复合情绪: dominant=%s(%s) blend=%s",
+                plutchik_profile.get("dominant_label") or "-",
+                plutchik_profile.get("dominant_value") or 0,
+                plutchik_profile.get("blend_label") or "-",
+            )
+        if emotion_event != "neutral" and emotion_regulation:
+            logger.debug(
+                "[PrivateCompanion] 情绪调节策略: strategy=%s intensity=%s reason=%s",
+                emotion_regulation.get("strategy_label") or emotion_regulation.get("strategy") or "-",
+                emotion_regulation.get("intensity") or 0,
+                emotion_regulation.get("reason") or "-",
             )
         vent_threshold = _safe_int(getattr(self, "qzone_emotional_vent_threshold", 90), 90, 40, 100)
         if (

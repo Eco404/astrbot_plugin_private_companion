@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 ProactiveEngineMixin — 主动行为候选、决策、计划事件与动作选择
 """
@@ -635,6 +635,9 @@ class ProactiveEngineMixin:
             "semantic_pressure": max(0.0, min(1.0, _safe_float(semantics.get("pressure"), 0.4))),
             "semantic_risk": max(0.0, min(1.0, _safe_float(semantics.get("risk"), 0.0))),
             "semantic_note": _single_line(semantics.get("note"), 180),
+            "semantic_need_layer": _single_line(semantics.get("need_layer"), 40),
+            "semantic_need_drive": _single_line(semantics.get("need_drive"), 80),
+            "semantic_need_note": _single_line(semantics.get("need_note"), 120),
             "semantic_blocker": bool(semantics.get("blocker")),
             "signature": self._proactive_topic_signature(impulse_reason, source, impulse_topic, impulse_motive),
             "chain": [] if role == "friend" else [dict(item) for item in (chain or []) if isinstance(item, dict)],
@@ -713,6 +716,9 @@ class ProactiveEngineMixin:
                     "semantic_pressure",
                     "semantic_risk",
                     "semantic_note",
+                    "semantic_need_layer",
+                    "semantic_need_drive",
+                    "semantic_need_note",
                     "semantic_blocker",
                 ):
                     if key in impulse:
@@ -871,6 +877,9 @@ class ProactiveEngineMixin:
             impulse["semantic_pressure"] = _safe_float(semantics.get("pressure"), 0.4)
             impulse["semantic_risk"] = _safe_float(semantics.get("risk"), 0.0)
             impulse["semantic_note"] = _single_line(semantics.get("note"), 180)
+            impulse["semantic_need_layer"] = _single_line(semantics.get("need_layer"), 40)
+            impulse["semantic_need_drive"] = _single_line(semantics.get("need_drive"), 80)
+            impulse["semantic_need_note"] = _single_line(semantics.get("need_note"), 120)
             impulse["semantic_blocker"] = bool(semantics.get("blocker"))
         score += (semantic_score - 0.5) * 0.42
         score -= max(0.0, _safe_float(impulse.get("semantic_pressure"), 0.4) - 0.55) * 0.22
@@ -926,13 +935,13 @@ class ProactiveEngineMixin:
             if self._friend_sensitive_proactive_reason(normalized_reason) or self._friend_sensitive_proactive_action(normalized_action):
                 blocker = True
                 score -= 0.45
-                note("朋友关系不适合这个主动来源/能力")
+                note("次要用户关系不适合这个主动来源/能力")
             if intimate:
                 score -= 0.22
-                note("朋友关系下亲密度偏高")
+                note("次要用户关系下亲密度偏高")
             if self._is_vague_seek_user_motive(normalized_reason, normalized_action, normalized_motive, normalized_topic):
                 score -= 0.12
-                note("朋友关系下动机太像索取回应")
+                note("次要用户关系下动机太像索取回应")
         else:
             if intimate and (profile.get("clingy") or profile.get("voicey")):
                 score += 0.07
@@ -1131,12 +1140,12 @@ class ProactiveEngineMixin:
         if self._friend_can_receive_proactive_reason(user, normalized_reason, normalized_action) is False:
             risk += 0.35
             blocker = True
-            note("朋友关系语义越界")
+            note("次要用户关系语义越界")
         if self._proactive_text_is_intimate(normalized_reason, normalized_action, normalized_motive, normalized_topic):
             risk += 0.18
             if self._private_user_role(user) == "friend":
                 risk += 0.18
-                note("朋友关系亲密过量")
+                note("次要用户关系亲密过量")
         score = 0.52 + (anchor_score - 0.5) * 0.42 - max(0.0, pressure - 0.45) * 0.36 - risk * 0.5
         if kind in {"continuation", "reminder"}:
             score += 0.08
@@ -1146,10 +1155,30 @@ class ProactiveEngineMixin:
             score += 0.04
         if kind == "check_in" and anchor_score < 0.45:
             score -= 0.08
+        need_profile: dict[str, Any] = {}
+        if bool(getattr(self, "enable_maslow_motivation_experiment", False)):
+            need_profile = self._maslow_motivation_profile(
+                user,
+                reason=normalized_reason,
+                action=normalized_action,
+                motive=normalized_motive,
+                topic=normalized_topic,
+                source=normalized_source,
+                semantic_kind=kind,
+                anchor_type=anchor_type,
+                anchor_score=anchor_score,
+                evidence_text=evidence_text,
+            )
+            strength = max(0.0, min(1.0, _safe_float(getattr(self, "maslow_motivation_strength", 35), 35, 0.0) / 100.0))
+            score += _safe_float(need_profile.get("score_bias"), 0.0) * strength
+            pressure += _safe_float(need_profile.get("pressure_bias"), 0.0) * strength
+            need_note = _single_line(need_profile.get("note"), 60)
+            if need_note:
+                note(f"实验动机:{need_note}")
         score = max(0.0, min(1.0, score))
         if not notes:
             note(f"{kind}/{anchor_type}")
-        return {
+        result = {
             "kind": kind,
             "anchor_type": anchor_type,
             "anchor_score": anchor_score,
@@ -1158,6 +1187,108 @@ class ProactiveEngineMixin:
             "score": score,
             "note": "；".join(notes[:4]),
             "blocker": blocker,
+        }
+        if need_profile:
+            result.update(
+                {
+                    "need_layer": _single_line(need_profile.get("layer"), 40),
+                    "need_drive": _single_line(need_profile.get("drive"), 80),
+                    "need_note": _single_line(need_profile.get("note"), 120),
+                    "need_score_bias": _safe_float(need_profile.get("score_bias"), 0.0),
+                    "need_pressure_bias": _safe_float(need_profile.get("pressure_bias"), 0.0),
+                }
+            )
+        return result
+
+    def _maslow_motivation_profile(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+        motive: str,
+        topic: str = "",
+        source: str = "",
+        semantic_kind: str = "",
+        anchor_type: str = "",
+        anchor_score: float = 0.5,
+        evidence_text: str = "",
+    ) -> dict[str, Any]:
+        text = f"{reason} {action} {topic} {motive} {source} {semantic_kind} {anchor_type} {evidence_text}"
+        action_parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
+        ignored_streak = _safe_int(user.get("ignored_streak"), 0, 0)
+
+        def has_any(tokens: tuple[str, ...]) -> bool:
+            return any(token in text for token in tokens)
+
+        layer = "belonging"
+        drive = "维持连接"
+        score_bias = 0.02
+        pressure_bias = 0.0
+
+        if reason == "insomnia_night" or has_any(("困", "睡", "熬夜", "失眠", "休息", "生病", "头疼", "不舒服", "饿", "胃口", "吃点")):
+            layer = "physiological"
+            drive = "状态照料"
+            score_bias = 0.04
+            pressure_bias = -0.02
+        elif action_parts & {"screen_peek"} or ignored_streak > 0 or has_any(("边界", "别回", "不用回", "忙", "别打扰", "沉默", "未回复")):
+            layer = "safety"
+            drive = "确认边界"
+            score_bias = -0.02 if ignored_streak >= 2 else 0.01
+            pressure_bias = 0.04 + min(0.04, ignored_streak * 0.015)
+        elif reason == "important_date_share" or has_any(("生日", "纪念", "考试", "面试", "项目", "成绩", "努力", "鼓励", "夸", "辛苦")):
+            layer = "esteem"
+            drive = "认可支持"
+            score_bias = 0.06
+            pressure_bias = -0.03
+        elif has_any(("意义", "存在", "世界观", "宇宙", "星空", "命运", "现实边界", "精神", "信念")):
+            layer = "meaning"
+            drive = "意义连接"
+            score_bias = 0.03
+            pressure_bias = -0.01
+        elif reason in {"creative_share", "diary_share", "news_share", "web_exploration_share", "bili_video_share", "activity_share"} or has_any(
+            ("学习", "创作", "灵感", "作品", "研究", "新闻", "搜索", "阅读", "视频", "日记", "见闻")
+        ):
+            layer = "growth"
+            drive = "探索成长"
+            score_bias = 0.03
+            pressure_bias = -0.02 if anchor_score >= 0.5 else 0.02
+        elif source in {"pending_followup", "followup"} or semantic_kind == "continuation" or anchor_type == "recent_context":
+            layer = "belonging"
+            drive = "续接共同话题"
+            score_bias = 0.07
+            pressure_bias = -0.06
+        elif semantic_kind in {"greeting", "light_touch"} or reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+            layer = "belonging"
+            drive = "轻量陪伴仪式"
+            score_bias = 0.03
+            pressure_bias = -0.02
+        elif reason in {"quiet_care", "check_in"} and anchor_score < 0.45:
+            layer = "belonging"
+            drive = "无明确由头的关心"
+            score_bias = -0.03
+            pressure_bias = 0.03
+
+        if action_parts & {"poke", "voice"}:
+            pressure_bias += 0.02
+        if self._private_user_role(user) == "friend" and layer in {"belonging", "esteem"}:
+            score_bias -= 0.02
+            pressure_bias += 0.02
+
+        labels = {
+            "physiological": "状态",
+            "safety": "安全",
+            "belonging": "归属",
+            "esteem": "尊重",
+            "growth": "成长",
+            "meaning": "意义",
+        }
+        return {
+            "layer": layer,
+            "drive": drive,
+            "score_bias": max(-0.12, min(0.12, score_bias)),
+            "pressure_bias": max(-0.12, min(0.12, pressure_bias)),
+            "note": f"{labels.get(layer, layer)}/{drive}",
         }
 
     def _proactive_semantic_evidence_text(self, value: Any, *, limit: int = 260) -> str:
@@ -1232,6 +1363,9 @@ class ProactiveEngineMixin:
                 "pressure": _safe_float(impulse.get("semantic_pressure"), 0.4),
                 "risk": _safe_float(impulse.get("semantic_risk"), 0.0),
                 "note": _single_line(impulse.get("semantic_note"), 180),
+                "need_layer": _single_line(impulse.get("semantic_need_layer"), 40),
+                "need_drive": _single_line(impulse.get("semantic_need_drive"), 80),
+                "need_note": _single_line(impulse.get("semantic_need_note"), 120),
                 "blocker": bool(impulse.get("semantic_blocker")),
             }
         return self._proactive_candidate_semantics(
@@ -1278,6 +1412,8 @@ class ProactiveEngineMixin:
             user.get("planned_proactive_impulse_id"),
             _single_line(semantics.get("kind"), 40),
             _single_line(semantics.get("anchor_type"), 40),
+            _single_line(semantics.get("need_layer"), 40),
+            _single_line(semantics.get("need_drive"), 80),
             f"semantic={_safe_float(semantics.get('score'), 0.5):.2f}",
             f"pressure={_safe_float(semantics.get('pressure'), 0.4):.2f}",
             f"risk={_safe_float(semantics.get('risk'), 0.0):.2f}",
@@ -1416,7 +1552,7 @@ class ProactiveEngineMixin:
 硬要求：
 - 不得放行内部机制泄露、工具名、模型、插件、提示词、后台任务。
 - 不得新增事实、现实能力或用户没给过的关系信息。
-- 朋友关系必须普通、低频、不过度亲密；主人/亲近关系也要尊重休息和拒绝。
+- 次要用户关系必须普通、低频、不过度亲密；主要用户/亲近关系也要尊重休息和拒绝。
 - 世界观表达必须贴合设定；能力只能作为角色内自然动机,不能露出调用过程。
 - 如果只是“想你了/来看看/在不在/忙不忙”且没有具体由头,通常 defer 或 rewrite。
 
@@ -1772,6 +1908,9 @@ class ProactiveEngineMixin:
         user["planned_proactive_anchor_type"] = _single_line(selected.get("semantic_anchor_type"), 40)
         user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(selected.get("semantic_score"), 0.5))) * 100)
         user["planned_proactive_semantic_note"] = _single_line(selected.get("semantic_note"), 180)
+        user["planned_proactive_need_layer"] = _single_line(selected.get("semantic_need_layer"), 40)
+        user["planned_proactive_need_drive"] = _single_line(selected.get("semantic_need_drive"), 80)
+        user["planned_proactive_need_note"] = _single_line(selected.get("semantic_need_note"), 120)
         user["planned_candidate_id"] = item.get("id", "")
         user["planned_event_chain"] = (
             []
@@ -1833,6 +1972,9 @@ class ProactiveEngineMixin:
             "semantic_pressure": int(max(0.0, min(1.0, _safe_float(semantics.get("pressure"), 0.0))) * 100) if semantics else 0,
             "semantic_risk": int(max(0.0, min(1.0, _safe_float(semantics.get("risk"), 0.0))) * 100) if semantics else 0,
             "semantic_note": _single_line(semantics.get("note"), 180),
+            "semantic_need_layer": _single_line(semantics.get("need_layer"), 40),
+            "semantic_need_drive": _single_line(semantics.get("need_drive"), 80),
+            "semantic_need_note": _single_line(semantics.get("need_note"), 120),
         }
         pool = self._cleanup_proactive_candidate_pool(now=now)
         if status in {"blocked", "accepted"}:
@@ -2001,12 +2143,18 @@ class ProactiveEngineMixin:
             user["planned_proactive_anchor_type"] = _single_line(impulse.get("semantic_anchor_type"), 40)
             user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(impulse.get("semantic_score"), 0.5))) * 100)
             user["planned_proactive_semantic_note"] = _single_line(impulse.get("semantic_note"), 180)
+            user["planned_proactive_need_layer"] = _single_line(impulse.get("semantic_need_layer"), 40)
+            user["planned_proactive_need_drive"] = _single_line(impulse.get("semantic_need_drive"), 80)
+            user["planned_proactive_need_note"] = _single_line(impulse.get("semantic_need_note"), 120)
         else:
             semantics = self._planned_proactive_semantics(user)
             user["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
             user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
             user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
             user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
+            user["planned_proactive_need_layer"] = _single_line(semantics.get("need_layer"), 40)
+            user["planned_proactive_need_drive"] = _single_line(semantics.get("need_drive"), 80)
+            user["planned_proactive_need_note"] = _single_line(semantics.get("need_note"), 120)
         user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
             [dict(step) for step in impulse.get("chain", []) if isinstance(step, dict)]
             if isinstance(impulse, dict)
@@ -2139,6 +2287,9 @@ class ProactiveEngineMixin:
         user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
         user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
         user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
+        user["planned_proactive_need_layer"] = _single_line(semantics.get("need_layer"), 40)
+        user["planned_proactive_need_drive"] = _single_line(semantics.get("need_drive"), 80)
+        user["planned_proactive_need_note"] = _single_line(semantics.get("need_note"), 120)
         user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
             list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
         )
@@ -2179,6 +2330,9 @@ class ProactiveEngineMixin:
         user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
         user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
         user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
+        user["planned_proactive_need_layer"] = _single_line(semantics.get("need_layer"), 40)
+        user["planned_proactive_need_drive"] = _single_line(semantics.get("need_drive"), 80)
+        user["planned_proactive_need_note"] = _single_line(semantics.get("need_note"), 120)
         user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
             list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
         )
@@ -2508,14 +2662,17 @@ class ProactiveEngineMixin:
                 user["planned_proactive_anchor_type"] = ""
                 user["planned_proactive_semantic_score"] = 0
                 user["planned_proactive_semantic_note"] = ""
+                user["planned_proactive_need_layer"] = ""
+                user["planned_proactive_need_drive"] = ""
+                user["planned_proactive_need_note"] = ""
                 user["planned_proactive_model_judge_signature"] = ""
                 user["planned_proactive_model_judge_result"] = {}
                 user["planned_proactive_model_judge_at"] = 0
-                self._mark_planned_candidate_status(user, "accepted", "朋友未回应状态下已降级为低压主动")
+                self._mark_planned_candidate_status(user, "accepted", "次要用户未回应状态下已降级为低压主动")
         if not is_troubleshooting and not self._friend_can_receive_proactive_reason(user, planned_reason, planned_action):
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
-            return False, "朋友关系不接收敏感主动"
+            return False, "次要用户关系不接收敏感主动"
         planned_semantics = self._planned_proactive_semantics(user)
         semantic_score = _safe_float(planned_semantics.get("score"), 0.5)
         semantic_pressure = _safe_float(planned_semantics.get("pressure"), 0.4)
@@ -2718,6 +2875,9 @@ class ProactiveEngineMixin:
             "planned_proactive_anchor_type",
             "planned_proactive_semantic_score",
             "planned_proactive_semantic_note",
+            "planned_proactive_need_layer",
+            "planned_proactive_need_drive",
+            "planned_proactive_need_note",
         )
         return {key: user.get(key) for key in keys}
 
@@ -2943,6 +3103,17 @@ class ProactiveEngineMixin:
             f"{inner_score:.2f}｜{_single_line(inner_readiness.get('label'), 40)}｜{_single_line(drive.get('detail'), 70)}",
             blocker=inner_score < 0.28,
         )
+        motivation = inner_readiness.get("motivation") if isinstance(inner_readiness.get("motivation"), dict) else {}
+        if motivation:
+            motivation_score = _safe_float(motivation.get("score"), 0.5)
+            add(
+                "experimental_motivation",
+                "实验动机调度",
+                motivation_score >= 0.40,
+                6 if motivation_score >= 0.66 else 2 if motivation_score >= 0.50 else -10,
+                f"{motivation_score:.2f}｜{_single_line(motivation.get('label'), 24)}｜{_single_line(motivation.get('detail'), 100)}",
+                blocker=motivation_score < 0.28,
+            )
         temp_score = _safe_float(temperature.get("score"), 0.55)
         add(
             "relationship_temperature",
@@ -3228,6 +3399,9 @@ class ProactiveEngineMixin:
             "semantic_pressure": int(max(0.0, min(1.0, _safe_float(semantics.get("pressure"), 0.0))) * 100),
             "semantic_risk": int(max(0.0, min(1.0, _safe_float(semantics.get("risk"), 0.0))) * 100),
             "semantic_note": _single_line(user.get("planned_proactive_semantic_note"), 180) or _single_line(semantics.get("note"), 180),
+            "need_layer": _single_line(user.get("planned_proactive_need_layer"), 40) or _single_line(semantics.get("need_layer"), 40),
+            "need_drive": _single_line(user.get("planned_proactive_need_drive"), 80) or _single_line(semantics.get("need_drive"), 80),
+            "need_note": _single_line(user.get("planned_proactive_need_note"), 120) or _single_line(semantics.get("need_note"), 120),
             "scheduled_ts": _safe_float(user.get("next_proactive_at"), 0),
             "candidate_id": _single_line(user.get("planned_candidate_id"), 40),
             "umo": _single_line(user.get("umo"), 180),
@@ -3498,6 +3672,9 @@ class ProactiveEngineMixin:
         user["planned_proactive_anchor_type"] = ""
         user["planned_proactive_semantic_score"] = 0
         user["planned_proactive_semantic_note"] = ""
+        user["planned_proactive_need_layer"] = ""
+        user["planned_proactive_need_drive"] = ""
+        user["planned_proactive_need_note"] = ""
         user["planned_event_chain"] = []
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
@@ -5826,7 +6003,7 @@ class ProactiveEngineMixin:
                 ])
             if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
                 return random.choice([
-                    "按朋友关系顺手打个招呼,语气轻一点,不显得黏人",
+                    "按次要用户关系顺手打个招呼,语气轻一点,不显得黏人",
                     "这个时间点刚好想起对方,只发一句普通问候",
                 ])
             if reason in {"activity_share", "diary_share", "background_schedule"}:

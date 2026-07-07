@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 CreativeMixin — 从 main.py 重新拆分出的创作系统
 """

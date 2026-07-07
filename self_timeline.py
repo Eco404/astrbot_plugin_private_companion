@@ -19,7 +19,7 @@ class SelfTimelineMixin:
         normalized = self._self_timeline_normalized_text(text)
         if not normalized:
             return False
-        if re.search(r"(我|用户|主人|对方).{0,8}(几点|什么时候|啥时候|做了什么|干嘛|在干嘛)", normalized):
+        if re.search(r"(我|用户|主人|主要用户|次要用户|对方).{0,8}(几点|什么时候|啥时候|做了什么|干嘛|在干嘛)", normalized):
             return False
         time_words = (
             "几点",

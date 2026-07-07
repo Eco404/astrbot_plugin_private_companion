@@ -60,6 +60,7 @@ const state = {
   worldbookLivingMemory: {},
   worldbookLivingMemoryRequestSeq: 0,
   roleplayPersonaDraft: null,
+  experimentalSubpage: "",
   configImportPackage: null,
   configImportPreview: null,
   configBackups: [],
@@ -364,7 +365,7 @@ function featureDraftFromOverview(overview = {}) {
 
 const pluginIntegrationAvailabilityRules = {
   enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
-  enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available),
+  enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
   enable_qzone_integration: () => true,
@@ -757,9 +758,9 @@ const featureMeta = {
   enable_group_relationship_graph: ["群友互动图", "记录成员之间近期谁常互相接话、玩梗或争论。"],
   enable_group_privacy_guard: ["群隐私保护", "保护私聊信息。"],
   enable_worldbook_member_recognition: ["群聊关系网", "以 QQ 号确认稳定身份，关系备注和重要记忆都放在这里。"],
-  enable_cross_user_memory_bridge: ["跨用户记忆", "主人可查询 Bot 与其他用户/群聊的近期互动摘要；只读，不发送消息。"],
+  enable_cross_user_memory_bridge: ["跨用户记忆", "主要用户可查询 Bot 与其他用户/群聊的近期互动摘要；只读，不发送消息。"],
   enable_atrelay_tools: ["跨群转述", "查询群成员、按关系网解析 @ 对象，并转述到群聊或私聊。"],
-  enable_livingmemory_integration: ["LivingMemory 协同", "引导模型按需调用长期记忆工具，避免重复造轮子。"],
+  enable_livingmemory_integration: ["记忆插件协同", "检测到“我会牢牢记住你”或 LivingMemory 时引导模型按需召回长期记忆，并展开更多协同配置。"],
   enable_bilibili_integration: ["B站 AI Bot 联动", "读取 B站 AI Bot 观看日志，并在合适节点私聊分享。"],
   enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档看视频。"],
   enable_news_integration: ["新闻阅读", "低频读取 RSS/Atom 新闻源，形成近期见闻和主动分享素材。"],
@@ -783,6 +784,9 @@ const featureMeta = {
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
+  enable_maslow_motivation_experiment: ["需求强化功能", "实验性功能第一项：把主动念头按状态、安全、归属、尊重、成长和意义等内部需求层轻量分类，强化候选排序与可选日程倾向。"],
+  enable_experimental_motivation_model: ["动机调度模型", "实验性功能第二项：结合驱力、诱因和唤醒状态，对主动计划做轻量调权，并在主动排障中显示判断依据。"],
+  enable_personality_iteration_experiment: ["角色贴合校准", "实验性功能第三项：基于艾森克 PEN、大五人格、依恋风格和自我决定理论，帮用户判断行为是否贴近角色，并提示该怎么调整。"],
 };
 
 const featureGroups = [
@@ -822,13 +826,6 @@ const featureGroups = [
     ],
   },
   {
-    title: "情绪模拟",
-    note: "Bot 自身短期情绪余波、收敛和可选公开心情动态。",
-    keys: [
-      "enable_emotion_simulation",
-    ],
-  },
-  {
     title: "群聊功能",
     note: "按要解决的问题找开关：启用范围、续话、读空气、合并、理解、安全、唤醒、学习、复读、转述和跨用户记忆。",
     keys: [
@@ -862,7 +859,7 @@ const featureGroups = [
   },
   {
     title: "身份与记忆联动",
-    note: "外部长期记忆联动；群聊关系网、跨群转述和跨用户记忆已归入群聊功能。",
+    note: "记忆插件协同（“我会牢牢记住你” / LivingMemory）；群聊关系网、跨群转述和跨用户记忆已归入群聊功能。",
     keys: [
       "enable_livingmemory_integration",
     ],
@@ -950,6 +947,8 @@ const embeddedFeatureParentByKey = {
   enable_tts_local_playback_live_only: "enable_tts_enhancement",
   enable_tts_live_subtitle_sync: "enable_tts_enhancement",
   creative_hidden_mode: "enable_creative_writing",
+  enable_maslow_schedule_influence: "enable_maslow_motivation_experiment",
+  maslow_motivation_strength: "enable_maslow_motivation_experiment",
 };
 
 const embeddedFeatureKeys = new Set(Object.keys(embeddedFeatureParentByKey));
@@ -1075,6 +1074,9 @@ const configLabels = {
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定模型",
   proactive_persona_judge_send_threshold: "人格判定放行阈值",
   proactive_persona_judge_cache_minutes: "人格判定缓存分钟",
+  enable_maslow_motivation_experiment: "需求强化功能",
+  enable_maslow_schedule_influence: "允许影响日程生成",
+  maslow_motivation_strength: "需求强化影响强度",
   timer_pre_silence_minutes: "预约前静默窗口",
   enable_tts_enhancement: "TTS强化",
   tts_generation_mode: "TTS生成路径",
@@ -1243,13 +1245,14 @@ const configLabels = {
   enable_almanac_perception: "轻量黄历",
   enable_yesterday_screen_diary_context: "昨日屏幕日记",
   screen_diary_context_max_chars: "昨日屏幕日记上下文字数",
+  memory_companion_context_timeout_seconds: "外部记忆上下文超时",
   passive_topic_memory_hours: "话题抑制记忆小时",
   proactive_intensity_preset: "主动强度预设",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
   proactive_unanswered_slowdown_start: "未回应降频起点",
   proactive_unanswered_max_interval_multiplier: "未回应最大间隔倍率",
-  friend_unanswered_max_cooldown_hours: "朋友未回应最长冷却",
+  friend_unanswered_max_cooldown_hours: "次要用户未回应最长冷却",
   timer_pre_silence_minutes: "预约前静默窗口",
   check_interval_seconds: "后台检查间隔秒",
   enabled: "群聊总开关",
@@ -1302,7 +1305,7 @@ const configLabels = {
   worldbook_auto_pending_observations: "低频待确认观察",
   worldbook_member_inject_limit: "单次注入节点数",
   worldbook_config_paths: "关系网配置路径",
-  cross_user_memory_owner_only: "仅主人可用",
+  cross_user_memory_owner_only: "仅主要用户可用",
   atrelay_require_worldbook_first: "优先按关系网解析",
   atrelay_member_cache_minutes: "群成员缓存分钟",
   atrelay_sensitive_confirm: "敏感转述确认",
@@ -1418,6 +1421,15 @@ const configLabels = {
   project_count: "创作项目",
   boredom_watch_enabled: "无聊刷视频",
   hidden_mode: "低调模式",
+  livingmemory_tool_name: "记忆召回工具名",
+  memory_companion_context_timeout_seconds: "记忆上下文超时（秒）",
+  enable_memory_companion_emotional_drift: "情绪漂移联动",
+  enable_memory_companion_cross_window_emotion: "跨窗口情绪连续性",
+  enable_memory_companion_dream_fragment: "梦境碎片写入",
+  enable_memory_companion_open_loop_search: "未完成话题取材",
+  enable_memory_companion_feature_context: "功能上下文读取",
+  memory_companion_context_top_k: "上下文召回条数",
+  memory_companion_context_max_chars: "上下文最大字符数",
 };
 
 const configDescriptions = {
@@ -1428,6 +1440,11 @@ const configDescriptions = {
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "用于主动人格/世界观判定的轻量模型。建议选择 JSON 稳定、判断保守、理解角色边界的小到中型模型。",
   proactive_persona_judge_send_threshold: "模型判定为 send 但分数低于该阈值时，会自动转为延后。越高越克制，越低越容易放行。",
   proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
+  enable_maslow_motivation_experiment: "实验性功能第一项。开启后，主动念头会被归入状态、安全、归属、尊重、成长、意义等内部需求层，再轻量影响候选排序；默认关闭，不改变最终回复正文，也不会让 Bot 把层级词说给用户。",
+  enable_experimental_motivation_model: "实验性功能第二项。开启后，主动计划会额外按驱力、诱因和唤醒适配做轻量调权：驱力代表 Bot 内部想开口，诱因代表这个候选是否有值得说的外部价值，唤醒代表当前状态是否适合行动。默认关闭。",
+  enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。它会告诉用户该调整 AstrBot 人格、世界知识、主动策略还是群聊边界，但不会自动改写。",
+  enable_maslow_schedule_influence: "需求强化功能的子选项，默认关闭。开启后，日程生成器会把需求层级当作轻量倾向，影响今天更偏休息、探索、等待、准备或低打扰互动；不会把层级术语写进日程正文。",
+  maslow_motivation_strength: "控制需求强化对主动候选排序的影响。0 只记录层级不改排序；35 为温和默认；100 会更明显偏向有明确由头的关系、状态或成长类念头。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   reply_style_prompt: "注入到普通被动回复和主动消息生成中的表达约束，适合写句数、简洁度、语言和社交媒体口语习惯；复杂问题或用户要求详细说明时，可在这里允许模型放宽。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于世界知识，它会影响私聊被动回复、群聊人格和关系判断。",
@@ -1445,6 +1462,15 @@ const configDescriptions = {
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
+  memory_companion_context_timeout_seconds: "插件主动、日程、QQ 空间、创作等链路读取外部长期记忆上下文的单项等待上限。超时会跳过该项，不阻塞主链；建议 0.8-1.5 秒。",
+  livingmemory_tool_name: "LivingMemory 默认注册的 Agent 工具名是 recall_long_term_memory。如插件更改了工具名，可在这里同步。“我会牢牢记住你”通过桥接接口协同，通常不需要修改此项。",
+  enable_memory_companion_emotional_drift: "从“我会牢牢记住你”拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀应用到 Bot 当前能量和心情底色。每次私聊和主动消息生成前触发。",
+  enable_memory_companion_cross_window_emotion: "拉取情绪漂移时同时获取全局跨会话情绪摘要，以 30% 强度叠加到当前会话。如窗口 A 刚翻到伤痕记忆，窗口 B 的 Bot 也会微妙低落，但不泄露具体内容。",
+  enable_memory_companion_dream_fragment: "日记生成后将首条梦境碎片写入“我会牢牢记住你”，带上 dream_fragment 标签和查询锚点，支持跨会话梦境连续性。",
+  enable_memory_companion_open_loop_search: "主动消息生成前从“我会牢牢记住你”检索未完成的承诺和话题，注入到主动消息提示词中，形成承诺兑现闭环。",
+  enable_memory_companion_feature_context: "主动消息生成/复核、当前状态问答、每日穿搭、自然语言生图、QQ 空间互动、群聊主动插话、私下创作和陪伴答疑等链路按需读取“我会牢牢记住你”的结构化上下文。关闭后这些链路不会主动召回记忆。",
+  memory_companion_context_top_k: "每次从“我会牢牢记住你”召回记忆时的最大条数。条数越多上下文越完整，但提示词更长、Token 消耗更多。",
+  memory_companion_context_max_chars: "单次召回记忆上下文的最大字符数上限。超过会被截断。建议 600-1200。",
   enable_rest_reply_simulation: "开启后，日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复。",
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
@@ -1472,7 +1498,7 @@ const configDescriptions = {
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
   proactive_unanswered_slowdown_start: "用户连续几次不回应 Bot 主动消息后，开始自动降低主动频率。",
   proactive_unanswered_max_interval_multiplier: "连续未回应时，最小主动间隔最多放大到多少倍。",
-  friend_unanswered_max_cooldown_hours: "朋友用户持续未回应时，主动消息最长可延后到多少小时内再尝试。",
+  friend_unanswered_max_cooldown_hours: "次要用户持续未回应时，主动消息最长可延后到多少小时内再尝试。",
   timer_pre_silence_minutes: "已有聊天临时预约时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句，避免抢在官方定时计划前打扰。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。",
   max_daily_messages: "每个私聊对象每天最多收到多少条插件主动消息。",
   passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
@@ -1736,7 +1762,7 @@ const configDescriptions = {
   worldbook_auto_pending_observations: "根据低频互动生成待确认观察，不直接写死到资料正文。",
   worldbook_member_inject_limit: "单次回复最多自动注入多少个相关用户词条。",
   worldbook_config_paths: "关系网资料来源路径。用于读取既有资料，不应写死在代码里。",
-  cross_user_memory_owner_only: "开启后，只有主人能在私聊里查询 Bot 与其他用户或群聊之间的近期互动摘要；关闭后所有目标私聊用户都可查询。",
+  cross_user_memory_owner_only: "开启后，只有主要用户能在私聊里查询 Bot 与其他用户或群聊之间的近期互动摘要；关闭后所有目标私聊用户都可查询。",
   atrelay_require_worldbook_first: "转述或 @ 群友时优先用关系网解析，避免群名片变化导致认错人。",
   atrelay_member_cache_minutes: "群成员列表缓存时间，减少频繁查询。",
   atrelay_sensitive_confirm: "敏感、私密或带情绪的转述是否先向用户确认。",
@@ -1806,6 +1832,7 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
+  enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
@@ -1851,7 +1878,7 @@ const featureSettingGroups = {
   enable_worldbook_member_recognition: ["worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
   enable_cross_user_memory_bridge: ["cross_user_memory_owner_only"],
   enable_atrelay_tools: ["atrelay_require_worldbook_first", "atrelay_member_cache_minutes", "atrelay_sensitive_confirm", "enable_atrelay_llm_rewrite", "atrelay_default_relay_style", "atrelay_multi_target_limit"],
-  enable_livingmemory_integration: [],
+  enable_livingmemory_integration: ["livingmemory_tool_name", "memory_companion_context_timeout_seconds", "enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
   enable_bilibili_integration: ["enable_bilibili_boredom_watch", "bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_bilibili_boredom_watch: ["bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_sources", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
@@ -1891,6 +1918,25 @@ const featureSettingSections = {
       keys: ["enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
     },
   ],
+  enable_livingmemory_integration: [
+    {
+      title: "基础协同",
+      note: "记忆召回工具名和上下文读取超时。",
+      keys: ["livingmemory_tool_name", "memory_companion_context_timeout_seconds"],
+    },
+    {
+      title: "“我会牢牢记住你” 深度联动",
+      note: "检测到“我会牢牢记住你”桥接时生效。控制情绪漂移、梦境碎片、未完成话题取材和功能上下文读取等深度协同能力。",
+      keys: ["enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
+    },
+  ],
+  enable_maslow_motivation_experiment: [
+    {
+      title: "需求强化范围",
+      note: "默认只强化主动候选；可选允许日程生成也参考这套内部倾向。",
+      keys: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
+    },
+  ],
   enable_mai_style_integration: [
     {
       title: "回复基座",
@@ -1909,7 +1955,7 @@ const featureSettingSections = {
     },
     {
       title: "关系与习惯",
-      note: "关系距离、未完话头和用户时段习惯。Bot 自身短期余波在“情绪模拟”里配置。",
+      note: "关系距离、未完话头和用户时段习惯。Bot 自身短期余波在“实验性功能 → 情绪模拟”里配置。",
       keys: ["enable_relationship_state_machine", "proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours", "enable_open_loop_tracking", "enable_user_habit_learning", "user_habit_min_count", "user_habit_max_items", "enable_food_menu_recommendation"],
     },
   ],
@@ -2128,7 +2174,7 @@ const featureSettingSections = {
   enable_cross_user_memory_bridge: [
     {
       title: "查询权限",
-      note: "跨用户/跨群互动摘要只读查询，建议只允许主人使用。",
+      note: "跨用户/跨群互动摘要只读查询，建议只允许主要用户使用。",
       keys: ["cross_user_memory_owner_only"],
     },
   ],
@@ -2198,12 +2244,12 @@ const featureSettingSections = {
   enable_emotion_simulation: [
     {
       title: "情绪余波",
-      note: "控制被刺到后的收敛、缓和和主动暂停节奏。",
+      note: "控制被刺到后的收敛、缓和、主动暂停和回复调节策略。",
       keys: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes"],
     },
     {
       title: "公开心情动态",
-      note: "默认关闭；仅主人可触发，且必须同时满足 QZone 可用、冷却、阈值和概率。",
+      note: "默认关闭；仅主要用户可触发，且必须同时满足 QZone 可用、冷却、阈值和概率。",
       keys: ["enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
     },
   ],
@@ -2351,6 +2397,17 @@ const featureSettingTypes = {
   proactive_prompt_template: { type: "textarea" },
   proactive_persona_judge_send_threshold: { type: "number", min: 0, max: 100, step: 1 },
   proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
+  enable_maslow_schedule_influence: { type: "checkbox" },
+  maslow_motivation_strength: { type: "number", min: 0, max: 100, step: 1 },
+  memory_companion_context_timeout_seconds: { type: "number", min: 0.2, max: 6, step: 0.1 },
+  livingmemory_tool_name: { type: "text" },
+  enable_memory_companion_emotional_drift: { type: "checkbox" },
+  enable_memory_companion_cross_window_emotion: { type: "checkbox" },
+  enable_memory_companion_dream_fragment: { type: "checkbox" },
+  enable_memory_companion_open_loop_search: { type: "checkbox" },
+  enable_memory_companion_feature_context: { type: "checkbox" },
+  memory_companion_context_top_k: { type: "number", min: 1, max: 10, step: 1 },
+  memory_companion_context_max_chars: { type: "number", min: 240, max: 1800, step: 60 },
   natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
@@ -3412,6 +3469,8 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderConfig();
   } else if (tabName === "models") {
     renderProviders();
+  } else if (tabName === "experimental") {
+    renderExperimentalPage();
   }
 }
 
@@ -3489,6 +3548,8 @@ async function ensureTabData(tabName, force = false) {
     renderTroubleshooting();
     loadDiagnostics(force).catch(() => {});
     await loadTroubleshooting();
+  } else if (tabName === "experimental") {
+    loadDiagnostics(force).catch(() => {});
   }
 }
 
@@ -3680,6 +3741,11 @@ const setupGuideAdvancedBlocks = [
     title: "主动增强",
     body: "配置主动消息之外的长线动作：主动带图、新闻、搜索、QQ 空间、B 站、创作和分段发送。适合核心主动链路稳定后逐项打开。",
   },
+  {
+    id: "experimental",
+    title: "实验性功能",
+    body: "配置情绪余波、需求强化、动机调度和角色贴合校准。适合先小范围观察，确认拟人化收益大于打扰和成本后再稳定开启。",
+  },
 ];
 
 const setupGuideAdvancedBlockMap = Object.fromEntries(setupGuideAdvancedBlocks.map((item) => [item.id, item]));
@@ -3731,27 +3797,13 @@ const setupGuideAdvancedItems = {
       key: "enable_relationship_state_machine",
       title: "关系距离与久未回复降级",
       ask: "是否让 Bot 根据亲近度、未回复时长和互动状态调整主动节奏？",
-      description: "朋友用户长时间不回、关系热度下降或互动变冷时，Bot 会逐步收敛念头和主动频率，而不是一直保持同样强度。",
+      description: "次要用户长时间不回、关系热度下降或互动变冷时，Bot 会逐步收敛念头和主动频率，而不是一直保持同样强度。",
       caution: "太保守会显得突然疏远，太宽松又会打扰。建议先用默认值，再根据实际主动记录微调。",
       kind: "feature",
       settings: [
         { key: "proactive_unanswered_slowdown_start", type: "number", label: "未回复多久开始降级", placeholder: "6", min: 0 },
         { key: "proactive_unanswered_max_interval_multiplier", type: "number", label: "最大间隔倍率", placeholder: "3", min: 1, step: 0.1 },
-        { key: "friend_unanswered_max_cooldown_hours", type: "number", label: "朋友未回复最大冷却小时", placeholder: "24", min: 0 },
-      ],
-    },
-    {
-      key: "enable_emotion_simulation",
-      title: "情绪余波",
-      ask: "是否让 Bot 保留短期情绪余波，比如被刺到、缓和、恢复和短暂回避？",
-      description: "它能让回复不那么一键清空情绪，也能影响主动消息、空间说说和关系距离判断。",
-      caution: "这是扮演状态，不是真实心理判断。阈值过低会让 Bot 太容易受伤，建议先温和开启。",
-      kind: "feature",
-      settings: [
-        { key: "enable_llm_emotion_judgement", type: "bool", label: "使用模型判断情绪变化", description: "比规则更细，但会增加轻量模型调用。" },
-        { key: "emotion_judgement_mode", type: "select", label: "情绪判断模式", options: [["balanced", "标准"], ["strict", "谨慎"], ["sensitive", "敏感"]] },
-        { key: "emotional_gate_hurt_threshold", type: "number", label: "受伤阈值", placeholder: "0.62", min: 0, max: 1, step: 0.01 },
-        { key: "emotional_gate_recovery_per_hour", type: "number", label: "每小时恢复量", placeholder: "0.18", min: 0, max: 1, step: 0.01 },
+        { key: "friend_unanswered_max_cooldown_hours", type: "number", label: "次要用户未回复最大冷却小时", placeholder: "24", min: 0 },
       ],
     },
     {
@@ -3797,6 +3849,53 @@ const setupGuideAdvancedItems = {
         { key: "tts_trigger_probability", type: "number", label: "自动语音概率（%）", placeholder: "8", min: 0, max: 100 },
         { key: "enable_tts_local_playback", type: "bool", label: "本机播放生成语音", description: "直播或本机陪伴场景再开。" },
       ],
+    },
+  ],
+  experimental: [
+    {
+      key: "enable_emotion_simulation",
+      title: "情绪余波",
+      ask: "是否让 Bot 保留短期情绪余波，比如被刺到、缓和、恢复和短暂回避？",
+      description: "它能让回复不那么一键清空情绪，也能影响主动消息、空间说说和关系距离判断；迁入实验性功能后仍保留旧默认值。",
+      caution: "这是扮演状态，不是真实心理判断。阈值过低会让 Bot 太容易受伤，建议先温和开启并观察。",
+      kind: "feature",
+      settings: [
+        { key: "enable_llm_emotion_judgement", type: "bool", label: "使用模型判断情绪变化", description: "比规则更细，但会增加轻量模型调用。" },
+        { key: "emotion_judgement_mode", type: "select", label: "情绪判断模式", options: [["suspicious", "只判断可疑消息"], ["always", "每条普通文本都判断"], ["off", "关闭模型复核"]] },
+        { key: "emotional_gate_hurt_threshold", type: "number", label: "受伤阈值", placeholder: "70", min: 10, max: 100, step: 5 },
+        { key: "emotional_gate_refuse_threshold", type: "number", label: "生气阈值", placeholder: "90", min: 20, max: 100, step: 5 },
+        { key: "emotional_gate_recovery_per_hour", type: "number", label: "每小时缓和量", placeholder: "24", min: 1, max: 60 },
+      ],
+    },
+    {
+      key: "enable_maslow_motivation_experiment",
+      title: "需求强化功能",
+      ask: "是否让主动念头按内部需求层级做轻量分类和排序？",
+      description: "它只影响主动候选的内部评分和排障标记，不会把状态、安全、归属、尊重、成长、意义这些词写进回复正文。",
+      caution: "默认关闭。建议先用温和强度观察主动候选是否更有由头，再决定是否允许影响日程。",
+      kind: "feature",
+      settings: [
+        { key: "maslow_motivation_strength", type: "number", label: "影响强度", placeholder: "35", min: 0, max: 100 },
+        { key: "enable_maslow_schedule_influence", type: "bool", label: "允许影响日程生成", description: "开启后日程会轻量参考内部需求倾向。" },
+      ],
+    },
+    {
+      key: "enable_experimental_motivation_model",
+      title: "动机调度模型",
+      ask: "是否让主动计划额外参考驱力、诱因和唤醒适配？",
+      description: "它会区分 Bot 内部想开口、当前候选是否值得说、当前状态是否适合行动，并在主动排障中展示。",
+      caution: "默认关闭。它只做轻量调权，不替代主动复核和免打扰限制。",
+      kind: "feature",
+      settings: [],
+    },
+    {
+      key: "enable_personality_iteration_experiment",
+      title: "角色贴合校准",
+      ask: "是否让排障页帮助你调整角色贴合度？",
+      description: "它会用艾森克 PEN、大五人格、依恋风格和自我决定理论，对照当前运行表现，提示应调整人格、世界知识、主动策略还是群聊边界。",
+      caution: "默认关闭。它会给出调整位置和建议写法，但不会自动改 AstrBot 人格、世界知识或回复正文。",
+      kind: "feature",
+      settings: [],
     },
   ],
   private: [
@@ -4056,12 +4155,12 @@ const setupGuideAdvancedItems = {
     {
       key: "enable_cross_user_memory_bridge",
       title: "跨用户记忆",
-      ask: "是否允许主人查询 Bot 与其他用户/群聊的互动线索？",
+      ask: "是否允许主要用户查询 Bot 与其他用户/群聊的互动线索？",
       description: "只读查询跨用户互动摘要，不负责发送消息。",
-      caution: "涉及跨会话信息，建议保持仅主人可查。",
+      caution: "涉及跨会话信息，建议保持仅主要用户可查。",
       kind: "feature",
       settings: [
-        { key: "cross_user_memory_owner_only", type: "bool", label: "仅主人可查询", description: "推荐开启，避免普通群友查询他人互动。" },
+        { key: "cross_user_memory_owner_only", type: "bool", label: "仅主要用户可查询", description: "推荐开启，避免普通群友查询他人互动。" },
       ],
     },
   ],
@@ -4581,6 +4680,7 @@ function setupGuideAdvancedBlockHtml(block) {
   const selected = state.setupGuideAdvancedBlock === block.id;
   const icons = {
     common: "🔧",
+    experimental: "🧪",
     private: "💬",
     group: "👥",
     proactive: "🌟",
@@ -4624,8 +4724,9 @@ function setupGuideAdvancedHomeHtml() {
         <span class="info"><b>2</b> 私聊增强</span>
         <span class="info"><b>3</b> 群聊增强</span>
         <span class="warn"><b>4</b> 主动增强</span>
+        <span class="warn"><b>5</b> 实验性功能</span>
       </div>
-      ${setupGuideHint("QQ 空间发布、主动带图、本机识屏会触发外部动作；建议基础链路稳定后再开。", "warn")}
+      ${setupGuideHint("实验性功能放在最后逐项观察；QQ 空间发布、主动带图、本机识屏会触发外部动作，建议基础链路稳定后再开。", "warn")}
     </div>
   `;
 }
@@ -5572,7 +5673,7 @@ function setupGuidePrivateIntensityHtml() {
         ${setupGuideNumber("privateDelayFactor", "主动延迟系数", "0.72", { min: 0, step: 0.01, description: "越低越不拖延。" })}
         ${setupGuideNumber("privateUnansweredSlowdownStart", "连续未回复降速起点", "2", { min: 0 })}
         ${setupGuideNumber("privateUnansweredMaxIntervalMultiplier", "未回复最大间隔倍率", "1.65", { min: 1, step: 0.05 })}
-        ${setupGuideNumber("privateFriendUnansweredMaxCooldownHours", "朋友未回复最长冷却（小时）", "30", { min: 0 })}
+        ${setupGuideNumber("privateFriendUnansweredMaxCooldownHours", "次要用户未回复最长冷却（小时）", "30", { min: 0 })}
       </div>
       <div class="setup-guide-choice-grid">
         ${setupGuideCheck("privateIgnoreTokenSoftLimit", "忽略 Token 软限额降载", "只适合最高在线陪伴档；仍不会绕过每日 Token 硬限额。")}
@@ -6782,8 +6883,8 @@ function renderHealthPanel() {
       text: `${group.access_mode || "whitelist"} 模式，记录 ${group.group_count || 0} 个群`,
     },
     {
-      level: features.enable_livingmemory_integration && overview.livingmemory?.available ? "ok" : "info",
-      title: "LivingMemory 协同",
+      level: features.enable_livingmemory_integration && (overview.livingmemory?.available || overview.livingmemory?.memory_companion_active) ? "ok" : "info",
+      title: "记忆插件协同",
       text: livingMemoryHealthText(overview.livingmemory),
     },
     {
@@ -6978,8 +7079,9 @@ function renderSetupProgress() {
 
 function livingMemoryHealthText(livingmemory) {
   if (!livingmemory?.enabled) return "协同开关未启用";
+  if (livingmemory?.memory_companion_active) return `“我会牢牢记住你”桥接可用`;
   if (!livingmemory?.available) return `未检测到可用插件：${livingmemory?.plugin_dir || "未知路径"}`;
-  return `可用 · ${livingmemory.tool_name || "recall_long_term_memory"}`;
+  return `LivingMemory 可用 · ${livingmemory.tool_name || "recall_long_term_memory"}`;
 }
 
 function renderDiagnostics() {
@@ -7840,6 +7942,8 @@ function troubleshootingPromptInjectionItemMarkup(item, options = {}) {
 function troubleshootingPromptInjectionModuleMarkup(module) {
   const content = String(module?.content || "");
   const chars = Number(module?.chars || content.length || 0);
+  const metadata = module?.metadata && typeof module.metadata === "object" ? module.metadata : {};
+  const metaRows = Object.entries(metadata).filter(([key, value]) => key && value);
   const meta = [
     module?.source ? `source=${module.source}` : "",
     module?.key ? `key=${module.key}` : "",
@@ -7857,6 +7961,11 @@ function troubleshootingPromptInjectionModuleMarkup(module) {
         </span>
         <em>${escapeHtml(meta)}</em>
       </summary>
+      ${metaRows.length ? `
+        <dl class="troubleshooting-injection-meta">
+          ${metaRows.map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+        </dl>
+      ` : ""}
       ${module?.preview && content.length > 900 ? `<p>${escapeHtml(module.preview)}</p>` : ""}
       <pre>${escapeHtml(content)}</pre>
     </details>
@@ -8052,7 +8161,7 @@ function userQuotaLabel(user) {
   if (user?.display_name && !String(user.display_name).startsWith("临时会话")) return user.display_name;
   if (user?.display_name && !user?.is_qq_user) return user.display_name;
   const nickname = String(user?.nickname || "").trim();
-  const genericNames = new Set(["用户", "主人", "默认用户"]);
+  const genericNames = new Set(["用户", "主人", "主要用户", "默认用户"]);
   if (!nickname || genericNames.has(nickname)) return id || "未命名";
   return id ? `${nickname} · ${id.slice(-4)}` : nickname;
 }
@@ -9213,7 +9322,7 @@ function renderUsers() {
     ? rows.map((user) => `
       <tr data-user-id="${escapeHtml(user.user_id)}" class="${user.user_id === state.selectedUserId ? "is-selected" : ""}">
         <td class="user-cell identity"><strong title="${escapeHtml(user.display_name || user.nickname || user.user_id)}">${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong>${user.is_qq_user ? "" : ` <span class="badge off">非 QQ</span>`}${Array.isArray(user.alias_user_ids) && user.alias_user_ids.length ? ` <span class="badge ok" title="${escapeHtml(user.alias_user_ids.join("\\n"))}">已合并 ${escapeHtml(user.alias_user_ids.length)} 个身份</span>` : ""}<br><span class="user-id-line"><span class="muted mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span><button type="button" class="copy-id-btn" data-copy-user-id="${escapeHtml(user.user_id)}">复制</button></span></td>
-        <td class="user-cell relation"><span class="badge ${user.enabled ? "" : "off"}">${escapeHtml(user.enabled ? "启用" : "停用")}</span> <span class="badge">${escapeHtml(user.relationship_role_label || "朋友")}</span> <span class="muted">${escapeHtml(user.relationship_stage || "未分层")}</span><br><span>分数 ${escapeHtml(user.relationship_score)}</span></td>
+        <td class="user-cell relation"><span class="badge ${user.enabled ? "" : "off"}">${escapeHtml(user.enabled ? "启用" : "停用")}</span> <span class="badge">${escapeHtml(user.relationship_role_label || "次要用户")}</span> <span class="muted">${escapeHtml(user.relationship_stage || "未分层")}</span><br><span>分数 ${escapeHtml(user.relationship_score)}</span></td>
         <td class="user-cell compact">入站 ${escapeHtml(user.inbound_count)} · 回复 ${escapeHtml(user.reply_count)}<br><span class="muted">记忆 ${escapeHtml(user.memory_items)} 条</span></td>
         <td class="user-cell proactive"><span>今日 ${escapeHtml(user.sent_today)} · 总计 ${escapeHtml(user.proactive_sent_count)}</span><br><span class="muted truncate" title="${escapeHtml(user.next_proactive || "")}">${escapeHtml(user.next_proactive)}</span></td>
         <td class="user-cell recent">${escapeHtml(user.last_seen)}<br><span class="muted">上次主动 ${escapeHtml(user.last_sent)}</span></td>
@@ -9273,12 +9382,12 @@ async function renderUserDetail(forceFetch = false) {
       <button data-user-action="delete" class="danger">删除私聊用户</button>
     </div>
     <form id="userEditForm" class="inline-form">
-      <label>称呼 <input name="nickname" value="${escapeHtml(detail.nickname || "")}" placeholder="例如 主人 / 名字" /></label>
+      <label>称呼 <input name="nickname" value="${escapeHtml(detail.nickname || "")}" placeholder="例如 昵称 / 名字" /></label>
       <label>语气 <input name="style" value="${escapeHtml(detail.style || "")}" placeholder="温柔 / 活泼 / 工作" /></label>
       <label>关系角色
         <select name="relationship_role">
-          <option value="owner" ${detail.relationship_role === "owner" ? "selected" : ""}>主人</option>
-          <option value="friend" ${detail.relationship_role !== "owner" ? "selected" : ""}>朋友</option>
+          <option value="owner" ${detail.relationship_role === "owner" ? "selected" : ""}>主要用户</option>
+          <option value="friend" ${detail.relationship_role !== "owner" ? "selected" : ""}>次要用户</option>
         </select>
       </label>
       <label>每日主动 <input name="proactive_daily_limit" type="number" min="-1" max="30" step="1" value="${escapeHtml(detail.proactive_daily_limit ?? -1)}" /></label>
@@ -9362,12 +9471,36 @@ function emotionGateBlock(detail) {
   const intent = detail.intent_profile && typeof detail.intent_profile === "object" ? detail.intent_profile : {};
   const mode = rel.mode || "normal";
   const moodScore = Number(rel.mood_score || 0);
+  const dims = rel.emotion_dimensions && typeof rel.emotion_dimensions === "object" ? rel.emotion_dimensions : {};
+  const dimensionText = Object.keys(dims).length
+    ? `愉快 ${Number(dims.pleasantness ?? 0)}｜紧张 ${Number(dims.tension ?? 0)}｜激动 ${Number(dims.arousal ?? 0)}｜确信 ${Number(dims.certainty ?? 0)}`
+    : "-";
+  const plutchik = rel.plutchik_profile && typeof rel.plutchik_profile === "object" ? rel.plutchik_profile : {};
+  const activeEmotionText = Array.isArray(plutchik.active) && plutchik.active.length
+    ? plutchik.active.map((item) => `${item.label || item.key || "-"} ${Number(item.value || 0)}`).join("｜")
+    : "-";
+  const blendText = [plutchik.dominant_label ? `${plutchik.dominant_label} ${Number(plutchik.dominant_value || 0)}` : "", plutchik.blend_label || ""]
+    .filter(Boolean)
+    .join("｜") || "-";
+  const regulation = rel.emotion_regulation && typeof rel.emotion_regulation === "object" ? rel.emotion_regulation : {};
+  const strategyStack = Array.isArray(regulation.strategy_stack) ? regulation.strategy_stack : [];
+  const regulationText = regulation.strategy && regulation.strategy !== "none"
+    ? `${regulation.strategy_label || regulation.strategy}｜强度 ${Number(regulation.intensity || 0)}${regulation.reason ? `｜${regulation.reason}` : ""}`
+    : "-";
+  const strategyStackText = strategyStack.length
+    ? strategyStack.map((item) => `${item.strategy_label || item.strategy || "-"} ${Number(item.intensity || 0)}`).join("｜")
+    : "-";
   const hurtUntil = Number(rel.hurt_until || 0);
   const now = Math.floor(Date.now() / 1000);
   const remaining = hurtUntil > now ? `${Math.ceil((hurtUntil - now) / 60)} 分钟` : "无";
   const pairs = [
     ["状态", mode],
     ["余波值", moodScore ? String(moodScore) : "0"],
+    ["四维", dimensionText],
+    ["基本/复合", blendText],
+    ["活跃情绪", activeEmotionText],
+    ["调节策略", regulationText],
+    ["策略候选", strategyStackText],
     ["收敛轮数", rel.silence_turns || 0],
     ["剩余收敛", remaining],
     ["上次事件", rel.last_emotion_event || intent.emotion_event || "neutral"],
@@ -10687,7 +10820,7 @@ function renderMemory() {
   const overview = state.overview || {};
   const daily = overview.daily_state || {};
   const life = overview.life_observation || {};
-  $("#livingMemoryBox").textContent = overview.livingmemory?.status || "未读取到 LivingMemory 状态";
+  $("#livingMemoryBox").textContent = overview.livingmemory?.status || "未读取到记忆插件协同状态";
   renderLifeHero(daily, life);
   renderDreamCard(life.dream || {});
   renderStatePillBoard(daily);
@@ -12585,7 +12718,7 @@ function renderProactiveCandidates() {
     const status = proactiveStatusLabel(item.status);
     const repeat = Number(item.repeat_count || 1);
     const userLabel = item.user_label || item.user_id || "-";
-    const roleLabel = item.user_role_label || (item.user_role === "owner" ? "主人" : "朋友");
+    const roleLabel = item.user_role_label || (item.user_role === "owner" ? "主要用户" : "次要用户");
     const sourceLabel = item.source_label || proactiveCandidateSourceLabel(item.source);
     const semanticMeta = proactiveSemanticMeta(item);
     return `
@@ -15518,6 +15651,21 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return state.featureDraft[name];
     return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
   };
+  if (featureKey === "enable_livingmemory_integration") {
+    const memoryCompanionActive = Boolean(state.overview?.livingmemory?.memory_companion_active);
+    const companionOnlyKeys = new Set([
+      "enable_memory_companion_emotional_drift",
+      "enable_memory_companion_cross_window_emotion",
+      "enable_memory_companion_dream_fragment",
+      "enable_memory_companion_open_loop_search",
+      "enable_memory_companion_feature_context",
+      "memory_companion_context_top_k",
+      "memory_companion_context_max_chars",
+    ]);
+    if (companionOnlyKeys.has(settingKey) && !memoryCompanionActive) return false;
+    if (settingKey === "enable_memory_companion_cross_window_emotion" && !boolSetting("enable_memory_companion_emotional_drift")) return false;
+    if (["memory_companion_context_top_k", "memory_companion_context_max_chars"].includes(settingKey) && !boolSetting("enable_memory_companion_feature_context")) return false;
+  }
   if (featureKey === "enable_proactive_only_mode") {
     if (settingKey === "proactive_prompt_template") return boolSetting("enable_llm_proactive_message");
     if (["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"].includes(settingKey)) {
@@ -15582,6 +15730,12 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     }
     if (settingKey === "response_review_max_chars") {
       return String(valueSetting("response_review_mode", "severe_only")) === "full";
+    }
+    return true;
+  }
+  if (featureKey === "enable_maslow_motivation_experiment") {
+    if (["enable_maslow_schedule_influence", "maslow_motivation_strength"].includes(settingKey)) {
+      return boolSetting("enable_maslow_motivation_experiment");
     }
     return true;
   }
@@ -15906,10 +16060,28 @@ const featureDetailGuides = {
     disabled: "关系更像静态设定，距离变化和边界收敛会弱一些。",
   },
   enable_emotion_simulation: {
-    summary: "维护 Bot 自身的短期情绪余波，例如被刺到后的收敛、慢慢缓和和不满时的短暂回避。",
+    summary: "维护 Bot 自身的短期情绪余波，例如被刺到后的收敛、慢慢缓和、不满时的短暂回避和回复调节。",
     trigger: "私聊出现伤害性表达、道歉、安抚、夸奖或亲密互动后；不强依赖意图画像开关。",
-    enabled: "Bot 会在情绪余波较重时短期收敛、暂停主动贴近；可选启用 QQ 空间公开心情动态。",
+    enabled: "Bot 会在情绪余波较重时短期收敛、暂停主动贴近，并按内部调节策略决定避开话题、换低压问法、转移注意、留解释空间或短答降压；可选启用 QQ 空间公开心情动态。",
     disabled: "Bot 不维护自身情绪余波，关系距离感仍可处理边界和相处分寸。",
+  },
+  enable_maslow_motivation_experiment: {
+    summary: "实验性功能第一项：把主动念头归入状态、安全、归属、尊重、成长和意义等内部需求层级。",
+    trigger: "主动候选生成、排序和排障记录时；不进入实际回复正文。",
+    enabled: "候选会带上内部需求层级，并按强度轻量调整价值分和打扰压力；若子选项开启，也可影响日程倾向。",
+    disabled: "主动候选仍按现有语义、关系和复核链路排序，不额外使用需求强化。",
+  },
+  enable_experimental_motivation_model: {
+    summary: "实验性功能第二项：用驱力、诱因和唤醒适配共同判断主动念头现在值不值得发。",
+    trigger: "主动计划到点、主动排障评分和主动正文生成前。",
+    enabled: "Bot 会区分内部想开口、外部诱因是否足够、当前唤醒水平是否适合行动；只做轻量调权并显示在主动排障中。",
+    disabled: "主动仍按现有开口欲、关系温度、语义自然度和模型复核判断。",
+  },
+  enable_personality_iteration_experiment: {
+    summary: "实验性功能第三项：把艾森克 PEN、大五人格、依恋风格和自我决定理论作为角色贴合标尺，帮助用户调整角色设定和运行策略。",
+    trigger: "打开排障/诊断页时读取现有运行态、主动候选、关系状态和群聊边界配置；不额外调用模型。",
+    enabled: "排障页会显示可审核建议，例如外向性表现偏高、焦虑型追问、回避型收缩、关系感/自主感不足，并明确建议用户调整 AstrBot 人格、世界知识、主动策略或群聊边界。",
+    disabled: "不会做人格理论检查；现有回复、主动和群聊链路保持不变。",
   },
   enable_dialogue_episode_memory: {
     summary: "把连续私聊整理成“共同经历”片段，之后只择要使用最近或相关片段来保持连续感。",
@@ -16206,16 +16378,16 @@ const featureDetailGuides = {
     disabled: "这些转述工具不可用，Bot 只能文字建议用户自己说。",
   },
   enable_cross_user_memory_bridge: {
-    summary: "让主人在私聊里询问 Bot 与某个用户或群聊的近期互动。",
-    trigger: "主人问“你和某某聊了什么”“最近和某群互动怎样”“在群里说过什么”时。",
-    enabled: "Bot 会读取对应会话的近期记录并整理成摘要；默认只允许主人用户查询。",
+    summary: "让主要用户在私聊里询问 Bot 与某个用户或群聊的近期互动。",
+    trigger: "主要用户问“你和某某聊了什么”“最近和某群互动怎样”“在群里说过什么”时。",
+    enabled: "Bot 会读取对应会话的近期记录并整理成摘要；默认只允许主要用户查询。",
     disabled: "Bot 不会跨用户读取互动记录，只能基于当前会话和已注入记忆回答。",
   },
   enable_livingmemory_integration: {
-    summary: "允许插件与 LivingMemory 长期记忆协同，按需调用外部记忆工具。",
-    trigger: "回复或整理时需要更长期记忆支持。",
-    enabled: "可减少重复存储，并让长期记忆链路更完整。",
-    disabled: "插件只使用自身记忆结构，不调用 LivingMemory。",
+    summary: "检测到“我会牢牢记住你”或 LivingMemory 时，引导模型按需使用记忆召回能力，并展开情绪漂移、梦境碎片、未完成话题取材等深度协同。",
+    trigger: "私聊/群聊提示词构建、主动消息生成、状态问答、创作等链路需要长期记忆支持时。",
+    enabled: "可减少重复存储，让长期记忆链路更完整。检测到“我会牢牢记住你”时还会自动拉取情绪漂移、写入梦境碎片、检索未完成话题和读取功能上下文。",
+    disabled: "插件只使用自身记忆结构，不调用外部记忆插件。",
   },
   enable_bilibili_integration: {
     summary: "接入 B 站相关能力，读取观看记录或视频信息作为 Bot 的生活见闻来源。",
@@ -17269,6 +17441,596 @@ async function runAction(action, successMessage = "", control = null) {
   } finally {
     setActionBusy(control, false);
   }
+}
+
+const experimentalFeatureKeys = [
+  "enable_emotion_simulation",
+  "enable_maslow_motivation_experiment",
+  "enable_experimental_motivation_model",
+  "enable_personality_iteration_experiment",
+];
+
+const experimentalFeatureMeta = {
+  enable_emotion_simulation: {
+    label: "情绪余波",
+    index: "第一项",
+    shortDesc: "维护 Bot 自身短期情绪余波：被刺到后的收敛、缓和后的恢复、不满时的短暂回避，并按调节策略影响回复语气。",
+    theory: [
+      { name: "伊扎德情绪四维", desc: "愉快度、紧张度、激动度、确信度，随伤害/道歉/安抚/夸奖等事件变化并自然回归基线。", impact: "每条私聊消息处理后，Bot 的四维数值实时变化，直接决定回复语气是放松还是收敛。" },
+      { name: "Plutchik 基本情绪", desc: "喜悦、信任、恐惧、惊讶、悲伤、厌恶、愤怒、期待 8 个短期情绪强度。", impact: "Bot 会同时维护 8 种基本情绪强度，强度最高的会浮现为当前主导情绪，影响措辞和表情。" },
+      { name: "复合情绪推导", desc: "如喜悦+信任→亲近/喜欢，期待+喜悦→期待/乐观，厌恶+愤怒→反感。", impact: "两种基本情绪同时活跃时自动合成复合情绪，让 Bot 的感受更细腻而非单一标签。" },
+      { name: "Gross 调节策略", desc: "在避开高压、换低压问法、转移注意、重新理解和短答降压之间选择内部策略。", impact: "受伤后 Bot 不会只沉默，而是从 5 种策略中选择最适合当前的：换话题、短答、留空间或重新理解对方意图。" },
+    ],
+    effects: [
+      { trigger: "用户说了刺人的话", behavior: "四维紧张度上升，Plutchik 愤怒/厌恶激活", result: "Bot 短期收敛热情，可能换低压问法或暂时回避亲密话题" },
+      { trigger: "用户道歉或安抚", behavior: "四维愉快度回升，缓和量按小时计入", result: "Bot 逐渐恢复原有语气，不是一键清零" },
+      { trigger: "情绪值超过生气阈值", behavior: "进入 hurt 模式，激活调节策略栈", result: "主动消息暂停贴近，回复变短，直到缓和到安全线" },
+      { trigger: "开启 QQ 空间心情动态", behavior: "高情绪强度时可能发布心情说说", result: "Bot 在社交平台表达当前心情，形成生活连续感" },
+    ],
+    caution: "这是扮演状态，不是真实心理判断。阈值过低会让 Bot 太容易受伤，建议先温和开启并观察。",
+    runtimeHint: "私聊用户详情页的「情绪余波」卡片可查看四维状态、基本/复合情绪、调节策略和策略候选。",
+  },
+  enable_maslow_motivation_experiment: {
+    label: "需求强化功能",
+    index: "第二项",
+    shortDesc: "把主动念头归入状态、安全、归属、尊重、成长和意义等内部需求层级，轻量调整候选排序；可选影响日程生成。",
+    theory: [
+      { name: "马斯洛需求层级", desc: "把主动念头按内部需求结构分类：状态（身体/生理）、安全（边界/稳定）、归属（关系/陪伴）、尊重（认可/地位）、成长（探索/学习）、意义（自我实现）。", impact: "每个主动候选会打上需求层级标签，让 Bot 知道自己「为什么想开口」，而不只是「想说什么」。" },
+      { name: "影响范围", desc: "默认只影响主动候选的价值分和打扰压力；开启子选项后可轻量影响日程倾向（休息/探索/等待/准备/低打扰）。", impact: "未开日程影响时只调整候选排序；开启后日程生成器会参考当前最缺的需求层安排今天的活动倾向。" },
+      { name: "强度控制", desc: "0 仅记录层级不改排序；35 为温和默认；100 会更明显偏向有明确关系/状态/成长由头的念头。", impact: "强度越高，低层级缺乏由头的念头越容易被排到后面，让主动消息更有实质内容。" },
+    ],
+    effects: [
+      { trigger: "主动候选生成", behavior: "按需求层级分类并计算评分偏移", result: "有明确由头的念头（如归属→关心、成长→分享新知）排序更靠前" },
+      { trigger: "开启日程影响", behavior: "日程生成器参考当前需求短板", result: "Bot 在状态疲惫时倾向休息日程，归属饥渴时倾向主动关心" },
+      { trigger: "排障链路", behavior: "候选记录标注需求层级和偏移量", result: "可在排障页看到每个候选的内部动机来源，便于调参" },
+    ],
+    caution: "默认关闭。建议先用温和强度观察主动候选是否更有由头，再决定是否允许影响日程。不会把层级术语写进回复正文。",
+    runtimeHint: "主动候选记录中会显示需求层级和评分偏移；可在主动页的候选列表或排障链路中查看。",
+  },
+  enable_experimental_motivation_model: {
+    label: "动机调度模型",
+    index: "第三项",
+    shortDesc: "结合驱力、诱因和唤醒状态对主动计划做轻量调权，并在主动排障中显示判断依据。",
+    theory: [
+      { name: "驱力理论", desc: "Bot 内部想开口的推动力，来自当前状态、精力、情绪和开口欲望。", impact: "精力低或情绪收敛时驱力下降，Bot 不太会主动找话；状态好时驱力上升，更自然地想联系。" },
+      { name: "诱因理论", desc: "当前候选是否有值得说的外部价值，如约定、提醒、分享内容或关系事件。", impact: "没有外部诱因的念头会被降权，避免 Bot 无话找话；有明确约定或新鲜事时诱因加分。" },
+      { name: "唤醒理论", desc: "当前状态是否适合行动：唤醒过高可能急躁，过低可能提不起劲，适中时行动更自然。", impact: "高唤醒时 Bot 可能连续发多条（被主动分段拦截）；低唤醒时倾向等待，直到状态更合适。" },
+    ],
+    effects: [
+      { trigger: "主动计划到点", behavior: "计算驱力×诱因×唤醒适配分", result: "三者都高时放行更果断；任一过低时延后或丢弃，减少无意义打扰" },
+      { trigger: "主动排障", behavior: "显示三维分数和判断依据", result: "可直观看到候选被放行或拦截的原因，不再只是「语义分不够」" },
+      { trigger: "高唤醒 + 高驱力但低诱因", behavior: "诱因不足压低总分", result: "Bot 想说话但找不到好由头，等待更合适的时机而非硬发" },
+    ],
+    caution: "默认关闭。它只做轻量调权，不替代主动复核和免打扰限制。",
+    runtimeHint: "开启后主动排障页会显示「实验动机调度」维度，包含驱力、诱因和唤醒适配的分数与说明。",
+  },
+  enable_personality_iteration_experiment: {
+    label: "角色贴合校准",
+    index: "第四项",
+    shortDesc: "基于艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 行为是否贴近角色基线，给出调整建议。",
+    theory: [
+      { name: "艾森克 PEN 模型", desc: "从精神质（P）、外向性（E）和神经质（N）三个维度衡量角色行为倾向。", impact: "检测 Bot 是否外向性偏高（话多/主动过频）或神经质偏高（情绪波动过大），提示调整人格设定。" },
+      { name: "大五人格", desc: "开放性、尽责性、外向性、宜人性和神经质，用于评估角色表现的五维一致性。", impact: "对照角色设定和实际表现，如设定内向但实际主动频繁，提示检查主动策略参数。" },
+      { name: "依恋风格", desc: "焦虑型（过度追问）、回避型（过度收缩）和安全型（自然回应）判断 Bot 的关系行为模式。", impact: "检测用户沉默后 Bot 是否焦虑追问（焦虑型）或过度冷淡（回避型），提示调整关系参数。" },
+      { name: "自我决定理论", desc: "关系感（归属）、自主感（主动由头）和能力感（成长信心）三大心理需求满足程度。", impact: "检查 Bot 主动是否缺乏自主由头（只靠日程驱动）、关系感是否不足（缺少共同经历积累）。" },
+    ],
+    effects: [
+      { trigger: "打开排障/诊断页", behavior: "读取运行态、主动候选、关系状态和群聊边界", result: "显示角色贴合建议卡片，指出偏差维度和调整方向" },
+      { trigger: "检测到外向性偏高", behavior: "对比主动频率与角色设定", result: "建议降低主动上限或检查人格描述是否过于热情" },
+      { trigger: "检测到焦虑型追问", behavior: "分析用户沉默后的 Bot 行为", result: "建议调整关系距离参数或增加沉默容忍度" },
+      { trigger: "检测到自主感不足", behavior: "检查主动候选的由头来源", result: "建议丰富世界知识或日程事件，让主动更有的放矢" },
+    ],
+    caution: "默认关闭。开启后只给调整建议，不自动改写 AstrBot 人格或世界知识。",
+    runtimeHint: "开启后排障/诊断页会显示角色贴合建议，如外向性偏高、焦虑型追问、回避型收缩、关系感/自主感不足等。",
+  },
+};
+
+function renderExperimentalPage() {
+  const root = $("#experimentalRoot");
+  if (!root) return;
+  const subpage = state.experimentalSubpage || "";
+  if (subpage && experimentalFeatureKeys.includes(subpage)) {
+    root.innerHTML = renderExperimentalSubpage(subpage);
+    bindExperimentalSubpageActions(subpage);
+  } else {
+    root.innerHTML = renderExperimentalOverview();
+    bindExperimentalOverviewActions();
+  }
+}
+
+function renderExperimentalOverview() {
+  const settings = state.overview?.settings || {};
+  const features = state.featureDraft || {};
+  const cards = experimentalFeatureKeys.map((key) => {
+    const meta = experimentalFeatureMeta[key];
+    const enabled = toBool(features[key]);
+    const guide = featureDetailGuides[key] || {};
+    return `
+      <article class="exp-card ${enabled ? "on" : "off"}" data-exp-open="${escapeHtml(key)}">
+        <div class="exp-card-head">
+          <div>
+            <span class="exp-card-index">${escapeHtml(meta.index)}</span>
+            <h3>${escapeHtml(meta.label)}</h3>
+            <code>${escapeHtml(key)}</code>
+          </div>
+          <label class="exp-card-toggle" onclick="event.stopPropagation()">
+            <input type="checkbox" data-exp-toggle="${escapeHtml(key)}" ${enabled ? "checked" : ""}>
+            <span class="feature-toggle-visual"></span>
+            <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
+          </label>
+        </div>
+        <p class="exp-card-desc">${escapeHtml(meta.shortDesc)}</p>
+        <div class="exp-card-foot">
+          <div class="exp-card-guide">
+            <span>何时生效</span>
+            <small>${escapeHtml(guide.trigger || "对应场景触发时生效。")}</small>
+          </div>
+          <button type="button" class="exp-card-enter" data-exp-open="${escapeHtml(key)}">进入详情 →</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+  const enabledCount = experimentalFeatureKeys.filter((key) => toBool(features[key])).length;
+  return `
+    <div class="subpage experimental-page">
+      <div class="section-head">
+        <div>
+          <h2>实验性功能</h2>
+          <span class="muted">心理机制、动机调度和角色校准类探索能力；适合先小范围观察，再决定是否纳入正式链路。</span>
+        </div>
+        <div class="actions compact">
+          <span class="module-badge">${enabledCount} / ${experimentalFeatureKeys.length} 开启</span>
+        </div>
+      </div>
+      <div class="experimental-overview-note">
+        <b>使用建议</b>
+        <span>以下功能仍处于实验阶段，建议逐项开启观察。除情绪模拟保留原默认值外，其他实验项默认关闭；不会把理论标签写进实际回复正文。</span>
+      </div>
+      <div class="exp-card-grid">
+        ${cards}
+      </div>
+    </div>
+  `;
+}
+
+function renderExperimentalSubpage(key) {
+  const meta = experimentalFeatureMeta[key];
+  if (!meta) return "";
+  const features = state.featureDraft || {};
+  const settings = state.overview?.settings || {};
+  const enabled = toBool(features[key]);
+  const guide = featureDetailGuides[key] || {};
+  const theoryHtml = meta.theory.map((item) => `
+    <section class="exp-theory-item">
+      <div class="exp-theory-head">
+        <b>${escapeHtml(item.name)}</b>
+      </div>
+      <p class="exp-theory-desc">${escapeHtml(item.desc)}</p>
+      ${item.impact ? `<div class="exp-theory-impact"><span class="exp-theory-impact-label">→ 对 Bot 行为的影响</span><p>${escapeHtml(item.impact)}</p></div>` : ""}
+    </section>
+  `).join("");
+  const effectsHtml = (meta.effects || []).map((item) => `
+    <section class="exp-effect-chain">
+      <div class="exp-effect-step">
+        <span class="exp-effect-tag trigger">触发</span>
+        <p>${escapeHtml(item.trigger)}</p>
+      </div>
+      <div class="exp-effect-arrow">→</div>
+      <div class="exp-effect-step">
+        <span class="exp-effect-tag behavior">内部行为</span>
+        <p>${escapeHtml(item.behavior)}</p>
+      </div>
+      <div class="exp-effect-arrow">→</div>
+      <div class="exp-effect-step">
+        <span class="exp-effect-tag result">可观察结果</span>
+        <p>${escapeHtml(item.result)}</p>
+      </div>
+    </section>
+  `).join("");
+  const guideRows = [
+    ["功能概述", guide.summary || meta.shortDesc],
+    ["何时生效", guide.trigger || "对应场景触发时生效。"],
+    ["开启后", guide.enabled || "相关能力会参与判断、注入或后台整理。"],
+    ["关闭后", guide.disabled || "相关能力停止新增处理，已有数据仍可在页面查看。"],
+  ].map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  const settingsHtml = renderExperimentalSettings(key);
+  const runtimeHtml = renderExperimentalRuntime(key);
+  return `
+    <div class="subpage experimental-subpage ${enabled ? "on" : "off"}">
+      <nav class="exp-breadcrumb">
+        <button type="button" data-exp-back>实验性功能</button>
+        <span>/ ${escapeHtml(meta.label)}</span>
+      </nav>
+      <div class="exp-state-strip ${enabled ? "on" : "off"}">
+        <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
+        <span>${escapeHtml(meta.index)} · ${escapeHtml(enabled ? "正在参与相关链路" : "当前未启用，相关链路保持原有行为")}</span>
+      </div>
+      <header class="exp-subpage-head">
+        <div>
+          <span class="module-badge">${escapeHtml(meta.index)}</span>
+          <h2>${escapeHtml(meta.label)}</h2>
+          <p>${escapeHtml(meta.shortDesc)}</p>
+        </div>
+        <label class="feature-detail-toggle">
+          <input type="checkbox" data-exp-toggle="${escapeHtml(key)}" ${enabled ? "checked" : ""}>
+          <span class="feature-toggle-visual"></span>
+          <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
+        </label>
+      </header>
+      ${meta.caution ? `<div class="exp-caution"><b>注意</b><span>${escapeHtml(meta.caution)}</span></div>` : ""}
+      <article class="exp-detail-card exp-theory-card">
+        <h3>理论框架与行为映射</h3>
+        <div class="exp-theory-list">${theoryHtml}</div>
+      </article>
+      ${effectsHtml ? `<article class="exp-detail-card exp-effects-card">
+        <h3>功能效果链路</h3>
+        <div class="exp-effect-list">${effectsHtml}</div>
+      </article>` : ""}
+      <article class="exp-detail-card exp-guide-card">
+        <h3>功能说明</h3>
+        <dl>${guideRows}</dl>
+      </article>
+      <div class="exp-bottom-grid">
+        ${settingsHtml}
+        ${runtimeHtml}
+      </div>
+    </div>
+  `;
+}
+
+function renderExperimentalSettings(key) {
+  const sections = featureSettingSections[key] || [];
+  const related = featureRelatedSettings(key);
+  if (!related.length && !sections.length) {
+    return `
+      <article class="exp-detail-card exp-settings-card">
+        <h3>参数配置</h3>
+        <div class="exp-settings-empty">该功能没有额外参数，通过开关即可控制。</div>
+      </article>
+    `;
+  }
+  const settings = state.overview?.settings || {};
+  const features = state.featureDraft || {};
+  const providers = state.providerDraft || {};
+  const relatedMap = Object.fromEntries(related.map((item) => [item.key, item]));
+  const settingRow = ({ key: name, value, description }) => `
+    <section class="feature-param-row">
+      <div class="feature-param-main">
+        <header>
+          <b>${escapeHtml(configLabel(name))}</b>
+          <code>${escapeHtml(name)}</code>
+        </header>
+        <p>${escapeHtml(description)}</p>
+      </div>
+      <div class="feature-param-control">
+        ${featureSettingInput(name, value)}
+      </div>
+    </section>
+  `;
+  const renderedKeys = new Set();
+  const groupedHtml = sections.map((section) => {
+    const items = (section.keys || []).map((name) => {
+      if (!featureSettingVisibleForCurrentMode(key, name, settings)) return null;
+      renderedKeys.add(name);
+      return relatedMap[name];
+    }).filter(Boolean);
+    if (!items.length) return "";
+    return `
+      <section class="feature-param-section">
+        <header>
+          <b>${escapeHtml(section.title || "参数")}</b>
+          ${section.note ? `<span>${escapeHtml(section.note)}</span>` : ""}
+        </header>
+        ${items.map(settingRow).join("")}
+      </section>
+    `;
+  }).join("");
+  const ungroupedItems = related.filter((item) => {
+    if (renderedKeys.has(item.key)) return false;
+    return featureSettingVisibleForCurrentMode(key, item.key, settings);
+  });
+  const ungroupedHtml = ungroupedItems.map(settingRow).join("");
+  return `
+    <article class="exp-detail-card exp-settings-card">
+      <h3>参数配置</h3>
+      <form class="feature-param-list" data-exp-param-form="${escapeHtml(key)}">
+        ${groupedHtml}
+        ${ungroupedHtml}
+        ${related.length ? `<button type="submit" class="feature-param-save">保存参数</button>` : ""}
+      </form>
+    </article>
+  `;
+}
+
+function renderExperimentalRuntime(key) {
+  const overview = state.overview || {};
+  const settings = overview.settings || {};
+  const features = state.featureDraft || {};
+  const enabled = toBool(features[key]);
+  const meta = experimentalFeatureMeta[key] || {};
+  let statusItems = [];
+  let extraHtml = "";
+  if (key === "enable_emotion_simulation") {
+    const llmJudge = toBool(features.enable_llm_emotion_judgement) || toBool(settings.enable_llm_emotion_judgement);
+    const judgeMode = String(features.emotion_judgement_mode || settings.emotion_judgement_mode || "suspicious");
+    const modeLabels = { suspicious: "只判断可疑消息", always: "每条普通文本都判断", off: "关闭模型复核" };
+    const hurtThreshold = features.emotional_gate_hurt_threshold ?? settings.emotional_gate_hurt_threshold ?? 70;
+    const refuseThreshold = features.emotional_gate_refuse_threshold ?? settings.emotional_gate_refuse_threshold ?? 90;
+    const recovery = features.emotional_gate_recovery_per_hour ?? settings.emotional_gate_recovery_per_hour ?? 24;
+    const ventEnabled = toBool(features.enable_qzone_emotional_vent_publish) || toBool(settings.enable_qzone_emotional_vent_publish);
+    statusItems = [
+      ["模型复核", llmJudge ? modeLabels[judgeMode] || judgeMode : "未启用"],
+      ["受伤阈值", String(hurtThreshold)],
+      ["生气阈值", String(refuseThreshold)],
+      ["每小时缓和量", String(recovery)],
+      ["QQ空间心情动态", ventEnabled ? "已启用" : "未启用"],
+    ];
+    const users = state.users || [];
+    const userCount = users.length;
+    const emotionalUsers = users.filter((u) => {
+      const rel = u.relationship_state || {};
+      return rel.mode && rel.mode !== "normal";
+    });
+    const emotionalCount = emotionalUsers.length;
+    const modeBuckets = { hurt: 0, cold: 0, warm: 0, close: 0 };
+    emotionalUsers.forEach((u) => {
+      const mode = u.relationship_state?.mode || "normal";
+      if (Object.prototype.hasOwnProperty.call(modeBuckets, mode)) modeBuckets[mode]++;
+    });
+    const topEmotional = emotionalUsers
+      .map((u) => {
+        const rel = u.relationship_state || {};
+        const dims = rel.emotion_dimensions || {};
+        const plutchik = rel.plutchik_profile || {};
+        const dominant = plutchik.dominant_label || "";
+        const moodScore = Number(rel.mood_score || 0);
+        return { nick: u.nickname || u.user_id || "-", mode: rel.mode || "normal", dominant, moodScore, regulation: rel.emotion_regulation?.strategy_label || rel.emotion_regulation?.strategy || "", dims };
+      })
+      .sort((a, b) => Math.abs(b.moodScore) - Math.abs(a.moodScore))
+      .slice(0, 4);
+    const userRows = topEmotional.map((u) => `
+      <div class="exp-runtime-user-row">
+        <div class="exp-runtime-user-head">
+          <b>${escapeHtml(u.nick)}</b>
+          <span class="exp-runtime-user-mode ${escapeHtml(u.mode)}">${escapeHtml(u.mode === "normal" ? "平稳" : u.mode)}</span>
+        </div>
+        <div class="exp-runtime-user-detail">
+          ${u.dominant ? `<span>主导情绪：${escapeHtml(u.dominant)}</span>` : ""}
+          <span>余波值：${escapeHtml(String(u.moodScore))}</span>
+          ${u.regulation ? `<span>策略：${escapeHtml(u.regulation)}</span>` : ""}
+        </div>
+      </div>
+    `).join("");
+    extraHtml = `
+      <div class="exp-runtime-extra">
+        <div class="exp-runtime-stats-row">
+          <div class="exp-runtime-stat"><span>私聊用户</span><b>${escapeHtml(String(userCount))}</b></div>
+          <div class="exp-runtime-stat"><span>情绪活跃</span><b>${escapeHtml(String(emotionalCount))}</b></div>
+          <div class="exp-runtime-stat"><span>收敛中</span><b>${escapeHtml(String(modeBuckets.hurt || 0))}</b></div>
+          <div class="exp-runtime-stat"><span>冷淡中</span><b>${escapeHtml(String(modeBuckets.cold || 0))}</b></div>
+        </div>
+        ${userRows ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">情绪波动最大的用户</div>${userRows}</div>` : ""}
+        <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
+      </div>
+    `;
+  } else if (key === "enable_maslow_motivation_experiment") {
+    const strength = features.maslow_motivation_strength ?? settings.maslow_motivation_strength ?? 35;
+    const scheduleInfluence = toBool(features.enable_maslow_schedule_influence) || toBool(settings.enable_maslow_schedule_influence);
+    statusItems = [
+      ["影响强度", `${strength} / 100`],
+      ["日程影响", scheduleInfluence ? "已开启" : "未开启"],
+      ["影响范围", scheduleInfluence ? "主动候选 + 日程倾向" : "仅主动候选"],
+    ];
+    const proactiveData = overview.proactive_candidates || {};
+    const allCandidates = proactiveData.items || [];
+    const pending = allCandidates.filter((c) => c.status === "pending" || c.status === "accepted");
+    const needBuckets = { 状态: 0, 安全: 0, 归属: 0, 尊重: 0, 成长: 0, 意义: 0, 未分类: 0 };
+    pending.forEach((c) => {
+      const level = c.need_level || c.maslow_level || "未分类";
+      const key = Object.prototype.hasOwnProperty.call(needBuckets, level) ? level : "未分类";
+      needBuckets[key]++;
+    });
+    const needBars = Object.entries(needBuckets).filter(([, v]) => v > 0).map(([k, v]) =>
+      `<div class="exp-runtime-need-bar"><span>${escapeHtml(k)}</span><div class="exp-runtime-need-bar-track"><div class="exp-runtime-need-bar-fill" style="width:${Math.min(100, v * 20)}%"></div></div><b>${escapeHtml(String(v))}</b></div>`
+    ).join("");
+    extraHtml = `
+      <div class="exp-runtime-extra">
+        <div class="exp-runtime-stats-row">
+          <div class="exp-runtime-stat"><span>待发送候选</span><b>${escapeHtml(String(pending.length))}</b></div>
+          <div class="exp-runtime-stat"><span>已进入计划</span><b>${escapeHtml(String(proactiveData.counts?.accepted || 0))}</b></div>
+        </div>
+        ${needBars ? `<div class="exp-runtime-need-chart"><div class="exp-runtime-need-chart-title">候选需求层级分布</div>${needBars}</div>` : ""}
+        <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
+      </div>
+    `;
+  } else if (key === "enable_experimental_motivation_model") {
+    const proactiveData = overview.proactive_candidates || {};
+    const allCandidates = proactiveData.items || [];
+    const pending = allCandidates.filter((c) => c.status === "pending" || c.status === "accepted");
+    statusItems = [
+      ["当前候选数", String(pending.length)],
+      ["调权方式", "驱力 × 诱因 × 唤醒适配"],
+      ["显示位置", "主动排障页"],
+    ];
+    const topCandidates = pending.slice(0, 4).map((c) => `
+      <div class="exp-runtime-user-row">
+        <div class="exp-runtime-user-head">
+          <b>${escapeHtml(c.topic || c.reason_label || c.reason || "未命名候选")}</b>
+          <span class="exp-runtime-user-mode">${escapeHtml(c.user_label || c.user_id || "-")}</span>
+        </div>
+        <div class="exp-runtime-user-detail">
+          ${c.semantic_score != null ? `<span>语义贴合：${escapeHtml(proactivePercent100(c.semantic_score) || "-")}</span>` : ""}
+          ${c.semantic_pressure != null ? `<span>压力：${escapeHtml(proactivePercent100(c.semantic_pressure) || "-")}</span>` : ""}
+          ${c.impulse_value != null ? `<span>冲动值：${escapeHtml(proactivePercent100(c.impulse_value) || "-")}</span>` : ""}
+        </div>
+      </div>
+    `).join("");
+    extraHtml = `
+      <div class="exp-runtime-extra">
+        <div class="exp-runtime-stats-row">
+          <div class="exp-runtime-stat"><span>待发送</span><b>${escapeHtml(String(pending.length))}</b></div>
+          <div class="exp-runtime-stat"><span>已发送</span><b>${escapeHtml(String(proactiveData.counts?.sent || 0))}</b></div>
+          <div class="exp-runtime-stat"><span>被拦截</span><b>${escapeHtml(String(proactiveData.counts?.blocked || 0))}</b></div>
+        </div>
+        ${topCandidates ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">近期候选评分</div>${topCandidates}</div>` : ""}
+        <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
+      </div>
+    `;
+  } else if (key === "enable_personality_iteration_experiment") {
+    const diagnostics = state.diagnostics || [];
+    const personalityItems = diagnostics.filter((d) =>
+      String(d.title || d.source || "").includes("人格") ||
+      String(d.title || d.source || "").includes("贴合") ||
+      String(d.title || d.source || "").includes("外向") ||
+      String(d.title || d.source || "").includes("焦虑") ||
+      String(d.title || d.source || "").includes("依恋") ||
+      String(d.detail || "").includes("艾森克") ||
+      String(d.detail || "").includes("大五") ||
+      String(d.detail || "").includes("依恋") ||
+      String(d.detail || "").includes("SDT") ||
+      String(d.detail || "").includes("自主感")
+    );
+    statusItems = [
+      ["检查维度", "艾森克PEN / 大五 / 依恋 / SDT"],
+      ["显示位置", "排障/诊断页"],
+      ["当前建议数", String(personalityItems.length)],
+    ];
+    const diagRows = personalityItems.slice(0, 4).map((d) => `
+      <div class="exp-runtime-user-row">
+        <div class="exp-runtime-user-head">
+          <b>${escapeHtml(d.title || d.source || "-")}</b>
+          <span class="exp-runtime-user-mode ${escapeHtml(d.level || "info")}">${escapeHtml(d.level || "info")}</span>
+        </div>
+        ${d.text || d.detail ? `<div class="exp-runtime-user-detail"><span>${escapeHtml((d.text || d.detail || "").slice(0, 120))}${(d.text || d.detail || "").length > 120 ? "…" : ""}</span></div>` : ""}
+      </div>
+    `).join("");
+    extraHtml = `
+      <div class="exp-runtime-extra">
+        ${diagRows ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">角色贴合诊断建议</div>${diagRows}</div>` : `<div class="exp-runtime-hint">暂无诊断建议。开启功能并产生运行数据后，排障页会显示角色贴合建议。</div>`}
+        <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
+      </div>
+    `;
+  }
+  const statusRows = statusItems.map(([name, value]) =>
+    `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`
+  ).join("");
+  return `
+    <article class="exp-detail-card exp-runtime-card">
+      <h3>运行状态</h3>
+      ${enabled ? `<dl class="exp-runtime-dl">${statusRows}</dl>${extraHtml}` : `<div class="exp-runtime-disabled">功能未开启，暂无运行态数据。${escapeHtml(meta.runtimeHint || "")}</div>`}
+    </article>
+  `;
+}
+
+function bindExperimentalOverviewActions() {
+  const root = $("#experimentalRoot");
+  if (!root) return;
+  root.querySelectorAll("[data-exp-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.experimentalSubpage = button.dataset.expOpen || "";
+      renderExperimentalPage();
+    });
+  });
+  root.querySelectorAll("[data-exp-toggle]").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const key = input.dataset.expToggle || "";
+      if (!key) return;
+      state.featureDraft[key] = input.checked;
+      const isSetting = Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, key);
+      const payload = isSetting
+        ? { settings: { [key]: input.checked } }
+        : { features: { [key]: input.checked } };
+      await runAction(
+        () => postJson("/settings/update", payload),
+        input.checked ? "已开启" : "已关闭",
+        input.closest(".exp-card-toggle") || input.closest(".feature-detail-toggle"),
+      );
+      renderExperimentalPage();
+    });
+  });
+}
+
+function bindExperimentalSubpageActions(key) {
+  const root = $("#experimentalRoot");
+  if (!root) return;
+  root.querySelectorAll("[data-exp-back]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const form = root.querySelector("[data-exp-param-form]");
+      if (form) {
+        await saveExperimentalSettings(key, form, "已保存并返回");
+      }
+      state.experimentalSubpage = "";
+      renderExperimentalPage();
+    });
+  });
+  root.querySelectorAll("[data-exp-toggle]").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const toggleKey = input.dataset.expToggle || "";
+      if (!toggleKey) return;
+      state.featureDraft[toggleKey] = input.checked;
+      const isSetting = Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, toggleKey);
+      const payload = isSetting
+        ? { settings: { [toggleKey]: input.checked } }
+        : { features: { [toggleKey]: input.checked } };
+      await runAction(
+        () => postJson("/settings/update", payload),
+        input.checked ? "已开启" : "已关闭",
+        input.closest(".feature-detail-toggle") || input.closest(".exp-card-toggle"),
+      );
+      renderExperimentalPage();
+    });
+  });
+  root.querySelectorAll("[data-exp-param-form]").forEach((form) => {
+    form.querySelectorAll("[data-feature-param]").forEach((input) => {
+      if (input.type === "checkbox") {
+        input.addEventListener("change", () => {
+          const paramKey = input.dataset.featureParam || "";
+          if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, paramKey)) {
+            state.featureDraft[paramKey] = input.checked;
+          }
+          if (Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, paramKey)) {
+            state.overview.settings[paramKey] = input.checked;
+          }
+          const label = input.closest(".feature-param-check")?.querySelector("span");
+          if (label) label.textContent = input.checked ? "开启" : "关闭";
+          if (key === "enable_emotion_simulation" && paramKey === "enable_llm_emotion_judgement") {
+            renderExperimentalPage();
+          }
+          if (key === "enable_maslow_motivation_experiment" && paramKey === "enable_maslow_motivation_experiment") {
+            renderExperimentalPage();
+          }
+        });
+      }
+      if (input.tagName === "SELECT") {
+        input.addEventListener("change", () => {
+          const paramKey = input.dataset.featureParam || "";
+          if (Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, paramKey)) {
+            state.overview.settings[paramKey] = input.value;
+          }
+          if (key === "enable_emotion_simulation" && paramKey === "emotion_judgement_mode") {
+            renderExperimentalPage();
+          }
+        });
+      }
+    });
+    form.querySelectorAll("[data-feature-provider-select]").forEach((select) => {
+      syncFeatureProviderInput(select);
+      select.addEventListener("change", () => syncFeatureProviderInput(select));
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await saveExperimentalSettings(key, form, "已保存参数");
+    });
+  });
+}
+
+async function saveExperimentalSettings(key, form, successMessage) {
+  const payload = collectFeatureDetailPayload(key, form);
+  await runAction(
+    () => postJson("/settings/update", payload),
+    successMessage || "已保存参数",
+    form.querySelector(".feature-param-save"),
+  );
 }
 
 function switchTab(tabName) {

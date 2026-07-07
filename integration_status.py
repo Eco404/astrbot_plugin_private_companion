@@ -438,10 +438,29 @@ class IntegrationStatusMixin:
         )
 
     def _format_livingmemory_status(self) -> str:
+        # Check for "我会牢牢记住你" (RememberYou) bridge first
+        companion_bridge = None
+        try:
+            companion_bridge = self._memory_companion_bridge()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        if companion_bridge is not None:
+            display_name = getattr(companion_bridge, "display_name", "") or "我会牢牢记住你"
+            return (
+                f"记忆插件协同：已检测到{display_name}。\n"
+                f"协同开关：{'开启' if self.enable_livingmemory_integration else '关闭'}\n"
+                f"情绪漂移联动：{'开启' if getattr(self, 'enable_memory_companion_emotional_drift', True) else '关闭'}\n"
+                f"跨窗口情绪连续性：{'开启' if getattr(self, 'enable_memory_companion_cross_window_emotion', True) else '关闭'}\n"
+                f"梦境碎片写入：{'开启' if getattr(self, 'enable_memory_companion_dream_fragment', True) else '关闭'}\n"
+                f"未完成话题取材：{'开启' if getattr(self, 'enable_memory_companion_open_loop_search', True) else '关闭'}\n"
+                f"功能上下文读取：{'开启' if getattr(self, 'enable_memory_companion_feature_context', True) else '关闭'}\n"
+                "用途：长期记忆沉淀、短上下文补充、情绪漂移、梦境碎片和跨会话连续性。\n"
+                "建议：保留本插件的生活状态/关系/群聊气氛层,把大规模长期检索交给记忆插件。"
+            )
         plugin_dir = self._livingmemory_plugin_dir()
         if not plugin_dir.exists():
             return (
-                "LivingMemory：未检测到 astrbot_plugin_livingmemory。\n"
+                "记忆插件协同：未检测到\"我会牢牢记住你\"或 LivingMemory。\n"
                 "当前会继续使用本插件内置的轻量记忆、片段记忆和群聊观察。"
             )
         metadata = plugin_dir / "metadata.yaml"
@@ -455,7 +474,7 @@ class IntegrationStatusMixin:
             except Exception:
                 version = ""
         return (
-            "LivingMemory：已检测到。\n"
+            "记忆插件协同：已检测到 LivingMemory。\n"
             f"路径：{plugin_dir}\n"
             f"版本：{version or '未知'}\n"
             f"协同开关：{'开启' if self.enable_livingmemory_integration else '关闭'}\n"

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
@@ -327,8 +327,8 @@ class MemoryCompanionAdapterMixin:
             "最近阅读 创作 搜索 生图 QQ空间 说说 行动",
             "最近吃了什么 今日穿搭 梦境碎片 主动私聊",
             "刚刚发布的 QQ 空间说说 最近已发说说 公开动态余味 不要重复已发说说",
-            "主人明确偏好 约定 边界",
-            "避免把朋友用户互动写进 Bot 日程",
+            "主要用户明确偏好 约定 边界",
+            "避免把次要用户互动写进 Bot 日程",
         ]
         if now_text:
             query_parts.append(f"当前时间 {now_text}")
@@ -351,6 +351,7 @@ class MemoryCompanionAdapterMixin:
             return ""
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
+            timeout = max(0.2, min(6.0, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
             text = await asyncio.wait_for(
                 composer(
                     query=query,
@@ -360,8 +361,15 @@ class MemoryCompanionAdapterMixin:
                     companion_bot_mood=bot_mood,
                     companion_bot_energy=bot_energy,
                 ),
-                timeout=4.0,
+                timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            logger.info(
+                "[PrivateCompanion] MemoryCompanion 日程上下文读取超时,已跳过: kind=%s timeout=%.2fs",
+                _single_line(kind, 60),
+                max(0.2, min(6.0, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2))),
+            )
+            return ""
         except Exception as exc:
             if self._memory_companion_optional_dependency_failed(exc, where="compose_schedule_context"):
                 return ""
@@ -386,10 +394,19 @@ class MemoryCompanionAdapterMixin:
         max_chars: int = 900,
         timeout_seconds: float = 4.0,
     ) -> str:
+        if not getattr(self, "enable_memory_companion_feature_context", True):
+            return ""
         bridge = self._memory_companion_bridge()
         composer = getattr(bridge, "compose_context", None) if bridge is not None else None
         if not callable(composer):
             return ""
+        # Apply configured defaults if caller didn't override
+        configured_top_k = getattr(self, "memory_companion_context_top_k", 5)
+        configured_max_chars = getattr(self, "memory_companion_context_max_chars", 900)
+        if top_k == 5:
+            top_k = configured_top_k
+        if max_chars == 900:
+            max_chars = configured_max_chars
         clean_query = _single_line(query, 1200)
         if not clean_query:
             return ""
@@ -437,6 +454,7 @@ class MemoryCompanionAdapterMixin:
             }
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
+            configured_timeout = max(0.2, min(6.0, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
             text = await asyncio.wait_for(
                 composer(
                     query=clean_query,
@@ -446,8 +464,15 @@ class MemoryCompanionAdapterMixin:
                     companion_bot_mood=bot_mood,
                     companion_bot_energy=bot_energy,
                 ),
-                timeout=max(0.5, min(6.0, float(timeout_seconds or 4.0))),
+                timeout=max(0.2, min(6.0, min(configured_timeout, _safe_float(timeout_seconds, configured_timeout, 0.2)))),
             )
+        except asyncio.TimeoutError:
+            logger.info(
+                "[PrivateCompanion] MemoryCompanion 功能上下文读取超时,已跳过: kind=%s timeout=%.2fs",
+                _single_line(kind, 60),
+                max(0.2, min(6.0, min(_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2), _safe_float(timeout_seconds, 1.2, 0.2)))),
+            )
+            return ""
         except Exception as exc:
             if self._memory_companion_optional_dependency_failed(exc, where=f"compose_feature_context:{kind}"):
                 return ""
@@ -1296,6 +1321,8 @@ class MemoryCompanionAdapterMixin:
         touched emotional memories in other sessions, a dampened residue is also
         applied to the current daily_state, creating a sense of emotional carryover.
         """
+        if not getattr(self, "enable_memory_companion_emotional_drift", True):
+            return
         bridge = self._memory_companion_bridge()
         if bridge is None:
             return
@@ -1314,7 +1341,7 @@ class MemoryCompanionAdapterMixin:
         cross_window_delta = 0.0
         cross_window_hints: list[str] = []
         cross_state_getter = getattr(bridge, "get_recent_emotional_state", None)
-        if callable(cross_state_getter):
+        if callable(cross_state_getter) and getattr(self, "enable_memory_companion_cross_window_emotion", True):
             try:
                 cross_state = cross_state_getter()
                 if isinstance(cross_state, dict) and cross_state.get("total", 0) > 0:
@@ -1384,6 +1411,8 @@ class MemoryCompanionAdapterMixin:
 
     async def _memory_companion_search_open_loops(self, *, session_id: str = "", limit: int = 3) -> list[dict[str, Any]]:
         """Search for unresolved open-loop / promise memories for proactive companionship."""
+        if not getattr(self, "enable_memory_companion_open_loop_search", True):
+            return []
         bridge = self._memory_companion_bridge()
         if bridge is None:
             return []
@@ -1407,6 +1436,8 @@ class MemoryCompanionAdapterMixin:
         user_id: str = "",
     ) -> None:
         """Record a dream fragment into the memory plugin for cross-session continuity."""
+        if not getattr(self, "enable_memory_companion_dream_fragment", True):
+            return
         dream_text = _single_line(content, 800)
         if not dream_text:
             return

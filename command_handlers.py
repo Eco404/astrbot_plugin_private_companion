@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -3607,7 +3607,7 @@ class CommandHandlersMixin:
                     )
                 return False
             if self._private_user_role(user, user_id) == "friend":
-                await self._reply(event, "这个规则快判生图/改图入口只给主人开放。")
+                await self._reply(event, "这个规则快判生图/改图入口只对主要用户开放。")
                 event.stop_event()
                 return True
             if self._natural_language_photo_quota_left(user) <= 0:

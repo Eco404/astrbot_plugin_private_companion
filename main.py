@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import base64
@@ -358,6 +358,8 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_ALIASES = {
     "转述工具": "enable_atrelay_tools",
     "livingmemory": "enable_livingmemory_integration",
     "lmem": "enable_livingmemory_integration",
+    "记忆插件": "enable_livingmemory_integration",
+    "记忆协同": "enable_livingmemory_integration",
 }
 _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "all": "全部被动链路",
@@ -377,7 +379,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "enable_worldbook_member_recognition": "关系网成员识别",
     "enable_cross_user_memory_bridge": "跨用户记忆互通",
     "enable_atrelay_tools": "跨群转述工具",
-    "enable_livingmemory_integration": "LivingMemory 被动引导",
+    "enable_livingmemory_integration": "记忆插件被动引导",
     "enable_tts_enhancement": "TTS 后处理",
     "enable_segmented_proactive_reply": "普通 LLM 分段",
 }
@@ -538,6 +540,7 @@ class PrivateCompanionPlugin(
         self.proactive_intensity_preset = self._normalize_proactive_intensity_preset(
             self._cfg_str(c, "proactive_intensity_preset", "off", "off")
         )
+        self.enable_experimental_motivation_model = self._cfg_bool(c, "enable_experimental_motivation_model", False)
         self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
         self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)
         self.min_interval_minutes = self._cfg_int(c, "min_interval_minutes", 120, 10)
@@ -744,6 +747,10 @@ class PrivateCompanionPlugin(
         self.proactive_persona_judge_provider_id = self._cfg_str(c, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "")
         self.proactive_persona_judge_send_threshold = self._cfg_int(c, "proactive_persona_judge_send_threshold", 62, 0, 100)
         self.proactive_persona_judge_cache_minutes = self._cfg_int(c, "proactive_persona_judge_cache_minutes", 180, 5, 720)
+        self.enable_maslow_motivation_experiment = self._cfg_bool(c, "enable_maslow_motivation_experiment", False)
+        self.enable_maslow_schedule_influence = self._cfg_bool(c, "enable_maslow_schedule_influence", False)
+        self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)
+        self.enable_personality_iteration_experiment = self._cfg_bool(c, "enable_personality_iteration_experiment", False)
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
@@ -1098,6 +1105,14 @@ class PrivateCompanionPlugin(
         self.group_followup_judge_provider_id = self._cfg_str(c, "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "")
         self.enable_livingmemory_integration = self._cfg_bool(c, "enable_livingmemory_integration", True)
         self.livingmemory_tool_name = self._cfg_str(c, "livingmemory_tool_name", "recall_long_term_memory", "recall_long_term_memory")
+        self.memory_companion_context_timeout_seconds = self._cfg_float(c, "memory_companion_context_timeout_seconds", 1.2, 0.2)
+        self.enable_memory_companion_emotional_drift = self._cfg_bool(c, "enable_memory_companion_emotional_drift", True)
+        self.enable_memory_companion_cross_window_emotion = self._cfg_bool(c, "enable_memory_companion_cross_window_emotion", True)
+        self.enable_memory_companion_dream_fragment = self._cfg_bool(c, "enable_memory_companion_dream_fragment", True)
+        self.enable_memory_companion_open_loop_search = self._cfg_bool(c, "enable_memory_companion_open_loop_search", True)
+        self.enable_memory_companion_feature_context = self._cfg_bool(c, "enable_memory_companion_feature_context", True)
+        self.memory_companion_context_top_k = self._cfg_int(c, "memory_companion_context_top_k", 5, 1, 10)
+        self.memory_companion_context_max_chars = self._cfg_int(c, "memory_companion_context_max_chars", 900, 240, 1800)
         self.enable_bilibili_integration = self._cfg_bool(c, "enable_bilibili_integration", True)
         self.enable_bilibili_boredom_watch = self._cfg_bool(c, "enable_bilibili_boredom_watch", True)
         self.bilibili_boredom_min_interval_hours = self._cfg_int(c, "bilibili_boredom_min_interval_hours", 8, 2, 72)
@@ -3697,7 +3712,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return False
         try:
             marker = _single_line(marker, 120) or "<!-- private_companion_turn_fragment -->"
-            current = str(getattr(req, "prompt", "") or "")
+            current = self._request_prompt_context_surface(req)
             fragments = getattr(req, "_private_companion_turn_prompt_fragments", None)
             if not isinstance(fragments, list):
                 fragments = []
@@ -3713,13 +3728,68 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     "index": len(fragments),
                 }
             )
-            self._render_turn_prompt_fragments(req)
+            if not self._render_turn_prompt_fragments(req, prefer_extra_user_content=True):
+                self._render_turn_prompt_fragments(req, prefer_extra_user_content=False)
             return True
         except Exception as exc:
             logger.debug("[PrivateCompanion] 指定位置 prompt 注入失败,回退 system_prompt: %s", _single_line(exc, 120))
             return False
 
-    def _render_turn_prompt_fragments(self, req: ProviderRequest) -> None:
+    def _request_prompt_context_surface(self, req: ProviderRequest) -> str:
+        parts = [str(getattr(req, "prompt", "") or ""), str(getattr(req, "system_prompt", "") or "")]
+        extra_parts = getattr(req, "extra_user_content_parts", None)
+        if isinstance(extra_parts, list):
+            for part in extra_parts:
+                if isinstance(part, dict):
+                    parts.append(str(part.get("text") or part.get("content") or ""))
+                else:
+                    parts.append(str(getattr(part, "text", "") or getattr(part, "content", "") or ""))
+        return "\n".join(item for item in parts if item)
+
+    def _remove_managed_turn_prompt_extra_part(self, req: ProviderRequest) -> None:
+        extra_parts = getattr(req, "extra_user_content_parts", None)
+        if not isinstance(extra_parts, list):
+            return
+        start_marker = "<!-- private_companion_turn_fragments_start -->"
+        end_marker = "<!-- private_companion_turn_fragments_end -->"
+        kept = []
+        for part in extra_parts:
+            text = ""
+            if isinstance(part, dict):
+                text = str(part.get("text") or part.get("content") or "")
+            else:
+                text = str(getattr(part, "text", "") or getattr(part, "content", "") or "")
+            if getattr(part, "_private_companion_turn_fragments", False):
+                continue
+            if start_marker in text and end_marker in text:
+                continue
+            kept.append(part)
+        req.extra_user_content_parts = kept
+
+    def _append_managed_turn_prompt_extra_part(self, req: ProviderRequest, text: str) -> bool:
+        content = str(text or "").strip()
+        if not content or TextPart is None:
+            return False
+        try:
+            extra_parts = getattr(req, "extra_user_content_parts", None)
+            if not isinstance(extra_parts, list):
+                req.extra_user_content_parts = []
+            part = TextPart(text=content)
+            mark_as_temp = getattr(part, "mark_as_temp", None)
+            if callable(mark_as_temp):
+                part = mark_as_temp()
+            try:
+                setattr(part, "_private_companion_turn_fragments", True)
+            except Exception:
+                pass
+            req.extra_user_content_parts.append(part)
+            setattr(req, "_private_companion_turn_prompt_placement", "extra_user_content_parts")
+            return True
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] extra_user_content_parts 注入失败,回退 prompt: %s", _single_line(exc, 120))
+            return False
+
+    def _render_turn_prompt_fragments(self, req: ProviderRequest, *, prefer_extra_user_content: bool = False) -> bool:
         start_marker = "<!-- private_companion_turn_fragments_start -->"
         end_marker = "<!-- private_companion_turn_fragments_end -->"
         current = str(getattr(req, "prompt", "") or "")
@@ -3732,7 +3802,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         fragments = getattr(req, "_private_companion_turn_prompt_fragments", None)
         if not isinstance(fragments, list) or not fragments:
             setattr(req, "prompt", base)
-            return
+            self._remove_managed_turn_prompt_extra_part(req)
+            return True
         seen_markers: set[str] = set()
         seen_content: set[str] = set()
         rendered_parts: list[str] = []
@@ -3751,9 +3822,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             rendered_parts.append(f"{marker}\n{content}")
         if not rendered_parts:
             setattr(req, "prompt", base)
-            return
+            self._remove_managed_turn_prompt_extra_part(req)
+            return True
         managed = f"{start_marker}\n" + "\n\n".join(rendered_parts) + f"\n{end_marker}"
+        if prefer_extra_user_content:
+            setattr(req, "prompt", base)
+            self._remove_managed_turn_prompt_extra_part(req)
+            if self._append_managed_turn_prompt_extra_part(req, managed):
+                return True
         setattr(req, "prompt", f"{base}\n\n{managed}".strip() if base else managed)
+        self._remove_managed_turn_prompt_extra_part(req)
+        setattr(req, "_private_companion_turn_prompt_placement", "prompt")
+        return True
 
     async def _record_request_prompt_fragment(
         self,
@@ -3795,6 +3875,206 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "发送者": _single_line(self._event_sender_id(event), 80),
             },
         )
+
+    async def _resolve_prompt_context_collector(self, spec: dict[str, Any]) -> dict[str, Any]:
+        key = _single_line(spec.get("key"), 80)
+        source = _single_line(spec.get("source"), 80)
+        priority = _safe_int(spec.get("priority"), 100, 0)
+        timeout = max(0.05, _safe_float(spec.get("timeout"), 0.8, 0.05))
+        started = time.time()
+        metadata = dict(spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {})
+        metadata.setdefault("来源", source or key)
+        metadata.setdefault("超时秒数", round(timeout, 2))
+        try:
+            func = spec.get("func")
+            if not callable(func):
+                raise TypeError("collector is not callable")
+            result = func()
+            if asyncio.iscoroutine(result):
+                result = await asyncio.wait_for(result, timeout=timeout)
+            content = str(result or "").strip()
+            elapsed_ms = int((time.time() - started) * 1000)
+            metadata.update(
+                {
+                    "耗时ms": elapsed_ms,
+                    "状态": "命中" if content else "空",
+                    "字符数": len(content),
+                }
+            )
+            return {
+                "key": key,
+                "source": source,
+                "priority": priority,
+                "content": content,
+                "metadata": metadata,
+                "status": "hit" if content else "empty",
+            }
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.time() - started) * 1000)
+            metadata.update({"耗时ms": elapsed_ms, "状态": "超时"})
+            logger.info(
+                "[PrivateCompanion] 请求上下文收集超时: key=%s source=%s timeout=%.2fs",
+                key or "-",
+                source or "-",
+                timeout,
+            )
+            return {
+                "key": key,
+                "source": source,
+                "priority": priority,
+                "content": "",
+                "metadata": metadata,
+                "status": "timeout",
+            }
+        except Exception as exc:
+            elapsed_ms = int((time.time() - started) * 1000)
+            metadata.update({"耗时ms": elapsed_ms, "状态": "失败", "错误": _single_line(exc, 120)})
+            logger.debug(
+                "[PrivateCompanion] 请求上下文收集失败: key=%s source=%s error=%s",
+                key or "-",
+                source or "-",
+                _single_line(exc, 120),
+            )
+            return {
+                "key": key,
+                "source": source,
+                "priority": priority,
+                "content": "",
+                "metadata": metadata,
+                "status": "error",
+            }
+
+    async def _collect_prompt_contexts_parallel(self, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        tasks = [self._resolve_prompt_context_collector(spec) for spec in specs if isinstance(spec, dict)]
+        if not tasks:
+            return []
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        collected: list[dict[str, Any]] = []
+        for result in results:
+            if isinstance(result, dict):
+                collected.append(result)
+            elif isinstance(result, Exception):
+                logger.debug("[PrivateCompanion] 请求上下文并行收集出现未捕获异常: %s", _single_line(result, 120))
+        return collected
+
+    def _add_collected_prompt_contexts(self, prompt_surface: PromptSurface, collected: list[dict[str, Any]]) -> None:
+        for item in collected:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            prompt_surface.add(
+                _single_line(item.get("key"), 80),
+                content,
+                priority=_safe_int(item.get("priority"), 100, 0),
+                source=_single_line(item.get("source"), 80),
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+            )
+
+    def _expression_profile_prompt_metadata(self, user: dict[str, Any]) -> dict[str, Any]:
+        profile = user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {}
+        samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
+        pending = profile.get("pending_samples") if isinstance(profile.get("pending_samples"), list) else []
+        return {
+            "来源": "表达学习样本",
+            "置信度": min(1.0, round(len(samples) / 8, 2)) if samples else 0,
+            "命中数": len(samples),
+            "待审核": len(pending),
+            "启用": bool(getattr(self, "enable_expression_learning", False)),
+            "模式": _single_line(getattr(self, "expression_learning_mode", "balanced"), 20),
+        }
+
+    async def _collect_private_passive_prompt_contexts(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *,
+        inbound_text: str,
+        current_user: dict[str, Any],
+        is_private_chat: bool,
+    ) -> list[dict[str, Any]]:
+        specs: list[dict[str, Any]] = []
+
+        def add_spec(
+            key: str,
+            source: str,
+            priority: int,
+            func: Any,
+            *,
+            timeout: float = 0.8,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            specs.append(
+                {
+                    "key": key,
+                    "source": source,
+                    "priority": priority,
+                    "func": func,
+                    "timeout": timeout,
+                    "metadata": metadata or {},
+                }
+            )
+
+        add_spec("creative.hidden", "creative", 60, lambda: self._format_hidden_creative_context_for_reply(inbound_text))
+        add_spec(
+            "bookshelf.secret",
+            "bookshelf",
+            61,
+            lambda: self._format_bookshelf_secret_for_prompt(inbound_text, current_user),
+            timeout=1.2,
+        )
+        add_spec("bookshelf.reading", "bookshelf", 62, lambda: self._format_bookshelf_reading_context_for_reply(inbound_text, current_user))
+        add_spec(
+            "private_reading.preference",
+            "private_reading",
+            63,
+            lambda: self._format_private_reading_preference_influence_for_reply(inbound_text, current_user),
+        )
+        add_spec("news.recent", "news", 64, lambda: self._format_recent_news_context_for_reply(inbound_text))
+        add_spec("web_exploration.recent", "web_exploration", 65, lambda: self._format_recent_web_exploration_context_for_reply(inbound_text))
+        if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
+            add_spec("skill.growth", "skill", 66, self._format_skill_growth_for_prompt)
+        else:
+            add_spec("skill.growth.match", "skill", 66, lambda: self._format_skill_growth_for_user_text(inbound_text))
+        if not self._memory_companion_should_defer_prompt_section("self_timeline", event, req):
+            add_spec("self.timeline", "self_timeline", 67, lambda: self._format_self_timeline_context_for_reply(inbound_text, current_user, limit=8))
+        if not self._memory_companion_should_defer_prompt_section("private_context", event, req):
+            add_spec("private.context", "companion", 70, lambda: self._format_private_chat_context_injection(current_user))
+        add_spec("companion.planner", "companion", 80, lambda: self._format_companion_planner_injection(current_user))
+        if not self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
+            add_spec("livingmemory.guidance", "livingmemory", 90, lambda: self._format_livingmemory_guidance(scope="private" if is_private_chat else "group"))
+        add_spec("detail.injection", "daily_detail", 40, self._format_detail_injection)
+
+        expression_text = ""
+        if bool(getattr(self, "enable_expression_learning", False)):
+            expression_text = self._format_expression_profile_for_prompt(current_user)
+            if expression_text.startswith("暂无足够样本"):
+                expression_text = ""
+        if expression_text:
+            add_spec(
+                "expression.rhythm",
+                "expression",
+                72,
+                lambda: "【表达节奏参考】\n" + expression_text + "\n只学习回复松紧、短句节奏和标点倾向；不要照抄样本，也不要把样本里的事实当作当前事实。",
+                metadata=self._expression_profile_prompt_metadata(current_user),
+            )
+
+        async def timer_context() -> str:
+            if not (self.enable_llm_timer_scheduling and is_private_chat):
+                return ""
+            try:
+                target_user_id = str(event.get_sender_id())
+            except Exception:
+                target_user_id = ""
+            if not target_user_id:
+                return ""
+            async with self._data_lock:
+                enabled = bool(self._get_user(target_user_id).get("enabled"))
+            return self._format_timer_scheduling_instruction() if enabled else ""
+
+        add_spec("timer.scheduling", "timer", 95, timer_context, timeout=0.5)
+        return await self._collect_prompt_contexts_parallel(specs)
 
     async def _format_passive_environment_fragment(self, event: AstrMessageEvent, *, lightweight: bool = False) -> str:
         if not lightweight:
@@ -4164,7 +4444,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "【群聊人格降噪】",
             "这是群聊场景，更适合先接住当前被问到的事或眼前话题，语气也尽量比私聊更轻一点。",
             "群聊里的身份优先按平台稳定 ID 理解；昵称、群名片、角色名、别名和“通常是谁”这类设定，更适合作为称呼线索，不直接当成身份结论。",
-            "提到群聊旧消息、群梗、记忆召回或最近群聊时，尽量保留具体成员名或 QQ 标签，例如“A[QQ:...] 说过/起哄过”；只有确实缺少成员线索时，再概括成“群里有人”。除非当前消息或引用明确就是这位发言者，尽量不要顺手改写成“你说过”“主人说过”这类直接归到当前对象身上的表达。",
+            "提到群聊旧消息、群梗、记忆召回或最近群聊时，尽量保留具体成员名或 QQ 标签，例如“A[QQ:...] 说过/起哄过”；只有确实缺少成员线索时，再概括成“群里有人”。除非当前消息或引用明确就是这位发言者，尽量不要顺手改写成“你说过”“主要用户说过”这类直接归到当前对象身上的表达。",
             "状态、日程、情绪和私聊关系更适合只留在语气底色里；如果没有人明确问到，就不必主动展开能量、天气、日程、心情或插件状态。",
             "表达上尽量自然一点，不需要刻意堆动作描写、撒娇、长解释或关系总结；一句能说清，就简单说一句。",
             "如果只是被轻轻提到，或者话题本身并不需要你展开，宁可短一点、轻一点、贴着当前梗回应，也不用顺势写成主动陪伴式长回复。",
@@ -4177,9 +4457,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if sender_is_target:
                 lines.append("当前发言者 ID 与目标陪伴用户匹配；相关关系可以保留，但在群聊这种公共场合里，亲密度和表达还是稍微收一点更自然。")
             else:
-                lines.append("当前发言者不是已配置的目标陪伴用户；更适合把 TA 当成普通群成员来接话，别把专属称呼或私聊关系直接套到 TA 身上。若要提到主人或目标用户，也更适合作为第三方提及。")
+                lines.append("当前发言者不是已配置的目标陪伴用户；更适合把 TA 当成普通群成员来接话，别把专属称呼或私聊关系直接套到 TA 身上。若要提到主要用户或目标用户，也更适合作为第三方提及。")
         else:
-            lines.append("本轮还不能确认当前发言者的稳定 ID，所以先别只凭昵称、群名片或角色设定就把对方认成主人或目标用户。")
+            lines.append("本轮还不能确认当前发言者的稳定 ID，所以先别只凭昵称、群名片或角色设定就把对方认成主要用户或目标用户。")
         if trigger:
             lines.append(f"本轮触发：{trigger}。按这个触发强度自然回应就够了，不用顺手把亲密度或话题范围再往上抬。")
         if high_active:
@@ -4251,9 +4531,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "【私聊身份防串】",
             f"当前私聊对象稳定 ID：{user_id}",
             "这个用户不是插件当前启用的目标陪伴用户/主用户。",
-            "如果基础人格里包含“主人”“恋人”“专属称呼”或只属于主用户的关系设定,不要套用到当前私聊对象身上。",
+            "如果基础人格里包含“主要用户/主人”“恋人”“专属称呼”或只属于主要用户的关系设定,不要套用到当前私聊对象身上。",
             "可以保留人格的通用说话风格,但关系身份、亲密度、记忆和承诺必须按当前用户重新判断。",
-            "除非当前用户明确提出角色扮演或临时设定,否则不要把对方当成主人、恋人或目标陪伴对象。",
+            "除非当前用户明确提出角色扮演或临时设定,否则不要把对方当成主要用户、恋人或目标陪伴对象。",
         ]
         if display_name and display_name != user_id:
             lines.append(f"平台当前显示名：{display_name}。显示名只作称呼线索,不能覆盖稳定 ID。")
@@ -6369,63 +6649,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if lightweight_passive:
             log_bookshelf_secret_skip("lightweight_passive", current_user, inbound_text)
         if not lightweight_passive:
-            hidden_creative_context = self._format_hidden_creative_context_for_reply(inbound_text)
-            if hidden_creative_context:
-                prompt_surface.add("creative.hidden", hidden_creative_context, priority=60, source="creative")
-            bookshelf_secret_context = await self._format_bookshelf_secret_for_prompt(inbound_text, current_user)
-            if bookshelf_secret_context:
-                prompt_surface.add("bookshelf.secret", bookshelf_secret_context, priority=61, source="bookshelf")
-            bookshelf_reading_context = self._format_bookshelf_reading_context_for_reply(inbound_text, current_user)
-            if bookshelf_reading_context:
-                prompt_surface.add("bookshelf.reading", bookshelf_reading_context, priority=62, source="bookshelf")
-            private_preference_context = self._format_private_reading_preference_influence_for_reply(inbound_text, current_user)
-            if private_preference_context:
-                prompt_surface.add("private_reading.preference", private_preference_context, priority=63, source="private_reading")
-            news_context = self._format_recent_news_context_for_reply(inbound_text)
-            if news_context:
-                prompt_surface.add("news.recent", news_context, priority=64, source="news")
-            web_exploration_context = self._format_recent_web_exploration_context_for_reply(inbound_text)
-            if web_exploration_context:
-                prompt_surface.add("web_exploration.recent", web_exploration_context, priority=65, source="web_exploration")
-            self_timeline_context = self._format_self_timeline_context_for_reply(inbound_text, current_user, limit=8)
-            if self._memory_companion_should_defer_prompt_section("self_timeline", event, req):
-                self_timeline_context = ""
-            if self_timeline_context:
-                prompt_surface.add("self.timeline", self_timeline_context, priority=67, source="self_timeline")
-            if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
-                skill_context = self._format_skill_growth_for_prompt()
-                if skill_context:
-                    prompt_surface.add("skill.growth", skill_context, priority=66, source="skill")
-            else:
-                skill_context = self._format_skill_growth_for_user_text(inbound_text)
-                if skill_context:
-                    prompt_surface.add("skill.growth.match", skill_context, priority=66, source="skill")
-            private_chat_context = self._format_private_chat_context_injection(current_user)
-            if self._memory_companion_should_defer_prompt_section("private_context", event, req):
-                private_chat_context = ""
-            if private_chat_context:
-                prompt_surface.add("private.context", private_chat_context, priority=70, source="companion")
-            companion_injection = self._format_companion_planner_injection(current_user)
-            if companion_injection:
-                prompt_surface.add("companion.planner", companion_injection, priority=80, source="companion")
-            livingmemory_guidance = self._format_livingmemory_guidance(scope="private" if is_private_chat else "group")
-            if self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
-                livingmemory_guidance = ""
-            if livingmemory_guidance:
-                prompt_surface.add("livingmemory.guidance", livingmemory_guidance, priority=90, source="livingmemory")
-            detail_injection = self._format_detail_injection()
-            if detail_injection:
-                prompt_surface.add("detail.injection", detail_injection, priority=40, source="daily_detail")
-            if self.enable_llm_timer_scheduling and is_private_chat:
-                try:
-                    user_id = str(event.get_sender_id())
-                except Exception:
-                    user_id = ""
-                if user_id:
-                    async with self._data_lock:
-                        enabled = bool(self._get_user(user_id).get("enabled"))
-                    if enabled:
-                        prompt_surface.add("timer.scheduling", self._format_timer_scheduling_instruction(), priority=95, source="timer")
+            collected_contexts = await self._collect_private_passive_prompt_contexts(
+                event,
+                req,
+                inbound_text=inbound_text,
+                current_user=current_user,
+                is_private_chat=is_private_chat,
+            )
+            self._add_collected_prompt_contexts(prompt_surface, collected_contexts)
         static_fragment_keys = {"reply.style", "identity.anchor"}
         static_injection, dynamic_injection = prompt_surface.render_partition(
             lambda fragment: fragment.normalized_key() in static_fragment_keys
@@ -6462,7 +6693,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current_prompt = req.system_prompt or ""
                 req.system_prompt = f"{current_prompt}\n\n{marker}\n{dynamic_injection}".strip()
             else:
-                dynamic_placement = "prompt"
+                dynamic_placement = _single_line(
+                    getattr(req, "_private_companion_turn_prompt_placement", "prompt"),
+                    40,
+                ) or "prompt"
         injection_placement = "+".join(part for part in (static_placement, dynamic_placement) if part) or "none"
         await self._append_conditional_tool_instructions_to_request(event, req)
         state_log_parts = [

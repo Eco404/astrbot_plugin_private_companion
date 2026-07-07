@@ -8833,6 +8833,31 @@ body.daily-outfit-preview-open {
   margin: 0 10px 10px;
 }
 
+.troubleshooting-injection-module .troubleshooting-injection-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 6px;
+  margin: 0 10px 10px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(242, 246, 252, 0.9);
+}
+
+.troubleshooting-injection-module .troubleshooting-injection-meta div {
+  min-width: 0;
+}
+
+.troubleshooting-injection-module .troubleshooting-injection-meta dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.troubleshooting-injection-module .troubleshooting-injection-meta dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
 .troubleshooting-injection-module pre {
   max-height: 280px;
   margin: 0 10px 10px;
@@ -17174,6 +17199,732 @@ pre {
 
   .roleplay-user-card > .roleplay-example-btn {
     justify-self: start;
+  }
+}
+
+/* ===== 实验性功能页面 ===== */
+
+.experimental-page,
+.experimental-subpage {
+  display: grid;
+  gap: 16px;
+}
+
+/* —— 总览页 —— */
+
+.experimental-overview-note {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--gold-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: linear-gradient(135deg, var(--gold-soft) 30%, var(--surface) 100%);
+}
+
+.experimental-overview-note b {
+  color: var(--gold);
+  font-size: 13px;
+}
+
+.experimental-overview-note span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.exp-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.exp-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 16px 18px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(245, 248, 253, 0.72));
+  box-shadow: var(--shadow-ring);
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+.exp-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 6px 20px rgba(26, 75, 140, 0.12), var(--shadow-ring);
+}
+
+.exp-card.on {
+  border-left: 4px solid var(--accent);
+}
+
+.exp-card.off {
+  border-left: 4px solid #b15a4f;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(245, 236, 226, 0.52));
+}
+
+.exp-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.exp-card-head h3 {
+  margin: 2px 0 3px;
+  font-size: 16px;
+  color: var(--ink);
+}
+
+.exp-card-head code {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.exp-card-index {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exp-card.off .exp-card-index {
+  background: #f5ece2;
+  color: #9b3f34;
+}
+
+.exp-card-toggle {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.exp-card-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.exp-card.on .exp-card-toggle .feature-toggle-visual {
+  background: var(--accent);
+}
+
+.exp-card.on .exp-card-toggle .feature-toggle-visual::after {
+  transform: translateX(16px);
+}
+
+.exp-card-toggle b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.exp-card-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.exp-card-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 10px;
+}
+
+.exp-card-guide {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.exp-card-guide span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exp-card-guide small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.exp-card-enter {
+  flex-shrink: 0;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.exp-card-enter:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* —— 二级详情页 —— */
+
+.exp-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.exp-breadcrumb button {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.exp-breadcrumb button:hover {
+  text-decoration: underline;
+}
+
+.exp-breadcrumb span {
+  color: var(--muted);
+}
+
+.exp-state-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.exp-state-strip.on {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.exp-state-strip.off {
+  background: #f5ece2;
+  color: #9b3f34;
+}
+
+.exp-state-strip b {
+  font-size: 13px;
+}
+
+.exp-state-strip span {
+  font-size: 12px;
+}
+
+.exp-subpage-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.exp-subpage-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 4px;
+  font-size: 20px;
+  color: var(--ink);
+}
+
+.exp-subpage-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 60ch;
+}
+
+.exp-subpage-head .feature-detail-toggle {
+  flex-shrink: 0;
+}
+
+.experimental-subpage.on .feature-detail-toggle .feature-toggle-visual {
+  background: var(--accent);
+}
+
+.experimental-subpage.on .feature-detail-toggle .feature-toggle-visual::after {
+  transform: translateX(16px);
+}
+
+.exp-caution {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--gold-soft);
+  border-left: 4px solid var(--gold);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  background: linear-gradient(135deg, var(--gold-soft) 20%, var(--surface) 100%);
+}
+
+.exp-caution b {
+  color: var(--gold);
+  font-size: 12px;
+}
+
+.exp-caution span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.experimental-subpage {
+  display: grid;
+  gap: 14px;
+}
+
+.exp-detail-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+}
+
+.exp-detail-card h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  color: var(--ink);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.exp-detail-card dl {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin: 0;
+}
+
+.exp-detail-card dl > div {
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.exp-detail-card dl > div > dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.exp-detail-card dl > div > dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* —— 理论框架 —— */
+
+.exp-theory-card {
+  grid-column: 1 / -1;
+}
+
+.exp-theory-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.exp-theory-item {
+  display: grid;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--plum) 16%, var(--line-soft));
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: linear-gradient(135deg, var(--plum-soft) 12%, var(--surface) 100%);
+}
+
+.exp-theory-head b {
+  color: var(--plum);
+  font-size: 13px;
+}
+
+.exp-theory-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.exp-theory-impact {
+  display: grid;
+  gap: 3px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed color-mix(in srgb, var(--plum) 20%, transparent);
+}
+
+.exp-theory-impact-label {
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exp-theory-impact p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* —— 功能效果链路 —— */
+
+.exp-effects-card {
+  grid-column: 1 / -1;
+}
+
+.exp-effect-list {
+  display: grid;
+  gap: 10px;
+}
+
+.exp-effect-chain {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.exp-effect-step {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.exp-effect-step p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.exp-effect-tag {
+  display: inline-block;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.exp-effect-tag.trigger {
+  background: #f5ece2;
+  color: #9b3f34;
+}
+
+.exp-effect-tag.behavior {
+  background: var(--plum-soft);
+  color: var(--plum);
+}
+
+.exp-effect-tag.result {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.exp-effect-arrow {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 16px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* —— 底部双栏：参数配置 + 运行状态 —— */
+
+.exp-bottom-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.exp-settings-card {
+  min-width: 0;
+}
+
+.exp-settings-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+/* —— 运行状态 —— */
+
+.exp-runtime-card {
+  min-width: 0;
+}
+
+.exp-runtime-dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.exp-runtime-dl > div {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.exp-runtime-dl > div > dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.exp-runtime-dl > div > dd {
+  margin: 0;
+  color: var(--accent-strong);
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.exp-runtime-extra {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.exp-runtime-stats-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exp-runtime-stat {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  background: var(--accent-soft);
+  min-width: 72px;
+}
+
+.exp-runtime-stat span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.exp-runtime-stat b {
+  color: var(--accent-strong);
+  font-size: 18px;
+}
+
+.exp-runtime-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.exp-runtime-disabled {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 8px 0;
+}
+
+.exp-runtime-user-list {
+  display: grid;
+  gap: 6px;
+}
+
+.exp-runtime-user-list-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exp-runtime-user-row {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.exp-runtime-user-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exp-runtime-user-head b {
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.exp-runtime-user-mode {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.exp-runtime-user-mode.hurt {
+  background: #f5d9d4;
+  color: #9b3f34;
+}
+
+.exp-runtime-user-mode.cold {
+  background: #e8eef5;
+  color: #4a6a8a;
+}
+
+.exp-runtime-user-mode.warn {
+  background: #f5ece2;
+  color: #9b6f34;
+}
+
+.exp-runtime-user-mode.error {
+  background: #f5d9d4;
+  color: #9b3f34;
+}
+
+.exp-runtime-user-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.exp-runtime-user-detail span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.exp-runtime-need-chart {
+  display: grid;
+  gap: 4px;
+}
+
+.exp-runtime-need-chart-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exp-runtime-need-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.exp-runtime-need-bar span {
+  color: var(--ink);
+  font-size: 12px;
+  min-width: 36px;
+}
+
+.exp-runtime-need-bar-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.exp-runtime-need-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+  transition: width 0.3s var(--ease);
+}
+
+.exp-runtime-need-bar b {
+  color: var(--accent-strong);
+  font-size: 12px;
+  min-width: 20px;
+  text-align: right;
+}
+
+/* —— 响应式 —— */
+
+@media (max-width: 760px) {
+  .exp-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-theory-list {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-effect-chain {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .exp-effect-arrow {
+    transform: rotate(90deg);
+    justify-self: center;
+  }
+
+  .exp-subpage-head {
+    flex-direction: column;
+  }
+
+  .exp-card-foot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .exp-card-enter {
+    justify-self: end;
   }
 }
 

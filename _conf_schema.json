@@ -549,6 +549,18 @@
     "default": "off",
     "invisible": true
   },
+  "enable_experimental_motivation_model": {
+    "description": "Legacy flat config: 启用驱力-诱因-唤醒调度",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "enable_personality_iteration_experiment": {
+    "description": "Legacy flat config: 启用角色贴合校准",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "inbound_message_debounce_seconds": {
     "description": "Legacy flat config: 重复消息防抖秒数",
     "type": "float",
@@ -844,7 +856,7 @@
     "invisible": true
   },
   "friend_unanswered_max_cooldown_hours": {
-    "description": "Legacy flat config: 朋友未回应最长冷却（小时）",
+    "description": "Legacy flat config: 次要用户未回应最长冷却（小时）",
     "type": "float",
     "default": 60,
     "invisible": true
@@ -901,6 +913,24 @@
     "description": "Legacy flat config: 主动人格判定缓存（分钟）",
     "type": "int",
     "default": 180,
+    "invisible": true
+  },
+  "enable_maslow_motivation_experiment": {
+    "description": "Legacy flat config: 需求强化功能",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "enable_maslow_schedule_influence": {
+    "description": "Legacy flat config: 需求强化影响日程",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "maslow_motivation_strength": {
+    "description": "Legacy flat config: 需求强化影响强度",
+    "type": "int",
+    "default": 35,
     "invisible": true
   },
   "proactive_reply_context_hours": {
@@ -1340,15 +1370,63 @@
     "invisible": true
   },
   "enable_livingmemory_integration": {
-    "description": "Legacy flat config: 启用 LivingMemory 协同",
+    "description": "Legacy flat config: 启用记忆插件协同",
     "type": "bool",
     "default": true,
     "invisible": true
   },
   "livingmemory_tool_name": {
-    "description": "Legacy flat config: LivingMemory 召回工具名",
+    "description": "Legacy flat config: 记忆召回工具名",
     "type": "string",
     "default": "recall_long_term_memory",
+    "invisible": true
+  },
+  "memory_companion_context_timeout_seconds": {
+    "description": "Legacy flat config: 记忆上下文超时（秒）",
+    "type": "float",
+    "default": 1.2,
+    "invisible": true
+  },
+  "enable_memory_companion_emotional_drift": {
+    "description": "Legacy flat config: 情绪漂移联动",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_memory_companion_cross_window_emotion": {
+    "description": "Legacy flat config: 跨窗口情绪连续性",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_memory_companion_dream_fragment": {
+    "description": "Legacy flat config: 梦境碎片写入",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_memory_companion_open_loop_search": {
+    "description": "Legacy flat config: 未完成话题取材",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_memory_companion_feature_context": {
+    "description": "Legacy flat config: 功能上下文读取",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "memory_companion_context_top_k": {
+    "description": "Legacy flat config: 上下文召回条数",
+    "type": "int",
+    "default": 5,
+    "invisible": true
+  },
+  "memory_companion_context_max_chars": {
+    "description": "Legacy flat config: 上下文最大字符数",
+    "type": "int",
+    "default": 900,
     "invisible": true
   },
   "enable_bilibili_integration": {
@@ -2093,7 +2171,7 @@
     "invisible": true
   },
   "cross_user_memory_owner_only": {
-    "description": "Legacy flat config: 仅主人可查询跨用户互动",
+    "description": "Legacy flat config: 仅主要用户可查询跨用户互动",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -4168,9 +4246,9 @@
         "default": 2.2
       },
       "friend_unanswered_max_cooldown_hours": {
-        "description": "朋友未回应最长冷却（小时）",
+        "description": "次要用户未回应最长冷却（小时）",
         "type": "float",
-        "hint": "朋友用户持续不回应时，主动消息随机延后窗口的最长上限。默认 60 小时，与旧版硬编码一致。",
+        "hint": "次要用户持续不回应时，主动消息随机延后窗口的最长上限。默认 60 小时，与旧版硬编码一致。",
         "slider": {
           "min": 1,
           "max": 168,
@@ -4732,9 +4810,9 @@
     }
   },
   "emotion_relationship_config": {
-    "description": "情绪与关系状态",
+    "description": "意图与关系状态",
     "type": "object",
-    "hint": "维护用户意图、关系温度、Bot 情绪和受伤/恢复闸门。",
+    "hint": "维护用户意图、关系温度、回复策略和边界收敛；Bot 自身情绪模拟已移至“实验性功能”。",
     "items": {
       "enable_intent_emotion_analysis": {
         "description": "启用本地意图/情绪快判",
@@ -4748,144 +4826,10 @@
       "enable_relationship_state_machine": {
         "description": "启用关系距离感",
         "type": "bool",
-        "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身被刺到后的短期余波由“情绪模拟”单独控制。",
+        "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身被刺到后的短期余波由“实验性功能 → 情绪模拟”单独控制。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
-        }
-      },
-      "enable_emotion_simulation": {
-        "description": "启用情绪模拟",
-        "type": "bool",
-        "hint": "维护 Bot 自身短期情绪余波，例如被刺到后的收敛、缓和后的恢复，以及不满时的短暂回避。只在非平稳状态影响回复和主动行为；公开心情动态需另开子项。",
-        "default": true,
-        "condition": {
-          "enable_mai_style_integration": true
-        }
-      },
-      "enable_llm_emotion_judgement": {
-        "description": "启用模型复核情绪变化",
-        "type": "bool",
-        "hint": "开启后，本地快判会先记录；可疑边界、玩笑、道歉、安抚或负向表达会交给模型后台复核，再更新短期情绪余波。本轮被动回复不等待模型，仍使用缓存情绪状态，默认关闭以保持低延迟。",
-        "default": false,
-        "condition": {
-          "enable_emotion_simulation": true
-        }
-      },
-      "emotion_judgement_mode": {
-        "description": "模型复核范围",
-        "type": "string",
-        "hint": "suspicious 只复核容易误判或已命中情绪信号的消息；always 会复核所有普通文本消息。复核异步进行，结果主要影响后续回复和主动行为。",
-        "default": "suspicious",
-        "condition": {
-          "enable_llm_emotion_judgement": true
-        }
-      },
-      "emotional_gate_hurt_threshold": {
-        "description": "伤心触发阈值",
-        "type": "int",
-        "hint": "用户消息被判定为足够刺痛且达到该值时，Bot 才会短期变得更安静、更收着。越高越不容易触发；轻度玩笑和普通边界不会直接触发。应低于“生气触发阈值”。",
-        "slider": {
-          "min": 10,
-          "max": 100,
-          "step": 5
-        },
-        "default": 70,
-        "condition": {
-          "enable_emotion_simulation": true
-        }
-      },
-      "emotional_gate_refuse_threshold": {
-        "description": "生气触发阈值",
-        "type": "int",
-        "hint": "累计刺痛感达到该值后，Bot 才会表现出更明显的不满和短暂回避。建议保持较高，只让连续明确伤害触发。",
-        "slider": {
-          "min": 20,
-          "max": 100,
-          "step": 5
-        },
-        "default": 90,
-        "condition": {
-          "enable_emotion_simulation": true
-        }
-      },
-      "emotional_gate_recovery_per_hour": {
-        "description": "每小时缓和量",
-        "type": "int",
-        "hint": "情绪余波会随时间自然回到稳定；道歉、安抚、夸奖也会额外缓和。",
-        "slider": {
-          "min": 1,
-          "max": 60,
-          "step": 1
-        },
-        "default": 24,
-        "condition": {
-          "enable_emotion_simulation": true
-        }
-      },
-      "emotional_gate_max_hurt_minutes": {
-        "description": "最长收敛分钟",
-        "type": "int",
-        "hint": "单次刺痛事件造成的最长主动暂停/收敛时长。默认较短，避免情绪余波长时间压低回复；道歉或安抚可以提前恢复。",
-        "slider": {
-          "min": 10,
-          "max": 720,
-          "step": 10
-        },
-        "default": 90,
-        "condition": {
-          "enable_emotion_simulation": true
-        }
-      },
-      "enable_qzone_emotional_vent_publish": {
-        "description": "公开心情动态",
-        "type": "bool",
-        "hint": "短期余波很重时，可在 QQ 空间动态层可用且冷却通过的情况下低频发布一条模糊心情说说。默认关闭，避免未经确认公开发布。",
-        "default": false,
-        "condition": {
-          "enable_emotion_simulation": true
-        }
-      },
-      "qzone_emotional_vent_threshold": {
-        "description": "心情动态触发阈值",
-        "type": "int",
-        "hint": "短期余波达到该值后，才可能触发公开心情动态。",
-        "slider": {
-          "min": 40,
-          "max": 100,
-          "step": 5
-        },
-        "default": 90,
-        "condition": {
-          "enable_qzone_emotional_vent_publish": true
-        }
-      },
-      "qzone_emotional_vent_cooldown_hours": {
-        "description": "心情动态冷却小时",
-        "type": "int",
-        "hint": "两次公开心情动态之间的最小间隔。",
-        "slider": {
-          "min": 4,
-          "max": 336,
-          "step": 4
-        },
-        "default": 72,
-        "condition": {
-          "enable_qzone_emotional_vent_publish": true
-        }
-      },
-      "qzone_emotional_vent_probability": {
-        "description": "心情动态触发概率",
-        "type": "float",
-        "hint": "达到极端情绪阈值并通过冷却后，实际尝试发布说说的概率。",
-        "slider": {
-          "min": 0,
-          "max": 1,
-          "step": 0.05
-        },
-        "default": 0.35,
-        "condition": {
-          "enable_qzone_emotional_vent_publish": true
         }
       },
       "enable_response_self_review": {
@@ -5119,24 +5063,111 @@
       "enabled": true
     }
   },
-  "external_memory_config": {
-    "description": "外部记忆",
+    "external_memory_config": {
+    "description": "记忆插件协同",
     "type": "object",
-    "hint": "接入 LivingMemory 等外部长期记忆能力。",
+    "hint": "接入“我会牢牢记住你”或 LivingMemory 等外部长期记忆能力。检测到“我会牢牢记住你”时会自动展开更多协同配置项。",
     "items": {
       "enable_livingmemory_integration": {
-        "description": "启用 LivingMemory 协同",
+        "description": "启用记忆插件协同",
         "type": "bool",
-        "hint": "检测到 astrbot_plugin_livingmemory 时，在私聊和群聊提示词中引导模型按需使用 recall_long_term_memory 工具。大规模长期记忆检索交给 LivingMemory，本插件继续负责人格、状态、关系和群聊气氛。",
+        "hint": "检测到“我会牢牢记住你”或 LivingMemory 时，在私聊和群聊提示词中引导模型按需使用记忆召回能力。大规模长期记忆检索交给记忆插件，本插件继续负责人格、状态、关系和群聊气氛。",
         "default": true
       },
       "livingmemory_tool_name": {
-        "description": "LivingMemory 召回工具名",
+        "description": "记忆召回工具名",
         "type": "string",
-        "hint": "LivingMemory 默认注册的 Agent 工具名是 recall_long_term_memory。如插件更改了工具名，可在这里同步。",
+        "hint": "LivingMemory 默认注册的 Agent 工具名是 recall_long_term_memory。如插件更改了工具名，可在这里同步。“我会牢牢记住你”通过桥接接口协同，通常不需要修改此项。",
         "default": "recall_long_term_memory",
         "condition": {
           "enable_livingmemory_integration": true
+        }
+      },
+      "memory_companion_context_timeout_seconds": {
+        "description": "记忆上下文超时（秒）",
+        "type": "float",
+        "hint": "插件主动、日程、QQ 空间、创作等链路读取记忆插件上下文的单项等待上限。超时会跳过该项，不阻塞主链。建议 0.8-1.5 秒。",
+        "default": 1.2,
+        "slider": {
+          "min": 0.2,
+          "max": 6.0,
+          "step": 0.1
+        },
+        "condition": {
+          "enable_livingmemory_integration": true
+        }
+      },
+      "enable_memory_companion_emotional_drift": {
+        "description": "情绪漂移联动",
+        "type": "bool",
+        "hint": "从“我会牢牢记住你”拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀应用到 Bot 当前能量和心情底色。每次私聊和主动消息生成前触发。",
+        "default": true,
+        "condition": {
+          "enable_livingmemory_integration": true
+        }
+      },
+      "enable_memory_companion_cross_window_emotion": {
+        "description": "跨窗口情绪连续性",
+        "type": "bool",
+        "hint": "拉取情绪漂移时同时获取全局跨会话情绪摘要，以 30% 强度叠加到当前会话。如窗口 A 刚翻到伤痕记忆，窗口 B 的 Bot 也会微妙低落，但不泄露具体内容。",
+        "default": true,
+        "condition": {
+          "enable_memory_companion_emotional_drift": true
+        }
+      },
+      "enable_memory_companion_dream_fragment": {
+        "description": "梦境碎片写入",
+        "type": "bool",
+        "hint": "日记生成后将首条梦境碎片写入“我会牢牢记住你”，带上 dream_fragment 标签和查询锚点，支持跨会话梦境连续性。",
+        "default": true,
+        "condition": {
+          "enable_livingmemory_integration": true
+        }
+      },
+      "enable_memory_companion_open_loop_search": {
+        "description": "未完成话题取材",
+        "type": "bool",
+        "hint": "主动消息生成前从“我会牢牢记住你”检索未完成的承诺和话题，注入到主动消息提示词中，形成承诺兑现闭环。",
+        "default": true,
+        "condition": {
+          "enable_livingmemory_integration": true
+        }
+      },
+      "enable_memory_companion_feature_context": {
+        "description": "功能上下文读取",
+        "type": "bool",
+        "hint": "主动消息生成/复核、当前状态问答、每日穿搭、自然语言生图、QQ 空间互动、群聊主动插话、私下创作和陪伴答疑等链路按需读取“我会牢牢记住你”的结构化上下文。关闭后这些链路不会主动召回记忆。",
+        "default": true,
+        "condition": {
+          "enable_livingmemory_integration": true
+        }
+      },
+      "memory_companion_context_top_k": {
+        "description": "上下文召回条数",
+        "type": "int",
+        "hint": "每次从“我会牢牢记住你”召回记忆时的最大条数。条数越多上下文越完整，但提示词更长、Token 消耗更多。",
+        "default": 5,
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "condition": {
+          "enable_memory_companion_feature_context": true
+        }
+      },
+      "memory_companion_context_max_chars": {
+        "description": "上下文最大字符数",
+        "type": "int",
+        "hint": "单次召回记忆上下文的最大字符数上限。超过会被截断。建议 600-1200。",
+        "default": 900,
+        "slider": {
+          "min": 240,
+          "max": 1800,
+          "step": 60
+        },
+        "condition": {
+          "enable_memory_companion_feature_context": true
         }
       }
     },
@@ -6621,14 +6652,14 @@
       "enable_cross_user_memory_bridge": {
         "description": "启用跨用户记忆互通",
         "type": "bool",
-        "hint": "开启后，主人可在私聊中询问 Bot 与某个私聊对象或群聊的近期互动。该功能只读摘要，不会发送消息，默认仅主人用户可用。",
+        "hint": "开启后，主要用户可在私聊中询问 Bot 与某个私聊对象或群聊的近期互动。该功能只读摘要，不会发送消息，默认仅主要用户可用。",
         "default": false,
         "condition": {
           "enable_worldbook_member_recognition": true
         }
       },
       "cross_user_memory_owner_only": {
-        "description": "仅主人可查询跨用户互动",
+        "description": "仅主要用户可查询跨用户互动",
         "type": "bool",
         "hint": "开启后，只有配置目标用户能查询 Bot 与其他用户/群聊的互动；关闭后，Bot 管理员也可在私聊中查询。",
         "default": true,
@@ -8350,6 +8381,191 @@
         "default": 700,
         "condition": {
           "enable_yesterday_screen_diary_context": true
+        }
+      }
+    },
+    "condition": {
+      "enabled": true
+    }
+  },
+  "experimental_motivation_config": {
+    "description": "实验性功能",
+    "type": "object",
+    "hint": "心理机制、动机调度、角色贴合校准和情绪余波等探索性功能。除已存在的情绪模拟会保留原默认值外，其它实验项默认关闭；建议逐项开启观察，不把理论标签写进实际回复正文。",
+    "items": {
+      "enable_maslow_motivation_experiment": {
+        "description": "启用需求强化功能",
+        "type": "bool",
+        "hint": "开启后，主动候选会先被归入类似马斯洛需求层级的内部需求结构，再轻量调整候选价值和打扰压力。该功能仍处实验阶段，建议先低强度观察。",
+        "default": false
+      },
+      "enable_maslow_schedule_influence": {
+        "description": "允许影响日程生成",
+        "type": "bool",
+        "hint": "需求强化功能的子选项，默认关闭。开启后，日程生成器会把状态、安全、归属、尊重、成长、意义等内部需求层当作轻量倾向，影响今天更偏休息、探索、等待、准备或低打扰互动；不会把层级术语写进日程正文。",
+        "default": false,
+        "condition": {
+          "enable_maslow_motivation_experiment": true
+        }
+      },
+      "maslow_motivation_strength": {
+        "description": "需求强化影响强度",
+        "type": "int",
+        "hint": "控制需求强化对主动候选排序的影响。0 表示只记录层级、不改变排序；35 为温和默认；100 会更明显偏向有明确关系/状态/成长由头的主动念头。",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "default": 35,
+        "condition": {
+          "enable_maslow_motivation_experiment": true
+        }
+      },
+      "enable_experimental_motivation_model": {
+        "description": "启用驱力-诱因-唤醒调度",
+        "type": "bool",
+        "hint": "实验性功能第二项。结合驱力理论、诱因理论和唤醒理论，对主动计划做轻量调权：驱力表示 Bot 内部想开口，诱因表示当前候选是否有值得说的外部价值，唤醒表示当前状态是否适合行动。默认关闭；开启后会在主动排障页显示“实验动机调度”。",
+        "default": false
+      },
+      "enable_personality_iteration_experiment": {
+        "description": "启用角色贴合校准",
+        "type": "bool",
+        "hint": "实验性功能第三项。基于艾森克 PEN、大五人格、依恋风格和自我决定理论，检查 Bot 当前行为是否贴近角色基线，并告诉用户应该调整 AstrBot 人格、世界知识、主动策略还是群聊边界。默认关闭；开启后只给调整建议，不自动改写 AstrBot 人格或世界知识。",
+        "default": false
+      },
+      "enable_emotion_simulation": {
+        "description": "启用情绪模拟",
+        "type": "bool",
+        "hint": "实验性情绪余波。维护 Bot 自身短期情绪，例如被刺到后的收敛、缓和后的恢复，以及不满时的短暂回避；会结合四维状态、基本/复合情绪和调节策略影响回复。该项迁入实验性功能但保留原默认值，避免更新后行为突变。",
+        "default": true,
+        "condition": {
+          "enable_mai_style_integration": true
+        }
+      },
+      "enable_llm_emotion_judgement": {
+        "description": "启用模型复核情绪变化",
+        "type": "bool",
+        "hint": "开启后，本地快判会先记录；可疑边界、玩笑、道歉、安抚或负向表达会交给模型后台复核，再更新短期情绪余波。本轮被动回复不等待模型，仍使用缓存情绪状态，默认关闭以保持低延迟。",
+        "default": false,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "emotion_judgement_mode": {
+        "description": "模型复核范围",
+        "type": "string",
+        "hint": "suspicious 只复核容易误判或已命中情绪信号的消息；always 会复核所有普通文本消息。复核异步进行，结果主要影响后续回复和主动行为。",
+        "default": "suspicious",
+        "condition": {
+          "enable_llm_emotion_judgement": true
+        }
+      },
+      "emotional_gate_hurt_threshold": {
+        "description": "伤心触发阈值",
+        "type": "int",
+        "hint": "用户消息被判定为足够刺痛且达到该值时，Bot 才会短期变得更安静、更收着。越高越不容易触发；轻度玩笑和普通边界不会直接触发。应低于“生气触发阈值”。",
+        "slider": {
+          "min": 10,
+          "max": 100,
+          "step": 5
+        },
+        "default": 70,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "emotional_gate_refuse_threshold": {
+        "description": "生气触发阈值",
+        "type": "int",
+        "hint": "累计刺痛感达到该值后，Bot 才会表现出更明显的不满和短暂回避。建议保持较高，只让连续明确伤害触发。",
+        "slider": {
+          "min": 20,
+          "max": 100,
+          "step": 5
+        },
+        "default": 90,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "emotional_gate_recovery_per_hour": {
+        "description": "每小时缓和量",
+        "type": "int",
+        "hint": "情绪余波会随时间自然回到稳定；道歉、安抚、夸奖也会额外缓和。",
+        "slider": {
+          "min": 1,
+          "max": 60,
+          "step": 1
+        },
+        "default": 24,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "emotional_gate_max_hurt_minutes": {
+        "description": "最长收敛分钟",
+        "type": "int",
+        "hint": "单次刺痛事件造成的最长主动暂停/收敛时长。默认较短，避免情绪余波长时间压低回复；道歉或安抚可以提前恢复。",
+        "slider": {
+          "min": 10,
+          "max": 720,
+          "step": 10
+        },
+        "default": 90,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "enable_qzone_emotional_vent_publish": {
+        "description": "公开心情动态",
+        "type": "bool",
+        "hint": "短期余波很重时，可在 QQ 空间动态层可用且冷却通过的情况下低频发布一条模糊心情说说。默认关闭，避免未经确认公开发布。",
+        "default": false,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "qzone_emotional_vent_threshold": {
+        "description": "心情动态触发阈值",
+        "type": "int",
+        "hint": "短期余波达到该值后，才可能触发公开心情动态。",
+        "slider": {
+          "min": 40,
+          "max": 100,
+          "step": 5
+        },
+        "default": 90,
+        "condition": {
+          "enable_qzone_emotional_vent_publish": true
+        }
+      },
+      "qzone_emotional_vent_cooldown_hours": {
+        "description": "心情动态冷却小时",
+        "type": "int",
+        "hint": "两次公开心情动态之间的最小间隔。",
+        "slider": {
+          "min": 4,
+          "max": 336,
+          "step": 4
+        },
+        "default": 72,
+        "condition": {
+          "enable_qzone_emotional_vent_publish": true
+        }
+      },
+      "qzone_emotional_vent_probability": {
+        "description": "心情动态触发概率",
+        "type": "float",
+        "hint": "达到极端情绪阈值并通过冷却后，实际尝试发布说说的概率。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.35,
+        "condition": {
+          "enable_qzone_emotional_vent_publish": true
         }
       }
     },

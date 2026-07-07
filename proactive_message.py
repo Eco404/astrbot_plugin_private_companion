@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 ProactiveMessageMixin — 主动消息生成、动作执行和发送链路
 """
@@ -1129,7 +1129,7 @@ class ProactiveMessageMixin:
     def _format_proactive_relationship_fact(self, user: dict[str, Any]) -> str:
         role = self._private_user_role(user) if isinstance(user, dict) else "owner"
         labeler = getattr(self, "_private_user_role_label", None)
-        label = labeler(role) if callable(labeler) else ("主人" if role == "owner" else "朋友")
+        label = labeler(role) if callable(labeler) else ("主要用户" if role == "owner" else "次要用户")
         profile = self._relationship_profile(user if isinstance(user, dict) else {})
         level = _single_line(profile.get("level"), 20) or "熟悉"
         preference = _single_line(profile.get("preference"), 20) or "普通"
@@ -1351,6 +1351,7 @@ class ProactiveMessageMixin:
         temperature = readiness.get("temperature") if isinstance(readiness.get("temperature"), dict) else {}
         temperature_label = _single_line(temperature.get("label"), 60)
         temperature_score = _safe_float(temperature.get("score"), 0.55)
+        motivation = readiness.get("motivation") if isinstance(readiness.get("motivation"), dict) else {}
 
         lines = ["【这次主动的内在约束】"]
         if kind or anchor_type:
@@ -1363,6 +1364,12 @@ class ProactiveMessageMixin:
             lines.append(
                 f"开口欲：{readiness_label or '平稳'} {readiness_score:.2f}；"
                 f"关系温度：{temperature_label or '平稳'} {temperature_score:.2f}。"
+            )
+        if motivation:
+            lines.append(
+                f"实验动机调度：{_single_line(motivation.get('label'), 24)} "
+                f"{_safe_float(motivation.get('score'), 0.5):.2f}；"
+                f"{_single_line(motivation.get('detail'), 120)}。"
             )
         afterglow = user.get("proactive_afterglow") if isinstance(user.get("proactive_afterglow"), dict) else {}
         if afterglow:
@@ -2123,7 +2130,7 @@ class ProactiveMessageMixin:
                     has_cross_private_interaction = bool(social_checker(cleaned))
                 except Exception:
                     has_cross_private_interaction = False
-            if has_cross_private_interaction or any(token in cleaned for token in ("朋友那边", "朋友用户", "朋友私聊")):
+            if has_cross_private_interaction or any(token in cleaned for token in ("朋友那边", "朋友用户", "朋友私聊", "次要用户那边", "次要用户私聊")):
                 return {"decision": "drop", "reason": "疑似混入其他私聊互动", "hard": True}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 1 and cleaned.count("？") + cleaned.count("?") >= 2:
             return {"decision": "rewrite", "reason": "未回应状态下问题太多", "text": re.split(r"[？?]", cleaned, maxsplit=1)[0].rstrip("，,。") + "。"}
@@ -4458,7 +4465,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not self.enable_photo_text_action:
             return "photo_text：未启用"
         if self._private_user_role(user) == "friend":
-            return "photo_text：朋友关系不使用主动生图或复用主人图片,不能假装已经拍照"
+            return "photo_text：次要用户关系不使用主动生图或复用主要用户图片,不能假装已经拍照"
         load_defer_note = self._photo_text_load_defer_note("photo_text", force_refresh=True)
         if load_defer_note:
             return f"photo_text：{load_defer_note},不能假装已经拍照"
