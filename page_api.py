@@ -1385,15 +1385,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "title": "图片生成链路测试",
                 "error": "插件缺少图片生成入口 _generate_photo_image",
             }
+        reference_enabled = bool(getattr(self.plugin, "enable_photo_reference_image", False))
         reference_getter = getattr(self.plugin, "_photo_persona_reference_image_path", None)
         reference_image_path = ""
-        if callable(reference_getter):
+        if reference_enabled and callable(reference_getter):
             try:
                 reference_image_path = self._single_line(reference_getter(), 260)
             except Exception:
                 reference_image_path = ""
         configured_reference = self._single_line(getattr(self.plugin, "photo_persona_reference_image_path", ""), 1000).strip().strip('"').strip("'")
-        has_reference_source = bool(reference_image_path or re.match(r"^https?://", configured_reference, flags=re.I))
+        has_reference_source = bool(reference_enabled and (reference_image_path or re.match(r"^https?://", configured_reference, flags=re.I)))
         workflow_kind = self._single_line(payload.get("workflow_kind"), 20)
         if not workflow_kind:
             workflow_kind = "selfie" if has_reference_source else "text2img"
@@ -1412,10 +1413,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     )
         prompt_text = self._single_line(payload.get("prompt"), 600)
         if not prompt_text and workflow_kind in {"selfie", "portrait", "自拍", "人像"}:
-            prompt_text = (
-                "排障测试自拍图，保持参考图中的人物身份和外观一致，手机随手自拍构图，"
-                "自然室内光，画面干净清晰，真实摄影风格，不包含文字水印"
-            )
+            if reference_image_path:
+                prompt_text = (
+                    "排障测试自拍图，保持参考图中的人物身份和外观一致，手机随手自拍构图，"
+                    "自然室内光，画面干净清晰，真实摄影风格，不包含文字水印"
+                )
+            else:
+                prompt_text = (
+                    "排障测试自拍图，一名角色面向镜头，手机随手自拍构图，"
+                    "自然室内光，画面干净清晰，真实摄影风格，不包含文字水印"
+                )
         if not prompt_text:
             role_appearance = self._troubleshooting_role_appearance_prompt()
             if role_appearance:
@@ -1459,7 +1466,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         except asyncio.TimeoutError:
             elapsed_ms = int((time.time() - started) * 1000)
             warnings = list(diagnostics.get("warnings") or [])
-            warnings.insert(0, f"测试等待 {timeout}s 后仍未返回；实际链路可能卡在在线 API、备用 API、参考图接口或本地工作流队列。")
+            timeout_targets = "在线 API、备用 API、参考图接口或本地工作流队列" if reference_image_path else "在线 API、备用 API 或本地工作流队列"
+            warnings.insert(0, f"测试等待 {timeout}s 后仍未返回；实际链路可能卡在{timeout_targets}。")
             return {
                 "ok": False,
                 "title": "图片生成链路测试",
@@ -7173,6 +7181,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_quote_group_interjection",
             "enable_quote_private_proactive",
             "enable_photo_text_action",
+            "enable_photo_reference_image",
             "inject_passive_states",
             "enable_passive_state_delta_injection",
             "enable_cycle_state",
@@ -8526,6 +8535,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "quote_skip_short_reply_chars",
             "quote_target_strategy",
             "enable_photo_text_action",
+            "enable_photo_reference_image",
             "photo_action_max_daily",
             "photo_generation_backend",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
@@ -10200,6 +10210,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             setattr(self.plugin, key, value)
 
     def _sync_photo_generation_runtime_config(self) -> None:
+        reference_enabled = self._config_get("enable_photo_reference_image")
+        if reference_enabled not in ("", None):
+            self.plugin.enable_photo_reference_image = self._normalize_bool_value(reference_enabled)
         enabled_backup = self._config_get("enable_backup_external_image_api")
         if enabled_backup not in ("", None):
             self.plugin.enable_backup_external_image_api = self._normalize_bool_value(enabled_backup)
@@ -10693,6 +10706,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_backend",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
             "COMFYUI_SELFIE_WORKFLOW_NAME",
+            "enable_photo_reference_image",
             "photo_persona_reference_image_path",
             "enable_daily_outfit_photo",
             "daily_outfit_photo_prompt",

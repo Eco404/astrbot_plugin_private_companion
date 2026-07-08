@@ -435,6 +435,7 @@ class CommandHandlersMixin:
             "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "规则快判生图每日上限"},
             "natural_language_photo_extra_prompt": {"type": "string", "max_len": 5000, "label": "规则快判生图附加提示词"},
             "enable_backup_external_image_api": {"type": "bool", "label": "启用备选在线图片 API"},
+            "enable_photo_reference_image": {"type": "bool", "label": "启用人设/穿搭参考图一致性"},
             "backup_external_image_api_platform": {
                 "type": "select",
                 "choices": {"auto", "openai", "bailian", "modelscope"},
@@ -495,6 +496,7 @@ class CommandHandlersMixin:
             "enable_cycle_state": {"label": "生理期模拟", "location": "拓展页 -> 功能开关 -> 拟人状态 -> 生理期模拟"},
             "humanized_state_intensity": {"label": "拟人状态强度", "location": "拓展页 -> 功能开关 -> 拟人状态 -> 状态强度"},
             "enable_photo_text_action": {"label": "生图/拍照能力", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力"},
+            "enable_photo_reference_image": {"label": "参考图一致性", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图一致性"},
             "photo_generation_backend": {"label": "生图后端", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 后端选择"},
             "external_image_api_platform": {"label": "在线生图平台", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
             "EXTERNAL_IMAGE_API_BASE_URL": {"label": "在线图片 API 地址", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
@@ -505,7 +507,7 @@ class CommandHandlersMixin:
             "BACKUP_EXTERNAL_IMAGE_API_MODEL": {"label": "备选在线图片模型", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "backup_external_image_api_size": {"label": "备选在线生图尺寸", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "backup_external_image_api_timeout_seconds": {"label": "备选在线生图超时秒数", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
-            "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 本地 ComfyUI；也可用命令 陪伴 参考图 设置"},
+            "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图一致性；也可用命令 陪伴 参考图 设置"},
             "natural_language_photo_generation_mode": {"label": "非指令生图处理方式", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
             "natural_language_photo_extra_prompt": {"label": "规则快判生图附加提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
             "photo_generation_scene_presets": {"label": "生图场景预设", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
@@ -2397,9 +2399,10 @@ class CommandHandlersMixin:
             {
                 "title": "生图/自拍/参考图问题",
                 "keywords": ["生图", "自拍", "参考图", "图片", "画图", "改图", "不出图", "脸", "分辨率", "没反应", "好了", "穿搭图", "提示词"],
-                "summary": "生图链路会优先使用配置的在线 API，失败后按配置回退；参考图支持本地路径或 URL。非指令生图默认走工具优先，由主链模型调用 pc_generate_photo；规则快判只适合需要插件前置抢接单的场景。",
+                "summary": "生图链路会优先使用配置的在线 API，失败后按配置回退；参考图一致性是可选子功能，开启后才会自动使用人设/穿搭参考图。非指令生图默认走工具优先，由主链模型调用 pc_generate_photo；规则快判只适合需要插件前置抢接单的场景。",
                 "checks": [
                     "确认 enable_photo_text_action 和生图后端配置可用。",
+                    "自拍/头像/角色表情包需要自动套人设或穿搭参考图时，先开启 enable_photo_reference_image；关闭时只按提示词生成。",
                     "非指令生图模式：natural_language_photo_generation_mode，可选 tool_first / rule_fast / off。",
                     "规则快判前置接管需要 enable_natural_language_photo_generation=true；显式指令和 pc_generate_photo 工具不依赖这个开关。",
                     "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空|查看>，也可带图或回复图片；查看会把当前实际参考图发出来检查。",
@@ -2413,6 +2416,7 @@ class CommandHandlersMixin:
                     "enable_natural_language_photo_generation",
                     "natural_language_photo_generation_max_daily",
                     "natural_language_photo_extra_prompt",
+                    "enable_photo_reference_image",
                     "photo_persona_reference_image_path",
                     "photo_generation_backend",
                     "photo_generation_fixed_prompt",
@@ -3111,10 +3115,16 @@ class CommandHandlersMixin:
             image_path, image_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
             if image_path:
                 saved = self._set_photo_reference_config_path(image_path)
+                enabled_note = (
+                    "参考图一致性已开启，会在 selfie/人像/头像/角色表情包自动生图里使用。"
+                    if getattr(self, "enable_photo_reference_image", False)
+                    else "参考图路径已保存，但“参考图一致性”当前关闭；需要自动用于自拍/头像/角色表情包时，请在生图/拍照能力详情里开启。"
+                )
                 return (
                     f"已把{image_label}设为主动自拍人设参考图：\n"
                     f"{image_path}\n"
-                    "只会在 selfie/人像类主动生图里使用；ComfyUI 需要支持 images=1 的自拍工作流。"
+                    f"{enabled_note}\n"
+                    "ComfyUI 需要支持 images=1 的自拍工作流。"
                     + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
                 ), image_path
             if force_image:
@@ -3124,11 +3134,16 @@ class CommandHandlersMixin:
         if not action or action in preview_actions:
             configured = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 260)
             resolved = self._photo_persona_reference_image_path() if callable(getattr(self, "_photo_persona_reference_image_path", None)) else ""
+            enabled = bool(getattr(self, "enable_photo_reference_image", False))
             if not configured:
-                return "当前没有设置主动自拍人设参考图。\n设置方式：陪伴 参考图 <本地图片路径或图片URL>；也可以发送图片并附上“陪伴 参考图”。", ""
+                return (
+                    f"参考图一致性：{'开启' if enabled else '关闭'}\n"
+                    "当前没有设置主动自拍人设参考图。\n"
+                    "设置方式：陪伴 参考图 <本地图片路径或图片URL>；也可以发送图片并附上“陪伴 参考图”。"
+                ), ""
             if not resolved and re.match(r"^https?://", configured.strip(), flags=re.I):
                 async_resolver = getattr(self, "_photo_persona_reference_image_path_async", None)
-                if callable(async_resolver):
+                if enabled and callable(async_resolver):
                     try:
                         resolved = _single_line(await async_resolver(), 260)
                     except Exception as exc:
@@ -3136,9 +3151,11 @@ class CommandHandlersMixin:
                         resolved = ""
             status = "可用" if resolved else "URL 待首次使用时下载" if re.match(r"^https?://", configured.strip(), flags=re.I) else "路径不可用或格式不支持"
             return (
+                f"参考图一致性：{'开启' if enabled else '关闭'}\n"
                 "当前主动自拍人设参考图：\n"
                 f"{configured}\n"
                 f"状态：{status}"
+                + ("" if enabled else "\n提示：开关关闭时不会自动用于自拍/头像/角色表情包。")
                 + (f"\n实际使用文件：{resolved}" if resolved and resolved != configured else "")
             ), resolved
         path, error = self._resolve_photo_reference_command_path(action)
@@ -3146,10 +3163,16 @@ class CommandHandlersMixin:
             return error, ""
         stable_path = await self._photo_reference_source_to_stable_path(path, stem="manual") or path
         saved = self._set_photo_reference_config_path(stable_path)
+        enabled_note = (
+            "参考图一致性已开启，会在 selfie/人像/头像/角色表情包自动生图里使用。"
+            if getattr(self, "enable_photo_reference_image", False)
+            else "参考图路径已保存，但“参考图一致性”当前关闭；需要自动用于自拍/头像/角色表情包时，请在生图/拍照能力详情里开启。"
+        )
         return (
             "已设置主动自拍人设参考图：\n"
             f"{stable_path}\n"
-            "只会在 selfie/人像类主动生图里使用；ComfyUI 需要支持 images=1 的自拍工作流。"
+            f"{enabled_note}\n"
+            "ComfyUI 需要支持 images=1 的自拍工作流。"
             + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。")
         ), stable_path
 

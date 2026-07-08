@@ -887,6 +887,7 @@ class PrivateCompanionPlugin(
         self.enable_photo_text_action = self._cfg_bool(
             c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
         )
+        self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
         self.enable_screen_glance_action = self._cfg_bool(
             c, "enable_screen_glance_action", bool(self._cfg_raw(c, "allow_screen_peek_action", legacy_screen_enabled))
         )

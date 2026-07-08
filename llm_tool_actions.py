@@ -69,7 +69,7 @@ class LlmToolActionsMixin:
 【生图/自拍工具】
 当用户明确要求你生成图片、画图、出图、自拍、拍照、头像、表情包，或要求基于参考图改图时，可以使用 `pc_generate_photo`。
 - 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。
-- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/镜前穿搭/头像特写”；未传参考图时会自动使用配置的人设参考图或今日穿搭参考图。
+- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/镜前穿搭/头像特写”；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。
 - 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。
 - 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。
 - 默认 `send=true`，工具会把生成图片发送到当前会话；如果只想拿路径再决定，可传 `send=false`。
@@ -236,7 +236,7 @@ class LlmToolActionsMixin:
                             return json.dumps(
                                 {
                                     "status": "need_reference",
-                                    "message": f"参考图解析缺少可选依赖 {missing}，将改用已配置的人设参考图或今日穿搭图。",
+                                    "message": f"参考图解析缺少可选依赖 {missing}；如已开启参考图一致性，会改用已配置的人设参考图或今日穿搭图。",
                                 },
                                 ensure_ascii=False,
                             )

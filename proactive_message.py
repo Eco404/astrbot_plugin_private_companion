@@ -5646,6 +5646,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         return str(path)
 
     def _photo_persona_reference_image_for_kind(self, workflow_kind: str, *, allow_daily_outfit: bool = True) -> str:
+        if not bool(getattr(self, "enable_photo_reference_image", False)):
+            return ""
         if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
             return ""
         if allow_daily_outfit:
@@ -5655,6 +5657,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         return self._photo_persona_reference_image_path()
 
     async def _photo_persona_reference_image_path_async(self) -> str:
+        if not bool(getattr(self, "enable_photo_reference_image", False)):
+            return ""
         local_path = self._photo_persona_reference_image_path()
         if local_path:
             return local_path
@@ -5687,6 +5691,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         *,
         allow_daily_outfit: bool = True,
     ) -> str:
+        if not bool(getattr(self, "enable_photo_reference_image", False)):
+            return ""
         if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
             return ""
         if allow_daily_outfit:

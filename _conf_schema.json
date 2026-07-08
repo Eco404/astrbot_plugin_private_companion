@@ -2578,6 +2578,12 @@
     "default": "auto",
     "invisible": true
   },
+  "enable_photo_reference_image": {
+    "description": "Legacy flat config: 启用人设/穿搭参考图一致性",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "COMFYUI_TEXT2IMG_WORKFLOW_NAME": {
     "description": "Legacy flat config: 主动拍照文生图工作流名",
     "type": "string",
@@ -7475,8 +7481,17 @@
       "COMFYUI_SELFIE_WORKFLOW_NAME": {
         "description": "主动自拍工作流名",
         "type": "string",
-        "hint": "用于自拍/人像类 photo_text 主动行为。若配置了人设参考图，会优先寻找 images=1、texts>=1、videos=0 的 ComfyUI 工作流；找不到则回退到纯文生图工作流。",
+        "hint": "用于自拍/人像类 photo_text 主动行为。开启“人设/穿搭参考图一致性”并配置参考图后，会优先寻找 images=1、texts>=1、videos=0 的 ComfyUI 工作流；找不到则回退到纯文生图工作流。",
         "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "enable_photo_reference_image": {
+        "description": "人设/穿搭参考图一致性",
+        "type": "bool",
+        "hint": "默认关闭。开启后，自拍、人像、头像、角色表情包等自动角色出镜链路会优先使用今日穿搭图或下方人设参考图来保持外观一致；关闭后不自动读取这些固定参考图，只按提示词生成。用户显式发送/引用图片要求改图时不受此开关影响。",
+        "default": false,
         "condition": {
           "enable_photo_text_action": true
         }
@@ -7484,10 +7499,11 @@
       "photo_persona_reference_image_path": {
         "description": "人设参考图路径或图片 URL",
         "type": "string",
-        "hint": "可填 png/jpg/jpeg/webp 本地文件路径，也可填 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。仅在自拍/人像类主动生图时使用。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口，不支持时回退纯文生图；SDGen 仍按提示词生成。",
+        "hint": "可选。仅在人设/穿搭参考图一致性开启时使用。可填 png/jpg/jpeg/webp 本地文件路径，也可填 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 不支持参考图。",
         "default": "",
         "condition": {
-          "enable_photo_text_action": true
+          "enable_photo_text_action": true,
+          "enable_photo_reference_image": true
         }
       },
       "enable_daily_outfit_photo": {
