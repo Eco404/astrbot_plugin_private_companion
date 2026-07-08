@@ -4965,6 +4965,22 @@ function setupGuideAdvancedDependenciesHtml(item) {
   `;
 }
 
+function setupGuideAdvancedExtraActionsHtml(item, enabled) {
+  if (!enabled || item?.key !== "enable_photo_text_action") return "";
+  const settings = state.overview?.settings || {};
+  const primaryModel = String(settings.EXTERNAL_IMAGE_API_MODEL || "").trim() || "未填写";
+  const backupModel = String(settings.BACKUP_EXTERNAL_IMAGE_API_MODEL || "").trim() || "未填写";
+  return `
+    <div class="setup-guide-advanced-tools">
+      <div>
+        <b>在线 API 快速切换</b>
+        <small>当前主用：${escapeHtml(primaryModel)}；备选：${escapeHtml(backupModel)}。点击后交换主/备在线生图 API 配置。</small>
+      </div>
+      <button type="button" data-swap-image-api>交换主/备 API</button>
+    </div>
+  `;
+}
+
 function setupGuideAdvancedItemHtml(item) {
   const enabled = Boolean(setupGuideFieldValue(item.key));
   const settings = Array.isArray(item.settings) ? item.settings : [];
@@ -4992,6 +5008,7 @@ function setupGuideAdvancedItemHtml(item) {
           <span><b>暂不需要</b><small>保持关闭；已经填过的参数不会被清空。</small></span>
         </label>
       </div>
+      ${setupGuideAdvancedExtraActionsHtml(item, enabled)}
       ${enabled && visibleSettings.length ? `
         <div class="setup-guide-advanced-settings">
           ${visibleSettings.map(setupGuideAdvancedSettingHtml).join("")}
@@ -7666,6 +7683,8 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       result.image_model ? `模型 ${result.image_model}` : "",
       result.workflow_kind ? `类型 ${result.workflow_kind}` : "",
       result.used_reference ? "已带参考图" : "",
+      result.timeout_seconds ? `等待上限 ${result.timeout_seconds}s` : "",
+      result.timeout_budget ? `预算 ${result.timeout_budget}` : "",
       result.context_chars ? `摘要 ${result.context_chars} 字` : "",
       result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
@@ -7775,6 +7794,15 @@ function troubleshootingChainPreviewMarkup(type, result) {
   }
   if (result.text_preview && !result.final_text_preview) parts.push(`<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>`);
   if (result.prompt) parts.push(`<small class="path">提示词：${escapeHtml(result.prompt)}</small>`);
+  const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+  if ((type === "image_generation_text2img" || type === "image_generation_selfie" || type === "image_generation") && warnings.length) {
+    parts.push(`
+      <details class="chain-test-steps chain-test-preview">
+        <summary>查看真实出图超时风险</summary>
+        ${warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+      </details>
+    `);
+  }
   return parts.join("");
 }
 
@@ -13638,6 +13666,7 @@ function renderModuleSettings() {
   fillForm("#worldbookModuleForm", formValues);
   fillForm("#memoryModuleForm", formValues);
   fillForm("#longTermModuleForm", formValues);
+  renderImageApiSwapSummary(settings);
   setPrivateReadingConfigVisible(isPrivateReadingAvailable());
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
@@ -13649,6 +13678,23 @@ function renderModuleSettings() {
   renderNewsSourceManager();
   renderExternalAbilities();
   renderPresetCards();
+}
+
+function renderImageApiSwapSummary(settings = state.overview?.settings || {}) {
+  const box = $("#imageApiSwapSummary");
+  if (!box) return;
+  const primaryModel = String(settings.EXTERNAL_IMAGE_API_MODEL || "").trim() || "未填写";
+  const primaryPlatform = String(settings.external_image_api_platform || "auto").trim() || "auto";
+  const backupModel = String(settings.BACKUP_EXTERNAL_IMAGE_API_MODEL || "").trim() || "未填写";
+  const backupPlatform = String(settings.backup_external_image_api_platform || "auto").trim() || "auto";
+  const backupReady = Boolean(
+    String(settings.BACKUP_EXTERNAL_IMAGE_API_BASE_URL || "").trim()
+    && String(settings.BACKUP_EXTERNAL_IMAGE_API_KEY || "").trim()
+    && String(settings.BACKUP_EXTERNAL_IMAGE_API_MODEL || "").trim()
+  );
+  box.textContent = backupReady
+    ? `主用：${primaryPlatform} / ${primaryModel}；备选：${backupPlatform} / ${backupModel}。点击后会交换两套在线图片 API。`
+    : `主用：${primaryPlatform} / ${primaryModel}；备选 API 未配置完整，补齐备选地址、Key、模型后才能一键切换。`;
 }
 
 function renderQuickStartStatus(settings) {
@@ -19084,6 +19130,21 @@ document.addEventListener("click", async (event) => {
   const proactiveTestButton = target.closest("[data-setup-guide-proactive-test]");
   if (proactiveTestButton instanceof HTMLButtonElement) {
     await runSetupGuideProactiveTest(proactiveTestButton);
+    return;
+  }
+  const swapImageApiButton = target.closest("[data-swap-image-api]");
+  if (swapImageApiButton instanceof HTMLButtonElement) {
+    if (!requireSecondClick(swapImageApiButton, "swap-image-api", "再次点击交换主/备在线生图 API", "再次点击交换")) return;
+    const result = await runAction(
+      () => postJson("/settings/swap_image_api", {}),
+      "已交换主/备在线生图 API",
+      swapImageApiButton,
+    );
+    if (result?.plugin) {
+      state.setupGuideDraft = null;
+      state.featureDraft = featureDraftFromOverview(result);
+      renderSetupGuideOverlay();
+    }
     return;
   }
   if (target.closest("[data-setup-guide-world-confirm]")) {

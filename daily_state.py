@@ -1163,6 +1163,58 @@ class DailyStateMixin:
     def _fallback_diary_payload(self) -> dict[str, Any]:
         return fallback_diary_payload(self)
 
+    def _polish_diary_text(self, text: Any, *, field: str = "body") -> str:
+        cleaned = _single_line(text, 900 if field == "body" else 180)
+        if not cleaned:
+            return ""
+        cleaned = re.sub(
+            r"状态(?:大概|大约)?(?:是|偏|比较)?([^,，。；;]{1,10})[,，]\s*能量(?:大概|大约|大抵)?(?:是|在|停在|约)?\s*\d{1,3}\s*/\s*100(?:\s*左右)?[,，]?\s*适合[^。；;，,]{0,30}(?:推进|节奏|小事)",
+            r"整个人还有点\1,就慢慢把注意力放回眼前的小事",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"今天(?:整体|大概)?偏([^,，。；;]{1,10})[,，]\s*能量(?:大概|大约|大抵)?(?:是|在|停在|约)?\s*\d{1,3}\s*/\s*100(?:\s*左右)?[,，]?\s*适合[^。；;，,]{0,30}(?:推进|节奏|小事)",
+            r"今天有点\1,就慢慢把注意力放回眼前的小事",
+            cleaned,
+        )
+        cleaned = re.sub(r"能量(?:大概|大约|大抵)?(?:是|在|停在|约)?\s*\d{1,3}\s*/\s*100(?:\s*左右)?", "精神还有点起伏", cleaned)
+        cleaned = re.sub(r"能量(?:大概|大约|大抵)?(?:是|在|停在|约)?\s*\d{1,3}(?:\s*左右)?", "精神还有点起伏", cleaned)
+        cleaned = re.sub(r"状态(?:大概|大约)?(?:是|偏|比较)?([^,，。；;]{1,10})", r"整个人有点\1", cleaned)
+        cleaned = re.sub(r"今天(?:整体|大概)?偏([^,，。；;]{1,10})", r"今天有点\1", cleaned)
+        cleaned = re.sub(r"状态(?:大概|大约)?(?:是|偏|比较)?([^,，。；;]{0,8}),?适合[^。；;，,]{0,20}(?:推进|节奏)", r"整个人有点\1", cleaned)
+        cleaned = re.sub(r"今天(?:整体|大概)?偏([^,，。；;]{1,8}),?适合[^。；;，,]{0,20}(?:推进|节奏)", r"今天有点偏\1", cleaned)
+        cleaned = re.sub(r"(?:先)?确认了?一下自己的状态", "在床边缓了一会儿", cleaned)
+        cleaned = re.sub(r"适合(?:保持|继续)?(?:温和|平稳|稳定)?(?:慢慢)?(?:推进|推着走|节奏)", "可以慢一点来", cleaned)
+        cleaned = re.sub(r"平稳推进", "慢慢来", cleaned)
+        cleaned = re.sub(r"可分享(?:的)?(?:碎片|句子)[:：]?", "", cleaned)
+        cleaned = re.sub(r"(?:主动计划|插件|模型|生成器|内部状态|状态报告)[:：]?", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,；;")
+        if field == "share":
+            cleaned = cleaned.rstrip("。.!！？")
+            if any(marker in cleaned for marker in ("适合", "推进", "状态")) and not any(marker in cleaned for marker in ("醒", "梦", "路", "雨", "风", "杯", "灯", "窗", "课", "饭", "困")):
+                cleaned = "今天有点慢半拍,想等遇到新的小事再讲给你听"
+            return _single_line(cleaned, 90)
+        if field == "summary":
+            if any(marker in cleaned for marker in ("精神还有点起伏", "状态", "适合")) and not any(marker in cleaned for marker in ("醒", "梦", "路", "雨", "风", "杯", "灯", "窗", "课", "饭", "困")):
+                cleaned = "今天醒得有点慢,但还是一点点把自己拢回现实里。"
+            return _single_line(cleaned, 120)
+        return _single_line(cleaned, 520)
+
+    def _polish_diary_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        polished = dict(payload)
+        polished["summary"] = self._polish_diary_text(polished.get("summary"), field="summary")
+        polished["body"] = self._polish_diary_text(polished.get("body"), field="body")
+        polished["share_seed"] = self._polish_diary_text(polished.get("share_seed"), field="share")
+        if not polished["summary"]:
+            polished["summary"] = "今天留下了一点很轻的小事,还想再慢慢想一会儿。"
+        if not polished["body"]:
+            polished["body"] = "今天过得不算很响亮,只是有些小事断断续续落在心里。醒来后慢慢把自己拢回现实,到晚一点又觉得有些话不用急着说完,先收在日记里也好。"
+        if not polished["share_seed"]:
+            polished["share_seed"] = "今天有点慢半拍,但也不是坏事"
+        return polished
+
     def _generate_fallback_long_term_events(self, state: dict[str, Any]) -> list[dict[str, str]]:
         events = self._generate_state_linked_long_term_events()
         if events:

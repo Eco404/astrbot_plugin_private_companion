@@ -240,16 +240,15 @@ def _recent_diary_duplicate_hit(plugin, payload: dict[str, Any], count: int = 3)
 def _repair_duplicate_daily_diary(plugin, payload: dict[str, Any], matched_date: str) -> dict[str, Any]:
     state = plugin.data.get("daily_state", {})
     mood = state.get("mood_bias", "平稳") if isinstance(state, dict) else "平稳"
-    energy = _safe_int(state.get("energy"), 70) if isinstance(state, dict) else 70
     weather = _single_line(plugin._weather_summary_text(plugin.data.get("daily_weather", {})), 48)
     note = "今天脑子里还残留着前几天梦里的画面,像醒来后还留着的一点余温。"
     if weather and weather != "暂无天气信息":
         note += f"外面的{weather}让这种余韵更明显了一点。"
-    note += f"状态大概是{mood},能量在 {energy}/100 左右,适合把注意力慢慢放回今天新的小事。"
+    note += f"整个人偏{mood},但已经不太想继续在旧梦里打转,就把注意力慢慢放回今天新的小事。"
     repaired = dict(payload)
     repaired["summary"] = "今天有一点梦境余韵,但更想把注意力放回新的小事上。"
     repaired["body"] = note
-    repaired["share_seed"] = "今天梦里的余韵还在,不过我想等遇到新的小事再讲给你听。"
+    repaired["share_seed"] = "今天梦里的余韵还在,不过我想等遇到新的小事再讲给你听"
     repaired["tags"] = payload.get("tags") if isinstance(payload.get("tags"), list) else ["平稳"]
     return repaired
 
@@ -658,8 +657,12 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 【写日记的要求】
 · 短、口语、像社交媒体上随手写给自己看的。不要散文腔,不要长篇。
 · 只记你自己的状态和看到的小事。不要对用户施压,不要写成计划清单。
+· summary/body/share_seed 是会展示给用户看的日记文本,必须像人在写日记,不能像插件状态报告。
+· 禁止在 summary/body/share_seed 里写“能量 74/100”“状态确认”“适合推进/平稳推进”“主动计划”“可分享碎片”“生成/模型/插件”等内部话。
+· 情绪和体力要落到具体身体感受或小动作里,例如“醒来后在床边缓了一会儿”“杯子里的水放到有点凉”“路灯亮起来才发现自己发了会儿呆”,不要直接报数值。
 · 可参考的事件：通勤或出门、路上看到的、梦、失眠、不舒服、饿了、整理东西、想到用户、重要的日期、没做完的小计划、想拍照/自拍、好奇用户在干嘛。只有人格里明确写了学生/工作/其他身份时,才使用对应的校园、职场或身份细节。
 · 0–3 个长线事件,代表之后几天还可能延续的小剧情,用来增加沉浸感。
+· proactive_events 是内部主动计划,可以结构化；但它不能污染 summary/body/share_seed 的口吻。
 · proactive_events 要同时带 motive（心里一闪而过的念头,不要长解释）,适合时也可以带 scene/tone/impulse。
 · 顺手产出 3–8 个梦境碎片关键词,它们是今天残留在脑子里的小东西：物件、动作、气味、颜色、情绪、半句话都可以。每个碎片给一个 0.6–3.5 的权重,越重代表越容易在梦里反复冒出来。
 · 最近 3 天日记里已经写过的具体物件、场景、动作和 share_seed 不要当成今天的新事件重复写。可以保留“梦境余韵/似曾相识”的连续感,但必须换成新的现实小事或只写成模糊余温。
@@ -667,9 +670,9 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 
 只输出 JSON：
 {{
-  "summary": "一句短日记,口语化,像写给自己看的生活碎片",
-  "body": "一段真正写在日记本里的内容,第一人称,120到260字,有当天的具体小事、身体/情绪余温和一点没说出口的念头",
-  "share_seed": "以后可以主动发给朋友的一小句话,像私聊消息",
+  "summary": "一句短日记,口语化,像写给自己看的生活碎片,不要出现内部数值或状态报告词",
+  "body": "一段真正写在日记本里的内容,第一人称,120到260字,有当天的具体小事、身体/情绪余温和一点没说出口的念头,不要报能量数值",
+  "share_seed": "以后可以主动发给朋友的一小句话,像私聊消息,自然一点,不要像总结",
   "tags": ["低能量", "失眠", "好梦", "生病", "恢复期", "回弹", "平稳"],
   "today_events": [
     {{"window": "09:00-10:30", "event": "早间醒来,确认今天状态", "mood": "平稳"}}
@@ -740,6 +743,9 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     duplicate_hit, matched_date = _recent_diary_duplicate_hit(plugin, payload)
     if duplicate_hit:
         payload = _repair_duplicate_daily_diary(plugin, payload, matched_date)
+    polisher = getattr(plugin, "_polish_diary_payload", None)
+    if callable(polisher):
+        payload = polisher(payload)
     tags = payload.get("tags", [])
     if not isinstance(tags, list):
         tags = []
@@ -778,9 +784,9 @@ def fallback_diary_payload(plugin) -> dict[str, Any]:
         if "tail" in phases or {"health_tail", "sleep_tail"} & kinds:
             tags.append("恢复期")
     return {
-        "summary": f"今天整体偏{mood},能量大约 {energy}/100,适合保持温和节奏。",
-        "body": f"今天整体偏{mood},醒来后先确认了一下自己的状态,能量大概停在 {energy}/100。没有特别想把事情说得很重,只是把该做的小事一点点收起来。晚一点的时候又想到还有些话可以慢慢留着,不用急着告诉谁。",
-        "share_seed": "今天的状态适合平稳推进。",
+        "summary": f"今天偏{mood},醒来后慢慢把自己拢回了现实里。",
+        "body": f"醒来以后整个人还有点偏{mood},像是梦里剩下的雾没有完全散掉。我在床边缓了一会儿,把杯子挪到手边,又把今天要做的小事一点点想起来。没有什么特别重的话想说,只是觉得有些念头可以先放在心里,等晚一点遇到合适的小事再讲也不迟。",
+        "share_seed": "今天醒来还有点慢半拍,像梦里的雾还没散干净",
         "tags": tags,
         "today_events": [
             {"window": "09:00-10:30", "event": "早间整理与状态确认", "mood": str(mood)},

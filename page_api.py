@@ -100,6 +100,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/group/delete", self.delete_group, ["POST"], "Private Companion Page delete group"),
             ("/group/slang/update", self.update_group_slang, ["POST"], "Private Companion Page update group slang"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
+            ("/settings/swap_image_api", self.swap_image_api_settings, ["POST"], "Private Companion Page swap image API settings"),
             ("/config/export", self.export_migration_config, ["GET"], "Private Companion Page export migration config"),
             ("/config/backups", self.list_migration_backups, ["GET"], "Private Companion Page list migration backups"),
             ("/config/restore", self.restore_migration_backup, ["POST"], "Private Companion Page restore migration backup"),
@@ -962,6 +963,67 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 更新设置失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def swap_image_api_settings(self) -> dict[str, Any]:
+        try:
+            payload = await request.get_json(silent=True) or {}
+            force = self._normalize_bool_value(payload.get("force"))
+            pairs = (
+                ("external_image_api_platform", "backup_external_image_api_platform"),
+                ("EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL"),
+                ("EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_KEY"),
+                ("EXTERNAL_IMAGE_API_MODEL", "BACKUP_EXTERNAL_IMAGE_API_MODEL"),
+                ("external_image_api_size", "backup_external_image_api_size"),
+                ("external_image_api_timeout_seconds", "backup_external_image_api_timeout_seconds"),
+                ("external_image_api_custom_headers", "backup_external_image_api_custom_headers"),
+            )
+
+            current: dict[str, Any] = {}
+            for primary_key, backup_key in pairs:
+                current[primary_key] = self._normalize_setting_value(primary_key, self._config_get(primary_key))
+                current[backup_key] = self._normalize_setting_value(backup_key, self._config_get(backup_key))
+
+            backup_required = (
+                "BACKUP_EXTERNAL_IMAGE_API_BASE_URL",
+                "BACKUP_EXTERNAL_IMAGE_API_KEY",
+                "BACKUP_EXTERNAL_IMAGE_API_MODEL",
+            )
+            missing_backup = [key for key in backup_required if not str(current.get(key) or "").strip()]
+            if missing_backup and not force:
+                labels = {
+                    "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": "备选在线 API 地址",
+                    "BACKUP_EXTERNAL_IMAGE_API_KEY": "备选在线 API Key",
+                    "BACKUP_EXTERNAL_IMAGE_API_MODEL": "备选在线图片模型",
+                }
+                return self._error("备选在线图片 API 未配置完整，不能切换：" + "、".join(labels.get(key, key) for key in missing_backup))
+
+            changed: dict[str, Any] = {}
+            for primary_key, backup_key in pairs:
+                changed[primary_key] = current.get(backup_key)
+                changed[backup_key] = current.get(primary_key)
+
+            old_primary_complete = bool(
+                str(current.get("EXTERNAL_IMAGE_API_BASE_URL") or "").strip()
+                and str(current.get("EXTERNAL_IMAGE_API_KEY") or "").strip()
+                and str(current.get("EXTERNAL_IMAGE_API_MODEL") or "").strip()
+            )
+            changed["enable_backup_external_image_api"] = old_primary_complete
+
+            for key, value in changed.items():
+                self._apply_config_value(key, value, changed)
+            self._sync_photo_generation_runtime_config()
+            config_saved = await self._save_config_if_possible()
+            overview = await self.get_overview()
+            if overview.get("success"):
+                data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
+                data["changed"] = changed
+                data["config_saved"] = config_saved
+                data["message"] = "已交换主在线图片 API 与备选在线图片 API。"
+                overview["data"] = data
+            return overview
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 切换在线生图 API 失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     async def export_migration_config(self) -> dict[str, Any]:
         try:
             package = await self._build_migration_package(self._migration_export_options_from_request())
@@ -1369,27 +1431,52 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "画面干净清晰，真实摄影风格，不包含人物、不包含文字水印"
                 )
         started = time.time()
+        diagnostics = self._image_generation_timeout_diagnostics(
+            workflow_kind=workflow_kind,
+            has_reference_source=has_reference_source,
+            reference_image_path=reference_image_path,
+        )
         logger.info(
-            "[PrivateCompanionPage] 图片生成排障测试开始: workflow_kind=%s prompt_chars=%s reference=%s prompt=%s",
+            "[PrivateCompanionPage] 图片生成排障测试开始: workflow_kind=%s prompt_chars=%s reference=%s timeout=%ss estimated=%ss prompt=%s",
             self._single_line(workflow_kind, 40),
             len(str(prompt_text or "")),
             has_reference_source,
+            diagnostics.get("test_timeout_seconds"),
+            diagnostics.get("estimated_timeout_seconds"),
             self._single_line(prompt_text, 180),
         )
-        timeout = max(
-            45,
-            self._int(getattr(self.plugin, "comfyui_photo_wait_seconds", 90)) + 30,
-            self._int(getattr(self.plugin, "external_image_api_timeout_seconds", 180)) + 30,
-        )
-        backend_name, image_path, note = await asyncio.wait_for(
-            generator(
-                workflow_kind=workflow_kind,
-                prompt_text=prompt_text,
-                session_key="private_companion_troubleshooting",
-                reference_image_path=reference_image_path,
-            ),
-            timeout=timeout,
-        )
+        timeout = self._int(diagnostics.get("test_timeout_seconds"), 240, 45, 900)
+        try:
+            backend_name, image_path, note = await asyncio.wait_for(
+                generator(
+                    workflow_kind=workflow_kind,
+                    prompt_text=prompt_text,
+                    session_key="private_companion_troubleshooting",
+                    reference_image_path=reference_image_path,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.time() - started) * 1000)
+            warnings = list(diagnostics.get("warnings") or [])
+            warnings.insert(0, f"测试等待 {timeout}s 后仍未返回；实际链路可能卡在在线 API、备用 API、参考图接口或本地工作流队列。")
+            return {
+                "ok": False,
+                "title": "图片生成链路测试",
+                "backend": "",
+                "path": "",
+                "file_size": 0,
+                "detail": f"测试超时（{timeout}s）",
+                "prompt": self._single_line(prompt_text, 220),
+                "workflow_kind": self._single_line(workflow_kind, 20),
+                "reference_image": self._single_line(reference_image_path, 260),
+                "used_reference": False,
+                "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
+                "elapsed_ms": elapsed_ms,
+                "error": f"测试超时（{timeout}s）",
+                **diagnostics,
+                "warnings": warnings[:8],
+            }
         elapsed_ms = int((time.time() - started) * 1000)
         exists = False
         file_size = 0
@@ -1428,7 +1515,94 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
             "elapsed_ms": elapsed_ms,
             "error": "" if image_path and exists else (self._single_line(note, 220) or "图片生成未返回有效文件"),
+            **diagnostics,
         }
+
+    def _image_generation_timeout_diagnostics(
+        self,
+        *,
+        workflow_kind: str,
+        has_reference_source: bool,
+        reference_image_path: str,
+    ) -> dict[str, Any]:
+        preferred = self._single_line(getattr(self.plugin, "photo_generation_backend", "auto"), 30).lower() or "auto"
+        external_timeout = self._int(getattr(self.plugin, "external_image_api_timeout_seconds", 180), 180, 20, 600)
+        backup_timeout = self._int(getattr(self.plugin, "backup_external_image_api_timeout_seconds", 180), 180, 20, 600)
+        comfyui_wait = self._int(getattr(self.plugin, "comfyui_photo_wait_seconds", 90), 90, 5, 600)
+        primary_external_configured = bool(
+            getattr(self.plugin, "external_image_api_base_url", "")
+            and getattr(self.plugin, "external_image_api_key", "")
+            and getattr(self.plugin, "external_image_api_model", "")
+        )
+        backup_available = bool(getattr(self.plugin, "_backup_external_photo_available", lambda: False)())
+        external_available = bool(getattr(self.plugin, "_external_photo_available", lambda: False)())
+        comfyui_available = bool(getattr(self.plugin, "_comfyui_photo_available", lambda: False)())
+        sdgen_available = bool(getattr(self.plugin, "_sdgen_photo_available", lambda: False)())
+        tool_call_timeout = self._image_generation_tool_call_timeout_seconds()
+
+        segments: list[tuple[str, int]] = []
+        warnings: list[str] = []
+        if preferred in {"auto", "external"} and external_available:
+            if primary_external_configured:
+                segments.append(("主在线图片 API", external_timeout * 2))
+            if backup_available:
+                segments.append(("备选在线图片 API", backup_timeout * 2))
+                warnings.append("已启用备选在线图片 API：主接口失败或超时后会再跑一轮备选接口，实际耗时可能明显长于单次测试观感。")
+        if preferred in {"auto", "comfyui"} and comfyui_available:
+            segments.append(("ComfyUI", comfyui_wait))
+        if preferred in {"auto", "sdgen"} and sdgen_available:
+            segments.append(("SDGen", 180))
+            warnings.append("SDGen 调用由 SDGen 插件自身控制，本插件只能估算耗时，无法完全保证外层超时。")
+
+        estimated = sum(seconds for _, seconds in segments) + 30
+        if not segments:
+            estimated = max(45, external_timeout + 30, comfyui_wait + 30)
+        test_timeout = min(900, max(45, estimated + 30))
+        if estimated + 30 > test_timeout:
+            warnings.append(f"估算完整回退链路约 {estimated}s，排障测试外层最多等待 {test_timeout}s；极端慢链路仍可能被测试层截断。")
+        if preferred == "auto" and len(segments) > 1:
+            warnings.append("当前为自动后端：真实出图可能按在线 API、ComfyUI、SDGen 依次回退，测试通过只代表本次命中的那条链路可用。")
+        if has_reference_source and workflow_kind not in {"selfie", "portrait", "自拍", "人像"}:
+            warnings.append("已配置参考图，但本次测的是文生图；自拍、表情包、改图或 QQ 空间人物配图仍需单独测试参考图链路。")
+        if workflow_kind in {"selfie", "portrait", "自拍", "人像"} and not reference_image_path and has_reference_source:
+            warnings.append("检测到参考图配置，但本次没有解析到可用本地参考图；真实自拍可能会因下载/路径问题失败。")
+        if external_available:
+            warnings.append("在线图片 API 使用全局串行锁；多个生图请求同时发生时，后来的请求会先排队，单独点击测试无法覆盖排队等待。")
+        if tool_call_timeout and estimated > tool_call_timeout:
+            warnings.append(
+                f"自然语言/主链工具调用可能受 AstrBot tool_call_timeout={tool_call_timeout}s 限制；"
+                f"当前完整链路估算约 {estimated}s，测试能等到不代表 pc_generate_photo 工具一定不会超时。"
+            )
+        warnings.append("排障生图只检查生成文件，不覆盖后续发图、QQ 空间发布、记忆回写和主链工具调用耗时。")
+
+        return {
+            "timeout_seconds": test_timeout,
+            "test_timeout_seconds": test_timeout,
+            "estimated_timeout_seconds": estimated,
+            "timeout_budget": " + ".join(f"{name}{seconds}s" for name, seconds in segments) or "未命中可用后端",
+            "backend_preference": preferred,
+            "external_timeout_seconds": external_timeout,
+            "backup_external_timeout_seconds": backup_timeout,
+            "comfyui_wait_seconds": comfyui_wait,
+            "backup_external": backup_available,
+            "external_queue_lock": external_available,
+            "tool_call_timeout_seconds": tool_call_timeout,
+            "warnings": warnings[:8],
+        }
+
+    def _image_generation_tool_call_timeout_seconds(self) -> int:
+        context = getattr(self.plugin, "context", None)
+        getter = getattr(context, "get_config", None)
+        if not callable(getter):
+            return 120
+        try:
+            cfg = getter()
+        except Exception:
+            return 120
+        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(provider_settings, dict):
+            return 120
+        return self._int(provider_settings.get("tool_call_timeout"), 120, 1, 3600)
 
     def _troubleshooting_role_appearance_prompt(self) -> str:
         persona = str(getattr(self.plugin, "schedule_persona_prompt", "") or self._config_get("schedule_persona_prompt") or "")
@@ -2938,6 +3112,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "detail": self._single_line(result.get("detail"), 220),
             "error": self._single_line(result.get("error"), 220),
             "prompt": self._single_line(result.get("prompt"), 500),
+            "timeout_seconds": self._int(result.get("timeout_seconds")),
+            "test_timeout_seconds": self._int(result.get("test_timeout_seconds")),
+            "estimated_timeout_seconds": self._int(result.get("estimated_timeout_seconds")),
+            "timeout_budget": self._single_line(result.get("timeout_budget"), 220),
+            "backend_preference": self._single_line(result.get("backend_preference"), 30),
+            "external_timeout_seconds": self._int(result.get("external_timeout_seconds")),
+            "backup_external_timeout_seconds": self._int(result.get("backup_external_timeout_seconds")),
+            "comfyui_wait_seconds": self._int(result.get("comfyui_wait_seconds")),
+            "backup_external": bool(result.get("backup_external")),
+            "external_queue_lock": bool(result.get("external_queue_lock")),
+            "tool_call_timeout_seconds": self._int(result.get("tool_call_timeout_seconds")),
+            "warnings": [
+                self._single_line(item, 220)
+                for item in (result.get("warnings") if isinstance(result.get("warnings"), list) else [])[:8]
+                if self._single_line(item, 220)
+            ],
             "text_preview": self._single_line(result.get("text_preview"), 220),
             "original_text_preview": self._single_line(result.get("original_text_preview"), 220),
             "final_text_preview": self._single_line(result.get("final_text_preview"), 220),
@@ -12730,9 +12920,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if unlocked:
             diary_entries = []
             for item in [entry for entry in diaries if isinstance(entry, dict)][-60:]:
-                body = self._single_line(item.get("body"), 1600)
-                summary = self._single_line(item.get("summary"), 1000)
-                share_seed = self._single_line(item.get("share_seed"), 1000)
+                body = self.plugin._polish_diary_text(item.get("body"), field="body")
+                summary = self.plugin._polish_diary_text(item.get("summary"), field="summary")
+                share_seed = self.plugin._polish_diary_text(item.get("share_seed"), field="share")
                 content = body or "\n\n".join(part for part in (summary, share_seed) if part)
                 diary_entries.append(
                     {
@@ -14160,9 +14350,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "diaries": [
                 {
                     "date": self._single_line(item.get("date"), 24),
-                    "summary": self._single_line(item.get("summary"), 180),
-                    "body": self._single_line(item.get("body"), 500),
-                    "share_seed": self._single_line(item.get("share_seed"), 140),
+                    "summary": self.plugin._polish_diary_text(item.get("summary"), field="summary"),
+                    "body": self.plugin._polish_diary_text(item.get("body"), field="body"),
+                    "share_seed": self.plugin._polish_diary_text(item.get("share_seed"), field="share"),
                     "tags": [self._single_line(tag, 20) for tag in item.get("tags", [])[:6] if self._single_line(tag, 20)]
                     if isinstance(item.get("tags"), list)
                     else [],

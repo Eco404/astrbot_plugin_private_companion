@@ -6387,6 +6387,46 @@ body.daily-outfit-preview-open {
   font-size: 11px;
 }
 
+.setup-guide-advanced-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid rgba(26, 75, 140, 0.14);
+  border-radius: var(--radius);
+  background: rgba(26, 75, 140, 0.045);
+}
+
+.setup-guide-advanced-tools div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.setup-guide-advanced-tools b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.setup-guide-advanced-tools small {
+  color: var(--muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.setup-guide-advanced-tools button {
+  min-height: 34px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .setup-guide-switch {
   display: inline-flex;
   align-items: center;

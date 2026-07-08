@@ -26,6 +26,101 @@ class CommandHandlersMixin:
     def _feature_on_text(self, value: Any) -> str:
         return "开启" if bool(value) else "关闭"
 
+    def _image_api_runtime_value(self, attr_name: str, default: Any = "") -> Any:
+        return getattr(self, attr_name, default)
+
+    def _image_api_format_runtime_pair(self, *, backup: bool = False) -> str:
+        prefix = "backup_" if backup else ""
+        platform = _single_line(self._image_api_runtime_value(f"{prefix}external_image_api_platform", "auto"), 30) or "auto"
+        model = _single_line(self._image_api_runtime_value(f"{prefix}external_image_api_model", ""), 80) or "未配置"
+        size = _single_line(self._image_api_runtime_value(f"{prefix}external_image_api_size", ""), 40) or "未配置"
+        timeout = _safe_int(self._image_api_runtime_value(f"{prefix}external_image_api_timeout_seconds", 180), 180, 20, 600)
+        base_url = str(self._image_api_runtime_value(f"{prefix}external_image_api_base_url", "") or "").strip()
+        key = str(self._image_api_runtime_value(f"{prefix}external_image_api_key", "") or "").strip()
+        ready = bool(base_url and key and str(self._image_api_runtime_value(f"{prefix}external_image_api_model", "") or "").strip())
+        return (
+            f"{'备选' if backup else '主用'}："
+            f"{'可用' if ready else '未完整'}｜平台 {platform}｜模型 {model}｜尺寸 {size}｜超时 {timeout}s"
+        )
+
+    def _image_api_command_status_text(self) -> str:
+        enabled_backup = bool(getattr(self, "enable_backup_external_image_api", False))
+        return (
+            "在线生图 API 当前配置：\n"
+            f"{self._image_api_format_runtime_pair(backup=False)}\n"
+            f"{self._image_api_format_runtime_pair(backup=True)}\n"
+            f"备选自动兜底：{self._feature_on_text(enabled_backup)}\n"
+            "切换主备：陪伴 切换生图API"
+        )
+
+    def _set_image_api_config_value(self, key: str, value: Any) -> bool:
+        config = getattr(self, "config", None)
+        if config is None:
+            return False
+        try:
+            saved = _set_into_config(config, key, value, allow_flat_fallback=False)
+        except TypeError:
+            saved = _set_into_config(config, key, value)
+        if not saved:
+            saved = _set_into_config(config, key, value)
+        return bool(saved)
+
+    def _swap_external_image_api_command_text(self, *, force: bool = False) -> str:
+        pairs = (
+            ("external_image_api_platform", "backup_external_image_api_platform", "external_image_api_platform", "backup_external_image_api_platform"),
+            ("external_image_api_base_url", "backup_external_image_api_base_url", "EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL"),
+            ("external_image_api_key", "backup_external_image_api_key", "EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_KEY"),
+            ("external_image_api_model", "backup_external_image_api_model", "EXTERNAL_IMAGE_API_MODEL", "BACKUP_EXTERNAL_IMAGE_API_MODEL"),
+            ("external_image_api_size", "backup_external_image_api_size", "external_image_api_size", "backup_external_image_api_size"),
+            ("external_image_api_timeout_seconds", "backup_external_image_api_timeout_seconds", "external_image_api_timeout_seconds", "backup_external_image_api_timeout_seconds"),
+            ("external_image_api_custom_headers", "backup_external_image_api_custom_headers", "external_image_api_custom_headers", "backup_external_image_api_custom_headers"),
+        )
+        current: dict[str, Any] = {}
+        for primary_attr, backup_attr, _, _ in pairs:
+            current[primary_attr] = getattr(self, primary_attr, "")
+            current[backup_attr] = getattr(self, backup_attr, "")
+
+        backup_missing = []
+        if not str(current.get("backup_external_image_api_base_url") or "").strip():
+            backup_missing.append("备选在线 API 地址")
+        if not str(current.get("backup_external_image_api_key") or "").strip():
+            backup_missing.append("备选在线 API Key")
+        if not str(current.get("backup_external_image_api_model") or "").strip():
+            backup_missing.append("备选在线图片模型")
+        if backup_missing and not force:
+            return (
+                "备选在线图片 API 未配置完整，暂不切换："
+                + "、".join(backup_missing)
+                + "\n需要先到拓展页填写备选 API，或确认风险后使用：陪伴 切换生图API 强制"
+            )
+
+        old_primary_complete = bool(
+            str(current.get("external_image_api_base_url") or "").strip()
+            and str(current.get("external_image_api_key") or "").strip()
+            and str(current.get("external_image_api_model") or "").strip()
+        )
+
+        for primary_attr, backup_attr, primary_key, backup_key in pairs:
+            primary_value = current.get(primary_attr)
+            backup_value = current.get(backup_attr)
+            if primary_attr.endswith("_platform"):
+                normalizer = getattr(self, "_normalize_external_image_api_platform", None)
+                if callable(normalizer):
+                    primary_value = normalizer(primary_value)
+                    backup_value = normalizer(backup_value)
+            if primary_attr.endswith("_timeout_seconds"):
+                primary_value = _safe_int(primary_value, 180, 20, 600)
+                backup_value = _safe_int(backup_value, 180, 20, 600)
+            setattr(self, primary_attr, backup_value)
+            setattr(self, backup_attr, primary_value)
+            self._set_image_api_config_value(primary_key, backup_value)
+            self._set_image_api_config_value(backup_key, primary_value)
+
+        self.enable_backup_external_image_api = old_primary_complete
+        self._set_image_api_config_value("enable_backup_external_image_api", old_primary_complete)
+        self._save_config_if_possible()
+        return "已交换主/备在线生图 API。\n" + self._image_api_command_status_text()
+
     def _companion_manual_clean_multiline(self, value: Any, limit: int = 1800) -> str:
         text = str(value or "").strip()
         if not text:

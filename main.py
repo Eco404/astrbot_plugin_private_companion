@@ -430,7 +430,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.8.2",
+    "5.8.3",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -7402,6 +7402,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "生成今日穿搭", "生成今日穿搭图", "生成每日穿搭", "生成每日穿搭图",
         }
         photo_command_actions = {"生图", "画图", "绘图", "生成图片", "出图", "自拍", "拍照", "拍一张", "改图", "修图", "重绘", "P图", "p图"}
+        image_api_status_actions = {"查看生图API", "查看生图api", "生图API状态", "生图api状态", "在线生图API", "在线生图api", "生图接口"}
+        image_api_swap_actions = {
+            "切换生图API", "切换生图api", "交换生图API", "交换生图api",
+            "切换在线生图API", "切换在线生图api", "交换在线生图API", "交换在线生图api",
+            "切换图片API", "切换图片api", "交换图片API", "交换图片api",
+            "切换备用生图", "启用备用生图", "使用备用生图", "切到备用生图",
+            "切换备选生图", "启用备选生图", "使用备选生图", "切到备选生图",
+        }
         if action in companion_manual_query_actions:
             inline_value = value.strip()
             if inline_value in {"确认", "应用", "执行", "确认执行", "应用建议"}:
@@ -7463,6 +7471,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "TTS语种", "tts语种", "语音语种", "TTS", "tts",
             *companion_manual_query_actions,
             *photo_command_actions,
+            *image_api_swap_actions,
         }
 
         is_private = bool(getattr(event, "is_private_chat", lambda: False)())
@@ -7499,6 +7508,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "话头删除", "删除话头", "未完话头删除", "删除未完话头",
             "清空记忆", "忘记我",
             "参考图", "人设参考图", "自拍参考图",
+            *image_api_status_actions,
+            *image_api_swap_actions,
         }
         if (action in management_actions or bookshelf_password_output_requested) and not self._can_manage_private_companion(event):
             await self._reply(event, self._management_denied_text())
@@ -7567,6 +7578,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response, response_image_path = await self._photo_reference_command_payload(event, user_id, value)
             elif action in daily_outfit_view_actions:
                 response, response_image_path = self._daily_outfit_command_payload()
+            elif action in image_api_status_actions:
+                response = self._image_api_command_status_text()
+            elif action in image_api_swap_actions:
+                response = "正在交换主/备在线生图 API。"
             elif action in photo_command_actions:
                 response = "正在准备图片。"
             elif action in {"查看主动判定", "主动判定", "判定"}:
@@ -7700,6 +7715,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if action in photo_command_actions:
             await self._handle_companion_photo_command(event, user_id, action, value)
+            return
+        if action in image_api_swap_actions:
+            force_swap = bool(re.search(r"(?:强制|force|确认|直接)", value, flags=re.I))
+            await self._reply(event, self._swap_external_image_api_command_text(force=force_swap))
+            event.stop_event()
             return
         if action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
             image_sources = await self._qzone_image_sources_from_event(event)

@@ -580,6 +580,173 @@ class NewsExplorationMixin:
         )
         del pool[:-200]
 
+    @staticmethod
+    def _external_event_payload_text(payload: dict[str, Any], *, limit: int = 900) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        parts: list[str] = []
+        for key in (
+            "headline",
+            "topic",
+            "title",
+            "impression",
+            "summary",
+            "note",
+            "comment",
+            "review",
+            "up_name",
+            "selected_source",
+            "source",
+            "source_title",
+            "video_context_text",
+        ):
+            value = payload.get(key)
+            if isinstance(value, list):
+                value = " ".join(str(item) for item in value[:6])
+            text = _single_line(value, 260)
+            if text:
+                parts.append(text)
+        for key in ("tags", "keywords", "actions", "memory_context"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                text = " ".join(_single_line(item, 80) for item in value[:8] if _single_line(item, 80))
+                if text:
+                    parts.append(text)
+        return _single_line(" ".join(parts), limit)
+
+    def _external_event_user_preference_profile(self, user: dict[str, Any]) -> dict[str, Any]:
+        profile: dict[str, Any] = {
+            "positive": [],
+            "negative": [],
+            "context": "",
+        }
+        memory = user.get("companion_memory") if isinstance(user, dict) else {}
+        llm_profile = memory.get("profile") if isinstance(memory, dict) else {}
+
+        def add_values(key: str, target: str, limit: int = 8) -> None:
+            value = llm_profile.get(key) if isinstance(llm_profile, dict) else None
+            values: list[str] = []
+            if isinstance(value, list):
+                values = [_single_line(item, 80) for item in value[:limit] if _single_line(item, 80)]
+            else:
+                text = _single_line(value, 160)
+                if text:
+                    values = [text]
+            profile[target].extend(values)
+
+        add_values("interests", "positive", 10)
+        add_values("weak_preferences", "positive", 10)
+        add_values("strong_memories", "positive", 5)
+        add_values("boundaries", "negative", 10)
+        action_prefs = user.get("action_preferences") if isinstance(user, dict) else {}
+        if isinstance(action_prefs, dict):
+            for key, value in action_prefs.items():
+                text = _single_line(value if isinstance(value, str) else key, 80)
+                if text:
+                    profile["positive"].append(text)
+        context_parts = []
+        formatter = getattr(self, "_format_companion_memory_for_prompt", None)
+        if callable(formatter):
+            try:
+                context_parts.append(_single_line(formatter(user), 900))
+            except Exception:
+                pass
+        for key in ("last_user_message", "last_companion_message", "proactive_boundary_note"):
+            text = _single_line(user.get(key), 180) if isinstance(user, dict) else ""
+            if text:
+                context_parts.append(text)
+        profile["positive"] = list(dict.fromkeys(item for item in profile["positive"] if item))[:24]
+        profile["negative"] = list(dict.fromkeys(item for item in profile["negative"] if item))[:16]
+        profile["context"] = _single_line("；".join(part for part in context_parts if part), 1200)
+        return profile
+
+    @staticmethod
+    def _external_event_text_match_score(text: str, clues: list[str], *, negative: bool = False) -> tuple[int, list[str]]:
+        haystack = str(text or "").lower()
+        score = 0
+        hits: list[str] = []
+        for clue in clues:
+            clue_text = _single_line(clue, 80)
+            if not clue_text:
+                continue
+            tokens = re.findall(r"[\u4e00-\u9fff]{2,8}|[a-z0-9_]{3,24}", clue_text.lower())
+            matched = 0
+            for token in tokens[:6]:
+                if token and token in haystack:
+                    matched += 1
+            if matched:
+                hits.append(clue_text)
+                score += min(5 if negative else 4, matched * (3 if negative else 2))
+        return min(20 if negative else 18, score), hits[:5]
+
+    def _external_event_user_preference_decision(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        profile = self._external_event_user_preference_profile(user)
+        payload_text = self._external_event_payload_text(payload).lower()
+        positive_score, positive_hits = self._external_event_text_match_score(payload_text, profile.get("positive", []))
+        negative_score, negative_hits = self._external_event_text_match_score(payload_text, profile.get("negative", []), negative=True)
+        context_score, context_hits = self._external_event_text_match_score(payload_text, [profile.get("context", "")])
+        score = max(0, min(30, positive_score + min(8, context_score) - negative_score))
+        return {
+            "score": score,
+            "positive_hits": positive_hits,
+            "negative_hits": negative_hits,
+            "context_hits": context_hits,
+            "blocked": bool(negative_score >= 8 and positive_score <= 2),
+        }
+
+    def _external_event_payload_from_news_item(self, item: dict[str, Any], *, base_digest: dict[str, Any] | None = None) -> dict[str, Any]:
+        title = _single_line(item.get("title"), 100)
+        summary = _single_line(item.get("summary") or item.get("snippet") or item.get("video_context_text"), 240)
+        source = _single_line(item.get("source"), 40)
+        payload = {
+            "topic": title or _single_line((base_digest or {}).get("topic"), 40) or "刚看到的新闻",
+            "headline": title or _single_line((base_digest or {}).get("headline"), 100),
+            "impression": summary or _single_line((base_digest or {}).get("impression"), 240),
+            "selected_key": _single_line(item.get("key"), 32),
+            "selected_link": _single_line(item.get("link") or item.get("video_link"), 400),
+            "selected_source": source,
+            "items": (base_digest or {}).get("items") if isinstance((base_digest or {}).get("items"), list) else [],
+            "created_ts": _safe_float((base_digest or {}).get("created_ts"), 0) or _now_ts(),
+        }
+        for key in ("published_ts", "score", "video_context_text", "video_link", "article_readable", "video_subtitle_readable"):
+            if key in item:
+                payload[key] = item.get(key)
+        return payload
+
+    def _select_external_event_for_user(
+        self,
+        user: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        *,
+        source_type: str,
+        base_payload: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        now = _now_ts() if now is None else now
+        best: dict[str, Any] = {}
+        best_score = -10**9
+        for raw in candidates[:12]:
+            if not isinstance(raw, dict):
+                continue
+            payload = self._external_event_payload_from_news_item(raw, base_digest=base_payload) if source_type == "news" else dict(raw)
+            if base_payload and source_type != "news":
+                payload.setdefault("created_ts", base_payload.get("created_ts"))
+            pref = self._external_event_user_preference_decision(user, payload)
+            if pref.get("blocked"):
+                continue
+            quality = self._external_event_quality_score(payload)
+            user_match = self._external_event_user_interest_score(user, payload)
+            duplicate_penalty = 12 if self._external_event_recently_seen(payload, source_type=source_type, now=now) else 0
+            total = quality * 2 + user_match * 3 + _safe_int(pref.get("score"), 0) - duplicate_penalty
+            if total > best_score:
+                best_score = total
+                best = {
+                    "payload": payload,
+                    "preference": pref,
+                    "selection_score": total,
+                }
+        return best
+
     def _external_event_user_interest_score(self, user: dict[str, Any], payload: dict[str, Any]) -> int:
         memory_text = ""
         formatter = getattr(self, "_format_companion_memory_for_prompt", None)
@@ -588,11 +755,7 @@ class NewsExplorationMixin:
                 memory_text = _single_line(formatter(user), 700).lower()
             except Exception:
                 memory_text = ""
-        haystack = (
-            _single_line(payload.get("headline") or payload.get("topic") or payload.get("title"), 180)
-            + " "
-            + _single_line(payload.get("impression") or payload.get("summary") or payload.get("note"), 320)
-        ).lower()
+        haystack = self._external_event_payload_text(payload).lower()
         if not memory_text or not haystack:
             return 0
         score = 0
@@ -944,13 +1107,18 @@ class NewsExplorationMixin:
         return contexts
 
     def _bilibili_video_candidate_from_memory(self) -> dict[str, Any] | None:
-        for item in self._load_bilibili_recent_video_memories():
+        candidates = self._bilibili_video_candidates_from_memory(limit=1)
+        return candidates[0] if candidates else None
+
+    def _bilibili_video_candidates_from_memory(self, *, limit: int = 6) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for item in self._load_bilibili_recent_video_memories(limit=max(1, limit * 2)):
             bvid = self._bilibili_memory_bvid(item)
             title = self._bilibili_memory_title(item)
             if not bvid or not title:
                 continue
             text = _single_line(item.get("text"), 220)
-            return {
+            candidates.append({
                 "key": f"{bvid}:{_single_line(item.get('time'), 20)}:memory",
                 "bvid": bvid,
                 "title": title,
@@ -964,24 +1132,32 @@ class NewsExplorationMixin:
                 "actions": [],
                 "source": "memory_api",
                 "memory_context": [text] if text else [],
-            }
-        return None
+            })
+            if len(candidates) >= limit:
+                break
+        return candidates
 
-    def _latest_bilibili_video_candidate(self, *, include_memory_api: bool = True) -> dict[str, Any] | None:
+    def _latest_bilibili_video_candidates(self, *, include_memory_api: bool = True, limit: int = 8) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
         logs = self._load_bilibili_watch_log()
         if logs:
-            for item in reversed(logs[-20:]):
+            for item in reversed(logs[-40:]):
                 bvid = _single_line(item.get("bvid"), 32)
                 title = _single_line(item.get("title"), 80)
                 if not bvid or not title:
                     continue
                 score = _safe_int(item.get("score"), 0, 0, 10)
-                comment = _single_line(item.get("comment"), 120)
-                review = _single_line(item.get("review"), 180)
                 if score < self.bilibili_share_min_score:
                     continue
-                return {
-                    "key": f"{bvid}:{_single_line(item.get('time'), 20)}",
+                key = f"{bvid}:{_single_line(item.get('time'), 20)}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                comment = _single_line(item.get("comment"), 120)
+                review = _single_line(item.get("review"), 180)
+                candidates.append({
+                    "key": key,
                     "bvid": bvid,
                     "title": title,
                     "up_name": _single_line(item.get("up_name"), 40),
@@ -994,10 +1170,20 @@ class NewsExplorationMixin:
                     "actions": list(item.get("actions") or []) if isinstance(item.get("actions"), list) else [],
                     "source": "watch_log",
                     "memory_context": self._bilibili_memory_context_for_bvid(bvid) if include_memory_api else [],
-                }
-        if include_memory_api:
-            return self._bilibili_video_candidate_from_memory()
-        return None
+                })
+                if len(candidates) >= limit:
+                    break
+        if include_memory_api and len(candidates) < limit:
+            for item in self._bilibili_video_candidates_from_memory(limit=limit - len(candidates)):
+                key = str(item.get("key") or item.get("bvid") or "")
+                if key and key not in seen:
+                    seen.add(key)
+                    candidates.append(item)
+        return candidates[:limit]
+
+    def _latest_bilibili_video_candidate(self, *, include_memory_api: bool = True) -> dict[str, Any] | None:
+        candidates = self._latest_bilibili_video_candidates(include_memory_api=include_memory_api, limit=1)
+        return candidates[0] if candidates else None
 
     def _record_bilibili_share_to_memory(self, user_id: str, candidate: dict[str, Any]) -> None:
         api = self._find_bilibili_memory_api()
@@ -1082,21 +1268,18 @@ class NewsExplorationMixin:
         if not self.enable_bilibili_integration:
             return False
         include_memory_api = bool(self._bilibili_memory_api_available(allow_probe=False))
-        candidate = self._latest_bilibili_video_candidate(include_memory_api=include_memory_api)
-        if not isinstance(candidate, dict):
+        candidates = self._latest_bilibili_video_candidates(include_memory_api=include_memory_api, limit=8)
+        if not candidates:
             return False
         users = self.data.get("users")
         if not isinstance(users, dict):
             return False
         now = _now_ts()
-        key = str(candidate.get("key") or candidate.get("bvid") or "")
         changed = False
         for user_id, user in users.items():
             if not isinstance(user, dict) or not self._is_target_private_user(str(user_id), user) or not user.get("enabled", True) or not user.get("umo"):
                 continue
             if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 90) * 60:
-                continue
-            if str(user.get("last_bilibili_share_key") or "") == key:
                 continue
             if now - _safe_float(user.get("last_bilibili_share_at"), 0) < 10 * 3600:
                 continue
@@ -1106,6 +1289,13 @@ class NewsExplorationMixin:
                 and str(user.get("planned_proactive_source") or "") == "timer"
                 and self._llm_timer_can_use_internal_scheduler(timer_event if isinstance(timer_event, dict) else None)
             ):
+                continue
+            selection = self._select_external_event_for_user(user, candidates, source_type="bilibili", now=now)
+            candidate = selection.get("payload") if isinstance(selection, dict) else None
+            if not isinstance(candidate, dict):
+                continue
+            key = str(candidate.get("key") or candidate.get("bvid") or "")
+            if key and str(user.get("last_bilibili_share_key") or "") == key:
                 continue
             score = _safe_int(candidate.get("score"), 0, 0, 10)
             decision = self._external_event_share_decision(
@@ -1123,6 +1313,9 @@ class NewsExplorationMixin:
             if not decision.get("should_share"):
                 continue
             chance = min(0.9, max(self.bilibili_share_probability, _safe_float(decision.get("probability"), self.bilibili_share_probability)))
+            preference = selection.get("preference") if isinstance(selection.get("preference"), dict) else {}
+            if _safe_int(preference.get("score"), 0) >= 8:
+                chance = min(0.95, chance + 0.12)
             if random.random() > chance:
                 continue
             delay_minutes = random.randint(12, 70)
@@ -1138,9 +1331,9 @@ class NewsExplorationMixin:
                     "scheduled_ts": scheduled,
                     "topic": title,
                     "score": max(score, _safe_int(decision.get("score"), score, 0, 100)),
-                    "motive": f"刚刷到 B 站视频《{title}》,觉得有一点能分享给 {user_id},但只轻轻提一句",
+                    "motive": f"刚刷到 B 站视频《{title}》,感觉和对方平时会在意的东西有点贴,只轻轻提一句",
                     "context_key": "bilibili_video_context",
-                    "context": {**candidate, "created_ts": now, "share_decision": decision},
+                    "context": {**candidate, "created_ts": now, "share_decision": decision, "preference_match": preference},
                 },
             )
             if not accepted:
@@ -2820,14 +3013,33 @@ class NewsExplorationMixin:
             for user_id, user in users.items():
                 if not isinstance(user, dict) or not self._is_target_private_user(str(user_id), user) or not user.get("enabled", True) or not user.get("umo"):
                     continue
+                selection = self._select_external_event_for_user(user, fresh[:12] or items[:12], source_type="news", base_payload=digest, now=now)
+                user_digest = selection.get("payload") if isinstance(selection, dict) else None
+                if not isinstance(user_digest, dict):
+                    user_digest = dict(digest)
+                user_preference = selection.get("preference") if isinstance(selection.get("preference"), dict) else {}
+                user_selected_key = _single_line(user_digest.get("selected_key"), 32) or selected_key
+                user_wish = wish
+                if user_selected_key and user_selected_key != selected_key:
+                    user_wish = self._external_event_fallback_wish(user_digest, source_type="news")
+                    if isinstance(wish, dict) and wish:
+                        user_wish = {
+                            **user_wish,
+                            "should_share": bool(wish.get("should_share")) or bool(user_wish.get("should_share")),
+                            "relevance": max(_safe_int(wish.get("relevance"), 0, 0, 10), _safe_int(user_wish.get("relevance"), 0, 0, 10)),
+                            "desire": max(_safe_int(wish.get("desire"), 0, 0, 10), _safe_int(user_wish.get("desire"), 0, 0, 10)),
+                            "share_probability": max(_safe_float(wish.get("share_probability"), 0.0), _safe_float(user_wish.get("share_probability"), 0.0)),
+                        }
+                    user_digest["self_link"] = user_wish
                 strong_self_link = (
-                    isinstance(wish, dict)
-                    and bool(wish)
+                    isinstance(user_wish, dict)
+                    and bool(user_wish)
                     and (
-                        _safe_int(wish.get("relevance"), 0, 0, 10) >= 8
-                        or _safe_int(wish.get("desire"), 0, 0, 10) >= 8
-                        or _safe_float(wish.get("share_probability"), 0.0) >= 0.8
-                        or bool(wish.get("boost_reason"))
+                        _safe_int(user_wish.get("relevance"), 0, 0, 10) >= 8
+                        or _safe_int(user_wish.get("desire"), 0, 0, 10) >= 8
+                        or _safe_float(user_wish.get("share_probability"), 0.0) >= 0.8
+                        or bool(user_wish.get("boost_reason"))
+                        or _safe_int(user_preference.get("score"), 0) >= 10
                     )
                 )
                 idle_required = max(self.idle_minutes, 90) * 60
@@ -2837,24 +3049,24 @@ class NewsExplorationMixin:
                 if idle_elapsed < idle_required:
                     _note_news_share(user_id, "skipped", "用户近期仍活跃，暂不主动打扰", idle_elapsed_seconds=round(idle_elapsed, 1), idle_required_seconds=round(idle_required, 1))
                     continue
-                if str(user.get("last_news_share_key") or "") == selected_key:
+                if str(user.get("last_news_share_key") or "") == user_selected_key:
                     _note_news_share(user_id, "skipped", "这条新闻已经给该用户排过主动")
                     continue
                 if now - _safe_float(user.get("last_news_share_at"), 0) < 8 * 3600:
                     _note_news_share(user_id, "skipped", "新闻分享 8 小时冷却中")
                     continue
-                if isinstance(wish, dict) and wish:
+                if isinstance(user_wish, dict) and user_wish:
                     if now - _safe_float(user.get("last_external_event_self_link_at"), 0) < self.external_event_self_link_cooldown_hours * 3600:
                         _note_news_share(user_id, "skipped", "外界信息自我关联冷却中")
                         continue
-                    if not wish.get("should_share"):
-                        _note_news_share(user_id, "skipped", "自我关联判断认为不适合主动分享", relevance=_safe_int(wish.get("relevance"), 0), desire=_safe_int(wish.get("desire"), 0))
+                    if not user_wish.get("should_share") and _safe_int(user_preference.get("score"), 0) < 8:
+                        _note_news_share(user_id, "skipped", "自我关联与用户偏好都不足以主动分享", relevance=_safe_int(user_wish.get("relevance"), 0), desire=_safe_int(user_wish.get("desire"), 0), user_preference=_safe_int(user_preference.get("score"), 0))
                         continue
                     decision = self._external_event_share_decision(
                         user,
-                        digest,
+                        user_digest,
                         source_type="news",
-                        wish=wish,
+                        wish=user_wish,
                         base_probability=self.news_share_probability,
                         now=now,
                     )
@@ -2868,16 +3080,19 @@ class NewsExplorationMixin:
                             "统一评分认为这条新闻不值得现在主动分享",
                             score=_safe_int(decision.get("score"), 0, 0, 100),
                             user_match=_safe_int(decision.get("user_match"), 0, 0, 10),
+                            user_preference=_safe_int(user_preference.get("score"), 0),
                         )
                         continue
                     share_probability = max(self.news_share_probability, _safe_float(decision.get("probability"), self.news_share_probability))
                     share_probability *= self.external_event_self_link_probability
                     if strong_self_link:
-                        share_probability = max(share_probability, min(0.95, _safe_float(wish.get("share_probability"), share_probability)))
+                        share_probability = max(share_probability, min(0.95, _safe_float(user_wish.get("share_probability"), share_probability)))
+                    if _safe_int(user_preference.get("score"), 0) >= 8:
+                        share_probability = min(0.95, share_probability + 0.10)
                 else:
                     decision = self._external_event_share_decision(
                         user,
-                        digest,
+                        user_digest,
                         source_type="news",
                         wish={"relevance": 4, "desire": 4, "should_share": True},
                         base_probability=self.news_share_probability,
@@ -2890,9 +3105,9 @@ class NewsExplorationMixin:
                 if random.random() > max(0.0, min(1.0, share_probability)):
                     _note_news_share(user_id, "skipped", "分享概率未命中", probability=round(max(0.0, min(1.0, share_probability)), 3))
                     continue
-                self_link_motive = _single_line(wish.get("motive") if isinstance(wish, dict) else "", 180)
-                self_link_tone = _single_line(wish.get("tone") if isinstance(wish, dict) else "", 60)
-                self_link_boundary = _single_line(wish.get("boundary") if isinstance(wish, dict) else "", 140)
+                self_link_motive = _single_line(user_wish.get("motive") if isinstance(user_wish, dict) else "", 180)
+                self_link_tone = _single_line(user_wish.get("tone") if isinstance(user_wish, dict) else "", 60)
+                self_link_boundary = _single_line(user_wish.get("boundary") if isinstance(user_wish, dict) else "", 140)
                 accepted = self._offer_proactive_candidate(
                     str(user_id),
                     user,
@@ -2901,33 +3116,35 @@ class NewsExplorationMixin:
                         "reason": "news_share",
                         "action": "message",
                         "scheduled_ts": now + random.randint(10, 55) * 60,
-                        "topic": _single_line(digest.get("topic"), 48) or "刚看到的新闻",
+                        "topic": _single_line(user_digest.get("topic"), 48) or "刚看到的新闻",
                         "score": max(4 if self_link_motive else 3, _safe_int(decision.get("score"), 0, 0, 100)),
                         "motive": self_link_motive
-                        or "刚看了几条新闻,其中一条让自己想轻轻和用户提一句,但不要像播报新闻",
+                        or "刚看了几条新闻,其中一条和对方平时会在意的东西有点贴,只轻轻提一句",
                         "context_key": "news_context",
                         "context": {
-                            **digest,
+                            **user_digest,
                             "share_tone": self_link_tone,
                             "share_boundary": self_link_boundary,
                             "share_decision": decision,
+                            "preference_match": user_preference,
                         },
                     },
                 )
                 if accepted:
                     accepted_any = True
-                    _note_news_share(user_id, "accepted", "已进入主动候选", probability=round(max(0.0, min(1.0, share_probability)), 3))
+                    _note_news_share(user_id, "accepted", "已按用户偏好进入主动候选", probability=round(max(0.0, min(1.0, share_probability)), 3), user_preference=_safe_int(user_preference.get("score"), 0), selected_key=user_selected_key)
                     user["news_context"] = {
-                        **digest,
+                        **user_digest,
                         "share_tone": self_link_tone,
                         "share_boundary": self_link_boundary,
                         "share_decision": decision,
+                        "preference_match": user_preference,
                     }
-                    user["last_news_share_key"] = selected_key
+                    user["last_news_share_key"] = user_selected_key
                     user["last_news_share_at"] = now
-                    if isinstance(wish, dict) and wish:
+                    if isinstance(user_wish, dict) and user_wish:
                         user["last_external_event_self_link_at"] = now
-                    self._remember_external_event(digest, source_type="news", reason="news_share")
+                    self._remember_external_event(user_digest, source_type="news", reason="news_share")
                 else:
                     _note_news_share(user_id, "blocked", "主动候选被计划队列拒绝，可能已有更早主动或主题重复")
         if accepted_any:

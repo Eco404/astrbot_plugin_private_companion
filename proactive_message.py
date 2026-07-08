@@ -6800,13 +6800,24 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if lock is None:
             lock = asyncio.Lock()
             self._external_image_api_runtime_lock = lock
+        wait_started = time.monotonic()
         async with lock:
-            return await self._run_external_photo_generation_serial(
+            waited_ms = int((time.monotonic() - wait_started) * 1000)
+            if waited_ms > 500:
+                logger.info(
+                    "[PrivateCompanion] 在线图片 API 等待串行锁: session=%s waited=%sms",
+                    _single_line(session_key, 80),
+                    waited_ms,
+                )
+            image_path, note = await self._run_external_photo_generation_serial(
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
                 image_size=image_size,
             )
+            if waited_ms > 500:
+                note = f"{note}；在线图片 API 排队等待 {waited_ms}ms"
+            return image_path, note
 
     def _parse_custom_headers(self, raw: str) -> dict[str, str]:
         """Parse custom HTTP headers from multi-line 'Key: Value' text."""
