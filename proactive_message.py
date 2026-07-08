@@ -1175,7 +1175,7 @@ class ProactiveMessageMixin:
         return """
 你要给 {{name}} 发一条主动私聊。不是回复刚收到的新消息,也不是解释任务。
 当前时间 {{current_time}}。{{unanswered_hint}}
-这会儿的小念头是“{{motive}}”,大概想聊“{{topic}}”,刚做的事是“{{action_context}}”,状态底色是“{{state_hint}}”,生活片段是“{{current_schedule}}”,时段情况是“{{time_guard}}”,最近已经说过“{{recent_topics}}”,关系事实是“{{relationship_fact}}”。
+这会儿想开口的由头是“{{motive}}”,大概想聊“{{topic}}”,刚做的事是“{{action_context}}”,状态底色是“{{state_hint}}”,生活片段是“{{current_schedule}}”,时段情况是“{{time_guard}}”,最近已经说过“{{recent_topics}}”,关系事实是“{{relationship_fact}}”。
 {{timer_hint}}
 
 只取一个最自然的切口开口,不要把洗漱/穿搭/天气/心情/日程逐项列成状态清单；如果已经有一个具体画面或一句话,就停在那里。

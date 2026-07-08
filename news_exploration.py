@@ -2497,7 +2497,7 @@ class NewsExplorationMixin:
             summary = _single_line(item.get("summary"), 180)
             lines.append(f"{idx}. [{source}] {title}" + (f"｜{summary}" if summary else ""))
         prompt = f"""
-请作为 Bot 私下阅读新闻后的内部整理,从下面新闻里挑一条最适合轻轻分享给用户的内容。
+请作为 Bot 私下阅读新闻后的内部整理,从下面新闻里挑一条最适合轻轻提起的内容。
 
 要求：
 1. 不要写成新闻播报,要像“刚看到一条消息后脑子里的印象”。
@@ -4210,7 +4210,7 @@ class NewsExplorationMixin:
                         "scheduled_ts": now + random.randint(12, 70) * 60,
                         "topic": _single_line(digest.get("topic"), 48) or "刚查到的新东西",
                         "score": max(4 if self_link_motive else 3, _safe_int(decision.get("score"), 0, 0, 100)),
-                        "motive": self_link_motive or "刚自己上网查了点新东西,有一点想按自己的语气轻轻告诉用户",
+                        "motive": self_link_motive or "刚自己上网查了点新东西,有一点想按自己的语气轻轻提一句",
                         "context_key": "web_exploration_context",
                         "context": {
                             **digest,

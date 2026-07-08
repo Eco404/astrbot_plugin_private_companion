@@ -242,7 +242,7 @@ def _repair_duplicate_daily_diary(plugin, payload: dict[str, Any], matched_date:
     mood = state.get("mood_bias", "平稳") if isinstance(state, dict) else "平稳"
     energy = _safe_int(state.get("energy"), 70) if isinstance(state, dict) else 70
     weather = _single_line(plugin._weather_summary_text(plugin.data.get("daily_weather", {})), 48)
-    note = "今天脑子里还残留着前几天梦里的画面,像醒来后还没散掉的一点余温。"
+    note = "今天脑子里还残留着前几天梦里的画面,像醒来后还留着的一点余温。"
     if weather and weather != "暂无天气信息":
         note += f"外面的{weather}让这种余韵更明显了一点。"
     note += f"状态大概是{mood},能量在 {energy}/100 左右,适合把注意力慢慢放回今天新的小事。"

@@ -365,7 +365,7 @@ function featureDraftFromOverview(overview = {}) {
 
 const pluginIntegrationAvailabilityRules = {
   enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
-  enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
+  enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.compatible_available || state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
   enable_qzone_integration: () => true,
@@ -1923,13 +1923,18 @@ const featureSettingSections = {
   ],
   enable_livingmemory_integration: [
     {
-      title: "基础协同",
-      note: "记忆召回工具名和上下文读取超时。",
-      keys: ["livingmemory_tool_name", "memory_companion_context_timeout_seconds"],
+      title: "LivingMemory 工具召回",
+      note: "仅在检测到 LivingMemory 时显示。用于同步它注册给 AstrBot 的召回工具名。",
+      keys: ["livingmemory_tool_name"],
     },
     {
-      title: "“我会牢牢记住你” 深度联动",
-      note: "检测到“我会牢牢记住你”桥接时生效。控制情绪漂移、梦境碎片、未完成话题取材和功能上下文读取等深度协同能力。",
+      title: "记忆插件桥接基础",
+      note: "仅在检测到“我会牢牢记住你”/MemoryCompanion 桥接时显示。控制读取外部记忆上下文时最多等待多久。",
+      keys: ["memory_companion_context_timeout_seconds"],
+    },
+    {
+      title: "记忆插件桥接联动",
+      note: "仅在检测到“我会牢牢记住你”/MemoryCompanion 桥接时显示。控制情绪漂移、梦境碎片、未完成话题取材和功能上下文读取。",
       keys: ["enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
     },
   ],
@@ -3299,7 +3304,8 @@ async function loadImageCache() {
   return data;
 }
 
-async function loadTroubleshooting() {
+async function loadTroubleshooting(options = {}) {
+  const { silent = false, skipExperimentalRender = false } = options;
   const [data, overview] = await Promise.all([
     fetchJson("/troubleshooting"),
     fetchJson("/overview").catch(() => null),
@@ -3309,8 +3315,8 @@ async function loadTroubleshooting() {
     state.overview = overview;
     state.featureDraft = featureDraftFromOverview(overview);
   }
-  renderTroubleshooting();
-  if (state.activeTab === "experimental") renderExperimentalPage();
+  if (!silent) renderTroubleshooting();
+  if (state.activeTab === "experimental" && !skipExperimentalRender) renderExperimentalPage();
   return data;
 }
 
@@ -3394,7 +3400,7 @@ function applyUserGroupLists(users, groups) {
 }
 
 async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) {
-  const { showErrors = false } = options;
+  const { showErrors = false, silent = false } = options;
   try {
     const [users, groups] = await Promise.all([
       fetchJson("/users?limit=300"),
@@ -3402,15 +3408,19 @@ async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) 
     ]);
     if (requestSeq !== loadAllRequestSeq) return null;
     applyUserGroupLists(users, groups);
-    renderAll();
-    const overview = state.overview || {};
-    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+    if (!silent) {
+      renderAll();
+      const overview = state.overview || {};
+      $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+    }
     return { users, groups };
   } catch (error) {
     if (requestSeq !== loadAllRequestSeq) return null;
     console.warn("[PrivateCompanionPage] 用户/群聊列表加载失败", error);
-    const overview = state.overview || {};
-    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，名单加载失败`;
+    if (!silent) {
+      const overview = state.overview || {};
+      $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，名单加载失败`;
+    }
     if (showErrors) showToast(`名单加载失败：${error.message}`, "error");
     return null;
   }
@@ -3486,7 +3496,8 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
   }
 }
 
-async function loadDiagnostics(force = false) {
+async function loadDiagnostics(force = false, options = {}) {
+  const { skipExperimentalRender = false } = options;
   if (state.lazyLoaded.diagnostics && !force) return state.diagnostics;
   const diagnostics = await fetchJson("/diagnostics");
   state.diagnostics = diagnostics.items || [];
@@ -3494,7 +3505,7 @@ async function loadDiagnostics(force = false) {
   if (state.activeTab === "troubleshooting") {
     renderDiagnostics();
   }
-  if (state.activeTab === "experimental") {
+  if (state.activeTab === "experimental" && !skipExperimentalRender) {
     renderExperimentalPage();
   }
   renderDashboardPulse();
@@ -3504,11 +3515,24 @@ async function loadDiagnostics(force = false) {
 async function refreshExperimentalRuntimeData(force = false) {
   const requestSeq = loadAllRequestSeq;
   await Promise.all([
-    loadDiagnostics(force).catch(() => null),
-    loadTroubleshooting().catch(() => null),
-    loadUserGroupLists(requestSeq).catch(() => null),
+    loadDiagnostics(force, { skipExperimentalRender: true }).catch(() => null),
+    loadTroubleshooting({ silent: true, skipExperimentalRender: true }).catch(() => null),
+    loadUserGroupLists(requestSeq, { silent: true }).catch(() => null),
   ]);
   if (state.activeTab === "experimental") renderExperimentalPage();
+}
+
+function scheduleExperimentalRuntimeRefresh(force = false) {
+  state.experimentalRuntimeRefreshForce = Boolean(state.experimentalRuntimeRefreshForce || force);
+  if (state.experimentalRuntimeRefreshTimer) {
+    clearTimeout(state.experimentalRuntimeRefreshTimer);
+  }
+  state.experimentalRuntimeRefreshTimer = setTimeout(() => {
+    const shouldForce = Boolean(state.experimentalRuntimeRefreshForce);
+    state.experimentalRuntimeRefreshForce = false;
+    state.experimentalRuntimeRefreshTimer = null;
+    refreshExperimentalRuntimeData(shouldForce).catch(() => {});
+  }, 120);
 }
 
 async function loadTokenStats(force = false) {
@@ -6911,7 +6935,9 @@ function renderHealthPanel() {
       text: `${group.access_mode || "whitelist"} 模式，记录 ${group.group_count || 0} 个群`,
     },
     {
-      level: features.enable_livingmemory_integration && (overview.livingmemory?.available || overview.livingmemory?.memory_companion_active) ? "ok" : "info",
+      level: overview.livingmemory?.conflict
+        ? "warn"
+        : features.enable_livingmemory_integration && (overview.livingmemory?.compatible_available || overview.livingmemory?.available || overview.livingmemory?.memory_companion_active) ? "ok" : "info",
       title: "记忆插件协同",
       text: livingMemoryHealthText(overview.livingmemory),
     },
@@ -7106,10 +7132,38 @@ function renderSetupProgress() {
 }
 
 function livingMemoryHealthText(livingmemory) {
-  if (!livingmemory?.enabled) return "协同开关未启用";
-  if (livingmemory?.memory_companion_active) return `“我会牢牢记住你”桥接可用`;
-  if (!livingmemory?.available) return `未检测到可用插件：${livingmemory?.plugin_dir || "未知路径"}`;
-  return `LivingMemory 可用 · ${livingmemory.tool_name || "recall_long_term_memory"}`;
+  if (!livingmemory) return "未读取到记忆插件协同状态";
+  if (livingmemory.conflict_warning) return livingmemory.conflict_warning;
+  const pluginName = livingmemory.selected_plugin_name || livingmemory.selected_plugin?.display_name || "";
+  if (!livingmemory.compatible_available && !livingmemory.available && !livingmemory.memory_companion_active) return "未检测到可协同记忆插件";
+  if (!livingmemory.configured_enabled && !livingmemory.enabled) return `协同开关未启用${pluginName ? `；检测到 ${pluginName}` : ""}`;
+  if (pluginName) return `当前使用：${pluginName}`;
+  if (livingmemory.memory_companion_active) return `当前使用：${livingmemory.memory_companion_display_name || "我会牢牢记住你"}`;
+  if (livingmemory.available) return `当前使用：LivingMemory · ${livingmemory.tool_name || "recall_long_term_memory"}`;
+  return "协同开关未启用";
+}
+
+function livingMemoryStatusText(livingmemory) {
+  if (!livingmemory) return "未读取到记忆插件协同状态";
+  const lines = [livingMemoryHealthText(livingmemory)];
+  const activePlugins = Array.isArray(livingmemory.active_plugins) ? livingmemory.active_plugins : [];
+  if (activePlugins.length) {
+    lines.push(`检测到：${activePlugins.map((item) => item.display_name || item.name || item.type).filter(Boolean).join("、")}`);
+  }
+  if (livingmemory.selected_plugin_name) {
+    lines.push(`当前使用：${livingmemory.selected_plugin_name}`);
+  }
+  if (livingmemory.available && livingmemory.tool_name) {
+    lines.push(`LivingMemory 工具名：${livingmemory.tool_name || "recall_long_term_memory"}`);
+  }
+  if (livingmemory.conflict_warning) {
+    lines.push("处理建议：只启用其中一个记忆插件，避免重复召回、重复写入或提示词变长。");
+  }
+  if (livingmemory.status) {
+    lines.push("");
+    lines.push(livingmemory.status);
+  }
+  return lines.filter((line, index, arr) => line && arr.indexOf(line) === index).join("\n");
 }
 
 function renderDiagnostics() {
@@ -10854,7 +10908,7 @@ function renderMemory() {
   const overview = state.overview || {};
   const daily = overview.daily_state || {};
   const life = overview.life_observation || {};
-  $("#livingMemoryBox").textContent = overview.livingmemory?.status || "未读取到记忆插件协同状态";
+  $("#livingMemoryBox").textContent = livingMemoryStatusText(overview.livingmemory);
   renderLifeHero(daily, life);
   renderDreamCard(life.dream || {});
   renderStatePillBoard(daily);
@@ -15718,8 +15772,11 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
   };
   if (featureKey === "enable_livingmemory_integration") {
-    const memoryCompanionActive = Boolean(state.overview?.livingmemory?.memory_companion_active);
+    const livingmemory = state.overview?.livingmemory || {};
+    const memoryCompanionActive = Boolean(livingmemory.memory_companion_active);
+    const livingmemoryAvailable = Boolean(livingmemory.available);
     const companionOnlyKeys = new Set([
+      "memory_companion_context_timeout_seconds",
       "enable_memory_companion_emotional_drift",
       "enable_memory_companion_cross_window_emotion",
       "enable_memory_companion_dream_fragment",
@@ -15728,6 +15785,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       "memory_companion_context_top_k",
       "memory_companion_context_max_chars",
     ]);
+    if (settingKey === "livingmemory_tool_name" && !livingmemoryAvailable) return false;
     if (companionOnlyKeys.has(settingKey) && !memoryCompanionActive) return false;
     if (settingKey === "enable_memory_companion_cross_window_emotion" && !boolSetting("enable_memory_companion_emotional_drift")) return false;
     if (["memory_companion_context_top_k", "memory_companion_context_max_chars"].includes(settingKey) && !boolSetting("enable_memory_companion_feature_context")) return false;
@@ -16050,6 +16108,13 @@ function featureDependencyLines(key) {
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI、SDGen 或在线图片 API"]);
   if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);
   if (key === "enable_yesterday_screen_diary_context") dependencies.push(["依赖", "screen_companion 昨日观察日记"]);
+  if (key === "enable_livingmemory_integration") {
+    const livingmemory = state.overview?.livingmemory || {};
+    if (livingmemory.conflict_warning) dependencies.push(["警告", livingmemory.conflict_warning]);
+    else if (livingmemory.selected_plugin_name) dependencies.push(["当前使用", livingmemory.selected_plugin_name]);
+    else if (livingmemory.compatible_available || livingmemory.available || livingmemory.memory_companion_active) dependencies.push(["当前使用", "已检测到可协同记忆插件"]);
+    else dependencies.push(["依赖", "需要安装并启用“我会牢牢记住你”/MemoryCompanion 或 LivingMemory"]);
+  }
   if (key.startsWith("enable_private_reading_")) dependencies.push(["依赖", "素材能力可用"]);
   if (key === "enable_private_image_self_recognition") dependencies.push(["依赖", "AstrBot 默认图片转述模型 / 插件识图模型"]);
   if (["enable_group_interjection", "enable_bilibili_boredom_watch", "enable_news_boredom_read", "enable_web_exploration_boredom_search", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_unanswered_screen_peek_followup"].includes(key)) {
@@ -17487,20 +17552,26 @@ function requireSecondClick(control, key, message, nextText = "再次点击确�
   return false;
 }
 
-async function runAction(action, successMessage = "", control = null) {
+async function runAction(action, successMessage = "", control = null, options = {}) {
+  const { reload = true } = options;
   setActionBusy(control, true);
   showToast("正在处理...");
   try {
     const result = await action();
-    if (result && typeof result === "object" && result.plugin && result.features) {
-      const requestSeq = ++loadAllRequestSeq;
+    if (reload) {
+      if (result && typeof result === "object" && result.plugin && result.features) {
+        const requestSeq = ++loadAllRequestSeq;
+        state.overview = result;
+        state.featureDraft = featureDraftFromOverview(result);
+        renderAll();
+        $("#subtitle").textContent = `${result.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+        void loadUserGroupLists(requestSeq);
+      } else {
+        await loadAll();
+      }
+    } else if (result && typeof result === "object" && result.plugin && result.features) {
       state.overview = result;
       state.featureDraft = featureDraftFromOverview(result);
-      renderAll();
-      $("#subtitle").textContent = `${result.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
-      void loadUserGroupLists(requestSeq);
-    } else {
-      await loadAll();
     }
     if (result && result.config_saved === false) {
       showToast("已应用到运行态，但配置持久化失败；重启或刷新后可能恢复旧值，请查看日志", "error");
@@ -17856,6 +17927,40 @@ function renderExperimentalPage() {
   }
 }
 
+function reflectExperimentalToggleChange(key, enabled) {
+  const root = $("#experimentalRoot");
+  if (!root) return;
+  root.querySelectorAll("[data-exp-toggle]").forEach((input) => {
+    if ((input.dataset.expToggle || "") !== key) return;
+    input.checked = enabled;
+    const label = input.closest(".exp-card-toggle, .feature-detail-toggle");
+    const labelText = label?.querySelector("b");
+    if (labelText) labelText.textContent = enabled ? "开启" : "关闭";
+  });
+  root.querySelectorAll("[data-exp-open]").forEach((item) => {
+    if ((item.dataset.expOpen || "") !== key) return;
+    if (item.classList.contains("exp-card") || item.classList.contains("exp-map-node")) {
+      item.classList.toggle("on", enabled);
+      item.classList.toggle("off", !enabled);
+    }
+  });
+  if (state.experimentalSubpage === key) {
+    const subpage = root.querySelector(".experimental-subpage");
+    subpage?.classList.toggle("on", enabled);
+    subpage?.classList.toggle("off", !enabled);
+    const strip = root.querySelector(".exp-state-strip");
+    if (strip) {
+      strip.classList.toggle("on", enabled);
+      strip.classList.toggle("off", !enabled);
+      const meta = experimentalFeatureMeta[key] || {};
+      const title = strip.querySelector("b");
+      const detail = strip.querySelector("span");
+      if (title) title.textContent = enabled ? "开启" : "关闭";
+      if (detail) detail.textContent = `${meta.index || ""} · ${enabled ? "正在参与相关链路" : "当前未启用，相关链路保持原有行为"}`;
+    }
+  }
+}
+
 function renderExperimentalOverview() {
   const settings = state.overview?.settings || {};
   const features = state.featureDraft || {};
@@ -17961,9 +18066,16 @@ function renderExperimentalSubpage(key) {
   return `
     <div class="subpage experimental-subpage ${enabled ? "on" : "off"}">
       <nav class="exp-breadcrumb">
-        <button type="button" data-exp-back>实验性功能</button>
+        <button type="button" data-exp-back>← 返回总览</button>
         <span>/ ${escapeHtml(meta.label)}</span>
       </nav>
+      <div class="exp-subpage-toolbar">
+        <button type="button" class="exp-toolbar-back" data-exp-back>← 返回总览</button>
+        <div class="exp-toolbar-jumps">
+          <button type="button" data-scroll-target="experimentalSettings">参数配置</button>
+          <button type="button" data-scroll-target="experimentalRuntime">运行状态</button>
+        </div>
+      </div>
       <div class="exp-state-strip ${enabled ? "on" : "off"}">
         <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
         <span>${escapeHtml(meta.index)} · ${escapeHtml(enabled ? "正在参与相关链路" : "当前未启用，相关链路保持原有行为")}</span>
@@ -17999,6 +18111,10 @@ function renderExperimentalSubpage(key) {
       <div class="exp-bottom-grid">
         ${settingsHtml}
         ${runtimeHtml}
+      </div>
+      <div class="exp-subpage-footer">
+        <button type="button" data-exp-back>← 返回实验功能总览</button>
+        <span>参数调整需要点击“保存参数”提交；返回不再自动保存，避免卡顿和误操作。</span>
       </div>
     </div>
   `;
@@ -18376,7 +18492,7 @@ function renderExperimentalSettings(key) {
   });
   const ungroupedHtml = ungroupedItems.map(settingRow).join("");
   return `
-    <article class="exp-detail-card exp-settings-card">
+    <article id="experimentalSettings" class="exp-detail-card exp-settings-card">
       <h3>参数配置</h3>
       <form class="feature-param-list" data-exp-param-form="${escapeHtml(key)}">
         ${groupedHtml}
@@ -18728,7 +18844,7 @@ if (key === "enable_emotion_simulation") {
     `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`
   ).join("");
   return `
-    <article class="exp-detail-card exp-runtime-card">
+    <article id="experimentalRuntime" class="exp-detail-card exp-runtime-card">
       <h3>运行状态</h3>
       ${enabled ? `<dl class="exp-runtime-dl">${statusRows}</dl>${extraHtml}` : `<div class="exp-runtime-disabled">功能未开启，暂无运行态数据。${escapeHtml(meta.runtimeHint || "")}</div>`}
     </article>
@@ -18755,12 +18871,16 @@ function bindExperimentalOverviewActions() {
       const payload = isSetting
         ? { settings: { [key]: input.checked } }
         : { features: { [key]: input.checked } };
-      await runAction(
+      const result = await runAction(
         () => postJson("/settings/update", payload),
         input.checked ? "已开启" : "已关闭",
         input.closest(".exp-card-toggle") || input.closest(".feature-detail-toggle"),
+        { reload: false },
       );
-      await refreshExperimentalRuntimeData(true);
+      if (result) {
+        reflectExperimentalToggleChange(key, input.checked);
+        scheduleExperimentalRuntimeRefresh(false);
+      }
     });
   });
 }
@@ -18769,13 +18889,10 @@ function bindExperimentalSubpageActions(key) {
   const root = $("#experimentalRoot");
   if (!root) return;
   root.querySelectorAll("[data-exp-back]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const form = root.querySelector("[data-exp-param-form]");
-      if (form) {
-        await saveExperimentalSettings(key, form, "已保存并返回");
-      }
+    button.addEventListener("click", () => {
       state.experimentalSubpage = "";
       renderExperimentalPage();
+      $("#experimentalRoot")?.scrollIntoView({ block: "start" });
     });
   });
   root.querySelectorAll("[data-exp-toggle]").forEach((input) => {
@@ -18788,12 +18905,16 @@ function bindExperimentalSubpageActions(key) {
       const payload = isSetting
         ? { settings: { [toggleKey]: input.checked } }
         : { features: { [toggleKey]: input.checked } };
-      await runAction(
+      const result = await runAction(
         () => postJson("/settings/update", payload),
         input.checked ? "已开启" : "已关闭",
         input.closest(".feature-detail-toggle") || input.closest(".exp-card-toggle"),
+        { reload: false },
       );
-      await refreshExperimentalRuntimeData(true);
+      if (result) {
+        reflectExperimentalToggleChange(toggleKey, input.checked);
+        scheduleExperimentalRuntimeRefresh(false);
+      }
     });
   });
   root.querySelectorAll("[data-exp-param-form]").forEach((form) => {
@@ -18842,13 +18963,14 @@ function bindExperimentalSubpageActions(key) {
 
 async function saveExperimentalSettings(key, form, successMessage) {
   const payload = collectFeatureDetailPayload(key, form);
-  await runAction(
+  const result = await runAction(
     () => postJson("/settings/update", payload),
     successMessage || "已保存参数",
     form.querySelector(".feature-param-save"),
+    { reload: false },
   );
-  if (state.activeTab === "experimental") {
-    await refreshExperimentalRuntimeData(true);
+  if (result && state.activeTab === "experimental") {
+    scheduleExperimentalRuntimeRefresh(true);
   }
 }
 

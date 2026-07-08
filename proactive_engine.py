@@ -1651,7 +1651,7 @@ class ProactiveEngineMixin:
                     "【来源专项改写：轻微想念】",
                     "规则层已经判断这次“想来找一下”成立，但正文不能只剩关系姿态。",
                     "如果现在的 topic/motive 只有“想你了/来看看你/在不在/忙不忙”，优先 rewrite。",
-                    "rewrite 后要补出一个很小的具体钩子：当前时段的小片段、刚冒出来的小念头，或一句能自然说给用户的话。",
+                    "rewrite 后要补出一个很小的具体钩子：当前时段的小片段、刚冒出来的小想法，或一句能自然开口的话。",
                     "这类来源只能轻，不要写成索取回应，也不要写成无缘由的空泛表白。",
                 ]
             )
@@ -1970,24 +1970,18 @@ class ProactiveEngineMixin:
 
     def _motive_with_hesitation_memory(self, impulse: dict[str, Any], motive: str) -> str:
         count = _safe_int(impulse.get("hesitation_count"), 0, 0, 8)
+        cleaned = self._normalize_internal_motive_text(motive)
         if count <= 0:
-            return self._normalize_internal_motive_text(motive)
+            return cleaned
         source = str(impulse.get("source") or "")
         if source in {"timer", "troubleshooting", "simulation"}:
-            return self._normalize_internal_motive_text(motive)
-        cleaned = self._normalize_internal_motive_text(motive)
-        if any(token in cleaned for token in ("刚才想说", "刚才差点", "忍住", "收住")):
             return cleaned
         topic = _single_line(impulse.get("topic"), 40)
-        if count >= 2:
-            prefix = "这个念头前面忍过一次,但它还没散"
-        else:
-            prefix = "刚才差点想说,后来又先收住了"
-        if topic:
-            prefix += f",这会儿又绕回“{topic}”"
         if cleaned:
-            return self._normalize_internal_motive_text(f"{prefix}；{cleaned}")
-        return self._normalize_internal_motive_text(prefix)
+            return cleaned
+        if topic:
+            return self._normalize_internal_motive_text(f"想到“{topic}”，想短短提一句")
+        return ""
 
     def _materialize_best_proactive_impulse(
         self,
@@ -3303,7 +3297,7 @@ class ProactiveEngineMixin:
                 "犹豫记忆",
                 True,
                 min(6, 2 + hesitation_count),
-                f"这个念头前面收住过 {hesitation_count} 次｜{_single_line(planned_impulse.get('hesitation_note'), 80)}",
+                f"同一候选曾延后 {hesitation_count} 次｜{_single_line(planned_impulse.get('hesitation_note'), 80)}",
                 blocker=False,
             )
         semantics = self._planned_proactive_semantics(user)
@@ -4580,27 +4574,27 @@ class ProactiveEngineMixin:
                 "topic": "早安",
                 "scene": "一天刚醒来的时候",
                 "tone": "还没完全醒",
-                "impulse": "想第一时间和用户说声早",
+                "impulse": "想第一时间说声早",
             },
             {
                 "window": "12:05-13:35",
                 "reason": "noon_greeting",
                 "action": "message",
-                "why": "午休或午饭时想起用户",
+                "why": "午休或午饭时忽然想起这边",
                 "topic": "午后犯困",
                 "scene": "午后犯困的时候",
                 "tone": "懒洋洋",
-                "impulse": "想趁午后休息时和用户说一句",
+                "impulse": "想趁午后休息时短短说一句",
             },
             {
                 "window": "20:10-21:20",
                 "reason": "evening_greeting",
                 "action": "message",
-                "why": "晚上节奏慢下来时，想和用户说一句",
+                "why": "晚上节奏慢下来时，想短短说一句",
                 "topic": "晚间问候",
                 "scene": "晚上安静下来时",
                 "tone": "安静",
-                "impulse": "想趁还没太晚和用户说一句",
+                "impulse": "想趁还没太晚短短说一句",
             },
         ]
 
@@ -4691,8 +4685,8 @@ class ProactiveEngineMixin:
         recent_activity_at = self._latest_private_user_activity_ts(user)
         anchors = [
             ("morning_greeting", "07:45-10:20", "刚睡醒，想第一时间和用户说声早安", "早上刚醒来"),
-            ("noon_greeting", "12:05-13:35", "中午有些犯困，想和用户打声招呼", "午后犯困"),
-            ("evening_greeting", "20:10-21:20", "晚上闲下来时，想和用户说一句", "晚间问候"),
+            ("noon_greeting", "12:05-13:35", "中午有些犯困，想短短打声招呼", "午后犯困"),
+            ("evening_greeting", "20:10-21:20", "晚上闲下来时，想短短说一句", "晚间问候"),
         ]
         today = now_dt.date()
         candidates = []
@@ -5071,12 +5065,12 @@ class ProactiveEngineMixin:
             "window": self._window_from_delay_minutes(delay_minutes, width_minutes=18),
             "reason": "check_in",
             "action": "screen_peek",
-            "why": "用户很久没有回复消息，想确认用户是不是还在忙。",
-            "topic": "偷看用户是不是还在忙",
-            "motive": "刚才主动找用户之后那边一直安静着，想确认用户是不是还在忙",
+            "why": "上一条之后那边一直安静，想看一眼是不是还在忙。",
+            "topic": "看看那边是不是还在忙",
+            "motive": "上一条之后那边一直安静着，想看一眼是不是还在忙",
             "scene": "上一条主动消息之后的安静空档",
             "tone": "好奇",
-            "impulse": "想确认用户是不是还在忙",
+            "impulse": "想看一眼那边是不是还在忙",
             "_scheduled_ts": now + delay_minutes * 60,
             "_cancel_on_inbound": True,
             "_unanswered_screen_peek": True,
@@ -5481,7 +5475,7 @@ class ProactiveEngineMixin:
         if activity:
             return f"{activity}里自然冒出来的小内容"
         if reason == "diary_share":
-            return "今天记录里想给用户看看的一小段"
+            return "今天记录里想给你看看的一小段"
         return "当前时段里自然冒出来的小内容"
 
     def _format_content_choice_options_for_prompt(self, action: Any = None) -> str:
@@ -6196,37 +6190,37 @@ class ProactiveEngineMixin:
             elif scene and topic:
                 lived_line = f"在{scene}的时候，想到“{topic}”{mood_fragment}"
             elif event_hint:
-                lived_line = f"刚刚{event_hint}的时候，想和用户说一句{mood_fragment}"
+                lived_line = f"刚刚{event_hint}的时候，想短短提一句{mood_fragment}"
             elif scene:
-                lived_line = f"刚刚在{scene}的时候，想和用户说一句{mood_fragment}"
+                lived_line = f"刚刚在{scene}的时候，想短短提一句{mood_fragment}"
             elif summary_hint:
-                lived_line = f"这一小段安静下来时，想和用户说一句{mood_fragment}"
+                lived_line = f"这一小段安静下来时，想短短提一句{mood_fragment}"
             if lived_line:
                 return self._normalize_internal_motive_text(lived_line)
 
         if reason == "insomnia_night":
             motives = [
-                "夜里一直没睡着，想和用户说一句",
+                "夜里一直没睡着，想短短留一句",
                 "睡不着，想看看用户是不是也还醒着",
-                "已经很晚了，但还是想给用户留一句话",
+                "已经很晚了，但还是想留一句话",
             ]
             if action == "voice":
-                motives.append("夜里不想打太多字，想给用户留一句语音")
+                motives.append("夜里不想打太多字，想留一句语音")
             return random.choice(motives)
         if reason == "state_share":
             motives = [
-                "这会儿说话可能慢一点，但还是想和用户说一句",
-                "这会儿不太想说太多，但还是想问用户一句",
-                "这一会儿比较安静，想慢慢和用户说一句",
+                "这会儿说话可能慢一点，但还是想短短提一句",
+                "这会儿不太想说太多，但还是想问一句",
+                "这一会儿比较安静，想慢慢说一句",
             ]
             if energy < 45:
-                motives.append("不太想说长句，但想确认用户还在")
+                motives.append("不太想说长句，但想看看那边还在不在")
             return random.choice(motives)
         if reason == "quiet_care":
             motives = [
                 "刚刚有点在意用户是不是又忙太久了",
                 "想起用户最近的状态，想问一句现在怎么样",
-                "本来不想打扰，但还是想确认用户那边还好不好",
+                "本来不想打扰，但还是想看看那边还好不好",
             ]
             if last_user_message:
                 motives.append(f"想起用户前面提过“{last_user_message}”，有点放心不下")
@@ -6251,27 +6245,27 @@ class ProactiveEngineMixin:
             return self._normalize_internal_motive_text("共同群里有个小片段还有点余味,想顺手给你递一下")
         if reason == "activity_share":
             motives = [
-                "刚刚碰到一个小片段，想和用户说一句",
+                "刚刚碰到一个小片段，想短短提一句",
                 "刚刚看到一个小东西，想分享一下",
-                "刚刚有个小想法，想告诉用户",
-                "脑子里忽然冒出一句没头没尾的话，想和用户说一下",
-                "刚刚那点小想法放着也没什么用，想和用户说一句",
-                "手边的小东西有点好笑，想给用户看",
+                "刚刚有个小想法，想顺口提一下",
+                "脑子里冒出一句没头没尾的话，想说一下",
+                "刚刚那点小想法放着也没什么用，想短短提一句",
+                "手边的小东西有点好笑，想给你看",
             ]
             if topic:
-                motives.append(f"刚碰到“{topic}”时，想和用户说一句")
+                motives.append(f"刚碰到“{topic}”时，想短短提一句")
             if any(token in weather for token in ("雨", "小雨", "阵雨")):
-                motives.append("听见外面下雨，想和用户说一句")
+                motives.append("听见外面下雨，想短短提一句")
             if any(token in weather for token in ("晴", "阳光", "晚霞")):
-                motives.append("看到外面的光线不错，想和用户说一句")
+                motives.append("看到外面的光线不错，想短短提一句")
             return random.choice(motives)
         if reason == "diary_share":
             return random.choice([
-                "翻到今天记下来的小片段时，想和用户说一句",
-                "看到今天写下来的那句话，觉得可以给用户看看",
-                "今天有个小片段还记着，想和用户说一下",
-                "有句话不算重要，但一直记着，想给用户看看",
-                "今天有个小念头还没散，想和用户说一句",
+                "翻到今天记下来的小片段时，想短短提一句",
+                "看到今天写下来的那句话，觉得可以给你看看",
+                "今天有个小片段还记着，想说一下",
+                "有句话不算重要，但一直记着，想给你看看",
+                "今天有个小片段还记着，想短短提一句",
             ])
         if reason == "important_date_share":
             return random.choice([
@@ -6281,32 +6275,32 @@ class ProactiveEngineMixin:
             ])
         if reason == "background_schedule":
             motives = [
-                "手上的事告一段落时，想和用户说一句",
-                "忙到能休息一小会儿时，想和用户说句话",
-                "眼前这一小段缓下来以后，想和用户说一句",
+                "手上的事告一段落时，想短短提一句",
+                "忙到能休息一小会儿时，想短短说句话",
+                "眼前这一小段缓下来以后，想短短说一句",
             ]
             if topic:
-                motives.append(f"手上这点“{topic}”还没结束，想和用户说一句")
+                motives.append(f"手上这点“{topic}”还没结束，想短短提一句")
             return random.choice(motives)
         if reason == "morning_greeting":
             return random.choice([
-                "人还没太清醒,但先想和用户说声早安",
+                "人还没太清醒,但先想轻轻说声早安",
                 "醒来还带着一点睡意,先想去打个招呼",
             ])
         if reason == "noon_greeting":
             return random.choice([
-                "中午这会儿人有点懒，想和用户说一句",
-                "午间一下子松下来，想和用户说句话",
+                "中午这会儿人有点懒，想短短说一句",
+                "午间一下子松下来，想短短说句话",
             ])
         if reason == "evening_greeting":
             return random.choice([
-                "晚一点安静下来以后，想和用户说一句",
-                "白天快结束时，想和用户说句话",
+                "晚一点安静下来以后，想短短说一句",
+                "白天快结束时，想短短说句话",
             ])
         motives = [
-            "刚好能休息一小会儿，想和用户说一句",
-            "眼前这点小事还没散掉，想和用户说一句",
-            "刚松一口气的时候，想和用户说句话",
+            "刚好能休息一小会儿，想短短说一句",
+            "眼前这点小事还记着，想短短说一句",
+            "刚松一口气的时候，想短短说句话",
         ]
         return self._normalize_internal_motive_text(random.choice(motives))
 
@@ -6329,9 +6323,42 @@ class ProactiveEngineMixin:
             "怎么一点动静都没有": "那边还没什么动静",
             "怎么还没动静": "那边还没什么动静",
             "一点动静都没有": "那边还没什么动静",
+            "想和用户说一句": "想短短说一句",
+            "想和用户说一声": "想短短提一声",
+            "想和用户说声": "想轻轻说声",
+            "想和用户说一下": "想短短说一下",
+            "想和用户说句话": "想短短说句话",
+            "想和用户打声招呼": "想打声招呼",
+            "想和用户分享": "想顺手分享",
+            "和用户说一句": "短短说一句",
+            "和用户说一声": "短短提一声",
+            "和用户说声": "轻轻说声",
+            "和用户说句话": "短短说句话",
+            "想给用户看": "想给你看",
+            "想给用户看看": "想给你看看",
+            "给用户看看": "给你看看",
+            "告诉用户": "顺口提一下",
+            "提醒用户一句": "提醒一句",
+            "用户是不是还在忙": "那边是不是还在忙",
+            "用户在不在": "那边有没有空",
+            "确认用户是不是还在忙": "看看那边是不是还在忙",
+            "确认用户还在": "看看那边还在不在",
+            "确认用户那边": "看看那边",
+            "确认用户": "看看那边",
+            "想到可以和用户说一句": "想到可以短短说一句",
+            "来找用户": "来这边",
+            "主要用户": "这边",
+            "次要用户": "对方",
+            "用户": "你",
         }
         for src, dst in replacements.items():
             cleaned = cleaned.replace(src, dst)
+        cleaned = re.sub(r"(?:主动)?(?:小)?念头", "小想法", cleaned)
+        cleaned = re.sub(r"这个念头前面忍过一次[,，]?但它还没散[,，]?", "", cleaned)
+        cleaned = re.sub(r"刚才差点想说[,，]?后来又先收住了[,，]?", "", cleaned)
+        cleaned = re.sub(r"这会儿又绕回[“\"]([^”\"]{1,40})[”\"]", r"想到“\1”", cleaned)
+        cleaned = cleaned.replace("忍过一次", "先放了放")
+        cleaned = cleaned.replace("还没散", "还记着")
         cleaned = cleaned.replace("忽然想", "有点想")
         cleaned = re.sub(r"(?:来找你一下){2,}", "来找你一下", cleaned)
         cleaned = cleaned.replace("碰你一下", "跟你说一句")

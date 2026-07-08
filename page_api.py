@@ -7062,10 +7062,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         ]
         values = {key: bool(getattr(self.plugin, key, False)) for key in keys}
         try:
-            livingmemory_available = bool(getattr(self.plugin, "_livingmemory_available", lambda: False)())
-        except Exception:
-            livingmemory_available = False
-        try:
             bilibili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
         except Exception:
             bilibili_available = False
@@ -7077,7 +7073,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             private_reading_available = bool(getattr(self.plugin, "_jm_cosmos_available", lambda: False)())
         except Exception:
             private_reading_available = False
-        values["enable_livingmemory_integration"] = bool(livingmemory_available and getattr(self.plugin, "enable_livingmemory_integration", False))
+        values["enable_livingmemory_integration"] = bool(getattr(self.plugin, "enable_livingmemory_integration", False))
         values["enable_bilibili_integration"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_integration", False))
         values["enable_bilibili_boredom_watch"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_boredom_watch", False))
         values["enable_qzone_integration"] = bool(getattr(self.plugin, "enable_qzone_integration", False))
@@ -9256,16 +9252,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add("warn", "私聊学习链路不完整", "画像记忆或表达学习未开启", "在配置页打开对应功能开关")
 
         if features.get("enable_livingmemory_integration"):
-            living_level = "ok" if self.plugin._livingmemory_available() else "warn"
-            try:
-                companion_active = bool(self.plugin._memory_companion_bridge())  # type: ignore[attr-defined]
-            except Exception:
-                companion_active = False
-            if companion_active:
-                living_text = "我会牢牢记住你 桥接可用"
-                living_level = "ok"
-            elif living_level == "ok":
-                living_text = "LivingMemory 插件可被调用"
+            living_summary = self._livingmemory_summary()
+            living_level = "warn" if living_summary.get("conflict") else ("ok" if living_summary.get("compatible_available") else "warn")
+            if living_summary.get("conflict_warning"):
+                living_text = str(living_summary.get("conflict_warning") or "")
+            elif living_summary.get("selected_plugin_name"):
+                living_text = f"当前使用：{living_summary.get('selected_plugin_name')}"
             else:
                 living_text = "已启用协同，但当前未检测到可用记忆插件"
             add(living_level, "记忆插件协同", living_text)
@@ -12006,16 +11998,54 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if bridge is not None:
                 memory_companion_active = True
                 memory_companion_display_name = getattr(bridge, "display_name", "") or "我会牢牢记住你"
+                if str(memory_companion_display_name).strip().lower() in {"rememberyou", "remember you", "memorycompanion", "memory companion", "astrbot_plugin_memory_companion", "astrbot_plugin_remember_you"}:
+                    memory_companion_display_name = "我会牢牢记住你"
         except Exception:
             pass
+        configured_enabled = bool(getattr(self.plugin, "enable_livingmemory_integration", False))
+        active_plugins: list[dict[str, Any]] = []
+        if memory_companion_active:
+            active_plugins.append(
+                {
+                    "type": "memory_companion",
+                    "name": memory_companion_display_name or "我会牢牢记住你",
+                    "display_name": memory_companion_display_name or "我会牢牢记住你",
+                    "status": "桥接可用",
+                }
+            )
+        if available:
+            active_plugins.append(
+                {
+                    "type": "livingmemory",
+                    "name": "LivingMemory",
+                    "display_name": "LivingMemory",
+                    "status": "工具式召回可用",
+                    "tool_name": getattr(self.plugin, "livingmemory_tool_name", "") or "recall_long_term_memory",
+                    "plugin_dir": plugin_dir,
+                }
+            )
+        selected_plugin = active_plugins[0] if active_plugins else None
+        conflict = bool(memory_companion_active and available)
+        conflict_warning = (
+            f"同时检测到{memory_companion_display_name or '我会牢牢记住你'}和 LivingMemory。建议只保留一个可协同记忆插件，避免重复召回、重复写入或提示词膨胀。"
+            if conflict
+            else ""
+        )
         return {
-            "enabled": bool(available and getattr(self.plugin, "enable_livingmemory_integration", False)),
+            "enabled": bool(configured_enabled and active_plugins),
+            "configured_enabled": configured_enabled,
+            "compatible_available": bool(active_plugins),
             "available": available,
             "tool_name": getattr(self.plugin, "livingmemory_tool_name", ""),
             "plugin_dir": plugin_dir,
             "status": status,
             "memory_companion_active": memory_companion_active,
             "memory_companion_display_name": memory_companion_display_name,
+            "active_plugins": active_plugins,
+            "selected_plugin": selected_plugin,
+            "selected_plugin_name": str((selected_plugin or {}).get("display_name") or ""),
+            "conflict": conflict,
+            "conflict_warning": conflict_warning,
         }
 
     def _screen_companion_available(self) -> bool:
