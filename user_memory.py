@@ -1265,7 +1265,12 @@ class UserMemoryMixin:
             open_loop_text = self._format_open_loops_for_prompt(user, hint=user.get("last_user_message") or "")
             recent_context_parts = [part for part in (episode_text, open_loop_text) if part]
             if recent_context_parts:
-                lines.append("近期共同经历：\n" + "\n".join(recent_context_parts))
+                lines.append(
+                    "近期共同经历：\n"
+                    + "\n".join(recent_context_parts)
+                    + "\n使用方式：只在和用户当前消息相关、用户主动回到旧话题，或能一句话自然带过时使用；"
+                    "不需要为了兑现旧话题打断当前话题。"
+                )
             consequence_text = self._format_action_consequence_hint(user)
             if consequence_text:
                 lines.append("最近主动行为闭环：\n" + consequence_text)
@@ -1376,25 +1381,46 @@ class UserMemoryMixin:
                     score += 3.0
         return score
 
+    def _open_loop_hint_allows_topic_return(self, hint: str) -> bool:
+        cleaned = _single_line(hint, 260)
+        if not cleaned:
+            return False
+        return bool(re.search(
+            r"(刚才|刚刚|前面|之前|上次|上回|昨天|昨晚|那个|这个|继续|接着|回到|再说|讲讲|说说|展开|还没|没回答|没讲完|我问的|我刚问|你刚说)",
+            cleaned,
+        ))
+
     def _select_open_loops_for_prompt(
         self,
         loops: list[dict[str, Any]],
         *,
         hint: str = "",
         limit: int = 3,
+        require_relevant: bool | None = None,
     ) -> list[dict[str, Any]]:
         candidates: list[tuple[int, float, dict[str, Any]]] = []
         total = len(loops)
+        hint_text = _single_line(hint, 260)
+        if require_relevant is None:
+            require_relevant = bool(hint_text)
+        allows_topic_return = self._open_loop_hint_allows_topic_return(hint_text)
         for index, item in enumerate(loops):
             if not isinstance(item, dict):
                 continue
             if str(item.get("status") or "") in {"已完成", "已取消"}:
+                continue
+            loop_text = _single_line(item.get("text"), 120)
+            if not loop_text:
+                continue
+            topic_score = self._open_loop_match_score(loop_text, hint_text) if hint_text else 0.0
+            if require_relevant and topic_score < 0.22 and not allows_topic_return:
                 continue
             score = self._open_loop_relevance_score(item, hint=hint)
             if index >= max(0, total - 1):
                 score += 2.0
             elif index >= max(0, total - 3):
                 score += 1.0
+            score += topic_score * 4.0
             candidates.append((index, score, item))
         if not candidates:
             return []

@@ -1077,6 +1077,7 @@ const configLabels = {
   enable_maslow_motivation_experiment: "需求强化功能",
   enable_maslow_schedule_influence: "允许影响日程生成",
   maslow_motivation_strength: "需求强化影响强度",
+  enable_personality_iteration_auto_tune: "允许自主调节参数",
   timer_pre_silence_minutes: "预约前静默窗口",
   enable_tts_enhancement: "TTS强化",
   tts_generation_mode: "TTS生成路径",
@@ -1442,7 +1443,8 @@ const configDescriptions = {
   proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
   enable_maslow_motivation_experiment: "实验性功能第一项。开启后，主动念头会被归入状态、安全、归属、尊重、成长、意义等内部需求层，再轻量影响候选排序；默认关闭，不改变最终回复正文，也不会让 Bot 把层级词说给用户。",
   enable_experimental_motivation_model: "实验性功能第二项。开启后，主动计划会额外按驱力、诱因和唤醒适配做轻量调权：驱力代表 Bot 内部想开口，诱因代表这个候选是否有值得说的外部价值，唤醒代表当前状态是否适合行动。默认关闭。",
-  enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。它会告诉用户该调整 AstrBot 人格、世界知识、主动策略还是群聊边界，但不会自动改写。",
+  enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。默认只给建议；若开启“允许自主调节参数”，会临时覆盖少量主动策略参数。",
+  enable_personality_iteration_auto_tune: "角色贴合校准的子选项。开启后，排障/实验页刷新时可根据诊断结果临时调节主动上限、空闲判定、最小间隔、主动人格放行阈值和主动复核强度；不会改写人格正文或世界知识。用户手动修改这些参数后会记录为新的手动值；关闭角色贴合校准或关闭本项时恢复到用户最后一次手动设置的值。",
   enable_maslow_schedule_influence: "需求强化功能的子选项，默认关闭。开启后，日程生成器会把需求层级当作轻量倾向，影响今天更偏休息、探索、等待、准备或低打扰互动；不会把层级术语写进日程正文。",
   maslow_motivation_strength: "控制需求强化对主动候选排序的影响。0 只记录层级不改排序；35 为温和默认；100 会更明显偏向有明确由头的关系、状态或成长类念头。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
@@ -1833,6 +1835,7 @@ const featureSettingGroups = {
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
+  enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
@@ -1935,6 +1938,13 @@ const featureSettingSections = {
       title: "需求强化范围",
       note: "默认只强化主动候选；可选允许日程生成也参考这套内部倾向。",
       keys: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
+    },
+  ],
+  enable_personality_iteration_experiment: [
+    {
+      title: "自主调节",
+      note: "默认只给诊断建议。开启后仅临时覆盖少量主动策略参数；关闭时恢复到用户最后一次手动设置的值。",
+      keys: ["enable_personality_iteration_auto_tune"],
     },
   ],
   enable_mai_style_integration: [
@@ -2399,6 +2409,7 @@ const featureSettingTypes = {
   proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
   enable_maslow_schedule_influence: { type: "checkbox" },
   maslow_motivation_strength: { type: "number", min: 0, max: 100, step: 1 },
+  enable_personality_iteration_auto_tune: { type: "checkbox" },
   memory_companion_context_timeout_seconds: { type: "number", min: 0.2, max: 6, step: 0.1 },
   livingmemory_tool_name: { type: "text" },
   enable_memory_companion_emotional_drift: { type: "checkbox" },
@@ -3299,6 +3310,7 @@ async function loadTroubleshooting() {
     state.featureDraft = featureDraftFromOverview(overview);
   }
   renderTroubleshooting();
+  if (state.activeTab === "experimental") renderExperimentalPage();
   return data;
 }
 
@@ -3482,8 +3494,21 @@ async function loadDiagnostics(force = false) {
   if (state.activeTab === "troubleshooting") {
     renderDiagnostics();
   }
+  if (state.activeTab === "experimental") {
+    renderExperimentalPage();
+  }
   renderDashboardPulse();
   return state.diagnostics;
+}
+
+async function refreshExperimentalRuntimeData(force = false) {
+  const requestSeq = loadAllRequestSeq;
+  await Promise.all([
+    loadDiagnostics(force).catch(() => null),
+    loadTroubleshooting().catch(() => null),
+    loadUserGroupLists(requestSeq).catch(() => null),
+  ]);
+  if (state.activeTab === "experimental") renderExperimentalPage();
 }
 
 async function loadTokenStats(force = false) {
@@ -3549,7 +3574,8 @@ async function ensureTabData(tabName, force = false) {
     loadDiagnostics(force).catch(() => {});
     await loadTroubleshooting();
   } else if (tabName === "experimental") {
-    loadDiagnostics(force).catch(() => {});
+    renderExperimentalPage();
+    await refreshExperimentalRuntimeData(force);
   }
 }
 
@@ -3892,10 +3918,12 @@ const setupGuideAdvancedItems = {
       key: "enable_personality_iteration_experiment",
       title: "角色贴合校准",
       ask: "是否让排障页帮助你调整角色贴合度？",
-      description: "它会用艾森克 PEN、大五人格、依恋风格和自我决定理论，对照当前运行表现，提示应调整人格、世界知识、主动策略还是群聊边界。",
-      caution: "默认关闭。它会给出调整位置和建议写法，但不会自动改 AstrBot 人格、世界知识或回复正文。",
+      description: "它会用艾森克 PEN、大五人格、依恋风格和自我决定理论，对照当前运行表现，提示应调整人格、世界知识、主动策略还是群聊边界；也可选临时调节主动策略参数。",
+      caution: "默认关闭。默认只给调整建议；开启自主调节也不会自动修改人格或世界知识，关闭后会恢复到用户最后一次手动设置的值。",
       kind: "feature",
-      settings: [],
+      settings: [
+        { key: "enable_personality_iteration_auto_tune", type: "bool", label: "允许自主调节参数", description: "临时覆盖主动上限、空闲判定、最小间隔、主动人格放行阈值和主动复核强度；关闭后恢复到最新手动值。" },
+      ],
     },
   ],
   private: [
@@ -9490,11 +9518,17 @@ function emotionGateBlock(detail) {
   const strategyStackText = strategyStack.length
     ? strategyStack.map((item) => `${item.strategy_label || item.strategy || "-"} ${Number(item.intensity || 0)}`).join("｜")
     : "-";
+  const pendingJudgement = detail.pending_emotion_judgement && typeof detail.pending_emotion_judgement === "object" ? detail.pending_emotion_judgement : {};
+  const judgementError = String(detail.last_emotion_judgement_error || "").trim();
+  const judgementText = pendingJudgement.text
+    ? `等待模型复核｜${pendingJudgement.text}${pendingJudgement.created_at_text ? `｜${pendingJudgement.created_at_text}` : ""}`
+    : (judgementError ? `上次复核失败｜${judgementError}` : "本地快判或已完成");
   const hurtUntil = Number(rel.hurt_until || 0);
   const now = Math.floor(Date.now() / 1000);
   const remaining = hurtUntil > now ? `${Math.ceil((hurtUntil - now) / 60)} 分钟` : "无";
   const pairs = [
     ["状态", mode],
+    ["模型复核", judgementText],
     ["余波值", moodScore ? String(moodScore) : "0"],
     ["四维", dimensionText],
     ["基本/复合", blendText],
@@ -12582,6 +12616,25 @@ function proactiveScore01(value) {
   return `${Math.round(num * 100)}%`;
 }
 
+const NEED_LAYER_LABELS = {
+  physiological: "状态",
+  safety: "安全",
+  belonging: "归属",
+  esteem: "尊重",
+  growth: "成长",
+  meaning: "意义",
+  状态: "状态",
+  安全: "安全",
+  归属: "归属",
+  尊重: "尊重",
+  成长: "成长",
+  意义: "意义",
+};
+
+function needLayerLabel(raw) {
+  return NEED_LAYER_LABELS[raw] || (raw ? raw : "未分类");
+}
+
 function proactiveSemanticMeta(item) {
   const meta = [];
   if (item.semantic_kind) meta.push(`语义：${proactiveSemanticLabel(item.semantic_kind)}`);
@@ -12593,6 +12646,10 @@ function proactiveSemanticMeta(item) {
   const risk = proactivePercent100(item.semantic_risk);
   if (risk) meta.push(`风险：${risk}`);
   if (item.semantic_note) meta.push(`语义说明：${item.semantic_note}`);
+  const needLayer = item.need_layer || item.need_level || item.maslow_level;
+  if (needLayer) meta.push(`需求：${needLayerLabel(needLayer)}`);
+  if (item.need_drive) meta.push(`驱动：${item.need_drive}`);
+  if (item.need_note) meta.push(`需求说明：${item.need_note}`);
   return meta;
 }
 
@@ -12629,6 +12686,15 @@ function proactiveReadinessMeta(item) {
   }
   if (readiness.temperature_label || readiness.temperature_detail) {
     meta.push(`关系温度：${[readiness.temperature_label, readiness.temperature_detail].filter(Boolean).join(" · ")}`);
+  }
+  const motivation = readiness.motivation || {};
+  if (motivation.label || motivation.detail || motivation.score) {
+    const parts = [
+      proactiveScore01(motivation.score),
+      motivation.label,
+      motivation.detail,
+    ].filter(Boolean);
+    meta.push(`动机调度：${parts.join(" · ")}`);
   }
   return meta;
 }
@@ -15739,6 +15805,12 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     }
     return true;
   }
+  if (featureKey === "enable_personality_iteration_experiment") {
+    if (settingKey === "enable_personality_iteration_auto_tune") {
+      return boolSetting("enable_personality_iteration_experiment");
+    }
+    return true;
+  }
   if (featureKey === "enable_photo_text_action") {
     if (settingKey === "daily_outfit_photo_prompt") return boolSetting("enable_daily_outfit_photo");
     if (settingKey === "enable_natural_language_photo_generation") {
@@ -16080,8 +16152,8 @@ const featureDetailGuides = {
   enable_personality_iteration_experiment: {
     summary: "实验性功能第三项：把艾森克 PEN、大五人格、依恋风格和自我决定理论作为角色贴合标尺，帮助用户调整角色设定和运行策略。",
     trigger: "打开排障/诊断页时读取现有运行态、主动候选、关系状态和群聊边界配置；不额外调用模型。",
-    enabled: "排障页会显示可审核建议，例如外向性表现偏高、焦虑型追问、回避型收缩、关系感/自主感不足，并明确建议用户调整 AstrBot 人格、世界知识、主动策略或群聊边界。",
-    disabled: "不会做人格理论检查；现有回复、主动和群聊链路保持不变。",
+    enabled: "排障页会显示可审核建议，例如外向性表现偏高、焦虑型追问、回避型收缩、关系感/自主感不足，并明确建议用户调整 AstrBot 人格、世界知识、主动策略或群聊边界。若开启自主调节，会临时覆盖少量主动策略参数。",
+    disabled: "不会做人格理论检查；若曾启用自主调节，会恢复到用户最后一次手动设置的主动策略参数。",
   },
   enable_dialogue_episode_memory: {
     summary: "把连续私聊整理成“共同经历”片段，之后只择要使用最近或相关片段来保持连续感。",
@@ -17444,16 +17516,16 @@ async function runAction(action, successMessage = "", control = null) {
 }
 
 const experimentalFeatureKeys = [
-  "enable_emotion_simulation",
   "enable_maslow_motivation_experiment",
   "enable_experimental_motivation_model",
   "enable_personality_iteration_experiment",
+  "enable_emotion_simulation",
 ];
 
 const experimentalFeatureMeta = {
   enable_emotion_simulation: {
     label: "情绪余波",
-    index: "第一项",
+    index: "第四项",
     shortDesc: "维护 Bot 自身短期情绪余波：被刺到后的收敛、缓和后的恢复、不满时的短暂回避，并按调节策略影响回复语气。",
     theory: [
       { name: "伊扎德情绪四维", desc: "愉快度、紧张度、激动度、确信度，随伤害/道歉/安抚/夸奖等事件变化并自然回归基线。", impact: "每条私聊消息处理后，Bot 的四维数值实时变化，直接决定回复语气是放松还是收敛。" },
@@ -17472,7 +17544,7 @@ const experimentalFeatureMeta = {
   },
   enable_maslow_motivation_experiment: {
     label: "需求强化功能",
-    index: "第二项",
+    index: "第一项",
     shortDesc: "把主动念头归入状态、安全、归属、尊重、成长和意义等内部需求层级，轻量调整候选排序；可选影响日程生成。",
     theory: [
       { name: "马斯洛需求层级", desc: "把主动念头按内部需求结构分类：状态（身体/生理）、安全（边界/稳定）、归属（关系/陪伴）、尊重（认可/地位）、成长（探索/学习）、意义（自我实现）。", impact: "每个主动候选会打上需求层级标签，让 Bot 知道自己「为什么想开口」，而不只是「想说什么」。" },
@@ -17489,7 +17561,7 @@ const experimentalFeatureMeta = {
   },
   enable_experimental_motivation_model: {
     label: "动机调度模型",
-    index: "第三项",
+    index: "第二项",
     shortDesc: "结合驱力、诱因和唤醒状态对主动计划做轻量调权，并在主动排障中显示判断依据。",
     theory: [
       { name: "驱力理论", desc: "Bot 内部想开口的推动力，来自当前状态、精力、情绪和开口欲望。", impact: "精力低或情绪收敛时驱力下降，Bot 不太会主动找话；状态好时驱力上升，更自然地想联系。" },
@@ -17506,8 +17578,8 @@ const experimentalFeatureMeta = {
   },
   enable_personality_iteration_experiment: {
     label: "角色贴合校准",
-    index: "第四项",
-    shortDesc: "基于艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 行为是否贴近角色基线，给出调整建议。",
+    index: "第三项",
+    shortDesc: "基于艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 行为是否贴近角色基线；默认给建议，可选临时调节主动策略参数。",
     theory: [
       { name: "艾森克 PEN 模型", desc: "从精神质（P）、外向性（E）和神经质（N）三个维度衡量角色行为倾向。", impact: "检测 Bot 是否外向性偏高（话多/主动过频）或神经质偏高（情绪波动过大），提示调整人格设定。" },
       { name: "大五人格", desc: "开放性、尽责性、外向性、宜人性和神经质，用于评估角色表现的五维一致性。", impact: "对照角色设定和实际表现，如设定内向但实际主动频繁，提示检查主动策略参数。" },
@@ -17516,14 +17588,260 @@ const experimentalFeatureMeta = {
     ],
     effects: [
       { trigger: "打开排障/诊断页", behavior: "读取运行态、主动候选、关系状态和群聊边界", result: "显示角色贴合建议卡片，指出偏差维度和调整方向" },
-      { trigger: "检测到外向性偏高", behavior: "对比主动频率与角色设定", result: "建议降低主动上限或检查人格描述是否过于热情" },
-      { trigger: "检测到焦虑型追问", behavior: "分析用户沉默后的 Bot 行为", result: "建议调整关系距离参数或增加沉默容忍度" },
+      { trigger: "检测到外向性偏高", behavior: "对比主动频率与角色设定", result: "建议降低主动上限或检查人格描述是否过于热情；开启自主调节时可临时降频" },
+      { trigger: "检测到焦虑型追问", behavior: "分析用户沉默后的 Bot 行为", result: "建议调整关系距离参数或增加沉默容忍度；开启自主调节时可临时拉长主动间隔" },
       { trigger: "检测到自主感不足", behavior: "检查主动候选的由头来源", result: "建议丰富世界知识或日程事件，让主动更有的放矢" },
     ],
-    caution: "默认关闭。开启后只给调整建议，不自动改写 AstrBot 人格或世界知识。",
-    runtimeHint: "开启后排障/诊断页会显示角色贴合建议，如外向性偏高、焦虑型追问、回避型收缩、关系感/自主感不足等。",
+    caution: "默认关闭。默认只给调整建议；若开启“允许自主调节参数”，只临时覆盖少量主动策略参数，不改写 AstrBot 人格或世界知识，关闭后恢复到用户最后一次手动设置的值。",
+    runtimeHint: "开启后排障/诊断页会显示角色贴合建议，如外向性偏高、焦虑型追问、回避型收缩、关系感/自主感不足等；自主调节结果会作为诊断项显示。",
   },
 };
+
+function experimentalVisualSpec(key) {
+  const specs = {
+    enable_emotion_simulation: {
+      mark: "情",
+      theme: "emotion",
+      model: "伊扎德四维 × Plutchik 八情绪 × Gross 调节策略",
+      question: "Bot 此刻的短期情绪余波会怎样影响回复？",
+      flow: [
+        ["采样", "私聊消息触发伤害、安抚、夸奖、道歉等事件。"],
+        ["量化", "更新愉快/紧张/激动/确信与八种基本情绪。"],
+        ["映射", "换算成收敛、低压问法、短答降压等行为倾向。"],
+        ["验证", "看用户详情页情绪卡、实验页量化条和排障记录。"],
+      ],
+      axes: [
+        ["伊扎德四维", "愉快度、紧张度、激动度、确信度", "控制语气松紧、句长、是否追问和判断是否保留余地。"],
+        ["Plutchik 八情绪", "喜悦、信任、恐惧、惊讶、悲伤、厌恶、愤怒、期待", "决定主导情绪和复合情绪，例如期待/乐观、反感、亲近。"],
+        ["Gross 调节", "避开高压、换低压问法、转移注意、重新理解、短答降压", "把内部情绪余波映射到更自然的外显回复策略。"],
+      ],
+      verify: [["私聊对象", "private"], ["排障页", "troubleshooting"]],
+    },
+    enable_maslow_motivation_experiment: {
+      mark: "需",
+      theme: "need",
+      model: "马斯洛需求层级 × 主动候选排序",
+      question: "这条主动念头为什么值得现在说？",
+      flow: [
+        ["采样", "主动候选生成时读取话题、动机、来源和语义锚点。"],
+        ["分类", "归入状态、安全、归属、尊重、成长、意义。"],
+        ["调权", "按需求层给评分偏移和压力偏移，不直接写进回复。"],
+        ["验证", "看主动候选里的需求层、评分偏移和压力偏移。"],
+      ],
+      axes: [
+        ["需求层", "状态 / 安全 / 归属 / 尊重 / 成长 / 意义", "解释主动念头的内在由头。"],
+        ["评分偏移", "正负小数", "影响候选排序，越高越容易排到前面。"],
+        ["压力偏移", "正负小数", "影响打扰感，越低越适合低打扰表达。"],
+      ],
+      verify: [["主动页", "proactive"], ["排障页", "troubleshooting"]],
+    },
+    enable_experimental_motivation_model: {
+      mark: "动",
+      theme: "motivation",
+      model: "驱力 × 诱因 × 唤醒适配",
+      question: "Bot 想开口、值得开口、适合开口，这三件事是否同时成立？",
+      flow: [
+        ["采样", "主动计划到点时读取状态、关系温度、候选语义和当前唤醒。"],
+        ["量化", "计算驱力、关系温度、诱因和唤醒适配。"],
+        ["合成", "按 25/18/37/20 权重合成综合动机分。"],
+        ["验证", "看主动运行态动机和主动链路测试里的实验动机阶段。"],
+      ],
+      axes: [
+        ["驱力", "25%", "内部想开口的推动力。"],
+        ["关系温度", "18%", "当前关系是否适合靠近。"],
+        ["诱因", "37%", "这条候选有没有具体外部价值。"],
+        ["唤醒适配", "20%", "当前状态是否适合行动。"],
+      ],
+      verify: [["主动页", "proactive"], ["排障页", "troubleshooting"]],
+    },
+    enable_personality_iteration_experiment: {
+      mark: "格",
+      theme: "personality",
+      model: "PEN × 大五 × 依恋风格 × 自我决定理论",
+      question: "当前行为是否贴近角色基线，偏差集中在哪条心理轴？",
+      flow: [
+        ["采样", "读取主动频率、候选质量、沉默后行为和群聊边界。"],
+        ["归因", "映射到外向性、焦虑/回避、关系感、自主感等轴。"],
+        ["建议", "给出人格、世界知识或主动策略的调整方向。"],
+        ["验证", "看诊断项；开启自主调节时看临时参数覆盖结果。"],
+      ],
+      axes: [
+        ["艾森克 PEN", "外向性 / 神经质 / 精神质", "检查话多、过频、情绪波动是否偏离角色。"],
+        ["大五人格", "开放性、尽责性、外向性、宜人性、神经质", "检查角色设定和实际表达是否一致。"],
+        ["依恋风格", "焦虑型 / 回避型 / 安全型", "检查沉默后追问或过度退开的关系模式。"],
+        ["自我决定 SDT", "关系感 / 自主感 / 能力感", "检查主动是否有具体由头和稳定关系连接。"],
+      ],
+      verify: [["排障页", "troubleshooting"], ["配置页", "config"]],
+    },
+  };
+  return specs[key] || { mark: "实", theme: "default", model: "实验功能", question: "", flow: [], axes: [], verify: [] };
+}
+
+function experimentalRuntimeSignals(key) {
+  if (key === "enable_emotion_simulation") {
+    const samples = expEmotionSamples();
+    const pending = samples.filter((item) => item.user.pending_emotion_judgement?.text).length;
+    const active = samples.filter((item) => item.score > 0).length;
+    return {
+      primary: `${active}/${samples.length}`,
+      label: "情绪样本",
+      detail: pending ? `${pending} 条等待模型复核` : (samples.length ? "已读取四维与八情绪" : "等待私聊触发"),
+      tone: active ? "ok" : "idle",
+      bars: [
+        ["样本", samples.length, Math.max(1, samples.length)],
+        ["波动", active, Math.max(1, samples.length)],
+        ["复核", pending, Math.max(1, samples.length)],
+      ],
+    };
+  }
+  if (key === "enable_maslow_motivation_experiment") {
+    const items = (state.overview?.proactive_candidates?.items || []).filter(proactiveCandidateIsPending);
+    const layers = new Set(items.map((item) => needLayerLabel(item.need_layer || item.need_level || item.maslow_level)).filter((item) => item !== "未分类"));
+    return {
+      primary: String(items.length),
+      label: "待处理候选",
+      detail: layers.size ? `${layers.size} 个需求层有样本` : "等待主动候选刷新",
+      tone: layers.size ? "ok" : "idle",
+      bars: [["候选", items.length, Math.max(1, items.length)], ["需求层", layers.size, 6]],
+    };
+  }
+  if (key === "enable_experimental_motivation_model") {
+    const states = (state.overview?.proactive_tasks?.user_states || [])
+      .filter((item) => item?.inner_readiness?.motivation && Object.keys(item.inner_readiness.motivation).length);
+    const top = states[0]?.inner_readiness?.motivation || {};
+    return {
+      primary: top.score ? proactiveScore01(top.score) : "0%",
+      label: "动机分",
+      detail: top.label || (states.length ? "已读取主动运行态" : "等待主动计划到点"),
+      tone: top.score ? "ok" : "idle",
+      bars: [["样本", states.length, Math.max(1, states.length)], ["综合", Math.round(Number(top.score || 0) * 100), 100]],
+    };
+  }
+  if (key === "enable_personality_iteration_experiment") {
+    const diagnostics = (state.diagnostics || []).filter((item) =>
+      String(item.title || item.text || item.detail || "").includes("角色贴合")
+      || String(item.text || item.detail || "").includes("艾森克")
+      || String(item.text || item.detail || "").includes("依恋")
+      || String(item.text || item.detail || "").includes("SDT")
+    );
+    const warnCount = diagnostics.filter((item) => ["warn", "error"].includes(item.level)).length;
+    return {
+      primary: String(diagnostics.length),
+      label: "诊断项",
+      detail: warnCount ? `${warnCount} 项需要关注` : (diagnostics.length ? "当前偏差较轻" : "等待诊断刷新"),
+      tone: warnCount ? "warn" : (diagnostics.length ? "ok" : "idle"),
+      bars: [["诊断", diagnostics.length, Math.max(1, diagnostics.length)], ["关注", warnCount, Math.max(1, diagnostics.length)]],
+    };
+  }
+  return { primary: "-", label: "运行态", detail: "暂无数据", tone: "idle", bars: [] };
+}
+
+function renderExperimentalCardVisual(key) {
+  const signal = experimentalRuntimeSignals(key);
+  const spec = experimentalVisualSpec(key);
+  const bars = (signal.bars || []).map(([label, value, max]) => `
+    <div class="exp-card-mini-bar">
+      <span>${escapeHtml(label)}</span>
+      <i><b style="width:${Math.min(100, Math.round((Number(value || 0) / Math.max(1, Number(max || 1))) * 100))}%"></b></i>
+      <em>${escapeHtml(String(value))}</em>
+    </div>
+  `).join("");
+  return `
+    <div class="exp-card-visual ${escapeHtml(spec.theme)} ${escapeHtml(signal.tone)}">
+      <div class="exp-card-orbit">${escapeHtml(spec.mark)}</div>
+      <div class="exp-card-signal">
+        <b>${escapeHtml(signal.primary)}</b>
+        <span>${escapeHtml(signal.label)}</span>
+        <small>${escapeHtml(signal.detail)}</small>
+      </div>
+      <div class="exp-card-mini-bars">${bars}</div>
+    </div>
+  `;
+}
+
+function renderExperimentalOverviewMap() {
+  const features = state.featureDraft || {};
+  const nodes = experimentalFeatureKeys.map((key) => {
+    const meta = experimentalFeatureMeta[key];
+    const spec = experimentalVisualSpec(key);
+    const signal = experimentalRuntimeSignals(key);
+    const enabled = toBool(features[key]);
+    return `
+      <button type="button" class="exp-map-node ${escapeHtml(spec.theme)} ${enabled ? "on" : "off"}" data-exp-open="${escapeHtml(key)}">
+        <span class="exp-map-mark">${escapeHtml(spec.mark)}</span>
+        <span class="exp-map-main">
+          <b>${escapeHtml(meta.label)}</b>
+          <small>${escapeHtml(spec.model)}</small>
+        </span>
+        <span class="exp-map-signal">
+          <b>${escapeHtml(signal.primary)}</b>
+          <small>${escapeHtml(signal.label)}</small>
+        </span>
+      </button>
+    `;
+  }).join("");
+  return `
+    <section class="exp-overview-map">
+      <div class="exp-overview-map-head">
+        <div>
+          <b>实验功能地图</b>
+          <span>按“理论模型 → 量化指标 → 行为映射 → 验证入口”查看，不再只看文字说明。</span>
+        </div>
+      </div>
+      <div class="exp-map-line">${nodes}</div>
+    </section>
+  `;
+}
+
+function renderExperimentalHero(key, enabled) {
+  const meta = experimentalFeatureMeta[key] || {};
+  const spec = experimentalVisualSpec(key);
+  const signal = experimentalRuntimeSignals(key);
+  const flow = (spec.flow || []).map(([title, text], index) => `
+    <div class="exp-hero-flow-step">
+      <i>${index + 1}</i>
+      <b>${escapeHtml(title)}</b>
+      <span>${escapeHtml(text)}</span>
+    </div>
+  `).join("");
+  const verify = (spec.verify || []).map(([label, tab]) => `
+    <button type="button" data-jump-tab="${escapeHtml(tab)}">${escapeHtml(label)}</button>
+  `).join("");
+  return `
+    <section class="exp-research-hero ${escapeHtml(spec.theme)} ${enabled ? "on" : "off"}">
+      <div class="exp-research-hero-main">
+        <span class="exp-research-kicker">${escapeHtml(spec.model)}</span>
+        <h2>${escapeHtml(meta.label || "")}</h2>
+        <p>${escapeHtml(spec.question || meta.shortDesc || "")}</p>
+        <div class="exp-hero-flow">${flow}</div>
+      </div>
+      <aside class="exp-signal-board ${escapeHtml(signal.tone)}">
+        <span>当前运行信号</span>
+        <b>${escapeHtml(signal.primary)}</b>
+        <strong>${escapeHtml(signal.label)}</strong>
+        <p>${escapeHtml(signal.detail)}</p>
+        <div class="exp-signal-actions">${verify}</div>
+      </aside>
+    </section>
+  `;
+}
+
+function renderExperimentalTheoryMatrix(key) {
+  const spec = experimentalVisualSpec(key);
+  const axes = (spec.axes || []).map(([name, metric, impact]) => `
+    <section class="exp-theory-axis-card">
+      <span>${escapeHtml(name)}</span>
+      <b>${escapeHtml(metric)}</b>
+      <p>${escapeHtml(impact)}</p>
+    </section>
+  `).join("");
+  return `
+    <article class="exp-detail-card exp-theory-matrix-card">
+      <h3>理论轴与量化口径</h3>
+      <div class="exp-theory-axis-grid">${axes}</div>
+    </article>
+  `;
+}
 
 function renderExperimentalPage() {
   const root = $("#experimentalRoot");
@@ -17560,6 +17878,7 @@ function renderExperimentalOverview() {
           </label>
         </div>
         <p class="exp-card-desc">${escapeHtml(meta.shortDesc)}</p>
+        ${renderExperimentalCardVisual(key)}
         <div class="exp-card-foot">
           <div class="exp-card-guide">
             <span>何时生效</span>
@@ -17586,6 +17905,7 @@ function renderExperimentalOverview() {
         <b>使用建议</b>
         <span>以下功能仍处于实验阶段，建议逐项开启观察。除情绪模拟保留原默认值外，其他实验项默认关闭；不会把理论标签写进实际回复正文。</span>
       </div>
+      ${renderExperimentalOverviewMap()}
       <div class="exp-card-grid">
         ${cards}
       </div>
@@ -17635,6 +17955,9 @@ function renderExperimentalSubpage(key) {
   ].map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   const settingsHtml = renderExperimentalSettings(key);
   const runtimeHtml = renderExperimentalRuntime(key);
+  const visualHtml = renderExperimentalTheoryVisual(key);
+  const heroHtml = renderExperimentalHero(key, enabled);
+  const matrixHtml = renderExperimentalTheoryMatrix(key);
   return `
     <div class="subpage experimental-subpage ${enabled ? "on" : "off"}">
       <nav class="exp-breadcrumb">
@@ -17657,7 +17980,10 @@ function renderExperimentalSubpage(key) {
           <b>${escapeHtml(enabled ? "开启" : "关闭")}</b>
         </label>
       </header>
+      ${heroHtml}
       ${meta.caution ? `<div class="exp-caution"><b>注意</b><span>${escapeHtml(meta.caution)}</span></div>` : ""}
+      ${visualHtml}
+      ${matrixHtml}
       <article class="exp-detail-card exp-theory-card">
         <h3>理论框架与行为映射</h3>
         <div class="exp-theory-list">${theoryHtml}</div>
@@ -17676,6 +18002,325 @@ function renderExperimentalSubpage(key) {
       </div>
     </div>
   `;
+}
+
+const EXP_PLUTCHIK_LABELS = {
+  joy: "喜悦",
+  trust: "信任",
+  fear: "恐惧",
+  surprise: "惊讶",
+  sadness: "悲伤",
+  disgust: "厌恶",
+  anger: "愤怒",
+  anticipation: "期待",
+};
+
+function expClamp(value, min = 0, max = 100) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) return min;
+  return Math.max(min, Math.min(max, num));
+}
+
+function expPercent(value, min = 0, max = 100) {
+  if (max <= min) return 0;
+  return expClamp(((Number(value || 0) - min) / (max - min)) * 100, 0, 100);
+}
+
+function expMetricBar(row) {
+  const min = Number(row.min ?? 0);
+  const max = Number(row.max ?? 100);
+  const value = expClamp(row.value, min, max);
+  const pct = expPercent(value, min, max);
+  const baseline = row.baseline == null ? null : expPercent(row.baseline, min, max);
+  const signed = min < 0 && value > 0 ? `+${Math.round(value)}` : `${Math.round(value)}`;
+  return `
+    <div class="exp-visual-meter-row ${row.tone ? escapeHtml(row.tone) : ""}">
+      <div class="exp-visual-meter-head">
+        <b>${escapeHtml(row.label)}</b>
+        <span>${escapeHtml(row.valueText || signed)}${row.unit ? escapeHtml(row.unit) : ""}</span>
+      </div>
+      <div class="exp-visual-meter-track" aria-label="${escapeHtml(row.label)}">
+        <i class="exp-visual-meter-fill" style="width:${pct}%"></i>
+        ${baseline == null ? "" : `<em class="exp-visual-meter-baseline" style="left:${baseline}%"></em>`}
+      </div>
+      <div class="exp-visual-meter-scale">
+        <small>${escapeHtml(row.low || String(min))}</small>
+        <small>${escapeHtml(row.mid || (baseline == null ? "" : "基线"))}</small>
+        <small>${escapeHtml(row.high || String(max))}</small>
+      </div>
+      ${row.mapping ? `<p>${escapeHtml(row.mapping)}</p>` : ""}
+    </div>
+  `;
+}
+
+function expTheoryVisualShell(title, subtitle, bodyHtml, footer = "") {
+  return `
+    <article class="exp-detail-card exp-theory-visual-card">
+      <div class="exp-visual-head">
+        <div>
+          <h3>${escapeHtml(title)}</h3>
+          <p>${escapeHtml(subtitle)}</p>
+        </div>
+        ${footer ? `<span>${escapeHtml(footer)}</span>` : ""}
+      </div>
+      ${bodyHtml}
+    </article>
+  `;
+}
+
+function expEmotionSamples() {
+  return (state.users || [])
+    .map((user) => {
+      const rel = user.relationship_state && typeof user.relationship_state === "object" ? user.relationship_state : {};
+      const dims = rel.emotion_dimensions && typeof rel.emotion_dimensions === "object" ? rel.emotion_dimensions : {};
+      const plutchik = rel.plutchik_profile && typeof rel.plutchik_profile === "object" ? rel.plutchik_profile : {};
+      const emotions = rel.plutchik_emotions && typeof rel.plutchik_emotions === "object" ? rel.plutchik_emotions : {};
+      const regulation = rel.emotion_regulation && typeof rel.emotion_regulation === "object" ? rel.emotion_regulation : {};
+      const dimStrength = ["pleasantness", "tension", "arousal", "certainty"].reduce((sum, key) => sum + Math.abs(Number(dims[key] || 0)), 0);
+      const activeStrength = Object.values(emotions).reduce((max, value) => Math.max(max, Number(value || 0)), Number(plutchik.dominant_value || 0));
+      const score = Math.max(Math.abs(Number(rel.mood_score || 0)), dimStrength, activeStrength, Number(regulation.intensity || 0));
+      return { user, rel, dims, plutchik, emotions, regulation, score };
+    })
+    .filter((item) => Object.keys(item.rel).length)
+    .sort((a, b) => b.score - a.score);
+}
+
+function expIzardMapping(key, value) {
+  const v = Number(value || 0);
+  if (key === "pleasantness") {
+    if (v <= -45) return "不愉快显著：回复应短、慢、低刺激，先稳住而不是开玩笑。";
+    if (v >= 35) return "愉快度较高：可以自然靠近，但仍避免突然过度热情。";
+    return "愉快度接近基线：按普通聊天节奏处理。";
+  }
+  if (key === "tension") {
+    if (v >= 60) return "紧张度高：减少追问和长解释，优先降压。";
+    if (v <= 25) return "紧张度低：语气可以更松，但不代表要主动贴近。";
+    return "中等紧张：保持稳态承接。";
+  }
+  if (key === "arousal") {
+    if (v >= 65) return "激动度高：容易外显反应过强，需要收住句长和语气。";
+    if (v <= 20) return "激动度低：适合轻声、慢一点的回复。";
+    return "激动度适中：可正常表达。";
+  }
+  if (key === "certainty") {
+    if (v <= 30) return "确信度低：不要替用户下结论，多用试探和确认。";
+    if (v >= 70) return "确信度高：可以更明确地承接当前关系判断。";
+    return "确信度中等：表达保留余地。";
+  }
+  return "";
+}
+
+function renderEmotionTheoryVisual() {
+  const samples = expEmotionSamples();
+  const sample = samples[0] || { user: {}, rel: {}, dims: {}, plutchik: {}, emotions: {}, regulation: {}, score: 0 };
+  const userLabel = sample.user.nickname || sample.user.display_name || sample.user.user_id || "暂无样本";
+  const dims = sample.dims || {};
+  const dimensionRows = [
+    { key: "pleasantness", label: "愉快度", value: dims.pleasantness ?? 0, min: -100, max: 100, baseline: 0, low: "受挫", mid: "中性", high: "愉快", tone: "pleasant" },
+    { key: "tension", label: "紧张度", value: dims.tension ?? 12, min: 0, max: 100, baseline: 12, low: "放松", mid: "基线 12", high: "高压", tone: "tension" },
+    { key: "arousal", label: "激动度", value: dims.arousal ?? 20, min: 0, max: 100, baseline: 20, low: "低唤醒", mid: "基线 20", high: "激动", tone: "arousal" },
+    { key: "certainty", label: "确信度", value: dims.certainty ?? 60, min: 0, max: 100, baseline: 60, low: "不确定", mid: "基线 60", high: "确定", tone: "certainty" },
+  ].map((row) => expMetricBar({ ...row, mapping: expIzardMapping(row.key, row.value) })).join("");
+  const emotions = sample.emotions || {};
+  const activeFromProfile = Array.isArray(sample.plutchik.active) ? sample.plutchik.active : [];
+  const emotionValue = (key) => {
+    if (emotions[key] != null) return Number(emotions[key] || 0);
+    const active = activeFromProfile.find((item) => item.key === key);
+    if (active) return Number(active.value || 0);
+    if (sample.plutchik.dominant === key) return Number(sample.plutchik.dominant_value || 0);
+    if (sample.plutchik.secondary === key) return Number(sample.plutchik.secondary_value || 0);
+    return 0;
+  };
+  const plutchikRows = Object.entries(EXP_PLUTCHIK_LABELS).map(([key, label]) => expMetricBar({
+    label,
+    value: emotionValue(key),
+    min: 0,
+    max: 100,
+    low: "0",
+    high: "100",
+    mapping: key === sample.plutchik.dominant ? "当前主导情绪，会优先影响措辞。" : "",
+  })).join("");
+  const regulation = sample.regulation || {};
+  const stack = Array.isArray(regulation.strategy_stack) && regulation.strategy_stack.length
+    ? regulation.strategy_stack
+    : (regulation.strategy && regulation.strategy !== "none" ? [regulation] : []);
+  const regulationRows = stack.length ? stack.map((item) => expMetricBar({
+    label: item.strategy_label || item.strategy || "调节策略",
+    value: item.intensity || 0,
+    min: 0,
+    max: 100,
+    low: "弱",
+    high: "强",
+    mapping: item.reason || "根据当前情绪负载选择。",
+  })).join("") : `<div class="exp-visual-empty">当前无需额外调节；出现高压、边界或受伤余波后会显示策略强度。</div>`;
+  const body = `
+    <div class="exp-visual-grid two">
+      <section class="exp-visual-panel">
+        <h4>伊扎德四维情绪</h4>
+        <div class="exp-visual-meter-list">${dimensionRows}</div>
+      </section>
+      <section class="exp-visual-panel">
+        <h4>Plutchik 八情绪</h4>
+        <div class="exp-visual-meter-list compact">${plutchikRows}</div>
+      </section>
+      <section class="exp-visual-panel wide">
+        <h4>Gross 调节策略</h4>
+        <div class="exp-visual-meter-list">${regulationRows}</div>
+      </section>
+    </div>
+  `;
+  return expTheoryVisualShell("理论量化视图", "把短期情绪拆成四维状态、八种基本情绪和调节策略；数值越高，越会影响回复节奏。", body, `样本：${userLabel}`);
+}
+
+function renderMaslowTheoryVisual() {
+  const proactiveData = state.overview?.proactive_candidates || {};
+  const pending = (proactiveData.items || []).filter(proactiveCandidateIsPending);
+  const layerOrder = ["状态", "安全", "归属", "尊重", "成长", "意义"];
+  const descriptions = {
+    状态: "身体/精力/休息相关，偏低打扰照料。",
+    安全: "边界/稳定/勿扰相关，会降低压力。",
+    归属: "关系连接/陪伴相关，常见于轻关心。",
+    尊重: "认可/被看见相关，避免讨好式索取。",
+    成长: "探索/学习/创作相关，适合有具体内容时分享。",
+    意义: "自我实现/长期目标相关，通常需要更强由头。",
+  };
+  const buckets = Object.fromEntries(layerOrder.map((label) => [label, { count: 0, scoreBias: 0, pressureBias: 0 }]));
+  pending.forEach((item) => {
+    const label = needLayerLabel(item.need_layer || item.need_level || item.maslow_level);
+    const bucket = buckets[label] || (buckets[label] = { count: 0, scoreBias: 0, pressureBias: 0 });
+    bucket.count += Number(item.repeat_count || 1);
+    bucket.scoreBias += Number(item.need_score_bias || 0);
+    bucket.pressureBias += Number(item.need_pressure_bias || 0);
+  });
+  const maxCount = Math.max(1, ...Object.values(buckets).map((item) => item.count));
+  const rows = layerOrder.map((label) => {
+    const bucket = buckets[label] || { count: 0, scoreBias: 0, pressureBias: 0 };
+    const avgScore = bucket.count ? bucket.scoreBias / bucket.count : 0;
+    const avgPressure = bucket.count ? bucket.pressureBias / bucket.count : 0;
+    return `
+      <div class="exp-need-map-row">
+        <div class="exp-need-map-label">
+          <b>${escapeHtml(label)}</b>
+          <span>${escapeHtml(descriptions[label])}</span>
+        </div>
+        <div class="exp-need-map-track"><i style="width:${Math.round((bucket.count / maxCount) * 100)}%"></i></div>
+        <div class="exp-need-map-meta">
+          <b>${escapeHtml(String(bucket.count))}</b>
+          <span>评分 ${avgScore >= 0 ? "+" : ""}${avgScore.toFixed(2)}｜压力 ${avgPressure >= 0 ? "+" : ""}${avgPressure.toFixed(2)}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+  const body = `
+    <div class="exp-visual-panel">
+      <h4>六层需求分布与排序影响</h4>
+      <div class="exp-need-map">${rows}</div>
+      <div class="exp-visual-note">统计范围：当前待处理主动候选。评分偏移越高越容易提前，压力偏移越低越不打扰。</div>
+    </div>
+  `;
+  return expTheoryVisualShell("理论量化视图", "把主动候选映射到六类需求，并显示每类候选数量、评分偏移和打扰压力偏移。", body, `候选：${pending.length}`);
+}
+
+function renderMotivationTheoryVisual() {
+  const taskData = state.overview?.proactive_tasks || {};
+  const userStates = Array.isArray(taskData.user_states) ? taskData.user_states : [];
+  const stateRows = userStates
+    .map((item) => ({ item, motivation: item?.inner_readiness?.motivation || {} }))
+    .filter((entry) => entry.motivation && Object.keys(entry.motivation).length)
+    .sort((a, b) => Number(b.motivation.score || 0) - Number(a.motivation.score || 0));
+  const selected = stateRows[0] || { item: {}, motivation: {} };
+  const motivation = selected.motivation || {};
+  const factors = [
+    { label: "驱力", weight: 25, value: motivation.drive?.score ?? 0, mapping: "Bot 内部想开口的推动力，受状态、精力、关系温度影响。" },
+    { label: "关系温度", weight: 18, value: motivation.temperature?.score ?? 0, mapping: "当前关系是否适合靠近；未回应、受伤或边界会降低。" },
+    { label: "诱因", weight: 37, value: motivation.incentive?.score ?? 0, mapping: "这条主动有没有具体外部价值；约定、事件、内容分享会提高。" },
+    { label: "唤醒适配", weight: 20, value: motivation.arousal?.score ?? 0, mapping: "当前状态是否适合行动；过高像急，过低像没劲。" },
+  ];
+  const rows = factors.map((item) => expMetricBar({
+    label: `${item.label} · 权重 ${item.weight}%`,
+    value: Math.round(Number(item.value || 0) * 100),
+    min: 0,
+    max: 100,
+    low: "低",
+    high: "高",
+    mapping: item.mapping,
+  })).join("");
+  const composite = expMetricBar({
+    label: "综合动机分",
+    value: Math.round(Number(motivation.score || 0) * 100),
+    min: 0,
+    max: 100,
+    low: "先收住",
+    mid: "观望",
+    high: "适合行动",
+    mapping: motivation.detail || "综合分由驱力、关系温度、诱因和唤醒适配加权得到。",
+  });
+  const body = `
+    <div class="exp-visual-grid two">
+      <section class="exp-visual-panel">
+        <h4>加权因子</h4>
+        <div class="exp-visual-meter-list">${rows}</div>
+      </section>
+      <section class="exp-visual-panel">
+        <h4>最终决策映射</h4>
+        <div class="exp-visual-meter-list">${composite}</div>
+        <div class="exp-visual-decision">
+          <b>${escapeHtml(motivation.label || "暂无运行样本")}</b>
+          <span>${escapeHtml(motivation.detail || "等待主动运行态或主动链路测试产生动机调度记录。")}</span>
+        </div>
+      </section>
+    </div>
+  `;
+  return expTheoryVisualShell("理论量化视图", "把主动开口拆成驱力、关系温度、诱因和唤醒适配四个量化因子，并展示它们如何合成最终动机分。", body, selected.item.user_label ? `样本：${selected.item.user_label}` : "暂无样本");
+}
+
+function renderPersonalityTheoryVisual() {
+  const diagnostics = (state.diagnostics || []).filter((item) =>
+    String(item.title || item.source || item.text || item.detail || "").includes("角色贴合")
+    || String(item.text || item.detail || "").includes("艾森克")
+    || String(item.text || item.detail || "").includes("大五")
+    || String(item.text || item.detail || "").includes("依恋")
+    || String(item.text || item.detail || "").includes("SDT")
+    || String(item.text || item.detail || "").includes("自主感")
+  );
+  const axes = [
+    { label: "艾森克 PEN", match: /艾森克|PEN|外向性|神经质|精神质/, mapping: "检查话多、主动过频、情绪波动是否偏离角色基线。" },
+    { label: "大五人格", match: /大五|开放性|尽责性|宜人性/, mapping: "检查设定中的性格倾向与实际主动/回复风格是否一致。" },
+    { label: "依恋风格", match: /依恋|焦虑型|回避型|安全型|追问|收缩/, mapping: "检查沉默后追问、过度退开或稳定承接的关系模式。" },
+    { label: "自我决定 SDT", match: /SDT|自主感|关系感|能力感|动机质量/, mapping: "检查主动是否有自主由头、关系连接和具体能力感。" },
+  ];
+  const levelWeight = { error: 3, warn: 2, info: 1, ok: 0 };
+  const rows = axes.map((axis) => {
+    const hits = diagnostics.filter((item) => axis.match.test(`${item.title || ""} ${item.text || ""} ${item.detail || ""}`));
+    const maxLevel = hits.reduce((level, item) => (levelWeight[item.level] || 0) > (levelWeight[level] || 0) ? item.level : level, "ok");
+    const value = hits.reduce((sum, item) => sum + (levelWeight[item.level] || 1), 0);
+    return `
+      <div class="exp-personality-axis ${escapeHtml(maxLevel)}">
+        <div>
+          <b>${escapeHtml(axis.label)}</b>
+          <span>${escapeHtml(axis.mapping)}</span>
+        </div>
+        <strong>${escapeHtml(hits.length ? `${hits.length} 项` : "平稳")}</strong>
+        <div class="exp-personality-axis-track"><i style="width:${Math.min(100, value * 28)}%"></i></div>
+      </div>
+    `;
+  }).join("");
+  const body = `
+    <div class="exp-visual-panel">
+      <h4>角色贴合诊断轴</h4>
+      <div class="exp-personality-axis-list">${rows}</div>
+      <div class="exp-visual-note">这里不是给人格打绝对分，而是把排障诊断映射到理论轴：有偏差才升高，平稳时显示“平稳”。</div>
+    </div>
+  `;
+  return expTheoryVisualShell("理论量化视图", "把诊断建议映射到 PEN、大五、依恋风格和自我决定理论四条轴，方便看偏差集中在哪里。", body, `诊断：${diagnostics.length}`);
+}
+
+function renderExperimentalTheoryVisual(key) {
+  if (key === "enable_emotion_simulation") return renderEmotionTheoryVisual();
+  if (key === "enable_maslow_motivation_experiment") return renderMaslowTheoryVisual();
+  if (key === "enable_experimental_motivation_model") return renderMotivationTheoryVisual();
+  if (key === "enable_personality_iteration_experiment") return renderPersonalityTheoryVisual();
+  return "";
 }
 
 function renderExperimentalSettings(key) {
@@ -17748,9 +18393,9 @@ function renderExperimentalRuntime(key) {
   const features = state.featureDraft || {};
   const enabled = toBool(features[key]);
   const meta = experimentalFeatureMeta[key] || {};
-  let statusItems = [];
-  let extraHtml = "";
-  if (key === "enable_emotion_simulation") {
+let statusItems = [];
+let extraHtml = "";
+if (key === "enable_emotion_simulation") {
     const llmJudge = toBool(features.enable_llm_emotion_judgement) || toBool(settings.enable_llm_emotion_judgement);
     const judgeMode = String(features.emotion_judgement_mode || settings.emotion_judgement_mode || "suspicious");
     const modeLabels = { suspicious: "只判断可疑消息", always: "每条普通文本都判断", off: "关闭模型复核" };
@@ -17767,50 +18412,133 @@ function renderExperimentalRuntime(key) {
     ];
     const users = state.users || [];
     const userCount = users.length;
-    const emotionalUsers = users.filter((u) => {
-      const rel = u.relationship_state || {};
-      return rel.mode && rel.mode !== "normal";
+    const asRuntimeObject = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const emotionModeLabels = { normal: "平稳", hurt: "收敛中", refusing: "高压回避", attached: "贴近", warming: "缓和", backoff: "后退" };
+    const emotionInfos = users.map((u) => {
+      const rel = asRuntimeObject(u.relationship_state);
+      const dims = asRuntimeObject(rel.emotion_dimensions);
+      const plutchik = asRuntimeObject(rel.plutchik_profile);
+      const regulation = asRuntimeObject(rel.emotion_regulation);
+      const pending = asRuntimeObject(u.pending_emotion_judgement || rel.pending_emotion_judgement);
+      const error = String(u.last_emotion_judgement_error || rel.last_emotion_judgement_error || "").trim();
+      const mode = String(rel.mode || "normal");
+      const moodScore = Number(rel.mood_score || 0);
+      const dimStrength = ["pleasantness", "tension", "arousal", "certainty"]
+        .map((k) => Math.abs(Number(dims[k] || 0)))
+        .reduce((sum, value) => sum + value, 0);
+      const activeItems = Array.isArray(plutchik.active)
+        ? plutchik.active.filter((e) => Number(e?.value || 0) > 0).slice(0, 3)
+        : [];
+      const activeStrength = activeItems.reduce((max, item) => Math.max(max, Number(item.value || 0)), 0);
+      const lastEvent = String(rel.last_emotion_event || "");
+      const hasPending = Boolean(pending.text || pending.created_at);
+      const hasError = Boolean(error);
+      const hasRegulation = Boolean((regulation.strategy && regulation.strategy !== "none") || Number(regulation.intensity || 0) > 0);
+      const hasSample = Object.keys(rel).length > 0 || hasPending || hasError;
+      const visible = hasSample && (
+        (mode && mode !== "normal") ||
+        moodScore !== 0 ||
+        dimStrength > 0 ||
+        activeStrength > 0 ||
+        hasRegulation ||
+        (lastEvent && lastEvent !== "neutral") ||
+        hasPending ||
+        hasError
+      );
+      const sortScore = Math.max(
+        Math.abs(moodScore),
+        dimStrength,
+        activeStrength,
+        hasPending ? 120 : 0,
+        hasError ? 90 : 0,
+        mode !== "normal" ? 80 : 0,
+        lastEvent && lastEvent !== "neutral" ? 60 : 0
+      );
+      return {
+        nick: u.nickname || u.display_name || u.user_id || "-",
+        mode,
+        modeLabel: emotionModeLabels[mode] || mode || "平稳",
+        dominant: plutchik.dominant_label || "",
+        blend: plutchik.blend_label || "",
+        moodScore,
+        regulation: regulation.strategy_label || regulation.strategy || "",
+        regulationIntensity: regulation.intensity || 0,
+        dims,
+        activeEmotions: activeItems.map((e) => `${e.label || e.key || "情绪"} ${Number(e.value || 0)}`).join("｜"),
+        lastEvent,
+        lastReason: rel.last_emotion_reason || rel.last_hurt_reason || "",
+        pendingText: pending.text || "",
+        pendingAge: pending.created_at_text || "",
+        error,
+        hasSample,
+        visible,
+        sortScore,
+      };
+    }).filter((item) => item.hasSample);
+    const emotionalInfos = emotionInfos.filter((item) => item.visible);
+    const emotionalCount = emotionalInfos.length;
+    const pendingCount = emotionInfos.filter((item) => item.pendingText).length;
+    const errorCount = emotionInfos.filter((item) => item.error).length;
+    const calmCount = Math.max(0, emotionInfos.length - emotionalCount);
+    const modeBuckets = { hurt: 0, refusing: 0, attached: 0, warming: 0, backoff: 0 };
+    emotionalInfos.forEach((item) => {
+      if (Object.prototype.hasOwnProperty.call(modeBuckets, item.mode)) modeBuckets[item.mode]++;
     });
-    const emotionalCount = emotionalUsers.length;
-    const modeBuckets = { hurt: 0, cold: 0, warm: 0, close: 0 };
-    emotionalUsers.forEach((u) => {
-      const mode = u.relationship_state?.mode || "normal";
-      if (Object.prototype.hasOwnProperty.call(modeBuckets, mode)) modeBuckets[mode]++;
-    });
-    const topEmotional = emotionalUsers
-      .map((u) => {
-        const rel = u.relationship_state || {};
-        const dims = rel.emotion_dimensions || {};
-        const plutchik = rel.plutchik_profile || {};
-        const dominant = plutchik.dominant_label || "";
-        const moodScore = Number(rel.mood_score || 0);
-        return { nick: u.nickname || u.user_id || "-", mode: rel.mode || "normal", dominant, moodScore, regulation: rel.emotion_regulation?.strategy_label || rel.emotion_regulation?.strategy || "", dims };
-      })
-      .sort((a, b) => Math.abs(b.moodScore) - Math.abs(a.moodScore))
+    const topEmotional = (emotionalInfos.length ? emotionalInfos : emotionInfos)
+      .sort((a, b) => b.sortScore - a.sortScore)
       .slice(0, 4);
-    const userRows = topEmotional.map((u) => `
+    const userRows = topEmotional.map((u) => {
+      const dimText = ["pleasantness", "tension", "arousal", "certainty"].map((k) => {
+        const v = u.dims[k];
+        if (v == null) return "";
+        const labels = { pleasantness: "愉快", tension: "紧张", arousal: "激动", certainty: "确信" };
+        return `<span>${labels[k]}：${v}</span>`;
+      }).filter(Boolean).join("");
+      return `
       <div class="exp-runtime-user-row">
         <div class="exp-runtime-user-head">
           <b>${escapeHtml(u.nick)}</b>
-          <span class="exp-runtime-user-mode ${escapeHtml(u.mode)}">${escapeHtml(u.mode === "normal" ? "平稳" : u.mode)}</span>
+          <span class="exp-runtime-user-mode ${escapeHtml(u.mode)}">${escapeHtml(u.pendingText ? "等待复核" : (u.error ? "复核失败" : u.modeLabel))}</span>
         </div>
         <div class="exp-runtime-user-detail">
-          ${u.dominant ? `<span>主导情绪：${escapeHtml(u.dominant)}</span>` : ""}
+          ${dimText ? `<span class="exp-runtime-dims">${dimText}</span>` : ""}
+          ${u.dominant ? `<span>主导：${escapeHtml(u.dominant)}</span>` : ""}
+          ${u.blend ? `<span>复合：${escapeHtml(u.blend)}</span>` : ""}
+          ${u.activeEmotions ? `<span>活跃：${escapeHtml(u.activeEmotions)}</span>` : ""}
           <span>余波值：${escapeHtml(String(u.moodScore))}</span>
-          ${u.regulation ? `<span>策略：${escapeHtml(u.regulation)}</span>` : ""}
+          ${u.lastEvent && u.lastEvent !== "neutral" ? `<span>事件：${escapeHtml(u.lastEvent)}</span>` : ""}
+          ${u.regulation ? `<span>调节：${escapeHtml(u.regulation)}（${u.regulationIntensity}）</span>` : ""}
+          ${u.pendingText ? `<span>复核中：${escapeHtml(u.pendingText)}${u.pendingAge ? `｜${escapeHtml(u.pendingAge)}` : ""}</span>` : ""}
+          ${u.error ? `<span>复核失败：${escapeHtml(u.error)}</span>` : ""}
+          ${u.lastReason ? `<span>原因：${escapeHtml(String(u.lastReason).slice(0, 80))}</span>` : ""}
         </div>
       </div>
-    `).join("");
+    `;}).join("");
+    const runtimeHint = emotionInfos.length
+      ? (emotionalInfos.length
+        ? `${meta.runtimeHint || ""}${pendingCount ? ` 当前还有 ${pendingCount} 条情绪复核等待模型返回。` : ""}`
+        : "当前已有情绪余波样本，但整体处于平稳或已回归状态；只有命中伤害、安抚、夸奖、道歉等事件，或模型复核返回有效变化后，数值才会明显波动。")
+      : "暂无情绪余波样本。私聊发生伤害、安抚、夸奖、道歉等事件后会出现；如果开启模型复核，结果可能要等异步复核完成后才显示。";
     extraHtml = `
       <div class="exp-runtime-extra">
         <div class="exp-runtime-stats-row">
           <div class="exp-runtime-stat"><span>私聊用户</span><b>${escapeHtml(String(userCount))}</b></div>
-          <div class="exp-runtime-stat"><span>情绪活跃</span><b>${escapeHtml(String(emotionalCount))}</b></div>
-          <div class="exp-runtime-stat"><span>收敛中</span><b>${escapeHtml(String(modeBuckets.hurt || 0))}</b></div>
-          <div class="exp-runtime-stat"><span>冷淡中</span><b>${escapeHtml(String(modeBuckets.cold || 0))}</b></div>
+          <div class="exp-runtime-stat"><span>已有样本</span><b>${escapeHtml(String(emotionInfos.length))}</b></div>
+          <div class="exp-runtime-stat"><span>情绪波动</span><b>${escapeHtml(String(emotionalCount))}</b></div>
+          <div class="exp-runtime-stat"><span>平稳样本</span><b>${escapeHtml(String(calmCount))}</b></div>
+          <div class="exp-runtime-stat"><span>等待复核</span><b>${escapeHtml(String(pendingCount))}</b></div>
+          <div class="exp-runtime-stat"><span>复核失败</span><b>${escapeHtml(String(errorCount))}</b></div>
         </div>
-        ${userRows ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">情绪波动最大的用户</div>${userRows}</div>` : ""}
-        <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
+        ${modeBuckets.hurt || modeBuckets.refusing || modeBuckets.attached || modeBuckets.warming || modeBuckets.backoff ? `
+          <div class="exp-runtime-stats-row">
+            <div class="exp-runtime-stat"><span>收敛中</span><b>${escapeHtml(String(modeBuckets.hurt || 0))}</b></div>
+            <div class="exp-runtime-stat"><span>高压回避</span><b>${escapeHtml(String(modeBuckets.refusing || 0))}</b></div>
+            <div class="exp-runtime-stat"><span>缓和/贴近</span><b>${escapeHtml(String((modeBuckets.warming || 0) + (modeBuckets.attached || 0)))}</b></div>
+            <div class="exp-runtime-stat"><span>后退</span><b>${escapeHtml(String(modeBuckets.backoff || 0))}</b></div>
+          </div>
+        ` : ""}
+        ${userRows ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">${escapeHtml(emotionalInfos.length ? "情绪波动最大的用户" : "最近情绪样本")}</div>${userRows}</div>` : ""}
+        <div class="exp-runtime-hint">${escapeHtml(runtimeHint)}</div>
       </div>
     `;
   } else if (key === "enable_maslow_motivation_experiment") {
@@ -17823,35 +18551,116 @@ function renderExperimentalRuntime(key) {
     ];
     const proactiveData = overview.proactive_candidates || {};
     const allCandidates = proactiveData.items || [];
-    const pending = allCandidates.filter((c) => c.status === "pending" || c.status === "accepted");
+    const pending = allCandidates.filter(proactiveCandidateIsPending);
     const needBuckets = { 状态: 0, 安全: 0, 归属: 0, 尊重: 0, 成长: 0, 意义: 0, 未分类: 0 };
     pending.forEach((c) => {
-      const level = c.need_level || c.maslow_level || "未分类";
-      const key = Object.prototype.hasOwnProperty.call(needBuckets, level) ? level : "未分类";
-      needBuckets[key]++;
+      const level = needLayerLabel(c.need_layer || c.need_level || c.maslow_level);
+      const bucketKey = Object.prototype.hasOwnProperty.call(needBuckets, level) ? level : "未分类";
+      needBuckets[bucketKey]++;
     });
+    const maxBucket = Math.max(1, ...Object.values(needBuckets));
     const needBars = Object.entries(needBuckets).filter(([, v]) => v > 0).map(([k, v]) =>
-      `<div class="exp-runtime-need-bar"><span>${escapeHtml(k)}</span><div class="exp-runtime-need-bar-track"><div class="exp-runtime-need-bar-fill" style="width:${Math.min(100, v * 20)}%"></div></div><b>${escapeHtml(String(v))}</b></div>`
+      `<div class="exp-runtime-need-bar"><span>${escapeHtml(k)}</span><div class="exp-runtime-need-bar-track"><div class="exp-runtime-need-bar-fill" style="width:${Math.min(100, (v / maxBucket) * 100)}%"></div></div><b>${escapeHtml(String(v))}</b></div>`
     ).join("");
+    const needCandidateRows = pending.filter((c) => c.need_layer || c.need_level).slice(0, 4).map((c) => `
+      <div class="exp-runtime-user-row">
+        <div class="exp-runtime-user-head">
+          <b>${escapeHtml(c.topic || c.reason_label || c.reason || "未命名候选")}</b>
+          <span class="exp-runtime-user-mode">${escapeHtml(needLayerLabel(c.need_layer || c.need_level))}</span>
+        </div>
+        <div class="exp-runtime-user-detail">
+          ${c.need_drive ? `<span>驱动：${escapeHtml(c.need_drive)}</span>` : ""}
+          ${c.need_note ? `<span>备注：${escapeHtml(c.need_note)}</span>` : ""}
+          ${c.need_score_bias != null ? `<span>评分偏移：${escapeHtml(String(c.need_score_bias))}</span>` : ""}
+        </div>
+      </div>
+    `).join("");
     extraHtml = `
       <div class="exp-runtime-extra">
         <div class="exp-runtime-stats-row">
           <div class="exp-runtime-stat"><span>待发送候选</span><b>${escapeHtml(String(pending.length))}</b></div>
           <div class="exp-runtime-stat"><span>已进入计划</span><b>${escapeHtml(String(proactiveData.counts?.accepted || 0))}</b></div>
         </div>
-        ${needBars ? `<div class="exp-runtime-need-chart"><div class="exp-runtime-need-chart-title">候选需求层级分布</div>${needBars}</div>` : ""}
+        ${needBars ? `<div class="exp-runtime-need-chart"><div class="exp-runtime-need-chart-title">候选需求层级分布</div>${needBars}</div>` : `<div class="exp-runtime-hint">暂无带需求层级的主动候选。开启后需要等待下一次主动候选生成/刷新，或到排障页运行一次主动消息测试，才会出现可观察记录。</div>`}
+        ${needCandidateRows ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">候选需求分析</div>${needCandidateRows}</div>` : ""}
         <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
       </div>
     `;
   } else if (key === "enable_experimental_motivation_model") {
     const proactiveData = overview.proactive_candidates || {};
     const allCandidates = proactiveData.items || [];
-    const pending = allCandidates.filter((c) => c.status === "pending" || c.status === "accepted");
+    const pending = allCandidates.filter(proactiveCandidateIsPending);
+    const taskData = overview.proactive_tasks || {};
+    const userStates = Array.isArray(taskData.user_states) ? taskData.user_states : [];
+    const motivationStates = userStates
+      .map((item) => ({ item, motivation: item?.inner_readiness?.motivation || {} }))
+      .filter((entry) => entry.motivation && Object.keys(entry.motivation).length);
+    const proactiveTest = state.troubleshooting?.chain_tests?.proactive_message || {};
+    const proactiveSteps = Array.isArray(proactiveTest.steps) ? proactiveTest.steps : [];
+    const motivationStep = proactiveSteps.find((step) =>
+      String(step.id || step.key || step.source || "").includes("experimental_motivation") ||
+      String(step.name || step.title || "").includes("实验动机")
+    );
+    const diagnostics = state.diagnostics || [];
+    const motivationDiag = motivationStep || diagnostics.find((d) =>
+      String(d.id || d.source || "").includes("experimental_motivation") ||
+      String(d.title || "").includes("实验动机")
+    );
+    const motivationState = motivationStates[0] || null;
+    let driveScore = "-", incentiveScore = "-", arousalLevel = "-", arousalFit = "-", motivationLabel = "-", motivationScore = "-";
+    const motivationDetail = String(motivationDiag?.detail || motivationDiag?.text || "");
+    if (motivationDetail) {
+      const detail = motivationDetail;
+      const scoreMatch = detail.match(/([\d.]+)｜/);
+      if (scoreMatch) motivationScore = scoreMatch[1];
+      const driveMatch = detail.match(/驱力([\d.]+)/);
+      if (driveMatch) driveScore = driveMatch[1];
+      const incentiveMatch = detail.match(/诱因([\d.]+)/);
+      if (incentiveMatch) incentiveScore = incentiveMatch[1];
+      const arousalMatch = detail.match(/唤醒([\d.]+)\/适配([\d.]+)/);
+      if (arousalMatch) { arousalLevel = arousalMatch[1]; arousalFit = arousalMatch[2]; }
+      const labelMatch = detail.match(/｜([^｜]+)｜/);
+      if (labelMatch) motivationLabel = labelMatch[1];
+    }
+    if (motivationState && motivationScore === "-") {
+      const motivation = motivationState.motivation || {};
+      const drive = motivation.drive || {};
+      const incentive = motivation.incentive || {};
+      const arousal = motivation.arousal || {};
+      motivationScore = proactiveScore01(motivation.score) || "-";
+      motivationLabel = motivation.label || "-";
+      driveScore = proactiveScore01(drive.score) || "-";
+      incentiveScore = proactiveScore01(incentive.score) || "-";
+      arousalLevel = proactiveScore01(arousal.level) || "-";
+      arousalFit = proactiveScore01(arousal.score) || "-";
+    }
     statusItems = [
-      ["当前候选数", String(pending.length)],
-      ["调权方式", "驱力 × 诱因 × 唤醒适配"],
-      ["显示位置", "主动排障页"],
+      ["综合动机分", motivationScore],
+      ["判断结果", motivationLabel],
+      ["驱力", driveScore],
+      ["诱因", incentiveScore],
+      ["唤醒水平", arousalLevel],
+      ["唤醒适配", arousalFit],
+      ["候选数", String(pending.length)],
+      ["数据来源", motivationStep ? "主动消息链路测试" : (motivationState ? "主动运行态" : (motivationDiag ? "诊断项" : "暂无记录"))],
     ];
+    const motivationStateRows = motivationStates.slice(0, 4).map(({ item, motivation }) => {
+      const incentive = motivation.incentive || {};
+      const arousal = motivation.arousal || {};
+      return `
+      <div class="exp-runtime-user-row">
+        <div class="exp-runtime-user-head">
+          <b>${escapeHtml(item.user_label || item.user_id || "未命名用户")}</b>
+          <span class="exp-runtime-user-mode">${escapeHtml(motivation.label || "-")}</span>
+        </div>
+        <div class="exp-runtime-user-detail">
+          <span>综合：${escapeHtml(proactiveScore01(motivation.score) || "-")}</span>
+          ${motivation.detail ? `<span>${escapeHtml(motivation.detail)}</span>` : ""}
+          ${incentive.label || incentive.detail ? `<span>诱因：${escapeHtml([incentive.label, incentive.detail].filter(Boolean).join(" · "))}</span>` : ""}
+          ${arousal.label || arousal.detail ? `<span>唤醒：${escapeHtml([arousal.label, arousal.detail].filter(Boolean).join(" · "))}</span>` : ""}
+        </div>
+      </div>
+    `;}).join("");
     const topCandidates = pending.slice(0, 4).map((c) => `
       <div class="exp-runtime-user-row">
         <div class="exp-runtime-user-head">
@@ -17861,23 +18670,26 @@ function renderExperimentalRuntime(key) {
         <div class="exp-runtime-user-detail">
           ${c.semantic_score != null ? `<span>语义贴合：${escapeHtml(proactivePercent100(c.semantic_score) || "-")}</span>` : ""}
           ${c.semantic_pressure != null ? `<span>压力：${escapeHtml(proactivePercent100(c.semantic_pressure) || "-")}</span>` : ""}
-          ${c.impulse_value != null ? `<span>冲动值：${escapeHtml(proactivePercent100(c.impulse_value) || "-")}</span>` : ""}
+          ${c.need_layer ? `<span>需求层：${escapeHtml(needLayerLabel(c.need_layer))}</span>` : ""}
         </div>
       </div>
     `).join("");
     extraHtml = `
       <div class="exp-runtime-extra">
         <div class="exp-runtime-stats-row">
-          <div class="exp-runtime-stat"><span>待发送</span><b>${escapeHtml(String(pending.length))}</b></div>
-          <div class="exp-runtime-stat"><span>已发送</span><b>${escapeHtml(String(proactiveData.counts?.sent || 0))}</b></div>
-          <div class="exp-runtime-stat"><span>被拦截</span><b>${escapeHtml(String(proactiveData.counts?.blocked || 0))}</b></div>
+          <div class="exp-runtime-stat"><span>驱力</span><b>${escapeHtml(driveScore)}</b></div>
+          <div class="exp-runtime-stat"><span>诱因</span><b>${escapeHtml(incentiveScore)}</b></div>
+          <div class="exp-runtime-stat"><span>唤醒适配</span><b>${escapeHtml(arousalFit)}</b></div>
+          <div class="exp-runtime-stat"><span>综合分</span><b>${escapeHtml(motivationScore)}</b></div>
         </div>
-        ${topCandidates ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">近期候选评分</div>${topCandidates}</div>` : ""}
-        <div class="exp-runtime-hint">${escapeHtml(meta.runtimeHint || "")}</div>
+        <div class="exp-runtime-hint">${motivationDetail ? escapeHtml(motivationDetail.slice(0, 200)) : (motivationState ? "已从主动运行态读取动机调度结果；如果想看完整分步链路，可以到排障页点击“测试主动消息”。" : "暂无“实验动机调度”阶段记录。开启后需要主动链路跑到 Bot 开口欲阶段才会出现；可以等待下一次主动触发，或到排障页点击“测试主动消息”。")}</div>
+        ${motivationStateRows ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">主动运行态动机</div>${motivationStateRows}</div>` : ""}
+        ${topCandidates ? `<div class="exp-runtime-user-list"><div class="exp-runtime-user-list-title">近期候选</div>${topCandidates}</div>` : ""}
       </div>
     `;
   } else if (key === "enable_personality_iteration_experiment") {
     const diagnostics = state.diagnostics || [];
+    const autoTuneEnabled = toBool(features.enable_personality_iteration_auto_tune) || toBool(settings.enable_personality_iteration_auto_tune);
     const personalityItems = diagnostics.filter((d) =>
       String(d.title || d.source || "").includes("人格") ||
       String(d.title || d.source || "").includes("贴合") ||
@@ -17893,6 +18705,7 @@ function renderExperimentalRuntime(key) {
     statusItems = [
       ["检查维度", "艾森克PEN / 大五 / 依恋 / SDT"],
       ["显示位置", "排障/诊断页"],
+      ["自主调节", autoTuneEnabled ? "已开启：临时覆盖少量主动策略参数" : "未开启：只给建议"],
       ["当前建议数", String(personalityItems.length)],
     ];
     const diagRows = personalityItems.slice(0, 4).map((d) => `
@@ -17926,7 +18739,8 @@ function bindExperimentalOverviewActions() {
   const root = $("#experimentalRoot");
   if (!root) return;
   root.querySelectorAll("[data-exp-open]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
       state.experimentalSubpage = button.dataset.expOpen || "";
       renderExperimentalPage();
     });
@@ -17935,6 +18749,7 @@ function bindExperimentalOverviewActions() {
     input.addEventListener("change", async () => {
       const key = input.dataset.expToggle || "";
       if (!key) return;
+      state.featureDraft = state.featureDraft || {};
       state.featureDraft[key] = input.checked;
       const isSetting = Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, key);
       const payload = isSetting
@@ -17945,7 +18760,7 @@ function bindExperimentalOverviewActions() {
         input.checked ? "已开启" : "已关闭",
         input.closest(".exp-card-toggle") || input.closest(".feature-detail-toggle"),
       );
-      renderExperimentalPage();
+      await refreshExperimentalRuntimeData(true);
     });
   });
 }
@@ -17967,6 +18782,7 @@ function bindExperimentalSubpageActions(key) {
     input.addEventListener("change", async () => {
       const toggleKey = input.dataset.expToggle || "";
       if (!toggleKey) return;
+      state.featureDraft = state.featureDraft || {};
       state.featureDraft[toggleKey] = input.checked;
       const isSetting = Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, toggleKey);
       const payload = isSetting
@@ -17977,7 +18793,7 @@ function bindExperimentalSubpageActions(key) {
         input.checked ? "已开启" : "已关闭",
         input.closest(".feature-detail-toggle") || input.closest(".exp-card-toggle"),
       );
-      renderExperimentalPage();
+      await refreshExperimentalRuntimeData(true);
     });
   });
   root.querySelectorAll("[data-exp-param-form]").forEach((form) => {
@@ -18031,6 +18847,9 @@ async function saveExperimentalSettings(key, form, successMessage) {
     successMessage || "已保存参数",
     form.querySelector(".feature-param-save"),
   );
+  if (state.activeTab === "experimental") {
+    await refreshExperimentalRuntimeData(true);
+  }
 }
 
 function switchTab(tabName) {

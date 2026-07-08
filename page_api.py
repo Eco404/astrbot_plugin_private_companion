@@ -73,6 +73,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         "creative_share_probability",
         "skill_growth_schedule_influence_strength",
     }
+    PERSONALITY_AUTO_TUNE_KEYS = {
+        "proactive_intensity_preset",
+        "max_daily_messages",
+        "idle_minutes",
+        "min_interval_minutes",
+        "proactive_persona_judge_send_threshold",
+        "proactive_review_strength",
+    }
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
@@ -913,6 +921,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 rebuild = getattr(self.plugin, "_rebuild_store_manager", None)
                 if callable(rebuild):
                     rebuild(reload_data=True)
+            await self._record_personality_auto_tune_manual_values(changed)
+            personality_restore: dict[str, Any] = {}
+            if (
+                ("enable_personality_iteration_experiment" in changed and not bool(changed.get("enable_personality_iteration_experiment")))
+                or ("enable_personality_iteration_auto_tune" in changed and not bool(changed.get("enable_personality_iteration_auto_tune")))
+            ):
+                personality_restore = await self._restore_personality_iteration_auto_tune(
+                    "角色贴合校准或自主调节已关闭"
+                )
+                restored_values = personality_restore.get("restored") if isinstance(personality_restore, dict) else {}
+                if isinstance(restored_values, dict):
+                    changed.update(restored_values)
             if any(key in self._allowed_provider_keys() for key in changed) or "provider_config_mode" in changed:
                 apply_quick = getattr(self.plugin, "_apply_quick_provider_defaults", None)
                 if callable(apply_quick):
@@ -927,6 +947,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if overview.get("success"):
                 overview["data"]["changed"] = changed
                 overview["data"]["config_saved"] = config_saved
+                if personality_restore:
+                    overview["data"]["personality_auto_tune_restore"] = personality_restore
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                 features = data.get("features") if isinstance(data.get("features"), dict) else {}
                 settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
@@ -1125,7 +1147,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 raw_groups = self.plugin.data.get("groups") if isinstance(self.plugin.data.get("groups"), dict) else {}
                 users = {str(key): dict(value) for key, value in raw_users.items() if isinstance(value, dict)}
                 groups = {str(key): dict(value) for key, value in raw_groups.items() if isinstance(value, dict)}
+            tune_result = await self._maybe_apply_personality_iteration_auto_tune(users, groups)
             items = self._build_diagnostics(users, groups)
+            tune_item = self._personality_auto_tune_diagnostic_item(tune_result)
+            if tune_item:
+                items.append(tune_item)
             return self._ok({"items": items})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取诊断失败: {exc}", exc_info=True)
@@ -1138,7 +1164,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 data = deepcopy(self.plugin.data)
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+            tune_result = await self._maybe_apply_personality_iteration_auto_tune(users, groups)
             diagnostics = self._build_diagnostics(users, groups)
+            tune_item = self._personality_auto_tune_diagnostic_item(tune_result)
+            if tune_item:
+                diagnostics.append(tune_item)
             proactive_tasks = self._proactive_task_summary(data)
             proactive_candidates = self._proactive_candidate_summary(data)
             token_stats = self._token_stats_payload(data.get("token_usage", {}))
@@ -6001,6 +6031,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         role = self.plugin._private_user_role(user, user_id_text) if hasattr(self.plugin, "_private_user_role") else ""
         role_labeler = getattr(self.plugin, "_private_user_role_label", None)
         role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
+        relationship_state = self._emotion_relationship_state_summary(rel_state)
+        pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
+        last_emotion_judgement_error = self._single_line(user.get("last_emotion_judgement_error"), 160)
         return {
             "user_id": user_id_text,
             "display_name": display_name,
@@ -6068,6 +6101,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_sent_count": user.get("proactive_sent_count", 0),
             "relationship_score": user.get("relationship_score", 0),
             "relationship_stage": relationship_stage,
+            "relationship_state": relationship_state,
+            "pending_emotion_judgement": pending_emotion_judgement,
+            "last_emotion_judgement_error": last_emotion_judgement_error,
             "planned_reason": user.get("planned_proactive_reason", ""),
             "planned_action": user.get("planned_proactive_action", ""),
             "next_proactive_ts": user.get("next_proactive_at", 0),
@@ -6082,6 +6118,107 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 if self._single_line(item, 80)
             ],
         }
+
+    def _emotion_relationship_state_summary(self, state: Any) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            return {}
+        scalar_limits = {
+            "mode": 24,
+            "stage": 24,
+            "last_intent": 40,
+            "last_emotion": 40,
+            "last_emotion_event": 40,
+            "last_emotion_reason": 120,
+            "last_emotion_target": 40,
+            "last_emotion_rule": 60,
+            "last_hurt_reason": 120,
+            "last_hurt_text": 180,
+            "updated_at": 40,
+        }
+        numeric_keys = {
+            "mood_score",
+            "mood_updated_ts",
+            "hurt_until",
+            "emotion_min_until",
+            "silence_turns",
+            "last_pressure",
+            "last_emotion_intensity",
+            "last_intent_confidence",
+            "last_emotion_confidence",
+        }
+        summary: dict[str, Any] = {}
+        for key, limit in scalar_limits.items():
+            if key in state:
+                summary[key] = self._single_line(state.get(key), limit)
+        for key in numeric_keys:
+            if key in state:
+                summary[key] = state.get(key)
+        dims = state.get("emotion_dimensions")
+        if isinstance(dims, dict):
+            summary["emotion_dimensions"] = {
+                key: dims.get(key)
+                for key in ("pleasantness", "tension", "arousal", "certainty")
+                if key in dims
+            }
+        plutchik_emotions = state.get("plutchik_emotions")
+        if isinstance(plutchik_emotions, dict):
+            summary["plutchik_emotions"] = {
+                key: plutchik_emotions.get(key)
+                for key in ("joy", "trust", "fear", "surprise", "sadness", "disgust", "anger", "anticipation")
+                if key in plutchik_emotions
+            }
+        plutchik = state.get("plutchik_profile")
+        if isinstance(plutchik, dict):
+            profile = {
+                key: plutchik.get(key)
+                for key in (
+                    "dominant",
+                    "dominant_label",
+                    "dominant_value",
+                    "blend_key",
+                    "blend_label",
+                    "blend_value",
+                    "updated_at",
+                )
+                if key in plutchik
+            }
+            active = plutchik.get("active")
+            if isinstance(active, list):
+                profile["active"] = [dict(item) for item in active[:8] if isinstance(item, dict)]
+            summary["plutchik_profile"] = profile
+        regulation = state.get("emotion_regulation")
+        if isinstance(regulation, dict):
+            reg = {
+                key: regulation.get(key)
+                for key in ("strategy", "strategy_label", "intensity", "reason", "updated_at")
+                if key in regulation
+            }
+            stack = regulation.get("strategy_stack")
+            if isinstance(stack, list):
+                reg["strategy_stack"] = [dict(item) for item in stack[:5] if isinstance(item, dict)]
+            summary["emotion_regulation"] = reg
+        return summary
+
+    def _emotion_pending_judgement_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        text = self._single_line(value.get("text"), 180)
+        created_at = self._float(value.get("created_at"))
+        local = value.get("local") if isinstance(value.get("local"), dict) else {}
+        result: dict[str, Any] = {
+            "text": text,
+            "created_at": created_at,
+            "created_at_text": self.plugin._format_timestamp_elapsed(created_at) if created_at else "",
+        }
+        if local:
+            result["local"] = {
+                "emotion_event": self._single_line(local.get("emotion_event"), 40),
+                "emotion_target": self._single_line(local.get("emotion_target"), 40),
+                "emotion_intensity": local.get("emotion_intensity"),
+                "emotion_confidence": local.get("emotion_confidence"),
+                "emotion_reason": self._single_line(local.get("emotion_reason"), 100),
+            }
+        return result if text or created_at or local else {}
 
     def _worldbook_member_for_private_user_locked(
         self,
@@ -8602,6 +8739,388 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "note": "预设只覆盖运行态有效频率，不改写手动参数；最高档不按每日主动次数封顶，并会忽略 Token 软限额降载，但免打扰、休息、用户拒绝、隐私和每日 Token 硬限额仍然生效。",
         }
 
+    async def _record_personality_auto_tune_manual_values(self, changed: dict[str, Any]) -> None:
+        manual_changes = {
+            key: deepcopy(value)
+            for key, value in (changed or {}).items()
+            if key in self.PERSONALITY_AUTO_TUNE_KEYS
+        }
+        if not manual_changes:
+            return
+        async with self.plugin._data_lock:
+            state = self.plugin.data.setdefault("personality_iteration_auto_tune", {})
+            if not isinstance(state, dict):
+                state = {}
+                self.plugin.data["personality_iteration_auto_tune"] = state
+            manual_values = state.setdefault("manual_values", {})
+            if not isinstance(manual_values, dict):
+                manual_values = {}
+                state["manual_values"] = manual_values
+            applied = state.setdefault("applied", {})
+            if not isinstance(applied, dict):
+                applied = {}
+                state["applied"] = applied
+            for key, value in manual_changes.items():
+                manual_values[key] = deepcopy(value)
+                applied.pop(key, None)
+            state["manual_updated_at"] = time.time()
+            state["last_manual_changes"] = deepcopy(manual_changes)
+            self.plugin._save_data_sync()
+
+    async def _maybe_apply_personality_iteration_auto_tune(self, users: dict[str, Any], groups: dict[str, Any]) -> dict[str, Any]:
+        if not bool(getattr(self.plugin, "enable_personality_iteration_experiment", False)):
+            return await self._restore_personality_iteration_auto_tune("角色贴合校准已关闭")
+        if not bool(getattr(self.plugin, "enable_personality_iteration_auto_tune", False)):
+            return await self._restore_personality_iteration_auto_tune("角色贴合自主调节已关闭")
+
+        suggestions = self._personality_iteration_suggestions(users, groups)
+        state_snapshot = await self._personality_auto_tune_state_snapshot()
+        manual_values = state_snapshot.get("manual_values") if isinstance(state_snapshot.get("manual_values"), dict) else {}
+        applied_for_sync = state_snapshot.get("applied") if isinstance(state_snapshot.get("applied"), dict) else {}
+        manual_values, applied_for_sync = await self._sync_personality_auto_tune_manual_snapshot(manual_values, applied_for_sync)
+        reference_values = {
+            key: deepcopy(manual_values.get(key, self._personality_auto_tune_current_value(key)))
+            for key in self.PERSONALITY_AUTO_TUNE_KEYS
+        }
+        plan = self._personality_iteration_auto_tune_plan(suggestions, reference_values)
+        applied_snapshot = applied_for_sync
+
+        if not plan:
+            if applied_snapshot:
+                return await self._restore_personality_iteration_auto_tune("当前没有需要自主调节的角色贴合问题")
+            await self._remember_personality_auto_tune_status(
+                {
+                    "changed": False,
+                    "reason": "暂无需要自主调节的角色贴合问题",
+                    "suggestion_count": len(suggestions),
+                    "updated_at": time.time(),
+                }
+            )
+            return {"changed": False, "reason": "暂无需要自主调节的角色贴合问题", "suggestion_count": len(suggestions)}
+
+        restore_keys = [key for key in applied_snapshot if key in self.PERSONALITY_AUTO_TUNE_KEYS and key not in plan]
+        restored_result: dict[str, Any] = {}
+        if restore_keys:
+            restored_result = await self._restore_personality_iteration_auto_tune(
+                "对应角色贴合问题已消失",
+                keys=restore_keys,
+                keep_state=True,
+            )
+
+        changes: list[dict[str, Any]] = []
+        async with self.plugin._data_lock:
+            state = self.plugin.data.setdefault("personality_iteration_auto_tune", {})
+            if not isinstance(state, dict):
+                state = {}
+                self.plugin.data["personality_iteration_auto_tune"] = state
+            manual_values = state.setdefault("manual_values", {})
+            if not isinstance(manual_values, dict):
+                manual_values = {}
+                state["manual_values"] = manual_values
+            applied = state.setdefault("applied", {})
+            if not isinstance(applied, dict):
+                applied = {}
+                state["applied"] = applied
+            for key in self.PERSONALITY_AUTO_TUNE_KEYS:
+                current_value = self._personality_auto_tune_current_value(key)
+                applied_value = applied.get(key)
+                manual_value = manual_values.get(key)
+                if key not in manual_values:
+                    manual_values[key] = deepcopy(current_value)
+                elif key in applied and current_value != applied_value and current_value != manual_value:
+                    # The value changed outside the auto tuner, so treat it as the user's new manual baseline.
+                    manual_values[key] = deepcopy(current_value)
+                    applied.pop(key, None)
+                elif key not in applied and current_value != manual_value:
+                    # The official config page can change values without calling this page's update endpoint.
+                    manual_values[key] = deepcopy(current_value)
+            for key, item in plan.items():
+                if key not in self.PERSONALITY_AUTO_TUNE_KEYS:
+                    continue
+                next_value = self._normalize_setting_value(key, item.get("value"))
+                current_value = self._personality_auto_tune_current_value(key)
+                if current_value == next_value:
+                    applied[key] = deepcopy(next_value)
+                    continue
+                applied[key] = deepcopy(next_value)
+                changes.append(
+                    {
+                        "key": key,
+                        "label": self._personality_auto_tune_label(key),
+                        "from": current_value,
+                        "to": next_value,
+                        "manual": deepcopy(manual_values.get(key)),
+                        "reason": self._single_line(item.get("reason"), 120),
+                    }
+                )
+            state["enabled"] = True
+            state["last_suggestion_count"] = len(suggestions)
+            state["last_tuned_at"] = time.time()
+            if changes:
+                state["last_changes"] = deepcopy(changes)
+            self.plugin._save_data_sync()
+
+        for change in changes:
+            self._apply_config_value(change["key"], change["to"])
+        config_saved = await self._save_config_if_possible() if changes else True
+        result = {
+            "changed": bool(changes),
+            "changes": changes,
+            "restored_changes": restored_result.get("changes", []) if isinstance(restored_result, dict) else [],
+            "config_saved": config_saved,
+            "suggestion_count": len(suggestions),
+            "reason": "已按角色贴合诊断临时覆盖参数" if changes else "当前自动覆盖值已经符合目标",
+        }
+        await self._remember_personality_auto_tune_status(result)
+        if changes:
+            logger.info(
+                "[PrivateCompanionPage] 角色贴合校准已自主调节参数: %s",
+                "; ".join(f"{item['key']}={item['from']}->{item['to']}" for item in changes),
+            )
+        return result
+
+    async def _personality_auto_tune_state_snapshot(self) -> dict[str, Any]:
+        async with self.plugin._data_lock:
+            state = self.plugin.data.get("personality_iteration_auto_tune")
+            return deepcopy(state) if isinstance(state, dict) else {}
+
+    async def _sync_personality_auto_tune_manual_snapshot(
+        self,
+        manual_values: dict[str, Any],
+        applied: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        manual_values = dict(manual_values or {})
+        applied = dict(applied or {})
+        touched = False
+        for key in self.PERSONALITY_AUTO_TUNE_KEYS:
+            current_value = self._personality_auto_tune_current_value(key)
+            manual_value = manual_values.get(key)
+            applied_value = applied.get(key)
+            if key not in manual_values:
+                manual_values[key] = deepcopy(current_value)
+                touched = True
+            elif key in applied and current_value != applied_value and current_value != manual_value:
+                manual_values[key] = deepcopy(current_value)
+                applied.pop(key, None)
+                touched = True
+            elif key not in applied and current_value != manual_value:
+                manual_values[key] = deepcopy(current_value)
+                touched = True
+        if touched:
+            async with self.plugin._data_lock:
+                state = self.plugin.data.setdefault("personality_iteration_auto_tune", {})
+                if not isinstance(state, dict):
+                    state = {}
+                    self.plugin.data["personality_iteration_auto_tune"] = state
+                state["manual_values"] = deepcopy(manual_values)
+                state["applied"] = deepcopy(applied)
+                state["manual_synced_at"] = time.time()
+                self.plugin._save_data_sync()
+        return manual_values, applied
+
+    async def _remember_personality_auto_tune_status(self, status: dict[str, Any]) -> None:
+        async with self.plugin._data_lock:
+            state = self.plugin.data.setdefault("personality_iteration_auto_tune", {})
+            if not isinstance(state, dict):
+                state = {}
+                self.plugin.data["personality_iteration_auto_tune"] = state
+            state["last_status"] = deepcopy(status)
+            state["last_status_at"] = time.time()
+            self.plugin._save_data_sync()
+
+    async def _restore_personality_iteration_auto_tune(
+        self,
+        reason: str = "",
+        *,
+        keys: list[str] | None = None,
+        keep_state: bool = False,
+    ) -> dict[str, Any]:
+        async with self.plugin._data_lock:
+            state = self.plugin.data.get("personality_iteration_auto_tune")
+            if not isinstance(state, dict):
+                return {}
+            manual_values = state.get("manual_values")
+            if not isinstance(manual_values, dict):
+                manual_values = state.get("baseline") if isinstance(state.get("baseline"), dict) else {}
+            applied = state.get("applied") if isinstance(state.get("applied"), dict) else {}
+            target_keys = [key for key in (keys or list(applied.keys())) if key in self.PERSONALITY_AUTO_TUNE_KEYS]
+            restore_values = {
+                key: deepcopy(manual_values.get(key))
+                for key in target_keys
+                if key in manual_values
+            }
+        if not restore_values:
+            return {}
+
+        restored: dict[str, Any] = {}
+        changes: list[dict[str, Any]] = []
+        for key, manual_value in restore_values.items():
+            current_value = self._personality_auto_tune_current_value(key)
+            normalized = self._normalize_setting_value(key, manual_value)
+            self._apply_config_value(key, normalized)
+            restored[key] = normalized
+            if current_value != normalized:
+                changes.append(
+                    {
+                        "key": key,
+                        "label": self._personality_auto_tune_label(key),
+                        "from": current_value,
+                        "to": normalized,
+                        "reason": self._single_line(reason, 120) or "恢复用户最后一次手动设置",
+                    }
+                )
+        config_saved = await self._save_config_if_possible()
+        async with self.plugin._data_lock:
+            state = self.plugin.data.setdefault("personality_iteration_auto_tune", {})
+            if keep_state:
+                applied = state.get("applied") if isinstance(state.get("applied"), dict) else {}
+                for key in restored:
+                    applied.pop(key, None)
+                state["applied"] = applied
+            else:
+                state.clear()
+            state["last_restore"] = {
+                "restored": deepcopy(restored),
+                "changes": deepcopy(changes),
+                "reason": self._single_line(reason, 160),
+                "restored_at": time.time(),
+                "config_saved": config_saved,
+            }
+            self.plugin._save_data_sync()
+        if changes:
+            logger.info(
+                "[PrivateCompanionPage] 角色贴合校准已恢复用户手动参数: %s",
+                "; ".join(f"{item['key']}={item['from']}->{item['to']}" for item in changes),
+            )
+        return {
+            "restored": restored,
+            "changes": changes,
+            "reason": self._single_line(reason, 160),
+            "config_saved": config_saved,
+        }
+
+    def _personality_iteration_auto_tune_plan(
+        self,
+        suggestions: list[dict[str, str]],
+        reference_values: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        reference_values = reference_values or {}
+        plan: dict[str, dict[str, Any]] = {}
+
+        def current_int(key: str, default: int = 0) -> int:
+            return self._int(reference_values.get(key, getattr(self.plugin, key, default)), default)
+
+        def current_text(key: str, default: str = "") -> str:
+            return str(reference_values.get(key, getattr(self.plugin, key, default)) or default).strip()
+
+        def propose(key: str, value: Any, reason: str) -> None:
+            normalized = self._normalize_setting_value(key, value)
+            if self._normalize_setting_value(key, reference_values.get(key, self._personality_auto_tune_current_value(key))) == normalized:
+                return
+            existing = plan.get(key)
+            if existing:
+                existing["value"] = normalized
+                existing["reason"] = f"{existing.get('reason')}; {reason}"
+            else:
+                plan[key] = {"value": normalized, "reason": reason}
+
+        def raise_to(key: str, target: int, step: int, reason: str, default: int = 0) -> None:
+            current = current_int(key, default)
+            if current < target:
+                propose(key, min(target, current + step), reason)
+
+        def lower_to(key: str, target: int, step: int, reason: str, default: int = 0) -> None:
+            current = current_int(key, default)
+            if current > target:
+                propose(key, max(target, current - step), reason)
+
+        def set_review_balanced(reason: str) -> None:
+            if current_text("proactive_review_strength", "lenient") == "lenient":
+                propose("proactive_review_strength", "balanced", reason)
+
+        def soften_high_preset(reason: str) -> None:
+            preset = current_text("proactive_intensity_preset", "off")
+            if preset in {"live", "high_private"}:
+                propose("proactive_intensity_preset", "balanced", reason)
+
+        for suggestion in suggestions:
+            dimension = self._single_line(suggestion.get("dimension"), 80)
+            level = self._single_line(suggestion.get("level"), 16)
+            if level not in {"warn", "error", "info"}:
+                continue
+            if "外向性表现偏高" in dimension:
+                soften_high_preset("外向性偏高时先从最高主动预设退到标准偏主动")
+                lower_to("max_daily_messages", 8, 2, "外向性偏高，降低每日私聊主动上限", 8)
+                raise_to("idle_minutes", 45, 15, "外向性偏高，拉长空闲判定", 60)
+                raise_to("min_interval_minutes", 90, 30, "外向性偏高，拉长主动最小间隔", 120)
+                raise_to("proactive_persona_judge_send_threshold", 58, 4, "外向性偏高，提高主动人格放行阈值", 62)
+            elif "焦虑型追问倾向" in dimension:
+                soften_high_preset("沉默后仍追问时先从最高主动预设退到标准偏主动")
+                lower_to("max_daily_messages", 6, 2, "焦虑型追问倾向，降低每日主动上限", 8)
+                raise_to("min_interval_minutes", 180, 60, "焦虑型追问倾向，显著拉长主动间隔", 120)
+                raise_to("proactive_persona_judge_send_threshold", 64, 6, "焦虑型追问倾向，提高主动放行阈值", 62)
+                set_review_balanced("焦虑型追问倾向，主动复核由宽松改为标准")
+            elif "回避型收缩风险" in dimension:
+                lower_to("min_interval_minutes", 240, 60, "回避型收缩风险，保留低打扰入口", 120)
+                lower_to("idle_minutes", 120, 30, "回避型收缩风险，避免完全退开", 60)
+                if 0 < current_int("max_daily_messages", 8) < 2:
+                    propose("max_daily_messages", 2, "回避型收缩风险，保留很低频主动上限")
+                if current_int("proactive_persona_judge_send_threshold", 62) > 70:
+                    lower_to("proactive_persona_judge_send_threshold", 66, 4, "回避型收缩风险，放宽过高的主动阈值", 62)
+            elif "动机质量偏低" in dimension:
+                raise_to("proactive_persona_judge_send_threshold", 60, 4, "主动由头偏弱，提高放行阈值", 62)
+                set_review_balanced("主动由头偏弱，主动复核由宽松改为标准")
+            elif "讨好型修复倾向" in dimension:
+                raise_to("proactive_persona_judge_send_threshold", 62, 4, "讨好型修复倾向，提高主动放行阈值", 62)
+                set_review_balanced("讨好型修复倾向，主动复核由宽松改为标准")
+        return plan
+
+    def _personality_auto_tune_current_value(self, key: str) -> Any:
+        return getattr(self.plugin, key, self._config_get(key))
+
+    @staticmethod
+    def _personality_auto_tune_label(key: str) -> str:
+        labels = {
+            "proactive_intensity_preset": "主动强度预设",
+            "max_daily_messages": "每日私聊主动上限",
+            "idle_minutes": "空闲判定分钟",
+            "min_interval_minutes": "主动最小间隔分钟",
+            "proactive_persona_judge_send_threshold": "主动人格放行阈值",
+            "proactive_review_strength": "主动复核强度",
+        }
+        return labels.get(key, key)
+
+    def _personality_auto_tune_diagnostic_item(self, result: dict[str, Any] | None) -> dict[str, str] | None:
+        if not isinstance(result, dict) or not result:
+            return None
+        changes = result.get("changes") if isinstance(result.get("changes"), list) else []
+        restored_changes = result.get("restored_changes") if isinstance(result.get("restored_changes"), list) else []
+        if result.get("restored") is not None:
+            restored_changes = changes
+        if restored_changes:
+            text = "；".join(
+                f"{self._single_line(item.get('label'), 30)}：{item.get('from')} → {item.get('to')}"
+                for item in restored_changes[:6]
+            )
+            return {
+                "level": "ok",
+                "title": "角色贴合校准：已恢复用户手动参数",
+                "text": text,
+                "action": "关闭角色贴合校准、关闭自主调节，或对应问题消失后，会恢复到用户最后一次手动设置的值。",
+            }
+        if not result.get("changed") or not changes:
+            return None
+        text = "；".join(
+            f"{self._single_line(item.get('label'), 30)}：{item.get('from')} → {item.get('to')}（手动值 {item.get('manual')}；{self._single_line(item.get('reason'), 60)}）"
+            for item in changes[:6]
+        )
+        return {
+            "level": "info",
+            "title": "角色贴合校准：已自主调节参数",
+            "text": text,
+            "action": "这是临时覆盖；用户再次手动调整后会更新手动值，关闭功能时恢复到最新手动值。",
+        }
+
     def _build_diagnostics(self, users: dict[str, Any], groups: dict[str, Any]) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
 
@@ -9906,6 +10425,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_persona_judge_cache_minutes",
             "enable_experimental_motivation_model",
             "enable_personality_iteration_experiment",
+            "enable_personality_iteration_auto_tune",
             "enable_maslow_schedule_influence",
             "maslow_motivation_strength",
             "proactive_photo_text_probability",
@@ -10614,6 +11134,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "proactive_intensity_preset":
             normalizer = getattr(self.plugin, "_normalize_proactive_intensity_preset", None)
             return normalizer(value) if callable(normalizer) else str(value or "off").strip().lower()
+        if key == "proactive_review_strength":
+            text = str(value or "lenient").strip().lower()
+            aliases = {
+                "宽松": "lenient",
+                "标准": "balanced",
+                "严格": "strict",
+            }
+            text = aliases.get(text, text)
+            return text if text in {"lenient", "balanced", "strict"} else "lenient"
         if key == "quote_skip_short_reply_chars":
             try:
                 return max(0, min(120, int(value)))
@@ -10639,6 +11168,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "enable_experimental_motivation_model":
             return self._normalize_bool_value(value)
         if key == "enable_personality_iteration_experiment":
+            return self._normalize_bool_value(value)
+        if key == "enable_personality_iteration_auto_tune":
             return self._normalize_bool_value(value)
         if key == "maslow_motivation_strength":
             try:
@@ -12566,6 +13097,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             semantic_pressure = self._int(item.get("semantic_pressure"))
             semantic_risk = self._int(item.get("semantic_risk"))
             semantic_note = self._single_line(item.get("semantic_note"), 180)
+            need_layer = self._single_line(item.get("semantic_need_layer") or item.get("need_layer"), 40)
+            need_drive = self._single_line(item.get("semantic_need_drive") or item.get("need_drive"), 80)
+            need_note = self._single_line(item.get("semantic_need_note") or item.get("need_note"), 120)
+            need_score_bias = item.get("semantic_need_score_bias", item.get("need_score_bias"))
+            need_pressure_bias = item.get("semantic_need_pressure_bias", item.get("need_pressure_bias"))
             sanitizer = getattr(self.plugin, "_sanitize_friend_proactive_plan_fields", None)
             if isinstance(user, dict) and callable(sanitizer):
                 sanitized = sanitizer(
@@ -12627,6 +13163,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "semantic_pressure": semantic_pressure,
                         "semantic_risk": semantic_risk,
                         "semantic_note": semantic_note,
+                        "need_layer": need_layer,
+                        "need_level": need_layer,
+                        "need_drive": need_drive,
+                        "need_note": need_note,
+                        "need_score_bias": need_score_bias,
+                        "need_pressure_bias": need_pressure_bias,
                         "status": status,
                         "note": note,
                         "repeat_count": repeat_count,
@@ -12654,6 +13196,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 merged["semantic_pressure"] = semantic_pressure
                 merged["semantic_risk"] = semantic_risk
                 merged["semantic_note"] = semantic_note
+                merged["need_layer"] = need_layer
+                merged["need_level"] = need_layer
+                merged["need_drive"] = need_drive
+                merged["need_note"] = need_note
+                merged["need_score_bias"] = need_score_bias
+                merged["need_pressure_bias"] = need_pressure_bias
             if topic:
                 merged["topic"] = topic
             if motive:
@@ -12688,6 +13236,32 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "items": items[:60],
         }
 
+    def _proactive_motivation_runtime_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        def part(raw: Any) -> dict[str, Any]:
+            if not isinstance(raw, dict):
+                return {}
+            result: dict[str, Any] = {
+                "score": round(self._float(raw.get("score")), 3),
+                "label": self._single_line(raw.get("label"), 60),
+                "detail": self._single_line(raw.get("detail"), 180),
+            }
+            if "level" in raw:
+                result["level"] = round(self._float(raw.get("level")), 3)
+            return result
+
+        return {
+            "score": round(self._float(value.get("score")), 3),
+            "label": self._single_line(value.get("label"), 60),
+            "detail": self._single_line(value.get("detail"), 220),
+            "drive": part(value.get("drive")),
+            "temperature": part(value.get("temperature")),
+            "incentive": part(value.get("incentive")),
+            "arousal": part(value.get("arousal")),
+        }
+
     def _proactive_task_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         users = data.get("users") if isinstance(data.get("users"), dict) else {}
         now = time.time()
@@ -12720,6 +13294,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "temperature_score": round(self._float(temperature.get("score")), 3) if temperature else 0,
                 "temperature_label": self._single_line(temperature.get("label"), 40) if temperature else "",
                 "temperature_detail": self._single_line(temperature.get("detail"), 140) if temperature else "",
+                "motivation": self._proactive_motivation_runtime_summary(raw.get("motivation")),
             }
 
         def planned_semantic_snapshot(user: dict[str, Any]) -> dict[str, Any]:
@@ -12727,6 +13302,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             anchor_type = self._single_line(user.get("planned_proactive_anchor_type"), 40)
             semantic_score = self._int(user.get("planned_proactive_semantic_score"))
             semantic_note = self._single_line(user.get("planned_proactive_semantic_note"), 180)
+            need_layer = self._single_line(user.get("planned_proactive_need_layer"), 40)
+            need_drive = self._single_line(user.get("planned_proactive_need_drive"), 80)
+            need_note = self._single_line(user.get("planned_proactive_need_note"), 120)
+            need_score_bias = None
+            need_pressure_bias = None
             pressure = 0
             risk = 0
             getter = getattr(self.plugin, "_planned_proactive_semantics", None)
@@ -12743,6 +13323,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     pressure = int(max(0.0, min(1.0, self._float(semantics.get("pressure")))) * 100)
                     risk = int(max(0.0, min(1.0, self._float(semantics.get("risk")))) * 100)
                     semantic_note = semantic_note or self._single_line(semantics.get("note"), 180)
+                    need_layer = need_layer or self._single_line(semantics.get("need_layer"), 40)
+                    need_drive = need_drive or self._single_line(semantics.get("need_drive"), 80)
+                    need_note = need_note or self._single_line(semantics.get("need_note"), 120)
+                    need_score_bias = semantics.get("need_score_bias")
+                    need_pressure_bias = semantics.get("need_pressure_bias")
             return {
                 "semantic_kind": semantic_kind,
                 "semantic_anchor_type": anchor_type,
@@ -12750,6 +13335,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "semantic_pressure": pressure,
                 "semantic_risk": risk,
                 "semantic_note": semantic_note,
+                "need_layer": need_layer,
+                "need_level": need_layer,
+                "need_drive": need_drive,
+                "need_note": need_note,
+                "need_score_bias": need_score_bias,
+                "need_pressure_bias": need_pressure_bias,
             }
 
         def planned_window_snapshot(user: dict[str, Any]) -> dict[str, Any]:
@@ -13087,6 +13678,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "semantic_pressure": self._int(raw.get("semantic_pressure")),
                 "semantic_risk": self._int(raw.get("semantic_risk")),
                 "semantic_note": self._single_line(raw.get("semantic_note"), 180),
+                "need_layer": self._single_line(raw.get("need_layer") or raw.get("semantic_need_layer"), 40),
+                "need_level": self._single_line(raw.get("need_layer") or raw.get("semantic_need_layer"), 40),
+                "need_drive": self._single_line(raw.get("need_drive") or raw.get("semantic_need_drive"), 80),
+                "need_note": self._single_line(raw.get("need_note") or raw.get("semantic_need_note"), 120),
+                "need_score_bias": raw.get("need_score_bias", raw.get("semantic_need_score_bias")),
+                "need_pressure_bias": raw.get("need_pressure_bias", raw.get("semantic_need_pressure_bias")),
                 "note": note,
                 "text_preview": text_preview,
                 "original_text_preview": original_text_preview,

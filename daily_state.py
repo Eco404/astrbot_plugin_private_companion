@@ -1581,15 +1581,31 @@ class DailyStateMixin:
         stopwords = {
             "刚才", "现在", "今天", "这个", "那个", "一下", "一点", "有点", "还是",
             "没有", "已经", "时候", "用户", "对方", "主动", "消息", "这会儿",
+            "内容", "第一", "时间", "看到", "喜欢", "希望", "继续", "话题", "换个",
+            "说过", "讲过", "提过", "聊过", "发过", "前面", "之前", "刚刚",
         }
         kept: list[str] = []
+        def add_anchor(value: str) -> None:
+            anchor = str(value or "").strip()
+            if len(anchor) < 2 or anchor in stopwords:
+                return
+            if re.fullmatch(r"[了啦呀呢嘛吗吧啊哦噢诶嗯]+", anchor):
+                return
+            if re.fullmatch(r"[年月日点分秒上下左右前后早晚中午今晚昨今明]+", anchor):
+                return
+            if anchor not in kept:
+                kept.append(anchor)
+
         for token in tokens:
-            if token in stopwords:
+            if re.fullmatch(r"[A-Za-z0-9_]{3,}", token):
+                add_anchor(token.lower())
                 continue
-            if token not in kept:
-                kept.append(token)
-            if len(kept) >= 8:
-                break
+            cleaned = re.sub(r"(的时候|时候|一下|一点|了|啦|呀|呢|嘛|吗|吧|啊|哦|噢|诶|嗯)$", "", token)
+            add_anchor(cleaned)
+            if len(cleaned) >= 3:
+                for size in (2, 3):
+                    for index in range(0, max(0, len(cleaned) - size + 1)):
+                        add_anchor(cleaned[index : index + size])
         return "|".join(kept)
 
     def _cleanup_recent_proactive_topics(self, user: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:
@@ -1677,6 +1693,13 @@ class DailyStateMixin:
             if signature == "morning_weather_check":
                 return f"早晨天气问候刚刚发过" + (f"：{old_text}" if old_text else "")
             return f"近 {max(1, int(age // 60))} 分钟已发送相似主动" + (f"：{old_text}" if old_text else "")
+        last_message = _single_line(_strip_internal_message_blocks(user.get("last_companion_message")), 500)
+        last_at = _safe_float(user.get("last_companion_message_at"), 0) or _safe_float(user.get("last_reply_at"), 0)
+        if last_message and last_at > 0 and check_now - last_at <= 4 * 3600:
+            last_signature = self._proactive_topic_signature(last_message)
+            if self._topic_signature_similar(signature, last_signature):
+                age = check_now - last_at
+                return f"近 {max(1, int(age // 60))} 分钟聊天里已经说过相似内容：{_single_line(last_message, 80)}"
         return ""
 
     def _pending_proactive_send_retry(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:

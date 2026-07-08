@@ -561,6 +561,12 @@
     "default": false,
     "invisible": true
   },
+  "enable_personality_iteration_auto_tune": {
+    "description": "Legacy flat config: 允许角色贴合校准自主调节参数",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "inbound_message_debounce_seconds": {
     "description": "Legacy flat config: 重复消息防抖秒数",
     "type": "float",
@@ -8431,8 +8437,17 @@
       "enable_personality_iteration_experiment": {
         "description": "启用角色贴合校准",
         "type": "bool",
-        "hint": "实验性功能第三项。基于艾森克 PEN、大五人格、依恋风格和自我决定理论，检查 Bot 当前行为是否贴近角色基线，并告诉用户应该调整 AstrBot 人格、世界知识、主动策略还是群聊边界。默认关闭；开启后只给调整建议，不自动改写 AstrBot 人格或世界知识。",
+        "hint": "实验性功能第三项。基于艾森克 PEN、大五人格、依恋风格和自我决定理论，检查 Bot 当前行为是否贴近角色基线，并告诉用户应该调整 AstrBot 人格、世界知识、主动策略还是群聊边界。默认关闭；默认只给建议，不自动改写 AstrBot 人格或世界知识。",
         "default": false
+      },
+      "enable_personality_iteration_auto_tune": {
+        "description": "允许自主调节参数",
+        "type": "bool",
+        "hint": "角色贴合校准的子选项。开启后，排障/实验页刷新时可按诊断结果临时覆盖少量主动策略参数，例如主动上限、空闲判定、最小间隔、主动人格放行阈值和主动复核强度；不会改写人格正文或世界知识。用户手动修改这些参数后会记录为新的手动值；关闭角色贴合校准或关闭本项时，恢复到用户最后一次手动设置的值。",
+        "default": false,
+        "condition": {
+          "enable_personality_iteration_experiment": true
+        }
       },
       "enable_emotion_simulation": {
         "description": "启用情绪模拟",

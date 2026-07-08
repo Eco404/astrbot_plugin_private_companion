@@ -17334,6 +17334,136 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.exp-card-visual {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 10px;
+  background:
+    radial-gradient(circle at 12% 20%, rgba(26,75,140,0.16), transparent 34%),
+    rgba(255,255,255,0.68);
+}
+
+.exp-card-visual.emotion {
+  background:
+    radial-gradient(circle at 10% 16%, rgba(200,54,47,0.16), transparent 34%),
+    radial-gradient(circle at 86% 18%, rgba(164,122,46,0.12), transparent 30%),
+    rgba(255,255,255,0.7);
+}
+
+.exp-card-visual.need {
+  background:
+    radial-gradient(circle at 10% 16%, rgba(164,122,46,0.18), transparent 34%),
+    rgba(255,255,255,0.7);
+}
+
+.exp-card-visual.motivation {
+  background:
+    radial-gradient(circle at 10% 16%, rgba(44,108,176,0.18), transparent 34%),
+    rgba(255,255,255,0.7);
+}
+
+.exp-card-visual.personality {
+  background:
+    radial-gradient(circle at 10% 16%, rgba(107,90,140,0.18), transparent 34%),
+    rgba(255,255,255,0.7);
+}
+
+.exp-card-orbit {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid rgba(26,75,140,0.24);
+  background: #fff;
+  color: var(--accent-strong);
+  font-size: 18px;
+  font-weight: 900;
+  box-shadow: 0 8px 18px rgba(15,42,74,0.08);
+}
+
+.exp-card-visual.emotion .exp-card-orbit {
+  border-color: rgba(200,54,47,0.22);
+  color: #9b3f34;
+}
+
+.exp-card-visual.need .exp-card-orbit {
+  border-color: rgba(164,122,46,0.24);
+  color: var(--gold);
+}
+
+.exp-card-visual.motivation .exp-card-orbit {
+  border-color: rgba(44,108,176,0.24);
+  color: var(--blue);
+}
+
+.exp-card-visual.personality .exp-card-orbit {
+  border-color: rgba(107,90,140,0.24);
+  color: var(--plum);
+}
+
+.exp-card-signal {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.exp-card-signal b {
+  color: var(--accent-strong);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.exp-card-signal span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.exp-card-signal small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.exp-card-mini-bars {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 5px;
+}
+
+.exp-card-mini-bar {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 28px;
+  gap: 7px;
+  align-items: center;
+}
+
+.exp-card-mini-bar span,
+.exp-card-mini-bar em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.exp-card-mini-bar i {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.exp-card-mini-bar i b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
 .exp-card-foot {
   display: flex;
   align-items: flex-end;
@@ -17379,6 +17509,134 @@ pre {
 .exp-card-enter:hover {
   background: var(--accent);
   color: #fff;
+}
+
+.exp-overview-map {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  padding: 14px;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.92), rgba(245,248,253,0.68)),
+    var(--surface);
+  box-shadow: var(--shadow-ring);
+}
+
+.exp-overview-map-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.exp-overview-map-head div {
+  display: grid;
+  gap: 2px;
+}
+
+.exp-overview-map-head b {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.exp-overview-map-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.exp-map-line {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.exp-map-node {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: rgba(255,255,255,0.72);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: transform 0.16s var(--ease), border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+
+.exp-map-node:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+  box-shadow: 0 8px 20px rgba(15,42,74,0.10);
+}
+
+.exp-map-node.off {
+  opacity: 0.78;
+}
+
+.exp-map-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 900;
+}
+
+.exp-map-node.emotion .exp-map-mark {
+  background: #f5d9d4;
+  color: #9b3f34;
+}
+
+.exp-map-node.need .exp-map-mark {
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+.exp-map-node.motivation .exp-map-mark {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.exp-map-node.personality .exp-map-mark {
+  background: var(--plum-soft);
+  color: var(--plum);
+}
+
+.exp-map-main,
+.exp-map-signal {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.exp-map-main b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.exp-map-main small,
+.exp-map-signal small {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.exp-map-signal {
+  grid-column: 1 / -1;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 6px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 6px;
+}
+
+.exp-map-signal b {
+  color: var(--accent-strong);
+  font-size: 16px;
 }
 
 /* —— 二级详情页 —— */
@@ -17493,6 +17751,218 @@ pre {
   line-height: 1.55;
 }
 
+.exp-research-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.32fr);
+  gap: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  padding: 16px;
+  background:
+    radial-gradient(circle at 8% 14%, rgba(26,75,140,0.18), transparent 28%),
+    linear-gradient(135deg, rgba(255,255,255,0.94), rgba(232,238,245,0.72));
+  box-shadow: var(--shadow-ring);
+}
+
+.exp-research-hero.emotion {
+  background:
+    radial-gradient(circle at 8% 14%, rgba(200,54,47,0.18), transparent 28%),
+    radial-gradient(circle at 72% 12%, rgba(164,122,46,0.14), transparent 26%),
+    linear-gradient(135deg, rgba(255,255,255,0.94), rgba(245,217,212,0.50));
+}
+
+.exp-research-hero.need {
+  background:
+    radial-gradient(circle at 8% 14%, rgba(164,122,46,0.20), transparent 28%),
+    linear-gradient(135deg, rgba(255,255,255,0.94), rgba(245,236,226,0.68));
+}
+
+.exp-research-hero.motivation {
+  background:
+    radial-gradient(circle at 8% 14%, rgba(44,108,176,0.20), transparent 28%),
+    radial-gradient(circle at 78% 12%, rgba(26,75,140,0.10), transparent 28%),
+    linear-gradient(135deg, rgba(255,255,255,0.94), rgba(216,230,246,0.64));
+}
+
+.exp-research-hero.personality {
+  background:
+    radial-gradient(circle at 8% 14%, rgba(107,90,140,0.20), transparent 28%),
+    linear-gradient(135deg, rgba(255,255,255,0.94), rgba(231,226,241,0.62));
+}
+
+.exp-research-hero.emotion .exp-hero-flow-step i {
+  background: #c8362f;
+}
+
+.exp-research-hero.need .exp-hero-flow-step i {
+  background: var(--gold);
+}
+
+.exp-research-hero.motivation .exp-hero-flow-step i {
+  background: var(--blue);
+}
+
+.exp-research-hero.personality .exp-hero-flow-step i {
+  background: var(--plum);
+}
+
+.exp-research-hero-main {
+  display: grid;
+  gap: 10px;
+}
+
+.exp-research-kicker {
+  width: fit-content;
+  border: 1px solid rgba(26,75,140,0.18);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: rgba(255,255,255,0.74);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.exp-research-hero h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.exp-research-hero p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.exp-hero-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.exp-hero-flow-step {
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(255,255,255,0.78);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: rgba(255,255,255,0.66);
+}
+
+.exp-hero-flow-step i {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.exp-hero-flow-step b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.exp-hero-flow-step span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.exp-signal-board {
+  display: grid;
+  gap: 5px;
+  align-content: start;
+  border: 1px solid rgba(255,255,255,0.78);
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(255,255,255,0.76);
+}
+
+.exp-signal-board > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.exp-signal-board > b {
+  color: var(--accent-strong);
+  font-size: 34px;
+  line-height: 1;
+}
+
+.exp-signal-board > strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.exp-signal-board p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.exp-signal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.exp-signal-actions button {
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 5px 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.exp-theory-matrix-card {
+  grid-column: 1 / -1;
+}
+
+.exp-theory-axis-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.exp-theory-axis-card {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 11px;
+  background: rgba(255,255,255,0.76);
+}
+
+.exp-theory-axis-card span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.exp-theory-axis-card b {
+  color: var(--accent-strong);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.exp-theory-axis-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .experimental-subpage {
   display: grid;
   gap: 14px;
@@ -17541,6 +18011,295 @@ pre {
   font-size: 13px;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+/* —— 理论量化视图 —— */
+
+.exp-theory-visual-card {
+  grid-column: 1 / -1;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.92), rgba(232,238,245,0.66)),
+    var(--surface);
+}
+
+.exp-visual-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 8px;
+}
+
+.exp-visual-head h3 {
+  border: 0;
+  padding: 0;
+}
+
+.exp-visual-head p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.exp-visual-head > span {
+  flex-shrink: 0;
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: rgba(255,255,255,0.78);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.exp-visual-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.exp-visual-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.exp-visual-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: rgba(255,255,255,0.78);
+}
+
+.exp-visual-panel.wide {
+  grid-column: 1 / -1;
+}
+
+.exp-visual-panel h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.exp-visual-meter-list {
+  display: grid;
+  gap: 10px;
+}
+
+.exp-visual-meter-list.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.exp-visual-meter-row {
+  display: grid;
+  gap: 5px;
+}
+
+.exp-visual-meter-head,
+.exp-visual-meter-scale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exp-visual-meter-head b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.exp-visual-meter-head span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.exp-visual-meter-track {
+  position: relative;
+  height: 9px;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(200,54,47,0.18), rgba(164,122,46,0.16) 48%, rgba(26,75,140,0.18)),
+    var(--line-soft);
+  overflow: hidden;
+}
+
+.exp-visual-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--blue));
+}
+
+.exp-visual-meter-row.pleasant .exp-visual-meter-fill {
+  background: linear-gradient(90deg, #c8362f, #a47a2e, #2c6cb0);
+}
+
+.exp-visual-meter-row.tension .exp-visual-meter-fill,
+.exp-visual-meter-row.arousal .exp-visual-meter-fill {
+  background: linear-gradient(90deg, #a47a2e, #c8362f);
+}
+
+.exp-visual-meter-row.certainty .exp-visual-meter-fill {
+  background: linear-gradient(90deg, #6b5a8c, #1a4b8c);
+}
+
+.exp-visual-meter-baseline {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(15,42,74,0.55);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.75);
+}
+
+.exp-visual-meter-scale small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.exp-visual-meter-row p,
+.exp-visual-note,
+.exp-visual-empty,
+.exp-visual-decision span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.exp-visual-empty {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: rgba(255,255,255,0.64);
+}
+
+.exp-need-map {
+  display: grid;
+  gap: 9px;
+}
+
+.exp-need-map-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(120px, 1fr) minmax(100px, 0.75fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.exp-need-map-label {
+  display: grid;
+  gap: 2px;
+}
+
+.exp-need-map-label b,
+.exp-need-map-meta b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.exp-need-map-label span,
+.exp-need-map-meta span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.exp-need-map-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.exp-need-map-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--gold), var(--accent));
+}
+
+.exp-need-map-meta {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.exp-visual-decision {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: var(--accent-soft);
+}
+
+.exp-visual-decision b {
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+
+.exp-personality-axis-list {
+  display: grid;
+  gap: 9px;
+}
+
+.exp-personality-axis {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: rgba(255,255,255,0.72);
+}
+
+.exp-personality-axis div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.exp-personality-axis b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.exp-personality-axis span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.exp-personality-axis strong {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.exp-personality-axis-track {
+  grid-column: 1 / -1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.exp-personality-axis-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.exp-personality-axis.warn .exp-personality-axis-track i {
+  background: var(--warn);
+}
+
+.exp-personality-axis.error .exp-personality-axis-track i {
+  background: var(--danger);
 }
 
 /* —— 理论框架 —— */
@@ -17844,6 +18603,14 @@ pre {
   font-size: 11px;
 }
 
+.exp-runtime-user-detail span.exp-runtime-dims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  color: var(--plum);
+  font-weight: 600;
+}
+
 .exp-runtime-need-chart {
   display: grid;
   gap: 4px;
@@ -17894,6 +18661,25 @@ pre {
 @media (max-width: 760px) {
   .exp-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  .exp-map-line,
+  .exp-hero-flow,
+  .exp-visual-grid.two,
+  .exp-visual-meter-list.compact {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-research-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-need-map-row {
+    grid-template-columns: 1fr;
+  }
+
+  .exp-need-map-meta {
+    text-align: left;
   }
 
   .exp-bottom-grid {

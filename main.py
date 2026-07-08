@@ -430,7 +430,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.7.6",
+    "5.8.1",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -751,6 +751,7 @@ class PrivateCompanionPlugin(
         self.enable_maslow_schedule_influence = self._cfg_bool(c, "enable_maslow_schedule_influence", False)
         self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)
         self.enable_personality_iteration_experiment = self._cfg_bool(c, "enable_personality_iteration_experiment", False)
+        self.enable_personality_iteration_auto_tune = self._cfg_bool(c, "enable_personality_iteration_auto_tune", False)
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
@@ -3746,6 +3747,107 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     parts.append(str(getattr(part, "text", "") or getattr(part, "content", "") or ""))
         return "\n".join(item for item in parts if item)
 
+    @staticmethod
+    def _strip_private_companion_prompt_artifacts(text: Any) -> str:
+        cleaned = str(text or "")
+        if not cleaned or "private_companion_" not in cleaned:
+            return cleaned
+        cleaned = re.sub(
+            r"\n*\s*<!--\s*private_companion_turn_fragments_start\s*-->.*?<!--\s*private_companion_turn_fragments_end\s*-->\s*",
+            "\n",
+            cleaned,
+            flags=re.DOTALL,
+        )
+        block_markers = (
+            "state",
+            "static",
+            "reply_style",
+            "environment",
+            "reply_image_anchor",
+            "atrelay_tools",
+            "relation_lookup",
+            "qzone_tools",
+            "photo_generation_tool",
+            "cross_user_memory",
+            "group_persona_denoise",
+            "group_high_intensity_reply_guard",
+            "group_context",
+            "recall_query",
+            "self_timeline",
+            "rest_backlog",
+            "atrelay_target_summary",
+            "worldbook_mentions",
+            "non_target_private_guard",
+            "capability_boundary",
+            "forward_message",
+            "group_injection_guard",
+            "reply_chain",
+        )
+        marker_pattern = "|".join(re.escape(f"private_companion_{name}_v1") for name in block_markers)
+        cleaned = re.sub(
+            rf"\n*\s*<!--\s*(?:{marker_pattern})\s*-->.*?(?=\n\s*<!--\s*private_companion_[a-z0-9_]+_v1\s*-->|\Z)",
+            "\n",
+            cleaned,
+            flags=re.DOTALL,
+        )
+        return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    def _sanitize_private_companion_prompt_artifacts_in_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list) or not contexts:
+            return
+        changed = 0
+
+        def clean_content(value: Any) -> tuple[Any, bool]:
+            if isinstance(value, str):
+                cleaned = self._strip_private_companion_prompt_artifacts(value)
+                return cleaned, cleaned != value
+            if isinstance(value, dict):
+                updated = dict(value)
+                dirty = False
+                for key in ("text", "content", "value"):
+                    if key in updated and isinstance(updated.get(key), str):
+                        cleaned = self._strip_private_companion_prompt_artifacts(updated.get(key))
+                        if cleaned != updated.get(key):
+                            updated[key] = cleaned
+                            dirty = True
+                return updated, dirty
+            if isinstance(value, list):
+                new_items = []
+                dirty = False
+                for item in value:
+                    cleaned_item, item_dirty = clean_content(item)
+                    new_items.append(cleaned_item)
+                    dirty = dirty or item_dirty
+                return new_items, dirty
+            return value, False
+
+        sanitized: list[Any] = []
+        for item in contexts:
+            if isinstance(item, dict):
+                updated = dict(item)
+                cleaned_content, dirty = clean_content(updated.get("content"))
+                if dirty:
+                    updated["content"] = cleaned_content
+                    changed += 1
+                sanitized.append(updated)
+            else:
+                cleaned_item, dirty = clean_content(item)
+                if dirty:
+                    changed += 1
+                sanitized.append(cleaned_item)
+        if changed <= 0:
+            return
+        try:
+            req.contexts = sanitized
+        except Exception:
+            return
+        logger.info(
+            "[PrivateCompanion] 已清理请求历史里的插件动态注入残留: session=%s contexts_changed=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            changed,
+        )
+
     def _remove_managed_turn_prompt_extra_part(self, req: ProviderRequest) -> None:
         extra_parts = getattr(req, "extra_user_content_parts", None)
         if not isinstance(extra_parts, list):
@@ -4302,7 +4404,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         detail = self._current_detail_segment_for_update()
         detail_key = _single_line(detail.get("key"), 80) if isinstance(detail, dict) else ""
         detail_summary = _single_line(detail.get("summary"), 80) if isinstance(detail, dict) else ""
-        weather = _single_line(state.get("weather"), 60)
+        friend_user = self._private_user_role(current_user or {}) == "friend"
+        weather = "" if friend_user else _single_line(state.get("weather"), 60)
         conditions: list[str] = []
         raw_conditions = state.get("conditions")
         if isinstance(raw_conditions, list):
@@ -4348,6 +4451,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if summary:
                 pieces.append(f"模拟氛围：{summary}")
         weather = _single_line(state.get("weather"), 60)
+        if self._private_user_role(current_user or {}) == "friend":
+            weather = ""
         if weather and weather != "暂无天气信息":
             pieces.append(f"天气素材：{weather}")
         conditions: list[str] = []
@@ -5798,6 +5903,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 safe_text = self._sanitize_orphan_tts_placeholders(text)
                 user["last_user_message"] = safe_text or text
                 user["last_user_message_at"] = received_ts
+                if self._clear_state_share_proactive_after_user_status_question(user, user_id=user_id, text=safe_text or text, now=received_ts):
+                    if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                        self._schedule_next_proactive(user, now=received_ts)
                 user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
                 self._apply_user_rest_silence_from_message(user, safe_text or text, now=received_ts)
@@ -5815,6 +5923,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user["pending_followup_event"] = {}
                 user["planned_proactive_quota_exempt"] = False
             user["ignored_streak"] = 0
+            user["friend_unanswered_silenced_since"] = 0
+            user["friend_unanswered_silence_note"] = ""
             self._schedule_data_save()
         logger.info(
             "[PrivateCompanion] 主动消息专用模式已跳过私聊被动增强: user=%s text=%s",
@@ -5857,6 +5967,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             log_bookshelf_secret_skip("llm_request_no_system_prompt")
             return
         self._sanitize_request_context_new_conversation_boundary(event, req)
+        self._sanitize_private_companion_prompt_artifacts_in_request(event, req)
         self._remember_external_llm_request_for_token_stats(event, req)
         proactive_only_limited = self._proactive_only_limited_passive_event(event)
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
@@ -6194,6 +6305,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 if self._feature_enabled_or_temp_unlocked("enable_environment_perception") and self.enable_worldview_perception
                 else ""
             )
+            worldview_context = self._sanitize_owner_environment_context_for_private_user(worldview_context, current_user)
             if worldview_context:
                 prompt_surface.add("worldview.adaptation", worldview_context, priority=37, source="worldview")
         identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
@@ -6213,6 +6325,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if mentioned_worldbook:
                 prompt_surface.add("worldbook.mentions", mentioned_worldbook, priority=55, source="worldbook")
         environment_fragment = await self._format_passive_environment_fragment(event, lightweight=lightweight_passive)
+        environment_fragment = self._sanitize_owner_environment_context_for_private_user(environment_fragment, current_user)
         if environment_fragment:
             prompt_surface.add(
                 "environment.lightweight" if lightweight_passive else "environment.perception",
@@ -6251,6 +6364,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         short_reaction_context = self._format_short_reaction_context_for_prompt(current_user, inbound_text)
         if short_reaction_context:
             prompt_surface.add("turn.short_reaction", short_reaction_context, priority=48, source="conversation")
+        if re.search(r"(说过|讲过|提过|聊过|发过|说了|讲了|提了).{0,4}(啦|了|呀|啊)?$", inbound_text):
+            prompt_surface.add(
+                "turn.repeat_correction_boundary",
+                (
+                    "【用户纠正重复话题】\n"
+                    "用户是在提醒你刚才/前面已经说过。回复只需要短短认一下，不要编造“几小时前/几分钟前”等具体时间差，"
+                    "也不要把回复写成“你希望我换个话题还是继续聊”的选项题。更自然的做法是：承认自己刚才没接稳，然后收住或自己轻轻换一个具体小切口。"
+                ),
+                priority=49,
+                source="conversation",
+            )
         reply_chain_context_getter = getattr(self, "_format_reply_chain_context_for_prompt", None)
         if callable(reply_chain_context_getter) and not bool(getattr(event, "private_companion_reply_chain_context_injected", False)):
             try:
@@ -6657,7 +6781,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 is_private_chat=is_private_chat,
             )
             self._add_collected_prompt_contexts(prompt_surface, collected_contexts)
-        static_fragment_keys = {"reply.style", "identity.anchor"}
+        static_fragment_keys = {"reply.style"}
         static_injection, dynamic_injection = prompt_surface.render_partition(
             lambda fragment: fragment.normalized_key() in static_fragment_keys
         )
@@ -6704,6 +6828,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             f"情绪底色={state.get('mood_bias', '平稳')}",
         ]
         weather = _single_line(state.get("weather"), 80)
+        if self._private_user_role(current_user or {}) == "friend":
+            weather = ""
         if weather and weather != "暂无天气信息":
             state_log_parts.append(f"天气={weather}")
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
@@ -6912,6 +7038,24 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         )
 
             inbound_text = _single_line(current_user.get("last_user_message"), 260)
+            sanitized_elapsed_text = self._sanitize_unverified_repeat_elapsed_claim(
+                inbound_text,
+                working_text,
+                current_user,
+            )
+            sanitized_elapsed_text = self._sanitize_robotic_topic_choice_after_repeat_correction(
+                inbound_text,
+                sanitized_elapsed_text,
+            )
+            if sanitized_elapsed_text != working_text:
+                logger.info(
+                    "[PrivateCompanion] 已清理重复纠正后的生硬回复: user=%s before=%s after=%s",
+                    user_id,
+                    _single_line(working_text, 120),
+                    _single_line(sanitized_elapsed_text, 120),
+                )
+                working_text = sanitized_elapsed_text
+                resp.completion_text = working_text
             music_album_context = getattr(event, "private_companion_reply_music_album_context", None)
             silence_decision = await self._decide_smart_silence(
                 inbound_text=inbound_text,
@@ -7044,6 +7188,76 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             raise
         finally:
             pass
+
+    def _sanitize_unverified_repeat_elapsed_claim(
+        self,
+        inbound_text: str,
+        response_text: str,
+        user: dict[str, Any],
+    ) -> str:
+        text = str(response_text or "").strip()
+        if not text:
+            return ""
+        inbound = str(inbound_text or "").strip()
+        if not re.search(r"(说过|讲过|提过|聊过|发过|说了|讲了|提了).{0,4}(啦|了|呀|啊)?$", inbound):
+            return text
+        if not re.search(r"\d+\s*(?:个)?\s*(?:小时|分钟|天)前.{0,8}(?:说过|讲过|提过|聊过|发过)", text):
+            return text
+
+        last_at = 0.0
+        if isinstance(user, dict):
+            last_at = _safe_float(user.get("last_companion_message_at"), 0) or _safe_float(user.get("last_reply_at"), 0)
+        elapsed = _now_ts() - last_at if last_at > 0 else 0.0
+        if 0 < elapsed <= 90 * 60:
+            replacement = "刚才说过了"
+        elif 0 < elapsed <= 6 * 3600:
+            replacement = "前面说过了"
+        else:
+            replacement = "之前说过了"
+        cleaned = re.sub(
+            r"\d+\s*(?:个)?\s*(?:小时|分钟|天)前.{0,4}(?:已经|就)?(?:说过|讲过|提过|聊过|发过)(?:了)?",
+            replacement,
+            text,
+        )
+        cleaned = re.sub(r"(刚才说过了|前面说过了|之前说过了)(?:了)+", r"\1", cleaned)
+        return cleaned.strip()
+
+    def _sanitize_robotic_topic_choice_after_repeat_correction(
+        self,
+        inbound_text: str,
+        response_text: str,
+    ) -> str:
+        text = str(response_text or "").strip()
+        if not text:
+            return ""
+        inbound = str(inbound_text or "").strip()
+        if not re.search(r"(说过|讲过|提过|聊过|发过|说了|讲了|提了).{0,4}(啦|了|呀|啊)?$", inbound):
+            return text
+        original = text
+        text = re.sub(r"刚醒(?=脑子|反应|没转|有点懵)", "刚才", text)
+        text = re.sub(
+            r"(?:（|\()\s*(?:看来|可能|大概)?\s*刚(?:才)?脑子([^）)]{0,24}?没(?:转|反应)[^）)]*?)\s*(?:）|\))",
+            r"刚才脑子\1。",
+            text,
+        )
+        text = re.sub(
+            r"(?:那)?\s*(?:你)?(?:希望|想让|要不要|要我|我是不是该)?[^。！？!?]{0,36}(?:换个话题|换话题)[^。！？!?]{0,36}(?:继续聊|接着聊|聊下去)[^。！？!?]*[？?。！!]*",
+            "",
+            text,
+        )
+        text = re.sub(
+            r"(?:那)?\s*(?:你)?(?:希望|想让|要不要|要我|我是不是该)?[^。！？!?]{0,36}(?:继续聊|接着聊|聊下去)[^。！？!?]{0,36}(?:换个话题|换话题)[^。！？!?]*[？?。！!]*",
+            "",
+            text,
+        )
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"([。！？!?])\s+", r"\1", text)
+        text = re.sub(r"[，,、；;]\s*$", "。", text).strip()
+        if text != original and not re.search(r"(不绕|先收|换个轻点|我记住|脑子|对哦|说过)", text):
+            text = f"{text.rstrip('。！？!?')}，我先不绕这个了。"
+        if text != original and re.fullmatch(r"(啊[，,。…]*)?(对哦[，,。…]*)?", text):
+            text = "啊，对哦，刚才脑子没转过来，我先不绕这个了。"
+        return text or original
 
     async def _debug_prompt_text(self, kind: str, user: dict[str, Any], event: AstrMessageEvent | None = None) -> str:
         normalized = str(kind or "").strip().lower()
@@ -7864,6 +8078,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             safe_text = self._sanitize_orphan_tts_placeholders(text)
             fast_user["last_user_message"] = safe_text or text
             fast_user["last_user_message_at"] = received_ts
+            if self._clear_state_share_proactive_after_user_status_question(fast_user, user_id=user_id, text=safe_text or text, now=received_ts):
+                if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
+                    self._schedule_next_proactive(fast_user, now=received_ts)
             try:
                 self._memory_companion_apply_emotional_drift(session_id=event.unified_msg_origin or "")
                 self._memory_companion_attach_private_context(
@@ -7900,6 +8117,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 fast_user["pending_followup_event"] = {}
                 fast_user["planned_proactive_quota_exempt"] = False
             fast_user["ignored_streak"] = 0
+            fast_user["friend_unanswered_silenced_since"] = 0
+            fast_user["friend_unanswered_silence_note"] = ""
             fast_user_is_owner = self._private_user_role(fast_user, user_id) == "owner"
             if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
@@ -8226,10 +8445,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user["pending_followup_event"] = {}
                 user["planned_proactive_quota_exempt"] = False
             user["ignored_streak"] = 0
+            user["friend_unanswered_silenced_since"] = 0
+            user["friend_unanswered_silence_note"] = ""
             if text:
                 safe_text = self._sanitize_orphan_tts_placeholders(text)
                 user["last_user_message"] = safe_text or text
                 user["last_user_message_at"] = received_ts
+                if is_target_user and self._clear_state_share_proactive_after_user_status_question(user, user_id=user_id, text=safe_text or text, now=received_ts):
+                    if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                        self._schedule_next_proactive(user, now=received_ts)
                 rest_silence_applied = self._apply_user_rest_silence_from_message(user, safe_text or text, now=received_ts)
                 if rest_silence_applied and _safe_float(user.get("user_rest_until"), 0) > received_ts:
                     if self._user_rest_signal_should_block_current_reply(safe_text or text):

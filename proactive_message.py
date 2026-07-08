@@ -1081,6 +1081,7 @@ class ProactiveMessageMixin:
             return ""
         if self._private_user_role(user) != "friend":
             return cleaned
+        cleaned = self._sanitize_owner_environment_context_for_private_user(cleaned, user)
         sensitive_names = [
             _single_line(item, 24)
             for item in (
@@ -1096,6 +1097,37 @@ class ProactiveMessageMixin:
         cleaned = re.sub(r"给你[^，。,；;。！？]{0,24}", "给熟人留了一点小东西", cleaned)
         cleaned = re.sub(r"你(?:的|那边|桌边|桌上|手边)", "对方那边", cleaned)
         return re.sub(r"\s+", " ", cleaned).strip()
+
+    def _sanitize_owner_environment_context_for_private_user(self, text: str, user: dict[str, Any] | None = None) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        if self._private_user_role(user) != "friend":
+            return cleaned
+        weather_tokens = (
+            "天气", "气温", "温度", "湿度", "降雨", "下雨", "阵雨", "小雨", "中雨", "大雨",
+            "暴雨", "雷雨", "雷暴", "晴", "多云", "阴天", "风速", "风力", "空气质量", "OpenWeather",
+        )
+        location_tokens = (
+            "当前位置", "当前地点", "所在地", "所在城市", "住处", "住址", "地址", "城市", "小区",
+            "街道", "门牌", "宿舍", "校区", "位置：", "地点：", "外面在",
+        )
+        kept: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if any(token in line for token in weather_tokens) or any(token in line for token in location_tokens):
+                continue
+            line = re.sub(r"身处(?:家里|学校|工作地点|外面|路上)[，,；;、]?", "", line)
+            line = re.sub(r"(?:家里|学校|工作地点|外面|路上)[（(][^）)]{1,40}[）)]", r"", line)
+            if line.strip():
+                kept.append(line.strip())
+        cleaned = "\n".join(kept).strip()
+        cleaned = re.sub(r"天气[^。！？\n]{0,80}[。！？]?", "", cleaned)
+        cleaned = re.sub(r"(?:当前位置|当前地点|所在地|所在城市|住处|住址|地址)[^。！？\n]{0,80}[。！？]?", "", cleaned)
+        cleaned = re.sub(r"身处(?:家里|学校|工作地点|外面|路上)[，,；;、]?", "", cleaned)
+        return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     def _current_time_period_label(self, now: datetime | None = None) -> tuple[str, str]:
         current = now or self._environment_now()
@@ -1193,6 +1225,7 @@ class ProactiveMessageMixin:
             reason=reason,
             action=action,
         )
+        state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
@@ -1209,7 +1242,12 @@ class ProactiveMessageMixin:
                         age = loop.get("age_days")
                         age_str = f"（{age:.0f}天前）" if age is not None else ""
                         loop_texts.append(f"- {content_preview}{age_str}")
-                    open_loops_hint = "你心里还挂着这些没完成的事，如果自然可以提一下：\n" + "\n".join(loop_texts)
+                    open_loops_hint = (
+                        "【未完成话题候选】\n"
+                        "这些只是可选候选，不是必须提起的任务。只有当本轮主动动机、当前话题或最近私聊比较贴合，"
+                        "或者你本来就是想兑现这件事时，才轻轻带一句；如果不贴，就先放着，不必为了它改变本轮话题。\n"
+                        + "\n".join(loop_texts)
+                    )
         except Exception:
             pass
         current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
@@ -1277,7 +1315,7 @@ class ProactiveMessageMixin:
                 f"{recent_history_hint}\n"
                 "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
             )
-        if open_loops_hint and "没完成的事" not in prompt:
+        if open_loops_hint and "未完成话题候选" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(memory_getter):
@@ -1473,6 +1511,7 @@ class ProactiveMessageMixin:
             reason=reason,
             action="voice",
         )
+        state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
         return f"""
 你现在要在同一段私聊会话里，准备一小句真正会被念出来的主动语音内容。
 当前会话里已有的人格、关系、上下文会继续生效，这里不要再重复铺陈。

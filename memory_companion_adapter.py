@@ -254,6 +254,7 @@ class MemoryCompanionAdapterMixin:
             "private_user_role": role,
             "user_id": _single_line(user_id, 80),
             "session_id": _single_line(getattr(event, "unified_msg_origin", "") if event is not None else user.get("umo"), 180),
+            "topic_fit_policy": "旧话题、未完成话头和长期记忆只在贴合当前用户消息、用户主动回问，或能一句轻轻带过时使用；不贴就先放着，不必改变本轮话题。",
         }
         # Attach bot emotional state for memory plugin to calibrate injection tone
         bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
@@ -435,6 +436,7 @@ class MemoryCompanionAdapterMixin:
                 "user_id": user_id,
                 "user_name": user_name,
                 "message_text": clean_query,
+                "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         elif isinstance(user, dict):
             umo = _single_line(user.get("umo"), 200)
@@ -445,12 +447,14 @@ class MemoryCompanionAdapterMixin:
                 "user_id": user_id,
                 "user_name": _single_line(user.get("nickname") or user.get("display_name") or user_id, 80),
                 "message_text": clean_query,
+                "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         else:
             session_context = {
                 "session_id": f"private_companion:{kind}",
                 "scope": "unknown",
                 "message_text": clean_query,
+                "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()

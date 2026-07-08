@@ -484,6 +484,146 @@ class ProactiveEngineMixin:
         user["proactive_impulses"] = kept[-16:]
         return user["proactive_impulses"]
 
+    def _user_asks_bot_current_state_or_activity(self, text: str) -> bool:
+        raw = _single_line(text, 120)
+        if not raw:
+            return False
+        if raw.lstrip().startswith(("/", "／", "!", "！", "#", "＃")):
+            return False
+        compact = re.sub(r"[\s,，。.!！?？~～…·、；;：:（）()【】\[\]\"'“”‘’]+", "", raw)
+        if not compact or len(compact) > 80:
+            return False
+        if re.search(r"(?:我|俺|咱|我们)(?:现在|这会儿|刚刚|刚才)?在?(?:干嘛|干啥|做什么|做啥|忙什么|忙啥)", compact):
+            return False
+        tech_status_words = ("插件", "系统", "接口", "API", "api", "配置", "页面", "排障", "日志", "服务", "连接", "模型", "任务", "进程")
+        if "状态" in compact and any(word in raw for word in tech_status_words):
+            return False
+        direct_patterns = (
+            r"(?:你|bot|机器人)?(?:现在|这会儿|这时候|刚才|今天)?在?(?:干嘛|干啥|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
+            r"(?:你|bot|机器人)?(?:现在|这会儿|今天)?在(?:上课|上班|睡觉|休息|吃饭|忙|摸鱼|干活|写作业|看书)(?:吗|嘛|没|呢)?$",
+            r"(?:你|bot|机器人)(?:现在|这会儿|今天)?(?:状态|情况)?(?:怎么样|咋样|如何|还好吗|还好不|累不累|困不困|忙不忙|饿不饿)$",
+            r"(?:你|bot|机器人)(?:现在|这会儿)?(?:什么状态|啥状态)$",
+        )
+        return any(re.fullmatch(pattern, compact, flags=re.I) for pattern in direct_patterns)
+
+    def _proactive_item_is_state_share_for_current_status_question(self, item: dict[str, Any] | None) -> bool:
+        if not isinstance(item, dict):
+            return False
+        reason = self._normalize_legacy_proactive_text(item.get("reason") or item.get("planned_proactive_reason"), limit=40)
+        source = self._normalize_legacy_proactive_text(item.get("source") or item.get("planned_proactive_source"), limit=40)
+        if source in {"timer", "troubleshooting", "simulation"}:
+            return False
+        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "creative_share", "important_date_share"}:
+            return False
+        if reason in {"state_share", "activity_share", "background_schedule", "diary_share"}:
+            return True
+        text = " ".join(
+            _single_line(item.get(key), 120)
+            for key in (
+                "topic",
+                "planned_proactive_topic",
+                "motive",
+                "planned_proactive_motive",
+                "why",
+                "scene",
+                "impulse",
+            )
+            if _single_line(item.get(key), 120)
+        )
+        if not text:
+            return False
+        state_tokens = (
+            "当前日程", "现在日程", "当前细化", "正在", "刚好在",
+            "上课", "上班", "摸鱼", "休息", "吃饭", "路上", "通勤", "回家", "小日常",
+            "今天的小事", "刚看到", "刚听到", "刚经历",
+        )
+        return reason in {"check_in", "quiet_care"} and any(token in text for token in state_tokens)
+
+    def _clear_state_share_proactive_after_user_status_question(
+        self,
+        user: dict[str, Any],
+        *,
+        user_id: str = "",
+        text: str = "",
+        now: float | None = None,
+    ) -> bool:
+        if not isinstance(user, dict) or not self._user_asks_bot_current_state_or_activity(text):
+            return False
+        check_now = _now_ts() if now is None else now
+        note = "用户已询问当前状态，状态分享念头已由被动回复承接"
+        changed = False
+        planned_item = {
+            "reason": user.get("planned_proactive_reason"),
+            "action": user.get("planned_proactive_action"),
+            "source": user.get("planned_proactive_source"),
+            "topic": user.get("planned_proactive_topic"),
+            "motive": user.get("planned_proactive_motive"),
+        }
+        if _safe_float(user.get("next_proactive_at"), 0) > 0 and self._proactive_item_is_state_share_for_current_status_question(planned_item):
+            self._mark_planned_candidate_status(user, "blocked", note)
+            self._clear_pending_proactive_plan(user)
+            changed = True
+        for impulse in self._cleanup_proactive_impulses(user, now=check_now):
+            if not isinstance(impulse, dict):
+                continue
+            state = _single_line(impulse.get("state") or "queued", 24).lower()
+            if state not in {"queued", "deferred", "pending", ""}:
+                continue
+            if not self._proactive_item_is_state_share_for_current_status_question(impulse):
+                continue
+            impulse["state"] = "blocked"
+            impulse["last_status"] = "blocked"
+            impulse["last_note"] = note
+            impulse["updated_ts"] = check_now
+            changed = True
+        target_user_id = _single_line(user_id or user.get("user_id") or user.get("id"), 40)
+        if target_user_id:
+            for candidate in self._cleanup_proactive_candidate_pool(now=check_now):
+                if not isinstance(candidate, dict):
+                    continue
+                if self._candidate_user_id(candidate) != target_user_id:
+                    continue
+                status = _single_line(candidate.get("status"), 24).lower()
+                if not self._pending_candidate_status(status):
+                    continue
+                if not self._proactive_item_is_state_share_for_current_status_question(candidate):
+                    continue
+                candidate["status"] = "blocked"
+                candidate["note"] = note
+                candidate["updated_ts"] = check_now
+                changed = True
+        if changed:
+            logger.info(
+                "[PrivateCompanion] 用户已询问当前状态,已清理状态分享主动念头: user=%s text=%s",
+                target_user_id or "unknown",
+                _single_line(text, 80),
+            )
+        return changed
+
+    def _friend_proactive_candidate_leaks_owner_environment(self, user: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        if not isinstance(user, dict) or self._private_user_role(user) != "friend" or not isinstance(candidate, dict):
+            return False
+        reason = self._normalize_legacy_proactive_text(candidate.get("reason"), limit=40)
+        if reason not in {"activity_share", "diary_share", "background_schedule", "state_share", "check_in", "quiet_care"}:
+            return False
+        text = " ".join(
+            _single_line(candidate.get(key), 180)
+            for key in ("topic", "motive", "why", "scene", "impulse", "status")
+            if _single_line(candidate.get(key), 180)
+        )
+        if not text:
+            return False
+        weather_tokens = (
+            "天气", "气温", "温度", "降雨", "下雨", "阵雨", "小雨", "中雨", "大雨",
+            "暴雨", "雷雨", "雷暴", "晴", "阳光", "多云", "阴天", "晚霞", "风",
+            "外面在下雨", "天色",
+        )
+        location_tokens = (
+            "当前位置", "当前地点", "所在城市", "住处", "住址", "地址", "小区", "街道",
+            "校区", "宿舍", "家里", "学校", "工作地点", "路上", "通勤",
+        )
+        return any(token in text for token in weather_tokens) or any(token in text for token in location_tokens)
+
     def _proactive_impulse_signature(self, item: dict[str, Any]) -> str:
         return self._proactive_topic_signature(
             item.get("reason"),
@@ -638,6 +778,8 @@ class ProactiveEngineMixin:
             "semantic_need_layer": _single_line(semantics.get("need_layer"), 40),
             "semantic_need_drive": _single_line(semantics.get("need_drive"), 80),
             "semantic_need_note": _single_line(semantics.get("need_note"), 120),
+            "semantic_need_score_bias": _safe_float(semantics.get("need_score_bias"), 0.0),
+            "semantic_need_pressure_bias": _safe_float(semantics.get("need_pressure_bias"), 0.0),
             "semantic_blocker": bool(semantics.get("blocker")),
             "signature": self._proactive_topic_signature(impulse_reason, source, impulse_topic, impulse_motive),
             "chain": [] if role == "friend" else [dict(item) for item in (chain or []) if isinstance(item, dict)],
@@ -719,6 +861,8 @@ class ProactiveEngineMixin:
                     "semantic_need_layer",
                     "semantic_need_drive",
                     "semantic_need_note",
+                    "semantic_need_score_bias",
+                    "semantic_need_pressure_bias",
                     "semantic_blocker",
                 ):
                     if key in impulse:
@@ -880,6 +1024,8 @@ class ProactiveEngineMixin:
             impulse["semantic_need_layer"] = _single_line(semantics.get("need_layer"), 40)
             impulse["semantic_need_drive"] = _single_line(semantics.get("need_drive"), 80)
             impulse["semantic_need_note"] = _single_line(semantics.get("need_note"), 120)
+            impulse["semantic_need_score_bias"] = _safe_float(semantics.get("need_score_bias"), 0.0)
+            impulse["semantic_need_pressure_bias"] = _safe_float(semantics.get("need_pressure_bias"), 0.0)
             impulse["semantic_blocker"] = bool(semantics.get("blocker"))
         score += (semantic_score - 0.5) * 0.42
         score -= max(0.0, _safe_float(impulse.get("semantic_pressure"), 0.4) - 0.55) * 0.22
@@ -1366,6 +1512,8 @@ class ProactiveEngineMixin:
                 "need_layer": _single_line(impulse.get("semantic_need_layer"), 40),
                 "need_drive": _single_line(impulse.get("semantic_need_drive"), 80),
                 "need_note": _single_line(impulse.get("semantic_need_note"), 120),
+                "need_score_bias": _safe_float(impulse.get("semantic_need_score_bias"), 0.0),
+                "need_pressure_bias": _safe_float(impulse.get("semantic_need_pressure_bias"), 0.0),
                 "blocker": bool(impulse.get("semantic_blocker")),
             }
         return self._proactive_candidate_semantics(
@@ -1975,6 +2123,8 @@ class ProactiveEngineMixin:
             "semantic_need_layer": _single_line(semantics.get("need_layer"), 40),
             "semantic_need_drive": _single_line(semantics.get("need_drive"), 80),
             "semantic_need_note": _single_line(semantics.get("need_note"), 120),
+            "semantic_need_score_bias": _safe_float(semantics.get("need_score_bias"), 0.0),
+            "semantic_need_pressure_bias": _safe_float(semantics.get("need_pressure_bias"), 0.0),
         }
         pool = self._cleanup_proactive_candidate_pool(now=now)
         if status in {"blocked", "accepted"}:
@@ -2073,6 +2223,11 @@ class ProactiveEngineMixin:
         if not self._user_enabled_for_proactive(str(user_id), user):
             self._clear_pending_proactive_plan(user)
             return False
+        silence_reason_getter = getattr(self, "_friend_unanswered_silence_reason", None)
+        silence_reason = silence_reason_getter(user, now=now) if callable(silence_reason_getter) else ""
+        if silence_reason and source not in {"timer", "troubleshooting", "simulation"}:
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note=silence_reason, user=user)
+            return False
         if not self._friend_can_receive_proactive_reason(user, candidate.get("reason"), candidate.get("action")):
             return False
         timer_event = self._get_active_llm_timer(user)
@@ -2107,6 +2262,9 @@ class ProactiveEngineMixin:
             candidate["reason"] = sanitized["reason"]
             candidate["topic"] = sanitized["topic"]
             candidate["motive"] = sanitized["motive"]
+            if self._friend_proactive_candidate_leaks_owner_environment(user, candidate):
+                self._record_proactive_candidate(user_id, candidate, status="blocked", note="次要用户不接收主要用户环境/天气分享", user=user)
+                return False
         if not self._action_is_available(action, user):
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="动作不可用或媒体额度不足", user=user)
             return False
@@ -2387,6 +2545,20 @@ class ProactiveEngineMixin:
             if _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=now)
             return False, "对话临时预约已交给官方定时计划"
+        silence_reason_getter = getattr(self, "_friend_unanswered_silence_reason", None)
+        silence_reason = silence_reason_getter(user, now=now) if callable(silence_reason_getter) else ""
+        if (
+            silence_reason
+            and not is_troubleshooting
+            and not due_timer_active
+            and planned_source not in {"timer", "simulation"}
+        ):
+            blocker = getattr(self, "_block_friend_unanswered_pending_proactive", None)
+            if callable(blocker):
+                blocker(user, note=silence_reason, now=now)
+            self._mark_planned_candidate_status(user, "blocked", silence_reason)
+            self._clear_pending_proactive_plan(user)
+            return False, silence_reason
         if (
             not is_troubleshooting
             and

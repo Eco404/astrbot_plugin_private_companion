@@ -887,6 +887,83 @@ class ProactiveMixin:
                 level = max(level, 1)
         return level
 
+    def _friend_unanswered_silence_reason(self, user: dict[str, Any] | None, *, now: float | None = None) -> str:
+        if not isinstance(user, dict) or self._private_user_role(user) != "friend":
+            return ""
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0, 50)
+        if ignored <= 0:
+            user["friend_unanswered_silenced_since"] = 0
+            user["friend_unanswered_silence_note"] = ""
+            return ""
+        check_now = _now_ts() if now is None else now
+        awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
+        unanswered_hours = (check_now - awaiting_since) / 3600.0 if awaiting_since > 0 else 0.0
+        if ignored >= 4:
+            reason = f"次要用户连续 {ignored} 次未回应，普通主动已暂停，等待用户先恢复对话"
+        elif ignored >= 3 and unanswered_hours >= 24:
+            reason = f"次要用户连续 {ignored} 次未回应且已超过 24 小时，普通主动已暂停"
+        elif ignored >= 2 and unanswered_hours >= 48:
+            reason = f"次要用户连续未回应已超过 48 小时，普通主动已暂停"
+        else:
+            reason = ""
+        if reason:
+            if _safe_float(user.get("friend_unanswered_silenced_since"), 0) <= 0:
+                user["friend_unanswered_silenced_since"] = check_now
+            user["friend_unanswered_silence_note"] = reason
+        else:
+            user["friend_unanswered_silenced_since"] = 0
+            user["friend_unanswered_silence_note"] = ""
+        return reason
+
+    def _block_friend_unanswered_pending_proactive(
+        self,
+        user: dict[str, Any],
+        *,
+        note: str,
+        now: float | None = None,
+    ) -> None:
+        if not isinstance(user, dict) or not note:
+            return
+        check_now = _now_ts() if now is None else now
+        safe_note = _single_line(note, 160)
+        impulse_cleaner = getattr(self, "_cleanup_proactive_impulses", None)
+        if callable(impulse_cleaner):
+            try:
+                for impulse in impulse_cleaner(user, now=check_now):
+                    if not isinstance(impulse, dict):
+                        continue
+                    state = _single_line(impulse.get("state") or "queued", 24).lower()
+                    source = _single_line(impulse.get("source"), 40)
+                    if state not in {"queued", "deferred", "pending", ""} or source in {"timer", "troubleshooting", "simulation"}:
+                        continue
+                    impulse["state"] = "blocked"
+                    impulse["last_status"] = "blocked"
+                    impulse["last_note"] = safe_note
+                    impulse["updated_ts"] = check_now
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 清理次要用户未回应主动念头失败: %s", _single_line(exc, 120))
+        pool_cleaner = getattr(self, "_cleanup_proactive_candidate_pool", None)
+        pending_checker = getattr(self, "_pending_candidate_status", None)
+        candidate_user_getter = getattr(self, "_candidate_user_id", None)
+        user_id = _single_line(user.get("user_id") or user.get("id"), 40)
+        if callable(pool_cleaner) and callable(pending_checker) and callable(candidate_user_getter) and user_id:
+            try:
+                for candidate in pool_cleaner(now=check_now):
+                    if not isinstance(candidate, dict):
+                        continue
+                    if candidate_user_getter(candidate) != user_id:
+                        continue
+                    source = _single_line(candidate.get("source"), 40)
+                    if source in {"timer", "troubleshooting", "simulation"}:
+                        continue
+                    if not pending_checker(_single_line(candidate.get("status"), 24).lower()):
+                        continue
+                    candidate["status"] = "blocked"
+                    candidate["note"] = safe_note
+                    candidate["updated_ts"] = check_now
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 清理次要用户未回应主动候选失败: %s", _single_line(exc, 120))
+
     @staticmethod
     def _friend_unanswered_should_remove_action(action: str) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
@@ -1972,6 +2049,20 @@ class ProactiveMixin:
             self._clear_pending_proactive_plan(user)
             return
         now = now or _now_ts()
+        timer_event = self._get_active_llm_timer(user)
+        if not (isinstance(timer_event, dict) and self._llm_timer_can_use_internal_scheduler(timer_event)):
+            silence_reason_getter = getattr(self, "_friend_unanswered_silence_reason", None)
+            silence_reason = silence_reason_getter(user, now=now) if callable(silence_reason_getter) else ""
+            if silence_reason:
+                self._block_friend_unanswered_pending_proactive(user, note=silence_reason, now=now)
+                self._clear_pending_proactive_plan(user)
+                logger.info(
+                    "[PrivateCompanion] 次要用户连续未回应,停止安排普通主动: user=%s ignored=%s reason=%s",
+                    _single_line(user_id, 40) or "unknown",
+                    _safe_int(user.get("ignored_streak"), 0, 0),
+                    _single_line(silence_reason, 120),
+                )
+                return
         if delay_hours is None:
             delay_hours = self._fallback_proactive_delay_hours(user, now=now)
         delay_factor = self._effective_proactive_float("delay_factor", 1.0, minimum=0.2, maximum=1.0)
@@ -1984,7 +2075,6 @@ class ProactiveMixin:
         if delay_hours is not None and intensity_factor > 0:
             widen = max(0.85, min(1.8, 1.25 - intensity_factor * 0.45))
             delay_hours = (delay_hours[0] * widen, delay_hours[1] * widen)
-        timer_event = self._get_active_llm_timer(user)
         planned_event = self._pick_best_planned_event(user, now)
         default_reason = (
             str(planned_event.get("reason") or "")
