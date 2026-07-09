@@ -2066,6 +2066,13 @@ class UserMemoryMixin:
         cleaned = _single_line(text, 220)
         if not cleaned or cleaned.startswith(("/", "!", "！", "#")):
             return
+        sleep_delay_detector = getattr(self, "_detect_sleep_delay_request", None)
+        if callable(sleep_delay_detector):
+            try:
+                if sleep_delay_detector(cleaned):
+                    return
+            except Exception:
+                pass
         category, topic, signature = self._classify_user_habit_message(cleaned)
         if not category or not signature:
             return

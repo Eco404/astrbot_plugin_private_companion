@@ -1924,7 +1924,10 @@ Provider 规则：{emotion_rule}
                 return f"<tts>{voice}</tts>\n{visible}" if visible and visible != voice else f"<tts>{voice}</tts>"
             return f"<tts>{voice}</tts>\n{visible}"
         except Exception as exc:
-            logger.warning("[PrivateCompanion] TTS 后处理判断失败,已保持纯文本: %s", _single_line(exc, 120))
+            if bool(getattr(exc, "_private_companion_tts_provider_logged", False)):
+                logger.info("[PrivateCompanion] TTS 后处理已回退纯文本: %s", _single_line(exc, 120))
+            else:
+                logger.warning("[PrivateCompanion] TTS 后处理判断失败,已保持纯文本: %s", _single_line(exc, 120))
             return ""
 
     async def _get_tts_conversion_provider(self, event: Any) -> Any:
@@ -1996,6 +1999,10 @@ Provider 规则：{emotion_rule}
                 len(str(prompt or "")),
                 _single_line(exc, 120),
             )
+            try:
+                setattr(exc, "_private_companion_tts_provider_logged", True)
+            except Exception:
+                pass
             if callable(record_usage):
                 record_usage(
                     provider_id=provider_id,

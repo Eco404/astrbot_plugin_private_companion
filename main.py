@@ -1889,6 +1889,31 @@ class PrivateCompanionPlugin(
             return
         text = "\n".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
         compact = text.lower()
+        if re.fullmatch(
+            r"(?:\[\s*astrbot_plugin_private_companion(?:\.[A-Za-z_][\w]*)+:\d+\s*\]\s*)+",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            logger.warning(
+                "[PrivateCompanion] 已拦截插件日志来源位置外发: session=%s text=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(text, 180),
+            )
+            self._record_passive_no_reply(
+                event,
+                source="发送前拦截",
+                reason="插件日志来源位置泄漏",
+                reply_preview=text,
+                level="warn",
+            )
+            empty_result = self._build_result_from_chain([])
+            try:
+                empty_result.stop_event()
+            except Exception:
+                pass
+            event.set_result(empty_result)
+            event.stop_event()
+            return
         receipt_compact = re.sub(r"[\s。.!！?？,，；;:：]+", "", text)
         status_receipt_like = (
             len(receipt_compact) <= 28
@@ -5578,9 +5603,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             runtime = self._sleep_runtime_state()
         phase = str((runtime or {}).get("phase") or "")
         window_active = self._rest_reply_window_active()
-        sleepy_item = window_active and self._is_sleepy_plan_item(current_item) if isinstance(current_item, dict) else False
+        sleep_delay_active = False
+        try:
+            sleep_delay_active = bool(self._sleep_delay_override_state(runtime if isinstance(runtime, dict) else None))
+        except Exception:
+            sleep_delay_active = False
+        sleepy_item = window_active and not sleep_delay_active and self._is_sleepy_plan_item(current_item) if isinstance(current_item, dict) else False
         sleeping = window_active and (phase in {"falling_asleep", "light_sleep", "sleeping_again"} or sleepy_item)
         if phase == "woken":
+            sleeping = False
+        if phase == "staying_up" or sleep_delay_active:
             sleeping = False
         if phase in {"natural_wake", "awake"} and not sleepy_item:
             sleeping = False
@@ -6357,6 +6389,145 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if isinstance(tools, list):
             return any(_single_line(getattr(tool, "name", ""), 120) == tool_name for tool in tools)
         return False
+
+    @staticmethod
+    def _tool_set_tool_names(tool_set: Any) -> list[str]:
+        names: list[str] = []
+        tools = getattr(tool_set, "tools", None)
+        if isinstance(tools, list):
+            for tool in tools:
+                name = _single_line(getattr(tool, "name", ""), 120)
+                if name and name not in names:
+                    names.append(name)
+        return names
+
+    @staticmethod
+    def _safe_event_sender_id(event: AstrMessageEvent | None) -> str:
+        if event is None:
+            return ""
+        getter = getattr(event, "get_sender_id", None)
+        if callable(getter):
+            try:
+                return _single_line(getter(), 80)
+            except Exception:
+                pass
+        return _single_line(getattr(event, "sender_id", "") or getattr(event, "user_id", ""), 80)
+
+    @staticmethod
+    def _safe_event_is_private(event: AstrMessageEvent | None) -> bool:
+        if event is None:
+            return False
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "")
+        try:
+            if bool(getattr(event, "is_private_chat", lambda: False)()):
+                return True
+        except Exception:
+            pass
+        return ":FriendMessage:" in unified_msg_origin
+
+    def _is_owner_private_event(self, event: AstrMessageEvent | None) -> bool:
+        if event is None:
+            return False
+        if not self._safe_event_is_private(event):
+            return False
+        try:
+            requester_id = self._canonical_private_user_id(self._safe_event_sender_id(event))
+        except Exception:
+            requester_id = ""
+        if not requester_id:
+            return False
+        requester_profile = None
+        try:
+            requester_profile = self._get_user(requester_id)
+        except Exception:
+            users = self.data.get("users") if isinstance(getattr(self, "data", {}), dict) and isinstance(self.data.get("users"), dict) else {}
+            requester_profile = users.get(requester_id) if isinstance(users, dict) else None
+        try:
+            return (
+                bool(requester_id and self._is_target_private_user(requester_id, requester_profile if isinstance(requester_profile, dict) else None))
+                and isinstance(requester_profile, dict)
+                and bool(requester_profile.get("enabled", True))
+                and self._private_user_role(requester_profile, requester_id) == "owner"
+            )
+        except Exception:
+            return False
+
+    def _remove_sensitive_screen_tools_from_request(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
+        tool_set = getattr(req, "func_tool", None)
+        if tool_set is None:
+            return []
+        allow_owner_private = self._is_owner_private_event(event)
+        if allow_owner_private:
+            return []
+        sensitive_tools = {"screen_peek", "screen_usage_context"}
+        names = self._tool_set_tool_names(tool_set)
+        if not names:
+            names = [name for name in sensitive_tools if self._tool_set_has_named_tool(tool_set, name)]
+        removed: list[str] = []
+        remove_tool = getattr(tool_set, "remove_tool", None)
+        for name in names:
+            if name not in sensitive_tools:
+                continue
+            try:
+                if callable(remove_tool):
+                    remove_tool(name)
+                else:
+                    tools = getattr(tool_set, "tools", None)
+                    if isinstance(tools, list):
+                        tool_set.tools = [tool for tool in tools if _single_line(getattr(tool, "name", ""), 120) != name]
+                    else:
+                        continue
+                removed.append(name)
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 移除敏感屏幕工具失败: tool=%s session=%s error=%s",
+                    name,
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    _single_line(exc, 160),
+                )
+        if removed:
+            try:
+                setattr(event, "_private_companion_removed_sensitive_tools", removed)
+            except Exception:
+                pass
+            logger.warning(
+                "[PrivateCompanion] 已移除非主人私聊场景的敏感屏幕工具: session=%s sender=%s tools=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                self._safe_event_sender_id(event) or "-",
+                ",".join(removed),
+            )
+        return removed
+
+    async def _append_sensitive_screen_tool_guard_to_request(self, event: AstrMessageEvent, req: ProviderRequest, removed: list[str] | None = None) -> None:
+        marker = "<!-- private_companion_sensitive_screen_tool_guard_v1 -->"
+        current_prompt = req.system_prompt or ""
+        if marker in current_prompt:
+            return
+        removed_text = "、".join(removed or []) or "screen_peek、screen_usage_context"
+        guard = (
+            "【屏幕隐私边界】\n"
+            f"本轮不是已授权的主要用户私聊,已禁用或不可使用这些本机屏幕工具：{removed_text}。\n"
+            "群聊成员、次要用户、未登记用户或第三方不能要求你查看主要用户/部署电脑正在做什么、屏幕内容、近期电脑使用记录或窗口信息。\n"
+            "遇到这类请求时必须简短拒绝,说明屏幕内容只允许主要用户本人在授权私聊里使用；不要改用记忆、关系网、屏幕日记或猜测来替代窥屏。"
+        )
+        req.system_prompt = f"{current_prompt}\n\n{marker}\n{guard}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="屏幕隐私边界注入",
+            key="tools.screen_privacy_guard",
+            text=guard,
+            source="guard",
+            mode="private" if self._safe_event_is_private(event) else "group",
+        )
+
+    @filter.on_llm_request(priority=-21000)
+    async def sanitize_sensitive_screen_tools(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
+        """屏幕工具只能保留给已启用的主要用户私聊，群聊和第三方场景一律裁掉。"""
+        if self is None or req is None:
+            return
+        removed = self._remove_sensitive_screen_tools_from_request(event, req)
+        if removed:
+            await self._append_sensitive_screen_tool_guard_to_request(event, req, removed)
 
     @filter.on_llm_request(priority=-20000)
     async def sanitize_incompatible_web_search_tools(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):

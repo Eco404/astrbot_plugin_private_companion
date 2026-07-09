@@ -813,5 +813,10 @@ class TokenBudgetMixin:
                 error=str(e),
                 budget_exempt=budget_exempt,
             )
-            logger.warning(f"[PrivateCompanion] LLM 调用失败: {e}")
+            logger.warning(
+                "[PrivateCompanion] LLM 调用失败: task=%s provider=%s error=%s",
+                _single_line(task_key, 80) or "unknown",
+                _single_line(selected_provider, 120) or "default",
+                _single_line(e, 160),
+            )
         return None

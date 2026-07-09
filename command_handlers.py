@@ -313,6 +313,18 @@ class CommandHandlersMixin:
             except Exception:
                 sender_id = ""
         data = getattr(self, "data", {}) if isinstance(getattr(self, "data", {}), dict) else {}
+        try:
+            sleep_delay = self._sleep_delay_override_state(clear_expired=True)
+        except Exception:
+            sleep_delay = {}
+        if isinstance(sleep_delay, dict) and sleep_delay:
+            until_text = _single_line(sleep_delay.get("until_text"), 24) or "-"
+            lines.append(
+                "临时晚睡覆盖："
+                f"到 {until_text}"
+                f"｜来源={_single_line(sleep_delay.get('user_text'), 60) or '用户今晚陪聊约定'}"
+                "｜过期后自动恢复日程休息"
+            )
         if group_id:
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
             group = groups.get(group_id) if isinstance(groups, dict) else None

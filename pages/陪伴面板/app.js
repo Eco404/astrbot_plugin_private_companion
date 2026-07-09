@@ -16200,12 +16200,12 @@ function featureRelatedSettings(key) {
     ))
     .map((item) => ({
       key: item,
-      value: Object.prototype.hasOwnProperty.call(settings, item)
-        ? settings[item]
-        : Object.prototype.hasOwnProperty.call(providers, item)
-          ? providers[item]
-          : Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
-            ? state.featureDraft[item]
+      value: Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
+        ? state.featureDraft[item]
+        : Object.prototype.hasOwnProperty.call(settings, item)
+          ? settings[item]
+          : Object.prototype.hasOwnProperty.call(providers, item)
+            ? providers[item]
             : fallbackValue(item),
       feature: Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item),
       description: configDescription(item),
@@ -17328,67 +17328,56 @@ function bindFeatureDetailActions() {
     form.querySelectorAll("[data-feature-param]").forEach((input) => {
       if (input.type === "checkbox") {
         input.addEventListener("change", () => {
+          const paramKey = input.dataset.featureParam || "";
           const label = input.closest(".feature-param-check")?.querySelector("span");
           if (label) label.textContent = input.checked ? "开启" : "关闭";
-          if (state.selectedFeatureKey === "enable_humanized_states" && input.dataset.featureParam === "enable_rest_reply_simulation") {
-            state.featureDraft.enable_rest_reply_simulation = input.checked;
+          if (paramKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, paramKey)) {
+            state.featureDraft[paramKey] = input.checked;
+          }
+          if (paramKey && Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, paramKey)) {
+            state.overview.settings[paramKey] = input.checked;
+          }
+          const syncSettingBackedFeatureParam = (paramKey, { rerender = false } = {}) => {
+            state.featureDraft[paramKey] = input.checked;
             state.overview.settings = state.overview.settings || {};
-            state.overview.settings.enable_rest_reply_simulation = input.checked;
-            renderFeatureSwitches();
+            state.overview.settings[paramKey] = input.checked;
+            if (rerender) renderFeatureSwitches();
+          };
+          if (state.selectedFeatureKey === "enable_humanized_states" && input.dataset.featureParam === "enable_rest_reply_simulation") {
+            syncSettingBackedFeatureParam("enable_rest_reply_simulation", { rerender: input.checked });
           }
           if (state.selectedFeatureKey === "enable_message_debounce" && input.dataset.featureParam === "enable_smart_message_debounce") {
-            state.featureDraft.enable_smart_message_debounce = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings.enable_smart_message_debounce = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam("enable_smart_message_debounce", { rerender: true });
           }
           if (state.selectedFeatureKey === "enable_response_self_review" && input.dataset.featureParam === "enable_smart_silence") {
-            state.featureDraft.enable_smart_silence = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings.enable_smart_silence = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam("enable_smart_silence", { rerender: true });
           }
           if (
             state.selectedFeatureKey === "enable_tts_enhancement"
             && ["auto_voice_enabled", "enable_tts_local_playback", "enable_tts_live_subtitle_sync"].includes(input.dataset.featureParam)
           ) {
-            state.featureDraft[input.dataset.featureParam] = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings[input.dataset.featureParam] = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
           if (state.selectedFeatureKey === "enable_emotion_simulation" && input.dataset.featureParam === "enable_llm_emotion_judgement") {
-            state.featureDraft.enable_llm_emotion_judgement = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings.enable_llm_emotion_judgement = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam("enable_llm_emotion_judgement", { rerender: true });
           }
           if (
             ["enable_group_slang_learning", "enable_group_member_profiles"].includes(state.selectedFeatureKey)
             && ["enable_group_slang_meanings", "enable_group_slang_web_search"].includes(input.dataset.featureParam)
           ) {
-            state.featureDraft[input.dataset.featureParam] = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings[input.dataset.featureParam] = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
           if (
             state.selectedFeatureKey === "enable_group_wakeup_enhancement"
             && ["enable_group_wakeup_question", "enable_group_wakeup_cold_group", "enable_group_interjection", "enable_group_interjection_feedback"].includes(input.dataset.featureParam)
           ) {
-            state.featureDraft[input.dataset.featureParam] = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings[input.dataset.featureParam] = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
           if (
             state.selectedFeatureKey === "enable_group_high_intensity_mode"
             && input.dataset.featureParam === "enable_group_high_intensity_mode"
           ) {
-            state.featureDraft[input.dataset.featureParam] = input.checked;
-            state.overview.settings = state.overview.settings || {};
-            state.overview.settings[input.dataset.featureParam] = input.checked;
-            renderFeatureSwitches();
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
         });
       }
@@ -19584,7 +19573,7 @@ function renderPersonaFinalEditor(styleSummaryResult, styleStale) {
     <section class="persona-final-editor">
       <header class="persona-final-head">
         <div>
-          <b>第四步：最终人格编辑器</b>
+          <b><span class="step-badge">4</span>最终人格编辑器</b>
           <span>逐段审核来源、冲突和长期可写入性。这里的内容才是最终复制入口。</span>
         </div>
         <button type="button" data-persona-standard-copy-final ${styleSummaryResult && !styleStale ? "" : "disabled"}>复制编辑器最终稿</button>
@@ -19618,7 +19607,7 @@ function renderPersonaFinalEditor(styleSummaryResult, styleStale) {
       <section class="persona-voice-apply">
         <header class="persona-voice-head">
           <div>
-            <b>第五步：应用到插件表达风格</b>
+            <b><span class="step-badge">5</span>应用到插件表达风格</b>
             <span>从最终人格和风格指纹里提取短规则，分别写入对话、创作、计划、内心和主动链路。只有点击保存后才会写入插件配置。</span>
           </div>
           <div class="persona-voice-actions">
@@ -19689,6 +19678,7 @@ function renderPersonaStandardizationWorkbench() {
   const styleStale = Boolean(state.personaStandardizationStyleStale || baseStale);
   const baseConfirmed = Boolean(draft.base_confirmed && result && !baseStale);
   const score = result?.draft?.score || {};
+  const sc = (v) => v >= 80 ? "good" : v >= 50 ? "ok" : "low";
   const styleHintRows = personaStandardizationStyleHints.map(([key, title, hint, placeholder]) => `
     <label class="persona-standard-question">
       <span><b>${escapeHtml(title)}</b><small>${escapeHtml(hint)}</small></span>
@@ -19901,20 +19891,22 @@ function renderPersonaStandardizationWorkbench() {
     <div class="persona-standard-result">
       <header>
         <div>
-          <b>第三步：稳定风格规则</b>
+          <b><span class="step-badge">3</span>稳定风格规则</b>
           <span>${escapeHtml(`已完成 ${styleProgress.answered}/${styleProgress.total} 个情景，已加载 ${styleProgress.loaded}/${styleProgress.total} 个。选择和自填只作为证据，最终只提取说话习惯。`)}</span>
         </div>
-        <button type="button" data-persona-style-summary-generate ${styleStale || !styleProgress.complete ? "disabled" : ""}>生成风格规则</button>
       </header>
       <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.summary)}</div>
       ${styleStale ? `<div class="setup-guide-hint warn">问卷、基础稿或第二步偏好已经修改，当前情景/风格规则已过期。请先重新生成基础稿或情景试答。</div>` : ""}
       ${scenarioCount && !styleProgress.complete ? `<div class="setup-guide-hint warn">请先完成全部情景。每个情景需要选择一个候选，或在“自填更贴近的回复”里写一句更准的回复；后续情景会按三条一组加载。</div>` : ""}
+      <div class="persona-standard-actions">
+        <button type="button" data-persona-style-summary-generate ${styleStale || !styleProgress.complete ? "disabled" : ""}>生成风格规则</button>
+      </div>
       ${styleSummaryResult?.parse_note ? `<div class="setup-guide-hint warn">${escapeHtml(styleSummaryResult.parse_note)}</div>` : ""}
       ${styleSummaryWarningRows ? `<div class="setup-guide-hint warn"><ul>${styleSummaryWarningRows}</ul></div>` : ""}
       <div class="persona-standard-review-grid">
-        <section><b>风格指纹</b>${fingerprintRows ? `<div class="persona-fingerprint-grid">${fingerprintRows}</div>` : ((styleSummaryResult?.draft?.style_rules || []).length ? `<ul>${styleSummaryResult.draft.style_rules.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p>尚未归纳。选择候选或填写证据后点击生成。</p>`)}</section>
-        <section><b>避免事项</b>${(styleSummaryResult?.draft?.avoid_rules || []).length ? `<ul>${styleSummaryResult.draft.avoid_rules.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p>生成后会列出需要避免的句式和口吻。</p>`}</section>
-        <section><b>审核清单</b>${styleSummaryChecklistRows ? `<ul>${styleSummaryChecklistRows}</ul>` : `<p>确认规则没有改变角色设定，也没有固定候选原句。</p>`}</section>
+        <section data-tone="info"><b>风格指纹</b>${fingerprintRows ? `<div class="persona-fingerprint-grid">${fingerprintRows}</div>` : ((styleSummaryResult?.draft?.style_rules || []).length ? `<ul>${styleSummaryResult.draft.style_rules.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p>尚未归纳。选择候选或填写证据后点击生成。</p>`)}</section>
+        <section data-tone="warn"><b>避免事项</b>${(styleSummaryResult?.draft?.avoid_rules || []).length ? `<ul>${styleSummaryResult.draft.avoid_rules.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p>生成后会列出需要避免的句式和口吻。</p>`}</section>
+        <section data-tone="check"><b>审核清单</b>${styleSummaryChecklistRows ? `<ul>${styleSummaryChecklistRows}</ul>` : `<p>确认规则没有改变角色设定，也没有固定候选原句。</p>`}</section>
       </div>
       ${renderPersonaFinalEditor(styleSummaryResult, styleStale)}
     </div>
@@ -19923,10 +19915,9 @@ function renderPersonaStandardizationWorkbench() {
       <section class="persona-style-workbench">
       <header>
         <div>
-          <b>第二步：稳定对话风格校准</b>
+          <b><span class="step-badge">2</span>稳定对话风格校准</b>
           <span>${scenarioCount ? `已加载 ${scenarioCount}/${styleProgress.total} 个情景，已完成 ${styleProgress.answered}/${styleProgress.total}。当前只显示一个情景；完成两个后会预取下一组三个。` : "先确认上面的基础设定，再生成前三个情景候选。"}</span>
         </div>
-        <button type="button" data-persona-style-generate ${baseStale ? "disabled" : ""}>${scenarioCount ? "重新开始生成情景" : "生成前三个情景"}</button>
       </header>
       <div class="persona-style-guide-strip">
         <span><b>1</b>看模拟上文</span>
@@ -19942,6 +19933,9 @@ function renderPersonaStandardizationWorkbench() {
         </label>
         <div class="persona-standard-question-grid">${styleHintRows}</div>
       </section>
+      <div class="persona-standard-actions">
+        <button type="button" data-persona-style-generate ${baseStale ? "disabled" : ""}>${scenarioCount ? "重新开始生成情景" : "生成前三个情景"}</button>
+      </div>
       ${baseStale ? `<div class="setup-guide-hint warn">基础问卷或来源已修改，当前基础稿已过期。请先重新生成基础设定稿。</div>` : ""}
       ${styleResult?.parse_note ? `<div class="setup-guide-hint warn">${escapeHtml(styleResult.parse_note)}</div>` : ""}
       ${styleWarningRows ? `<div class="setup-guide-hint warn"><ul>${styleWarningRows}</ul></div>` : ""}
@@ -19959,13 +19953,13 @@ function renderPersonaStandardizationWorkbench() {
     <section class="persona-standard-result">
       <header>
         <div>
-          <b>第一步：基础设定审核稿</b>
+          <b><span class="step-badge">1</span>基础设定审核稿</b>
           <span>${escapeHtml(baseResultMeta)}</span>
         </div>
         <div class="persona-standard-score">
-          <span>完整 ${escapeHtml(String(score.completeness ?? 0))}</span>
-          <span>一致 ${escapeHtml(String(score.consistency ?? 0))}</span>
-          <span>可用 ${escapeHtml(String(score.roleplay_usability ?? 0))}</span>
+          <span class="${sc(score.completeness ?? 0)}">完整 <b>${escapeHtml(String(score.completeness ?? 0))}</b>/100</span>
+          <span class="${sc(score.consistency ?? 0)}">一致 <b>${escapeHtml(String(score.consistency ?? 0))}</b>/100</span>
+          <span class="${sc(score.roleplay_usability ?? 0)}">可用 <b>${escapeHtml(String(score.roleplay_usability ?? 0))}</b>/100</span>
         </div>
       </header>
       ${result.parse_note ? `<div class="setup-guide-hint warn">${escapeHtml(result.parse_note)}</div>` : ""}
@@ -19975,11 +19969,11 @@ function renderPersonaStandardizationWorkbench() {
         <textarea class="persona-standard-template" rows="24" data-persona-standard-template>${escapeHtml(baseTemplateText)}</textarea>
       </label>
       <div class="persona-standard-review-grid">
-        <section><b>改动摘要</b>${summaryRows ? `<ul>${summaryRows}</ul>` : `<p>暂无摘要。</p>`}</section>
-        <section><b>需要审核</b>${warningRows ? `<ul>${warningRows}</ul>` : `<p>没有明显冲突，但仍建议通读。</p>`}</section>
-        <section><b>审核清单</b>${checklistRows ? `<ul>${checklistRows}</ul>` : `<p>确认角色身份、关系称呼、禁区和长期设定。</p>`}</section>
+        <section data-tone="info"><b>改动摘要</b>${summaryRows ? `<ul>${summaryRows}</ul>` : `<p>暂无摘要。</p>`}</section>
+        <section data-tone="warn"><b>需要审核</b>${warningRows ? `<ul>${warningRows}</ul>` : `<p>没有明显冲突，但仍建议通读。</p>`}</section>
+        <section data-tone="check"><b>审核清单</b>${checklistRows ? `<ul>${checklistRows}</ul>` : `<p>确认角色身份、关系称呼、禁区和长期设定。</p>`}</section>
       </div>
-      <div class="setup-guide-actions">
+      <div class="persona-standard-actions">
         <button type="button" data-persona-standard-copy ${baseStale ? "disabled" : ""}>复制基础稿</button>
         <button type="button" data-persona-standard-confirm ${baseStale ? "disabled" : ""}>确认基本信息，进入风格校准</button>
         <button type="button" class="ghost" data-persona-standard-clear>清空结果</button>
@@ -19989,7 +19983,7 @@ function renderPersonaStandardizationWorkbench() {
   ` : `
     <section class="persona-standard-empty">
       <b>还没有生成基础设定稿</b>
-      <span>第一步只整理稳定设定，不生成口癖、句长、标点习惯等强语气内容。</span>
+      <span>在上方选择人格来源和整理强度后，点击「生成基础稿」。第一步只整理稳定设定，不生成口癖、句长等强语气内容。</span>
     </section>
   `;
   return `
@@ -19997,52 +19991,57 @@ function renderPersonaStandardizationWorkbench() {
       <h3>问卷式人格标准化</h3>
       <p>先整理稳定设定，再用情景试答校准说话方式。全程只生成可编辑审核稿，不自动覆盖原人格。</p>
       <div class="persona-flow-steps">${flowSteps}</div>
-      <div class="persona-standard-source">
-        <label class="setup-guide-choice ${draft.use_pasted_source ? "" : "selected"}">
-          <input type="radio" name="personaStandardSource" value="current" data-persona-standard-source ${draft.use_pasted_source ? "" : "checked"}>
-          <span><b>选择 AstrBot 人格</b><small>从可读取的人格列表选择，不会切换实际对话人格。</small></span>
-        </label>
-        <label class="setup-guide-choice ${draft.use_pasted_source ? "selected" : ""}">
-          <input type="radio" name="personaStandardSource" value="paste" data-persona-standard-source ${draft.use_pasted_source ? "checked" : ""}>
-          <span><b>粘贴人格文本</b><small>当前人格读取不到，或想整理另一版人格时使用。</small></span>
-        </label>
-      </div>
-      <label class="persona-standard-question ${draft.use_pasted_source ? "is-hidden" : ""}" data-persona-standard-persona-wrap>
-        <span><b>人格选择</b><small>优先选择要整理的 AstrBot 人格；列表未加载时会沿用当前默认人格。</small></span>
-        <select data-persona-standard-persona>
-          ${(state.roleplayPersonas || []).length
-            ? (state.roleplayPersonas || []).map((item) => {
-              const id = String(item.id || "");
-              const label = `${item.label || id}${item.source ? ` · ${item.source}` : ""}`;
-              return `<option value="${escapeHtml(id)}" ${id === String(draft.persona_id || "") ? "selected" : ""}>${escapeHtml(label)}</option>`;
-            }).join("")
-            : `<option value="">继承 AstrBot 当前配置人格</option>`}
-        </select>
-      </label>
-      <label class="persona-standard-question ${draft.use_pasted_source ? "" : "is-hidden"}" data-persona-standard-source-text-wrap>
-        <span><b>原人格文本</b><small>只在选择粘贴人格文本时使用。</small></span>
-        <textarea rows="8" data-persona-standard-source-text placeholder="把原 AstrBot 人格粘贴到这里">${escapeHtml(draft.source_text || "")}</textarea>
-      </label>
-      <div class="persona-standard-strength">
-        ${[
-          ["light", "轻度", "只整理排版和明显冲突"],
-          ["medium", "中度", "补足缺失模块并优化表达"],
-          ["deep", "深度", "更主动重构为完整模板，性格层次会写得更细"],
-        ].map(([value, label, desc]) => `
-          <label class="setup-guide-choice ${draft.strength === value ? "selected" : ""}">
-            <input type="radio" name="personaStandardStrength" value="${escapeHtml(value)}" data-persona-standard-strength ${draft.strength === value ? "checked" : ""}>
-            <span><b>${escapeHtml(label)}</b><small>${escapeHtml(desc)}</small></span>
-          </label>
-        `).join("")}
-      </div>
-      <section class="persona-reference-section">
+      <section class="persona-config-section">
         <header>
-          <b>补充资料（可选）</b>
-          <span>主要用于第一步整理基础设定，尤其是性格底色、内在驱动、亲疏变化、压力反应、矛盾感、关系、喜恶和边界。</span>
+          <b><span class="step-badge">1</span>基础设定配置</b>
+          <span>选择人格来源、设定整理强度，可选补充参考材料。</span>
         </header>
-        <label class="persona-standard-question">
-          <span><b>参考材料</b><small>可以写“平时怎样、熟了怎样、被误解怎样、被要求怎样、真正害怕/在意什么”。第二步会读取前 4000 字作为风格参考。</small></span>
-          <textarea rows="8" data-persona-standard-supplement placeholder="例如：
+        <div class="persona-standard-source">
+          <label class="setup-guide-choice ${draft.use_pasted_source ? "" : "selected"}">
+            <input type="radio" name="personaStandardSource" value="current" data-persona-standard-source ${draft.use_pasted_source ? "" : "checked"}>
+            <span><b>选择 AstrBot 人格</b><small>从可读取的人格列表选择，不会切换实际对话人格。</small></span>
+          </label>
+          <label class="setup-guide-choice ${draft.use_pasted_source ? "selected" : ""}">
+            <input type="radio" name="personaStandardSource" value="paste" data-persona-standard-source ${draft.use_pasted_source ? "checked" : ""}>
+            <span><b>粘贴人格文本</b><small>当前人格读取不到，或想整理另一版人格时使用。</small></span>
+          </label>
+        </div>
+        <label class="persona-standard-question ${draft.use_pasted_source ? "is-hidden" : ""}" data-persona-standard-persona-wrap>
+          <span><b>人格选择</b><small>优先选择要整理的 AstrBot 人格；列表未加载时会沿用当前默认人格。</small></span>
+          <select data-persona-standard-persona>
+            ${(state.roleplayPersonas || []).length
+              ? (state.roleplayPersonas || []).map((item) => {
+                const id = String(item.id || "");
+                const label = `${item.label || id}${item.source ? ` · ${item.source}` : ""}`;
+                return `<option value="${escapeHtml(id)}" ${id === String(draft.persona_id || "") ? "selected" : ""}>${escapeHtml(label)}</option>`;
+              }).join("")
+              : `<option value="">继承 AstrBot 当前配置人格</option>`}
+          </select>
+        </label>
+        <label class="persona-standard-question ${draft.use_pasted_source ? "" : "is-hidden"}" data-persona-standard-source-text-wrap>
+          <span><b>原人格文本</b><small>只在选择粘贴人格文本时使用。</small></span>
+          <textarea rows="8" data-persona-standard-source-text placeholder="把原 AstrBot 人格粘贴到这里">${escapeHtml(draft.source_text || "")}</textarea>
+        </label>
+        <div class="persona-standard-strength">
+          ${[
+            ["light", "轻度", "仅整理排版与明显冲突，改动最小"],
+            ["medium", "中度", "补足缺失模块并优化表达，推荐使用"],
+            ["deep", "深度", "主动重构为完整模板，性格层次更细腻"],
+          ].map(([value, label, desc]) => `
+            <label class="setup-guide-choice ${draft.strength === value ? "selected" : ""}">
+              <input type="radio" name="personaStandardStrength" value="${escapeHtml(value)}" data-persona-standard-strength ${draft.strength === value ? "checked" : ""}>
+              <span><b>${escapeHtml(label)}</b><small>${escapeHtml(desc)}</small></span>
+            </label>
+          `).join("")}
+        </div>
+        <section class="persona-reference-section">
+          <header>
+            <b>补充资料（可选）</b>
+            <span>主要用于第一步整理基础设定，尤其是性格底色、内在驱动、亲疏变化、压力反应、矛盾感、关系、喜恶和边界。</span>
+          </header>
+          <label class="persona-standard-question">
+            <span><b>参考材料</b><small>可以写"平时怎样、熟了怎样、被误解怎样、被要求怎样、真正害怕/在意什么"。第二步会读取前 4000 字作为风格参考。</small></span>
+            <textarea rows="8" data-persona-standard-supplement placeholder="例如：
 用户：你刚才这个说法好像太正式了
 她：啊，那我换短一点。刚才那句不算。
 
@@ -20053,13 +20052,14 @@ function renderPersonaStandardizationWorkbench() {
 关系变化：对陌生人礼貌收着，对熟人会更直接，也会保留一点边界。
 矛盾感：想靠近但怕显得太主动；会照顾人，但不想被当成只会顺从。
 如果资料与原人格冲突，请在审核提醒里标出来。">${escapeHtml(draft.supplement_text || "")}</textarea>
-        </label>
+          </label>
+        </section>
+        <div class="persona-standard-actions">
+          <button type="button" data-persona-standard-generate>${draft.use_pasted_source ? "用粘贴文本生成基础稿" : "用所选人格生成基础稿"}</button>
+          <button type="button" class="ghost" data-persona-standard-fill-sample>填入示例</button>
+        </div>
+        <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.base)}</div>
       </section>
-      <div class="setup-guide-actions">
-        <button type="button" data-persona-standard-generate>${draft.use_pasted_source ? "用粘贴文本生成基础稿" : "用所选人格生成基础稿"}</button>
-        <button type="button" class="ghost" data-persona-standard-fill-sample>填入示例</button>
-      </div>
-      <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.base)}</div>
       ${resultHtml}
       ${styleHtml}
     </article>

@@ -726,16 +726,55 @@ class LlmToolActionsMixin:
             requester_id = str(event.get_sender_id())
         except Exception:
             requester_id = ""
+        try:
+            requester_id = self._canonical_private_user_id(requester_id)
+        except Exception:
+            requester_id = str(requester_id or "").strip()
         owner_only = bool(getattr(self, "cross_user_memory_owner_only", True))
         if owner_only:
             users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
-            requester_profile = users.get(requester_id) if isinstance(users, dict) else None
+            try:
+                requester_profile = self._get_user(requester_id) if requester_id else None
+            except Exception:
+                requester_profile = users.get(requester_id) if isinstance(users, dict) else None
             try:
                 requester_is_owner = isinstance(requester_profile, dict) and self._private_user_role(requester_profile, requester_id) == "owner"
             except Exception:
                 requester_is_owner = False
-            allowed = requester_id in set(self._configured_target_ids()) or requester_is_owner
+            requester_enabled = not isinstance(requester_profile, dict) or bool(requester_profile.get("enabled", True))
+            requester_is_target = False
+            try:
+                requester_is_target = bool(
+                    self._is_target_private_user(requester_id, requester_profile if isinstance(requester_profile, dict) else None)
+                )
+            except Exception:
+                requester_is_target = False
+            configured_target = requester_id in set(self._configured_target_ids()) if requester_id else False
+            allowed = bool(
+                requester_id
+                and requester_enabled
+                and (
+                    configured_target
+                    or requester_is_owner
+                    or requester_is_target
+                )
+            )
             forbidden_message = "只有主要用户可以查询 Bot 与其他人的互动。"
+            if is_private and not allowed:
+                role = ""
+                try:
+                    role = self._private_user_role(requester_profile, requester_id) if isinstance(requester_profile, dict) else ""
+                except Exception:
+                    role = ""
+                logger.info(
+                    "[PrivateCompanion] 跨用户互动查询权限未通过: sender=%s enabled=%s role=%s configured_target=%s target=%s umo=%s",
+                    requester_id or "-",
+                    requester_enabled,
+                    role or "-",
+                    configured_target,
+                    requester_is_target,
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120),
+                )
         else:
             allowed = self._can_manage_private_companion(event)
             forbidden_message = "只有主要用户/管理员在私聊中可以查询 Bot 与其他人的互动。"

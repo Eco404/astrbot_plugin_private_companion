@@ -15959,6 +15959,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "woken_count": self._int(runtime.get("woken_count")),
                 "updated_at": self.plugin._format_timestamp_elapsed(runtime.get("updated_at", 0)),
             }
+            delay_until = self._float(runtime.get("sleep_delay_until_ts"), 0)
+            if delay_until > time.time():
+                summary["sleep_delay_override"] = {
+                    "active": True,
+                    "until": self._single_line(runtime.get("sleep_delay_until_text"), 40)
+                    or self.plugin._environment_fromtimestamp(delay_until).strftime("%m-%d %H:%M"),
+                    "reason": self._single_line(runtime.get("sleep_delay_reason"), 120),
+                    "user_text": self._single_line(runtime.get("sleep_delay_user_text"), 120),
+                    "explicit_time": bool(runtime.get("sleep_delay_explicit_time")),
+                }
         return summary
 
     def _life_observation_summary(self, data: dict[str, Any]) -> dict[str, Any]:

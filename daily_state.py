@@ -5474,50 +5474,60 @@ class DailyStateMixin:
 
     def _format_schedule_adjustments_for_prompt(self) -> str:
         raw = self.data.get("schedule_adjustments", [])
-        if not isinstance(raw, list) or not raw:
-            return "（暂无）"
         now = _now_ts()
         kept = []
         lines = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            if _single_line(item.get("source_role"), 20) != "owner":
-                continue
-            expires_at = _safe_float(item.get("expires_at"), 0)
-            if expires_at > 0 and expires_at <= now:
-                continue
-            date_text = _single_line(item.get("date"), 16)
-            if date_text and date_text != _today_key():
-                continue
-            kept.append(item)
-            note = _single_line(item.get("note"), 120)
-            source = _single_line(item.get("source"), 24)
-            user_text = _single_line(item.get("user_text"), 80)
-            intensity = _single_line(item.get("intensity"), 16)
-            scope = _single_line(item.get("scope"), 30)
-            if note:
-                meta = "｜".join(part for part in (source or "互动", intensity, scope) if part)
-                lines.append(f"- {meta}：{note}")
-            if user_text:
-                lines.append(f"  用户原话摘要：{user_text}")
-            immediate = _single_line(item.get("immediate_reaction"), 120)
-            if immediate:
-                lines.append(f"  即时反应：{immediate}")
-            updates = item.get("state_updates")
-            if isinstance(updates, list) and updates:
-                update_text = "；".join(
-                    _single_line(update, 60)
-                    for update in updates
-                    if _single_line(update, 60)
-                )
-                if update_text:
-                    lines.append(f"  状态变量更新：{update_text}")
-            carry = _single_line(item.get("carry_rule"), 120)
-            if carry:
-                lines.append(f"  承接要求：{carry}")
-        if len(kept) != len(raw):
-            self.data["schedule_adjustments"] = kept[-12:]
+        override_lines = []
+        override = self._sleep_delay_override_state(now=now)
+        if override:
+            until_text = _single_line(override.get("until_text"), 24)
+            source_text = _single_line(override.get("user_text"), 80)
+            override_lines.append(f"- 临时延后休息｜强｜今晚：到 {until_text} 前按用户临时陪聊约定处理,不要把当前睡眠段当成必须沉默。")
+            if source_text:
+                override_lines.append(f"  用户原话摘要：{source_text}")
+            override_lines.append("  承接要求：只影响今晚；到点后自然收声或回到休息,不要写成长期熬夜习惯。")
+        if isinstance(raw, list) and raw:
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                if _single_line(item.get("source_role"), 20) != "owner":
+                    continue
+                expires_at = _safe_float(item.get("expires_at"), 0)
+                if expires_at > 0 and expires_at <= now:
+                    continue
+                date_text = _single_line(item.get("date"), 16)
+                if date_text and date_text != _today_key():
+                    continue
+                kept.append(item)
+                note = _single_line(item.get("note"), 120)
+                source = _single_line(item.get("source"), 24)
+                user_text = _single_line(item.get("user_text"), 80)
+                intensity = _single_line(item.get("intensity"), 16)
+                scope = _single_line(item.get("scope"), 30)
+                if note:
+                    meta = "｜".join(part for part in (source or "互动", intensity, scope) if part)
+                    lines.append(f"- {meta}：{note}")
+                if user_text:
+                    lines.append(f"  用户原话摘要：{user_text}")
+                immediate = _single_line(item.get("immediate_reaction"), 120)
+                if immediate:
+                    lines.append(f"  即时反应：{immediate}")
+                updates = item.get("state_updates")
+                if isinstance(updates, list) and updates:
+                    update_text = "；".join(
+                        _single_line(update, 60)
+                        for update in updates
+                        if _single_line(update, 60)
+                    )
+                    if update_text:
+                        lines.append(f"  状态变量更新：{update_text}")
+                carry = _single_line(item.get("carry_rule"), 120)
+                if carry:
+                    lines.append(f"  承接要求：{carry}")
+            if len(kept) != len(raw):
+                self.data["schedule_adjustments"] = kept[-12:]
+        if override_lines:
+            lines.extend(override_lines)
         return "\n".join(lines[-12:]) if lines else "（暂无）"
 
     def _current_detail_segment_for_update(self) -> dict[str, Any] | None:
@@ -5557,6 +5567,7 @@ class DailyStateMixin:
             "falling_asleep": "入睡中",
             "light_sleep": "浅睡",
             "woken": "被叫醒",
+            "staying_up": "临时晚睡",
             "sleeping_again": "继续睡",
             "natural_wake": "自然醒",
         }.get(str(phase or ""), "清醒")
@@ -5600,6 +5611,179 @@ class DailyStateMixin:
                 return True
         return True
 
+    @staticmethod
+    def _sleep_delay_cn_number(value: Any) -> int | None:
+        text = str(value or "").strip().replace("兩", "两").replace("〇", "零")
+        if not text:
+            return None
+        if text.isdigit():
+            return int(text)
+        digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        if text in digits:
+            return digits[text]
+        if "十" in text:
+            left, _, right = text.partition("十")
+            tens = digits.get(left, 1) if left else 1
+            ones = digits.get(right, 0) if right else 0
+            return tens * 10 + ones
+        return None
+
+    @classmethod
+    def _sleep_delay_parse_minute(cls, value: Any) -> int:
+        text = str(value or "").strip()
+        if not text:
+            return 0
+        if text == "半":
+            return 30
+        if text == "一刻":
+            return 15
+        if text == "三刻":
+            return 45
+        parsed = cls._sleep_delay_cn_number(text)
+        if parsed is None:
+            return 0
+        return max(0, min(59, parsed))
+
+    def _sleep_delay_next_local_ts(self, hour: int, minute: int, *, now_dt: datetime | None = None) -> float:
+        current = now_dt or self._environment_now()
+        target = datetime.combine(current.date(), datetime.min.time(), tzinfo=current.tzinfo) + timedelta(
+            hours=max(0, min(23, hour)),
+            minutes=max(0, min(59, minute)),
+        )
+        if target.timestamp() <= current.timestamp() + 60:
+            target += timedelta(days=1)
+        return target.timestamp()
+
+    def _parse_sleep_delay_until_ts(self, compact: str, *, now_dt: datetime | None = None) -> tuple[float, bool]:
+        current = now_dt or self._environment_now()
+        hour_token = r"(?:\d{1,2}|[零〇一二两兩三四五六七八九十]{1,3})"
+        minute_token = r"(?:\d{1,2}|[零〇一二两兩三四五六七八九十]{1,3}|半|一刻|三刻)"
+        match = re.search(
+            rf"(?:陪(?:我|着我)?到|陪到|撑到|等到|到|至)"
+            rf"(凌晨|半夜|今晚|今夜|夜里|晚上|明早|明天早上|明天)?"
+            rf"({hour_token})(?:[:：点點时])({minute_token})?",
+            compact,
+        )
+        if not match:
+            return 0.0, False
+        period = str(match.group(1) or "")
+        hour = self._sleep_delay_cn_number(match.group(2))
+        if hour is None:
+            return 0.0, False
+        minute = self._sleep_delay_parse_minute(match.group(3))
+        if period in {"凌晨", "半夜"}:
+            if hour == 12:
+                hour = 0
+        elif period in {"今晚", "今夜", "夜里", "晚上"}:
+            if hour == 12:
+                hour = 0
+            elif 6 <= hour <= 11:
+                hour += 12
+        elif period in {"明早", "明天早上"}:
+            if hour == 12:
+                hour = 0
+        elif current.hour >= 18:
+            if hour == 12:
+                hour = 0
+            elif 6 <= hour <= 11:
+                hour += 12
+        if hour > 23:
+            return 0.0, False
+        target_ts = self._sleep_delay_next_local_ts(hour, minute, now_dt=current)
+        if period in {"明早", "明天早上"}:
+            target_dt = self._environment_fromtimestamp(target_ts)
+            if target_dt.date() == current.date():
+                target_ts = (target_dt + timedelta(days=1)).timestamp()
+        explicit_cap = min(current.timestamp() + 6 * 3600, self._sleep_delay_next_local_ts(6, 0, now_dt=current))
+        return min(target_ts, explicit_cap), True
+
+    def _detect_sleep_delay_request(self, text: str) -> dict[str, Any] | None:
+        normalized = _single_line(text, 220)
+        compact = re.sub(r"\s+", "", normalized)
+        if not compact:
+            return None
+        if re.search(r"(早点睡|早睡|快睡|去睡|睡觉吧|该睡|别熬夜|不要熬夜|别晚睡|不要晚睡|不许熬夜|不许晚睡|别睡太晚|不要睡太晚)", compact):
+            return None
+        delay_intent = bool(
+            re.search(r"(今晚|今夜|今天晚上|夜里|凌晨|待会|等下|一会).{0,14}(晚点睡|迟点睡|晚睡|先不睡|不睡了|先别睡|别睡|熬夜)", compact)
+            or re.search(r"(陪我|陪陪我|陪着我|和我).{0,12}(熬夜|晚点睡|迟点睡|先别睡|别睡|不睡)", compact)
+            or re.search(r"(陪我|陪陪我|陪着我|和我).{0,12}到.{0,10}(?:点|點|时|:|：|半).{0,8}(?:再睡|睡觉|去睡)", compact)
+            or re.search(r"(陪我|陪陪我|陪着我|和我).{0,12}到(?:凌晨|半夜|今晚|今夜|夜里).{0,10}(?:点|點|时|:|：|半)", compact)
+            or re.search(r"(先别睡|别睡了?|别去睡)", compact)
+        )
+        if not delay_intent:
+            return None
+        now_dt = self._environment_now()
+        explicit_until, explicit = self._parse_sleep_delay_until_ts(compact, now_dt=now_dt)
+        if explicit_until > now_dt.timestamp() + 5 * 60:
+            until_ts = explicit_until
+        else:
+            default_until = now_dt.timestamp() + 2 * 3600
+            default_cap = self._sleep_delay_next_local_ts(3, 30, now_dt=now_dt)
+            until_ts = min(default_until, default_cap)
+            if until_ts < now_dt.timestamp() + 30 * 60:
+                until_ts = min(now_dt.timestamp() + 60 * 60, self._sleep_delay_next_local_ts(6, 0, now_dt=now_dt))
+        until_text = self._environment_fromtimestamp(until_ts).strftime("%m-%d %H:%M")
+        return {
+            "until_ts": until_ts,
+            "until_text": until_text,
+            "explicit_time": explicit,
+            "user_text": normalized,
+        }
+
+    def _sleep_delay_override_state(
+        self,
+        runtime: dict[str, Any] | None = None,
+        *,
+        now: float | None = None,
+        clear_expired: bool = True,
+    ) -> dict[str, Any]:
+        check_now = _now_ts() if now is None else now
+        runtime = runtime if isinstance(runtime, dict) else self._sleep_runtime_state()
+        until_ts = _safe_float(runtime.get("sleep_delay_until_ts"), 0)
+        if until_ts <= check_now:
+            if clear_expired and until_ts > 0:
+                for key in (
+                    "sleep_delay_until_ts",
+                    "sleep_delay_until_text",
+                    "sleep_delay_reason",
+                    "sleep_delay_user_text",
+                    "sleep_delay_set_at",
+                    "sleep_delay_explicit_time",
+                ):
+                    runtime.pop(key, None)
+            return {}
+        until_text = _single_line(runtime.get("sleep_delay_until_text"), 24)
+        if not until_text:
+            until_text = self._environment_fromtimestamp(until_ts).strftime("%m-%d %H:%M")
+            runtime["sleep_delay_until_text"] = until_text
+        return {
+            "until_ts": until_ts,
+            "until_text": until_text,
+            "reason": _single_line(runtime.get("sleep_delay_reason"), 120),
+            "user_text": _single_line(runtime.get("sleep_delay_user_text"), 120),
+            "explicit_time": bool(runtime.get("sleep_delay_explicit_time")),
+        }
+
+    def _apply_sleep_delay_override(self, delay: dict[str, Any], *, text: str = "") -> dict[str, Any]:
+        until_ts = _safe_float(delay.get("until_ts"), 0)
+        if until_ts <= _now_ts():
+            return self._sleep_runtime_state()
+        until_text = _single_line(delay.get("until_text"), 24) or self._environment_fromtimestamp(until_ts).strftime("%m-%d %H:%M")
+        runtime = self._set_sleep_phase(
+            "staying_up",
+            event=f"用户约定今晚晚点休息，到 {until_text} 前按临时陪聊处理",
+            source="user_sleep_delay",
+            now=_now_ts(),
+        )
+        runtime["sleep_delay_until_ts"] = until_ts
+        runtime["sleep_delay_until_text"] = until_text
+        runtime["sleep_delay_reason"] = "用户临时要求今晚晚点睡或陪聊"
+        runtime["sleep_delay_user_text"] = _single_line(text or delay.get("user_text"), 120)
+        runtime["sleep_delay_set_at"] = _now_ts()
+        runtime["sleep_delay_explicit_time"] = bool(delay.get("explicit_time"))
+        return runtime
+
     def _set_sleep_phase(self, phase: str, *, event: str, source: str = "schedule", now: float | None = None) -> dict[str, Any]:
         now = now or _now_ts()
         runtime = self._sleep_runtime_state()
@@ -5617,7 +5801,23 @@ class DailyStateMixin:
         runtime = self._sleep_runtime_state()
         item = current_item if isinstance(current_item, dict) else self._get_current_plan_item(self.data.get("daily_plan", {}))
         rest_window_active = self._sleep_rest_window_active()
-        sleepy = rest_window_active and self._is_sleepy_plan_item(item) if isinstance(item, dict) else False
+        base_sleepy = rest_window_active and self._is_sleepy_plan_item(item) if isinstance(item, dict) else False
+        delay_override = self._sleep_delay_override_state(runtime, now=now)
+        if delay_override and (base_sleepy or runtime.get("phase") == "staying_up"):
+            return self._set_sleep_phase(
+                "staying_up",
+                event=f"用户约定今晚晚点休息，到 {delay_override.get('until_text')} 前不按睡眠段拦截",
+                source="user_sleep_delay",
+                now=now,
+            )
+        sleepy = base_sleepy and not delay_override
+        if runtime.get("phase") == "staying_up" and not delay_override:
+            if not sleepy:
+                return self._set_sleep_phase("awake", event="临时晚睡约定已结束，当前不在休息段", source="time", now=now)
+            text = " ".join(_single_line(item.get(key), 80) for key in ("activity", "mood", "message_seed")) if isinstance(item, dict) else ""
+            if any(token in text for token in ("准备睡", "睡前", "入睡", "洗漱", "收声")):
+                return self._set_sleep_phase("falling_asleep", event="临时晚睡约定结束，回到睡前段", source="schedule", now=now)
+            return self._set_sleep_phase("light_sleep", event="临时晚睡约定结束，回到休息段", source="schedule", now=now)
         if runtime.get("phase") == "woken":
             last_woken = _safe_float(runtime.get("last_woken_at"), _safe_float(runtime.get("updated_at"), now))
             grace_seconds = self._sleep_awake_grace_seconds()
@@ -5678,8 +5878,9 @@ class DailyStateMixin:
             intensity: str = "中",
             scope: str = "当前段和下一段",
             carry_rule: str = "后续细化必须把这次用户介入当成已经发生的事实承接,不要只当成一句无影响的聊天。",
+            **extra: Any,
         ) -> dict[str, Any]:
-            return {
+            data = {
                 "source": source,
                 "note": note,
                 "immediate_reaction": immediate_reaction,
@@ -5689,6 +5890,8 @@ class DailyStateMixin:
                 "carry_rule": carry_rule,
                 "user_text": normalized,
             }
+            data.update(extra)
+            return data
 
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_activity_text = ""
@@ -5697,7 +5900,22 @@ class DailyStateMixin:
                 _single_line(current_item.get(key), 80)
                 for key in ("activity", "mood", "message_seed")
             )
-        is_actual_rest_segment = self._sleep_rest_window_active() and any(
+        sleep_delay = self._detect_sleep_delay_request(normalized)
+        if sleep_delay:
+            until_text = _single_line(sleep_delay.get("until_text"), 24)
+            return payload(
+                source="临时延后休息",
+                note=f"用户今晚希望晚点休息或陪聊；到 {until_text} 前暂时不要把睡眠段当成必须沉默,但这只是今晚的临时约定。",
+                immediate_reaction="她会把今晚的节奏稍微放慢并留出陪聊余地,但不会把这当成长期作息改变。",
+                state_updates=[f"休息安排：今晚临时延后到 {until_text}", "清醒程度：陪聊但低负担", "后续安排：到点后自然收声或睡回去"],
+                intensity="强",
+                scope=f"今晚到 {until_text}",
+                carry_rule="只影响今晚和当前休息段；后续细化可以保留轻微陪聊/等待感,但不得把它写成长期熬夜习惯,到点后应自然收声或回到休息。",
+                sleep_delay_until_ts=sleep_delay.get("until_ts"),
+                sleep_delay_until_text=until_text,
+                sleep_delay_explicit_time=bool(sleep_delay.get("explicit_time")),
+            )
+        is_actual_rest_segment = self._sleep_rest_window_active() and not self._sleep_delay_override_state(clear_expired=True) and any(
             token in current_activity_text
             for token in ("睡", "午休", "休息", "躺", "被窝", "枕头", "入睡", "准备睡", "睡前", "小睡", "补觉", "眯一会")
         )
@@ -5932,6 +6150,20 @@ class DailyStateMixin:
             "created_at": now,
             "expires_at": now + ttl_hours * 3600,
         }
+        sleep_delay_until = _safe_float(adjustment.get("sleep_delay_until_ts"), 0)
+        if sleep_delay_until > now:
+            item["sleep_delay_until_ts"] = sleep_delay_until
+            item["sleep_delay_until_text"] = _single_line(adjustment.get("sleep_delay_until_text"), 24)
+            item["sleep_delay_explicit_time"] = bool(adjustment.get("sleep_delay_explicit_time"))
+            self._apply_sleep_delay_override(
+                {
+                    "until_ts": sleep_delay_until,
+                    "until_text": item["sleep_delay_until_text"],
+                    "explicit_time": item["sleep_delay_explicit_time"],
+                    "user_text": item["user_text"],
+                },
+                text=item["user_text"],
+            )
         self._record_detail_interaction_update(item)
         if raw and isinstance(raw[-1], dict) and raw[-1].get("note") == note:
             raw[-1].update(item)
@@ -6263,6 +6495,10 @@ class DailyStateMixin:
             last_event = _single_line(runtime.get("last_event"), 80)
             if phase_label and phase_label != "清醒":
                 sleep_runtime_text = f"{phase_label}" + (f"，{last_event}" if last_event else "")
+            sleep_delay = self._sleep_delay_override_state(runtime, clear_expired=True)
+            if sleep_delay:
+                until_text = _single_line(sleep_delay.get("until_text"), 24)
+                sleep_runtime_text = f"临时晚睡到 {until_text}，这是用户今晚的陪聊约定，不是长期作息"
         if sleep_runtime_text and sleep_runtime_text not in primary_fragments:
             primary_fragments.append(sleep_runtime_text)
         dream_text = _single_line(state.get("dream"), 80)
