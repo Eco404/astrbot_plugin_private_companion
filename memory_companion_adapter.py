@@ -13,6 +13,17 @@ from astrbot.api import logger
 from .helpers import _missing_optional_model_dependency, _safe_float, _safe_int, _single_line
 
 
+def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
+    helper = globals().get("_safe_float")
+    if callable(helper):
+        return helper(value, default, minimum)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, parsed)
+
+
 class MemoryCompanionAdapterMixin:
     """Optional bridge helpers for astrbot_plugin_memory_companion."""
 
@@ -352,7 +363,7 @@ class MemoryCompanionAdapterMixin:
             return ""
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
-            timeout = max(0.2, min(6.0, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
+            timeout = max(0.2, min(6.0, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
             text = await asyncio.wait_for(
                 composer(
                     query=query,
@@ -368,7 +379,7 @@ class MemoryCompanionAdapterMixin:
             logger.info(
                 "[PrivateCompanion] MemoryCompanion 日程上下文读取超时,已跳过: kind=%s timeout=%.2fs",
                 _single_line(kind, 60),
-                max(0.2, min(6.0, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2))),
+                max(0.2, min(6.0, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2))),
             )
             return ""
         except Exception as exc:
@@ -458,7 +469,7 @@ class MemoryCompanionAdapterMixin:
             }
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
-            configured_timeout = max(0.2, min(6.0, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
+            configured_timeout = max(0.2, min(6.0, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
             text = await asyncio.wait_for(
                 composer(
                     query=clean_query,
@@ -468,13 +479,13 @@ class MemoryCompanionAdapterMixin:
                     companion_bot_mood=bot_mood,
                     companion_bot_energy=bot_energy,
                 ),
-                timeout=max(0.2, min(6.0, min(configured_timeout, _safe_float(timeout_seconds, configured_timeout, 0.2)))),
+                timeout=max(0.2, min(6.0, min(configured_timeout, _memory_companion_safe_float(timeout_seconds, configured_timeout, 0.2)))),
             )
         except asyncio.TimeoutError:
             logger.info(
                 "[PrivateCompanion] MemoryCompanion 功能上下文读取超时,已跳过: kind=%s timeout=%.2fs",
                 _single_line(kind, 60),
-                max(0.2, min(6.0, min(_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2), _safe_float(timeout_seconds, 1.2, 0.2)))),
+                max(0.2, min(6.0, min(_memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2), _memory_companion_safe_float(timeout_seconds, 1.2, 0.2)))),
             )
             return ""
         except Exception as exc:

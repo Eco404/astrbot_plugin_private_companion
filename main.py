@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import base64
@@ -536,7 +536,15 @@ class PrivateCompanionPlugin(
                 self._startup_config_migration_changes,
             )
 
-        self.enabled = self._cfg_bool(c, "enabled", True)
+        legacy_enabled_value = self._cfg_raw(c, "enabled", None)
+        if isinstance(legacy_enabled_value, str):
+            self._legacy_enabled_config_disabled = legacy_enabled_value.strip().lower() in {
+                "false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", "",
+            }
+        else:
+            self._legacy_enabled_config_disabled = legacy_enabled_value is False
+        # 插件启停只交给 AstrBot 官方插件开关；旧版配置里的 enabled 已废弃，避免残留 false 误关整套链路。
+        self.enabled = True
         self.enable_proactive_only_mode = self._cfg_bool(c, "enable_proactive_only_mode", False)
         self.proactive_intensity_preset = self._normalize_proactive_intensity_preset(
             self._cfg_str(c, "proactive_intensity_preset", "off", "off")
@@ -826,8 +834,13 @@ class PrivateCompanionPlugin(
         self.photo_persona_reference_image_path = self._cfg_str(c, "photo_persona_reference_image_path", "")
         self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
         self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
-        if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external"}:
+        if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
             self.photo_generation_backend = "auto"
+        self.custom_photo_tool_name = self._cfg_str(c, "custom_photo_tool_name", "", "").strip()
+        self.custom_photo_tool_prompt_param = self._cfg_str(c, "custom_photo_tool_prompt_param", "prompt", "prompt").strip() or "prompt"
+        self.custom_photo_tool_kind_param = self._cfg_str(c, "custom_photo_tool_kind_param", "", "").strip()
+        self.custom_photo_tool_reference_param = self._cfg_str(c, "custom_photo_tool_reference_param", "", "").strip()
+        self.custom_photo_tool_extra_params = self._cfg_str(c, "custom_photo_tool_extra_params", "", "").strip()
         self.enable_local_photo_load_guard = self._cfg_bool(c, "enable_local_photo_load_guard", True)
         self.local_photo_cpu_busy_percent = self._cfg_int(c, "local_photo_cpu_busy_percent", 85, 1, 100)
         self.local_photo_memory_busy_percent = self._cfg_int(c, "local_photo_memory_busy_percent", 88, 1, 100)
@@ -852,6 +865,9 @@ class PrivateCompanionPlugin(
         self.backup_external_image_api_size = self._cfg_str(c, "backup_external_image_api_size", "1024x1024", "1024x1024")
         self.backup_external_image_api_timeout_seconds = self._cfg_int(c, "backup_external_image_api_timeout_seconds", 180, 20, 600)
         self.backup_external_image_api_custom_headers = self._cfg_str(c, "backup_external_image_api_custom_headers", "")
+        self.external_image_api_endpoints = self._normalize_external_image_api_endpoints(
+            self._cfg_raw(c, "external_image_api_endpoints", [])
+        )
         self.photo_generation_style = self._cfg_str(c, "photo_generation_style", "真实", "真实")
         self.photo_generation_style_custom_prompt = self._cfg_str(c, "photo_generation_style_custom_prompt", "")
         self.photo_generation_fixed_prompt = self._cfg_str(c, "photo_generation_fixed_prompt", "")
@@ -1488,9 +1504,11 @@ class PrivateCompanionPlugin(
 
     async def initialize(self):
         self._repair_private_companion_handler_bindings()
-        if not self.enabled:
-            logger.info("[PrivateCompanion] 插件总开关已关闭,不启动主动消息循环")
-            return
+        if getattr(self, "_legacy_enabled_config_disabled", False):
+            logger.warning(
+                "[PrivateCompanion] 检测到旧版配置 enabled=false；该字段已废弃并被忽略。"
+                "如需停用插件，请在 AstrBot 官方插件管理页关闭本插件。"
+            )
         self._log_registered_command_handlers()
         self._install_send_message_to_user_tool_sanitizer()
         self._schedule_default_persona_prompt_refresh()
@@ -1958,6 +1976,15 @@ class PrivateCompanionPlugin(
         error_markers = (
             "error occurred while processing agent request",
             "all chat models failed",
+            "badrequesterror",
+            "provider api error",
+            "unable to submit request",
+            "invalid_request",
+            "functiondeclaration",
+            "function declaration",
+            "schema didn't specify",
+            "tool schema",
+            "aisearch",
             "sqlite3.operationalerror",
             "database is locked",
             "sqlalche.me/e/20/e3q8",
@@ -3164,7 +3191,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             image_size(string): 可选，在线图片 API 尺寸，如 1024x1024。
             send(boolean): 是否生成后直接发送到当前会话，默认 true。
             caption(string): 发送图片时附带的短文字。
-            scene_preset(string): 可选场景预设，如 角色自拍/COS自拍/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景。
+            scene_preset(string): 可选场景预设，如 角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景。
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
@@ -3276,14 +3303,29 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
-        return await self._pc_send_to_group_impl(event, **kwargs)
+        result = await self._pc_send_to_group_impl(event, **kwargs)
+        if str(result or "").startswith("消息已发送"):
+            setattr(
+                event,
+                "private_companion_atrelay_tool_result",
+                {
+                    "status": "success",
+                    "destination": "group",
+                    "final_reply": "带到了。",
+                    "final_reply_reference": "参考意图：转述已经成功发到目标群；只给用户一个很短的成功回执，不要复述转述正文，也不要写工具执行状态。",
+                    "sent_text": _single_line(kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg"), 800),
+                    "recipient": _single_line(kwargs.get("at_user") or kwargs.get("at") or kwargs.get("target_user") or kwargs.get("user_id"), 80),
+                    "group_id": _single_line(kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group"), 40),
+                },
+            )
+        return result
 
     @filter.llm_tool(name="pc_send_to_private_user")
     async def pc_send_to_private_user(self, event: AstrMessageEvent, **kwargs) -> str:
-        """向指定 QQ 用户发送私聊消息。
+        """向指定平台用户 ID 发送私聊消息。
 
         Args:
-            user_id(string): 目标 QQ。
+            user_id(string): 目标用户 ID；OneBot 通常是 QQ 号，QQ 官方机器人通常是 openid/平台用户 ID。
             message(string): 最终要发送的转述文本。
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
@@ -3293,7 +3335,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
-        return await self._pc_send_to_private_user_impl(event, **kwargs)
+        result = await self._pc_send_to_private_user_impl(event, **kwargs)
+        if str(result or "").startswith("已向") and "发送私聊消息" in str(result or ""):
+            need_receipt = self._atrelay_bool_flag(
+                kwargs.get("need_receipt", kwargs.get("wait_for_reply", kwargs.get("receipt", kwargs.get("report_back", False))))
+            )
+            setattr(
+                event,
+                "private_companion_atrelay_tool_result",
+                {
+                    "status": "success",
+                    "destination": "private",
+                    "final_reply": "带到了，有回复我再告诉你。" if need_receipt else "带到了。",
+                    "final_reply_reference": (
+                        "参考意图：转述已经成功发给目标私聊用户，并且如果对方回复会再告诉当前用户；只给一个很短的成功回执。"
+                        if need_receipt
+                        else "参考意图：转述已经成功发给目标私聊用户；只给用户一个很短的成功回执，不要复述转述正文，也不要写工具执行状态。"
+                    ),
+                    "sent_text": _single_line(kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg"), 800),
+                    "recipient": _single_line(kwargs.get("user_id") or kwargs.get("qq") or kwargs.get("target_user") or kwargs.get("target"), 128),
+                },
+            )
+        return result
 
     @filter.llm_tool(name="pc_send_to_groups")
     async def pc_send_to_groups(self, event: AstrMessageEvent, **kwargs) -> str:
@@ -3312,10 +3375,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.llm_tool(name="pc_send_to_private_users")
     async def pc_send_to_private_users(self, event: AstrMessageEvent, **kwargs) -> str:
-        """向多个 QQ 用户发送同一条私聊转述。
+        """向多个平台用户 ID 发送同一条私聊转述。
 
         Args:
-            user_ids(string): 目标 QQ,可用逗号、空格或换行分隔。
+            user_ids(string): 目标用户 ID,可用逗号、空格或换行分隔；OneBot 通常是 QQ 号，QQ 官方机器人通常是 openid/平台用户 ID。
             message(string): 最终要发送的转述文本。
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
@@ -3680,6 +3743,136 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "nano-banana": "gemini",
         }
         return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"} else "auto")
+
+    @staticmethod
+    def _normalize_external_image_endpoint_enabled(value: Any, default: bool = True) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+            return True
+        if text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
+            return False
+        return default
+
+    def _normalize_external_image_api_endpoint(self, item: Any, *, index: int = 0) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+
+        def pick(*keys: str, default: Any = "") -> Any:
+            for key in keys:
+                if key in item and item.get(key) not in (None, ""):
+                    return item.get(key)
+            return default
+
+        endpoint = {
+            "name": _single_line(pick("name", "label", "title", default=f"在线 API {index + 1}"), 80) or f"在线 API {index + 1}",
+            "enabled": self._normalize_external_image_endpoint_enabled(pick("enabled", "enable", "active", default=True), True),
+            "platform": self._normalize_external_image_api_platform(
+                pick("platform", "external_image_api_platform", "image_api_platform", default="auto")
+            ),
+            "base_url": str(
+                pick(
+                    "base_url",
+                    "api_base",
+                    "api_base_url",
+                    "url",
+                    "endpoint",
+                    "EXTERNAL_IMAGE_API_BASE_URL",
+                    "BACKUP_EXTERNAL_IMAGE_API_BASE_URL",
+                    default="",
+                )
+                or ""
+            ).strip(),
+            "api_key": str(
+                pick(
+                    "api_key",
+                    "key",
+                    "token",
+                    "EXTERNAL_IMAGE_API_KEY",
+                    "BACKUP_EXTERNAL_IMAGE_API_KEY",
+                    default="",
+                )
+                or ""
+            ).strip(),
+            "model": str(
+                pick(
+                    "model",
+                    "model_name",
+                    "EXTERNAL_IMAGE_API_MODEL",
+                    "BACKUP_EXTERNAL_IMAGE_API_MODEL",
+                    default="",
+                )
+                or ""
+            ).strip(),
+            "size": str(
+                pick("size", "image_size", "external_image_api_size", "backup_external_image_api_size", default="1024x1024")
+                or "1024x1024"
+            ).strip()
+            or "1024x1024",
+            "timeout_seconds": _safe_int(
+                pick(
+                    "timeout_seconds",
+                    "timeout",
+                    "external_image_api_timeout_seconds",
+                    "backup_external_image_api_timeout_seconds",
+                    default=180,
+                ),
+                180,
+                20,
+                600,
+            ),
+            "custom_headers": str(
+                pick(
+                    "custom_headers",
+                    "headers",
+                    "external_image_api_custom_headers",
+                    "backup_external_image_api_custom_headers",
+                    default="",
+                )
+                or ""
+            ).strip(),
+        }
+        return endpoint
+
+    def _normalize_external_image_api_endpoints(self, value: Any) -> list[dict[str, Any]]:
+        raw = value
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                raw = []
+            else:
+                try:
+                    parsed = json.loads(text)
+                    raw = parsed
+                except Exception:
+                    lines = [line.strip() for line in text.splitlines() if line.strip()]
+                    raw = [{"base_url": line} for line in lines]
+        if isinstance(raw, dict):
+            raw = raw.get("items") or raw.get("endpoints") or raw.get("apis") or []
+        if not isinstance(raw, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for index, item in enumerate(raw[:12]):
+            endpoint = self._normalize_external_image_api_endpoint(item, index=index)
+            if not endpoint:
+                continue
+            if not any(str(endpoint.get(key) or "").strip() for key in ("base_url", "api_key", "model", "custom_headers")):
+                continue
+            signature = (
+                str(endpoint.get("platform") or "auto").lower(),
+                str(endpoint.get("base_url") or "").rstrip("/"),
+                str(endpoint.get("model") or ""),
+                str(endpoint.get("api_key") or "")[:12],
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            normalized.append(endpoint)
+        return normalized
 
     def _apply_quick_provider_defaults(self) -> None:
         fast = str(getattr(self, "fast_response_provider_id", "") or "").strip()
@@ -5981,6 +6174,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return "已临时放行：\n" + "\n".join(f"- {self._proactive_only_unlock_label(item)}" for item in sorted(target_keys))
 
     def _proactive_only_blocks_passive_event(self, event: AstrMessageEvent | None, feature: str = "") -> bool:
+        if feature == "pc_tools" and bool(getattr(event, "private_companion_proactive_framework", False)):
+            return True
         if not bool(getattr(self, "enable_proactive_only_mode", False)):
             self._clear_proactive_only_temp_unlocks_if_mode_off()
             return False
@@ -6066,6 +6261,139 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         await self.apply_tts_enhancement_request(event, req)
+
+    def _llm_request_provider_settings_for_event(self, event: AstrMessageEvent | None) -> dict[str, Any]:
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        resolver = getattr(self, "_astrbot_provider_settings_for_umo", None)
+        if callable(resolver):
+            try:
+                return dict(resolver(umo) or {})
+            except Exception:
+                pass
+        try:
+            cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+        except TypeError:
+            try:
+                cfg = self.context.get_config(umo) if umo else self.context.get_config()
+            except Exception:
+                cfg = {}
+        except Exception:
+            cfg = {}
+        settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+        return dict(settings or {}) if isinstance(settings, dict) else {}
+
+    def _llm_request_provider_identity_parts(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> list[str]:
+        parts: list[str] = []
+
+        def add(value: Any) -> None:
+            text = _single_line(value, 200)
+            if text and text not in parts:
+                parts.append(text)
+
+        if req is not None:
+            for key in ("provider_id", "llm_provider_id", "chat_provider_id", "model"):
+                add(getattr(req, key, ""))
+        settings = self._llm_request_provider_settings_for_event(event)
+        for key in (
+            "default_provider_id",
+            "default_llm_provider_id",
+            "provider_id",
+            "model",
+            "api_base",
+            "base_url",
+        ):
+            add(settings.get(key))
+        context = getattr(self, "context", None)
+        get_using = getattr(context, "get_using_provider", None)
+        if callable(get_using):
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            provider = None
+            try:
+                provider = get_using(umo=umo) if umo else get_using()
+            except TypeError:
+                try:
+                    provider = get_using(umo) if umo else get_using(None)
+                except Exception:
+                    provider = None
+            except Exception:
+                provider = None
+            if provider is not None:
+                try:
+                    meta = provider.meta()
+                    if isinstance(meta, dict):
+                        for key in ("id", "model", "type"):
+                            add(meta.get(key))
+                    else:
+                        for key in ("id", "model", "type"):
+                            add(getattr(meta, key, ""))
+                except Exception:
+                    pass
+                config = getattr(provider, "provider_config", None) or getattr(provider, "config", None) or {}
+                if isinstance(config, dict):
+                    for key in ("id", "provider_id", "provider", "model", "api_base", "base_url"):
+                        add(config.get(key))
+        return parts
+
+    def _llm_request_uses_gemini_family_provider(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> bool:
+        identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
+        return any(
+            marker in identity
+            for marker in (
+                "gemini",
+                "generativelanguage.googleapis.com",
+                "googleapis.com/v1beta/openai",
+            )
+        )
+
+    @staticmethod
+    def _tool_set_has_named_tool(tool_set: Any, tool_name: str) -> bool:
+        get_tool = getattr(tool_set, "get_tool", None)
+        if callable(get_tool):
+            try:
+                return get_tool(tool_name) is not None
+            except Exception:
+                pass
+        tools = getattr(tool_set, "tools", None)
+        if isinstance(tools, list):
+            return any(_single_line(getattr(tool, "name", ""), 120) == tool_name for tool in tools)
+        return False
+
+    @filter.on_llm_request(priority=-20000)
+    async def sanitize_incompatible_web_search_tools(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
+        """移除 Gemini/OpenAI 兼容层会拒绝的 Baidu AI Search MCP 工具声明。"""
+        if self is None or req is None:
+            return
+        tool_set = getattr(req, "func_tool", None)
+        if tool_set is None:
+            return
+        if not self._tool_set_has_named_tool(tool_set, "AIsearch"):
+            return
+        if not self._llm_request_uses_gemini_family_provider(event, req):
+            return
+        remove_tool = getattr(tool_set, "remove_tool", None)
+        if not callable(remove_tool):
+            return
+        try:
+            remove_tool("AIsearch")
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 移除不兼容 AIsearch 工具失败: %s", _single_line(exc, 160))
+            return
+        settings = self._llm_request_provider_settings_for_event(event)
+        provider_label = " / ".join(self._llm_request_provider_identity_parts(event, req)[:3]) or "unknown"
+        umo = _single_line(getattr(event, "unified_msg_origin", ""), 120)
+        log_key = f"{umo}:{provider_label}:AIsearch"
+        logged = getattr(self, "_incompatible_web_search_tool_logged_keys", None)
+        if not isinstance(logged, set):
+            logged = set()
+            setattr(self, "_incompatible_web_search_tool_logged_keys", logged)
+        if log_key not in logged:
+            logged.add(log_key)
+            logger.warning(
+                "[PrivateCompanion] 已移除本轮 Gemini 不兼容的 AIsearch 搜索工具，避免请求 400: provider=%s websearch_provider=%s session=%s",
+                _single_line(provider_label, 200),
+                _single_line(settings.get("websearch_provider"), 80) or "unknown",
+                umo or "unknown",
+            )
 
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
@@ -7512,7 +7840,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return False
 
     @filter.command("陪伴", alias={"私聊陪伴", "主动陪伴"})
-    async def companion_command(self, event: AstrMessageEvent, *args, **kwargs):
+    async def companion_command(self, event: AstrMessageEvent):
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
         if self is None:
             return
@@ -7712,7 +8040,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             elif action in image_api_status_actions:
                 response = self._image_api_command_status_text()
             elif action in image_api_swap_actions:
-                response = "正在交换主/备在线生图 API。"
+                response = "正在交换在线生图 API 优先级。"
             elif action in photo_command_actions:
                 response = "正在准备图片。"
             elif action in {"查看主动判定", "主动判定", "判定"}:
@@ -8018,7 +8346,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event.stop_event()
 
     @filter.command("陪伴群", alias={"群陪伴", "群聊陪伴"})
-    async def group_companion_command(self, event: AstrMessageEvent, *args, **kwargs):
+    async def group_companion_command(self, event: AstrMessageEvent):
         """管理群聊陪伴状态、群友画像、群内常见词、话题线程和关系网。"""
         if self is None:
             return
@@ -9314,4 +9642,3 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if seconds < 86400:
             return f"{int(seconds // 3600)} 小时前"
         return f"{int(seconds // 86400)} 天前"
-

@@ -43,7 +43,91 @@ class CommandHandlersMixin:
             f"{'可用' if ready else '未完整'}｜平台 {platform}｜模型 {model}｜尺寸 {size}｜超时 {timeout}s"
         )
 
+    def _image_api_endpoint_queue_for_command(self) -> list[dict[str, Any]]:
+        normalizer = getattr(self, "_normalize_external_image_api_endpoints", None)
+        configured = getattr(self, "external_image_api_endpoints", [])
+        endpoints = normalizer(configured) if callable(normalizer) else configured
+        if isinstance(endpoints, list) and endpoints:
+            return [endpoint for endpoint in endpoints if isinstance(endpoint, dict)]
+        return []
+
+    def _image_api_endpoint_ready_for_command(self, endpoint: dict[str, Any]) -> bool:
+        return bool(
+            endpoint
+            and endpoint.get("enabled", True)
+            and str(endpoint.get("base_url") or "").strip()
+            and str(endpoint.get("api_key") or "").strip()
+            and str(endpoint.get("model") or "").strip()
+        )
+
+    def _image_api_endpoint_status_line(self, endpoint: dict[str, Any], index: int) -> str:
+        name = _single_line(endpoint.get("name"), 34) or f"在线 API {index + 1}"
+        platform = _single_line(endpoint.get("platform") or "auto", 24) or "auto"
+        model = _single_line(endpoint.get("model") or "", 64) or "未配置"
+        size = _single_line(endpoint.get("size") or "1024x1024", 32) or "1024x1024"
+        timeout = _safe_int(endpoint.get("timeout_seconds"), 180, 20, 600)
+        if not bool(endpoint.get("enabled", True)):
+            state = "已关闭"
+        else:
+            state = "可用" if self._image_api_endpoint_ready_for_command(endpoint) else "未完整"
+        return f"{index + 1}. {name}：{state}｜平台 {platform}｜模型 {model}｜尺寸 {size}｜超时 {timeout}s"
+
+    def _sync_legacy_image_api_config_from_command_endpoints(self, endpoints: list[dict[str, Any]]) -> None:
+        normalizer = getattr(self, "_normalize_external_image_api_endpoints", None)
+        normalized = normalizer(endpoints) if callable(normalizer) else list(endpoints or [])
+        first = normalized[0] if len(normalized) >= 1 and isinstance(normalized[0], dict) else {}
+        second = normalized[1] if len(normalized) >= 2 and isinstance(normalized[1], dict) else {}
+
+        def endpoint_complete(endpoint: dict[str, Any]) -> bool:
+            return self._image_api_endpoint_ready_for_command(endpoint)
+
+        updates = {
+            "external_image_api_platform": first.get("platform", "auto") if first else "auto",
+            "EXTERNAL_IMAGE_API_BASE_URL": first.get("base_url", "") if first else "",
+            "EXTERNAL_IMAGE_API_KEY": first.get("api_key", "") if first else "",
+            "EXTERNAL_IMAGE_API_MODEL": first.get("model", "") if first else "",
+            "external_image_api_size": first.get("size", "1024x1024") if first else "1024x1024",
+            "external_image_api_timeout_seconds": _safe_int(first.get("timeout_seconds"), 180, 20, 600) if first else 180,
+            "external_image_api_custom_headers": first.get("custom_headers", "") if first else "",
+            "enable_backup_external_image_api": endpoint_complete(second),
+            "backup_external_image_api_platform": second.get("platform", "auto") if second else "auto",
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": second.get("base_url", "") if second else "",
+            "BACKUP_EXTERNAL_IMAGE_API_KEY": second.get("api_key", "") if second else "",
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL": second.get("model", "") if second else "",
+            "backup_external_image_api_size": second.get("size", "1024x1024") if second else "1024x1024",
+            "backup_external_image_api_timeout_seconds": _safe_int(second.get("timeout_seconds"), 180, 20, 600) if second else 180,
+            "backup_external_image_api_custom_headers": second.get("custom_headers", "") if second else "",
+        }
+        attr_map = {
+            "external_image_api_platform": "external_image_api_platform",
+            "EXTERNAL_IMAGE_API_BASE_URL": "external_image_api_base_url",
+            "EXTERNAL_IMAGE_API_KEY": "external_image_api_key",
+            "EXTERNAL_IMAGE_API_MODEL": "external_image_api_model",
+            "external_image_api_size": "external_image_api_size",
+            "external_image_api_timeout_seconds": "external_image_api_timeout_seconds",
+            "external_image_api_custom_headers": "external_image_api_custom_headers",
+            "enable_backup_external_image_api": "enable_backup_external_image_api",
+            "backup_external_image_api_platform": "backup_external_image_api_platform",
+            "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": "backup_external_image_api_base_url",
+            "BACKUP_EXTERNAL_IMAGE_API_KEY": "backup_external_image_api_key",
+            "BACKUP_EXTERNAL_IMAGE_API_MODEL": "backup_external_image_api_model",
+            "backup_external_image_api_size": "backup_external_image_api_size",
+            "backup_external_image_api_timeout_seconds": "backup_external_image_api_timeout_seconds",
+            "backup_external_image_api_custom_headers": "backup_external_image_api_custom_headers",
+        }
+        for key, value in updates.items():
+            setattr(self, attr_map[key], value)
+            self._set_image_api_config_value(key, value)
+
     def _image_api_command_status_text(self) -> str:
+        endpoints = self._image_api_endpoint_queue_for_command()
+        if endpoints:
+            lines = [
+                "在线生图 API 当前队列：",
+                *[self._image_api_endpoint_status_line(endpoint, index) for index, endpoint in enumerate(endpoints[:12])],
+                "切换优先级：陪伴 切换生图API（交换前两条）",
+            ]
+            return "\n".join(lines)
         enabled_backup = bool(getattr(self, "enable_backup_external_image_api", False))
         return (
             "在线生图 API 当前配置：\n"
@@ -66,6 +150,36 @@ class CommandHandlersMixin:
         return bool(saved)
 
     def _swap_external_image_api_command_text(self, *, force: bool = False) -> str:
+        endpoints = self._image_api_endpoint_queue_for_command()
+        if endpoints:
+            if len(endpoints) < 2:
+                return "在线生图 API 队列少于 2 条，无法交换优先级。"
+            second = endpoints[1] if isinstance(endpoints[1], dict) else {}
+            missing = []
+            if not bool(second.get("enabled", True)):
+                missing.append("第二条 API 已关闭")
+            if not str(second.get("base_url") or "").strip():
+                missing.append("第二条 API 地址")
+            if not str(second.get("api_key") or "").strip():
+                missing.append("第二条 API Key")
+            if not str(second.get("model") or "").strip():
+                missing.append("第二条图片模型")
+            if missing and not force:
+                return (
+                    "第二条在线生图 API 不可用，暂不切换："
+                    + "、".join(missing)
+                    + "\n需要先到拓展页补齐队列，或确认风险后使用：陪伴 切换生图API 强制"
+                )
+            changed = list(endpoints)
+            changed[0], changed[1] = changed[1], changed[0]
+            normalizer = getattr(self, "_normalize_external_image_api_endpoints", None)
+            changed = normalizer(changed) if callable(normalizer) else changed
+            self.external_image_api_endpoints = changed
+            self._set_image_api_config_value("external_image_api_endpoints", changed)
+            self._sync_legacy_image_api_config_from_command_endpoints(changed)
+            self._save_config_if_possible()
+            return "已交换在线生图 API 队列前两项。\n" + self._image_api_command_status_text()
+
         pairs = (
             ("external_image_api_platform", "backup_external_image_api_platform", "external_image_api_platform", "backup_external_image_api_platform"),
             ("external_image_api_base_url", "backup_external_image_api_base_url", "EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL"),
@@ -484,7 +598,7 @@ class CommandHandlersMixin:
             "SMART_SILENCE_PROVIDER_ID": {"label": "智能沉默模型", "location": "拓展页 -> 模型/Provider -> SMART_SILENCE_PROVIDER_ID；也可在 功能开关 -> 通用能力 -> 智能沉默 查看"},
             "TROUBLESHOOTING_PROVIDER_ID": {"label": "排障/答疑模型", "location": "拓展页 -> 模型/Provider -> TROUBLESHOOTING_PROVIDER_ID"},
             "enable_group_wakeup_enhancement": {"label": "群聊唤醒增强", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强"},
-            "group_access_mode": {"label": "群聊访问模式", "location": "拓展页 -> 用户与群聊 -> 群聊名单/访问模式"},
+            "group_access_mode": {"label": "群聊访问模式", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊启用范围"},
             "group_wakeup_context_words": {"label": "群聊弱相关唤醒词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 唤醒词"},
             "group_wakeup_direct_words": {"label": "群聊强唤醒词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 唤醒词"},
             "group_wakeup_interest_keywords": {"label": "群聊兴趣唤醒关键词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 兴趣唤醒"},
@@ -533,7 +647,7 @@ class CommandHandlersMixin:
             "min_interval_minutes": {"label": "主动消息最小间隔", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
             "proactive_review_strength": {"label": "主动发送前复核强度", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
             "quiet_hours": {"label": "主动免打扰时间", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
-            "target_user_ids": {"label": "目标用户 QQ 列表", "location": "拓展页 -> 用户与群聊 -> 私聊对象/目标用户"},
+            "target_user_ids": {"label": "目标用户 ID 列表", "location": "拓展页 -> 模块 -> 快速启动 -> 部署与目标 -> 私聊服务对象 ID"},
             "REST_WAKEUP_PROVIDER_ID": {"label": "休息醒来判断模型", "location": "拓展页 -> 模型/Provider -> REST_WAKEUP_PROVIDER_ID"},
             "enable_companion_memory": {"label": "用户陪伴记忆", "location": "拓展页 -> 功能开关 -> 记忆、表达与习惯 -> 用户陪伴记忆"},
             "enable_group_episode_memory": {"label": "群聊片段记忆", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊片段记忆"},
@@ -2108,10 +2222,12 @@ class CommandHandlersMixin:
             {
                 "title": "管理命令、夹层密码和权限为什么用不了",
                 "keywords": ["管理员命令", "管理权限", "管理员权限", "指令失效", "命令失效", "用不了命令", "不能用命令", "夹层密码", "输出夹层密码", "强制输出", "admins_id", "target_user_ids", "UMO", "UID", "default"],
-                "summary": "陪伴插件的管理命令会在执行前先检查发送者 QQ。私聊管理权限只认 AstrBot 全局管理员 admins_id，或本插件私聊目标用户 QQ；UMO、UID、default、平台名和会话串都不是用户 QQ，填进去不会生效。",
+                "summary": "陪伴插件的管理命令会在执行前先检查发送者用户 ID。私聊管理权限只认 AstrBot 全局管理员 admins_id，或本插件私聊目标用户 ID；OneBot 通常是 QQ 号，QQ 官方机器人通常是 openid/平台用户 ID。",
                 "checks": [
-                    "在 AstrBot 全局管理员配置 admins_id 里填真实 QQ 数字号，或在插件拓展页/私聊页把该 QQ 加为私聊目标用户。",
-                    "target_user_ids 只放 QQ 数字号，一行一个或用逗号分隔；不要放 default、aiocqhttp、FriendMessage、UMO 或 UID。",
+                    "在 AstrBot 全局管理员配置 admins_id 里填真实用户 ID，或在插件拓展页「模块 → 快速启动」把该用户 ID 加为私聊服务对象。",
+                    "OneBot/aiocqhttp 通常填 QQ 号；QQ 官方机器人请填日志或私聊页显示的 openid/平台用户 ID。",
+                    "target_user_ids 一行一个或用逗号分隔；优先直接填写用户 ID，误粘贴私聊 UMO 时会尝试提取 FriendMessage 后面的用户 ID。",
+                    "不要放 default、aiocqhttp、UID、平台名或群聊会话串；这些不是私聊发送者用户 ID。",
                     "群管理员只用于群聊管理命令，不会自动获得私聊里的夹层密码、重置插件、生成日程等私聊管理权限。",
                     "夹层密码相关命令属于管理命令：陪伴 输出夹层密码、陪伴 强制输出 夹层密码、陪伴 重置夹层密码。",
                     "如果用户只是自然语言问“夹层密码是什么”，不会直接走管理输出；需要使用明确命令且通过权限检查。",
@@ -2120,8 +2236,8 @@ class CommandHandlersMixin:
                     "target_user_ids",
                 ],
                 "suggestions": [
-                    "先让用户发：陪伴 状态，确认命令能被插件接管；如果提示需要管理权限，就检查 admins_id 或私聊目标 QQ。",
-                    "如果日志里看到 UMO/UID/default，说明查的是会话定位，不是权限 ID；权限配置仍要回到用户 QQ 数字号。",
+                    "先让用户发：陪伴 状态，确认命令能被插件接管；如果提示需要管理权限，就检查 admins_id 或私聊目标用户 ID。",
+                    "如果日志里看到 UID/default，说明查的是会话定位，不是权限 ID；权限配置要回到 event.get_sender_id() 对应的稳定用户 ID。",
                 ],
             },
             {
@@ -2420,7 +2536,7 @@ class CommandHandlersMixin:
                 "keywords": ["主动", "不主动", "不发消息", "很久没发", "主动消息", "私聊主动"],
                 "summary": "主动消息会受目标用户、每日上限、最小间隔、免打扰、休息状态、用户很久没回、主动价值复核和发送失败重试影响。",
                 "checks": [
-                    "确认用户 QQ 已加入插件私聊目标用户，或已在私聊页启用。",
+                    "确认用户 ID 已加入插件私聊目标用户，或已在私聊页启用。",
                     "检查 max_daily_messages、min_interval_minutes、quiet_hours。",
                     "如果用户长期不回，主动会变短、变少，甚至延后。",
                     "如果开启主动消息价值复核，低价值或像打扰的消息会被改写/拦截。",

@@ -506,9 +506,10 @@ class ProactiveMixin:
         else:
             parts = []
         ids = []
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
         for part in parts:
-            user_id = str(part).strip()
-            if user_id and user_id.isdigit() and not self._is_bot_self_user_id(user_id) and user_id not in ids:
+            user_id = normalizer(part) if callable(normalizer) else _single_line(part, 128)
+            if user_id and not self._is_bot_self_user_id(user_id) and user_id not in ids:
                 ids.append(user_id)
         return ids
 
@@ -520,8 +521,9 @@ class ProactiveMixin:
         return self._is_target_private_user(user_id, user)
 
     def _default_private_umo_for_user_id(self, user_id: str) -> str:
-        user_id = str(user_id or "").strip()
-        if not user_id.isdigit() or self._is_bot_self_user_id(user_id):
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+        user_id = normalizer(user_id) if callable(normalizer) else _single_line(user_id, 128)
+        if not user_id or self._is_bot_self_user_id(user_id):
             return ""
         platform = _single_line(getattr(self, "target_platform", ""), 40) or "aiocqhttp"
         return f"{platform}:FriendMessage:{user_id}"
@@ -529,8 +531,9 @@ class ProactiveMixin:
     def _private_delivery_user_id_for(self, user_id: str) -> str:
         canonical = self._canonical_private_user_id(str(user_id or "").strip())
         aliases = getattr(self, "private_user_delivery_aliases", {}) or {}
-        target = str(aliases.get(canonical) or "").strip()
-        if target and target.isdigit() and not self._is_bot_self_user_id(target):
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+        target = normalizer(aliases.get(canonical)) if callable(normalizer) else _single_line(aliases.get(canonical), 128)
+        if target and not self._is_bot_self_user_id(target):
             return target
         return canonical
 

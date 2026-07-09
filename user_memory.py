@@ -4550,7 +4550,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
 {persona}
 
 【互动数据】
-用户 QQ：{user_id}
+用户 ID：{user_id}
 用户主动私聊次数：{inbound_count}
 Bot 主动消息次数：{proactive_count}
 Bot 主动后用户回复次数：{reply_count}

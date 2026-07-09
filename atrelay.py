@@ -289,7 +289,7 @@ class AtRelayMixin:
         }
 
     async def _resolve_atrelay_target_user(self, event: AstrMessageEvent, group_id: str, keyword: str) -> dict[str, Any]:
-        query = _single_line(keyword, 60)
+        query = _single_line(keyword, 128)
         if not query:
             return {}
         if query.isdigit():
@@ -298,6 +298,15 @@ class AtRelayMixin:
                 "user_id": query,
                 "name": _single_line(profile.get("name"), 60) if isinstance(profile, dict) else query,
                 "source": "qq",
+            }
+        direct_id = self._normalize_atrelay_private_target_id(query)
+        if direct_id:
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            user = users.get(direct_id) if isinstance(users, dict) else None
+            return {
+                "user_id": direct_id,
+                "name": _single_line(user.get("nickname"), 60) if isinstance(user, dict) and user.get("nickname") else direct_id,
+                "source": "private_user_id",
             }
         wb_matches = self._resolve_worldbook_member_by_name(query)
         if wb_matches:
@@ -370,13 +379,13 @@ class AtRelayMixin:
         *,
         exclude_current_group: bool = False,
     ) -> dict[str, Any]:
-        recipient = _single_line(recipient_hint, 80)
+        recipient = _single_line(recipient_hint, 128)
         if not recipient:
             return {}
         resolved = await self._resolve_atrelay_target_user(event, "", recipient)
         if resolved.get("ambiguous"):
-            return {"status": "ambiguous", "message": "收话人匹配到多个对象，请补充 QQ", "matches": resolved.get("matches", [])[:8]}
-        user_id = _single_line(resolved.get("user_id"), 40)
+            return {"status": "ambiguous", "message": "收话人匹配到多个对象，请补充用户 ID", "matches": resolved.get("matches", [])[:8]}
+        user_id = _single_line(resolved.get("user_id"), 128)
         if not user_id:
             return {}
         excluded = self._extract_group_id_from_event(event) if exclude_current_group else ""
@@ -755,6 +764,33 @@ class AtRelayMixin:
             if limit and len(items) >= limit:
                 break
         return items
+
+    def _normalize_atrelay_private_target_id(self, value: Any) -> str:
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+        candidate = normalizer(value) if callable(normalizer) else _single_line(value, 128)
+        if not candidate or self._is_bot_self_user_id(candidate):
+            return ""
+        if candidate.isdigit():
+            return candidate
+        canonical = self._canonical_private_user_id(candidate)
+        configured = set(self._configured_target_ids()) if callable(getattr(self, "_configured_target_ids", None)) else set()
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+        users = users if isinstance(users, dict) else {}
+        aliases = getattr(self, "private_user_aliases", {}) or {}
+        deliveries = getattr(self, "private_user_delivery_aliases", {}) or {}
+        known_ids = {candidate, canonical}
+        for mapping in (aliases, deliveries):
+            if isinstance(mapping, dict):
+                for key, target in mapping.items():
+                    for raw in (key, target):
+                        normalized = normalizer(raw) if callable(normalizer) else _single_line(raw, 128)
+                        if normalized:
+                            known_ids.add(normalized)
+        if configured.intersection(known_ids):
+            return canonical or candidate
+        if any(item in users for item in known_ids):
+            return canonical if canonical in users else candidate
+        return ""
 
     def _atrelay_send_log(self) -> list[dict[str, Any]]:
         log = self.data.setdefault("atrelay_send_log", [])

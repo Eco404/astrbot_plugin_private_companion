@@ -63,7 +63,7 @@ class InteractionUtilsMixin:
             "陪伴 昵称 <称呼>\n"
             "陪伴 语气 <简短语气描述>\n"
             "陪伴 清空记忆\n"
-            "提示：私聊陪伴默认开启；插件私聊目标用户里填写 QQ 数字号后，会自动预热主动消息。"
+            "提示：私聊陪伴默认开启；插件私聊目标用户里填写平台用户 ID 后，会自动预热主动消息。"
         )
 
     def _private_only_text(self) -> str:
@@ -95,9 +95,10 @@ class InteractionUtilsMixin:
                 parts = raw
             else:
                 parts = []
+            normalizer = getattr(self, "_normalize_private_identity_id", None)
             for item in parts:
-                value = str(item or "").strip()
-                if value and value.isdigit():
+                value = normalizer(item) if callable(normalizer) else _single_line(item, 128)
+                if value:
                     ids.add(value)
         return ids
 
@@ -105,9 +106,12 @@ class InteractionUtilsMixin:
         user_id = str(user_id or "").strip()
         if not user_id:
             return False
-        if user_id in set(self._configured_target_ids()):
+        canonical_id = self._canonical_private_user_id(user_id) if callable(getattr(self, "_canonical_private_user_id", None)) else user_id
+        target_ids = set(self._configured_target_ids())
+        if user_id in target_ids or canonical_id in target_ids:
             return True
-        return user_id in self._configured_admin_ids()
+        admin_ids = self._configured_admin_ids()
+        return user_id in admin_ids or canonical_id in admin_ids
 
     def _is_group_admin_event(self, event: AstrMessageEvent) -> bool:
         message_obj = getattr(event, "message_obj", None)
@@ -138,9 +142,9 @@ class InteractionUtilsMixin:
     def _management_denied_text(self) -> str:
         return (
             "这个操作需要管理权限。\n"
-            "私聊里只认两类 QQ 数字号：AstrBot 全局管理员 admins_id，或本插件私聊目标用户 QQ。\n"
-            "请在 AstrBot 管理员配置里填用户 QQ 号，或在插件拓展页的私聊目标用户里加入该 QQ。\n"
-            "不要填写 UMO、UID、default、平台名或会话串；那些不是用户 QQ，不能作为管理权限。"
+            "私聊里只认两类用户 ID：AstrBot 全局管理员 admins_id，或本插件私聊目标用户。\n"
+            "OneBot/aiocqhttp 通常填 QQ 号；QQ 官方机器人请填日志或私聊页显示的 openid/平台用户 ID。\n"
+            "优先直接填写用户 ID；误粘贴私聊 UMO 时会尝试提取 FriendMessage 后面的用户 ID。不要填写 UID、default、平台名或群聊会话串。"
         )
 
     async def _reply(self, event: AstrMessageEvent, text: str, *, quote_current: bool = True):

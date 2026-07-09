@@ -69,27 +69,27 @@
         "condition": "enable_daily_token_soft_limit"
       },
       "target_user_ids": {
-        "description": "私聊主动目标 QQ 号",
+        "description": "私聊目标用户 ID",
         "type": "list",
-        "hint": "填写后启动时会自动预热这些私聊对象。只想被动聊天也可以留空。",
+        "hint": "填写后启动时会自动预热这些私聊对象。OneBot/aiocqhttp 通常填 QQ 号；QQ 官方机器人请填日志或私聊页显示的 openid/平台用户 ID。误粘贴私聊 UMO 时会自动提取 FriendMessage 后面的用户 ID。只想被动聊天也可以留空。",
         "default": []
       },
       "private_user_aliases": {
         "description": "私聊身份别名归并",
         "type": "text",
-        "hint": "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射,例如：688C2CE7...=100012345。留空则不归并。",
+        "hint": "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主用户 ID。每行一个映射,例如：临时ID=主用户ID。留空则不归并。",
         "default": ""
       },
       "private_user_delivery_aliases": {
         "description": "私聊主动发送目标映射",
         "type": "text",
-        "hint": "只改变主动消息/主动测试的发送出口,不改变记忆归属。每行一个映射,例如：大号QQ=小号QQ。配合“私聊身份别名归并”里的 小号QQ=大号QQ 使用,即可小号收消息、大号保留记忆。",
+        "hint": "只改变主动消息/主动测试的发送出口,不改变记忆归属。每行一个映射,例如：主用户ID=投递用户ID。配合“私聊身份别名归并”里的 投递用户ID=主用户ID 使用,即可让另一个平台用户 ID 收消息、主用户 ID 保留记忆。",
         "default": ""
       },
       "target_platform": {
         "description": "私聊目标平台名",
         "type": "string",
-        "hint": "用于拼接未见过用户的 unified_msg_origin，QQ/OneBot 通常是 aiocqhttp。若用户私聊过 Bot，会自动替换成真实会话来源。",
+        "hint": "用于拼接未见过用户的 unified_msg_origin，QQ/OneBot 通常是 aiocqhttp；QQ 官方机器人通常是 qq_official。若用户私聊过 Bot，会自动替换成真实会话来源。",
         "default": "aiocqhttp"
       },
       "enable_environment_perception": {
@@ -249,12 +249,6 @@
       }
     }
   },
-  "enabled": {
-    "description": "启用插件",
-    "type": "bool",
-    "hint": "总开关。关闭后后台主动消息循环不会启动，但配置仍保留。",
-    "default": false
-  },
   "enable_proactive_only_mode": {
     "description": "Legacy flat config: 仅保留主动能力",
     "type": "bool",
@@ -298,7 +292,7 @@
     "invisible": true
   },
   "target_user_ids": {
-    "description": "Legacy flat config: 私聊主动目标 QQ 号",
+    "description": "Legacy flat config: 私聊目标用户 ID",
     "type": "list",
     "default": [],
     "invisible": true
@@ -2656,6 +2650,36 @@
     "default": "auto",
     "invisible": true
   },
+  "custom_photo_tool_name": {
+    "description": "Legacy flat config: 自定义生图函数工具名",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "custom_photo_tool_prompt_param": {
+    "description": "Legacy flat config: 生图工具提示词参数名",
+    "type": "string",
+    "default": "prompt",
+    "invisible": true
+  },
+  "custom_photo_tool_kind_param": {
+    "description": "Legacy flat config: 生图工具类型参数名",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "custom_photo_tool_reference_param": {
+    "description": "Legacy flat config: 生图工具参考图参数名",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "custom_photo_tool_extra_params": {
+    "description": "Legacy flat config: 生图工具额外参数",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
   "enable_photo_reference_image": {
     "description": "Legacy flat config: 启用人设/穿搭参考图一致性",
     "type": "bool",
@@ -2839,6 +2863,12 @@
     "description": "Legacy flat config: 备选在线生图自定义请求头",
     "type": "string",
     "default": "",
+    "invisible": true
+  },
+  "external_image_api_endpoints": {
+    "description": "Legacy flat config: 在线生图 API 优先级队列",
+    "type": "list",
+    "default": [],
     "invisible": true
   },
   "photo_generation_style": {
@@ -3776,9 +3806,6 @@
         },
         "_special": "select_provider"
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "proactive_reach_config": {
@@ -3828,9 +3855,6 @@
         },
         "default": 3
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "recall_config": {
@@ -3945,9 +3969,6 @@
         "default": false,
         "condition": "enable_forbidden_word_recall"
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "message_debounce_config": {
@@ -4203,9 +4224,6 @@
         "default": 300,
         "condition": "enable_private_image_vision_cache"
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "private_followup_config": {
@@ -4374,9 +4392,6 @@
         "hint": "开启后只限制命令管理入口；不会阻止 target_user_ids 自动预热。",
         "default": true
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "proactive_generation_config": {
@@ -4454,9 +4469,6 @@
         },
         "default": 12
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "timer_config": {
@@ -4540,9 +4552,6 @@
         },
         "default": 180
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "daily_creative_config": {
@@ -4658,9 +4667,6 @@
           "enable_creative_writing": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "skill_growth_config": {
@@ -4730,9 +4736,6 @@
           "enable_skill_growth_schedule_influence": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "private_understanding_config": {
@@ -4746,9 +4749,6 @@
         "hint": "开启后，普通私聊/群聊被动回复和部分主动消息会在 AstrBot 默认人格之上参考回复风格提示词、互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
         "default": true
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "memory_habit_config": {
@@ -4894,9 +4894,6 @@
           "enable_user_habit_learning": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "emotion_relationship_config": {
@@ -5148,12 +5145,9 @@
           "enable_mai_style_integration": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
-    "external_memory_config": {
+  "external_memory_config": {
     "description": "记忆插件协同",
     "type": "object",
     "hint": "接入“我会牢牢记住你”或 LivingMemory 等外部长期记忆能力。检测到“我会牢牢记住你”时会自动展开更多协同配置项。",
@@ -5260,9 +5254,6 @@
           "enable_memory_companion_feature_context": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "bilibili_config": {
@@ -5327,9 +5318,6 @@
           "enable_bilibili_integration": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "news_config": {
@@ -5506,9 +5494,6 @@
           "enable_news_integration": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "web_exploration_config": {
@@ -5651,9 +5636,6 @@
           "enable_web_exploration": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "qzone_config": {
@@ -5805,9 +5787,6 @@
           "enable_qzone_comment_inbox": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "private_reading_config": {
@@ -5950,9 +5929,6 @@
           "enable_private_reading_integration": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_observation_config": {
@@ -6028,9 +6004,6 @@
           "enable_group_companion": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "forward_message_config": {
@@ -6135,9 +6108,6 @@
           "forward_message_image_vision": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_scene_config": {
@@ -6177,9 +6147,6 @@
           "enable_group_companion": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_wakeup_config": {
@@ -6412,9 +6379,6 @@
           "enable_group_wakeup_enhancement": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_high_intensity_config": {
@@ -6518,9 +6482,6 @@
           "enable_group_high_intensity_mode": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_slang_topic_config": {
@@ -6604,9 +6565,6 @@
           "enable_group_slang_web_search": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_relationship_config": {
@@ -6720,9 +6678,6 @@
           "enable_worldbook_member_recognition": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "relay_bridge_config": {
@@ -6929,9 +6884,6 @@
           "enable_group_companion": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "group_interject_config": {
@@ -7077,9 +7029,6 @@
           "enable_group_companion": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "life_schedule_config": {
@@ -7156,9 +7105,6 @@
           "enable_daily_plan": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "schedule_detail_config": {
@@ -7226,9 +7172,6 @@
         },
         "default": 7
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "humanized_state_config": {
@@ -7430,9 +7373,6 @@
           "enable_rest_reply_simulation": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "dream_diary_config": {
@@ -7494,9 +7434,6 @@
           "enable_enhanced_dreams": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "photo_action_config": {
@@ -7541,8 +7478,53 @@
       "photo_generation_backend": {
         "description": "主动生图后端",
         "type": "string",
-        "hint": "可填：auto、comfyui、sdgen、external。auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/astrbot_plugin_SDGen；未配置在线 API 时使用本地后端。",
+        "hint": "可填：auto、comfyui、sdgen、external、tool_call。auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/astrbot_plugin_SDGen；未配置在线 API 时使用本地后端。tool_call 会调用其他插件注册的函数工具（需在下方填写工具名）。",
         "default": "auto",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "custom_photo_tool_name": {
+        "description": "自定义生图函数工具名",
+        "type": "string",
+        "hint": "生图后端选择 tool_call 时必填。填写其他插件通过 @filter.llm_tool 注册的函数工具名，例如 generate_selfie。插件会在生图时调用该工具并把结果解析为图片路径或图片数据。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "custom_photo_tool_prompt_param": {
+        "description": "生图工具的提示词参数名",
+        "type": "string",
+        "hint": "调用自定义生图工具时，提示词使用的参数名。默认为 prompt；如果目标工具用的是 description、text 或其他参数名，在此填写。",
+        "default": "prompt",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "custom_photo_tool_kind_param": {
+        "description": "生图工具的类型参数名",
+        "type": "string",
+        "hint": "可选。如果目标工具支持传入生图类型（如 selfie/text2img/edit），在此填写对应参数名；留空则不传类型参数。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "custom_photo_tool_reference_param": {
+        "description": "生图工具的参考图参数名",
+        "type": "string",
+        "hint": "可选。如果目标工具支持参考图/改图，在此填写参考图路径对应的参数名；留空则不传参考图参数。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "custom_photo_tool_extra_params": {
+        "description": "生图工具的额外参数（JSON）",
+        "type": "text",
+        "hint": "可选。JSON 格式的额外参数，调用工具时会一并传入。例如 {“size”:“1024x1024”,“steps”:20}；留空则不传额外参数。",
+        "default": "",
         "condition": {
           "enable_photo_text_action": true
         }
@@ -7871,6 +7853,15 @@
           "enable_backup_external_image_api": true
         }
       },
+      "external_image_api_endpoints": {
+        "description": "在线生图 API 优先级队列",
+        "type": "list",
+        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、timeout_seconds、custom_headers。通过拓展页队列编辑器修改最方便；为空时继续沿用上面的主用/备选在线 API 字段。",
+        "default": [],
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
       "photo_generation_style": {
         "description": "主动生图风格",
         "type": "string",
@@ -7901,15 +7892,12 @@
       "photo_generation_scene_presets": {
         "description": "生图场景预设",
         "type": "string",
-        "hint": "可选。格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；自定义同名会覆盖内置。主动拍照、每日穿搭和自然语言生图会按请求自动套用匹配预设，并写入最近生图日志。",
+        "hint": "可选。格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、日常穿搭、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；普通穿搭默认走日常穿搭，只有明确镜前/对镜/镜子时才走镜前穿搭；自定义同名会覆盖内置。主动拍照、每日穿搭和自然语言生图会按请求自动套用匹配预设，并写入最近生图日志。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "screen_action_config": {
@@ -7988,9 +7976,6 @@
           "enable_unanswered_screen_peek_followup": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "poke_action_config": {
@@ -8018,9 +8003,6 @@
           "enable_poke_action": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "voice_action_config": {
@@ -8192,9 +8174,6 @@
           "enable_tts_enhancement": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "voice_playback_config": {
@@ -8259,9 +8238,6 @@
           "enable_tts_local_playback": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "auto_voice_config": {
@@ -8372,9 +8348,6 @@
           "enable_voice_action": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "presence_sync_config": {
@@ -8397,9 +8370,6 @@
           "enable_qq_presence_sync": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "weather_config": {
@@ -8483,9 +8453,6 @@
           "enable_yesterday_screen_diary_context": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "experimental_motivation_config": {
@@ -8677,9 +8644,6 @@
           "enable_qzone_emotional_vent_publish": true
         }
       }
-    },
-    "condition": {
-      "enabled": true
     }
   },
   "legacy_compat_config": {
@@ -9096,9 +9060,6 @@
         "default": "",
         "invisible": true
       }
-    },
-    "condition": {
-      "enabled": true
     }
   }
 }

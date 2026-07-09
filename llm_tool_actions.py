@@ -69,7 +69,7 @@ class LlmToolActionsMixin:
 【生图/自拍工具】
 当用户明确要求你生成图片、画图、出图、自拍、拍照、头像、表情包，或要求基于参考图改图时，可以使用 `pc_generate_photo`。
 - 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。
-- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/镜前穿搭/头像特写”；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。
+- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写”；普通穿搭优先日常穿搭，只有明确“镜前/对镜/镜子”时才用镜前穿搭；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。
 - 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。
 - 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。
 - 默认 `send=true`，工具会把生成图片发送到当前会话；如果只想拿路径再决定，可传 `send=false`。
@@ -498,13 +498,13 @@ class LlmToolActionsMixin:
         return platform or getattr(self, "target_platform", "") or "aiocqhttp"
 
     def _interaction_query_private_targets(self, hint: str = "") -> list[dict[str, str]]:
-        query = _single_line(hint, 80)
+        query = _single_line(hint, 128)
         users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
         profiles = self.data.get("worldbook_member_profiles") if isinstance(self.data.get("worldbook_member_profiles"), dict) else {}
         targets: dict[str, dict[str, str]] = {}
 
         def add(user_id: str, label: str = "", source: str = "") -> None:
-            user_id = _single_line(user_id, 40)
+            user_id = _single_line(user_id, 128)
             if not user_id:
                 return
             existing = targets.setdefault(user_id, {"user_id": user_id, "label": "", "source": ""})
@@ -515,10 +515,15 @@ class LlmToolActionsMixin:
 
         if query and query.isdigit():
             add(query, query, "qq")
+        configured_ids = set(self._configured_target_ids()) if callable(getattr(self, "_configured_target_ids", None)) else set()
+        for configured_id in configured_ids:
+            uid = _single_line(configured_id, 128)
+            if uid and (not query or query == uid or query in uid):
+                add(uid, uid, "target_config")
         for user_id, user in users.items():
             if not isinstance(user, dict):
                 continue
-            uid = _single_line(user.get("user_id") or user_id, 40)
+            uid = _single_line(user.get("user_id") or user_id, 128)
             tokens = [
                 uid,
                 user.get("nickname"),
@@ -647,7 +652,7 @@ class LlmToolActionsMixin:
         return lines
 
     def _interaction_query_user_filter_tokens(self, user_hint: str = "") -> tuple[set[str], set[str]]:
-        user_hint = _single_line(user_hint, 80)
+        user_hint = _single_line(user_hint, 128)
         ids: set[str] = set()
         names: set[str] = set()
         if user_hint:
@@ -695,7 +700,7 @@ class LlmToolActionsMixin:
         return lines
 
     def _interaction_query_group_user_recent_lines(self, user_hint: str, *, limit: int = 36) -> list[str]:
-        user_hint = _single_line(user_hint, 80)
+        user_hint = _single_line(user_hint, 128)
         if not user_hint:
             return []
         groups = self.data.get("groups") if isinstance(self.data.get("groups"), dict) else {}
@@ -737,7 +742,7 @@ class LlmToolActionsMixin:
         if not is_private or not allowed:
             return json.dumps({"status": "forbidden", "message": forbidden_message}, ensure_ascii=False)
         scope = _single_line(kwargs.get("scope") or kwargs.get("type") or "auto", 20).lower()
-        user_hint = _single_line(kwargs.get("user_hint") or kwargs.get("user") or kwargs.get("user_id") or kwargs.get("target_user") or "", 80)
+        user_hint = _single_line(kwargs.get("user_hint") or kwargs.get("user") or kwargs.get("user_id") or kwargs.get("target_user") or "", 128)
         group_hint = _single_line(kwargs.get("group_hint") or kwargs.get("group") or kwargs.get("group_id") or kwargs.get("target_group") or "", 80)
         hint = _single_line(kwargs.get("hint") or kwargs.get("target") or kwargs.get("name") or "", 80)
         hours = max(1, min(24 * 30, _safe_int(kwargs.get("hours"), 72, 1)))
@@ -764,7 +769,7 @@ class LlmToolActionsMixin:
             if not targets:
                 return json.dumps({"status": "not_found", "message": "没有找到匹配的私聊对象", "hint": target_hint}, ensure_ascii=False)
             if len(targets) > 1 and not (user_hint or hint).isdigit():
-                return json.dumps({"status": "ambiguous", "message": "匹配到多个私聊对象，需要补充 QQ 或更明确称呼", "matches": targets[:8]}, ensure_ascii=False)
+                return json.dumps({"status": "ambiguous", "message": "匹配到多个私聊对象，需要补充用户 ID 或更明确称呼", "matches": targets[:8]}, ensure_ascii=False)
             target = targets[0]
             user_id = target.get("user_id", "")
             umo = f"{platform}:FriendMessage:{user_id}"
@@ -980,7 +985,7 @@ class LlmToolActionsMixin:
         group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("group_name") or ""
         nickname = kwargs.get("nickname") or kwargs.get("name") or kwargs.get("keyword") or kwargs.get("user_name") or kwargs.get("user") or ""
         target_group = _single_line(group_id, 40) or self._extract_group_id_from_event(event)
-        query = _single_line(nickname, 60)
+        query = _single_line(nickname, 128)
         if not query:
             return json.dumps({"status": "error", "message": "缺少 nickname/name 参数"}, ensure_ascii=False)
         resolved = await self._resolve_atrelay_target_user(event, target_group, query)
@@ -1054,10 +1059,10 @@ class LlmToolActionsMixin:
         return prefixes
 
     def _atrelay_target_umo_candidates(self, event: AstrMessageEvent, message_type: str, target_id: str) -> list[str]:
-        target = _single_line(target_id, 40)
+        message_type = "GroupMessage" if message_type == "group" else "FriendMessage"
+        target = _single_line(target_id, 40 if message_type == "GroupMessage" else 128)
         if not target:
             return []
-        message_type = "GroupMessage" if message_type == "group" else "FriendMessage"
         candidates: list[str] = []
 
         def add_umo(value: Any) -> None:
@@ -1170,7 +1175,7 @@ class LlmToolActionsMixin:
         expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
 
         text = self._normalize_atrelay_text(message, limit=800)
-        recipient = _single_line(recipient_hint, 80)
+        recipient = _single_line(recipient_hint, 128)
         if not text:
             return json.dumps({"status": "error", "message": "缺少 message/text 内容"}, ensure_ascii=False)
 
@@ -1279,7 +1284,7 @@ class LlmToolActionsMixin:
 
         target_user = recipient
         if not target_user:
-            return json.dumps({"status": "need_recipient", "message": "需要补充私聊目标 QQ 或称呼"}, ensure_ascii=False)
+            return json.dumps({"status": "need_recipient", "message": "需要补充私聊目标用户 ID 或称呼"}, ensure_ascii=False)
         if not target_user.isdigit():
             resolved = await self._resolve_atrelay_target_user(event, "", target_user)
             if not resolved.get("user_id") and not resolved.get("ambiguous"):
@@ -1292,8 +1297,8 @@ class LlmToolActionsMixin:
             if not resolved.get("user_id") and not resolved.get("ambiguous") and not group_id:
                 return json.dumps(
                     {
-                        "status": "need_group_or_qq",
-                        "message": "关系网里没有唯一确认这个称呼；请补充目标所在群号/群名，或直接提供 QQ。",
+                        "status": "need_group_or_user_id",
+                        "message": "关系网里没有唯一确认这个称呼；请补充目标所在群号/群名，或直接提供用户 ID。",
                     },
                     ensure_ascii=False,
                 )
@@ -1303,12 +1308,12 @@ class LlmToolActionsMixin:
                 return json.dumps(
                     {
                         "status": "ambiguous",
-                        "message": "匹配到多个用户，请补充 QQ",
+                        "message": "匹配到多个用户，请补充用户 ID",
                         "matches": resolved.get("matches", [])[:8],
                     },
                     ensure_ascii=False,
                 )
-            target_user = _single_line(resolved.get("user_id"), 40)
+            target_user = _single_line(resolved.get("user_id"), 128)
             if not target_user:
                 return json.dumps({"status": "not_found", "message": "未找到私聊目标"}, ensure_ascii=False)
         send_text = await self._rewrite_atrelay_message_with_llm(
@@ -1453,11 +1458,11 @@ class LlmToolActionsMixin:
             kwargs.get("confirm_before_report", kwargs.get("require_reply_confirmation", kwargs.get("confirm_reply", False)))
         )
         receipt_expire_hours = kwargs.get("receipt_expire_hours", kwargs.get("expire_hours", kwargs.get("ttl_hours", 12)))
-        target_user = _single_line(user_id, 40)
+        target_user = self._normalize_atrelay_private_target_id(user_id)
         text = self._normalize_atrelay_text(message, limit=800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
-        if not target_user.isdigit():
-            return "发送失败：QQ 号格式不正确"
+        if not target_user:
+            return "发送失败：目标用户 ID 无效或尚未登记"
         if not text:
             return "发送失败：消息内容为空"
         boundary = self._atrelay_boundary_guard(text)
@@ -1534,9 +1539,13 @@ class LlmToolActionsMixin:
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
-        targets = [item for item in self._parse_atrelay_target_list(user_ids, limit=self.atrelay_multi_target_limit) if item.isdigit()]
+        targets = []
+        for item in self._parse_atrelay_target_list(user_ids, limit=self.atrelay_multi_target_limit):
+            target = self._normalize_atrelay_private_target_id(item)
+            if target and target not in targets:
+                targets.append(target)
         if not targets:
-            return "发送失败：没有有效 QQ"
+            return "发送失败：没有有效私聊目标用户 ID"
         results = []
         for user_id in targets:
             result = await self._pc_send_to_private_user_impl(

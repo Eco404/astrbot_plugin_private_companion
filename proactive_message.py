@@ -294,22 +294,153 @@ class _CapturedFrameworkSendMessage(Exception):
 class ProactiveMessageMixin:
     """主动消息生成、动作执行和发送链路"""
 
+    @staticmethod
+    def _looks_like_internal_provider_error_text(text: Any) -> bool:
+        cleaned = _single_line(text, 1000).lower()
+        if not cleaned:
+            return False
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", cleaned).strip()
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", cleaned)
+        direct_markers = (
+            "all chat models failed",
+            "all llm providers failed",
+            "badrequesterror",
+            "api connection error",
+            "apiconnectionerror",
+            "api status error",
+            "apistatuserror",
+            "authenticationerror",
+            "permissiondeniederror",
+            "ratelimiterror",
+            "notfounderror",
+            "internalservererror",
+            "provider api error",
+            "unable to submit request",
+            "invalid_request",
+            "invalid request error",
+            "functiondeclaration",
+            "function declaration",
+            "schema didn't specify",
+            "tool schema",
+            "tool has no return value",
+            "status disabled",
+            "主动消息专用模式下",
+            "普通被动回复不可使用 private companion 工具",
+            "主动渲染阶段不可使用 private companion 工具",
+            "has sent the result directly to the user",
+            "traceback",
+            "error code: 400",
+            "error code 400",
+            "400 bad request",
+            "模型调用失败",
+            "工具调用失败",
+            "函数工具调用失败",
+            "api 调用失败",
+            "api调用失败",
+            "provider 调用失败",
+            "provider调用失败",
+            "没有返回值，或者已将结果直接发送给用户",
+            "没有返回值,或者已将结果直接发送给用户",
+        )
+        compact_markers = (
+            "allchatmodelsfailed",
+            "allllmprovidersfailed",
+            "badrequesterror",
+            "apiconnectionerror",
+            "apistatuserror",
+            "authenticationerror",
+            "permissiondeniederror",
+            "ratelimiterror",
+            "notfounderror",
+            "internalservererror",
+            "providerapierror",
+            "unabletosubmitrequest",
+            "invalid_request",
+            "invalidrequest",
+            "invalidrequesterror",
+            "functiondeclaration",
+            "schemadidntspecify",
+            "toolschema",
+            "toolhasnoreturnvalue",
+            "statusdisabled",
+            "主动消息专用模式下",
+            "普通被动回复不可使用privatecompanion工具",
+            "主动渲染阶段不可使用privatecompanion工具",
+            "hassenttheresultdirectlytotheuser",
+            "errorcode400",
+            "400badrequest",
+            "模型调用失败",
+            "工具调用失败",
+            "函数工具调用失败",
+            "api调用失败",
+            "provider调用失败",
+            "没有返回值或者已将结果直接发送给用户",
+        )
+        if any(marker in cleaned or marker in normalized for marker in direct_markers):
+            return True
+        if any(marker in compact for marker in compact_markers):
+            return True
+        if "errorcode" in compact and any(
+            token in compact
+            for token in (
+                "badrequest",
+                "invalidrequest",
+                "provider",
+                "apierror",
+                "functiondeclaration",
+            )
+        ):
+            return True
+        if "functiondeclaration" in compact and any(
+            token in compact for token in ("schema", "properties", "parameters", "tool", "tools", "badrequest", "invalidrequest")
+        ):
+            return True
+        if "aisearch" in cleaned and any(
+            marker in cleaned
+            for marker in (
+                "failed",
+                "badrequest",
+                "invalid_request",
+                "unable to submit",
+                "provider api",
+            )
+        ):
+            return True
+        return False
+
+    def _clean_external_share_source_field(self, value: Any, limit: int = 160) -> str:
+        text = _single_line(value, limit)
+        if not text:
+            return ""
+        if self._looks_like_internal_provider_error_text(text):
+            return ""
+        if self._framework_agent_meta_summary_leak(text):
+            return ""
+        return text
+
     def _format_bilibili_video_action_context(self, user: dict[str, Any]) -> str:
         video = user.get("bilibili_video_context")
         if not isinstance(video, dict):
             return ""
         if _now_ts() - _safe_float(video.get("created_ts"), 0) > 6 * 3600:
             return ""
-        title = _single_line(video.get("title"), 80)
-        bvid = _single_line(video.get("bvid"), 32)
-        up_name = _single_line(video.get("up_name"), 40)
+        title = self._clean_external_share_source_field(video.get("title"), 80)
+        bvid = self._clean_external_share_source_field(video.get("bvid"), 32)
+        up_name = self._clean_external_share_source_field(video.get("up_name"), 40)
         score = _safe_int(video.get("score"), 0, 0, 10)
-        mood = _single_line(video.get("mood"), 24)
-        comment = _single_line(video.get("comment"), 120)
-        review = _single_line(video.get("review"), 180)
-        source = _single_line(video.get("source"), 40)
+        mood = self._clean_external_share_source_field(video.get("mood"), 24)
+        comment = self._clean_external_share_source_field(video.get("comment"), 120)
+        review = self._clean_external_share_source_field(video.get("review"), 180)
+        source = self._clean_external_share_source_field(video.get("source"), 40)
         memory_context = video.get("memory_context") if isinstance(video.get("memory_context"), list) else []
-        memory_lines = [_single_line(item, 160) for item in memory_context if _single_line(item, 160)][:3]
+        memory_lines = [
+            text
+            for item in memory_context
+            for text in [self._clean_external_share_source_field(item, 160)]
+            if text
+        ][:3]
+        if not title and not bvid and not comment and not review:
+            return ""
         parts = [
             "B站视频分享线索：刚刷到一个视频",
             f"标题：{title}" if title else "",
@@ -330,15 +461,17 @@ class ProactiveMessageMixin:
             return ""
         if _now_ts() - _safe_float(news.get("created_ts"), 0) > 8 * 3600:
             return ""
-        topic = _single_line(news.get("topic"), 60)
-        headline = _single_line(news.get("headline"), 100)
-        source = _single_line(news.get("selected_source"), 40)
-        impression = _single_line(news.get("impression"), 240)
-        link = _single_line(news.get("selected_link"), 400)
+        topic = self._clean_external_share_source_field(news.get("topic"), 60)
+        headline = self._clean_external_share_source_field(news.get("headline"), 100)
+        source = self._clean_external_share_source_field(news.get("selected_source"), 40)
+        impression = self._clean_external_share_source_field(news.get("impression"), 240)
+        link = self._clean_external_share_source_field(news.get("selected_link"), 400)
         self_link = news.get("self_link") if isinstance(news.get("self_link"), dict) else {}
-        self_link_text = _single_line(self_link.get("self_link") if isinstance(self_link, dict) else "", 180)
-        self_link_tone = _single_line(news.get("share_tone") or (self_link.get("tone") if isinstance(self_link, dict) else ""), 80)
-        self_link_boundary = _single_line(news.get("share_boundary") or (self_link.get("boundary") if isinstance(self_link, dict) else ""), 160)
+        self_link_text = self._clean_external_share_source_field(self_link.get("self_link") if isinstance(self_link, dict) else "", 180)
+        self_link_tone = self._clean_external_share_source_field(news.get("share_tone") or (self_link.get("tone") if isinstance(self_link, dict) else ""), 80)
+        self_link_boundary = self._clean_external_share_source_field(news.get("share_boundary") or (self_link.get("boundary") if isinstance(self_link, dict) else ""), 160)
+        if not topic and not headline and not link and not impression:
+            return ""
         parts = [
             "新闻阅读线索：刚扫过几条新闻,其中一条让自己有点想私下提一句。",
             f"话题：{topic}" if topic else "",
@@ -359,16 +492,18 @@ class ProactiveMessageMixin:
             return ""
         if _now_ts() - _safe_float(exploration.get("created_ts"), 0) > 10 * 3600:
             return ""
-        query = _single_line(exploration.get("query"), 80)
-        topic = _single_line(exploration.get("topic"), 80)
-        note = _single_line(exploration.get("note"), 260)
-        source_title = _single_line(exploration.get("source_title"), 120)
-        source_url = _single_line(exploration.get("source_url"), 420)
-        reason = _single_line(exploration.get("reason"), 140)
+        query = self._clean_external_share_source_field(exploration.get("query"), 80)
+        topic = self._clean_external_share_source_field(exploration.get("topic"), 80)
+        note = self._clean_external_share_source_field(exploration.get("note"), 260)
+        source_title = self._clean_external_share_source_field(exploration.get("source_title"), 120)
+        source_url = self._clean_external_share_source_field(exploration.get("source_url"), 420)
+        reason = self._clean_external_share_source_field(exploration.get("reason"), 140)
         self_link = exploration.get("self_link") if isinstance(exploration.get("self_link"), dict) else {}
-        self_link_text = _single_line(self_link.get("self_link") if isinstance(self_link, dict) else "", 180)
-        self_link_tone = _single_line(exploration.get("share_tone") or (self_link.get("tone") if isinstance(self_link, dict) else ""), 80)
-        self_link_boundary = _single_line(exploration.get("share_boundary") or (self_link.get("boundary") if isinstance(self_link, dict) else ""), 160)
+        self_link_text = self._clean_external_share_source_field(self_link.get("self_link") if isinstance(self_link, dict) else "", 180)
+        self_link_tone = self._clean_external_share_source_field(exploration.get("share_tone") or (self_link.get("tone") if isinstance(self_link, dict) else ""), 80)
+        self_link_boundary = self._clean_external_share_source_field(exploration.get("share_boundary") or (self_link.get("boundary") if isinstance(self_link, dict) else ""), 160)
+        if not query and not topic and not note and not source_title and not source_url:
+            return ""
         parts = [
             "网页探索线索：Bot 刚刚按自己的兴趣主动搜索并了解了一点新东西,这是一条内部探索笔记。",
             f"搜索词：{query}" if query else "",
@@ -1306,6 +1441,14 @@ class ProactiveMessageMixin:
         delivery_hint = self._proactive_natural_delivery_hint()
         if delivery_hint and "自然交付提醒" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
+        tool_boundary_hint = (
+            "【主动生成工具边界】\n"
+            "- 这一轮只生成要发给当前私聊对象的一句正文，不调用任何转述、私聊发送、群发、QQ空间或生图发送工具。\n"
+            "- 不要写“已发送/已转述/消息已发给某人/工具执行完成”等状态回执。\n"
+            "- 如果想分享一件事，就直接把那句自然聊天内容写出来。"
+        )
+        if "主动生成工具边界" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{tool_boundary_hint}"
         if "时间锚定" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{temporal_grounding_hint}"
         if recent_history_hint and "最近私聊实况" not in prompt:
@@ -1433,6 +1576,7 @@ class ProactiveMessageMixin:
             true_external_info = reason in {"bili_video_share", "news_share", "web_exploration_share"} or anchor_type == "external_info"
             if true_external_info:
                 lines.append("外界分享必须贴住这次看到的标题、视频、新闻或资料本身；如果只是低压地放一句，也要围绕来源表达感受，不要改成无关的个人状态或泛泛压力询问。")
+                lines.append("最终正文必须让用户一眼知道你在分享什么：至少带标题、BV/链接、来源名或具体内容锚点之一；不要只写“看这个/这条好离谱/给你看个东西”。")
             elif anchor_type == "group_context":
                 lines.append("群聊见闻只是一段共同群里的小片段：可以轻轻转述一个具体笑点或画面，不要把内部话题名写成“标题/新闻/资料”。")
         elif kind in {"care", "check_in", "light_touch"}:
@@ -1612,6 +1756,8 @@ class ProactiveMessageMixin:
         cleaned = _single_line(text, 500).lower()
         if not cleaned:
             return False
+        if self._looks_like_internal_provider_error_text(text):
+            return True
         normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", cleaned).strip()
         compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", cleaned)
         if self._is_proactive_delivery_receipt_text(text):
@@ -1822,7 +1968,7 @@ class ProactiveMessageMixin:
         if captured_text:
             if text and self._framework_agent_meta_summary_leak(text):
                 logger.warning(
-                    "[PrivateCompanion] 主动主链 final 疑似工具循环摘要,改用已捕获发送文本: label=%s final=%s captured=%s",
+                    "[PrivateCompanion] 主动主链 final 疑似工具循环摘要或 Provider 失败,改用已捕获发送文本: label=%s final=%s captured=%s",
                     label,
                     _single_line(text, 160),
                     _single_line(captured_text, 160),
@@ -1830,7 +1976,7 @@ class ProactiveMessageMixin:
             text = captured_text
         elif text and self._framework_agent_meta_summary_leak(text):
             logger.warning(
-                "[PrivateCompanion] 主动主链 final 疑似工具循环摘要且无可用捕获文本,已丢弃: label=%s text=%s",
+                "[PrivateCompanion] 主动主链 final 疑似工具循环摘要或 Provider 失败且无可用捕获文本,已丢弃: label=%s text=%s",
                 label,
                 _single_line(text, 180),
             )
@@ -2202,7 +2348,11 @@ class ProactiveMessageMixin:
             action_context=action_context,
         )
         if not source_text:
-            return None
+            return {
+                "decision": "drop",
+                "reason": "外界分享缺少可见来源",
+                "hard": True,
+            }
         if self._external_share_text_mentions_source(cleaned, source_text):
             return None
         reference = self._external_share_fallback_reference(source_text)
@@ -2210,8 +2360,8 @@ class ProactiveMessageMixin:
             return {
                 "decision": "rewrite",
                 "reason": "外界分享正文偏离来源",
-                "text": "",
-                "reference_text": reference,
+                "text": reference,
+                "source_text": source_text,
                 "hard": True,
             }
         return {
@@ -2233,40 +2383,97 @@ class ProactiveMessageMixin:
         parts: list[str] = []
 
         def add(value: Any, limit: int = 160) -> None:
-            text = _single_line(value, limit)
+            text = self._clean_external_share_source_field(value, limit)
             if text and text not in parts:
                 parts.append(text)
 
         add(topic, 180)
-        add(action_context, 520)
+        if action_context:
+            for raw_line in str(action_context or "").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if self._looks_like_internal_provider_error_text(line):
+                    continue
+                if re.match(
+                    r"^(?:标题|话题|摘要重点|搜索词|参考来源|来源|链接|UP|短评|回味|内部印象|留下的印象)[:：]",
+                    line,
+                    flags=re.I,
+                ):
+                    add(line, 220)
         if isinstance(user, dict):
             for key in ("bilibili_video_context", "news_context", "web_exploration_context"):
                 payload = user.get(key)
                 if not isinstance(payload, dict):
                     continue
-                for field in ("title", "headline", "topic", "summary", "comment", "review", "source", "selected_source"):
+                for field in (
+                    "title",
+                    "headline",
+                    "topic",
+                    "summary",
+                    "impression",
+                    "comment",
+                    "review",
+                    "source",
+                    "selected_source",
+                    "source_title",
+                    "selected_link",
+                    "source_url",
+                    "link",
+                    "url",
+                    "bvid",
+                ):
                     add(payload.get(field), 180)
         if not parts:
             add(motive, 140)
         return _single_line("；".join(parts), 760)
 
+    def _external_share_is_vague_pointer(self, text: str) -> bool:
+        message = _single_line(text, 260)
+        if not message:
+            return False
+        if re.search(r"https?://|(?:^|[^A-Za-z0-9])BV[0-9A-Za-z]{8,16}(?:$|[^A-Za-z0-9])", message):
+            return False
+        if re.search(r"[《“\"『「][^》”\"』」]{2,80}[》”\"』」]", message):
+            return False
+        compact = re.sub(r"[\s，,。！？!?、~～…]+", "", message)
+        vague_patterns = (
+            "你快看这个",
+            "快看这个",
+            "看这个",
+            "你看看这个",
+            "看看这个",
+            "给你看个东西",
+            "刷到个东西",
+            "这个也太",
+            "这个太",
+            "这个好",
+            "这条也太",
+            "这条太",
+            "这也太",
+            "居然这么",
+        )
+        if any(pattern in compact for pattern in vague_patterns):
+            return True
+        if len(compact) <= 26 and any(token in compact for token in ("这个", "这条", "那条", "东西")) and any(
+            token in compact for token in ("离谱", "逆天", "好笑", "绷不住", "惊了", "怪")
+        ):
+            return True
+        return False
+
     def _external_share_text_mentions_source(self, text: str, source_text: str) -> bool:
         message = _single_line(text, 260).lower()
         source = _single_line(source_text, 760).lower()
         if not message or not source:
-            return True
-        source_markers = (
-            "看到", "刷到", "看见", "标题", "视频", "新闻", "文章", "资料", "这条", "这个", "那条",
-            "b站", "bili", "链接", "分享", "外面", "报道", "内容",
-        )
+            return False
+        if self._looks_like_internal_provider_error_text(message):
+            return False
+        if self._external_share_is_vague_pointer(message):
+            return False
         anchor_tokens = self._external_share_anchor_tokens(source)
         for token in anchor_tokens:
             if token and token in message:
                 return True
-        # If the source itself has no concrete title/topic tokens, do not over-block
-        # a clearly source-shaped short share.
-        if not anchor_tokens and any(marker in message for marker in source_markers):
-            return True
         return False
 
     def _external_share_anchor_tokens(self, source_text: str) -> list[str]:
@@ -2297,6 +2504,8 @@ class ProactiveMessageMixin:
                     add(item)
         generic = {
             "标题", "视频", "新闻", "文章", "资料", "来源", "分享", "短评", "回味", "评分", "链接",
+            "这个", "这条", "那条", "那个", "东西", "内容", "感觉", "有点", "刚刚", "刚才",
+            "离谱", "逆天", "好笑", "有趣", "震惊", "惊了", "神奇", "奇怪", "贴", "轻轻",
             "刚刷到一个视频", "刚刷到", "刷到一", "到一个", "一个视", "个视频", "一个视频",
             "b站视频分享线索", "站视频分享线索", "视频分享线索", "分享线索",
             "新闻阅读线索", "阅读线索", "刚扫过", "扫过几", "几条新", "条新闻",
@@ -2320,10 +2529,22 @@ class ProactiveMessageMixin:
         if not source:
             return ""
         title = ""
+        link = ""
+        link_match = re.search(r"https?://[^\s；，。！？!?]+", source, flags=re.I)
+        if link_match:
+            link = _single_line(link_match.group(0).rstrip("）)】]》>。."), 220)
+        bvid_match = re.search(r"\bBV[0-9A-Za-z]{8,16}\b", source)
+        if not link and bvid_match:
+            link = f"https://www.bilibili.com/video/{bvid_match.group(0)}"
+        book_match = re.search(r"[《“\"『「]([^》”\"』」]{2,90})[》”\"』」]", source)
+        if book_match:
+            title = _single_line(book_match.group(1), 64)
         for pattern in (
             r"(?:标题|摘要重点|话题|headline|topic)[:：]\s*([^；。\n\r|｜]{2,90})",
             r"^([^；。\n\r]{4,90})",
         ):
+            if title:
+                break
             match = re.search(pattern, source, flags=re.I)
             if match:
                 title = _single_line(match.group(1), 64)
@@ -2335,11 +2556,31 @@ class ProactiveMessageMixin:
                 )[0]
                 break
         if not title:
+            if link:
+                if "bilibili.com" in link:
+                    return _single_line(f"刚刷到这个 B站视频，有点想丢给你看一眼。 {link}", 220)
+                return _single_line(f"刚看到这条资料，有点想丢给你看一眼。 {link}", 220)
             return ""
         title = title.strip(" ，。！？；：、,.!?;:|｜")
         if not title:
+            if link:
+                if "bilibili.com" in link:
+                    return _single_line(f"刚刷到这个 B站视频，有点想丢给你看一眼。 {link}", 220)
+                return _single_line(f"刚看到这条资料，有点想丢给你看一眼。 {link}", 220)
             return ""
-        return _single_line(f"外部分享偏离来源时的参考意图：低压提到刚看到的内容“{title}”，像日常分享一样递给对方。", 180)
+        if self._looks_like_internal_provider_error_text(title):
+            return ""
+        if "bilibili.com" in link or re.search(r"\bBV[0-9A-Za-z]{8,16}\b", source):
+            base = f"刚刷到 B站《{title}》，这个标题有点想丢给你看一眼。"
+        elif any(token in source for token in ("新闻阅读线索", "selected_source", "摘要重点", "新闻")):
+            base = f"刚看到《{title}》，有点想丢给你看一眼。"
+        elif any(token in source for token in ("网页探索线索", "搜索词", "参考来源", "source_url")):
+            base = f"刚查到《{title}》这条资料，有点想丢给你看一眼。"
+        else:
+            base = f"刚看到《{title}》，有点想丢给你看一眼。"
+        if link:
+            base = f"{base} {link}"
+        return _single_line(base, 220)
 
     def _strip_proactive_motive_leak_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -2400,8 +2641,193 @@ class ProactiveMessageMixin:
         markers = (
             "隐私", "泄露", "越界", "风险", "危险", "敏感", "违规", "骚扰", "威胁",
             "其他私聊", "朋友私聊", "混入", "承诺工具", "承诺发图", "承诺语音", "承诺查询",
+            "系统动作", "发送状态", "状态汇报", "工具执行", "工具结果", "工具回执",
+            "执行回执", "发送回执", "系统回执", "不是角色真正",
         )
         return any(marker in text for marker in markers)
+
+    def _balanced_proactive_defer_release_reason(
+        self,
+        user: dict[str, Any],
+        *,
+        note: str = "",
+        now: float | None = None,
+    ) -> str:
+        if not isinstance(user, dict):
+            return ""
+        note_text = _single_line(note, 120)
+        generic_defer = any(
+            token in note_text
+            for token in ("刚结束", "稍后", "稍候", "时机", "自然", "突兀", "间隔", "不合适")
+        )
+        if not generic_defer:
+            return ""
+        today = _today_key()
+        sent_today = _safe_int(user.get("sent_today"), 0) if str(user.get("sent_day") or "") == today else 0
+        if sent_today > 0:
+            return ""
+        last_sent_at = max(
+            _safe_float(user.get("last_proactive_sent_at"), 0),
+            _safe_float(user.get("last_sent"), 0),
+        )
+        if last_sent_at > 0 and datetime.fromtimestamp(last_sent_at).strftime("%Y-%m-%d") == today:
+            return ""
+        check_now = _now_ts() if now is None else now
+        now_dt = datetime.fromtimestamp(check_now)
+        if now_dt.hour * 60 + now_dt.minute < 10 * 60 + 30:
+            return ""
+        idle_getter = getattr(self, "_effective_user_idle_minutes", None)
+        try:
+            idle_minutes = idle_getter(user) if callable(idle_getter) else _safe_int(getattr(self, "idle_minutes", 20), 20)
+        except Exception:
+            idle_minutes = _safe_int(getattr(self, "idle_minutes", 20), 20)
+        recent_private_at = max(
+            _safe_float(user.get("last_user_message_at"), 0),
+            _safe_float(user.get("last_private_seen"), 0),
+        )
+        if recent_private_at > 0 and check_now - recent_private_at < max(10, min(60, idle_minutes)) * 60:
+            return ""
+        return "今日尚无主动且候选非硬风险，标准强度低频放行"
+
+    @staticmethod
+    def _proactive_review_elapsed_text(seconds: float) -> str:
+        if seconds < 0:
+            return "未知"
+        if seconds < 90:
+            return "刚刚"
+        if seconds < 3600:
+            return f"约{max(1, int(seconds // 60))}分钟"
+        if seconds < 86400:
+            return f"约{max(1, int(seconds // 3600))}小时"
+        return f"约{max(1, int(seconds // 86400))}天"
+
+    def _format_proactive_review_runtime_context(self, user: dict[str, Any], *, now: float | None = None) -> str:
+        check_now = _now_ts() if now is None else now
+        now_dt = datetime.fromtimestamp(check_now)
+        today = _today_key()
+        sent_today = _safe_int(user.get("sent_today"), 0) if str(user.get("sent_day") or "") == today else 0
+        last_sent_at = max(
+            _safe_float(user.get("last_proactive_sent_at"), 0),
+            _safe_float(user.get("last_sent"), 0),
+        )
+        activity_getter = getattr(self, "_latest_private_user_activity_ts", None)
+        try:
+            last_private_at = activity_getter(user) if callable(activity_getter) else 0
+        except Exception:
+            last_private_at = 0
+        if last_private_at <= 0:
+            last_private_at = max(
+                _safe_float(user.get("last_user_message_at"), 0),
+                _safe_float(user.get("last_private_seen"), 0),
+            )
+        idle_getter = getattr(self, "_effective_user_idle_minutes", None)
+        interval_getter = getattr(self, "_effective_user_min_interval_minutes", None)
+        try:
+            idle_minutes = idle_getter(user) if callable(idle_getter) else _safe_int(getattr(self, "idle_minutes", 20), 20)
+        except Exception:
+            idle_minutes = _safe_int(getattr(self, "idle_minutes", 20), 20)
+        try:
+            min_interval = interval_getter(user) if callable(interval_getter) else _safe_int(getattr(self, "min_interval_minutes", 80), 80)
+        except Exception:
+            min_interval = _safe_int(getattr(self, "min_interval_minutes", 80), 80)
+        private_elapsed = check_now - last_private_at if last_private_at > 0 else -1
+        sent_elapsed = check_now - last_sent_at if last_sent_at > 0 else -1
+        return "\n".join(
+            part
+            for part in (
+                f"当前判定时间：{now_dt.strftime('%Y-%m-%d %H:%M')}",
+                f"今天已成功主动：{sent_today} 条",
+                f"距用户上次私聊活动：{self._proactive_review_elapsed_text(private_elapsed)}；普通主动要求空闲约 {max(0, int(idle_minutes))} 分钟",
+                f"距上次主动发送：{self._proactive_review_elapsed_text(sent_elapsed)}；普通主动最小间隔约 {max(0, int(min_interval))} 分钟",
+                f"上次主动内容：{_single_line(user.get('last_proactive_message'), 120)}" if user.get("last_proactive_message") else "",
+            )
+            if part
+        )
+
+    def _stale_proactive_review_defer_release_reason(
+        self,
+        user: dict[str, Any],
+        *,
+        note: str = "",
+        now: float | None = None,
+    ) -> str:
+        note_text = _single_line(note, 120)
+        if not note_text or not re.search(r"(早安|今早|早上|睡前|晚安)", note_text):
+            return ""
+        check_now = _now_ts() if now is None else now
+        now_minutes = datetime.fromtimestamp(check_now).hour * 60 + datetime.fromtimestamp(check_now).minute
+        if "睡前" in note_text or "晚安" in note_text:
+            stale_after = 9 * 60
+        else:
+            stale_after = 12 * 60
+        if now_minutes < stale_after:
+            return ""
+        recent_private_at = max(
+            _safe_float(user.get("last_user_message_at"), 0),
+            _safe_float(user.get("last_private_seen"), 0),
+        )
+        if recent_private_at > 0 and check_now - recent_private_at < 45 * 60:
+            return ""
+        return "复核理由沿用了过期早间/睡前语境，已改按当前运行态放行"
+
+    def _normalize_proactive_review_decision_policy(
+        self,
+        user: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        strength: str,
+        source: str = "model",
+    ) -> dict[str, Any]:
+        """Apply the final review policy after local/model judgement.
+
+        Local and model checks can identify risks or suggest edits, but this
+        policy layer owns whether a soft defer/drop is allowed to affect
+        scheduling. Hard safety blocks still pass through unchanged.
+        """
+        if not isinstance(payload, dict):
+            return {"decision": "send", "reason": "复核结果为空，按本地安全检查放行"}
+        decision = str(payload.get("decision") or "send").strip().lower()
+        if decision not in {"send", "rewrite", "defer", "drop"}:
+            decision = "send"
+        note = _single_line(payload.get("reason"), 120)
+        reviewed_text = str(payload.get("text") or "").strip()
+        hard_block = bool(payload.get("hard")) or self._proactive_review_hard_block_reason(note)
+        normalized = dict(payload)
+        normalized["decision"] = decision
+        if note:
+            normalized["reason"] = note
+        if decision in {"send", "rewrite"}:
+            return normalized
+        if hard_block:
+            normalized["hard"] = True
+            return normalized
+        if strength == "strict":
+            return normalized
+        if decision == "drop":
+            if strength == "balanced":
+                normalized["decision"] = "defer"
+                normalized["delay_minutes"] = max(45, _safe_int(normalized.get("delay_minutes"), 45, 30, 90))
+                normalized["reason"] = _single_line(f"{note or '复核偏保守'}；已按标准强度降级为延后", 120)
+                return normalized
+            normalized["decision"] = "rewrite" if reviewed_text else "send"
+            normalized["reason"] = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
+            return normalized
+        if decision == "defer":
+            if strength == "balanced":
+                release_reason = (
+                    self._stale_proactive_review_defer_release_reason(user, note=note)
+                    or self._balanced_proactive_defer_release_reason(user, note=note)
+                )
+                if release_reason:
+                    normalized["decision"] = "rewrite" if reviewed_text else "send"
+                    normalized["reason"] = _single_line(f"{note or '复核偏保守'}；{release_reason}", 120)
+                    return normalized
+                normalized["reason"] = note or "标准强度保留具体延后建议"
+                return normalized
+            normalized["decision"] = "rewrite" if reviewed_text else "send"
+            normalized["reason"] = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
+            return normalized
+        return normalized
 
     async def _review_proactive_message_send_decision(
         self,
@@ -2428,7 +2854,9 @@ class ProactiveMessageMixin:
             topic=topic,
             action_context=review_context,
         )
-        if local.get("decision") in {"drop", "defer"} and (strength != "lenient" or bool(local.get("hard"))):
+        local_decision = str(local.get("decision") or "send").strip().lower()
+        local_hard_block = bool(local.get("hard")) or self._proactive_review_hard_block_reason(_single_line(local.get("reason"), 120))
+        if local_decision in {"drop", "defer"} and local_hard_block:
             return local
         if local.get("decision") == "rewrite" and str(local.get("reference_text") or "").strip():
             rewritten_reference = await self._rewrite_reference_reply_with_persona(
@@ -2462,13 +2890,15 @@ class ProactiveMessageMixin:
                 }
         if local.get("decision") == "rewrite" and bool(local.get("hard")):
             return local
-        if not bool(getattr(self, "enable_response_self_review", True)):
+        if local_decision in {"drop", "defer"} and strength == "strict":
             return local
+        if not bool(getattr(self, "enable_response_self_review", True)):
+            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
         if mode not in {"local_only", "severe_only", "full"}:
             mode = "severe_only"
         if mode == "local_only":
-            return local
+            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
         intent_hint = self._format_proactive_generation_intent_hint(
             user,
@@ -2478,6 +2908,17 @@ class ProactiveMessageMixin:
             action_context=review_context,
         )
         proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
+        runtime_context = self._format_proactive_review_runtime_context(user)
+        local_context = "；".join(
+            part
+            for part in (
+                f"本地结论={local_decision or 'send'}",
+                f"说明={_single_line(local.get('reason'), 100)}" if local.get("reason") else "",
+                "硬风险=yes" if local_hard_block else "硬风险=no",
+                f"本地建议文本={_single_line(local.get('text'), 120)}" if local.get("text") else "",
+            )
+            if part
+        )
         prompt = f"""
 你是主动私聊发送前的价值复核模型。请判断候选主动消息是否适合现在进入对话。
 
@@ -2486,7 +2927,7 @@ class ProactiveMessageMixin:
 可选 decision：
 - send：适合现在发，text 留空。
 - rewrite：内容值得发，但需要改得更自然更短，text 填改写后的正文。
-- defer：现在时机不合适，但稍后可发，delay_minutes 填 30 到 90。
+- defer：仅当“当前运行态”显示用户刚私聊、当前话题明确冲突、候选和最近私聊直接撞车时使用，delay_minutes 填 30 到 90。
 - drop：没有发送价值、像回复空气、像承接刚刚不存在的新消息、太泛泛、容易打扰，直接取消。
 
 判断原则：
@@ -2495,6 +2936,9 @@ class ProactiveMessageMixin:
 - 如果只是“想你了/来看看你/忙不忙/吃了吗/辛苦了”且没有具体由头，通常 defer 或 drop。
 - 不要把内部动机、犹豫过程或发送理由写进正文，例如“本来想跟你说”“怕说太早”“绕了一圈还是来找你”；这类内容应 rewrite 成具体片段，或 drop。
 - 如果最近用户刚刚在聊正事或刚聊完，倾向 defer；如果候选本身没价值，drop。
+- 你不是调度器，不要因为“感觉稍后更自然/略显突兀/间隔近”就 defer；这种情况应优先 rewrite 成更低压，或者 send。
+- 必须以“当前判定时间”和“运行态”为准。不要沿用旧历史里的“早安、今早、睡前、晚安刚结束”等标签当作当前理由。
+- 如果要 defer，reason 必须说清楚当前仍然不适合的真实原因；如果只是旧的早间/睡前聊天已经过了很久，不要再用“刚结束早安/今早/睡前闲聊”作为理由。
 - 候选消息必须贴合“本轮主动来源”和“内在约束”：分享型要有分享落点，关心型要低压，续接型要有真实来源，虚由头要短。
 - 时间优先级：当前真实时间和最近私聊记录高于旧记忆。旧天气、通勤、身体状态可以作为回想、余波、吐槽或类比出现，但不要强行改写成今天刚发生。
 - 如果候选提到旧天气、通勤或身体状态，先判断它是否自然；只有在明显和当前时段、最近私聊矛盾到会误导用户时，才 rewrite。不要因为出现天气/通勤词就 drop。
@@ -2503,6 +2947,12 @@ class ProactiveMessageMixin:
 
 【最近私聊记录】
 {history or "（无可用历史）"}
+
+【当前运行态】
+{runtime_context}
+
+【本地前置检查】
+{local_context or "本地检查通过"}
 
 【本轮主动来源】
 reason={reason or "check_in"}；action={action or "message"}；topic={_single_line(topic, 80) or "无"}；motive={_single_line(motive, 120) or "无"}；summary={_single_line(action_summary, 80) or "无"}
@@ -2528,17 +2978,17 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         )
         payload = self._parse_json_object(raw)
         if not isinstance(payload, dict):
-            return local
+            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         decision = str(payload.get("decision") or "").strip().lower()
         if decision not in {"send", "rewrite", "defer", "drop"}:
-            return local
+            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         reviewed_text = str(payload.get("text") or "").strip()
         delay_minutes = _safe_int(payload.get("delay_minutes"), 45, 30, 90)
         note = _single_line(payload.get("reason"), 120)
         original_decision = decision
         if decision == "rewrite":
             if not reviewed_text:
-                return local
+                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             reviewed_text = self._sanitize_action_boundaries(
                 self._sanitize_proactive_text(reviewed_text),
                 reason=reason,
@@ -2548,7 +2998,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             )
             reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
             if not reviewed_text:
-                return local
+                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if self._framework_agent_meta_summary_leak(reviewed_text):
                 return {
                     "decision": "drop",
@@ -2557,24 +3007,24 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     "reason": "主动候选疑似工具循环/内部发送摘要泄漏",
                 }
             if len(reviewed_text) > max(len(text) + 60, 240):
-                return local
+                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
-                return local
-        if decision in {"defer", "drop"} and strength != "strict":
-            hard_block = self._proactive_review_hard_block_reason(note)
-            if decision == "drop" and strength == "balanced" and not hard_block:
-                decision = "defer"
-                delay_minutes = max(45, delay_minutes)
-                note = _single_line(f"{note or '复核偏保守'}；已按标准强度降级为延后", 120)
-            elif strength == "lenient" and not hard_block:
-                if reviewed_text:
-                    decision = "rewrite"
-                else:
-                    decision = "send"
-                note = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
-            elif decision == "drop" and not hard_block:
-                decision = "defer"
-                note = _single_line(f"{note or '复核偏保守'}；已降级为延后", 120)
+                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+        normalized_payload = self._normalize_proactive_review_decision_policy(
+            user,
+            {
+                "decision": decision,
+                "text": reviewed_text,
+                "delay_minutes": delay_minutes,
+                "reason": note,
+            },
+            strength=strength,
+            source="model",
+        )
+        decision = str(normalized_payload.get("decision") or decision).strip().lower()
+        reviewed_text = str(normalized_payload.get("text") or reviewed_text or "").strip()
+        delay_minutes = _safe_int(normalized_payload.get("delay_minutes"), delay_minutes, 30, 90)
+        note = _single_line(normalized_payload.get("reason") or note, 120)
         if decision == "send" and str(local.get("decision") or "") == "rewrite" and str(local.get("text") or "").strip():
             reviewed_text = str(local.get("text") or "").strip()
             decision = "rewrite"
@@ -2648,6 +3098,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 continue
             if self._is_proactive_delivery_receipt_text(line):
                 continue
+            if self._looks_like_internal_provider_error_text(line):
+                continue
             kept.append(line)
         cleaned = "\n".join(kept).strip().strip('"').strip("'")
         cleaned = cleaned.replace("（图片已送达）", "").replace("(图片已送达)", "")
@@ -2657,6 +3109,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         else:
             cleaned = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        if self._looks_like_internal_provider_error_text(cleaned):
+            return ""
         return cleaned[:260]
 
     async def _generate_voice_note_via_framework(
@@ -4756,12 +5210,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "single character",
             "daily outfit selfie",
             "selfie outfit photo",
+            "non-mirror handheld selfie or natural environmental outfit portrait",
             "solo",
             "visible face",
             "complete head and hair",
             "clear eyes",
             "natural expression",
-            "upper body to three-quarter body portrait",
+            "upper body to three-quarter body portrait, not a full-length mirror shot",
             "centered composition",
             "1:1 square cover composition",
             "safe margins around head and body",
@@ -4791,6 +5246,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "body only",
             "outfit only",
             "back view",
+            "mirror selfie",
+            "full-length mirror selfie",
+            "full body mirror shot",
+            "standing in front of a mirror",
+            "dressing room mirror",
+            "phone covering face",
             "cut off face",
             "bad hands",
             "extra fingers",
@@ -5011,6 +5472,38 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return f"path={_single_line(path_text, 120)} exists=unknown size=-"
 
     def _photo_generation_backend_config_summary(self) -> str:
+        configured_endpoints = getattr(self, "external_image_api_endpoints", [])
+        if isinstance(configured_endpoints, list) and configured_endpoints:
+            queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
+            endpoints: list[dict[str, Any]] = []
+            if callable(queue_getter):
+                try:
+                    endpoints = [
+                        endpoint
+                        for endpoint in queue_getter(include_incomplete=True, include_disabled=True)
+                        if isinstance(endpoint, dict)
+                    ]
+                except Exception:
+                    endpoints = []
+            endpoint_bits = []
+            for index, endpoint in enumerate(endpoints[:6]):
+                ready = not bool(self._external_image_api_endpoint_unavailable_note(endpoint))
+                endpoint_bits.append(
+                    f"{index + 1}:{_single_line(endpoint.get('name') or endpoint.get('model'), 40) or '-'}"
+                    f"/{_single_line(endpoint.get('platform'), 20) or 'auto'}"
+                    f"/{'ready' if ready else 'unready'}"
+                )
+            return (
+                f"preferred={_single_line(getattr(self, 'photo_generation_backend', ''), 30) or 'auto'} "
+                f"comfyui={self._comfyui_photo_available()} "
+                f"sdgen={self._sdgen_photo_available()} "
+                f"external={self._external_photo_available()} "
+                f"external_queue={len(endpoints)} "
+                f"external_queue_items={';'.join(endpoint_bits) or '-'} "
+                f"backup_note={_single_line(self._backup_external_photo_unavailable_note(), 80) or '-'} "
+                f"tool_call={self._custom_tool_photo_available()} "
+                f"tool_name={_single_line(getattr(self, 'custom_photo_tool_name', ''), 80) or '-'}"
+            )
         external_base = _single_line(self._normalized_external_image_api_base_url(), 120)
         if external_base:
             external_base = re.sub(r"([?&](?:key|token|access_token|api_key)=)[^&]+", r"\1***", external_base, flags=re.I)
@@ -5030,7 +5523,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             f"backup_platform={_single_line(getattr(self, 'backup_external_image_api_platform', ''), 30) or '-'} "
             f"backup_model={_single_line(getattr(self, 'backup_external_image_api_model', ''), 80) or '-'} "
             f"backup_base={backup_base or '-'} "
-            f"backup_note={_single_line(self._backup_external_photo_unavailable_note(), 80) or '-'}"
+            f"backup_note={_single_line(self._backup_external_photo_unavailable_note(), 80) or '-'} "
+            f"tool_call={self._custom_tool_photo_available()} "
+            f"tool_name={_single_line(getattr(self, 'custom_photo_tool_name', ''), 80) or '-'}"
         )
 
     def _record_recent_photo_generation(
@@ -5201,9 +5696,108 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "Current selfie scene constraint: "
             f"{outfit_hint}; "
             f"place the selfie in the current schedule/location context: {scene_hint}; "
-            "avoid studio backdrops, unrelated bedrooms, default empty rooms, or locations that conflict with the current schedule."
+            "avoid studio backdrops, unrelated bedrooms, default empty rooms, or locations that conflict with the current schedule; "
+            "unless the request explicitly asks for a mirror, avoid mirror selfies, full-length mirror shots, dressing-room mirrors, "
+            "and phone-covering-face compositions; prefer a handheld selfie or natural environmental portrait with upper-body to three-quarter framing."
         )
         return _single_line(f"{prompt}\n\n{extra}".strip(), 1800), scene_hint
+
+    @staticmethod
+    def _photo_generation_explicit_mirror_request(text: str) -> bool:
+        raw = _single_line(text, 1200)
+        if not raw:
+            return False
+        lowered = raw.lower()
+        detection_text = re.split(r"negative prompt\s*:", lowered, maxsplit=1, flags=re.I)[0]
+        positive_scan = re.sub(
+            r"(?:不要|避免|别|不许|禁止).{0,18}(?:镜前|对镜|镜中|镜子|全身镜|穿衣镜|试衣镜)",
+            " ",
+            detection_text,
+            flags=re.I,
+        )
+        positive_scan = re.sub(
+            r"(?:no|not|avoid|without)\s+(?:a\s+)?(?:mirror|mirror\s+selfie|full[-\s]?length\s+mirror|"
+            r"full[-\s]?body\s+mirror|mirror\s+shot|mirror\s+photo|mirror\s+portrait)[^,.;；。]*",
+            " ",
+            positive_scan,
+            flags=re.I,
+        )
+        positive_scan = re.sub(r"unless[^,.;；。]*mirror[^,.;；。]*", " ", positive_scan, flags=re.I)
+        if re.search(
+            r"镜前|对镜|镜中|镜子|全身镜|穿衣镜|试衣镜|\bmirror\b|looking\s+in\s+the\s+mirror|in\s+front\s+of\s+(?:a\s+)?mirror",
+            positive_scan,
+            flags=re.I,
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _append_photo_negative_terms(prompt_text: str, terms: list[str], *, limit: int = 1800) -> str:
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            return ""
+        existing = prompt.lower()
+        missing = [term for term in terms if term and term.lower() not in existing]
+        if not missing:
+            return _single_line(prompt, limit)
+        suffix = ", ".join(missing)
+        if re.search(r"negative prompt\s*:", prompt, flags=re.I):
+            prompt = prompt.rstrip().rstrip(".")
+            return _single_line(f"{prompt}, {suffix}.", limit)
+        return _single_line(f"{prompt}. Negative prompt: {suffix}.", limit)
+
+    def _sanitize_unrequested_mirror_selfie_prompt(
+        self,
+        prompt_text: str,
+        *,
+        context_text: str = "",
+        limit: int = 1800,
+    ) -> str:
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            return ""
+        if self._photo_generation_explicit_mirror_request(context_text):
+            return _single_line(prompt, limit)
+        replacements = (
+            (r"\bfull[-\s]?length\s+mirror\s+(?:selfie|shot|photo|portrait)\b", "natural upper-body to three-quarter portrait"),
+            (r"\bfull[-\s]?body\s+mirror\s+(?:selfie|shot|photo|portrait)\b", "natural upper-body to three-quarter portrait"),
+            (r"\bmirror\s+(?:selfie|shot|photo|portrait)\b", "handheld selfie or natural environmental portrait"),
+            (r"\bstanding\s+in\s+front\s+of\s+(?:a\s+)?mirror\b", "standing naturally in the current location"),
+            (r"\bdressing[-\s]?room\s+mirror\b", "current-location background"),
+            (r"\bphone\s+covering\s+(?:the\s+)?face\b", "visible face"),
+            (r"全身镜自拍|全身对镜|对镜自拍|镜前自拍|镜中自拍|穿衣镜|试衣镜", "自然半身或四分之三身随手拍"),
+        )
+        cleaned = prompt
+        for pattern, replacement in replacements:
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*,\s*,+", ", ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;；")
+        negative_terms = [
+            "mirror selfie",
+            "full-length mirror selfie",
+            "full body mirror shot",
+            "dressing room mirror",
+            "phone covering face",
+        ]
+        return self._append_photo_negative_terms(cleaned or prompt, negative_terms, limit=limit)
+
+    def _apply_photo_generation_selfie_composition_guard(self, prompt_text: str, workflow_kind: str) -> str:
+        prompt = str(prompt_text or "").strip()
+        normalized = str(workflow_kind or "").strip().lower()
+        if normalized not in {"selfie", "portrait", "自拍", "人像"}:
+            return _single_line(prompt, 1800)
+        if self._photo_generation_explicit_mirror_request(prompt):
+            return _single_line(prompt, 1800)
+        guard = (
+            "Default selfie composition guard: no mirror selfie or full-length mirror shot unless explicitly requested; "
+            "keep the face visible, avoid phone covering face, use upper-body to three-quarter framing, and place the character naturally in the current scene."
+        )
+        merged = f"{prompt}\n\n{guard}".strip()
+        return self._append_photo_negative_terms(
+            merged,
+            ["mirror selfie", "full-length mirror selfie", "full body mirror shot", "dressing room mirror", "phone covering face"],
+            limit=1800,
+        )
 
     def _builtin_photo_generation_scene_presets(self) -> dict[str, str]:
         return {
@@ -5215,9 +5809,15 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 "cosplay themed selfie, keep the character's own face, hair color, eye color, and key visual traits, "
                 "clear costume theme, tasteful outfit, convention snapshot or room fitting photo feeling"
             ),
+            "日常穿搭": (
+                "daily outfit portrait without mirror, handheld selfie or natural environmental portrait, "
+                "upper-body to three-quarter framing, visible face, clear clothing layers and color palette, "
+                "location-appropriate background, no phone covering face, not body-only"
+            ),
             "镜前穿搭": (
-                "mirror outfit photo or half-body outfit portrait, clear clothes, jacket, accessories and color palette, "
-                "complete visible face, subject inside square safe area, not outfit-only, not clothing close-up"
+                "explicitly requested mirror outfit photo, half-body to three-quarter mirror composition, "
+                "clear clothes, jacket, accessories and color palette, complete visible face, no phone covering face, "
+                "subject inside square safe area, not full-length body-only, not outfit-only, not clothing close-up"
             ),
             "头像特写": (
                 "avatar-ready face close-up, clear hair, eyes and expression, clean background, centered face, enough margin, "
@@ -5285,8 +5885,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 names.append("表情包场景")
             elif re.search(r"\bcos\b|cosplay|角色扮演|扮成|神灯|制服|女仆|巫女|魔法少女", text, flags=re.I):
                 names.append("COS自拍")
-            elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "镜前", "outfit", "clothes", "jacket", "uniform", "skirt", "mirror")):
+            elif self._photo_generation_explicit_mirror_request(text):
                 names.append("镜前穿搭")
+            elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "outfit", "clothes", "jacket", "uniform", "skirt")):
+                names.append("日常穿搭")
             elif any(token in text for token in ("头像", "特写", "大头", "avatar", "close-up", "closeup", "profile picture")):
                 names.append("头像特写")
             else:
@@ -5320,6 +5922,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         return {
             "角色自拍": "casual character selfie",
             "COS自拍": "cosplay selfie",
+            "日常穿搭": "daily outfit portrait",
             "镜前穿搭": "mirror outfit photo",
             "头像特写": "avatar close-up",
             "房间日常": "indoor slice-of-life",
@@ -5339,12 +5942,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
     ) -> tuple[str, str, str]:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
+        prompt_text, preset_names = self._apply_photo_generation_scene_presets(prompt_text, workflow_kind)
         prompt_text, selfie_scene_hint = self._apply_photo_generation_selfie_schedule_scene_prompt(
             prompt_text,
             workflow_kind,
             allow_daily_outfit_reference=allow_daily_outfit_reference,
         )
-        prompt_text, preset_names = self._apply_photo_generation_scene_presets(prompt_text, workflow_kind)
+        prompt_text = self._apply_photo_generation_selfie_composition_guard(prompt_text, workflow_kind)
         prompt_text = self._apply_photo_generation_fixed_prompt(prompt_text)
         reference_image_path = _single_line(reference_image_path, 260)
         if not reference_image_path:
@@ -5440,6 +6044,22 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 session_key=session_key,
             )
             return finish("SDGen", image_path, note)
+        if preferred == "tool_call":
+            if not self._custom_tool_photo_available():
+                return finish("函数工具", "", "自定义生图函数工具不可用或未配置")
+            image_path, note = await self._run_custom_tool_photo_generation(
+                prompt_text,
+                session_key=session_key,
+                workflow_kind=workflow_kind,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
+            )
+            if image_path:
+                return finish("函数工具", image_path, note)
+            can_fallback = self._external_photo_available() or self._comfyui_photo_available() or (not reference_image_path and self._sdgen_photo_available())
+            if not can_fallback:
+                return finish("函数工具", "", note)
+            logger.info("[PrivateCompanion] 函数工具生图未成功,继续尝试可用后端回退: trace=%s note=%s", trace_id, _single_line(note, 180))
         if preferred == "external":
             if not self._external_photo_available():
                 return finish("在线图片 API", "", "在线图片 API 后端不可用或未配置")
@@ -5451,7 +6071,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             )
             if image_path:
                 return finish("在线图片 API", image_path, note)
-            can_fallback = self._backup_external_photo_available() or self._comfyui_photo_available() or (not reference_image_path and self._sdgen_photo_available())
+            can_fallback = self._comfyui_photo_available() or (not reference_image_path and self._sdgen_photo_available())
             if not can_fallback:
                 return finish("在线图片 API", "", note)
             logger.info("[PrivateCompanion] 固定在线图片 API 未成功,继续尝试可用后端回退: trace=%s note=%s", trace_id, _single_line(note, 180))
@@ -5558,7 +6178,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 输出 JSON：
 {{
   "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
-  "prompt": "English image-generation prompt in this form: Positive prompt: subject, appearance, outfit, scene, lighting, camera, composition, style. Negative prompt: cropped head, faceless, text, watermark, logo, nsfw. Do not write chat tone or explanations.",
+  "prompt": "English image-generation prompt in this form: Positive prompt: subject, appearance, outfit, scene, lighting, camera, composition, style. Negative prompt: cropped head, faceless, mirror selfie unless explicitly requested, full-length mirror shot, phone covering face, text, watermark, logo, nsfw. Do not write chat tone or explanations.",
   "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
 }}
 
@@ -5570,6 +6190,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 5. `prompt` 里要明确体现上面的风格要求。
 6. 不要包含 NSFW、隐私信息、用户真实电脑画面。
 7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
+8. 不要默认生成全身镜/对镜自拍/手机挡脸自拍；只有话题、动机或当前日程明确出现“镜前/对镜/镜子/全身镜/mirror”时才允许。普通穿搭图用当前地点里的手持自拍、半身或四分之三身环境人像。
 """.strip()
         text = await self._llm_call(
             prompt,
@@ -5597,6 +6218,22 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             image_prompt = (
                 f"社交媒体随手拍,当前背景：{current},温柔自然的生活感,"
                 f"清晰构图,柔和光线,{style_instruction}"
+            )
+        if kind == "selfie":
+            mirror_context = "；".join(
+                part
+                for part in (
+                    f"reason={reason}",
+                    f"topic={topic_hint}",
+                    f"motive={motive_hint}",
+                    f"schedule={self._format_plan_item_for_prompt(current_item)}",
+                )
+                if _single_line(part, 260)
+            )
+            image_prompt = self._sanitize_unrequested_mirror_selfie_prompt(
+                image_prompt,
+                context_text=mirror_context,
+                limit=900,
             )
         if not caption:
             caption = "今天看到一个很适合拍下来分享的小画面。"
@@ -5945,6 +6582,179 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         except Exception as e:
             logger.warning(f"[PrivateCompanion] SDGen 生图失败: {e}", exc_info=True)
             return "", str(e)
+
+    async def _run_custom_tool_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        workflow_kind: str = "text2img",
+        reference_image_path: str = "",
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        handler = self._find_custom_photo_tool_handler()
+        if handler is None:
+            return "", "未找到配置的生图函数工具"
+        prompt_param = _single_line(getattr(self, "custom_photo_tool_prompt_param", "prompt"), 60) or "prompt"
+        kind_param = _single_line(getattr(self, "custom_photo_tool_kind_param", ""), 60)
+        reference_param = _single_line(getattr(self, "custom_photo_tool_reference_param", ""), 60)
+        extra_params_text = _single_line(getattr(self, "custom_photo_tool_extra_params", ""), 2000)
+        tool_name = _single_line(getattr(self, "custom_photo_tool_name", ""), 120)
+        kwargs: dict[str, Any] = {prompt_param: prompt_text}
+        if kind_param:
+            kwargs[kind_param] = workflow_kind
+        if reference_param and reference_image_path:
+            kwargs[reference_param] = reference_image_path
+        if extra_params_text:
+            try:
+                extra = json.loads(extra_params_text)
+                if isinstance(extra, dict):
+                    for ek, ev in extra.items():
+                        if ek not in kwargs:
+                            kwargs[ek] = ev
+            except Exception:
+                logger.warning("[PrivateCompanion] 自定义生图工具额外参数解析失败,已忽略: tool=%s", _single_line(tool_name, 80))
+        event = None
+        try:
+            message_obj = AstrBotMessage()
+            message_obj.type = MessageType.GROUP_MESSAGE
+            message_obj.self_id = str(session_key or "custom_tool")
+            message_obj.session_id = str(session_key or "custom_tool")
+            message_obj.message_id = f"custom_tool_{uuid.uuid4().hex[:12]}"
+            message_obj.sender = MessageMember(user_id=str(session_key or "custom_tool"))
+            message_obj.message = []
+            message_obj.message_str = ""
+            message_obj.raw_message = None
+            message_obj.timestamp = int(time.time())
+            event = AstrMessageEvent("", message_obj, None, message_obj.session_id)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 构造自定义工具事件失败: %s", _single_line(exc, 160))
+        if event is None:
+            return "", "无法为函数工具构造事件上下文"
+        logger.info(
+            "[PrivateCompanion] 自定义工具生图提交: tool=%s session=%s kind=%s prompt_chars=%s reference=%s params=%s",
+            _single_line(tool_name, 80),
+            _single_line(session_key, 80),
+            _single_line(workflow_kind, 30),
+            len(str(prompt_text or "")),
+            bool(reference_image_path),
+            list(kwargs.keys()),
+        )
+        try:
+            result = await handler(event, **kwargs)
+        except TypeError:
+            try:
+                result = await handler(event=event, **kwargs)
+            except Exception as exc:
+                logger.warning("[PrivateCompanion] 自定义工具生图调用失败(keyword): %s", _single_line(exc, 200))
+                return "", f"函数工具调用失败：{_single_line(exc, 160)}"
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 自定义工具生图调用失败: %s", _single_line(exc, 200))
+            return "", f"函数工具调用失败：{_single_line(exc, 160)}"
+        result_text = str(result or "") if not isinstance(result, str) else result
+        if not result_text.strip():
+            return "", "函数工具返回空结果"
+        image_path, parse_note = await self._parse_custom_tool_photo_result(result_text, session_key=session_key)
+        if image_path:
+            logger.info(
+                "[PrivateCompanion] 自定义工具生图完成: tool=%s path=%s note=%s result_preview=%s",
+                _single_line(tool_name, 80),
+                _single_line(image_path, 180),
+                _single_line(parse_note, 120),
+                _single_line(result_text, 180),
+            )
+            return image_path, f"ok ({_single_line(tool_name, 60)})"
+        logger.info(
+            "[PrivateCompanion] 自定义工具生图未解析到图片: tool=%s result_preview=%s",
+            _single_line(tool_name, 80),
+            _single_line(result_text, 220),
+        )
+        return "", f"函数工具返回结果未包含可识别的图片路径或数据：{_single_line(result_text, 160)}"
+
+    async def _parse_custom_tool_photo_result(
+        self,
+        result_text: str,
+        *,
+        session_key: str,
+    ) -> tuple[str, str]:
+        text = str(result_text or "").strip()
+        if not text:
+            return "", "结果为空"
+        json_data: Any = None
+        try:
+            json_data = json.loads(text)
+        except Exception:
+            pass
+        if isinstance(json_data, dict):
+            for key in ("image_path", "path", "file_path", "file", "image", "image_url", "url", "image_base64", "base64", "data"):
+                val = json_data.get(key)
+                if not val:
+                    continue
+                val_str = str(val).strip()
+                if not val_str:
+                    continue
+                resolved, note = await self._resolve_custom_tool_image_candidate(val_str, session_key=session_key)
+                if resolved:
+                    return resolved, note
+            for val in json_data.values():
+                if not isinstance(val, str):
+                    continue
+                resolved, note = await self._resolve_custom_tool_image_candidate(val, session_key=session_key)
+                if resolved:
+                    return resolved, note
+        url_matches = re.findall(r'https?://[^\s"\'<>\]\\]+', text)
+        for url in url_matches:
+            resolved, note = await self._resolve_custom_tool_image_candidate(url, session_key=session_key)
+            if resolved:
+                return resolved, note
+        path_matches = re.findall(r'(?:[/\\][A-Za-z]:[\\/]|[A-Za-z]:[\\/]|/[\w\-./]+|[\w\-./]+\.(?:png|jpg|jpeg|webp|gif|bmp))', text)
+        for path_str in path_matches:
+            resolved, note = await self._resolve_custom_tool_image_candidate(path_str, session_key=session_key)
+            if resolved:
+                return resolved, note
+        b64_match = re.search(r'(?:data:image/[a-z]+;base64,)?([A-Za-z0-9+/]{256,}={0,2})', text)
+        if b64_match:
+            b64_data = b64_match.group(1)
+            try:
+                image_bytes = base64.b64decode(b64_data)
+                if image_bytes and len(image_bytes) > 100:
+                    path = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=".png")
+                    if path:
+                        return path, "base64 已保存"
+            except Exception:
+                pass
+        return "", "未找到可识别的图片"
+
+    async def _resolve_custom_tool_image_candidate(
+        self,
+        candidate: str,
+        *,
+        session_key: str,
+    ) -> tuple[str, str]:
+        text = str(candidate or "").strip().strip('"').strip("'").strip()
+        if not text or len(text) < 3:
+            return "", "候选为空"
+        if text.lower().startswith(("http://", "https://")):
+            path, note = await self._download_external_image_url(text, session_key=session_key)
+            return path, note
+        try:
+            path = Path(text)
+            if path.exists() and path.is_file():
+                size = path.stat().st_size
+                if size > 100:
+                    return str(path), "本地文件"
+        except Exception:
+            pass
+        if re.match(r'^[A-Za-z0-9+/]{256,}={0,2}$', text):
+            try:
+                image_bytes = base64.b64decode(text)
+                if image_bytes and len(image_bytes) > 100:
+                    path = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=".png")
+                    if path:
+                        return path, "base64 已保存"
+            except Exception:
+                pass
+        return "", "候选不可用"
 
     def _resolved_external_image_api_platform(self) -> str:
         normalizer = getattr(self, "_normalize_external_image_api_platform", None)
@@ -7184,6 +7994,124 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         """Return parsed custom headers for the currently active (primary or backup) image API."""
         return self._parse_custom_headers(getattr(self, "external_image_api_custom_headers", ""))
 
+    def _external_image_api_runtime_keys(self) -> tuple[str, ...]:
+        return (
+            "external_image_api_platform",
+            "external_image_api_base_url",
+            "external_image_api_key",
+            "external_image_api_model",
+            "external_image_api_size",
+            "external_image_api_timeout_seconds",
+            "external_image_api_custom_headers",
+        )
+
+    def _legacy_external_image_api_endpoint(self, *, backup: bool = False) -> dict[str, Any]:
+        prefix = "backup_" if backup else ""
+        endpoint = {
+            "name": "备选在线 API" if backup else "主在线 API",
+            "enabled": bool(getattr(self, "enable_backup_external_image_api", False)) if backup else True,
+            "platform": getattr(self, f"{prefix}external_image_api_platform", "auto"),
+            "base_url": getattr(self, f"{prefix}external_image_api_base_url", ""),
+            "api_key": getattr(self, f"{prefix}external_image_api_key", ""),
+            "model": getattr(self, f"{prefix}external_image_api_model", ""),
+            "size": getattr(self, f"{prefix}external_image_api_size", "1024x1024"),
+            "timeout_seconds": getattr(self, f"{prefix}external_image_api_timeout_seconds", 180),
+            "custom_headers": getattr(self, f"{prefix}external_image_api_custom_headers", ""),
+        }
+        normalizer = getattr(self, "_normalize_external_image_api_endpoint", None)
+        return normalizer(endpoint, index=1 if backup else 0) if callable(normalizer) else endpoint
+
+    def _external_image_api_endpoint_label(self, endpoint: dict[str, Any], index: int = 0) -> str:
+        name = _single_line(endpoint.get("name"), 60) if isinstance(endpoint, dict) else ""
+        if name:
+            return name
+        model = _single_line(endpoint.get("model"), 60) if isinstance(endpoint, dict) else ""
+        return f"在线 API #{index + 1}" + (f"({model})" if model else "")
+
+    def _external_image_api_endpoint_signature(self, endpoint: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(endpoint.get("platform") or "auto").lower(),
+            str(endpoint.get("base_url") or "").strip().rstrip("/"),
+            str(endpoint.get("model") or "").strip(),
+            str(endpoint.get("api_key") or "").strip()[:12],
+        )
+
+    def _external_image_api_endpoint_queue(
+        self,
+        *,
+        include_incomplete: bool = False,
+        include_disabled: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalizer = getattr(self, "_normalize_external_image_api_endpoints", None)
+        configured = getattr(self, "external_image_api_endpoints", [])
+        configured = normalizer(configured) if callable(normalizer) else configured
+        raw_endpoints = list(configured or []) if isinstance(configured, list) else []
+        if not raw_endpoints:
+            raw_endpoints = [
+                self._legacy_external_image_api_endpoint(backup=False),
+                self._legacy_external_image_api_endpoint(backup=True),
+            ]
+        endpoints: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for endpoint in raw_endpoints[:12]:
+            if not isinstance(endpoint, dict):
+                continue
+            normalized = normalizer([endpoint]) if callable(normalizer) else [endpoint]
+            endpoint = normalized[0] if normalized else dict(endpoint)
+            if not include_disabled and not bool(endpoint.get("enabled", True)):
+                continue
+            if not include_incomplete and self._external_image_api_endpoint_unavailable_note(endpoint):
+                continue
+            signature = self._external_image_api_endpoint_signature(endpoint)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            endpoints.append(endpoint)
+        return endpoints
+
+    def _external_image_api_endpoint_unavailable_note(self, endpoint: dict[str, Any]) -> str:
+        if not isinstance(endpoint, dict):
+            return "invalid"
+        if not bool(endpoint.get("enabled", True)):
+            return "disabled"
+        missing = []
+        if not str(endpoint.get("base_url") or "").strip():
+            missing.append("base_url")
+        if not str(endpoint.get("api_key") or "").strip():
+            missing.append("api_key")
+        if not str(endpoint.get("model") or "").strip():
+            missing.append("model")
+        if missing:
+            return "missing_" + ",".join(missing)
+        checker = getattr(self, "_external_image_model_misconfiguration_note", None)
+        if not callable(checker):
+            return ""
+        old_values = {key: getattr(self, key, None) for key in self._external_image_api_runtime_keys()}
+        try:
+            self._apply_external_image_api_endpoint_runtime(endpoint)
+            note = checker()
+            return _single_line(note, 160) if note else ""
+        except Exception:
+            return ""
+        finally:
+            for key, value in old_values.items():
+                setattr(self, key, value)
+
+    def _apply_external_image_api_endpoint_runtime(self, endpoint: dict[str, Any]) -> None:
+        normalizer = getattr(self, "_normalize_external_image_api_platform", None)
+        platform = endpoint.get("platform", "auto")
+        setattr(
+            self,
+            "external_image_api_platform",
+            normalizer(platform) if callable(normalizer) else str(platform or "auto").strip().lower(),
+        )
+        setattr(self, "external_image_api_base_url", str(endpoint.get("base_url") or "").strip())
+        setattr(self, "external_image_api_key", str(endpoint.get("api_key") or "").strip())
+        setattr(self, "external_image_api_model", str(endpoint.get("model") or "").strip())
+        setattr(self, "external_image_api_size", str(endpoint.get("size") or "1024x1024").strip() or "1024x1024")
+        setattr(self, "external_image_api_timeout_seconds", _safe_int(endpoint.get("timeout_seconds"), 180, 20, 600))
+        setattr(self, "external_image_api_custom_headers", str(endpoint.get("custom_headers") or "").strip())
+
     async def _run_external_photo_generation_serial(
         self,
         prompt_text: str,
@@ -7192,47 +8120,37 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         reference_image_path: str = "",
         image_size: str = "",
     ) -> tuple[str, str]:
-        primary_configured = bool(
-            getattr(self, "external_image_api_base_url", "")
-            and getattr(self, "external_image_api_key", "")
-            and getattr(self, "external_image_api_model", "")
-        )
-        primary_note = ""
-        if primary_configured:
-            image_path, primary_note = await self._run_external_photo_generation_once(
+        endpoints = self._external_image_api_endpoint_queue(include_incomplete=True)
+        if not endpoints:
+            return "", "在线图片 API 未配置完整"
+        notes: list[str] = []
+        for index, endpoint in enumerate(endpoints):
+            label = self._external_image_api_endpoint_label(endpoint, index)
+            unavailable = self._external_image_api_endpoint_unavailable_note(endpoint)
+            if unavailable:
+                note = f"{label}不可用：{unavailable}"
+                notes.append(note)
+                logger.info("[PrivateCompanion] 在线图片 API 端点跳过: endpoint=%s note=%s", label, _single_line(unavailable, 160))
+                continue
+            logger.info(
+                "[PrivateCompanion] 尝试在线图片 API 端点: index=%s/%s name=%s platform=%s model=%s",
+                index + 1,
+                len(endpoints),
+                _single_line(label, 80),
+                _single_line(endpoint.get("platform"), 30) or "auto",
+                _single_line(endpoint.get("model"), 80) or "-",
+            )
+            image_path, note = await self._run_external_photo_generation_with_endpoint(
+                endpoint,
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
                 image_size=image_size,
             )
             if image_path:
-                return image_path, primary_note
-        else:
-            primary_note = "主在线图片 API 未配置完整"
-
-        if self._backup_external_photo_available():
-            logger.info(
-                "[PrivateCompanion] 主在线图片 API 未成功,尝试备选在线图片 API: primary_note=%s backup_model=%s",
-                _single_line(primary_note, 180),
-                _single_line(getattr(self, "backup_external_image_api_model", ""), 80),
-            )
-            image_path, backup_note = await self._run_external_photo_generation_with_backup(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                image_size=image_size,
-            )
-            if image_path:
-                return image_path, f"{backup_note}；已使用备选在线图片 API"
-            return "", f"{primary_note}；备选在线图片 API 失败：{_single_line(backup_note, 220)}"
-        backup_note = self._backup_external_photo_unavailable_note()
-        if backup_note:
-            logger.info(
-                "[PrivateCompanion] 主在线图片 API 未成功,备选在线图片 API 不可用: primary_note=%s backup_note=%s",
-                _single_line(primary_note, 180),
-                _single_line(backup_note, 120),
-            )
-        return "", primary_note
+                return image_path, f"{note}；已使用{label}"
+            notes.append(f"{label}失败：{_single_line(note, 220)}")
+        return "", "；".join(notes[-6:]) or "在线图片 API 未返回可用图片"
 
     async def _run_external_photo_generation_with_backup(
         self,
@@ -7242,28 +8160,26 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         reference_image_path: str = "",
         image_size: str = "",
     ) -> tuple[str, str]:
-        keys = (
-            "external_image_api_platform",
-            "external_image_api_base_url",
-            "external_image_api_key",
-            "external_image_api_model",
-            "external_image_api_size",
-            "external_image_api_timeout_seconds",
-            "external_image_api_custom_headers",
+        return await self._run_external_photo_generation_with_endpoint(
+            self._legacy_external_image_api_endpoint(backup=True),
+            prompt_text,
+            session_key=session_key,
+            reference_image_path=reference_image_path,
+            image_size=image_size,
         )
-        old_values = {key: getattr(self, key, None) for key in keys}
-        backup_values = {
-            "external_image_api_platform": getattr(self, "backup_external_image_api_platform", "auto"),
-            "external_image_api_base_url": getattr(self, "backup_external_image_api_base_url", ""),
-            "external_image_api_key": getattr(self, "backup_external_image_api_key", ""),
-            "external_image_api_model": getattr(self, "backup_external_image_api_model", ""),
-            "external_image_api_size": getattr(self, "backup_external_image_api_size", "1024x1024"),
-            "external_image_api_timeout_seconds": getattr(self, "backup_external_image_api_timeout_seconds", 180),
-            "external_image_api_custom_headers": getattr(self, "backup_external_image_api_custom_headers", ""),
-        }
+
+    async def _run_external_photo_generation_with_endpoint(
+        self,
+        endpoint: dict[str, Any],
+        prompt_text: str,
+        *,
+        session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        old_values = {key: getattr(self, key, None) for key in self._external_image_api_runtime_keys()}
         try:
-            for key, value in backup_values.items():
-                setattr(self, key, value)
+            self._apply_external_image_api_endpoint_runtime(endpoint)
             return await self._run_external_photo_generation_once(
                 prompt_text,
                 session_key=session_key,
@@ -7877,6 +8793,26 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             "sent",
         }:
             return True
+        receipt_prefixes = (
+            "消息已发送给",
+            "消息发送给",
+            "已发送给",
+            "已经发送给",
+            "已向",
+            "已经向",
+        )
+        receipt_descriptors = (
+            "讲的是",
+            "说的是",
+            "内容是",
+            "内容就是",
+            "发的是",
+            "转述的是",
+            "分享的是",
+            "告诉的是",
+        )
+        if compact.startswith(receipt_prefixes) and any(token in compact for token in receipt_descriptors):
+            return True
         long_receipt_markers = (
             ("已经把", "转给"),
             ("已把", "转给"),
@@ -7985,6 +8921,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if has_media:
                 return {"decision": "send", "text": "", "reason": ""}
             return {"decision": "drop", "text": "", "reason": "主动行为没有产出可发送内容", "hard": True}
+        if self._looks_like_internal_provider_error_text(raw):
+            return {"decision": "drop", "text": "", "reason": "主动正文是模型/工具调用失败信息", "hard": True}
 
         kept_lines: list[str] = []
         removed_leak = False

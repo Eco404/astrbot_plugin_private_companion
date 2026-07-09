@@ -3469,6 +3469,13 @@ class ProactiveEngineMixin:
         return raw
 
     def _proactive_visible_text_preview(self, text: str, *, limit: int = 180) -> str:
+        meta_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if callable(meta_checker):
+            try:
+                if meta_checker(str(text or "")):
+                    return ""
+            except Exception:
+                pass
         cleaner = getattr(self, "_visible_text_without_tts_reading", None)
         if callable(cleaner):
             try:
@@ -3476,6 +3483,19 @@ class ProactiveEngineMixin:
             except Exception:
                 pass
         return _single_line(_strip_internal_message_blocks(text), limit)
+
+    def _proactive_audit_safe_note(self, note: Any, *, limit: int = 180) -> str:
+        text = _single_line(note, limit)
+        if not text:
+            return ""
+        meta_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if callable(meta_checker):
+            try:
+                if meta_checker(text):
+                    return "模型/供应商返回内部错误，原文已隐藏"
+            except Exception:
+                pass
+        return text
 
     def _proactive_audit_signature(self, item: dict[str, Any], *, bucket_seconds: int = 300) -> str:
         updated = _safe_float(item.get("updated_ts") or item.get("created_ts"), 0)
@@ -3560,7 +3580,7 @@ class ProactiveEngineMixin:
             "updated_ts": now,
             "user_id": str(user_id or user.get("user_id") or user.get("id") or ""),
             "status": _single_line(status, 32) or "unknown",
-            "note": _single_line(note, 180),
+            "note": self._proactive_audit_safe_note(note, limit=180),
             "source": self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or "proactive",
             "reason": self._normalize_legacy_proactive_text(reason or user.get("planned_proactive_reason"), limit=40),
             "action": _single_line(action or user.get("planned_proactive_action"), 60) or "message",
@@ -3622,7 +3642,7 @@ class ProactiveEngineMixin:
             item["status"] = _single_line(status, 32) or item.get("status") or "unknown"
             item["updated_ts"] = _now_ts()
             if note:
-                item["note"] = _single_line(note, 180)
+                item["note"] = self._proactive_audit_safe_note(note, limit=180)
             if text:
                 item["text_preview"] = self._proactive_visible_text_preview(text)
             if original_text:
@@ -5723,6 +5743,19 @@ class ProactiveEngineMixin:
     def _external_photo_available(self) -> bool:
         if not self.enable_photo_text_action:
             return False
+        configured = getattr(self, "external_image_api_endpoints", [])
+        has_configured_queue = isinstance(configured, list) and bool(configured)
+        queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
+        if callable(queue_getter):
+            try:
+                queue_available = bool(queue_getter())
+                if has_configured_queue:
+                    return queue_available
+                if queue_available:
+                    return True
+            except Exception:
+                if has_configured_queue:
+                    return False
         configured = bool(
             self.external_image_api_base_url
             and self.external_image_api_key
@@ -5743,6 +5776,28 @@ class ProactiveEngineMixin:
     def _backup_external_photo_unavailable_note(self) -> str:
         if not self.enable_photo_text_action:
             return "photo_action_disabled"
+        configured = getattr(self, "external_image_api_endpoints", [])
+        has_configured_queue = isinstance(configured, list) and bool(configured)
+        queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
+        endpoint_note = getattr(self, "_external_image_api_endpoint_unavailable_note", None)
+        if callable(queue_getter) and callable(endpoint_note):
+            try:
+                endpoints = queue_getter(include_incomplete=True)
+                if has_configured_queue:
+                    if len(endpoints) <= 1:
+                        return "missing_backup_endpoints"
+                    backup_endpoints = endpoints[1:]
+                    notes = [
+                        _single_line(endpoint_note(endpoint), 80)
+                        for endpoint in backup_endpoints
+                        if isinstance(endpoint, dict)
+                    ]
+                    if any(not note for note in notes):
+                        return ""
+                    return "all_backup_endpoints_unavailable" if notes else "missing_backup_endpoints"
+            except Exception:
+                if has_configured_queue:
+                    return "queue_error"
         if not bool(getattr(self, "enable_backup_external_image_api", False)):
             return "disabled"
         missing = []
@@ -5811,6 +5866,28 @@ class ProactiveEngineMixin:
             except Exception:
                 continue
         return False
+
+    def _find_custom_photo_tool_handler(self) -> Any | None:
+        tool_name = _single_line(getattr(self, "custom_photo_tool_name", ""), 120)
+        if not tool_name:
+            return None
+        try:
+            for handler in star_handlers_registry:
+                handler_name = str(getattr(handler, "handler_name", "") or "")
+                if handler_name == tool_name:
+                    callback = getattr(handler, "handler", None) or getattr(handler, "func", None)
+                    if callable(callback):
+                        return callback
+        except Exception:
+            pass
+        return None
+
+    def _custom_tool_photo_available(self) -> bool:
+        if not self.enable_photo_text_action:
+            return False
+        if not getattr(self, "custom_photo_tool_name", "").strip():
+            return False
+        return self._find_custom_photo_tool_handler() is not None
 
     def _local_photo_generation_load_state(self, *, force_refresh: bool = False) -> dict[str, Any]:
         now = _now_ts()
@@ -5888,7 +5965,7 @@ class ProactiveEngineMixin:
                 "每日 Token 软限额已暂缓主动生图"
                 f"（今日已用约 {self._today_llm_token_total()} Token；软限额 {self.daily_token_soft_limit}）"
             )
-        if self.photo_generation_backend == "external":
+        if self.photo_generation_backend in {"external", "tool_call"}:
             return ""
         if self.photo_generation_backend == "sdgen":
             local_available = self._sdgen_photo_available()
@@ -5935,6 +6012,9 @@ class ProactiveEngineMixin:
                 return False
         elif self.photo_generation_backend == "external":
             if not self._external_photo_available():
+                return False
+        elif self.photo_generation_backend == "tool_call":
+            if not self._custom_tool_photo_available():
                 return False
         else:
             comfyui_available = self._comfyui_photo_available() and not self._local_photo_generation_busy_state()
@@ -6813,4 +6893,3 @@ class ProactiveEngineMixin:
             f"转述：{_single_line(narrated, 180)}\n"
             f"最终消息：\n{text}{failure_note}"
         ), image_path, extra_components
-

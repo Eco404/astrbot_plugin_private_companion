@@ -776,6 +776,43 @@ class CoreStoreMixin:
             current = str(aliases.get(current) or "").strip()
         return current or str(user_id or "").strip()
 
+    @staticmethod
+    def _normalize_private_identity_id(value: Any, limit: int = 128) -> str:
+        text = _single_line(value, limit)
+        if not text:
+            return ""
+        lower = text.lower()
+        invalid_exact = {
+            "default",
+            "aiocqhttp",
+            "qq_official",
+            "weixin_official_account",
+            "dingtalk",
+            "friendmessage",
+            "groupmessage",
+            "friend_message",
+            "group_message",
+            "umo",
+            "uid",
+            "none",
+            "null",
+        }
+        if lower in invalid_exact:
+            return ""
+        if ":FriendMessage:" in text:
+            session_id = _single_line(text.rsplit(":FriendMessage:", 1)[-1], limit)
+            if not session_id or ":" in session_id:
+                return ""
+            session_lower = session_id.lower()
+            if session_lower in invalid_exact or re.search(r"(friendmessage|groupmessage|unified_msg_origin)", session_lower):
+                return ""
+            return session_id
+        if ":" in text:
+            return ""
+        if re.search(r"(friendmessage|groupmessage|unified_msg_origin)", lower):
+            return ""
+        return text
+
     def _merge_user_record_values(self, target: dict[str, Any], source: dict[str, Any], alias_id: str) -> None:
         additive_keys = {
             "inbound_count",
@@ -976,7 +1013,6 @@ class CoreStoreMixin:
         user.setdefault("manual_disabled", False)
         if (
             not created
-            and str(user_id).isdigit()
             and str(user_id) in set(self._configured_target_ids())
             and user.get("enabled") is False
             and not user.get("manual_enabled")
@@ -1028,7 +1064,7 @@ class CoreStoreMixin:
             return False
         if isinstance(user, dict) and user.get("manual_enabled"):
             return True
-        if not user_id or not user_id.isdigit():
+        if not user_id:
             return False
         if user_id in set(self._configured_target_ids()):
             return True
@@ -1041,20 +1077,20 @@ class CoreStoreMixin:
     def _known_bot_self_ids(self) -> set[str]:
         ids: set[str] = set()
         for attr in ("bot_self_id", "bot_user_id", "self_id"):
-            value = str(getattr(self, attr, "") or "").strip()
-            if value.isdigit():
+            value = self._normalize_private_identity_id(getattr(self, attr, ""))
+            if value:
                 ids.add(value)
         raw_ids = getattr(self, "bot_self_ids", None)
         if isinstance(raw_ids, (list, tuple, set)):
             for item in raw_ids:
-                value = str(item or "").strip()
-                if value.isdigit():
+                value = self._normalize_private_identity_id(item)
+                if value:
                     ids.add(value)
         platform_manager = getattr(getattr(self, "context", None), "platform_manager", None)
         for inst in list(getattr(platform_manager, "platform_insts", []) or []):
             for attr in ("client_self_id", "self_id", "bot_self_id", "bot_user_id"):
-                value = str(getattr(inst, attr, "") or "").strip()
-                if value.isdigit():
+                value = self._normalize_private_identity_id(getattr(inst, attr, ""))
+                if value:
                     ids.add(value)
         return ids
 

@@ -783,6 +783,19 @@ class IntegrationStatusMixin:
             return ""
         preferred = _single_line(getattr(self, "photo_generation_backend", ""), 30) or "auto"
         external_model = _single_line(getattr(self, "external_image_api_model", ""), 80)
+        configured_endpoints = getattr(self, "external_image_api_endpoints", [])
+        endpoint_queue: list[dict[str, Any]] = []
+        if isinstance(configured_endpoints, list) and configured_endpoints:
+            queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
+            if callable(queue_getter):
+                try:
+                    endpoint_queue = [
+                        endpoint
+                        for endpoint in queue_getter(include_incomplete=True, include_disabled=True)
+                        if isinstance(endpoint, dict)
+                    ]
+                except Exception:
+                    endpoint_queue = []
         platform = "openai"
         resolver = getattr(self, "_resolved_external_image_api_platform", None)
         if callable(resolver):
@@ -795,6 +808,8 @@ class IntegrationStatusMixin:
         comfyui_available = bool(getattr(self, "_comfyui_photo_available", lambda: False)())
         sdgen_available = bool(getattr(self, "_sdgen_photo_available", lambda: False)())
         external_available = bool(getattr(self, "_external_photo_available", lambda: False)())
+        tool_call_available = bool(getattr(self, "_custom_tool_photo_available", lambda: False)())
+        tool_call_name = _single_line(getattr(self, "custom_photo_tool_name", ""), 80)
 
         def comfyui_label() -> str:
             labels = []
@@ -806,6 +821,19 @@ class IntegrationStatusMixin:
             return f"ComfyUI{suffix}"
 
         def external_label() -> str:
+            if endpoint_queue:
+                ready_count = 0
+                note_getter = getattr(self, "_external_image_api_endpoint_unavailable_note", None)
+                for endpoint in endpoint_queue:
+                    if callable(note_getter):
+                        try:
+                            if not note_getter(endpoint):
+                                ready_count += 1
+                        except Exception:
+                            pass
+                first = endpoint_queue[0] if endpoint_queue else {}
+                first_model = _single_line(first.get("model"), 60) if isinstance(first, dict) else ""
+                return f"在线图片 API 队列 {ready_count}/{len(endpoint_queue)} 可用 / 优先 {first_model or '未填模型'}"
             prefix = "阿里云百炼" if platform == "bailian" else "在线图片 API"
             return f"{prefix} / {external_model or '未填模型'}"
 
@@ -815,6 +843,8 @@ class IntegrationStatusMixin:
             return comfyui_label()
         if preferred == "sdgen":
             return "SDGen"
+        if preferred == "tool_call":
+            return f"函数工具 / {tool_call_name or '未配置'}" if tool_call_available else f"函数工具（未找到 {tool_call_name or '未配置'}）"
         if external_available:
             return f"auto -> {external_label()}"
         if comfyui_available:

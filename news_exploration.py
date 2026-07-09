@@ -406,6 +406,23 @@ def _decode_news_response_text(
 class NewsExplorationMixin:
     """新闻阅读/网页探索"""
 
+    def _clean_bilibili_share_field(self, value: Any, limit: int = 160) -> str:
+        cleaner = getattr(self, "_clean_external_share_source_field", None)
+        if callable(cleaner):
+            try:
+                return cleaner(value, limit)
+            except Exception:
+                pass
+        text = _single_line(value, limit)
+        checker = getattr(self, "_looks_like_internal_provider_error_text", None)
+        if callable(checker):
+            try:
+                if checker(text):
+                    return ""
+            except Exception:
+                pass
+        return text
+
     def _external_event_pool(self) -> list[dict[str, Any]]:
         raw = self.data.setdefault("external_event_pool", [])
         if not isinstance(raw, list):
@@ -1076,20 +1093,26 @@ class NewsExplorationMixin:
         return []
 
     def _bilibili_memory_bvid(self, item: dict[str, Any]) -> str:
-        bvid = _single_line(item.get("bvid") or item.get("video_bvid"), 40)
+        bvid = self._clean_bilibili_share_field(item.get("bvid") or item.get("video_bvid"), 40)
         if bvid:
             return bvid
         text = str(item.get("text") or "")
+        checker = getattr(self, "_looks_like_internal_provider_error_text", None)
+        if callable(checker) and checker(text):
+            return ""
         match = re.search(r"\bBV[0-9A-Za-z]{8,16}\b", text)
         return _single_line(match.group(0), 40) if match else ""
 
     def _bilibili_memory_title(self, item: dict[str, Any]) -> str:
-        title = _single_line(item.get("video_title") or item.get("title"), 80)
+        title = self._clean_bilibili_share_field(item.get("video_title") or item.get("title"), 80)
         if title:
             return title
         text = str(item.get("text") or "")
+        checker = getattr(self, "_looks_like_internal_provider_error_text", None)
+        if callable(checker) and checker(text):
+            return ""
         match = re.search(r"《([^》]{1,80})》", text)
-        return _single_line(match.group(1), 80) if match else ""
+        return self._clean_bilibili_share_field(match.group(1), 80) if match else ""
 
     def _bilibili_memory_context_for_bvid(self, bvid: str, *, limit: int = 3) -> list[str]:
         safe_bvid = _single_line(bvid, 40)
@@ -1099,7 +1122,7 @@ class NewsExplorationMixin:
         for item in self._load_bilibili_recent_video_memories(limit=18):
             if self._bilibili_memory_bvid(item) != safe_bvid:
                 continue
-            text = _single_line(item.get("text"), 180)
+            text = self._clean_bilibili_share_field(item.get("text"), 180)
             if text and text not in contexts:
                 contexts.append(text)
             if len(contexts) >= limit:
@@ -1117,7 +1140,7 @@ class NewsExplorationMixin:
             title = self._bilibili_memory_title(item)
             if not bvid or not title:
                 continue
-            text = _single_line(item.get("text"), 220)
+            text = self._clean_bilibili_share_field(item.get("text"), 220)
             candidates.append({
                 "key": f"{bvid}:{_single_line(item.get('time'), 20)}:memory",
                 "bvid": bvid,
@@ -1143,8 +1166,8 @@ class NewsExplorationMixin:
         logs = self._load_bilibili_watch_log()
         if logs:
             for item in reversed(logs[-40:]):
-                bvid = _single_line(item.get("bvid"), 32)
-                title = _single_line(item.get("title"), 80)
+                bvid = self._clean_bilibili_share_field(item.get("bvid"), 32)
+                title = self._clean_bilibili_share_field(item.get("title"), 80)
                 if not bvid or not title:
                     continue
                 score = _safe_int(item.get("score"), 0, 0, 10)
@@ -1154,15 +1177,15 @@ class NewsExplorationMixin:
                 if key in seen:
                     continue
                 seen.add(key)
-                comment = _single_line(item.get("comment"), 120)
-                review = _single_line(item.get("review"), 180)
+                comment = self._clean_bilibili_share_field(item.get("comment"), 120)
+                review = self._clean_bilibili_share_field(item.get("review"), 180)
                 candidates.append({
                     "key": key,
                     "bvid": bvid,
                     "title": title,
-                    "up_name": _single_line(item.get("up_name"), 40),
+                    "up_name": self._clean_bilibili_share_field(item.get("up_name"), 40),
                     "score": score,
-                    "mood": _single_line(item.get("mood"), 24),
+                    "mood": self._clean_bilibili_share_field(item.get("mood"), 24),
                     "comment": comment,
                     "review": review,
                     "pic": _single_line(item.get("pic"), 240),
@@ -1189,8 +1212,8 @@ class NewsExplorationMixin:
         api = self._find_bilibili_memory_api()
         if api is None or not callable(getattr(api, "record", None)):
             return
-        bvid = _single_line(candidate.get("bvid"), 40)
-        title = _single_line(candidate.get("title"), 80)
+        bvid = self._clean_bilibili_share_field(candidate.get("bvid"), 40)
+        title = self._clean_bilibili_share_field(candidate.get("title"), 80)
         if not bvid or not title:
             return
         async def _record() -> None:

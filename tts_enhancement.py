@@ -1704,17 +1704,20 @@ TTS 朗读文本：
 
     def _configured_main_user_ids(self) -> set[str]:
         ids: set[str] = set()
-        for value in getattr(self, "target_user_ids", []) or []:
-            text = re.sub(r"\D+", "", str(value or ""))
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+
+        def add(raw: Any) -> None:
+            text = normalizer(raw) if callable(normalizer) else _single_line(raw, 128)
             if text:
                 ids.add(text)
+
+        for value in getattr(self, "target_user_ids", []) or []:
+            add(value)
         aliases = getattr(self, "private_user_aliases", {}) or {}
         if isinstance(aliases, dict):
             for key, value in aliases.items():
                 for raw in (key, value):
-                    text = re.sub(r"\D+", "", str(raw or ""))
-                    if text:
-                        ids.add(text)
+                    add(raw)
         return ids
 
     def _event_targets_main_user(self, event: Any) -> bool:
@@ -1722,7 +1725,8 @@ TTS 朗读文本：
         if not main_ids:
             return False
         try:
-            sender = re.sub(r"\D+", "", str(event.get_sender_id()))
+            normalizer = getattr(self, "_normalize_private_identity_id", None)
+            sender = normalizer(event.get_sender_id()) if callable(normalizer) else _single_line(event.get_sender_id(), 128)
         except Exception:
             sender = ""
         if sender and sender in main_ids:
