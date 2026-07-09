@@ -5843,13 +5843,16 @@ function setupGuideDailyResultHtml() {
   const planLabel = items.length ? `${items.length} 个日程点` : "粗日程无可展示条目";
   const detailLabel = currentSummary ? "当前时段已细化" : segments.length ? `已生成 ${segments.length} 个细化片段` : "当前时段未细化";
   const pending = Boolean(result.pending);
-  const statusClass = pending ? "is-warn" : currentSummary || segments.length || items.length ? "is-ok" : "is-warn";
-  const title = pending ? "已先生成兜底日程" : "日程生成完成";
-  const statusText = pending ? "正式日程仍在后台生成，首次配置可先继续" : "";
+  const detailPending = Boolean(result.detail_pending);
+  const detailError = String(result.detail_error || "").trim();
+  const statusClass = pending || detailPending || detailError ? "is-warn" : currentSummary || segments.length || items.length ? "is-ok" : "is-warn";
+  const title = pending ? "已先生成兜底日程" : detailPending ? "细化已转入后台" : "日程生成完成";
+  const statusText = pending ? "正式日程仍在后台生成，首次配置可先继续" : detailPending ? "当前细化仍在后台生成，可先继续" : "";
   return `
     <div class="setup-guide-daily-simple ${statusClass}">
       <b>${escapeHtml(title)}</b>
       <span>${escapeHtml([plan.date || "", planLabel, detailLabel, statusText].filter(Boolean).join(" · "))}</span>
+      ${detailError ? `<small>${escapeHtml(detailError)}</small>` : ""}
       ${currentSummary ? `<small>当前：${escapeHtml(currentSummary)}</small>` : ""}
       <details>
         <summary>查看详细日程和细化内容</summary>
@@ -6494,7 +6497,9 @@ async function runSetupGuideDailyGeneration(control = null) {
       daily_plan: result.plan || state.overview?.daily_plan || {},
     };
     rerenderSetupGuideOverlayPreserveScroll();
-    showToast(forceDetail ? "当前日程细化已生成" : "今日日程已生成");
+    if (forceDetail && result.detail_pending) showToast("当前细化已转入后台，可先继续配置");
+    else if (forceDetail && result.detail_error) showToast(result.detail_error, "error");
+    else showToast(forceDetail ? "当前日程细化已生成" : "今日日程已生成");
   } catch (error) {
     state.setupGuideDailyResult = { error: error.message || "请求失败" };
     rerenderSetupGuideOverlayPreserveScroll();
@@ -7153,7 +7158,9 @@ function renderHealthPanel() {
         : "创作行为未启用",
     },
   ];
-  $("#healthPanel").innerHTML = items.map((item) => `
+  const panel = $("#healthPanel");
+  if (!panel) return;
+  panel.innerHTML = items.map((item) => `
     <div class="health-item ${escapeHtml(item.level)}">
       <b>${escapeHtml(item.title)}</b>
       <span>${escapeHtml(item.text)}</span>
@@ -14027,12 +14034,12 @@ function renderModuleWorkbench(settings) {
     {
       title: "图片与语音",
       kicker: "媒体能力",
-      status: toBool(settings.enable_tts_enhancement) || toBool(settings.enable_private_image_enhancement) ? "可用" : "低干预",
-      tone: toBool(settings.enable_tts_enhancement) || toBool(settings.enable_private_image_enhancement) ? "ok" : "off",
+      status: toBool(settings.enable_tts_enhancement) || toBool(settings.enable_private_image_self_recognition) ? "可用" : "低干预",
+      tone: toBool(settings.enable_tts_enhancement) || toBool(settings.enable_private_image_self_recognition) ? "ok" : "off",
       body: "图片缓存、视觉摘要和 TTS 规则可以在这里快速查看；表情包识别不准时也能直接去缓存页整理。",
       meta: [
         toBool(settings.enable_tts_enhancement) ? `TTS ${settings.tts_voice_language || "默认"}` : "TTS 强化关闭",
-        toBool(settings.enable_private_image_enhancement) ? "图片转述增强开启" : "图片转述增强关闭",
+        toBool(settings.enable_private_image_self_recognition) ? "图片转述增强开启" : "图片转述增强关闭",
       ],
       actions: [
         ["image-cache", "管理图片缓存"],
@@ -19575,7 +19582,9 @@ async function generatePersonaStyleScenarios(button) {
   }
   const draft = collectPersonaStandardizationQuestionnaire();
   const questionnaire = {};
+  questionnaire.supplement_text = draft.supplement_text || "";
   personaStandardizationStyleHints.forEach(([key]) => { questionnaire[key] = draft[key] || ""; });
+  questionnaire.strength = draft.strength || "medium";
   const result = await runAction(
     () => postJson("/roleplay/persona_style_scenarios", {
       questionnaire,
@@ -19617,7 +19626,9 @@ async function retryPersonaStyleScenario(scenarioId, button) {
     return;
   }
   const questionnaire = {};
+  questionnaire.supplement_text = draft.supplement_text || "";
   personaStandardizationStyleHints.forEach(([key]) => { questionnaire[key] = draft[key] || ""; });
+  questionnaire.strength = draft.strength || "medium";
   const result = await runAction(
     () => postJson("/roleplay/persona_style_scenario_retry", {
       questionnaire,

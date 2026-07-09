@@ -5839,6 +5839,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         current_detail_text = ""
         generation_status = ""
         pending = False
+        detail_pending = False
+        detail_error = ""
         try:
             if generate_schedule:
                 plan, generation_status, pending = await self._setup_guide_generate_daily_plan_fast(timeout=timeout_seconds)
@@ -5853,10 +5855,36 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     plan = await self.plugin._ensure_daily_plan(force=False)
                     if not plan:
                         plan = await self.plugin._ensure_daily_plan(force=True)
-                if force_detail:
-                    detail = await self.plugin._ensure_detail_enhancement(force=True)
-                else:
-                    detail = await self.plugin._ensure_detail_enhancement(force=False)
+                detail_refiner = getattr(self.plugin, "_ensure_detail_enhancement", None)
+                if callable(detail_refiner):
+                    detail_timeout = max(3, min(60, timeout_seconds))
+                    detail_task = asyncio.create_task(detail_refiner(force=bool(force_detail)))
+
+                    def _consume_setup_detail_task(done_task: asyncio.Task) -> None:
+                        try:
+                            done_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "[PrivateCompanionPage] 首次配置后台日程细化失败: %s",
+                                self._single_line(exc, 180),
+                                exc_info=True,
+                            )
+
+                    detail_task.add_done_callback(_consume_setup_detail_task)
+                    try:
+                        detail = await asyncio.wait_for(asyncio.shield(detail_task), timeout=detail_timeout)
+                    except asyncio.TimeoutError:
+                        detail_pending = True
+                        detail_error = f"当前细化超过 {detail_timeout}s，已转入后台继续生成，可先继续配置。"
+                    except Exception as exc:
+                        detail_error = f"当前细化失败：{self._single_line(exc, 160)}"
+                        logger.warning(
+                            "[PrivateCompanionPage] 首次配置日程细化失败: %s",
+                            self._single_line(exc, 180),
+                            exc_info=True,
+                        )
 
             formatter = getattr(self.plugin, "_format_current_detail_view", None)
             if callable(formatter):
@@ -5882,6 +5910,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "daily_timeline": self._daily_timeline_summary(data),
                     "generation_status": generation_status,
                     "pending": pending,
+                    "detail_pending": detail_pending,
+                    "detail_error": detail_error,
                     "detail_skipped": bool(generate_schedule and not refine_schedule),
                 }
             )
@@ -6423,6 +6453,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         output_hint = self._multi_line(questionnaire.get("output"), 700) if isinstance(questionnaire, dict) else ""
         examples_hint = self._multi_line(questionnaire.get("examples"), 700) if isinstance(questionnaire, dict) else ""
         supplement_text = self._multi_line(questionnaire.get("supplement_text"), 5000) if isinstance(questionnaire, dict) else ""
+        strength = self._single_line(questionnaire.get("strength"), 40) if isinstance(questionnaire, dict) else ""
+        output_hint = self._multi_line(questionnaire.get("output"), 700) if isinstance(questionnaire, dict) else ""
+        examples_hint = self._multi_line(questionnaire.get("examples"), 700) if isinstance(questionnaire, dict) else ""
+        supplement_text = self._multi_line(questionnaire.get("supplement_text"), 5000) if isinstance(questionnaire, dict) else ""
         scenarios = [
             ("passive_unfulfilled_duty_admit", "passive_one_liner", "被指出未履行义务时的简短承认", "模板：A：“（某项日常义务）还没做。” 语气：简短、略带委屈。"),
             ("passive_reason_evasion", "passive_one_liner", "被追问具体原因时的推脱", "模板：B：“不知道诶。” 语气：回避、模糊。"),
@@ -6516,6 +6550,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     f"{self._single_line(option.get('id'), 4)}. {self._single_line(option.get('label'), 30)}：{self._single_line(option.get('text'), 120)}"
                 )
         style_hint = self._multi_line(questionnaire.get("speech"), 700) if isinstance(questionnaire, dict) else ""
+        output_hint = self._multi_line(questionnaire.get("output"), 700) if isinstance(questionnaire, dict) else ""
+        examples_hint = self._multi_line(questionnaire.get("examples"), 700) if isinstance(questionnaire, dict) else ""
+        supplement_text = self._multi_line(questionnaire.get("supplement_text"), 5000) if isinstance(questionnaire, dict) else ""
+        strength = self._single_line(questionnaire.get("strength"), 40) if isinstance(questionnaire, dict) else ""
         system_prompt = (
             "你是角色扮演对话风格校准助手。用户认为当前情景的三个候选都不够贴近，需要根据反馈重生成该情景。\n"
             "要求：\n"
@@ -6532,12 +6570,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             f"用户反馈/重生成建议：\n{feedback or '用户认为三个选项都不贴近，请在基础设定内拉开风格差异。'}\n\n"
             f"旧候选（不要照抄）：\n{chr(10).join(old_lines) or '无'}\n\n"
             f"用户初步说话偏好：\n{style_hint or '无'}\n\n"
+            f"输出约束偏好：\n{output_hint or '无'}\n\n"
+            f"示例与反例偏好：\n{examples_hint or '无'}\n\n"
+            f"用户补充资料/聊天记录（用于贴近用户实际给出的语气，不要原样复制）：\n{supplement_text or '无'}\n\n"
+            f"标准化强度：{strength or 'medium'}\n\n"
             f"基础设定稿：\n{source}"
         )
         return system_prompt, user_prompt
 
     def _persona_style_summary_prompt(self, base_template: str, evidence: list[Any], questionnaire: dict[str, Any]) -> tuple[str, str]:
         source = self._multi_line(base_template, 9000)
+        supplement_text = self._multi_line(questionnaire.get("supplement_text"), 5000) if isinstance(questionnaire, dict) else ""
         style_hint = self._multi_line(questionnaire.get("speech"), 700) if isinstance(questionnaire, dict) else ""
         output_hint = self._multi_line(questionnaire.get("output"), 700) if isinstance(questionnaire, dict) else ""
         examples_hint = self._multi_line(questionnaire.get("examples"), 700) if isinstance(questionnaire, dict) else ""

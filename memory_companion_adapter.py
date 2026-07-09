@@ -10,7 +10,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _missing_optional_model_dependency, _safe_int, _single_line
+from .helpers import _missing_optional_model_dependency, _safe_float, _safe_int, _single_line
 
 
 class MemoryCompanionAdapterMixin:

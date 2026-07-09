@@ -122,13 +122,17 @@ def _strip_internal_message_blocks(text: Any) -> str:
     return normalized
 
 
+_CHAT_SELF_CLOSING_TAG_ALLOWLIST = (
+    r"br|image|img|video|audio|record|file|at|face|emoji|reply|tts|pc[_-]?tts|timer"
+)
+
 _NONSTANDARD_SELF_CLOSING_TAG_PATTERN = re.compile(
-    r"<\s*(?!(?:br|image|video|audio|tts|pc[_-]?tts|timer)\b)"
+    rf"<\s*(?!(?:{_CHAT_SELF_CLOSING_TAG_ALLOWLIST})\b)"
     r"[A-Za-z][A-Za-z0-9_-]{0,31}(?:\s+[^<>\r\n]{0,160})?/\s*>",
     re.IGNORECASE,
 )
 _ESCAPED_NONSTANDARD_SELF_CLOSING_TAG_PATTERN = re.compile(
-    r"&lt;\s*(?!(?:br|image|video|audio|tts|pc[_-]?tts|timer)\b)"
+    rf"&lt;\s*(?!(?:{_CHAT_SELF_CLOSING_TAG_ALLOWLIST})\b)"
     r"[A-Za-z][A-Za-z0-9_-]{0,31}(?:\s+[^&\r\n]{0,160})?/\s*&gt;",
     re.IGNORECASE,
 )
