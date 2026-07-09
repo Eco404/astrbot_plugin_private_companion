@@ -430,7 +430,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.8.3",
+    "5.9.0",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -615,6 +615,12 @@ class PrivateCompanionPlugin(
         self.default_style = self._cfg_str(c, "default_style", "温柔", "温柔")
         reply_style_raw = _flat_get(c, "reply_style_prompt", None)
         self.reply_style_prompt = DEFAULT_REPLY_STYLE_PROMPT if reply_style_raw is None else str(reply_style_raw).strip()
+        self.enable_persona_voice_channels = self._cfg_bool(c, "enable_persona_voice_channels", True)
+        self.persona_conversation_voice_prompt = self._cfg_str(c, "persona_conversation_voice_prompt", "")
+        self.persona_creative_voice_prompt = self._cfg_str(c, "persona_creative_voice_prompt", "")
+        self.persona_planning_voice_prompt = self._cfg_str(c, "persona_planning_voice_prompt", "")
+        self.persona_inner_voice_prompt = self._cfg_str(c, "persona_inner_voice_prompt", "")
+        self.persona_proactive_voice_prompt = self._cfg_str(c, "persona_proactive_voice_prompt", "")
         self.worldview_adaptation_mode = self._cfg_str(c, "worldview_adaptation_mode", "auto", "auto")
         if self.worldview_adaptation_mode not in {"auto", "modern", "fantasy", "sci_fi", "custom", "off"}:
             self.worldview_adaptation_mode = "auto"
@@ -752,6 +758,7 @@ class PrivateCompanionPlugin(
         self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)
         self.enable_personality_iteration_experiment = self._cfg_bool(c, "enable_personality_iteration_experiment", False)
         self.enable_personality_iteration_auto_tune = self._cfg_bool(c, "enable_personality_iteration_auto_tune", False)
+        self.enable_persona_standardization_experiment = self._cfg_bool(c, "enable_persona_standardization_experiment", False)
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
@@ -1623,7 +1630,7 @@ class PrivateCompanionPlugin(
             self._save_data_sync()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
-    async def observe_recall_enhancement_events(self, event: AstrMessageEvent):
+    async def observe_recall_enhancement_events(self, event: AstrMessageEvent, *args, **kwargs):
         """记录普通消息和 QQ/OneBot 撤回事件，用于撤回增强。"""
         self._qzone_note_event_bot(event)
         if not self.enabled:
@@ -1699,7 +1706,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result()
-    async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent):
+    async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent, *args, **kwargs):
         """LLM 回复进入发送前阶段时停止私聊持续输入状态。"""
         if not self.enabled:
             return
@@ -1707,14 +1714,14 @@ class PrivateCompanionPlugin(
             self._stop_passive_input_status_loop(event)
 
     @filter.on_decorating_result()
-    async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent):
+    async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """群级 LLM 熔断的发送前兜底。"""
         if not self.enabled:
             return
         self._stop_group_llm_reply_if_blocked(event, source="decorating_result")
 
     @filter.on_decorating_result()
-    async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent):
+    async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前兜底清理内部控制块，避免 timer/TTSBLOCK 泄漏到聊天。"""
         if not self.enabled:
             return
@@ -1755,7 +1762,7 @@ class PrivateCompanionPlugin(
             )
 
     @filter.on_decorating_result()
-    async def cancel_reply_if_trigger_recalled_before_send(self, event: AstrMessageEvent):
+    async def cancel_reply_if_trigger_recalled_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """若触发/唤醒消息在回复发出前被撤回，则静默取消本次回复。"""
         if not self.enabled:
             return
@@ -1785,7 +1792,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
-    async def suppress_forbidden_outbound_before_send(self, event: AstrMessageEvent):
+    async def suppress_forbidden_outbound_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """自己的待发送消息命中违禁词时，优先在发送前拦截。"""
         if not self.enabled:
             return
@@ -1825,7 +1832,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
-    async def suppress_framework_error_leak_before_send(self, event: AstrMessageEvent):
+    async def suppress_framework_error_leak_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """避免 AstrBot/Core 的技术错误和工具循环摘要直接发进聊天。"""
         if not self.enabled:
             return
@@ -1976,7 +1983,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
-    async def suppress_group_question_wakeup_collision_reply(self, event: AstrMessageEvent):
+    async def suppress_group_question_wakeup_collision_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """答疑唤醒的群聊回复发送前复核，避免 Bot 碰瓷式插话。"""
         if not self.enabled:
             return
@@ -2043,7 +2050,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
-    async def suppress_smart_silence_reply_before_send(self, event: AstrMessageEvent):
+    async def suppress_smart_silence_reply_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """用户明确想停下当前话题时，用小模型决定是否静默取消待发送回复。"""
         if not self.enabled:
             return
@@ -2175,7 +2182,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
-    async def record_empty_passive_result_before_send(self, event: AstrMessageEvent):
+    async def record_empty_passive_result_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前兜底记录空结果，避免被动不回复却没有排障原因。"""
         if not self.enabled:
             return
@@ -2204,14 +2211,14 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result()
-    async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent):
+    async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前处理 TTS强化标签和自动语音转换。"""
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         await self.apply_tts_enhancement_before_send(event)
 
     @filter.on_decorating_result()
-    async def strip_group_internal_identity_anchors(self, event: AstrMessageEvent):
+    async def strip_group_internal_identity_anchors(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前清理群聊内部身份锚点，避免调试标记泄露到回复。"""
         if not self.enabled:
             return
@@ -2237,7 +2244,7 @@ class PrivateCompanionPlugin(
                     pass
 
     @filter.on_decorating_result()
-    async def suppress_group_silent_control_reply(self, event: AstrMessageEvent):
+    async def suppress_group_silent_control_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """模型输出“不回复”控制语时静默吞掉，避免把内部判断发到群里。"""
         if not self.enabled:
             return
@@ -2362,7 +2369,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return {"decision": decision, "reason": reason}
 
     @filter.on_decorating_result()
-    async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent):
+    async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent, *args, **kwargs):
         """按回复范围与分段策略整理 LLM 输出，减少长回复和误引用。"""
         if not self.enabled:
             return
@@ -2429,7 +2436,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
 
     @filter.on_decorating_result()
-    async def remember_group_bot_reply_context_before_send(self, event: AstrMessageEvent):
+    async def remember_group_bot_reply_context_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """记录群聊 Bot 实际候选回复，供下一轮连续对话判断使用。"""
         if not self.enabled:
             return
@@ -2503,7 +2510,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return role == "friend"
 
     @filter.on_decorating_result()
-    async def final_tts_markup_guard_before_send(self, event: AstrMessageEvent):
+    async def final_tts_markup_guard_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前终检 TTS 标签，避免 <tts> 原样泄漏到聊天。"""
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
@@ -2990,7 +2997,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 return
 
     @filter.on_decorating_result()
-    async def attach_group_reply_quote(self, event: AstrMessageEvent):
+    async def attach_group_reply_quote(self, event: AstrMessageEvent, *args, **kwargs):
         """群聊回复发送前自动补引用，保持上下文对齐。"""
         result = None
         chain: list[Any] = []
@@ -3353,18 +3360,86 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         }
         return aliases.get(text, text if text in {"auto", "prompt", "system_prompt"} else "prompt")
 
-    def _format_reply_style_prompt(self) -> str:
-        text = str(getattr(self, "reply_style_prompt", "") or "").strip()
+    def _normalize_persona_voice_text(self, value: Any, *, max_chars: int = 1200) -> str:
+        text = str(value or "").strip()
         if not text:
             return ""
         text = re.sub(r"\r\n?", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text[:max_chars].strip()
+
+    def _format_persona_voice_channel_prompt(self, channel: str) -> str:
+        if not bool(getattr(self, "enable_persona_voice_channels", True)):
+            return ""
+        channel = str(channel or "").strip().lower()
+        specs = {
+            "conversation": (
+                "对话风格",
+                "persona_conversation_voice_prompt",
+                "只用于私聊/群聊里真正说出口的聊天回复。不要把创作腔、日程计划或内心分析写进外发消息；用户要求详细说明时可优先保证信息完整。",
+            ),
+            "creative": (
+                "创作风格",
+                "persona_creative_voice_prompt",
+                "只用于日记、QQ 空间、私下创作、文案和公开动态。允许比聊天更完整,但仍应像角色本人写的,避免模型作文、升华总结和营销文案腔。",
+            ),
+            "planning": (
+                "计划风格",
+                "persona_planning_voice_prompt",
+                "只影响日程、计划、候选排序和行动倾向。这里描述角色会怎样安排自己、被什么驱动、什么时候收住,不是最终聊天台词。",
+            ),
+            "inner": (
+                "内心活动风格",
+                "persona_inner_voice_prompt",
+                "只用于内部动机、念头、犹豫和状态余波。它默认不可直接外发,不能泄露系统、插件、模型或自我分析过程。",
+            ),
+            "proactive": (
+                "主动开口风格",
+                "persona_proactive_voice_prompt",
+                "只用于把主动动机改写成最终私聊/群聊开口。优先具体由头、低压力、短句和可接话落点；不要写成回复空气、任务汇报或询问是否继续。",
+            ),
+        }
+        label, attr, note = specs.get(channel, ("表达风格", f"persona_{channel}_voice_prompt", "只在对应链路使用。"))
+        text = self._normalize_persona_voice_text(getattr(self, attr, ""), max_chars=1400)
         if not text:
             return ""
+        return f"【人格标准化：{label}】\n{text}\n使用边界：{note}"
+
+    def _format_proactive_voice_prompt(self) -> str:
+        parts: list[str] = []
+        base = self._normalize_persona_voice_text(getattr(self, "reply_style_prompt", ""), max_chars=900)
+        if base:
+            parts.append(
+                "【主动消息基础表达约束】\n"
+                f"{base}\n"
+                "这里只保留句数、口语化和简洁度等通用约束；不要把普通被动接话方式直接当成主动开口。"
+            )
+        proactive = self._format_persona_voice_channel_prompt("proactive")
+        if proactive:
+            parts.append(proactive)
+        conversation = self._format_persona_voice_channel_prompt("conversation")
+        if conversation and not proactive:
+            parts.append(
+                conversation
+                + "\n补充边界：当前没有单独配置主动开口风格,因此只把对话风格作为轻量回退；仍必须围绕主动由头自然开口。"
+            )
+        return "\n\n".join(part for part in parts if part).strip()
+
+    def _format_reply_style_prompt(self) -> str:
+        text = str(getattr(self, "reply_style_prompt", "") or "").strip()
+        persona_voice = self._format_persona_voice_channel_prompt("conversation")
+        if not text and not persona_voice:
+            return ""
+        text = self._normalize_persona_voice_text(text)
+        parts: list[str] = []
+        if text:
+            parts.append(text)
+        if persona_voice:
+            parts.append(persona_voice)
         return (
             "【回复风格约束】\n"
-            f"{text}\n"
-            "这些规则用于普通聊天和主动消息的表达节奏；如果当前问题确实需要排障、教程、代码说明、复杂解释或用户明确要求详细说明，可以优先保证信息完整。"
+            + "\n\n".join(parts)
+            + "\n这些规则用于普通聊天的表达节奏；如果当前问题确实需要排障、教程、代码说明、复杂解释或用户明确要求详细说明，可以优先保证信息完整。"
         )
 
     async def _append_reply_style_to_request(
@@ -3555,8 +3630,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "魔搭": "modelscope",
             "魔搭社区": "modelscope",
             "api-inference": "modelscope",
+            "doubao": "doubao",
+            "豆包": "doubao",
+            "火山": "doubao",
+            "火山引擎": "doubao",
+            "volcengine": "doubao",
+            "volces": "doubao",
+            "ark": "doubao",
+            "seedream": "doubao",
+            "seed": "doubao",
+            "gemini": "gemini",
+            "google": "gemini",
+            "google-ai": "gemini",
+            "google_ai": "gemini",
+            "generativelanguage": "gemini",
+            "nano-banana": "gemini",
         }
-        return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope"} else "auto")
+        return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"} else "auto")
 
     def _apply_quick_provider_defaults(self) -> None:
         fast = str(getattr(self, "fast_response_provider_id", "") or "").strip()
@@ -5934,7 +6024,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_request()
-    async def inject_tts_enhancement_request_fallback(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def inject_tts_enhancement_request_fallback(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """TTS 请求规则独立兜底，避免被状态注入链路早退顺手跳过。"""
         if not self.enabled:
             return
@@ -5945,7 +6035,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         await self.apply_tts_enhancement_request(event, req)
 
     @filter.on_llm_request()
-    async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
         def log_bookshelf_secret_skip(reason: str, user: dict[str, Any] | None = None, text: str = "") -> None:
             logger_func = getattr(self, "_log_bookshelf_secret_skip", None)
@@ -6874,7 +6964,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_response()
-    async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse):
+    async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """规范化 TTS 标签错拼，避免 <ttts> 等内容漏到发送链路。"""
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
@@ -6885,7 +6975,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         await self.protect_tts_enhancement_response_blocks(event, resp)
 
     @filter.on_llm_response()
-    async def record_external_llm_token_usage(self, event: AstrMessageEvent, resp: LLMResponse):
+    async def record_external_llm_token_usage(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """统计非插件内部调用的 AstrBot 主回复 Token，单独展示且不计入插件限额。"""
         if not self.enabled:
             return
@@ -6954,7 +7044,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_response()
-    async def capture_llm_timer_directive(self, event: AstrMessageEvent, resp: LLMResponse):
+    async def capture_llm_timer_directive(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """LLM 回复后捕获定时/状态指令，并做私聊回复审校。"""
         release_now = False
         try:
@@ -7384,7 +7474,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return False
 
     @filter.command("陪伴", alias={"私聊陪伴", "主动陪伴"})
-    async def companion_command(self, event: AstrMessageEvent):
+    async def companion_command(self, event: AstrMessageEvent, *args, **kwargs):
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
@@ -7888,14 +7978,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event.stop_event()
 
     @filter.command("陪伴群", alias={"群陪伴", "群聊陪伴"})
-    async def group_companion_command(self, event: AstrMessageEvent):
+    async def group_companion_command(self, event: AstrMessageEvent, *args, **kwargs):
         """管理群聊陪伴状态、群友画像、群内常见词、话题线程和关系网。"""
         self._qzone_note_event_bot(event)
         async for result in self._group_companion_command_impl(event):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
-    async def on_private_message(self, event: AstrMessageEvent):
+    async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
         self._qzone_note_event_bot(event)
         received_ts = _now_ts()
@@ -7934,6 +8024,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 _single_line(text, 120),
                 "disabled" if existing_user_disabled else "not_target",
             )
+            return
+        if text and await self._maybe_answer_companion_manual_natural_question(event, text):
             return
         natural_photo_text = _single_line(event.message_str, 800)
         if natural_photo_text:
@@ -8593,7 +8685,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             asyncio.create_task(self._maybe_refresh_dialogue_episode(user_id, user_snapshot))
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
-    async def on_group_message(self, event: AstrMessageEvent):
+    async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
         self._qzone_note_event_bot(event)
         if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):

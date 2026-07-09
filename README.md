@@ -3,11 +3,11 @@
 `astrbot_plugin_private_companion` 是面向 AstrBot 的持续陪伴编排插件。它把人格连续性、生活状态、日程节奏、私聊关系、群聊观察、主动消息、图片/语音/转发理解、长期创作、模型 Provider 和扩展页排障组织到同一套体验里，让 Bot 不只是“收到消息后临时回复”，而是有状态、有记忆、有边界地生活和互动。
 
 - 插件名：`astrbot_plugin_private_companion`
-- 版本：`5.8.3`
+- 版本：`5.9.0`
 - 适配平台：`aiocqhttp`
 - AstrBot 版本：`>=4.22.0`
 - 编码要求：UTF-8
-- 维护状态：5.8.3 优化新闻/视频主动分享的用户偏好匹配，按目标用户单独选择更合适的内容，并继续保留 5.8.2 的配置、缓存和主动模板修复。
+- 维护状态：5.9.0 聚焦人格标准化问卷与稳定对话风格校准，同时保留新闻/视频偏好匹配、配置引导、缓存和主动模板修复。
 - **成本提醒：火山方舟协作计划免费额度已延期到 `2026-07-31` 左右；具体以火山方舟控制台/官方活动页为准。请继续检查 Provider、每日 Token 限额和后台任务开关，注意成本控制。**
 - 若有好的想法仍可联系我，QQ：995051631（代码小白），欢迎提交 Issues，目标是无愧“最强”之名，喜欢的话请点一个 Star。
 
@@ -82,6 +82,7 @@
 - 模型与成本编排：为日程、细化、日记与梦境、创作正文、创作大纲、创作审校、新闻整理、主动搜索、主动人格判定、回复/主动复核、关系分析、记忆整理、合并消息转述、群聊判断等任务分别指定 Provider。
 - Token 监控：记录插件内部任务的调用次数、Token 消耗、失败记录、主 LLM `cached_tokens/cache_read_tokens` 和每日统计，并支持每日插件 Token 限额。
 - 模型数据排障：排障中心可检查技能相似项、群黑话杂音、关系网待确认观察、长期画像噪音和表达学习污染，只给建议，不自动改写数据。
+- 人格标准化入口：在实验性功能页可打开“人格标准化问卷”工具，读取当前 AstrBot 人格或粘贴人格文本，按社交软件文字聊天模板生成可编辑审核稿；它不是运行时功能开关，结果始终需要人工审核，不会自动覆盖 AstrBot 人格。
 - 扩展页管理：在 AstrBot WebUI 中查看和管理私聊、群聊、关系网、状态、梦境、书柜、主动计划、功能开关、模型配置、Token 消耗和排障结果；配置页支持分档导出/导入可迁移配置、校验备份完整性、查看最近自动备份并一键恢复，默认不包含模型 Provider、敏感配置、缓存、最近消息和运行日志；模型页会按用途分组展示 Provider、回退关系、当前使用项和测试入口。
 
 主动搜索自定义接口：
@@ -263,17 +264,19 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 
 在线生图模型平台可选值：
 
-- `auto`：根据地址和模型名自动识别；OpenAI 兼容接口继续走 `/images/generations`，百炼地址会改走 DashScope 原生接口，魔搭地址会走 api-inference 异步任务轮询。
+- `auto`：根据地址和模型名自动识别；OpenAI 兼容接口继续走 `/images/generations`，百炼地址会改走 DashScope 原生接口，魔搭地址会走 api-inference 异步任务轮询，豆包/火山方舟和 Gemini 会走各自原生图片链路。
 - `openai`：固定按 OpenAI 兼容图片接口处理，支持 `/images/generations` 与 `/images/edits`。
 - `bailian`：固定按阿里云百炼 / DashScope 原生生图接口处理，模型会按能力自动走多模态同步返回或异步任务轮询。
 - `modelscope`：固定按魔搭社区 `api-inference.modelscope.cn` 文生图接口处理，提交任务后轮询 `/v1/tasks/{task_id}`，兼容 `images`、`output_images`、`results` 等图片结果字段。
-- 在线地址支持自动归一化：可直接填共享域名、专属域名、`/api/v1` 或 `/v1` 根地址、完整生图接口地址；常见百炼控制台页面链接也会尽量自动修正成可请求地址。
+- `doubao`：固定按豆包/火山方舟 Seedream 图片接口处理，地址可填 `https://ark.cn-beijing.volces.com/api/v3` 或完整 `/images/generations`。
+- `gemini`：固定按 Gemini `generateContent` 图片返回处理，地址可填 `https://generativelanguage.googleapis.com/v1beta` 或完整 `/models/{model}:generateContent`。
+- 在线地址支持自动归一化：可直接填共享域名、专属域名、`/api/v1`、`/api/v3` 或 `/v1beta` 根地址、完整生图接口地址；常见百炼控制台页面链接也会尽量自动修正成可请求地址。
 
 按能力选择后端：
 
-- 只需要普通文生图、主动配图、空间说说配图：OpenAI 兼容在线 API、魔搭社区、NAI 本地代理、SDGen、ComfyUI 通常都可以尝试。
-- 需要自拍、头像、今日穿搭、角色表情包或改图参考图：必须选择真正支持参考图输入的后端。在线 OpenAI 兼容后端需要可用的 `/images/edits` 或等价接口；ComfyUI 需要自拍工作流实际接收图片；不支持参考图的后端不会被当作“参考图已使用”。
-- `SDGen` 和 `modelscope` 当前按纯文生图链路使用，不适合作为参考图/改图后端。
+- 只需要普通文生图、主动配图、空间说说配图：OpenAI 兼容在线 API、百炼、魔搭社区、豆包/火山方舟、Gemini、NAI 本地代理、SDGen、ComfyUI 通常都可以尝试。
+- 需要自拍、头像、今日穿搭、角色表情包或改图参考图：必须选择真正支持参考图输入的后端。在线 OpenAI 兼容后端需要可用的 `/images/edits` 或等价接口；Gemini 会把本地参考图作为 `inlineData` 提交；ComfyUI 需要自拍工作流实际接收图片；不支持参考图的后端不会被当作“参考图已使用”。
+- `SDGen`、`modelscope` 和 `doubao` 当前按纯文生图链路使用，不适合作为参考图/改图后端。
 - `astrbot_plugin_nai_image` 会在 `127.0.0.1:8765` 提供 OpenAI Images 兼容代理，可把本插件的外部图片 API 地址填为 `http://127.0.0.1:8765`，API Key 和模型名可填占位值；但它的 `/v1/images/edits` 当前会丢弃上传参考图并降级为纯文生图，因此只建议用于普通文生图、主动配图和公开说说配图，不建议用于自拍一致性、今日穿搭参考图、头像、表情包或改图链路。
 
 参考图一致性：
@@ -698,7 +701,7 @@ QQ 空间动态被视为公开生活札记，不等同于私聊记忆。用户�
 
 - 开发者：`menglimi`
 - 插件仓库：<https://github.com/menglimi/astrbot_plugin_private_companion>
-- 插件版本：`5.8.3`
+- 插件版本：`5.9.0`
 - 主要文件：
   - `main.py`：插件主体、主动判定、回复注入、群聊观察、能力执行。
   - `planning.py`：日程与规划相关逻辑。

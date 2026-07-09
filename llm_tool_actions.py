@@ -370,22 +370,38 @@ class LlmToolActionsMixin:
                     scene_preset=preset_text,
                     reference_image_path=reference_path,
                 )
-        return json.dumps(
-            {
-                "status": "success" if ok else "error",
-                "success": ok,
-                "message": "图片已生成并发送" if sent else ("图片已生成" if ok else (_single_line(note, 220) or "生图失败")),
-                "backend": _single_line(backend_name, 80),
-                "path": _single_line(image_path, 260),
-                "kind": workflow_kind,
-                "intent_kind": intent_kind,
-                "used_reference": bool(reference_path and "已使用" in str(note or "")),
-                "reference_image_path": _single_line(reference_path, 260),
-                "sent": sent,
-                "note": _single_line(note, 220),
-            },
-            ensure_ascii=False,
-        )
+        result_payload = {
+            "status": "success" if ok else "error",
+            "success": ok,
+            "message": "图片已生成并发送" if sent else ("图片已生成" if ok else (_single_line(note, 220) or "生图失败")),
+            "backend": _single_line(backend_name, 80),
+            "path": _single_line(image_path, 260),
+            "kind": workflow_kind,
+            "intent_kind": intent_kind,
+            "used_reference": bool(reference_path and "已使用" in str(note or "")),
+            "reference_image_path": _single_line(reference_path, 260),
+            "sent": sent,
+            "note": _single_line(note, 220),
+        }
+        if not ok:
+            note_text = _single_line(note, 360) or "生图失败"
+            lowered_note = note_text.lower()
+            hint = "请按 actual_error 里的真实原因回复用户，不要改写成未出现的超时、排队或权限问题。"
+            if "404" in note_text or "not found" in lowered_note or "未找到" in note_text:
+                hint = "在线生图接口返回 404，通常是 API 地址端点不对或缺少 /v1；请让用户检查在线图片 API 地址是否支持 /images/generations。"
+            elif "图片模型" in note_text or "image model" in lowered_note:
+                hint = "当前模型可能不是生图模型；请让用户把在线图片模型改成对应平台的图片模型。"
+            elif "api key" in lowered_note or "unauthorized" in lowered_note or "401" in note_text or "403" in note_text:
+                hint = "请让用户检查在线图片 API Key、权限和额度。"
+            result_payload.update(
+                {
+                    "failure_reason": note_text,
+                    "actual_error": note_text,
+                    "actionable_hint": hint,
+                    "do_not_claim_timeout": "超时" not in note_text and "timeout" not in lowered_note,
+                }
+            )
+        return json.dumps(result_payload, ensure_ascii=False)
 
     async def _pc_qzone_view_feed_impl(
         self,

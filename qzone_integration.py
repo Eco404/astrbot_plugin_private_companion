@@ -2153,10 +2153,17 @@ class QzoneMixin(QzoneMediaMixin):
         )
         if mood == "emotional_vent":
             base += " 心情动态也要克制，只写公开可见的余味，不要写成控诉或伤感散文。"
+        voice = ""
+        voice_formatter = getattr(self, "_format_persona_voice_channel_prompt", None)
+        if callable(voice_formatter):
+            voice = voice_formatter("creative")
         custom = _single_line(getattr(self, "qzone_publish_style_prompt", ""), 500)
+        parts = [base]
+        if voice:
+            parts.append(voice)
         if custom:
-            return f"{base}\n自定义风格：{custom}"
-        return base
+            parts.append(f"自定义风格：{custom}")
+        return "\n".join(parts)
 
     def _qzone_publish_image_style_prompt(self) -> str:
         base = (

@@ -63,7 +63,7 @@ class InteractionUtilsMixin:
             "陪伴 昵称 <称呼>\n"
             "陪伴 语气 <简短语气描述>\n"
             "陪伴 清空记忆\n"
-            "提示：私聊陪伴默认开启；配置页 target_user_ids 里的 QQ 会自动预热主动消息。"
+            "提示：私聊陪伴默认开启；插件私聊目标用户里填写 QQ 数字号后，会自动预热主动消息。"
         )
 
     def _private_only_text(self) -> str:
@@ -138,11 +138,9 @@ class InteractionUtilsMixin:
     def _management_denied_text(self) -> str:
         return (
             "这个操作需要管理权限。\n"
-            "管理权限来源：\n"
-            "1. Bot 管理员（AstrBot 全局配置 admins_id）\n"
-            "2. 插件目标用户（拓展页-配置-快速启动-私聊目标 QQ）\n"
-            "3. 群管理员（自动识别）\n"
-            "请检查以上配置后重试。"
+            "私聊里只认两类 QQ 数字号：AstrBot 全局管理员 admins_id，或本插件私聊目标用户 QQ。\n"
+            "请在 AstrBot 管理员配置里填用户 QQ 号，或在插件拓展页的私聊目标用户里加入该 QQ。\n"
+            "不要填写 UMO、UID、default、平台名或会话串；那些不是用户 QQ，不能作为管理权限。"
         )
 
     async def _reply(self, event: AstrMessageEvent, text: str, *, quote_current: bool = True):

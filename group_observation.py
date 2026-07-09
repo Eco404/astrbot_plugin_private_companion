@@ -2693,6 +2693,10 @@ class GroupObservationMixin:
 {memory_context or '暂无可用长期参考。'}
 使用方式：只用于判断这个群、这些人和这个话题是否适合接话；不要在回复里提到记忆来源。
 
+【人格标准化：群聊主动开口】
+{self._format_persona_voice_channel_prompt("proactive") if callable(getattr(self, "_format_persona_voice_channel_prompt", None)) else "（未配置单独主动风格）"}
+使用方式：只取“主动开口”的短句节奏和去 AI 味规则；群聊里要更轻,不要把私聊亲密度搬进群聊。
+
 【刚刚触发的消息】
 {_single_line(text, 180)}
 

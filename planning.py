@@ -547,6 +547,11 @@ def get_schedule_planning_prompt(plugin) -> str:
         worldview_adaptation = formatter()
     if worldview_adaptation:
         parts.append(worldview_adaptation)
+    voice_formatter = getattr(plugin, "_format_persona_voice_channel_prompt", None)
+    if callable(voice_formatter):
+        planning_voice = voice_formatter("planning")
+        if planning_voice:
+            parts.append(planning_voice)
     maslow_schedule_hint = _build_maslow_schedule_influence_prompt(plugin)
     if maslow_schedule_hint:
         parts.append(maslow_schedule_hint)
@@ -776,6 +781,19 @@ def build_detail_enhancement_prompt(
         if photo_available
         else "proactive_events 不要为了多样化强行写不可用动作。当前没有 photo_text；可用 message、主要用户/本机屏幕授权场景下的 screen_peek、voice 或 poke 时再选择,否则就用 message。"
     )
+    voice_formatter = getattr(plugin, "_format_persona_voice_channel_prompt", None)
+    planning_voice = voice_formatter("planning") if callable(voice_formatter) else ""
+    inner_voice = voice_formatter("inner") if callable(voice_formatter) else ""
+    proactive_voice = voice_formatter("proactive") if callable(voice_formatter) else ""
+    channel_voice_block = "\n\n".join(
+        part for part in (
+            planning_voice,
+            inner_voice,
+            proactive_voice,
+            "分通道使用原则：today_events/summary/presence_status 参考计划风格；motive/impulse 参考内心活动风格；topic/why/action 的可外发切口参考主动开口风格。不要把内心活动原样写成最终要发给用户的话。",
+        )
+        if part
+    )
     return f"""
 你现在是 Private Companion 的日程细化生成器,要把最新命中的时间区间放大来看。不要当成策划会,要像旁观角色真实度过了这一小段。
 
@@ -882,6 +900,9 @@ def build_detail_enhancement_prompt(
 
 【MemoryCompanion 连续性参考】
 {memory_companion_context_block}
+
+【人格标准化分通道风格】
+{channel_voice_block or "（未配置分通道风格，按日程和主动默认规则处理）"}
 
 【天气】
 {weather_info}

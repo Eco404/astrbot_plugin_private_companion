@@ -237,6 +237,10 @@ class CreativeMixin:
         schedule_persona = _single_line(self.schedule_persona_prompt, 500)
         style = _single_line(self.default_style, 80)
         bot_name = _single_line(self.bot_name, 40)
+        creative_voice = ""
+        voice_formatter = getattr(self, "_format_persona_voice_channel_prompt", None)
+        if callable(voice_formatter):
+            creative_voice = voice_formatter("creative")
         return "\n".join(
             part
             for part in (
@@ -244,6 +248,7 @@ class CreativeMixin:
                 f"AstrBot 默认人格：{default_persona}" if default_persona else "",
                 f"日程/生活人设补充：{schedule_persona}" if schedule_persona else "",
                 f"默认对话风格：{style}" if style else "",
+                creative_voice,
                 "创作要求：作品类型、题材、叙事声音、比喻密度、说话习惯、关注点和节奏都要像这个人格会写出来的东西。",
                 "身份边界：如果人格没有学生、职场、异世界、职业、年龄、身体特征等设定,不要凭空添加；如果人格明确不是人类,不要写成人类日常生理经验。",
                 "文风边界：不要套用通用网文腔、营销文案腔或过度华丽散文腔；不要为了梦境感牺牲可读性。",

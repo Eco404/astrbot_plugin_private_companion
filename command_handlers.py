@@ -438,8 +438,20 @@ class CommandHandlersMixin:
             "enable_photo_reference_image": {"type": "bool", "label": "启用人设/穿搭参考图一致性"},
             "backup_external_image_api_platform": {
                 "type": "select",
-                "choices": {"auto", "openai", "bailian", "modelscope"},
-                "aliases": {"百炼": "bailian", "阿里云百炼": "bailian", "魔搭": "modelscope", "魔搭社区": "modelscope", "openai兼容": "openai"},
+                "choices": {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"},
+                "aliases": {
+                    "百炼": "bailian",
+                    "阿里云百炼": "bailian",
+                    "魔搭": "modelscope",
+                    "魔搭社区": "modelscope",
+                    "豆包": "doubao",
+                    "火山": "doubao",
+                    "火山引擎": "doubao",
+                    "seedream": "doubao",
+                    "google": "gemini",
+                    "谷歌": "gemini",
+                    "openai兼容": "openai",
+                },
                 "label": "备选在线生图平台",
             },
             "backup_external_image_api_timeout_seconds": {"type": "int", "min": 20, "max": 600, "label": "备选在线生图超时秒数"},
@@ -771,9 +783,41 @@ class CommandHandlersMixin:
             tags.add("model")
         if any(word in compact for word in ("rememberyou", "remember you", "我会牢牢记住你", "记忆插件", "知识图谱", "专属记忆", "未安装")):
             tags.add("memory")
+        if any(word in compact for word in ("管理员命令", "管理权限", "管理员权限", "指令失效", "命令失效", "用不了命令", "不能用命令", "夹层密码", "输出夹层密码", "强制输出", "admins_id", "target_user_ids", "umo", "uid", "default")):
+            tags.add("permission")
         if any(word in compact for word in ("在哪", "哪里", "位置", "设置", "配置项", "怎么改", "如何改", "调参")):
             tags.add("location")
         return tags
+
+    def _is_companion_manual_natural_permission_question(self, text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "")).lower()
+        if not compact:
+            return False
+        permission_terms = (
+            "管理员命令", "管理命令", "管理权限", "管理员权限", "私聊管理员", "私聊管理",
+            "夹层密码", "书柜密码", "抽屉密码", "输出夹层密码", "强制输出", "重置夹层密码",
+            "admins_id", "adminsid", "target_user_ids", "targetuserids", "umo", "uid", "default",
+        )
+        problem_terms = (
+            "用不了", "不能用", "没法用", "无法用", "失效", "不生效", "没反应", "不识别",
+            "怎么用", "怎么设置", "怎么配置", "怎么加", "为什么", "咋", "哪", "填什么", "要填",
+        )
+        if not any(term in compact for term in permission_terms):
+            return False
+        return any(term in compact for term in problem_terms)
+
+    async def _maybe_answer_companion_manual_natural_question(self, event: AstrMessageEvent, text: Any) -> bool:
+        if not self._is_companion_manual_natural_permission_question(text):
+            return False
+        question = self._companion_manual_clean_question_text(text, 260)
+        answer = await self._companion_manual_answer(event, question)
+        await self._reply(event, answer)
+        try:
+            event.stop_event()
+        except Exception:
+            pass
+        logger.info("[PrivateCompanion] 自然语言插件权限答疑已接管: text=%s", _single_line(question, 120))
+        return True
 
     def _companion_manual_entry_tags(self, entry: dict[str, Any]) -> set[str]:
         title = re.sub(r"\s+", "", str(entry.get("title") or "")).lower()
@@ -799,6 +843,8 @@ class CommandHandlersMixin:
             return {"model"}
         if "rememberyou" in title or "联动" in title:
             return {"memory"}
+        if "管理命令" in title or "权限" in title or "夹层密码" in title:
+            return {"permission"}
         if "主动消息" in title:
             return {"proactive"}
         if "拟人身体" in title or "饥饿" in title:
@@ -2060,6 +2106,25 @@ class CommandHandlersMixin:
     def _companion_manual_entries(self) -> list[dict[str, Any]]:
         return [
             {
+                "title": "管理命令、夹层密码和权限为什么用不了",
+                "keywords": ["管理员命令", "管理权限", "管理员权限", "指令失效", "命令失效", "用不了命令", "不能用命令", "夹层密码", "输出夹层密码", "强制输出", "admins_id", "target_user_ids", "UMO", "UID", "default"],
+                "summary": "陪伴插件的管理命令会在执行前先检查发送者 QQ。私聊管理权限只认 AstrBot 全局管理员 admins_id，或本插件私聊目标用户 QQ；UMO、UID、default、平台名和会话串都不是用户 QQ，填进去不会生效。",
+                "checks": [
+                    "在 AstrBot 全局管理员配置 admins_id 里填真实 QQ 数字号，或在插件拓展页/私聊页把该 QQ 加为私聊目标用户。",
+                    "target_user_ids 只放 QQ 数字号，一行一个或用逗号分隔；不要放 default、aiocqhttp、FriendMessage、UMO 或 UID。",
+                    "群管理员只用于群聊管理命令，不会自动获得私聊里的夹层密码、重置插件、生成日程等私聊管理权限。",
+                    "夹层密码相关命令属于管理命令：陪伴 输出夹层密码、陪伴 强制输出 夹层密码、陪伴 重置夹层密码。",
+                    "如果用户只是自然语言问“夹层密码是什么”，不会直接走管理输出；需要使用明确命令且通过权限检查。",
+                ],
+                "settings": [
+                    "target_user_ids",
+                ],
+                "suggestions": [
+                    "先让用户发：陪伴 状态，确认命令能被插件接管；如果提示需要管理权限，就检查 admins_id 或私聊目标 QQ。",
+                    "如果日志里看到 UMO/UID/default，说明查的是会话定位，不是权限 ID；权限配置仍要回到用户 QQ 数字号。",
+                ],
+            },
+            {
                 "title": "刚才被动消息为什么没回",
                 "keywords": ["刚才没回", "刚才没回复", "刚刚没回", "为什么没回", "为什么不回", "没有回复", "被动未回复", "空结果", "跳过发送", "消息链全为空", "没发出来"],
                 "summary": "这类问题先看最近被动未回复记录，而不是先猜人格。常见来源包括休息回复闸门、智能沉默、回复复核拦截、群聊答疑碰瓷复核、空结果兜底、自然语言生图或其他命令接管。",
@@ -2355,7 +2420,7 @@ class CommandHandlersMixin:
                 "keywords": ["主动", "不主动", "不发消息", "很久没发", "主动消息", "私聊主动"],
                 "summary": "主动消息会受目标用户、每日上限、最小间隔、免打扰、休息状态、用户很久没回、主动价值复核和发送失败重试影响。",
                 "checks": [
-                    "确认用户在 target_user_ids 或私聊页已启用。",
+                    "确认用户 QQ 已加入插件私聊目标用户，或已在私聊页启用。",
                     "检查 max_daily_messages、min_interval_minutes、quiet_hours。",
                     "如果用户长期不回，主动会变短、变少，甚至延后。",
                     "如果开启主动消息价值复核，低价值或像打扰的消息会被改写/拦截。",

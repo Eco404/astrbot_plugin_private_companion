@@ -40,6 +40,15 @@ const state = {
   setupGuideProactiveTest: null,
   setupGuideApplying: false,
   setupGuideAdvancedRequested: false,
+  personaStandardizationDraft: null,
+  personaStandardizationStyleDraft: null,
+  personaStandardizationStyleSummaryDraft: null,
+  personaStandardizationFinalEditor: null,
+  personaStandardizationVoiceDraft: null,
+  personaStandardizationVoiceDraftStale: false,
+  personaStandardizationBaseStale: false,
+  personaStandardizationStyleStale: false,
+  personaStandardizationQuestionnaire: null,
   roleplayPersonas: [],
   providerFilter: "",
   providerMode: "all",
@@ -72,7 +81,12 @@ const state = {
     roleplayPersonas: false,
     tokenStats: false,
     configBackups: false,
+    userGroupLists: false,
   },
+  lazyScripts: {},
+  userGroupListPromise: null,
+  dailyOutfitHydrateTimer: null,
+  dailyOutfitHydrateKey: "",
   pageFontFamily: "original",
   pageTheme: "classic",
 };
@@ -91,6 +105,14 @@ const featureSwitchNotes = {
   enable_skill_growth_simulation: "自定义技能不在这里填写，请到观察页的“技能成长”卡片新增、隐藏、冻结成长或合并别名。",
   enable_food_menu_recommendation: "候选菜单在本功能详情页管理；观察页不再展示这块内容。",
 };
+
+const featureSwitchExcludedKeys = new Set([
+  "enable_maslow_motivation_experiment",
+  "enable_experimental_motivation_model",
+  "enable_personality_iteration_experiment",
+  "enable_emotion_simulation",
+  "enable_persona_standardization_experiment",
+]);
 
 const providerLabels = {
   FAST_RESPONSE_PROVIDER_ID: "快速响应模型",
@@ -1006,6 +1028,7 @@ function proactiveOnlyRelatedUnlocks(key) {
 function visibleFeatureSwitchKey(key) {
   if (key === "enable_proactive_only_mode") return false;
   if (hiddenCompatibilityConfigKeys.has(key)) return false;
+  if (featureSwitchExcludedKeys.has(key)) return false;
   const detailSettingKeys = new Set(Object.values(featureSettingGroups || {}).flat());
   const groupedFeatureKeys = new Set(featureGroups.flatMap((group) => group.keys));
   if (detailSettingKeys.has(key) && !groupedFeatureKeys.has(key)) return false;
@@ -1062,6 +1085,12 @@ const configLabels = {
   require_opt_in: "是否需要私聊确认",
   default_style: "默认语气",
   reply_style_prompt: "回复风格提示词",
+  enable_persona_voice_channels: "启用分通道人格风格",
+  persona_conversation_voice_prompt: "对话风格",
+  persona_creative_voice_prompt: "创作风格",
+  persona_planning_voice_prompt: "计划风格",
+  persona_inner_voice_prompt: "内心活动风格",
+  persona_proactive_voice_prompt: "主动开口风格",
   plugin_specific_persona_id: "插件指定人格 ID",
   private_user_aliases: "私聊身份别名归并",
   private_user_delivery_aliases: "私聊主动发送目标映射",
@@ -1452,6 +1481,12 @@ const configDescriptions = {
   maslow_motivation_strength: "控制需求强化对主动候选排序的影响。0 只记录层级不改排序；35 为温和默认；100 会更明显偏向有明确由头的关系、状态或成长类念头。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   reply_style_prompt: "注入到普通被动回复和主动消息生成中的表达约束，适合写句数、简洁度、语言和社交媒体口语习惯；复杂问题或用户要求详细说明时，可在这里允许模型放宽。",
+  enable_persona_voice_channels: "开启后，插件会把人格标准化提取出的表达风格按对话、创作、计划、内心活动、主动开口五个通道分别注入对应链路，避免一种聊天口癖污染所有任务。",
+  persona_conversation_voice_prompt: "只用于私聊/群聊真正说出口的聊天回复。适合写口癖、句长、标点、接话方式和拒绝方式。",
+  persona_creative_voice_prompt: "用于日记、QQ 空间、私下创作和文案。可以比聊天完整，但应避免 AI 作文、总结升华和营销文案腔。",
+  persona_planning_voice_prompt: "用于日程、主动候选和行动倾向。它描述角色会如何安排自己、被什么驱动，不是聊天台词。",
+  persona_inner_voice_prompt: "用于内部动机、念头和状态余波。默认不会外发，不能写成系统分析或工具说明。",
+  persona_proactive_voice_prompt: "用于把主动动机变成最终开口。重点是具体由头、低压力、短句和可接话，不写成回复空气或任务汇报。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于世界知识，它会影响私聊被动回复、群聊人格和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
   private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射，例如：大号QQ=小号QQ。",
@@ -1726,15 +1761,15 @@ const configDescriptions = {
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
   local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
   local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  external_image_api_platform: "可填 auto、openai、bailian、modelscope。auto 会根据 API 地址和模型名自动判断；魔搭社区会按异步任务提交并轮询。",
-  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口；魔搭可填 https://api-inference.modelscope.cn/v1 或完整 /v1/images/generations。",
+  external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini。auto 会根据 API 地址和模型名自动判断；魔搭社区会按异步任务提交并轮询，Gemini 会走 generateContent 图片返回。",
+  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口；魔搭可填 https://api-inference.modelscope.cn/v1；豆包/火山方舟可填 https://ark.cn-beijing.volces.com/api/v3；Gemini 可填 https://generativelanguage.googleapis.com/v1beta。",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
-  EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写 gpt-5.5、deepseek、claude、qwen 等聊天/文本模型。填写后配合 API 地址和 Key 可作为 external 或 auto 的生图后端。",
+  EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写普通聊天/文本模型。示例：gpt-image-1、qwen-image、wanx、seedream、gemini-*-image 或 imagen。",
   external_image_api_size: "在线生图尺寸，例如 1024x1024、768x1344。",
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
   external_image_api_custom_headers: "可选。每行一个请求头，格式：Key: Value。会追加到在线生图 API 请求；下载同源结果图时也会安全复用。",
   enable_backup_external_image_api: "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选 API，再回退本地 ComfyUI/SDGen。",
-  backup_external_image_api_platform: "可填 auto、openai、bailian、modelscope。含义与主在线生图平台一致，只在备选 API 生效时使用。",
+  backup_external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选 API 生效时使用。",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线生图接口地址。主在线 API 失败后才会使用。",
   BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
   BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选平台的图片模型名，不要填写聊天/文本模型。",
@@ -1803,6 +1838,12 @@ const featureSettingGroups = {
   enable_mai_style_integration: [
     "default_style",
     "reply_style_prompt",
+    "enable_persona_voice_channels",
+    "persona_conversation_voice_prompt",
+    "persona_creative_voice_prompt",
+    "persona_planning_voice_prompt",
+    "persona_inner_voice_prompt",
+    "persona_proactive_voice_prompt",
     "enable_companion_memory",
     "memory_refresh_interval_minutes",
     "max_companion_memory_items",
@@ -1961,6 +2002,11 @@ const featureSettingSections = {
       title: "回复基座",
       note: "控制私聊接话策略和基础语气。",
       keys: ["default_style", "reply_style_prompt"],
+    },
+    {
+      title: "人格标准化分通道",
+      note: "从稳定对话风格校准沉淀出的短规则；对话、创作、计划、内心和主动开口分别使用。",
+      keys: ["enable_persona_voice_channels", "persona_conversation_voice_prompt", "persona_creative_voice_prompt", "persona_planning_voice_prompt", "persona_inner_voice_prompt", "persona_proactive_voice_prompt"],
     },
     {
       title: "记忆与表达",
@@ -2417,7 +2463,13 @@ const featureSettingTypes = {
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
   SMART_SILENCE_PROVIDER_ID: { type: "provider" },
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: { type: "provider" },
+  enable_persona_voice_channels: { type: "checkbox" },
   reply_style_prompt: { type: "textarea" },
+  persona_conversation_voice_prompt: { type: "textarea" },
+  persona_creative_voice_prompt: { type: "textarea" },
+  persona_planning_voice_prompt: { type: "textarea" },
+  persona_inner_voice_prompt: { type: "textarea" },
+  persona_proactive_voice_prompt: { type: "textarea" },
   proactive_prompt_template: { type: "textarea" },
   proactive_persona_judge_send_threshold: { type: "number", min: 0, max: 100, step: 1 },
   proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
@@ -2448,8 +2500,8 @@ const featureSettingTypes = {
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"]] },
-  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"]] },
-  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"]] },
+  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   WEB_EXPLORATION_API_KEY: { type: "password" },
@@ -2788,6 +2840,62 @@ async function hydrateDailyOutfitLogo() {
   if (window.PrivateCompanionDailyOutfit?.hydrateDailyOutfitLogo) {
     await window.PrivateCompanionDailyOutfit.hydrateDailyOutfitLogo({ state, fetchJson, document });
   }
+}
+
+const optionalScriptSources = {};
+
+function loadOptionalScript(name) {
+  if (!optionalScriptSources[name]) return Promise.resolve(false);
+  if (state.lazyScripts[name]) return state.lazyScripts[name];
+  const existing = document.querySelector(`script[data-optional-script="${name}"]`);
+  if (existing?.dataset.loaded === "1") return Promise.resolve(true);
+  state.lazyScripts[name] = new Promise((resolve, reject) => {
+    const script = existing || document.createElement("script");
+    script.dataset.optionalScript = name;
+    script.async = true;
+    script.onload = () => {
+      script.dataset.loaded = "1";
+      resolve(true);
+    };
+    script.onerror = () => {
+      delete state.lazyScripts[name];
+      reject(new Error(`脚本加载失败：${name}`));
+    };
+    if (!existing) {
+      script.src = optionalScriptSources[name];
+      document.body.appendChild(script);
+    }
+  });
+  return state.lazyScripts[name];
+}
+
+function runWhenIdle(callback, timeout = 1200) {
+  if (typeof window.requestIdleCallback === "function") {
+    return window.requestIdleCallback(callback, { timeout });
+  }
+  return window.setTimeout(callback, Math.min(360, timeout));
+}
+
+function cancelIdleTask(handle) {
+  if (!handle) return;
+  if (typeof window.cancelIdleCallback === "function") {
+    window.cancelIdleCallback(handle);
+  } else {
+    window.clearTimeout(handle);
+  }
+}
+
+function scheduleDailyOutfitHydration(force = false) {
+  const outfit = state.overview?.daily_outfit || {};
+  const key = String(outfit.image_data_url || "");
+  const image = document.getElementById("dailyOutfitLogo");
+  if (!force && key && state.dailyOutfitHydrateKey === key && image?.dataset.source === key) return;
+  if (state.dailyOutfitHydrateTimer) cancelIdleTask(state.dailyOutfitHydrateTimer);
+  state.dailyOutfitHydrateTimer = runWhenIdle(() => {
+    state.dailyOutfitHydrateTimer = null;
+    state.dailyOutfitHydrateKey = key;
+    hydrateDailyOutfitLogo().catch(() => {});
+  }, 1600);
 }
 
 async function fetchJson(path, options = {}) {
@@ -3271,8 +3379,10 @@ async function applyConfigImport() {
     state.overview = result;
     state.configBackups = result.migration_backups || state.configBackups;
     state.configLastChecks = result.post_import_checks || [];
+    state.lazyLoaded.userGroupLists = false;
+    state.userGroupListPromise = null;
     renderAll();
-    void loadUserGroupLists(requestSeq);
+    void loadUserGroupLists(requestSeq, { force: true });
   }
   showToast("配置已导入，已自动备份导入前状态");
 }
@@ -3287,8 +3397,10 @@ async function restoreConfigBackup(id) {
     state.overview = result;
     state.configBackups = result.migration_backups || state.configBackups;
     state.configLastChecks = result.post_import_checks || [];
+    state.lazyLoaded.userGroupLists = false;
+    state.userGroupListPromise = null;
     renderAll();
-    void loadUserGroupLists(requestSeq);
+    void loadUserGroupLists(requestSeq, { force: true });
   }
   showToast("已从备份恢复");
 }
@@ -3408,36 +3520,71 @@ function applyUserGroupLists(users, groups) {
   if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
 }
 
+function renderAfterUserGroupListsLoaded() {
+  renderDashboardPulse();
+  renderRelationshipChart();
+  renderGroupBubbleChart();
+  renderQuotaChart();
+  if (state.activeTab === "private") {
+    renderUsers();
+  } else if (state.activeTab === "group") {
+    renderGroups();
+  } else if (state.activeTab === "worldbook") {
+    renderWorldbook();
+  } else if (state.activeTab === "memory") {
+    renderMemory();
+  } else if (state.activeTab === "proactive") {
+    renderProactiveCandidates();
+  } else if (state.activeTab === "experimental") {
+    renderExperimentalPage();
+  }
+}
+
 async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) {
-  const { showErrors = false, silent = false } = options;
+  const { showErrors = false, silent = false, force = false } = options;
+  if (!force && state.lazyLoaded.userGroupLists) {
+    return { users: { items: state.users }, groups: { items: state.groups } };
+  }
+  if (!force && state.userGroupListPromise) return state.userGroupListPromise;
+  const promise = (async () => {
+    try {
+      const [users, groups] = await Promise.all([
+        fetchJson("/users?limit=300"),
+        fetchJson("/groups?limit=300"),
+      ]);
+      if (requestSeq !== loadAllRequestSeq) return null;
+      applyUserGroupLists(users, groups);
+      state.lazyLoaded.userGroupLists = true;
+      if (!silent) {
+        renderAfterUserGroupListsLoaded();
+        const overview = state.overview || {};
+        $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
+      }
+      return { users, groups };
+    } catch (error) {
+      if (requestSeq !== loadAllRequestSeq) return null;
+      console.warn("[PrivateCompanionPage] 用户/群聊列表加载失败", error);
+      if (!silent) {
+        const overview = state.overview || {};
+        $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，名单加载失败`;
+      }
+      if (showErrors) showToast(`名单加载失败：${error.message}`, "error");
+      return null;
+    }
+  })();
+  state.userGroupListPromise = promise;
   try {
-    const [users, groups] = await Promise.all([
-      fetchJson("/users?limit=300"),
-      fetchJson("/groups?limit=300"),
-    ]);
-    if (requestSeq !== loadAllRequestSeq) return null;
-    applyUserGroupLists(users, groups);
-    if (!silent) {
-      renderAll();
-      const overview = state.overview || {};
-      $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
-    }
-    return { users, groups };
-  } catch (error) {
-    if (requestSeq !== loadAllRequestSeq) return null;
-    console.warn("[PrivateCompanionPage] 用户/群聊列表加载失败", error);
-    if (!silent) {
-      const overview = state.overview || {};
-      $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，名单加载失败`;
-    }
-    if (showErrors) showToast(`名单加载失败：${error.message}`, "error");
-    return null;
+    return await promise;
+  } finally {
+    if (state.userGroupListPromise === promise) state.userGroupListPromise = null;
   }
 }
 
 async function loadAll(options = {}) {
   const requestSeq = ++loadAllRequestSeq;
   const { waitForLists = false } = options;
+  state.lazyLoaded.userGroupLists = false;
+  state.userGroupListPromise = null;
   $("#subtitle").textContent = "读取运行态中...";
   try {
     const overview = await fetchJson("/overview");
@@ -3445,9 +3592,17 @@ async function loadAll(options = {}) {
     applyOverviewData(overview);
     renderAll();
     void ensureTabData(state.activeTab, true);
-    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，正在补全名单...`;
-    const listPromise = loadUserGroupLists(requestSeq, { showErrors: true });
-    if (waitForLists) await listPromise;
+    $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载`;
+    const loadLists = () => {
+      if (state.lazyLoaded.userGroupLists) return Promise.resolve(null);
+      $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 正在后台补全名单...`;
+      return loadUserGroupLists(requestSeq, { showErrors: true });
+    };
+    if (waitForLists) {
+      await loadLists();
+    } else {
+      runWhenIdle(() => { loadLists(); }, 900);
+    }
   } catch (error) {
     if (requestSeq !== loadAllRequestSeq) return;
     $("#subtitle").textContent = `加载失败：${error.message}`;
@@ -3463,7 +3618,7 @@ function hydrateTokenStatsFromOverview(overview) {
 }
 
 function renderAll() {
-  hydrateDailyOutfitLogo();
+  scheduleDailyOutfitHydration();
   renderStats();
   renderDashboard();
   renderActiveTab(state.activeTab);
@@ -3486,6 +3641,11 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
   } else if (tabName === "qzone") {
     if (window.PrivateCompanionQzonePanel?.render) {
       window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml });
+    } else {
+      const meta = document.getElementById("qzoneFeedMeta");
+      const feed = document.getElementById("qzoneFeed");
+      if (meta) meta.textContent = "QQ 空间面板脚本未加载";
+      if (feed && !feed.innerHTML.trim()) feed.innerHTML = `<div class="empty small">QQ 空间面板脚本未加载。请刷新拓展页；若仍失败，检查 qzone-panel.js 是否被浏览器拦截。</div>`;
     }
   } else if (tabName === "image-cache") {
     renderImageCache();
@@ -3526,7 +3686,7 @@ async function refreshExperimentalRuntimeData(force = false) {
   await Promise.all([
     loadDiagnostics(force, { skipExperimentalRender: true }).catch(() => null),
     loadTroubleshooting({ silent: true, skipExperimentalRender: true }).catch(() => null),
-    loadUserGroupLists(requestSeq, { silent: true }).catch(() => null),
+    loadUserGroupLists(requestSeq, { silent: true, force }).catch(() => null),
   ]);
   if (state.activeTab === "experimental") renderExperimentalPage();
 }
@@ -3590,6 +3750,9 @@ async function loadConfigBackups(force = false) {
 async function ensureTabData(tabName, force = false) {
   if (tabName === "dashboard") {
     return;
+  }
+  if (["private", "group", "worldbook", "memory", "proactive", "experimental"].includes(tabName) && (!state.lazyLoaded.userGroupLists || force)) {
+    await loadUserGroupLists(loadAllRequestSeq, { showErrors: true, force });
   }
   if (tabName === "tokens") {
     await loadTokenStats(force);
@@ -3803,7 +3966,7 @@ const setupGuideAdvancedBlocks = [
   {
     id: "experimental",
     title: "实验性功能",
-    body: "配置情绪余波、需求强化、动机调度和角色贴合校准。适合先小范围观察，确认拟人化收益大于打扰和成本后再稳定开启。",
+    body: "配置情绪余波、需求强化、动机调度和角色贴合校准；人格标准化作为一次性工具入口单独使用。适合先小范围观察，确认拟人化收益大于打扰和成本后再稳定开启。",
   },
 ];
 
@@ -4267,10 +4430,10 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"]], description: "不知道选什么就先用自动；如果只配置了其中一种后端，也可以直接指定。" },
-        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"]], description: "只有在线 API 或自动模式需要。魔搭社区会走异步任务轮询。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]], description: "只有在线 API 或自动模式需要。魔搭会轮询任务，Gemini 支持参考图，豆包按 Seedream 文生图处理。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_BASE_URL", type: "text", label: "在线图片 API 地址", placeholder: "https://.../v1/images/generations", description: "可填完整生图接口，也可填平台根地址；留空则不会走在线 API。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_KEY", type: "password", label: "在线图片 API Key", placeholder: "sk-...", description: "只用于在线图片 API；不走在线后端可以留空。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / dall-e-3 / wanx2.1-t2i-turbo", description: "请填写图片模型，不要填聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / qwen-image / seedream / gemini-*-image", description: "请填写图片模型，不要填普通聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "external_image_api_size", type: "text", label: "在线生图尺寸", placeholder: "1024x1024", description: "按平台支持的尺寸填写。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "COMFYUI_TEXT2IMG_WORKFLOW_NAME", type: "text", label: "ComfyUI 文生图工作流", placeholder: "text2img_workflow", description: "选择 ComfyUI 或自动模式时填写；对应 ComfyUI 插件里的工作流名称。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "COMFYUI_SELFIE_WORKFLOW_NAME", type: "text", label: "ComfyUI 自拍工作流", placeholder: "selfie_workflow", description: "用于自拍、人像、头像和角色表情包；没有单独工作流可先填同一个。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
@@ -17089,6 +17252,10 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
 
 function renderProviders() {
   if (window.PrivateCompanionProviderTree?.renderProviders) {
+    const saveButton = document.getElementById("saveProvidersBtn");
+    const testButton = document.getElementById("testAllProvidersBtn");
+    if (saveButton) saveButton.disabled = false;
+    if (testButton) testButton.disabled = false;
     window.PrivateCompanionProviderTree.renderProviders({
       window,
       document,
@@ -17110,6 +17277,16 @@ function renderProviders() {
       setProviderConfigMode,
       postJson,
     });
+    bindProviderToolbar();
+    return;
+  }
+  const form = document.getElementById("providerForm");
+  const saveButton = document.getElementById("saveProvidersBtn");
+  const testButton = document.getElementById("testAllProvidersBtn");
+  if (saveButton) saveButton.disabled = true;
+  if (testButton) testButton.disabled = true;
+  if (form && !form.innerHTML.trim()) {
+    form.innerHTML = `<div class="empty small">模型配置面板脚本未加载。请刷新拓展页；若仍失败，检查 provider-tree.js 是否被浏览器拦截。</div>`;
   }
 }
 
@@ -17134,6 +17311,10 @@ function bindProviderToolbar() {
 }
 
 async function testProvider(key) {
+  if (!window.PrivateCompanionProviderTree?.testProvider) {
+    showToast("模型配置面板脚本未加载，请刷新拓展页", "error");
+    return;
+  }
   if (window.PrivateCompanionProviderTree?.testProvider) {
     await window.PrivateCompanionProviderTree.testProvider({
       document,
@@ -17620,9 +17801,11 @@ async function runAction(action, successMessage = "", control = null, options = 
         const requestSeq = ++loadAllRequestSeq;
         state.overview = result;
         state.featureDraft = featureDraftFromOverview(result);
+        state.lazyLoaded.userGroupLists = false;
+        state.userGroupListPromise = null;
         renderAll();
         $("#subtitle").textContent = `${result.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
-        void loadUserGroupLists(requestSeq);
+        void loadUserGroupLists(requestSeq, { force: true });
       } else {
         await loadAll();
       }
@@ -17649,6 +17832,12 @@ const experimentalFeatureKeys = [
   "enable_personality_iteration_experiment",
   "enable_emotion_simulation",
 ];
+
+const personaStandardizationToolMeta = {
+  label: "人格标准化问卷",
+  index: "工具入口",
+  shortDesc: "读取当前 AstrBot 人格或粘贴人格文本，生成可审核的基础设定稿，再通过情景试答归纳稳定对话风格。",
+};
 
 const experimentalFeatureMeta = {
   enable_emotion_simulation: {
@@ -17921,6 +18110,27 @@ function renderExperimentalOverviewMap() {
   `;
 }
 
+function renderExperimentalToolEntrances() {
+  return `
+    <section class="exp-tool-entry-panel">
+      <div class="exp-tool-entry-head">
+        <div>
+          <b>一次性工具入口</b>
+          <span>这些是配置、整理或审核工具，不是运行时开关；点击后直接进入流程。</span>
+        </div>
+      </div>
+      <div class="exp-tool-grid">
+        <button type="button" class="exp-tool-card" data-exp-tool-open="persona_standardization_tool">
+          <span class="exp-card-index">${escapeHtml(personaStandardizationToolMeta.index)}</span>
+          <b>${escapeHtml(personaStandardizationToolMeta.label)}</b>
+          <small>${escapeHtml(personaStandardizationToolMeta.shortDesc)}</small>
+          <em>打开问卷 →</em>
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 function renderExperimentalHero(key, enabled) {
   const meta = experimentalFeatureMeta[key] || {};
   const spec = experimentalVisualSpec(key);
@@ -17978,6 +18188,13 @@ function renderExperimentalPage() {
   if (subpage && experimentalFeatureKeys.includes(subpage)) {
     root.innerHTML = renderExperimentalSubpage(subpage);
     bindExperimentalSubpageActions(subpage);
+  } else if (subpage === "persona_standardization_tool") {
+    const shouldLoadPersonas = !state.lazyLoaded.roleplayPersonas;
+    root.innerHTML = renderPersonaStandardizationToolPage();
+    bindExperimentalSubpageActions(subpage);
+    if (shouldLoadPersonas) loadRoleplayPersonas(false).then(() => {
+      if (state.experimentalSubpage === "persona_standardization_tool") renderExperimentalPage();
+    }).catch(() => {});
   } else {
     root.innerHTML = renderExperimentalOverview();
     bindExperimentalOverviewActions();
@@ -18057,7 +18274,7 @@ function renderExperimentalOverview() {
       <div class="section-head">
         <div>
           <h2>实验性功能</h2>
-          <span class="muted">心理机制、动机调度和角色校准类探索能力；适合先小范围观察，再决定是否纳入正式链路。</span>
+          <span class="muted">运行时实验能力在这里开启；配置和整理类工具作为入口单独使用。</span>
         </div>
         <div class="actions compact">
           <span class="module-badge">${enabledCount} / ${experimentalFeatureKeys.length} 开启</span>
@@ -18067,10 +18284,37 @@ function renderExperimentalOverview() {
         <b>使用建议</b>
         <span>以下功能仍处于实验阶段，建议逐项开启观察。除情绪模拟保留原默认值外，其他实验项默认关闭；不会把理论标签写进实际回复正文。</span>
       </div>
+      ${renderExperimentalToolEntrances()}
       ${renderExperimentalOverviewMap()}
       <div class="exp-card-grid">
         ${cards}
       </div>
+    </div>
+  `;
+}
+
+function renderPersonaStandardizationToolPage() {
+  return `
+    <div class="subpage experimental-subpage persona-tool-subpage">
+      <nav class="exp-breadcrumb">
+        <button type="button" data-exp-back>← 返回总览</button>
+        <span>/ ${escapeHtml(personaStandardizationToolMeta.label)}</span>
+      </nav>
+      <div class="exp-subpage-toolbar">
+        <button type="button" class="exp-toolbar-back" data-exp-back>← 返回总览</button>
+      </div>
+      <header class="exp-subpage-head">
+        <div>
+          <span class="module-badge">${escapeHtml(personaStandardizationToolMeta.index)}</span>
+          <h2>${escapeHtml(personaStandardizationToolMeta.label)}</h2>
+          <p>${escapeHtml(personaStandardizationToolMeta.shortDesc)}</p>
+        </div>
+      </header>
+      <div class="experimental-overview-note">
+        <b>入口说明</b>
+        <span>这是一次性整理工具，不需要开启功能开关。生成结果只用于审核和复制，不会自动改写 AstrBot 人格。</span>
+      </div>
+      ${renderPersonaStandardizationWorkbench()}
     </div>
   `;
 }
@@ -18486,6 +18730,1024 @@ function renderPersonalityTheoryVisual() {
     </div>
   `;
   return expTheoryVisualShell("理论量化视图", "把诊断建议映射到 PEN、大五、依恋风格和自我决定理论四条轴，方便看偏差集中在哪里。", body, `诊断：${diagnostics.length}`);
+}
+
+const personaStandardizationStyleHints = [
+  ["speech", "初步说话偏好", "这里只作为第二步试答参考，不会写进第一版基础设定。", "例如：短句为主，少解释，偶尔嘴硬，不要客服腔。"],
+  ["output", "输出约束偏好", "希望试答避免或保留的格式习惯。", "例如：不写动作旁白，不说自己是 AI，不频繁确认用户是否继续。"],
+  ["examples", "示例与反例", "可填几句你觉得像/不像她的话，帮助模型区分候选风格。", "例如：像：啥、没懂、我在哦；不像：我是您的智能助手。"],
+];
+
+const personaStandardizationTimeNotes = {
+  base: "预计 20-60 秒；人格越长、补充资料越多越慢。",
+  confirm: "通常 1 秒内；只是确认当前审核稿，不调用模型。",
+  scenarios: "预计 20-45 秒；会一次生成多组情景候选。",
+  summary: "预计 15-40 秒；会把全部选择归纳成稳定风格规则。",
+};
+
+function personaStandardizationDraftState() {
+  if (!state.personaStandardizationQuestionnaire) {
+    state.personaStandardizationQuestionnaire = { strength: "medium", persona_id: "", source_text: "", supplement_text: "", use_pasted_source: false, base_confirmed: false, style_choices: {}, style_custom: {}, style_feedback: {} };
+  }
+  return state.personaStandardizationQuestionnaire;
+}
+
+function personaStandardizationCurrentTemplate() {
+  const textarea = document.querySelector("[data-persona-standard-template]");
+  return textarea?.value || state.personaStandardizationDraft?.draft?.template || "";
+}
+
+function personaStandardizationStyleSummary() {
+  const styleBlock = state.personaStandardizationStyleSummaryDraft?.draft?.style_block || "";
+  return formatPersonaTemplateForEditing(styleBlock);
+}
+
+function personaStandardizationMergedTemplate() {
+  const base = personaStandardizationCurrentTemplate();
+  const style = personaStandardizationStyleSummary();
+  if (!base || !style) return base || style;
+  let merged = base;
+  const styleForConstraints = style.replace(/^【说话方式与对话习惯】\s*/u, "").trim();
+  if (/####\s*对话风格[\s\S]*?(?=####\s*格式示例|####\s*错误格式|####\s*预设特殊场景|<\/Output_Constraints>)/u.test(merged)) {
+    merged = merged.replace(
+      /####\s*对话风格[\s\S]*?(?=####\s*格式示例|####\s*错误格式|####\s*预设特殊场景|<\/Output_Constraints>)/u,
+      `#### 对话风格\n\n${styleForConstraints}\n\n`,
+    );
+  }
+  if (/【待确认说话方式】[\s\S]*$/u.test(merged)) {
+    merged = merged.replace(/【待确认说话方式】[\s\S]*$/u, "").trim();
+  }
+  merged = merged.replace(/^\s*[-•]?\s*\[STYLE_PENDING\]\s*$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (merged !== base) return `${merged.trim()}\n`;
+  if (base.includes("【待确认说话方式】")) {
+    return base.replace(/【待确认说话方式】[\s\S]*$/u, style);
+  }
+  return `${base.trim()}\n\n${style}`;
+}
+
+function personaStandardizationSplitSections(text) {
+  const source = formatPersonaTemplateForEditing(text);
+  if (!source) return [];
+  const marker = /(^|\n)(#{1,6}\s+[^\n]+|【[^】]{2,36}】)/g;
+  const matches = [];
+  let found;
+  while ((found = marker.exec(source)) !== null) {
+    matches.push({
+      start: found.index + found[1].length,
+      title: found[2].trim(),
+    });
+  }
+  if (!matches.length) {
+    return [{ id: "section_1", title: "未分段内容", content: source.trim() }];
+  }
+  const sections = [];
+  const firstStart = matches[0].start;
+  const prefix = source.slice(0, firstStart).trim();
+  if (prefix) {
+    sections.push({ id: "section_intro", title: "开头说明", content: prefix });
+  }
+  matches.forEach((item, index) => {
+    const next = matches[index + 1]?.start ?? source.length;
+    const block = source.slice(item.start, next).trim();
+    const content = block.replace(item.title, "").trim();
+    if (!content && !item.title) return;
+    sections.push({
+      id: `section_${index + 1}`,
+      title: item.title.replace(/^#{1,6}\s*/u, ""),
+      heading: item.title.match(/^(#{1,6})\s+/u)?.[1] || "",
+      content: content || "",
+    });
+  });
+  return sections.filter((item) => item.title || item.content);
+}
+
+function personaStandardizationSectionKind(title, content) {
+  const normalizedTitle = String(title || "").replace(/^#{1,6}\s*/u, "").trim();
+  const text = `${normalizedTitle}\n${content}`;
+  if (/^(基本要求|基础要求|输出内容|社交距离|内容限制|对话安全|初始化|预设特殊场景)$/u.test(normalizedTitle)) return "template";
+  if (/说话|对话|口癖|句式|标点|格式示例|错误格式|特殊场景|回复|主动/u.test(text)) return "style";
+  if (/关系|称呼|用户|互动/u.test(text)) return "relationship";
+  if (/边界|安全|禁止|约束|不可|不要/u.test(text)) return "boundary";
+  if (/世界|背景|经历|设定|身份|角色|档案|Profile/u.test(text)) return "profile";
+  return "normalized";
+}
+
+function personaStandardizationSourceTags(section, context) {
+  const tags = [];
+  const kind = personaStandardizationSectionKind(section.title, section.content);
+  if (kind === "style") {
+    tags.push("scenario_calibration");
+    if (context.hasSupplement) tags.push("supplement_material");
+  } else if (kind === "template") {
+    tags.push("template_guardrail");
+    tags.push("model_normalization");
+  } else {
+    tags.push("original_persona");
+    tags.push("model_normalization");
+    if (context.hasSupplement && /补充|偏好|示例|反例|聊天|记录/u.test(section.content)) {
+      tags.push("supplement_material");
+    }
+  }
+  if (/待确认|冲突|需要审核|可能|不确定|无法判断/u.test(section.content)) tags.push("needs_review");
+  if (personaStandardizationRiskHits(section.content).length) tags.push("unsafe_long_term");
+  return Array.from(new Set(tags));
+}
+
+function personaStandardizationRiskHits(text) {
+  const value = String(text || "");
+  const risks = [
+    ["短期时间线", /今天|明天|昨天|今晚|今早|刚刚|刚才|这会儿|此刻/u],
+    ["临时天气/日程", /天气|下雨|气温|日程|正在上课|下班回家|通勤/u],
+    ["隐私位置", /地址|住址|小区|楼栋|门牌|定位|公司地址|学校地址/u],
+    ["插件/模型配置", /插件配置|模型供应商|供应商|Provider|API|工具调用|缓存|token|QQ号|target_/iu],
+    ["流程痕迹", /问卷|候选|证据|校准|第一阶段|第二阶段|用户选择/u],
+  ];
+  return risks.filter(([, pattern]) => pattern.test(value)).map(([label]) => label);
+}
+
+function personaStandardizationConflictItems(baseText, styleText) {
+  const base = String(baseText || "");
+  const style = String(styleText || "");
+  const pairs = [
+    ["克制程度", /克制|沉稳|寡言|冷淡|少话/u, /撒娇|黏|热情|频繁|主动索取|高频/u],
+    ["主动强度", /不主动|少主动|被动|不打扰/u, /主动|监督|提醒|索取|查岗/u],
+    ["表达形式", /不用动作|无动作|不写动作|纯文字/u, /动作|摸摸|抱|亲|旁白/u],
+    ["语气强度", /温柔|礼貌|柔和/u, /毒舌|威胁|讽刺|命令/u],
+    ["回复长度", /详细|解释|长篇|完整/u, /短句|极简|少解释|半句/u],
+  ];
+  return pairs
+    .filter(([, basePattern, stylePattern]) => basePattern.test(base) && stylePattern.test(style))
+    .map(([title]) => title);
+}
+
+const personaStandardizationTagLabels = {
+  original_persona: "原人格继承",
+  supplement_material: "补充资料推导",
+  scenario_calibration: "场景校准推导",
+  model_normalization: "模型格式整理",
+  template_guardrail: "模板规范项",
+  conflict: "与原人格冲突",
+  unsafe_long_term: "不建议长期写入",
+  needs_review: "需要确认",
+};
+
+function personaStandardizationBuildFinalEditor() {
+  const finalText = personaStandardizationMergedTemplate();
+  const baseText = personaStandardizationCurrentTemplate();
+  const styleText = personaStandardizationStyleSummary();
+  const draft = personaStandardizationDraftState();
+  const context = { hasSupplement: Boolean(String(draft.supplement_text || "").trim()) };
+  const conflicts = personaStandardizationConflictItems(baseText, styleText);
+  const sections = personaStandardizationSplitSections(finalText).map((section, index) => {
+    const tags = personaStandardizationSourceTags(section, context);
+    if (conflicts.length && personaStandardizationSectionKind(section.title, section.content) === "style") {
+      tags.push("conflict");
+    }
+    return {
+      id: `final_${index + 1}`,
+      title: section.title || `段落 ${index + 1}`,
+      heading: section.heading || "",
+      content: section.content || "",
+      tags: Array.from(new Set(tags)),
+      risks: personaStandardizationRiskHits(`${section.title}\n${section.content}`),
+    };
+  });
+  const counts = {};
+  sections.forEach((section) => {
+    (section.tags || []).forEach((tag) => { counts[tag] = (counts[tag] || 0) + 1; });
+  });
+  return {
+    sections,
+    counts,
+    conflicts,
+    generated_at: new Date().toLocaleString(),
+  };
+}
+
+function personaStandardizationEnsureFinalEditor() {
+  if (!state.personaStandardizationStyleSummaryDraft) return null;
+  if (!state.personaStandardizationFinalEditor) {
+    state.personaStandardizationFinalEditor = personaStandardizationBuildFinalEditor();
+  }
+  return state.personaStandardizationFinalEditor;
+}
+
+function collectPersonaFinalEditor(root = document) {
+  const editor = state.personaStandardizationFinalEditor;
+  if (!editor) return "";
+  const scope = root || document;
+  const sections = (editor.sections || []).map((section) => {
+    const titleInput = scope.querySelector(`[data-persona-final-title="${section.id}"]`);
+    const contentInput = scope.querySelector(`[data-persona-final-content="${section.id}"]`);
+    const title = String(titleInput?.value ?? section.title ?? "").trim();
+    const content = formatPersonaTemplateForEditing(contentInput?.value ?? section.content ?? "");
+    if (!title && !content) return "";
+    const header = title.startsWith("#") || title.startsWith("【") ? title : `${section.heading || "#"} ${title}`;
+    return `${header}\n${content}`.trim();
+  }).filter(Boolean);
+  return formatPersonaTemplateForEditing(sections.join("\n\n"));
+}
+
+const personaVoiceChannelMeta = [
+  ["conversation", "对话", "persona_conversation_voice_prompt", "真正说出口的私聊/群聊回复。写口癖、句长、标点、接话和拒绝方式。"],
+  ["creative", "创作", "persona_creative_voice_prompt", "日记、QQ 空间、私下创作和文案。保留角色笔触，不套聊天短句。"],
+  ["planning", "计划", "persona_planning_voice_prompt", "日程、主动候选和行动倾向。描述会怎么安排自己，不是聊天台词。"],
+  ["inner", "内心", "persona_inner_voice_prompt", "内部动机、念头和状态余波。默认不外发，不能写成系统分析。"],
+  ["proactive", "主动", "persona_proactive_voice_prompt", "把主动动机变成最终开口。强调具体由头、低压力和可接话。"],
+];
+
+function personaStyleFingerprintText(keys, limit = 8) {
+  const fingerprint = state.personaStandardizationStyleSummaryDraft?.draft?.style_fingerprint || {};
+  const rows = [];
+  keys.forEach((key) => {
+    const items = Array.isArray(fingerprint[key]) ? fingerprint[key] : [];
+    items.forEach((item) => {
+      const text = String(item || "").trim();
+      if (text && rows.length < limit) rows.push(text);
+    });
+  });
+  return rows;
+}
+
+function personaVoiceRuleLines(title, lines) {
+  const clean = Array.from(new Set((lines || []).map((line) => String(line || "").trim()).filter(Boolean)));
+  return [`${title}：`, ...clean.slice(0, 12).map((line) => `- ${line}`)].join("\n");
+}
+
+function buildPersonaVoiceChannelDrafts(root = document) {
+  const finalText = collectPersonaFinalEditor(root) || personaStandardizationMergedTemplate();
+  const summary = state.personaStandardizationStyleSummaryDraft?.draft || {};
+  const styleRules = Array.isArray(summary.style_rules) ? summary.style_rules.filter(Boolean).slice(0, 5) : [];
+  const avoidRules = Array.isArray(summary.avoid_rules) ? summary.avoid_rules.filter(Boolean).slice(0, 5) : [];
+  const lexical = personaStyleFingerprintText(["lexical_habits", "sentence_patterns", "length_rhythm", "punctuation"], 7);
+  const relation = personaStyleFingerprintText(["relationship_tone", "emotion_expression", "opening_closing"], 7);
+  const proactive = personaStyleFingerprintText(["opening_closing", "questioning", "topic_shift", "relationship_tone"], 7);
+  const stableStyleHint = finalText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => /口癖|句式|长度|标点|开头|收尾|主动|追问|转移|亲密|拒绝|安慰|错误格式|避免/u.test(line))
+    .slice(0, 8);
+  return {
+    conversation: personaVoiceRuleLines("对话风格", [
+      "用于私聊/群聊真正外发的聊天回复，不用于日程、创作或内部念头。",
+      ...lexical,
+      ...relation.slice(0, 3),
+      ...styleRules.slice(0, 3),
+      "复杂问题、教程、排障和用户明确要求详细说明时，信息完整性优先。",
+      avoidRules.length ? `避免：${avoidRules.join("；")}` : "避免助手腔、总结腔、过度确认和硬问是否继续。",
+    ]),
+    creative: personaVoiceRuleLines("创作风格", [
+      "用于日记、QQ 空间、私下创作和文案；可以比聊天更完整，但仍像角色本人写下的东西。",
+      "保留角色观察角度、词感和节奏，不把聊天短句机械套进作品。",
+      ...stableStyleHint.slice(0, 4),
+      "减少排比、升华、哲理总结、万能比喻和营销文案式收尾。",
+      avoidRules.length ? `避免：${avoidRules.join("；")}` : "避免 AI 作文腔、散文模板和“仿佛/像是/某种意义上”的空泛连接。",
+    ]),
+    planning: personaVoiceRuleLines("计划风格", [
+      "用于日程、主动候选和行动倾向；描述角色会怎样安排自己，不是最终聊天台词。",
+      "计划应体现角色稳定偏好、拖延/守约/探索/等待/靠近等倾向。",
+      "日程里只写角色自己的行动、环境和状态，不把内心分析或用户关系写成任务清单。",
+      ...relation.slice(0, 4),
+      "主动候选必须有具体由头，没有切口就留空或延后。",
+    ]),
+    inner: personaVoiceRuleLines("内心活动风格", [
+      "用于内部动机、念头、犹豫和状态余波，默认不可直接外发。",
+      "可以更碎、更主观、更像脑内一闪而过，但不能写成系统分析。",
+      ...relation.slice(0, 3),
+      ...proactive.slice(0, 3),
+      "禁止出现插件、模型、系统、策略分数、工具调用、我判断用户需要陪伴等后台措辞。",
+    ]),
+    proactive: personaVoiceRuleLines("主动开口风格", [
+      "用于把主动动机变成最终外发的一句话或短消息。",
+      "先找具体由头：眼前物、日程缝隙、刚发生的小事、共同话题或真实约定；不要泛泛问在不在。",
+      ...proactive,
+      "低压力、可接话，发完能自然停住；不要索取回应、汇报任务或解释为什么主动。",
+      "避免“你方便聊聊吗”“我想和你分享一下”“希望你今天过得不错”“要不要继续这个话题”等 AI 味开场。",
+    ]),
+  };
+}
+
+function personaVoiceDraftState(root = document) {
+  if (!state.personaStandardizationVoiceDraft) {
+    state.personaStandardizationVoiceDraft = buildPersonaVoiceChannelDrafts(root);
+    state.personaStandardizationVoiceDraftStale = false;
+  }
+  return state.personaStandardizationVoiceDraft;
+}
+
+function collectPersonaVoiceDraft(root = document) {
+  const draft = { ...personaVoiceDraftState(root) };
+  const scope = root || document;
+  scope.querySelectorAll?.("[data-persona-voice-channel]").forEach((input) => {
+    const channel = input.dataset.personaVoiceChannel || "";
+    if (channel) draft[channel] = input.value || "";
+  });
+  state.personaStandardizationVoiceDraft = draft;
+  return draft;
+}
+
+function personaVoiceSettingsPayload(root = document) {
+  const draft = collectPersonaVoiceDraft(root);
+  const settings = { enable_persona_voice_channels: true };
+  personaVoiceChannelMeta.forEach(([channel, , key]) => {
+    settings[key] = String(draft[channel] || "").trim();
+  });
+  return { settings };
+}
+
+function formatPersonaTemplateForEditing(value) {
+  let text = String(value || "").replace(/\r\n/g, "\n").trim();
+  if (!text) return "";
+  text = text.replace(/^\s*#{1,6}\s*$/gm, "");
+  text = text.replace(/^\s*[•·]\s*$/gm, "");
+  text = text.replace(/^\s*(#{1,6})\s*(.+)$/gm, (_, hashes, title) => `${hashes} ${String(title || "").trim()}`);
+  text = text.replace(/\s*(#{1,6}\s+)/g, "\n\n$1");
+  text = text.replace(/\s*(【[^】]{2,28}】)/g, "\n\n$1\n");
+  text = text.replace(/\n[ \t]*[-•]\s*\n/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  return text;
+}
+
+function collectPersonaStyleEvidence() {
+  const draft = personaStandardizationDraftState();
+  const scenarios = state.personaStandardizationStyleDraft?.draft?.scenarios || [];
+  return scenarios.map((scenario) => {
+    const selectedId = draft.style_choices?.[scenario.id] || "";
+    const selected = (scenario.options || []).find((item) => item.id === selectedId) || null;
+    const custom = (draft.style_custom?.[scenario.id] || "").trim();
+    const feedback = (draft.style_feedback?.[scenario.id] || "").trim();
+    return {
+      id: scenario.id || "",
+      title: scenario.title || "",
+      prompt: scenario.prompt || "",
+      selected_id: selected?.id || "",
+      selected_label: selected?.label || "",
+      chosen_text: selected?.text || "",
+      custom_text: custom,
+      feedback,
+      traits: selected?.traits || [],
+    };
+  }).filter((item) => item.selected_id || item.custom_text);
+}
+
+function personaStyleScenarioProgress() {
+  const draft = personaStandardizationDraftState();
+  const scenarios = state.personaStandardizationStyleDraft?.draft?.scenarios || [];
+  const total = scenarios.length;
+  let answered = 0;
+  scenarios.forEach((scenario) => {
+    const selected = draft.style_choices?.[scenario.id] || "";
+    const custom = (draft.style_custom?.[scenario.id] || "").trim();
+    if (selected || custom) answered += 1;
+  });
+  return { total, answered, missing: Math.max(0, total - answered), complete: total > 0 && answered >= total };
+}
+
+function renderPersonaFinalEditor(styleSummaryResult, styleStale) {
+  if (!styleSummaryResult) return "";
+  const editor = personaStandardizationEnsureFinalEditor();
+  if (!editor) return "";
+  const voiceDraft = styleSummaryResult && !styleStale ? personaVoiceDraftState() : {};
+  const voiceStale = Boolean(state.personaStandardizationVoiceDraftStale);
+  const count = (key) => Number(editor.counts?.[key] || 0);
+  const sourceStats = [
+    ["原人格继承", count("original_persona"), "ok"],
+    ["补充资料推导", count("supplement_material"), "info"],
+    ["场景校准推导", count("scenario_calibration"), "style"],
+    ["格式整理", count("model_normalization"), "neutral"],
+    ["需确认", count("needs_review"), "warn"],
+    ["冲突/风险", count("conflict") + count("unsafe_long_term"), "danger"],
+  ];
+  const navRows = (editor.sections || []).map((section, index) => `
+    <a href="#personaFinal_${escapeHtml(section.id)}">
+      <span>${escapeHtml(String(index + 1).padStart(2, "0"))}</span>
+      <b>${escapeHtml(section.title || `段落 ${index + 1}`)}</b>
+      <small>${escapeHtml((section.tags || []).map((tag) => personaStandardizationTagLabels[tag] || tag).slice(0, 2).join(" / ") || "待审核")}</small>
+    </a>
+  `).join("");
+  const sectionRows = (editor.sections || []).map((section, index) => {
+    const tags = (section.tags || []).map((tag) => `<span class="${escapeHtml(tag)}">${escapeHtml(personaStandardizationTagLabels[tag] || tag)}</span>`).join("");
+    const risks = (section.risks || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+    return `
+      <section class="persona-final-section ${section.tags?.includes("conflict") ? "has-conflict" : ""} ${section.tags?.includes("unsafe_long_term") ? "has-risk" : ""}" id="personaFinal_${escapeHtml(section.id)}">
+        <header>
+          <div>
+            <span>${escapeHtml(String(index + 1).padStart(2, "0"))}</span>
+            <input type="text" data-persona-final-title="${escapeHtml(section.id)}" value="${escapeHtml(section.title || "")}" aria-label="段落标题">
+          </div>
+          <div class="persona-final-tags">${tags}</div>
+        </header>
+        ${risks ? `<div class="persona-final-risk"><b>不建议直接长期写入的线索</b><ul>${risks}</ul></div>` : ""}
+        <textarea rows="${Math.min(18, Math.max(5, String(section.content || "").split("\n").length + 2))}" data-persona-final-content="${escapeHtml(section.id)}" aria-label="段落正文">${escapeHtml(section.content || "")}</textarea>
+      </section>
+    `;
+  }).join("");
+  const conflictRows = (editor.conflicts || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const reviewRows = (editor.sections || [])
+    .filter((section) => (section.tags || []).some((tag) => ["conflict", "unsafe_long_term", "needs_review"].includes(tag)))
+    .map((section) => `<li><b>${escapeHtml(section.title)}</b><span>${escapeHtml((section.tags || []).map((tag) => personaStandardizationTagLabels[tag] || tag).join(" / "))}</span></li>`)
+    .join("");
+  const voiceRows = personaVoiceChannelMeta.map(([channel, label, key, desc]) => `
+    <label class="persona-voice-card">
+      <header>
+        <div>
+          <b>${escapeHtml(label)}</b>
+          <span>${escapeHtml(desc)}</span>
+        </div>
+        <code>${escapeHtml(key)}</code>
+      </header>
+      <textarea rows="8" data-persona-voice-channel="${escapeHtml(channel)}" aria-label="${escapeHtml(`${label}分通道规则`)}">${escapeHtml(voiceDraft[channel] || "")}</textarea>
+    </label>
+  `).join("");
+  return `
+    <section class="persona-final-editor">
+      <header class="persona-final-head">
+        <div>
+          <b>第四步：最终人格编辑器</b>
+          <span>逐段审核来源、冲突和长期可写入性。这里的内容才是最终复制入口。</span>
+        </div>
+        <button type="button" data-persona-standard-copy-final ${styleSummaryResult && !styleStale ? "" : "disabled"}>复制编辑器最终稿</button>
+      </header>
+      <div class="persona-final-stats">
+        ${sourceStats.map(([label, value, tone]) => `<span class="${escapeHtml(tone)}"><b>${escapeHtml(String(value))}</b>${escapeHtml(label)}</span>`).join("")}
+      </div>
+      <div class="persona-final-layout">
+        <nav class="persona-final-nav">
+          <b>段落导航</b>
+          ${navRows || `<p>暂无可编辑段落。</p>`}
+        </nav>
+        <div class="persona-final-main">
+          ${sectionRows || `<div class="persona-standard-empty"><b>没有可编辑内容</b><span>请先生成风格规则。</span></div>`}
+        </div>
+        <aside class="persona-final-audit">
+          <section>
+            <b>冲突提示</b>
+            ${conflictRows ? `<ul>${conflictRows}</ul>` : `<p>没有检测到明显“原人格底色”和“风格推导”的方向冲突。</p>`}
+          </section>
+          <section>
+            <b>重点复核</b>
+            ${reviewRows ? `<ul class="persona-final-review-list">${reviewRows}</ul>` : `<p>暂无高风险段落。仍建议通读后再复制。</p>`}
+          </section>
+          <section>
+            <b>写入原则</b>
+            <p>最终人格只保留稳定身份、关系、边界和说话习惯。天气、日程、地址、插件配置、一次性聊天上下文应交给运行时上下文，不写入长期人格。</p>
+          </section>
+        </aside>
+      </div>
+      <section class="persona-voice-apply">
+        <header class="persona-voice-head">
+          <div>
+            <b>第五步：应用到插件表达风格</b>
+            <span>从最终人格和风格指纹里提取短规则，分别写入对话、创作、计划、内心和主动链路。只有点击保存后才会写入插件配置。</span>
+          </div>
+          <div class="persona-voice-actions">
+            <button type="button" class="ghost" data-persona-voice-regenerate ${styleSummaryResult && !styleStale ? "" : "disabled"}>重新生成分通道草稿</button>
+            <button type="button" data-persona-voice-save ${styleSummaryResult && !styleStale && !voiceStale ? "" : "disabled"}>保存到插件表达风格</button>
+          </div>
+        </header>
+        ${voiceStale ? `<div class="setup-guide-hint warn">最终人格内容已修改，下方分通道草稿可能不再对应最新文本。请先重新生成分通道草稿，再保存到插件表达风格。</div>` : ""}
+        <div class="persona-voice-notes">
+          <span>只保存短规则，不保存完整人格</span>
+          <span>内心活动不会直接外发</span>
+          <span>创作、对话、计划、主动分别注入</span>
+          <span>保存前请逐项审核</span>
+        </div>
+        <div class="persona-voice-grid">${voiceRows}</div>
+      </section>
+    </section>
+  `;
+}
+
+function invalidatePersonaStyleSummary(root) {
+  state.personaStandardizationStyleSummaryDraft = null;
+  state.personaStandardizationFinalEditor = null;
+  state.personaStandardizationVoiceDraft = null;
+  state.personaStandardizationVoiceDraftStale = false;
+  const scope = root || document;
+  const summary = scope.querySelector?.("[data-persona-style-summary]");
+  if (summary) summary.value = "";
+  scope.querySelectorAll?.("[data-persona-standard-copy-final]").forEach((button) => {
+    button.disabled = true;
+  });
+}
+
+function invalidatePersonaStyleDraft(root) {
+  state.personaStandardizationStyleStale = true;
+  state.personaStandardizationStyleSummaryDraft = null;
+  invalidatePersonaStyleSummary(root);
+  const scope = root || document;
+  scope.querySelectorAll?.("[data-persona-style-summary-generate], [data-persona-style-retry]").forEach((button) => {
+    button.disabled = true;
+  });
+}
+
+function invalidatePersonaStandardizationDraft(root) {
+  state.personaStandardizationBaseStale = true;
+  invalidatePersonaStyleDraft(root);
+  const draft = personaStandardizationDraftState();
+  draft.base_confirmed = false;
+  const scope = root || document;
+  scope.querySelectorAll?.("[data-persona-standard-copy], [data-persona-style-generate], [data-persona-style-retry]").forEach((button) => {
+    button.disabled = true;
+  });
+}
+
+function personaStandardizationStepClass(status) {
+  return `persona-flow-step ${status}`;
+}
+
+function renderPersonaStandardizationWorkbench() {
+  const draft = personaStandardizationDraftState();
+  if (!draft.persona_id && !draft.use_pasted_source && (state.roleplayPersonas || []).length) {
+    draft.persona_id = state.roleplayPersonas[0]?.id || "";
+  }
+  const result = state.personaStandardizationDraft || null;
+  const styleResult = state.personaStandardizationStyleDraft || null;
+  const baseStale = Boolean(state.personaStandardizationBaseStale);
+  const styleStale = Boolean(state.personaStandardizationStyleStale || baseStale);
+  const baseConfirmed = Boolean(draft.base_confirmed && result && !baseStale);
+  const score = result?.draft?.score || {};
+  const styleHintRows = personaStandardizationStyleHints.map(([key, title, hint, placeholder]) => `
+    <label class="persona-standard-question">
+      <span><b>${escapeHtml(title)}</b><small>${escapeHtml(hint)}</small></span>
+      <textarea rows="3" data-persona-standard-field="${escapeHtml(key)}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(draft[key] || "")}</textarea>
+    </label>
+  `).join("");
+  const summaryRows = (result?.draft?.change_summary || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const warningRows = (result?.draft?.warnings || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const checklistRows = (result?.draft?.review_checklist || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const styleWarningRows = (styleResult?.draft?.warnings || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const styleSummaryResult = state.personaStandardizationStyleSummaryDraft || null;
+  const finalEditor = styleSummaryResult && !styleStale ? personaStandardizationEnsureFinalEditor() : null;
+  const styleSummaryWarningRows = (styleSummaryResult?.draft?.warnings || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const styleSummaryChecklistRows = (styleSummaryResult?.draft?.review_checklist || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const fingerprintLabels = {
+    lexical_habits: "口癖词",
+    sentence_patterns: "句式",
+    length_rhythm: "长短节奏",
+    punctuation: "标点",
+    opening_closing: "开头收尾",
+    emotion_expression: "情绪表达",
+    questioning: "追问习惯",
+    topic_shift: "话题切换",
+    relationship_tone: "关系语气",
+  };
+  const fingerprintRows = Object.entries(styleSummaryResult?.draft?.style_fingerprint || {})
+    .map(([key, items]) => {
+      const rows = Array.isArray(items) ? items.filter(Boolean) : [];
+      if (!rows.length) return "";
+      return `<section><b>${escapeHtml(fingerprintLabels[key] || key)}</b><ul>${rows.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`;
+    })
+    .filter(Boolean)
+    .join("");
+  const baseTemplateText = formatPersonaTemplateForEditing(result?.draft?.template || "");
+  const scenarioCount = styleResult?.draft?.scenarios?.length || 0;
+  const evidenceCount = collectPersonaStyleEvidence().length;
+  const styleProgress = personaStyleScenarioProgress();
+  const flowSteps = [
+    ["1", "基础设定", result ? (baseStale ? "问卷已改，需重新生成" : (baseConfirmed ? "已确认基本信息" : "请先审核并确认")) : "先选择/粘贴人格并生成基础稿", result && !baseStale && baseConfirmed ? "done" : "active"],
+    ["2", "情景校准", scenarioCount ? (styleStale ? "偏好已改，需重新生成" : `已完成 ${styleProgress.answered}/${styleProgress.total} 个情景`) : (baseConfirmed ? "填写风格参考后生成候选" : "等待确认基础信息"), scenarioCount && !styleStale && styleProgress.complete ? "done" : (baseConfirmed ? "active" : "locked")],
+    ["3", "风格规则", styleSummaryResult ? "已归纳，进入最终审核" : (scenarioCount && !styleStale ? (styleProgress.complete ? `已有 ${evidenceCount} 条证据` : `还差 ${styleProgress.missing} 个情景`) : "等待情景选择"), styleSummaryResult ? "done" : (scenarioCount && !styleStale && styleProgress.complete ? "active" : "locked")],
+    ["4", "最终编辑", finalEditor ? `可审核 ${finalEditor.sections?.length || 0} 个段落` : "等待风格规则生成", finalEditor ? "active" : "locked"],
+  ].map(([index, title, desc, status]) => `
+    <div class="${personaStandardizationStepClass(status)}">
+      <strong>${escapeHtml(index)}</strong>
+      <span><b>${escapeHtml(title)}</b><small>${escapeHtml(desc)}</small></span>
+    </div>
+  `).join("");
+  const scenarioRows = (styleResult?.draft?.scenarios || []).map((scenario) => {
+    const selected = draft.style_choices?.[scenario.id] || "";
+    const custom = draft.style_custom?.[scenario.id] || "";
+    const feedback = draft.style_feedback?.[scenario.id] || "";
+    const answered = Boolean(selected || String(custom || "").trim());
+    const typeLabels = { passive_one_liner: "被动一句式", active_one_liner: "主动一句式", continuous_scene: "连续场景" };
+    const options = (scenario.options || []).map((option) => `
+      <label class="persona-style-option ${selected === option.id ? "selected" : ""}">
+        <input type="radio" name="personaStyle_${escapeHtml(scenario.id)}" value="${escapeHtml(option.id)}" data-persona-style-choice="${escapeHtml(scenario.id)}" ${selected === option.id ? "checked" : ""}>
+        <span><b>${escapeHtml(option.label || option.id)}${selected === option.id ? `<i>已选</i>` : ""}</b><em>${escapeHtml(option.text || "")}</em>${option.traits?.length ? `<small>${escapeHtml(option.traits.join(" / "))}</small>` : ""}</span>
+      </label>
+    `).join("");
+    return `
+      <section class="persona-style-scenario ${answered ? "answered" : "missing"}">
+        <header>
+          <div><b>${escapeHtml(scenario.title || scenario.id)}</b><span>${escapeHtml(scenario.prompt || "")}</span></div>
+          <em>${escapeHtml(typeLabels[scenario.type] || "情景")} · ${answered ? "已校准" : "待选择"}</em>
+        </header>
+        <div class="persona-style-options">${options}</div>
+        <label class="persona-standard-question">
+          <span><b>自填更贴近的回复</b><small>如果三句都不准，直接写一句更像她的。它只作为归纳证据，不会原样写进最终稿。</small></span>
+          <textarea rows="2" data-persona-style-custom="${escapeHtml(scenario.id)}" placeholder="可选：写一句更像她的回复；填写后可不选上面的候选">${escapeHtml(custom)}</textarea>
+        </label>
+        <details class="persona-style-retry" ${feedback ? "open" : ""}>
+          <summary>三个都不满意，写建议后重生成</summary>
+          <div>
+            <label>
+              <span><b>重生成建议</b><small>只影响这个情景，不会改动其它情景。</small></span>
+              <textarea rows="2" data-persona-style-feedback="${escapeHtml(scenario.id)}" placeholder="例如：不要太软，少解释，更像随口回一句">${escapeHtml(feedback)}</textarea>
+            </label>
+          <button type="button" class="ghost" data-persona-style-retry="${escapeHtml(scenario.id)}" ${styleStale ? "disabled" : ""}>重生成此情景</button>
+          </div>
+        </details>
+      </section>
+    `;
+  }).join("");
+  const styleSummaryHtml = scenarioRows ? `
+    <div class="persona-standard-result">
+      <header>
+        <div>
+          <b>第三步：稳定风格规则</b>
+          <span>${escapeHtml(`已完成 ${styleProgress.answered}/${styleProgress.total} 个情景。选择和自填只作为证据，最终只提取说话习惯，不把候选原句写进人格。`)}</span>
+        </div>
+        <button type="button" data-persona-style-summary-generate ${styleStale || !styleProgress.complete ? "disabled" : ""}>生成风格规则</button>
+      </header>
+      <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.summary)}</div>
+      ${styleStale ? `<div class="setup-guide-hint warn">问卷、基础稿或第二步偏好已经修改，当前情景/风格规则已过期。请先重新生成基础稿或情景试答。</div>` : ""}
+      ${scenarioRows && !styleProgress.complete ? `<div class="setup-guide-hint warn">请先完成全部情景。每个情景需要选择一个候选，或在“自填更贴近的回复”里写一句更准的回复。</div>` : ""}
+      ${styleSummaryResult?.parse_note ? `<div class="setup-guide-hint warn">${escapeHtml(styleSummaryResult.parse_note)}</div>` : ""}
+      ${styleSummaryWarningRows ? `<div class="setup-guide-hint warn"><ul>${styleSummaryWarningRows}</ul></div>` : ""}
+      <div class="persona-standard-review-grid">
+        <section><b>风格指纹</b>${fingerprintRows ? `<div class="persona-fingerprint-grid">${fingerprintRows}</div>` : ((styleSummaryResult?.draft?.style_rules || []).length ? `<ul>${styleSummaryResult.draft.style_rules.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p>尚未归纳。选择候选或填写证据后点击生成。</p>`)}</section>
+        <section><b>避免事项</b>${(styleSummaryResult?.draft?.avoid_rules || []).length ? `<ul>${styleSummaryResult.draft.avoid_rules.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p>生成后会列出需要避免的句式和口吻。</p>`}</section>
+        <section><b>审核清单</b>${styleSummaryChecklistRows ? `<ul>${styleSummaryChecklistRows}</ul>` : `<p>确认规则没有改变角色设定，也没有固定候选原句。</p>`}</section>
+      </div>
+      ${renderPersonaFinalEditor(styleSummaryResult, styleStale)}
+    </div>
+  ` : "";
+  const styleHtml = baseConfirmed ? `
+      <section class="persona-style-workbench">
+      <header>
+        <div>
+          <b>第二步：稳定对话风格校准</b>
+          <span>${scenarioCount ? `已生成 ${scenarioCount} 个情景，已完成 ${styleProgress.answered}/${styleProgress.total}。每个情景都需要选择、自填，或写建议重生成。` : "先确认上面的基础设定，再生成常见情景候选。"}</span>
+        </div>
+        <button type="button" data-persona-style-generate ${baseStale ? "disabled" : ""}>${scenarioCount ? "重新生成全部情景" : "生成情景候选"}</button>
+      </header>
+      <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.scenarios)}</div>
+      <section class="persona-style-hints">
+        <header><b>风格参考</b><span>这些内容只用于生成情景候选，不会直接写进最终人格。</span></header>
+        <div class="persona-standard-question-grid">${styleHintRows}</div>
+      </section>
+      ${baseStale ? `<div class="setup-guide-hint warn">基础问卷或来源已修改，当前基础稿已过期。请先重新生成基础设定稿。</div>` : ""}
+      ${styleResult?.parse_note ? `<div class="setup-guide-hint warn">${escapeHtml(styleResult.parse_note)}</div>` : ""}
+      ${styleWarningRows ? `<div class="setup-guide-hint warn"><ul>${styleWarningRows}</ul></div>` : ""}
+      ${scenarioRows || `<div class="persona-standard-empty"><b>还没有情景候选</b><span>确认基础信息后，模型会按多个聊天场景各给三句不同风格的候选回复。</span></div>`}
+      ${styleSummaryHtml}
+    </section>
+  ` : (result && !baseStale ? `
+    <section class="persona-standard-empty">
+      <b>确认基础信息后再校准说话方式</b>
+      <span>先通读上面的基础设定稿。确认角色身份、关系、边界和长期设定无误后，再进入情景试答。</span>
+    </section>
+  ` : "");
+  const resultHtml = result ? `
+    <section class="persona-standard-result">
+      <header>
+        <div>
+          <b>第一步：基础设定审核稿</b>
+          <span>${escapeHtml(result.persona_id ? `来源人格：${result.persona_id}` : "来源：当前 AstrBot 人格")} · ${escapeHtml(result.provider_id || "主模型")} · 原文 ${escapeHtml(String(result.source_chars || 0))} 字</span>
+        </div>
+        <div class="persona-standard-score">
+          <span>完整 ${escapeHtml(String(score.completeness ?? 0))}</span>
+          <span>一致 ${escapeHtml(String(score.consistency ?? 0))}</span>
+          <span>可用 ${escapeHtml(String(score.roleplay_usability ?? 0))}</span>
+        </div>
+      </header>
+      ${result.parse_note ? `<div class="setup-guide-hint warn">${escapeHtml(result.parse_note)}</div>` : ""}
+      ${baseStale ? `<div class="setup-guide-hint warn">你修改了问卷、来源或整理强度。下面是旧审核稿，只能参考；继续前请重新生成。</div>` : ""}
+      <label class="persona-standard-editor">
+        <span><b>审核稿正文</b><small>已经按模板标题分段。你可以直接在这里改字，确认后再进入风格校准。</small></span>
+        <textarea class="persona-standard-template" rows="24" data-persona-standard-template>${escapeHtml(baseTemplateText)}</textarea>
+      </label>
+      <div class="persona-standard-review-grid">
+        <section><b>改动摘要</b>${summaryRows ? `<ul>${summaryRows}</ul>` : `<p>暂无摘要。</p>`}</section>
+        <section><b>需要审核</b>${warningRows ? `<ul>${warningRows}</ul>` : `<p>没有明显冲突，但仍建议通读。</p>`}</section>
+        <section><b>审核清单</b>${checklistRows ? `<ul>${checklistRows}</ul>` : `<p>确认角色身份、关系称呼、禁区和长期设定。</p>`}</section>
+      </div>
+      <div class="setup-guide-actions">
+        <button type="button" data-persona-standard-copy ${baseStale ? "disabled" : ""}>复制基础稿</button>
+        <button type="button" data-persona-standard-confirm ${baseStale ? "disabled" : ""}>确认基本信息，进入风格校准</button>
+        <button type="button" class="ghost" data-persona-standard-clear>清空结果</button>
+      </div>
+      <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.confirm)}</div>
+    </section>
+  ` : `
+    <section class="persona-standard-empty">
+      <b>还没有生成基础设定稿</b>
+      <span>第一步只整理稳定设定，不生成口癖、句长、标点习惯等强语气内容。</span>
+    </section>
+  `;
+  return `
+    <article class="exp-detail-card persona-standard-card">
+      <h3>问卷式人格标准化</h3>
+      <p>先整理稳定设定，再用情景试答校准说话方式。全程只生成可编辑审核稿，不自动覆盖原人格。</p>
+      <div class="persona-flow-steps">${flowSteps}</div>
+      <div class="persona-standard-source">
+        <label class="setup-guide-choice ${draft.use_pasted_source ? "" : "selected"}">
+          <input type="radio" name="personaStandardSource" value="current" data-persona-standard-source ${draft.use_pasted_source ? "" : "checked"}>
+          <span><b>选择 AstrBot 人格</b><small>从可读取的人格列表选择，不会切换实际对话人格。</small></span>
+        </label>
+        <label class="setup-guide-choice ${draft.use_pasted_source ? "selected" : ""}">
+          <input type="radio" name="personaStandardSource" value="paste" data-persona-standard-source ${draft.use_pasted_source ? "checked" : ""}>
+          <span><b>粘贴人格文本</b><small>当前人格读取不到，或想整理另一版人格时使用。</small></span>
+        </label>
+      </div>
+      <label class="persona-standard-question ${draft.use_pasted_source ? "is-hidden" : ""}" data-persona-standard-persona-wrap>
+        <span><b>人格选择</b><small>优先选择要整理的 AstrBot 人格；列表未加载时会沿用当前默认人格。</small></span>
+        <select data-persona-standard-persona>
+          ${(state.roleplayPersonas || []).length
+            ? (state.roleplayPersonas || []).map((item) => {
+              const id = String(item.id || "");
+              const label = `${item.label || id}${item.source ? ` · ${item.source}` : ""}`;
+              return `<option value="${escapeHtml(id)}" ${id === String(draft.persona_id || "") ? "selected" : ""}>${escapeHtml(label)}</option>`;
+            }).join("")
+            : `<option value="">继承 AstrBot 当前配置人格</option>`}
+        </select>
+      </label>
+      <label class="persona-standard-question ${draft.use_pasted_source ? "" : "is-hidden"}" data-persona-standard-source-text-wrap>
+        <span><b>原人格文本</b><small>只在选择粘贴人格文本时使用。</small></span>
+        <textarea rows="8" data-persona-standard-source-text placeholder="把原 AstrBot 人格粘贴到这里">${escapeHtml(draft.source_text || "")}</textarea>
+      </label>
+      <div class="persona-standard-strength">
+        ${[
+          ["light", "轻度", "只整理排版和明显冲突"],
+          ["medium", "中度", "补足缺失模块并优化表达"],
+          ["deep", "深度", "更主动重构为完整模板"],
+        ].map(([value, label, desc]) => `
+          <label class="setup-guide-choice ${draft.strength === value ? "selected" : ""}">
+            <input type="radio" name="personaStandardStrength" value="${escapeHtml(value)}" data-persona-standard-strength ${draft.strength === value ? "checked" : ""}>
+            <span><b>${escapeHtml(label)}</b><small>${escapeHtml(desc)}</small></span>
+          </label>
+        `).join("")}
+      </div>
+      <section class="persona-reference-section">
+        <header>
+          <b>补充资料（可选）</b>
+          <span>可以粘贴聊天记录、角色卡补充、对话示例、像或不像的片段。留空也可以直接生成。</span>
+        </header>
+        <label class="persona-standard-question">
+          <span><b>参考材料</b><small>这些内容只作为证据。模型会优先保留原人格；聊天记录里偶发的一句话不会被直接写成永久设定。</small></span>
+          <textarea rows="8" data-persona-standard-supplement placeholder="例如：
+用户：你刚才这个说法好像太正式了
+她：啊，那我换短一点。刚才那句不算。
+
+补充说明：
+保留原人格里的称呼和关系；如果资料与原人格冲突，请在审核提醒里标出来。">${escapeHtml(draft.supplement_text || "")}</textarea>
+        </label>
+      </section>
+      <div class="setup-guide-actions">
+        <button type="button" data-persona-standard-generate>${draft.use_pasted_source ? "用粘贴文本生成基础稿" : "用所选人格生成基础稿"}</button>
+        <button type="button" class="ghost" data-persona-standard-fill-sample>填入示例</button>
+      </div>
+      <div class="persona-time-note">${escapeHtml(personaStandardizationTimeNotes.base)}</div>
+      ${resultHtml}
+      ${styleHtml}
+    </article>
+  `;
+}
+
+function collectPersonaStandardizationQuestionnaire() {
+  const draft = personaStandardizationDraftState();
+  document.querySelectorAll("[data-persona-standard-field]").forEach((input) => {
+    draft[input.dataset.personaStandardField || ""] = input.value || "";
+  });
+  document.querySelectorAll("[data-persona-style-custom]").forEach((input) => {
+    draft.style_custom = draft.style_custom || {};
+    draft.style_custom[input.dataset.personaStyleCustom || ""] = input.value || "";
+  });
+  document.querySelectorAll("[data-persona-style-feedback]").forEach((input) => {
+    draft.style_feedback = draft.style_feedback || {};
+    draft.style_feedback[input.dataset.personaStyleFeedback || ""] = input.value || "";
+  });
+  const source = document.querySelector("[data-persona-standard-source]:checked")?.value || "current";
+  draft.use_pasted_source = source === "paste";
+  const personaSelect = document.querySelector("[data-persona-standard-persona]");
+  const sourceTextInput = document.querySelector("[data-persona-standard-source-text]");
+  const supplementInput = document.querySelector("[data-persona-standard-supplement]");
+  if (personaSelect) draft.persona_id = personaSelect.value || "";
+  if (sourceTextInput) draft.source_text = sourceTextInput.value || "";
+  if (supplementInput) draft.supplement_text = supplementInput.value || "";
+  draft.strength = document.querySelector("[data-persona-standard-strength]:checked")?.value || draft.strength || "medium";
+  return draft;
+}
+
+async function generatePersonaStandardizationDraft(button) {
+  const draft = collectPersonaStandardizationQuestionnaire();
+  const questionnaire = {
+    supplement_text: draft.supplement_text || "",
+  };
+  personaStandardizationStyleHints.forEach(([key]) => { questionnaire[key] = draft[key] || ""; });
+  questionnaire.strength = draft.strength || "medium";
+  const result = await runAction(
+    () => postJson("/roleplay/standardize_persona", {
+      questionnaire,
+      persona_id: draft.use_pasted_source ? "" : (draft.persona_id || ""),
+      source_text: draft.use_pasted_source ? draft.source_text : "",
+    }),
+    "已生成审核稿",
+    button,
+    { reload: false },
+  );
+  if (result) {
+    state.personaStandardizationDraft = result;
+    state.personaStandardizationStyleDraft = null;
+    state.personaStandardizationStyleSummaryDraft = null;
+    state.personaStandardizationFinalEditor = null;
+    state.personaStandardizationVoiceDraft = null;
+    state.personaStandardizationVoiceDraftStale = false;
+    state.personaStandardizationBaseStale = false;
+    state.personaStandardizationStyleStale = false;
+    draft.base_confirmed = false;
+    draft.style_choices = {};
+    draft.style_custom = {};
+    draft.style_feedback = {};
+    renderExperimentalPage();
+  }
+}
+
+async function generatePersonaStyleScenarios(button) {
+  if (state.personaStandardizationBaseStale) {
+    showToast("基础设定稿已过期，请先重新生成基础设定稿", "error");
+    return;
+  }
+  if (!personaStandardizationDraftState().base_confirmed) {
+    showToast("请先确认基础信息，再生成情景候选", "error");
+    return;
+  }
+  const draft = collectPersonaStandardizationQuestionnaire();
+  const questionnaire = {};
+  personaStandardizationStyleHints.forEach(([key]) => { questionnaire[key] = draft[key] || ""; });
+  const result = await runAction(
+    () => postJson("/roleplay/persona_style_scenarios", {
+      questionnaire,
+      base_template: personaStandardizationCurrentTemplate(),
+    }),
+    "已生成情景候选",
+    button,
+    { reload: false },
+  );
+  if (result) {
+    state.personaStandardizationStyleDraft = result;
+    state.personaStandardizationStyleSummaryDraft = null;
+    state.personaStandardizationFinalEditor = null;
+    state.personaStandardizationVoiceDraft = null;
+    state.personaStandardizationVoiceDraftStale = false;
+    state.personaStandardizationStyleStale = false;
+    const styleState = personaStandardizationDraftState();
+    styleState.style_choices = {};
+    styleState.style_custom = {};
+    styleState.style_feedback = styleState.style_feedback || {};
+    renderExperimentalPage();
+  }
+}
+
+async function retryPersonaStyleScenario(scenarioId, button) {
+  if (state.personaStandardizationStyleStale || state.personaStandardizationBaseStale) {
+    showToast("当前情景已过期，请先重新生成情景候选", "error");
+    return;
+  }
+  if (!personaStandardizationDraftState().base_confirmed) {
+    showToast("请先确认基础信息", "error");
+    return;
+  }
+  const draft = collectPersonaStandardizationQuestionnaire();
+  const scenarios = state.personaStandardizationStyleDraft?.draft?.scenarios || [];
+  const scenario = scenarios.find((item) => item.id === scenarioId);
+  if (!scenario) {
+    showToast("没有找到这个情景", "error");
+    return;
+  }
+  const questionnaire = {};
+  personaStandardizationStyleHints.forEach(([key]) => { questionnaire[key] = draft[key] || ""; });
+  const result = await runAction(
+    () => postJson("/roleplay/persona_style_scenario_retry", {
+      questionnaire,
+      scenario,
+      feedback: draft.style_feedback?.[scenarioId] || "",
+      base_template: personaStandardizationCurrentTemplate(),
+    }),
+    "已重生成此情景",
+    button,
+    { reload: false },
+  );
+  if (result?.scenario) {
+    const nextScenarios = scenarios.map((item) => (item.id === scenarioId ? result.scenario : item));
+    state.personaStandardizationStyleDraft = {
+      ...state.personaStandardizationStyleDraft,
+      parse_note: result.parse_note || state.personaStandardizationStyleDraft?.parse_note || "",
+      draft: {
+        ...(state.personaStandardizationStyleDraft?.draft || {}),
+        scenarios: nextScenarios,
+      },
+    };
+    state.personaStandardizationStyleSummaryDraft = null;
+    state.personaStandardizationFinalEditor = null;
+    state.personaStandardizationVoiceDraft = null;
+    state.personaStandardizationVoiceDraftStale = false;
+    state.personaStandardizationStyleStale = false;
+    draft.style_choices = draft.style_choices || {};
+    draft.style_custom = draft.style_custom || {};
+    draft.style_choices[scenarioId] = "";
+    draft.style_custom[scenarioId] = "";
+    renderExperimentalPage();
+  }
+}
+
+async function generatePersonaStyleSummary(button) {
+  if (state.personaStandardizationStyleStale || state.personaStandardizationBaseStale) {
+    showToast("当前情景或基础稿已过期，请先重新生成", "error");
+    return;
+  }
+  if (!personaStandardizationDraftState().base_confirmed) {
+    showToast("请先确认基础信息", "error");
+    return;
+  }
+  const draft = collectPersonaStandardizationQuestionnaire();
+  const questionnaire = {};
+  questionnaire.supplement_text = draft.supplement_text || "";
+  personaStandardizationStyleHints.forEach(([key]) => { questionnaire[key] = draft[key] || ""; });
+  questionnaire.strength = draft.strength || "medium";
+  const evidence = collectPersonaStyleEvidence();
+  const progress = personaStyleScenarioProgress();
+  if (!progress.complete) {
+    showToast(`请先完成全部情景，还差 ${progress.missing} 个`, "error");
+    return;
+  }
+  if (!evidence.length) {
+    showToast("请先生成情景候选并选择或自填", "error");
+    return;
+  }
+  const result = await runAction(
+    () => postJson("/roleplay/persona_style_summary", {
+      questionnaire,
+      evidence,
+      base_template: personaStandardizationCurrentTemplate(),
+    }),
+    "已归纳风格规则",
+    button,
+    { reload: false },
+  );
+  if (result) {
+    state.personaStandardizationStyleSummaryDraft = result;
+    state.personaStandardizationFinalEditor = null;
+    state.personaStandardizationVoiceDraft = null;
+    state.personaStandardizationVoiceDraftStale = false;
+    state.personaStandardizationStyleStale = false;
+    renderExperimentalPage();
+  }
+}
+
+async function savePersonaVoiceChannelDrafts(button, root = document) {
+  if (state.personaStandardizationVoiceDraftStale) {
+    showToast("最终人格已修改，请先重新生成分通道草稿", "error");
+    return;
+  }
+  const payload = personaVoiceSettingsPayload(root);
+  const result = await runAction(
+    () => postJson("/settings/update", payload),
+    "已保存分通道人格风格",
+    button,
+    { reload: false },
+  );
+  if (result) {
+    state.overview = state.overview || {};
+    state.overview.settings = {
+      ...(state.overview.settings || {}),
+      ...(payload.settings || {}),
+    };
+    scheduleExperimentalRuntimeRefresh(true);
+  }
+}
+
+function fillPersonaStandardizationSample() {
+  const draft = personaStandardizationDraftState();
+  Object.assign(draft, {
+    supplement_text: "聊天记录示例：\n用户：你刚才这个说法好像太正式了\n她：啊，那我换短一点。刚才那句不算。\n用户：你在干嘛？\n她：刚下课，脑子还没转过来。\n\n补充说明：\n保留原人格里的称呼和关系；不要写成客服腔；如果资料和原人格冲突，以原人格为准并提醒我审核。",
+    speech: "短句为主，自然口语，少解释。避免“希望换个话题还是继续聊”“我可以帮你”等人机式句子。",
+    output: "社交软件文字回复短一点、像真人打字；不用动作描写和旁白，不自称智能助手，不输出工具或系统说明。",
+    examples: "示例：啥 / 没懂 / 我在哦 / 笑死。反例：（揉眼睛）早上好、我是您的智能助手、要不要继续这个话题。",
+  });
+  invalidatePersonaStandardizationDraft();
+  renderExperimentalPage();
+}
+
+function confirmPersonaStandardizationBase() {
+  const draft = collectPersonaStandardizationQuestionnaire();
+  if (!state.personaStandardizationDraft || state.personaStandardizationBaseStale) {
+    showToast("请先生成并审核基础设定稿", "error");
+    return;
+  }
+  const template = personaStandardizationCurrentTemplate();
+  if (!String(template || "").trim()) {
+    showToast("基础设定稿为空，无法进入风格校准", "error");
+    return;
+  }
+  if (state.personaStandardizationDraft?.draft) {
+    state.personaStandardizationDraft.draft.template = template;
+  }
+  draft.base_confirmed = true;
+  state.personaStandardizationStyleStale = false;
+  renderExperimentalPage();
+  showToast("已确认基础信息，可以开始校准对话风格");
 }
 
 function renderExperimentalTheoryVisual(key) {
@@ -18918,6 +20180,13 @@ function bindExperimentalOverviewActions() {
       renderExperimentalPage();
     });
   });
+  root.querySelectorAll("[data-exp-tool-open]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.experimentalSubpage = button.dataset.expToolOpen || "";
+      renderExperimentalPage();
+    });
+  });
   root.querySelectorAll("[data-exp-toggle]").forEach((input) => {
     input.addEventListener("change", async () => {
       const key = input.dataset.expToggle || "";
@@ -19015,6 +20284,153 @@ function bindExperimentalSubpageActions(key) {
       event.preventDefault();
       await saveExperimentalSettings(key, form, "已保存参数");
     });
+  });
+  root.querySelectorAll("[data-persona-standard-field], [data-persona-standard-source-text], [data-persona-standard-supplement]").forEach((input) => {
+    input.addEventListener("input", () => {
+      collectPersonaStandardizationQuestionnaire();
+      const key = input.dataset.personaStandardField || "";
+      if (["speech", "output", "examples"].includes(key)) {
+        invalidatePersonaStyleDraft(root);
+      } else {
+        invalidatePersonaStandardizationDraft(root);
+      }
+    });
+  });
+  root.querySelector("[data-persona-standard-template]")?.addEventListener("input", () => {
+    invalidatePersonaStyleDraft(root);
+    const draft = personaStandardizationDraftState();
+    draft.base_confirmed = false;
+  });
+  root.querySelectorAll("[data-persona-standard-source], [data-persona-standard-strength], [data-persona-standard-persona]").forEach((input) => {
+    input.addEventListener("change", () => {
+      collectPersonaStandardizationQuestionnaire();
+      invalidatePersonaStandardizationDraft(root);
+      renderExperimentalPage();
+    });
+  });
+  root.querySelector("[data-persona-standard-generate]")?.addEventListener("click", async (event) => {
+    await generatePersonaStandardizationDraft(event.currentTarget);
+  });
+  root.querySelector("[data-persona-style-generate]")?.addEventListener("click", async (event) => {
+    await generatePersonaStyleScenarios(event.currentTarget);
+  });
+  root.querySelector("[data-persona-style-summary-generate]")?.addEventListener("click", async (event) => {
+    await generatePersonaStyleSummary(event.currentTarget);
+  });
+  root.querySelectorAll("[data-persona-style-choice]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const draft = personaStandardizationDraftState();
+      const scenarioId = input.dataset.personaStyleChoice || "";
+      draft.style_choices = draft.style_choices || {};
+      draft.style_custom = draft.style_custom || {};
+      draft.style_choices[scenarioId] = input.value || "";
+      const scenarios = state.personaStandardizationStyleDraft?.draft?.scenarios || [];
+      const scenario = scenarios.find((item) => item.id === scenarioId);
+      const selected = (scenario?.options || []).find((option) => option.id === input.value);
+      const selectedText = selected?.text || "";
+      if (selectedText) {
+        draft.style_custom[scenarioId] = selectedText;
+        const customInput = Array.from(root.querySelectorAll("[data-persona-style-custom]"))
+          .find((item) => item.dataset.personaStyleCustom === scenarioId);
+        if (customInput) customInput.value = selectedText;
+      }
+      invalidatePersonaStyleSummary(root);
+      renderExperimentalPage();
+    });
+  });
+  root.querySelectorAll("[data-persona-style-custom]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const draft = personaStandardizationDraftState();
+      draft.style_custom = draft.style_custom || {};
+      draft.style_custom[input.dataset.personaStyleCustom || ""] = input.value || "";
+      invalidatePersonaStyleSummary(root);
+    });
+  });
+  root.querySelectorAll("[data-persona-style-feedback]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const draft = personaStandardizationDraftState();
+      draft.style_feedback = draft.style_feedback || {};
+      draft.style_feedback[input.dataset.personaStyleFeedback || ""] = input.value || "";
+      invalidatePersonaStyleSummary(root);
+    });
+  });
+  root.querySelectorAll("[data-persona-final-title], [data-persona-final-content]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const editor = state.personaStandardizationFinalEditor;
+      if (!editor) return;
+      const id = input.dataset.personaFinalTitle || input.dataset.personaFinalContent || "";
+      const section = (editor.sections || []).find((item) => item.id === id);
+      if (!section) return;
+      if (input.dataset.personaFinalTitle !== undefined) {
+        section.title = input.value || "";
+      } else {
+        section.content = input.value || "";
+      }
+      if (state.personaStandardizationVoiceDraft) {
+        state.personaStandardizationVoiceDraftStale = true;
+        root.querySelector("[data-persona-voice-save]")?.setAttribute("disabled", "disabled");
+        const voicePanel = root.querySelector(".persona-voice-apply");
+        if (voicePanel && !voicePanel.querySelector("[data-persona-voice-stale-warning]")) {
+          const warning = document.createElement("div");
+          warning.className = "setup-guide-hint warn";
+          warning.dataset.personaVoiceStaleWarning = "true";
+          warning.textContent = "最终人格内容已修改，下方分通道草稿可能不再对应最新文本。请先重新生成分通道草稿，再保存到插件表达风格。";
+          voicePanel.querySelector(".persona-voice-notes")?.before(warning);
+        }
+      }
+    });
+  });
+  root.querySelectorAll("[data-persona-voice-channel]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const channel = input.dataset.personaVoiceChannel || "";
+      if (!channel) return;
+      state.personaStandardizationVoiceDraft = state.personaStandardizationVoiceDraft || {};
+      state.personaStandardizationVoiceDraft[channel] = input.value || "";
+    });
+  });
+  root.querySelector("[data-persona-voice-regenerate]")?.addEventListener("click", () => {
+    state.personaStandardizationVoiceDraft = buildPersonaVoiceChannelDrafts(root);
+    state.personaStandardizationVoiceDraftStale = false;
+    renderExperimentalPage();
+    showToast("已重新生成分通道草稿，请审核后保存");
+  });
+  root.querySelector("[data-persona-voice-save]")?.addEventListener("click", async (event) => {
+    await savePersonaVoiceChannelDrafts(event.currentTarget, root);
+  });
+  root.querySelectorAll("[data-persona-style-retry]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      await retryPersonaStyleScenario(event.currentTarget.dataset.personaStyleRetry || "", event.currentTarget);
+    });
+  });
+  root.querySelector("[data-persona-standard-fill-sample]")?.addEventListener("click", () => {
+    fillPersonaStandardizationSample();
+  });
+  root.querySelector("[data-persona-standard-confirm]")?.addEventListener("click", () => {
+    confirmPersonaStandardizationBase();
+  });
+  root.querySelector("[data-persona-standard-copy]")?.addEventListener("click", async () => {
+    const text = root.querySelector("[data-persona-standard-template]")?.value || state.personaStandardizationDraft?.draft?.template || "";
+    await copyTextToClipboard(text, "已复制审核稿");
+  });
+  root.querySelector("[data-persona-standard-copy-final]")?.addEventListener("click", async () => {
+    const text = collectPersonaFinalEditor(root) || personaStandardizationMergedTemplate();
+    await copyTextToClipboard(text, "已复制最终稿");
+  });
+  root.querySelector("[data-persona-standard-clear]")?.addEventListener("click", () => {
+    state.personaStandardizationDraft = null;
+    state.personaStandardizationStyleDraft = null;
+    state.personaStandardizationStyleSummaryDraft = null;
+    state.personaStandardizationFinalEditor = null;
+    state.personaStandardizationVoiceDraft = null;
+    state.personaStandardizationVoiceDraftStale = false;
+    state.personaStandardizationBaseStale = false;
+    state.personaStandardizationStyleStale = false;
+    const draft = personaStandardizationDraftState();
+    draft.base_confirmed = false;
+    draft.style_choices = {};
+    draft.style_custom = {};
+    draft.style_feedback = {};
+    renderExperimentalPage();
   });
 }
 
@@ -20370,6 +21786,10 @@ $("#enableSafeFeaturesBtn").addEventListener("click", () => {
 });
 
 $("#saveProvidersBtn").addEventListener("click", async () => {
+  if (!window.PrivateCompanionProviderTree?.currentProviderValues) {
+    showToast("模型配置面板脚本未加载，请刷新拓展页", "error");
+    return;
+  }
   const values = currentProviderValues();
   const provider_config_mode = currentProviderConfigMode();
   const providers = {};
@@ -20389,6 +21809,10 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
 });
 
 $("#testAllProvidersBtn").addEventListener("click", async () => {
+  if (!window.PrivateCompanionProviderTree?.testProvider) {
+    showToast("模型配置面板脚本未加载，请刷新拓展页", "error");
+    return;
+  }
   for (const key of Object.keys(providerLabels).filter((item) => visibleConfigKey(item) && providerAllowedInCurrentMode(item))) {
     await testProvider(key);
   }

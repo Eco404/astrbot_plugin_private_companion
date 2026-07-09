@@ -1683,6 +1683,8 @@ class ProactiveEngineMixin:
         window_phase, window_detail = self._planned_impulse_window_phase(user)
         inner_readiness = self._proactive_inner_readiness(user)
         source_hint = self._format_proactive_source_model_hint(user)
+        planning_voice = self._format_persona_voice_channel_prompt("planning") if callable(getattr(self, "_format_persona_voice_channel_prompt", None)) else ""
+        inner_voice = self._format_persona_voice_channel_prompt("inner") if callable(getattr(self, "_format_persona_voice_channel_prompt", None)) else ""
         role = self._private_user_role(user)
         nickname = _single_line(user.get("nickname"), 40) or self.default_nickname
         return f"""
@@ -1709,6 +1711,11 @@ class ProactiveEngineMixin:
 
 【世界观/适配】
 {_single_line(worldview, 1000) or "（无额外世界观适配）"}
+
+【人格标准化：计划/内心通道】
+{planning_voice or "（无单独计划风格）"}
+{inner_voice or "（无单独内心活动风格）"}
+使用方式：这里只判断“这个念头/安排是否像角色自然产生”,不要把内心活动当成最终聊天正文,也不要因为风格规则而新增事实。
 
 【关系边界】
 {boundary}

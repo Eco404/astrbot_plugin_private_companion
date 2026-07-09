@@ -185,6 +185,42 @@
         "hint": "用于约束普通回复和主动消息的表达节奏。适合写回复句数、语言、口语化、简洁度等要求；复杂问题或用户要求详细说明时可允许模型放宽。",
         "default": "每次回复至多三句话；简单的回答尽可能保持在 1~2 句，并尽可能保持口语化与简洁化。回复长度和语气应该与当前对话节奏相匹配，必须使用简体中文进行回复，话语符合社交媒体交流习惯。当你需要解决复杂问题或进行详细说明时，可以无视这一要求。"
       },
+      "enable_persona_voice_channels": {
+        "description": "启用分通道人格风格",
+        "type": "bool",
+        "hint": "开启后，插件会把人格标准化提取出的表达风格按对话、创作、计划、内心活动、主动开口五个通道分别注入对应链路，避免一种聊天口癖污染所有任务。",
+        "default": true
+      },
+      "persona_conversation_voice_prompt": {
+        "description": "对话风格",
+        "type": "text",
+        "hint": "只用于私聊/群聊真正说出口的聊天回复。适合写口癖、句长、标点、接话方式和拒绝方式。",
+        "default": ""
+      },
+      "persona_creative_voice_prompt": {
+        "description": "创作风格",
+        "type": "text",
+        "hint": "用于日记、QQ 空间、私下创作和文案。可以比聊天完整，但应避免 AI 作文、总结升华和营销文案腔。",
+        "default": ""
+      },
+      "persona_planning_voice_prompt": {
+        "description": "计划风格",
+        "type": "text",
+        "hint": "用于日程、主动候选和行动倾向。它描述角色会如何安排自己、被什么驱动，不是聊天台词。",
+        "default": ""
+      },
+      "persona_inner_voice_prompt": {
+        "description": "内心活动风格",
+        "type": "text",
+        "hint": "用于内部动机、念头和状态余波。默认不会外发，不能写成系统分析或工具说明。",
+        "default": ""
+      },
+      "persona_proactive_voice_prompt": {
+        "description": "主动开口风格",
+        "type": "text",
+        "hint": "用于把主动动机变成最终开口。重点是具体由头、低压力、短句和可接话，不写成回复空气或任务汇报。",
+        "default": ""
+      },
       "worldview_adaptation_mode": {
         "description": "世界观适配模式",
         "type": "string",
@@ -367,6 +403,42 @@
     "description": "Legacy flat config: 回复风格提示词",
     "type": "text",
     "default": "每次回复至多三句话；简单的回答尽可能保持在 1~2 句，并尽可能保持口语化与简洁化。回复长度和语气应该与当前对话节奏相匹配，必须使用简体中文进行回复，话语符合社交媒体交流习惯。当你需要解决复杂问题或进行详细说明时，可以无视这一要求。",
+    "invisible": true
+  },
+  "enable_persona_voice_channels": {
+    "description": "Legacy flat config: 启用分通道人格风格",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "persona_conversation_voice_prompt": {
+    "description": "Legacy flat config: 对话风格",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "persona_creative_voice_prompt": {
+    "description": "Legacy flat config: 创作风格",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "persona_planning_voice_prompt": {
+    "description": "Legacy flat config: 计划风格",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "persona_inner_voice_prompt": {
+    "description": "Legacy flat config: 内心活动风格",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "persona_proactive_voice_prompt": {
+    "description": "Legacy flat config: 主动开口风格",
+    "type": "text",
+    "default": "",
     "invisible": true
   },
   "worldview_adaptation_mode": {
@@ -563,6 +635,12 @@
   },
   "enable_personality_iteration_auto_tune": {
     "description": "Legacy flat config: 允许角色贴合校准自主调节参数",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "enable_persona_standardization_experiment": {
+    "description": "Legacy flat config: 人格标准化问卷旧开关（已改为扩展页入口）",
     "type": "bool",
     "default": false,
     "invisible": true
@@ -7644,7 +7722,7 @@
       "external_image_api_platform": {
         "description": "在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、bailian、modelscope。openai 适用于 OpenAI 兼容 /images/generations；bailian 适用于阿里云百炼 / DashScope 原生生图接口；modelscope 适用于魔搭社区 api-inference 文生图接口并支持异步任务轮询；auto 会按地址和模型名自动识别。",
+        "hint": "可填：auto、openai、bailian、modelscope、doubao、gemini。openai 适用于 OpenAI 兼容 /images/generations；bailian 适用于阿里云百炼 / DashScope 原生生图接口；modelscope 适用于魔搭社区 api-inference 文生图接口并支持异步任务轮询；doubao 适用于豆包/火山方舟 Seedream 文生图；gemini 适用于 Gemini generateContent 图片返回；auto 会按地址和模型名自动识别。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true
@@ -7653,7 +7731,7 @@
       "EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "在线图片 API 地址",
         "type": "string",
-        "hint": "当平台为 openai 时，可填写完整的 /images/generations 地址，或只填 API 根地址；插件会自动补齐。平台为 bailian 时，可填写百炼 / DashScope 的 API 根地址（如 /api/v1），也可直接填写多模态或异步生图完整接口地址。平台为 modelscope 时可填写 https://api-inference.modelscope.cn/v1 或完整 /v1/images/generations 地址。",
+        "hint": "当平台为 openai 时，可填写完整的 /images/generations 地址，或只填 API 根地址；插件会自动补齐。平台为 bailian 时，可填写百炼 / DashScope 的 API 根地址（如 /api/v1），也可直接填写多模态或异步生图完整接口地址。平台为 modelscope 时可填写 https://api-inference.modelscope.cn/v1 或完整 /v1/images/generations 地址。平台为 doubao 时可填写 https://ark.cn-beijing.volces.com/api/v3 或完整 /images/generations 地址。平台为 gemini 时可填写 https://generativelanguage.googleapis.com/v1beta 或完整 /models/{model}:generateContent 地址。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -7671,7 +7749,7 @@
       "EXTERNAL_IMAGE_API_MODEL": {
         "description": "在线图片模型",
         "type": "string",
-        "hint": "必须填写该平台的图片模型名。openai 平台按 OpenAI 兼容 images/generations 请求；bailian 平台可填 qwen-image、wan 系列等百炼图片模型，并按模型能力自动走多模态同步或任务轮询；modelscope 平台会提交异步文生图任务并轮询任务结果。",
+        "hint": "必须填写该平台的图片模型名。openai 平台按 OpenAI 兼容 images/generations 请求；bailian 平台可填 qwen-image、wan 系列等百炼图片模型，并按模型能力自动走多模态同步或任务轮询；modelscope 平台会提交异步文生图任务并轮询任务结果；doubao 平台可填 seedream 系列图片模型；gemini 平台可填支持图片生成的 Gemini/Imagen 模型。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -7721,7 +7799,7 @@
       "backup_external_image_api_platform": {
         "description": "备选在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、bailian、modelscope。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
+        "hint": "可填：auto、openai、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true,
@@ -7731,7 +7809,7 @@
       "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "备选在线图片 API 地址",
         "type": "string",
-        "hint": "主在线图片 API 失败后才会使用。支持 OpenAI 兼容 images 接口、阿里云百炼 / DashScope 原生生图接口和魔搭社区 api-inference 文生图接口。",
+        "hint": "主在线图片 API 失败后才会使用。支持 OpenAI 兼容 images 接口、阿里云百炼 / DashScope 原生生图接口、魔搭社区 api-inference 文生图接口、豆包/火山方舟 Seedream 和 Gemini generateContent 图片接口。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true,
