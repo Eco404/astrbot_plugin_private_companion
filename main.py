@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import gc
 import hashlib
 import html
@@ -1460,7 +1461,33 @@ class PrivateCompanionPlugin(
         if failed:
             logger.warning("[PrivateCompanion] SQLite WAL 并发优化部分失败: %s", "；".join(failed))
 
+    def _repair_private_companion_handler_bindings(self) -> None:
+        """热更新后强制把残留 handler 重新绑定到当前插件实例。"""
+        try:
+            module_path = str(getattr(type(self), "__module__", "") or "")
+            package_prefix = module_path.rsplit(".", 1)[0] if "." in module_path else module_path
+            if not package_prefix:
+                return
+            repaired = 0
+            for handler in list(star_handlers_registry):
+                handler_module_path = str(getattr(handler, "handler_module_path", "") or "")
+                if not handler_module_path.startswith(package_prefix):
+                    continue
+                handler_name = str(getattr(handler, "handler_name", "") or "")
+                if not handler_name:
+                    continue
+                current_func = getattr(type(self), handler_name, None)
+                if not callable(current_func):
+                    continue
+                handler.handler = functools.partial(current_func, self)
+                repaired += 1
+            if repaired:
+                logger.info("[PrivateCompanion] 已修复热更新残留回调绑定: handlers=%s", repaired)
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 修复热更新残留回调绑定失败: %s", _single_line(exc, 160))
+
     async def initialize(self):
+        self._repair_private_companion_handler_bindings()
         if not self.enabled:
             logger.info("[PrivateCompanion] 插件总开关已关闭,不启动主动消息循环")
             return
@@ -1632,6 +1659,8 @@ class PrivateCompanionPlugin(
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
     async def observe_recall_enhancement_events(self, event: AstrMessageEvent, *args, **kwargs):
         """记录普通消息和 QQ/OneBot 撤回事件，用于撤回增强。"""
+        if self is None:
+            return
         self._qzone_note_event_bot(event)
         if not self.enabled:
             return
@@ -1708,7 +1737,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent, *args, **kwargs):
         """LLM 回复进入发送前阶段时停止私聊持续输入状态。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if bool(getattr(event, "is_private_chat", lambda: False)()):
             self._stop_passive_input_status_loop(event)
@@ -1716,14 +1745,14 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """群级 LLM 熔断的发送前兜底。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         self._stop_group_llm_reply_if_blocked(event, source="decorating_result")
 
     @filter.on_decorating_result()
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前兜底清理内部控制块，避免 timer/TTSBLOCK 泄漏到聊天。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
             return
@@ -1764,7 +1793,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def cancel_reply_if_trigger_recalled_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """若触发/唤醒消息在回复发出前被撤回，则静默取消本次回复。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_recall_enhancement"):
             return
@@ -1794,7 +1823,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def suppress_forbidden_outbound_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """自己的待发送消息命中违禁词时，优先在发送前拦截。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_recall_enhancement"):
             return
@@ -1834,7 +1863,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def suppress_framework_error_leak_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """避免 AstrBot/Core 的技术错误和工具循环摘要直接发进聊天。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
@@ -1985,7 +2014,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def suppress_group_question_wakeup_collision_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """答疑唤醒的群聊回复发送前复核，避免 Bot 碰瓷式插话。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
@@ -2052,7 +2081,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def suppress_smart_silence_reply_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """用户明确想停下当前话题时，用小模型决定是否静默取消待发送回复。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if (
             bool(getattr(self, "enable_response_self_review", True))
@@ -2184,7 +2213,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def record_empty_passive_result_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前兜底记录空结果，避免被动不回复却没有排障原因。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if bool(getattr(event, "_private_companion_passive_no_reply_recorded", False)):
             return
@@ -2213,6 +2242,8 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前处理 TTS强化标签和自动语音转换。"""
+        if self is None or not self.enabled:
+            return
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         await self.apply_tts_enhancement_before_send(event)
@@ -2220,7 +2251,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def strip_group_internal_identity_anchors(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前清理群聊内部身份锚点，避免调试标记泄露到回复。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
@@ -2246,7 +2277,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result()
     async def suppress_group_silent_control_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """模型输出“不回复”控制语时静默吞掉，避免把内部判断发到群里。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
@@ -2371,7 +2402,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_decorating_result()
     async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent, *args, **kwargs):
         """按回复范围与分段策略整理 LLM 输出，减少长回复和误引用。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_segmented_proactive_reply"):
             return
@@ -2438,7 +2469,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_decorating_result()
     async def remember_group_bot_reply_context_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """记录群聊 Bot 实际候选回复，供下一轮连续对话判断使用。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
@@ -2512,6 +2543,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_decorating_result()
     async def final_tts_markup_guard_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前终检 TTS 标签，避免 <tts> 原样泄漏到聊天。"""
+        if self is None or not self.enabled:
+            return
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         guard = getattr(self, "finalize_outbound_tts_markup_guard", None)
@@ -3001,7 +3034,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """群聊回复发送前自动补引用，保持上下文对齐。"""
         result = None
         chain: list[Any] = []
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if not bool(getattr(self, "enable_proactive_quote_trigger_message", False)):
             return
@@ -3069,7 +3102,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             selector(string): 可选,自然语言选择器,如“最新”“第2条”“最后”；也可以填 fid。
             fid(string): 可选,明确指定说说 fid。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply, selector=selector, fid=fid)
 
@@ -3095,7 +3128,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             image_url(string): 可选,单张图片 URL。
             use_latest_draft(boolean): 可选,是否使用最近生成的生活说说草稿。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         if images:
             kwargs["images"] = images
@@ -3133,7 +3166,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             caption(string): 发送图片时附带的短文字。
             scene_preset(string): 可选场景预设，如 角色自拍/COS自拍/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_generate_photo_impl(
             event,
@@ -3154,7 +3187,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         Args:
             group_name(string): 群名关键词或群号。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_group_id_by_name_impl(event, **kwargs)
 
@@ -3166,7 +3199,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             group_id(string): 目标群号；私聊中可填写要查询的群号。
             nickname(string): 关系网名称、别名、群名片、昵称或 QQ。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_user_id_by_name_impl(event, **kwargs)
 
@@ -3177,7 +3210,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         Args:
             keyword(string): QQ 号、昵称、别名，或用户原话里最像名字的部分。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_query_relation_person_impl(event, **kwargs)
 
@@ -3189,7 +3222,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             group_id(string): 目标群号。
             keyword(string): 可选筛选关键词、昵称、群名片或 QQ。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_get_specified_group_members_impl(event, **kwargs)
 
@@ -3205,7 +3238,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             hours(number): 查询最近多少小时，默认 72。
             limit(number): 返回多少条候选互动线索，默认 36。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_query_interaction_impl(event, **kwargs)
 
@@ -3226,7 +3259,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             confirm_before_report(boolean): 带回私聊回复前是否先向对方确认。
             expire_hours(number): 延迟转述有效小时数。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_relay_message_impl(event, **kwargs)
 
@@ -3241,7 +3274,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_group_impl(event, **kwargs)
 
@@ -3258,7 +3291,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             confirm_before_report(boolean): 带回私聊回复前是否先向对方确认。
             receipt_expire_hours(number): 等待回执的有效小时数。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_private_user_impl(event, **kwargs)
 
@@ -3273,7 +3306,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_groups_impl(event, **kwargs)
 
@@ -3287,7 +3320,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             relay_mode(string): persona/soft/original。
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_send_to_private_users_impl(event, **kwargs)
 
@@ -3303,7 +3336,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
             expire_hours(number): 挂起有效小时数。
         """
-        if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         return await self._pc_schedule_group_relay_impl(event, **kwargs)
 
@@ -6026,7 +6059,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_llm_request()
     async def inject_tts_enhancement_request_fallback(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """TTS 请求规则独立兜底，避免被状态注入链路早退顺手跳过。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._stop_group_llm_reply_if_blocked(event, source="llm_request_tts_fallback"):
             return
@@ -6037,6 +6070,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
+        if self is None:
+            return
+
         def log_bookshelf_secret_skip(reason: str, user: dict[str, Any] | None = None, text: str = "") -> None:
             logger_func = getattr(self, "_log_bookshelf_secret_skip", None)
             if not callable(logger_func):
@@ -6966,6 +7002,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_llm_response()
     async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """规范化 TTS 标签错拼，避免 <ttts> 等内容漏到发送链路。"""
+        if self is None or not self.enabled:
+            return
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         original_text = str(getattr(resp, "completion_text", "") or "")
@@ -6977,7 +7015,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.on_llm_response()
     async def record_external_llm_token_usage(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """统计非插件内部调用的 AstrBot 主回复 Token，单独展示且不计入插件限额。"""
-        if not self.enabled:
+        if self is None or not self.enabled:
             return
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
             return
@@ -7048,7 +7086,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """LLM 回复后捕获定时/状态指令，并做私聊回复审校。"""
         release_now = False
         try:
-            if not self.enabled:
+            if self is None or not self.enabled:
                 release_now = True
                 return
             if self._proactive_only_blocks_passive_event(event, "enable_llm_timer_scheduling"):
@@ -7476,6 +7514,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.command("陪伴", alias={"私聊陪伴", "主动陪伴"})
     async def companion_command(self, event: AstrMessageEvent, *args, **kwargs):
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
+        if self is None:
+            return
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
         args = raw_text.replace("\u3000", " ").split(maxsplit=2)
@@ -7980,6 +8020,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.command("陪伴群", alias={"群陪伴", "群聊陪伴"})
     async def group_companion_command(self, event: AstrMessageEvent, *args, **kwargs):
         """管理群聊陪伴状态、群友画像、群内常见词、话题线程和关系网。"""
+        if self is None:
+            return
         self._qzone_note_event_bot(event)
         async for result in self._group_companion_command_impl(event):
             yield result
@@ -7987,6 +8029,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
+        if self is None:
+            return
         self._qzone_note_event_bot(event)
         received_ts = _now_ts()
         user_id = str(event.get_sender_id())
@@ -8687,6 +8731,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
+        if self is None:
+            return
         self._qzone_note_event_bot(event)
         if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
             return
@@ -9268,3 +9314,4 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if seconds < 86400:
             return f"{int(seconds // 3600)} 小时前"
         return f"{int(seconds // 86400)} 天前"
+

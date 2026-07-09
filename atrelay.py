@@ -595,7 +595,7 @@ class AtRelayMixin:
     @filter.on_llm_response()
     async def compact_atrelay_tool_final_response(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """转述工具已执行后，只保留一句自然短回执，避免模型补关系评价或复述正文。"""
-        if not self.enabled or resp is None:
+        if self is None or not self.enabled or resp is None:
             return
         result = getattr(event, "private_companion_atrelay_tool_result", None)
         if not isinstance(result, dict) or _single_line(result.get("status"), 24) not in {"success", "scheduled"}:
