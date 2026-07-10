@@ -750,7 +750,18 @@ class PrivateReadingMixin:
                 self._record_llm_budget_skip(provider_id=provider_id, task="private_reading_vision", prompt=prompt)
                 return {}
             start = time.time()
-            result = await provider.text_chat(prompt=prompt, image_urls=image_urls)
+            timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+            timeout = (
+                timeout_getter(
+                    task="private_reading_vision",
+                    provider_id=provider_id,
+                    timeout_key="PRIVATE_READING_VISION_PROVIDER_ID",
+                )
+                if callable(timeout_getter)
+                else None
+            )
+            request_call = provider.text_chat(prompt=prompt, image_urls=image_urls)
+            result = await asyncio.wait_for(request_call, timeout=timeout) if timeout is not None else await request_call
             text = str(getattr(result, "completion_text", result) or "").strip()
             self._record_llm_usage(
                 provider_id=provider_id,

@@ -2466,6 +2466,7 @@ class ProactiveMixin:
                     ("日记", self._ensure_daily_diary),
                     ("每日穿搭", self._ensure_daily_outfit_photo),
                     ("创作推进", self._maybe_advance_creative_projects),
+                    ("余额感知", self._maybe_refresh_balance_awareness),
                     ("被动注入缓存", self._refresh_passive_injection_cache),
                 ):
                     try:
@@ -2492,6 +2493,7 @@ class ProactiveMixin:
                 ("日记", self._ensure_daily_diary),
                 ("每日穿搭", self._ensure_daily_outfit_photo),
                 ("创作推进", self._maybe_advance_creative_projects),
+                ("余额感知", self._maybe_refresh_balance_awareness),
                 ("被动注入缓存", self._refresh_passive_injection_cache),
             ):
                 try:

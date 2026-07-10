@@ -388,6 +388,7 @@ class CoreStoreMixin:
             "inbound_debounce_stats": {},
             "group_llm_reply_blocks": {},
             "cache_metrics": {},
+            "balance_awareness": {},
         }
 
     @staticmethod
@@ -446,6 +447,7 @@ class CoreStoreMixin:
         data.setdefault("inbound_debounce_stats", {})
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("cache_metrics", {})
+        data.setdefault("balance_awareness", {})
         return data
 
     @staticmethod

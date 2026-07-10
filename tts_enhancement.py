@@ -1964,10 +1964,27 @@ Provider 规则：{emotion_rule}
                 provider_id = ""
         record_usage = getattr(self, "_record_llm_usage", None)
         try:
+            timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+            timeout = (
+                timeout_getter(
+                    task=task,
+                    provider_id=provider_id,
+                    timeout_key="tts_conversion_provider_id",
+                )
+                if callable(timeout_getter)
+                else None
+            )
+            async def request_text_chat():
+                try:
+                    return await provider.text_chat(prompt=prompt, max_tokens=max_tokens)
+                except TypeError:
+                    return await provider.text_chat(prompt=prompt)
+
             try:
-                resp = await provider.text_chat(prompt=prompt, max_tokens=max_tokens)
-            except TypeError:
-                resp = await provider.text_chat(prompt=prompt)
+                request_call = request_text_chat()
+                resp = await asyncio.wait_for(request_call, timeout=timeout) if timeout is not None else await request_call
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(f"TTS 文本模型超过 {timeout:.0f} 秒未返回") from exc
             elapsed_ms = int((time.time() - start) * 1000)
             completion = str(getattr(resp, "completion_text", resp) or "")
             logger.info(

@@ -58,6 +58,7 @@ const state = {
   providerMode: "all",
   providerConfigMode: "",
   providerDraft: {},
+  providerTimeoutDraft: {},
   proactiveCandidateFilter: "all",
   imageCacheItems: [],
   imageCacheTotal: 0,
@@ -162,6 +163,21 @@ const providerLabels = {
 
 function isProviderConfigKey(key) {
   return Object.prototype.hasOwnProperty.call(providerLabels, key);
+}
+
+function normalizeModelTimeoutOverrides(raw) {
+  let source = raw;
+  if (typeof source === "string") {
+    try { source = JSON.parse(source || "{}"); } catch (_error) { source = {}; }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const result = {};
+  Object.entries(source).forEach(([key, value]) => {
+    if (!isProviderConfigKey(key)) return;
+    const timeout = Math.round(Number(value));
+    if (Number.isFinite(timeout) && timeout >= 5 && timeout <= 600) result[key] = timeout;
+  });
+  return result;
 }
 
 const privateReadingConfigKeys = new Set([
@@ -727,7 +743,7 @@ const featureMeta = {
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
   enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息在实际发送前按人格和上下文终审：发送、改写或丢弃。"],
   enable_smart_silence: ["智能沉默", "发送前判断用户是否想收住话题；可选择只看明确边界，或交给小模型结合上下文判断。"],
-  enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
+  enable_llm_timer_scheduling: ["临时预约与动作查岗", "把明确提醒约定或洗澡、吃饭、短时办事等离开动作转成 AstrBot 官方计划；动作查岗会估时、按人格调整强度，并在用户提前回来时取消。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
   enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身被刺到、缓和、恢复和短暂回避的余波。"],
@@ -3690,6 +3706,7 @@ function applyOverviewData(overview) {
   state.featureDraft = featureDraftFromOverview(overview);
   state.imageApiEndpointDraft = null;
   state.providerConfigMode = inferProviderConfigMode(overview);
+  state.providerTimeoutDraft = normalizeModelTimeoutOverrides(overview?.settings?.model_timeout_overrides);
   state.pageFontFamily = String(overview?.settings?.page_font_family || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
   state.pageTheme = normalizePageTheme(overview?.settings?.page_theme);
   applyPageFontFamily();
@@ -3885,7 +3902,7 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderBookshelf();
   } else if (tabName === "qzone") {
     if (window.PrivateCompanionQzonePanel?.render) {
-      window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml });
+      window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml, document });
     } else {
       const meta = document.getElementById("qzoneFeedMeta");
       const feed = document.getElementById("qzoneFeed");
@@ -13515,6 +13532,9 @@ function proactiveTaskMarkup(item) {
     item.replaced_job_id ? `替换旧任务：${item.replaced_job_id}` : "",
     item.cancelled_job_id ? `取消任务：${item.cancelled_job_id}` : "",
     item.timer_status ? `预约状态：${item.timer_status}` : "",
+    item.activity ? `用户动作：${item.activity}` : "",
+    Number(item.estimated_minutes || 0) > 0 ? `预计耗时：${item.estimated_minutes} 分钟` : "",
+    Number(item.followup_intensity || 0) > 0 ? `查岗强度：${item.followup_intensity}/3` : "",
     item.timer_error ? `错误：${item.timer_error}` : "",
     item.raw_time ? `原始时间：${item.raw_time}` : "",
     item.trigger_message_id ? `触发消息：${item.trigger_message_id}` : "",
@@ -17615,6 +17635,13 @@ function providerValuesForRender() {
 
 function currentProviderValues() {
   return providerValuesForRender();
+}
+
+function currentProviderTimeoutValues() {
+  if (window.PrivateCompanionProviderTree?.currentProviderTimeoutValues) {
+    return window.PrivateCompanionProviderTree.currentProviderTimeoutValues({ document, state });
+  }
+  return normalizeModelTimeoutOverrides(state.overview?.settings?.model_timeout_overrides);
 }
 
 function bindProviderToolbar() {
@@ -22586,19 +22613,22 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
     return;
   }
   const values = currentProviderValues();
+  const timeoutOverrides = currentProviderTimeoutValues();
   const provider_config_mode = currentProviderConfigMode();
   const providers = {};
   Object.keys(providerLabels).forEach((key) => {
     if (visibleConfigKey(key)) providers[key] = values[key] || "";
   });
   await runAction(
-    () => postJson("/settings/update", { settings: { provider_config_mode }, providers, overwrite_provider_modes: true }),
+    () => postJson("/settings/update", { settings: { provider_config_mode, model_timeout_overrides: timeoutOverrides }, providers, overwrite_provider_modes: true }),
     "已保存模型配置，并覆盖 quick / precision 两套分流",
     $("#saveProvidersBtn")
   );
   state.overview = state.overview || {};
   state.overview.settings = { ...(state.overview.settings || {}), provider_config_mode };
   state.providerDraft = { ...state.providerDraft, ...providers };
+  state.providerTimeoutDraft = { ...timeoutOverrides };
+  state.overview.settings.model_timeout_overrides = { ...timeoutOverrides };
   state.providerConfigMode = provider_config_mode;
   renderProviders();
 });

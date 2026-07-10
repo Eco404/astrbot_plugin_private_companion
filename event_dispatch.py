@@ -2896,6 +2896,18 @@ class EventDispatchMixin:
             )
         else:
             debounce_provider_id = str(getattr(self, "smart_message_debounce_provider_id", "") or getattr(self, "llm_provider_id", "") or "")
+        timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+        timeout_override = (
+            timeout_getter(
+                task="smart_message_debounce",
+                provider_id=debounce_provider_id,
+                timeout_key="SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            )
+            if callable(timeout_getter)
+            else None
+        )
+        if timeout_override is not None:
+            timeout_seconds = float(timeout_override)
         try:
             raw = await asyncio.wait_for(
                 self._llm_call(

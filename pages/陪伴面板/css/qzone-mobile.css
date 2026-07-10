@@ -40,14 +40,6 @@
     gap: 12px;
   }
 
-  .qzone-card,
-  .qzone-post-card,
-  .qzone-detail-card,
-  .qzone-comment-block,
-  .qzone-empty {
-    border-radius: 10px;
-  }
-
   .qzone-mini-summary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -55,7 +47,7 @@
   .qzone-scope-switch {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 7px;
+    gap: 3px;
   }
 
   #qzoneTargetForm,
@@ -83,7 +75,13 @@
     gap: 10px;
   }
 
-  .qzone-post-card footer,
+  .qzone-post-card footer {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    width: 100%;
+  }
+
   .qzone-detail-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -91,7 +89,6 @@
     width: 100%;
   }
 
-  .qzone-post-card footer .danger-outline,
   .qzone-detail-actions .danger-outline {
     grid-column: 1 / -1;
   }

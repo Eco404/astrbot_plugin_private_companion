@@ -7,6 +7,38 @@ window.PrivateCompanionProviderTree = (() => {
     };
   }
 
+  function normalizeTimeoutValue(value) {
+    if (value === null || value === undefined || String(value).trim() === "") return "";
+    const parsed = Math.round(Number(value));
+    return Number.isFinite(parsed) && parsed >= 5 && parsed <= 600 ? parsed : "";
+  }
+
+  function providerTimeoutValuesForRender(context) {
+    const { state } = context;
+    const saved = state.overview?.settings?.model_timeout_overrides;
+    let source = saved;
+    if (typeof source === "string") {
+      try { source = JSON.parse(source || "{}"); } catch (_error) { source = {}; }
+    }
+    const values = {};
+    Object.entries(source && typeof source === "object" ? source : {}).forEach(([key, value]) => {
+      const normalized = normalizeTimeoutValue(value);
+      if (normalized !== "") values[key] = normalized;
+    });
+    return { ...values, ...(state.providerTimeoutDraft || {}) };
+  }
+
+  function currentProviderTimeoutValues(context) {
+    const { document } = context;
+    const values = providerTimeoutValuesForRender(context);
+    document.querySelectorAll("[data-provider-timeout]").forEach((input) => {
+      const normalized = normalizeTimeoutValue(input.value);
+      if (normalized === "") delete values[input.dataset.providerTimeout];
+      else values[input.dataset.providerTimeout] = normalized;
+    });
+    return values;
+  }
+
   function providerGuideMarkup(context, key) {
     const { providerGuides, providerPreferenceMeta, providerPassiveImpactMeta, escapeHtml } = context;
     const guide = providerGuides[key];
@@ -91,6 +123,15 @@ window.PrivateCompanionProviderTree = (() => {
     state.providerDraft[key] = input.value.trim();
   }
 
+  function rememberProviderTimeoutDraft(context, input) {
+    const { state } = context;
+    const key = input.dataset.providerTimeout || "";
+    if (!key) return;
+    const normalized = normalizeTimeoutValue(input.value);
+    state.providerTimeoutDraft = { ...(state.providerTimeoutDraft || {}) };
+    state.providerTimeoutDraft[key] = normalized;
+  }
+
   function syncProviderInput(context, select) {
     const { document } = context;
     const key = select.dataset.providerSelect;
@@ -114,7 +155,8 @@ window.PrivateCompanionProviderTree = (() => {
       return;
     }
     try {
-      const result = await postJson("/provider/test", { key, provider_id: providerId });
+      const timeoutSeconds = currentProviderTimeoutValues(context)[key] || null;
+      const result = await postJson("/provider/test", { key, provider_id: providerId, timeout_seconds: timeoutSeconds });
       if (result.ok) {
         const suffix = result.sample ? ` · ${result.sample}` : "";
         setProviderStatus(context, key, `正常 ${result.elapsed_ms}ms${suffix}`, "ok");
@@ -158,6 +200,7 @@ window.PrivateCompanionProviderTree = (() => {
     const preference = providerPreferenceMeta[guide.preference || "balanced"];
     const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
     const preview = [guide.purpose || "", guide.fit || ""].filter(Boolean).join(" ");
+    const timeoutValue = providerTimeoutValuesForRender(context)[key] || "";
     return `
       <article class="provider-card ${configured ? "configured" : "inherited"}" data-provider-card="${escapeHtml(key)}">
         <div class="provider-tree-node">
@@ -178,6 +221,13 @@ window.PrivateCompanionProviderTree = (() => {
           <label class="provider-field">
             <span>Provider</span>
             ${providerSelect(context, key, selected)}
+          </label>
+          <label class="provider-field provider-timeout-field">
+            <span>请求超时</span>
+            <span class="provider-timeout-control">
+              <input type="number" min="5" max="600" step="1" inputmode="numeric" data-provider-timeout="${escapeHtml(key)}" value="${escapeHtml(timeoutValue)}" placeholder="默认" aria-label="${escapeHtml(label)}请求超时秒数" />
+              <b>秒</b>
+            </span>
           </label>
           <div class="provider-current">
             <span>当前使用</span>
@@ -305,6 +355,14 @@ window.PrivateCompanionProviderTree = (() => {
     document.querySelectorAll("[data-provider-key]").forEach((input) => {
       input.addEventListener("input", () => rememberProviderDraft(context, input.dataset.providerKey));
     });
+    document.querySelectorAll("[data-provider-timeout]").forEach((input) => {
+      input.addEventListener("input", () => rememberProviderTimeoutDraft(context, input));
+      input.addEventListener("change", () => {
+        const normalized = normalizeTimeoutValue(input.value);
+        input.value = normalized === "" ? "" : String(normalized);
+        rememberProviderTimeoutDraft(context, input);
+      });
+    });
     document.querySelectorAll("[data-provider-test]").forEach((button) => {
       button.addEventListener("click", async () => {
         await testProvider(context, button.dataset.providerTest);
@@ -370,6 +428,7 @@ window.PrivateCompanionProviderTree = (() => {
     renderProviders,
     bindProviderToolbar,
     currentProviderValues,
+    currentProviderTimeoutValues,
     testProvider: (context, key) => testProvider(context, key),
   };
 })();

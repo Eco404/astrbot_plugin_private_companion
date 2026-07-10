@@ -7582,14 +7582,29 @@ class DailyStateMixin:
                     lines.append("刚刚的介入：" + "；".join(update_lines) + "。")
         return "\n".join(lines)
 
-    def _format_timer_scheduling_instruction(self) -> str:
+    def _format_timer_scheduling_instruction(self, user: dict[str, Any] | None = None) -> str:
         if not self.enable_llm_timer_scheduling:
             return ""
-        return """【对话临时预约】
-仅当用户明确要求稍后提醒/叫醒/回头说,或双方形成了明确临时约定时,在回复末尾写：
-<timer>{"time":"YYYY-MM-DD HH:MM:SS","topic":"约定内容"}</timer>
-改时间直接写新时间；取消同一约定时写：<timer>{"action":"cancel"}</timer>
-时间和约定不明确就不要写。该标签只会转写为 AstrBot 官方定时计划。"""
+        role = self._private_user_role(user) if isinstance(user, dict) else "owner"
+        role_note = (
+            "当前是主要用户；只有人格资料明确支持监督、黏人或查岗倾向时，强度才可到 2，极明确时才可到 3。"
+            if role == "owner"
+            else "当前是次要用户；动作回访强度必须为 1，只做普通朋友式轻问候。"
+        )
+        current_time = self._environment_fromtimestamp(_now_ts()).strftime("%Y-%m-%d %H:%M:%S")
+        return f"""【临时预约与动作查岗】
+当前本地时间：{current_time}。所有 time 都必须据此换算为未来的绝对时间。
+一、明确约定：用户明确要求稍后提醒/叫醒/回头说，或双方形成明确临时约定时，在回复末尾写：
+<timer>{{"time":"YYYY-MM-DD HH:MM:SS","topic":"约定内容"}}</timer>
+
+二、动作查岗：用户明确说自己暂时离开去做一个有自然结束点的具体动作（如洗澡、吃饭、拿快递、短时出门办事），即使没有主动要求提醒，也可以形成一个“忙完后想问一句”的主动念头。生成念头的同一轮必须估计合理耗时并直接预约下一次主动消息：
+<timer>{{"time":"YYYY-MM-DD HH:MM:SS","reason":"activity_followup","activity":"洗澡","estimated_minutes":30,"topic":"洗完澡后问问回来了没有","motive":"记得用户刚去洗澡，估计差不多结束后想自然问一句","followup_intensity":1,"style":"轻松自然"}}</timer>
+
+估时应结合动作和用户给出的线索：洗澡通常 20-40 分钟，吃饭通常 30-60 分钟，短途办事通常 45-120 分钟；用户给了时长或返回时间时以用户信息为准。睡觉、上班、上学、长时间学习、旅行等没有可靠结束点的动作，不得擅自估时查岗，除非用户给了明确时长或要求联系。
+强度 1 是轻轻问一句；2 可以更直接、更有存在感；3 仅限主要用户且当前人格和关系明确支持的轻度监督感。无论强度都不得命令、指责、施压、连续轰炸或假装看见用户现实状态。{role_note}
+
+改时间直接写新时间；取消同一约定时写：<timer>{{"action":"cancel"}}</timer>
+除上述动作查岗外，时间和约定不明确就不要写。标签不应出现在可见回复中，只会被转写为 AstrBot 官方一次性定时计划。"""
 
     def _extract_timer_directives(self, text: str) -> tuple[str, list[dict[str, Any]]]:
         raw_text = str(text or "")
@@ -7681,10 +7696,15 @@ class DailyStateMixin:
         if scheduled_ts <= 0:
             return None
         parsed: dict[str, Any] = {"scheduled_ts": scheduled_ts, "raw_time": time_text}
-        for key in ("reason", "topic", "motive", "action", "style"):
+        for key in ("reason", "topic", "motive", "action", "style", "activity"):
             value = payload.get(key)
             if value is not None:
                 parsed[key] = _single_line(value, 140 if key == "motive" else 60)
+        if _single_line(parsed.get("reason"), 40) == "activity_followup":
+            parsed["estimated_minutes"] = _safe_int(payload.get("estimated_minutes"), 0, 0, 720)
+            parsed["followup_intensity"] = self._normalize_activity_followup_intensity(
+                payload.get("followup_intensity")
+            )
         chain = self._normalize_chain_steps(payload.get("chain"))
         if chain:
             parsed["chain"] = chain
@@ -7711,6 +7731,43 @@ class DailyStateMixin:
                 }
             )
         return normalized_chain
+
+    @staticmethod
+    def _normalize_activity_followup_intensity(value: Any) -> int:
+        text = str(value or "").strip().lower()
+        aliases = {
+            "soft": 1,
+            "gentle": 1,
+            "轻": 1,
+            "轻柔": 1,
+            "normal": 2,
+            "direct": 2,
+            "标准": 2,
+            "直接": 2,
+            "firm": 3,
+            "strong": 3,
+            "强": 3,
+            "强势": 3,
+        }
+        if text in aliases:
+            return aliases[text]
+        return _safe_int(value, 1, 1, 3)
+
+    def _activity_followup_intensity_for_user(self, value: Any, user: dict[str, Any]) -> int:
+        intensity = self._normalize_activity_followup_intensity(value)
+        if self._private_user_role(user) != "owner" or _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return 1
+        if intensity < 3:
+            return intensity
+        persona_text = " ".join(
+            (
+                str(getattr(self, "schedule_persona_prompt", "") or ""),
+                str(getattr(self, "persona_proactive_voice_prompt", "") or ""),
+                str(user.get("style") or ""),
+            )
+        )
+        strong_markers = ("查岗", "监督", "管着", "管束", "强势", "严格", "占有", "黏人", "粘人")
+        return 3 if any(marker in persona_text for marker in strong_markers) else 2
 
     def _parse_timer_timestamp(self, time_text: str) -> float:
         normalized = str(time_text or "").strip()
@@ -7892,6 +7949,10 @@ class DailyStateMixin:
         topic: str,
         motive: str,
         source_text: str,
+        style: str = "",
+        activity: str = "",
+        estimated_minutes: int = 0,
+        followup_intensity: int = 1,
     ) -> str:
         when = self._environment_fromtimestamp(scheduled_ts).strftime("%Y-%m-%d %H:%M")
         lines = [
@@ -7904,12 +7965,33 @@ class DailyStateMixin:
             lines.append(f"补充语境：{motive}")
         if reason:
             lines.append(f"类型：{reason}")
+        if reason == "activity_followup":
+            lines[0] = "这是 PrivateCompanion 根据用户暂时离开的动作生成的一次动作查岗主动消息。到点后自然联系用户,不要解释定时任务或内部判断。"
+            if activity:
+                lines.append(f"用户动作：{activity}")
+            if estimated_minutes > 0:
+                lines.append(f"生成念头时的预计耗时：{estimated_minutes} 分钟")
+            lines.append(f"查岗强度：{followup_intensity}/3")
+            intensity_rules = {
+                1: "轻轻问一句动作是否结束或人是否回来了，不要求立即回复。",
+                2: "可以更直接、更有存在感地问一句，但保持亲近和可拒绝。",
+                3: "可带符合人格的轻度监督感或小小不满，但不得命令、指责、威胁或连续追发。",
+            }
+            lines.append(f"表达要求：{intensity_rules.get(followup_intensity, intensity_rules[1])}")
+            proactive_voice = ""
+            formatter = getattr(self, "_format_proactive_voice_prompt", None)
+            if callable(formatter):
+                proactive_voice = _single_line(formatter(), 500)
+            if proactive_voice:
+                lines.append(f"人格化主动风格：{proactive_voice}")
+        if style:
+            lines.append(f"语气参考：{style}")
         if action and action != "message":
             lines.append(f"期望动作：{action}")
         seed = _single_line(source_text, 180)
         if seed:
             lines.append(f"聊天线索：{seed}")
-        lines.append("执行方式：使用 send_message_to_user 给原会话发一条简短自然的消息；如果是叫醒/提醒,直接完成提醒。")
+        lines.append("执行方式：使用 send_message_to_user 给原会话发一条简短自然的消息；如果是叫醒/提醒,直接完成提醒。只发送一次，不因用户未回复而自行追加。")
         return "\n".join(lines)
 
     def _official_cron_manager(self) -> Any | None:
@@ -7949,11 +8031,18 @@ class DailyStateMixin:
                 "reason": _single_line(timer_event.get("reason"), 40),
                 "action": _single_line(timer_event.get("action"), 40),
                 "topic": _single_line(timer_event.get("topic"), 80),
+                "activity": _single_line(timer_event.get("activity"), 60),
+                "estimated_minutes": _safe_int(timer_event.get("estimated_minutes"), 0, 0, 720),
+                "followup_intensity": _safe_int(timer_event.get("followup_intensity"), 1, 1, 3),
             },
         }
         try:
             job = await cron_mgr.add_active_job(
-                name="PrivateCompanion 临时约定",
+                name=(
+                    "PrivateCompanion 动作查岗"
+                    if _single_line(timer_event.get("reason"), 40) == "activity_followup"
+                    else "PrivateCompanion 临时约定"
+                ),
                 cron_expression=None,
                 payload=payload,
                 description=_single_line(timer_event.get("topic") or note, 180),
@@ -7994,6 +8083,9 @@ class DailyStateMixin:
         async with self._data_lock:
             user = self._get_user(user_id)
             existing = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
+            expected_event_id = _single_line(payload.get("_expected_event_id"), 40)
+            if expected_event_id and _single_line(existing.get("id"), 40) != expected_event_id:
+                return
             existing_active = (
                 isinstance(existing, dict)
                 and _single_line(existing.get("backend"), 40) == "astrbot_cron"
@@ -8043,6 +8135,53 @@ class DailyStateMixin:
             error or cancel_event.get("error") or "-",
         )
 
+    def _has_active_activity_followup_timer(
+        self,
+        user: dict[str, Any] | None,
+        *,
+        trigger_message_id: str = "",
+    ) -> bool:
+        if not isinstance(user, dict):
+            return False
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict) or _single_line(event.get("reason"), 40) != "activity_followup":
+            return False
+        current_message_id = _single_line(trigger_message_id, 120)
+        original_message_id = _single_line(event.get("trigger_message_id"), 120)
+        return not (current_message_id and original_message_id and current_message_id == original_message_id)
+
+    async def _cancel_activity_followup_on_user_return(
+        self,
+        user_id: str,
+        *,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
+        source_text: str = "",
+    ) -> bool:
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            should_cancel = self._has_active_activity_followup_timer(
+                user,
+                trigger_message_id=trigger_message_id,
+            )
+            event = self._get_active_llm_timer(user) if should_cancel else None
+            expected_event_id = _single_line((event or {}).get("id"), 40)
+        if not should_cancel:
+            return False
+        await self._cancel_llm_timer(
+            user_id,
+            {
+                "cancel": True,
+                "topic": "用户已提前回来，取消动作查岗",
+                "_expected_event_id": expected_event_id,
+            },
+            source_text=_single_line(source_text, 140) or "用户在动作查岗到点前发来了新消息",
+            source_origin="user_returned_before_activity_followup",
+            trigger_message_id=trigger_message_id,
+            trigger_umo=trigger_umo,
+        )
+        return True
+
     async def _schedule_llm_timer(
         self,
         user_id: str,
@@ -8080,6 +8219,8 @@ class DailyStateMixin:
                 scheduled_ts,
                 source_text,
             )
+            if reason == "activity_followup":
+                scheduled_ts = max(scheduled_ts, _now_ts() + 5 * 60)
             action = _single_line(payload.get("action"), 24) or "message"
             if action not in {"message", "screen_peek", "photo_text", "voice", "jm_cosmos_read"}:
                 action = "message"
@@ -8098,13 +8239,41 @@ class DailyStateMixin:
                 topic=topic,
             )
             existing = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
-            if (
+            existing_active = (
                 isinstance(existing, dict)
                 and _single_line(existing.get("backend"), 40) == "astrbot_cron"
                 and _single_line(existing.get("status"), 40) in {"scheduled", "pending"}
                 and _safe_float(existing.get("scheduled_ts"), 0) > _now_ts()
+            )
+            if (
+                reason == "activity_followup"
+                and existing_active
+                and _single_line(existing.get("reason"), 40) != "activity_followup"
+            ):
+                logger.info(
+                    "[PrivateCompanion] 保留已有明确预约,跳过自动动作查岗: user=%s existing=%s topic=%s",
+                    user_id,
+                    _single_line(existing.get("reason"), 40) or "appointment",
+                    _single_line(existing.get("topic"), 80) or "-",
+                )
+                return
+            if (
+                existing_active
             ):
                 replaced_job_id = _single_line(existing.get("job_id"), 80)
+            activity = _single_line(payload.get("activity"), 60) if reason == "activity_followup" else ""
+            estimated_minutes = (
+                _safe_int(payload.get("estimated_minutes"), 0, 0, 720)
+                if reason == "activity_followup"
+                else 0
+            )
+            if reason == "activity_followup" and estimated_minutes <= 0:
+                estimated_minutes = max(5, min(720, int(round((scheduled_ts - _now_ts()) / 60))))
+            followup_intensity = (
+                self._activity_followup_intensity_for_user(payload.get("followup_intensity"), user)
+                if reason == "activity_followup"
+                else 1
+            )
             timer_event = {
                 "id": uuid.uuid4().hex,
                 "scheduled_ts": scheduled_ts,
@@ -8114,6 +8283,9 @@ class DailyStateMixin:
                 "topic": topic,
                 "motive": self._normalize_internal_motive_text(motive),
                 "style": _single_line(payload.get("style"), 40),
+                "activity": activity,
+                "estimated_minutes": estimated_minutes,
+                "followup_intensity": followup_intensity,
                 "seed_text": _single_line(source_text, 80),
                 "origin": source_origin,
                 "created_at": _now_ts(),
@@ -8133,6 +8305,10 @@ class DailyStateMixin:
                 topic=topic,
                 motive=timer_event["motive"],
                 source_text=source_text,
+                style=timer_event["style"],
+                activity=activity,
+                estimated_minutes=estimated_minutes,
+                followup_intensity=followup_intensity,
             )
             user_snapshot = dict(user)
         replace_error = ""
@@ -10220,6 +10396,7 @@ class DailyStateMixin:
                     continue
             task_start_private_activity_at = self._latest_private_user_activity_ts(user)
             task_start_private_inbound_count = _safe_int(user.get("private_inbound_count"), 0)
+            render_failure_stage = ""
             pending_send_retry = None if is_troubleshooting_for_send else self._pending_proactive_send_retry(user)
             if pending_send_retry:
                 reason = _single_line(pending_send_retry.get("reason"), 40) or normalize_legacy_tag_text(user.get("planned_proactive_reason")) or "check_in"
@@ -10260,6 +10437,7 @@ class DailyStateMixin:
                         self._update_proactive_audit(audit_id, status="failed", note=f"生成失败: {_single_line(e, 140)}")
                         self._save_data_sync()
                     continue
+            render_failure_stage = _single_line(user.pop("_proactive_render_failure_stage", ""), 240)
             if is_troubleshooting_for_send:
                 async with self._data_lock:
                     current_after_render_ok = self._get_user(user_id)
@@ -10462,6 +10640,9 @@ class DailyStateMixin:
                 outbound_decision = str(outbound_validation.get("decision") or "send")
                 if outbound_decision == "drop":
                     note = _single_line(outbound_validation.get("reason"), 120) or "主动正文未通过发送前本地校验"
+                    empty_render_failure = not text and not image_path and not extra_components
+                    if empty_render_failure and render_failure_stage:
+                        note = _single_line(f"主动行为没有产出可发送内容：{render_failure_stage}", 360)
                     async with self._data_lock:
                         current_for_outbound_guard = self._get_user(user_id)
                         current_for_outbound_guard["proactive_sending"] = False
@@ -10483,7 +10664,12 @@ class DailyStateMixin:
                         else:
                             self._mark_planned_candidate_status(current_for_outbound_guard, "blocked", note)
                             self._clear_pending_proactive_plan(current_for_outbound_guard)
-                            self._schedule_next_proactive(current_for_outbound_guard, now=_now_ts(), delay_hours=(1.5, 4.0))
+                            if empty_render_failure:
+                                materialized = self._materialize_best_proactive_impulse(current_for_outbound_guard, now=_now_ts())
+                                if not materialized:
+                                    self._schedule_next_proactive(current_for_outbound_guard, now=_now_ts(), delay_hours=(0.33, 1.0))
+                            else:
+                                self._schedule_next_proactive(current_for_outbound_guard, now=_now_ts(), delay_hours=(1.5, 4.0))
                         self._update_proactive_audit(audit_id, status="cancelled", note=note, text=text)
                         self._clear_pending_proactive_send_retry(current_for_outbound_guard)
                         self._save_data_sync()
@@ -10842,18 +11028,21 @@ class DailyStateMixin:
                 self._debug_tick_skip(user_id, note, prefix="放弃")
                 continue
             if not text and not image_path and not extra_components:
+                empty_note = "主动行为没有产出可发送内容"
+                if render_failure_stage:
+                    empty_note = _single_line(f"{empty_note}：{render_failure_stage}", 360)
                 async with self._data_lock:
                     current = self._get_user(user_id)
                     current["proactive_sending"] = False
                     current["proactive_sending_started_at"] = 0
                     if is_troubleshooting_for_send:
-                        self._append_troubleshooting_proactive_step(current, "内容检查", "error", "主动行为没有产出可发送内容")
+                        self._append_troubleshooting_proactive_step(current, "内容检查", "error", empty_note)
                         self._record_troubleshooting_proactive_result(
                             user_id,
                             current,
                             ok=False,
-                            detail="主动行为没有产出可发送内容",
-                            error="主动消息渲染为空",
+                            detail=empty_note,
+                            error="主动消息两级渲染仍为空",
                             action=effective_action_for_send or planned_action_for_send or "message",
                             reason=reason or "check_in",
                         )
@@ -10861,12 +11050,14 @@ class DailyStateMixin:
                     elif self._simulation_active(current):
                         self._consume_simulation_event(current)
                     else:
-                        self._mark_planned_candidate_status(current, "dropped", "主动行为失败或不适合发送")
+                        self._mark_planned_candidate_status(current, "dropped", empty_note)
                         self._clear_pending_proactive_plan(current)
-                        self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(2, 8))
-                    self._update_proactive_audit(audit_id, status="dropped", note="主动行为失败或不适合发送")
+                        materialized = self._materialize_best_proactive_impulse(current, now=_now_ts())
+                        if not materialized:
+                            self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(0.33, 1.0))
+                    self._update_proactive_audit(audit_id, status="dropped", note=empty_note)
                     self._save_data_sync()
-                self._debug_tick_skip(user_id, "主动行为失败或不适合发送", prefix="放弃")
+                self._debug_tick_skip(user_id, empty_note, prefix="放弃")
                 continue
             try:
                 reason_label = _REASON_TEXT.get(reason, reason or "check_in")

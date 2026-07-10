@@ -4760,14 +4760,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._ok(
                 {
                     "available": True,
-                    "db_path": str(db_path),
                     "user_id": user_id,
                     "tokens": tokens,
                     "primary_tokens": token_bundle.get("primary_tokens", []),
                     "support_tokens": token_bundle.get("support_tokens", []),
                     "items": items,
                     "total": len(items),
-                    "filter_note": "默认仅召回命中 QQ/绑定身份/关系节点名称的记忆；别名和群名片只用于加分。",
+                    "filter_note": "默认仅召回命中 QQ 或绑定身份键的记忆；名称、别名和群名片不单独作为召回依据。",
                     "message": f"已找到 {len(items)} 条 LivingMemory 相关记忆",
                 }
             )
@@ -7751,6 +7750,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         provider_id = self._single_line(payload.get("provider_id"), 160)
         if key and key not in self._allowed_provider_keys():
             return self._error("不允许测试该 Provider 配置项")
+        timeout_raw = payload.get("timeout_seconds")
+        timeout_seconds = None
+        if timeout_raw not in (None, ""):
+            timeout_seconds = self._float(timeout_raw, 0.0, 5.0, 600.0)
         start = time.time()
         try:
             text = await self.plugin._llm_call(
@@ -7758,6 +7761,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 max_tokens=16,
                 provider_id=provider_id,
                 task="provider_test",
+                timeout_key=key,
+                timeout_seconds=timeout_seconds,
             )
             elapsed_ms = int((time.time() - start) * 1000)
             ok = bool(text)
@@ -10009,6 +10014,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "page_font_family",
             "page_theme",
             "provider_config_mode",
+            "model_timeout_overrides",
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
@@ -11618,6 +11624,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 else str(value or "quick").strip().lower()
             )
             return
+        if key == "model_timeout_overrides":
+            normalizer = getattr(self.plugin, "_normalize_model_timeout_overrides", None)
+            self.plugin.model_timeout_overrides = normalizer(value) if callable(normalizer) else {}
+            return
         if key == "proactive_intensity_preset":
             normalizer = getattr(self.plugin, "_normalize_proactive_intensity_preset", None)
             self.plugin.proactive_intensity_preset = (
@@ -12679,6 +12689,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             }
             text = aliases.get(text, text)
             return text if text in {"quick", "precision"} else "quick"
+        if key == "model_timeout_overrides":
+            normalizer = getattr(self.plugin, "_normalize_model_timeout_overrides", None)
+            normalized = normalizer(value) if callable(normalizer) else {}
+            return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
         if key == "storage_backend":
             text = str(value or "json").strip().lower()
             return text if text in {"json", "sqlite"} else "json"
@@ -15546,6 +15560,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "job_id": self._single_line(timer_event.get("job_id"), 80),
                     "timer_status": timer_status,
                     "timer_error": self._single_line(timer_event.get("error") or timer_event.get("replace_error"), 180),
+                    "activity": self._single_line(timer_event.get("activity"), 60),
+                    "estimated_minutes": self._int(timer_event.get("estimated_minutes")),
+                    "followup_intensity": self._int(timer_event.get("followup_intensity")),
                     "replaced_job_id": self._single_line(timer_event.get("replaced_job_id"), 80),
                     "cancelled_job_id": self._single_line(timer_event.get("cancelled_job_id"), 80),
                     "raw_time": self._single_line(timer_event.get("raw_time"), 40),
@@ -16754,13 +16771,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             profile.get("linked_qq_user_id"),
             profile.get("merged_into_user_id"),
             profile.get("linked_bili_profile_id"),
-            profile.get("name"),
         ]
         external_ids = profile.get("external_ids")
         if isinstance(external_ids, list):
             primary_raw.extend(external_ids)
         support_raw: list[Any] = []
-        for key in ("aliases", "observed_names"):
+        for key in ("name", "aliases", "observed_names"):
             value = profile.get(key)
             if isinstance(value, list):
                 support_raw.extend(value)

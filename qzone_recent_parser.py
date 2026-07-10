@@ -31,6 +31,7 @@ class _QzoneFeedHtmlParser(HTMLParser):
         self.text_parts: list[str] = []
         self.repost_parts: list[str] = []
         self.image_urls: list[str] = []
+        self.image_items: list[dict[str, str]] = []
         self._class_stack: list[set[str]] = []
         self._tag_stack: list[str] = []
 
@@ -49,6 +50,51 @@ class _QzoneFeedHtmlParser(HTMLParser):
                 return str(value or "")
         return ""
 
+    @classmethod
+    def _first_attr(cls, attrs: list[tuple[str, str | None]], *names: str) -> str:
+        for name in names:
+            value = cls._attr(attrs, name).strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _is_content_image_url(value: str) -> bool:
+        source = str(value or "").strip().lower()
+        return bool(source) and not source.startswith("http://qzonestyle.gtimg.cn")
+
+    def _record_image(self, attrs: list[tuple[str, str | None]]) -> None:
+        preview_url = self._first_attr(attrs, "src", "data-src", "data-lazy-src", "data-original-src")
+        full_url = self._first_attr(
+            attrs,
+            "data-original",
+            "data-origin",
+            "data-origin-url",
+            "data-original-url",
+            "data-originalurl",
+            "data-big-url",
+            "data-bigurl",
+            "data-full-url",
+            "data-fullurl",
+            "data-raw-url",
+            "data-rawurl",
+            "origsrc",
+            "original",
+            "data-url",
+        )
+        if not self._is_content_image_url(full_url):
+            full_url = ""
+        if not self._is_content_image_url(preview_url):
+            preview_url = ""
+        source = full_url or preview_url
+        if not source:
+            return
+        item = {"preview_url": preview_url or source, "full_url": source}
+        if item not in self.image_items:
+            self.image_items.append(item)
+        if source not in self.image_urls:
+            self.image_urls.append(source)
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = str(tag or "").lower()
         classes = self._classes(attrs)
@@ -60,12 +106,9 @@ class _QzoneFeedHtmlParser(HTMLParser):
                 self._class_stack.append(classes)
                 self._class_stack.pop()
             return
-        src = self._attr(attrs, "src")
-        if not src or src.startswith("http://qzonestyle.gtimg.cn"):
-            return
         active_classes = self._class_stack + [classes]
         if any({"img-box", "video-img"} & item for item in active_classes):
-            self.image_urls.append(src)
+            self._record_image(attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = str(tag or "").lower()
@@ -99,13 +142,18 @@ class _QzoneFeedHtmlParser(HTMLParser):
 
 
 def _parse_feed_html(html_content: str) -> tuple[str, str, list[str]]:
+    text, repost, image_urls, _items = _parse_feed_html_details(html_content)
+    return text, repost, image_urls
+
+
+def _parse_feed_html_details(html_content: str) -> tuple[str, str, list[str], list[dict[str, str]]]:
     parser = _QzoneFeedHtmlParser()
     parser.feed(str(html_content or ""))
     text = "".join(parser.text_parts).strip()
     repost = "".join(parser.repost_parts).strip()
     if "：" in repost:
         repost = repost.split("：", 1)[1].strip()
-    return text, repost, parser.image_urls
+    return text, repost, parser.image_urls, parser.image_items
 
 
 def _html_attr_value(html_content: str, *names: str) -> str:
@@ -145,7 +193,7 @@ def parse_recent_feeds(data: dict[str, Any]) -> list[Any]:
         html_content = str(feed.get("html") or "")
         if not html_content:
             continue
-        text, rt_con, image_urls = _parse_feed_html(html_content)
+        text, rt_con, image_urls, image_items = _parse_feed_html_details(html_content)
         posts.append(
             SimpleNamespace(
                 tid=tid,
@@ -154,6 +202,7 @@ def parse_recent_feeds(data: dict[str, Any]) -> list[Any]:
                 text=text,
                 rt_con=rt_con,
                 images=image_urls,
+                image_items=image_items,
                 comments=[],
                 create_time=int(feed.get("abstime") or 0),
                 appid=str(feed.get("appid") or "311"),

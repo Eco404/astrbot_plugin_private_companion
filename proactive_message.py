@@ -45,6 +45,10 @@ except ImportError:
             from astrbot.core.message.components import Reply
         except ImportError:
             Reply = None
+try:
+    from astrbot.core.message import components as CoreMessageComponents
+except ImportError:
+    CoreMessageComponents = None
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import file_token_service
@@ -289,6 +293,57 @@ class _CapturedSendMessageCall:
 
 class _CapturedFrameworkSendMessage(Exception):
     """Stop the framework agent once its send_message_to_user payload is captured."""
+
+
+class _ProactiveFrameworkToolManagerProxy:
+    """Hide incompatible global tools from the synthetic proactive agent only."""
+
+    def __init__(self, manager: Any, excluded_names: set[str]) -> None:
+        self._manager = manager
+        self._excluded_names = {str(name).strip() for name in excluded_names if str(name).strip()}
+        self._logged_exclusion = False
+
+    def get_full_tool_set(self):
+        tool_set = self._manager.get_full_tool_set()
+        remove_tool = getattr(tool_set, "remove_tool", None)
+        if callable(remove_tool):
+            existing_names = {
+                str(getattr(tool, "name", "") or "").strip()
+                for tool in list(getattr(tool_set, "tools", []) or [])
+            }
+            removed_names = sorted(name for name in self._excluded_names if name in existing_names)
+            for name in self._excluded_names:
+                remove_tool(name)
+            if removed_names and not self._logged_exclusion:
+                self._logged_exclusion = True
+                logger.info(
+                    "[PrivateCompanion] 主动主链已隔离不兼容全局工具: %s",
+                    ",".join(removed_names),
+                )
+        return tool_set
+
+    def get_func(self, name: str):
+        if str(name or "").strip() in self._excluded_names:
+            return None
+        return self._manager.get_func(name)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager, name)
+
+
+class _ProactiveFrameworkContextProxy:
+    def __init__(self, context: Any, excluded_tool_names: set[str]) -> None:
+        self._context = context
+        self._tool_manager_proxy = _ProactiveFrameworkToolManagerProxy(
+            context.get_llm_tool_manager(),
+            excluded_tool_names,
+        )
+
+    def get_llm_tool_manager(self):
+        return self._tool_manager_proxy
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._context, name)
 
 
 class ProactiveMessageMixin:
@@ -1493,6 +1548,11 @@ class ProactiveMessageMixin:
                 f"{recent_history_hint}\n"
                 "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
             )
+        balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
+        if callable(balance_hint_getter):
+            balance_hint = balance_hint_getter(user, reason=reason)
+            if balance_hint:
+                prompt = f"{prompt.rstrip()}\n\n{balance_hint}"
         if open_loops_hint and "未完成话题候选" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
@@ -1604,7 +1664,13 @@ class ProactiveMessageMixin:
             lines.append("这次由头不算很硬或打扰压力偏高：正文要更短、更轻，最好像把一句话放下，不追问、不求回应。")
         elif semantic_score >= 0.68:
             lines.append("这次有明确由头：正文可以贴着那个由头说一个具体点，但仍然不要解释调度原因。")
-        if reason == "birthday_eve_hint":
+        if reason == "low_balance":
+            balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
+            balance_hint = balance_hint_getter(user, reason=reason) if callable(balance_hint_getter) else ""
+            if balance_hint:
+                lines.append(balance_hint)
+            lines.append("这是用户明确开启的余额感知事件：允许按人格轻轻要零花钱或补给，但只提一次，不催促、不索要回复，也不把服务余额写成用户欠款。")
+        elif reason == "birthday_eve_hint":
             lines.append("这是生日前夜的一点留白：可以温柔地提醒对方明天多偏爱自己一点，但不要说出生日、准备、惊喜或任何剧透；一小句就停，不制造期待压力。")
         elif reason == "birthday_makeup":
             lines.append("这是次日午前的低调补送：真诚祝福即可，不要反复道歉、不解释系统或错过原因，也不要把昨天的生日写成今天。")
@@ -1796,9 +1862,14 @@ class ProactiveMessageMixin:
                 text_value = self._sanitize_captured_plain_text(item.get("text"))
                 if text_value:
                     captured_text_parts.append(text_value)
-            if captured_text_parts:
-                break
         return "\n".join(captured_text_parts).strip()
+
+    def _framework_context_for_proactive_agent(self) -> Any:
+        context = getattr(self, "context", None)
+        tool_manager_getter = getattr(context, "get_llm_tool_manager", None)
+        if not callable(tool_manager_getter):
+            return context
+        return _ProactiveFrameworkContextProxy(context, {"AIsearch"})
 
     def _framework_agent_meta_summary_leak(self, text: str) -> bool:
         cleaned = _single_line(text, 500).lower()
@@ -1951,6 +2022,8 @@ class ProactiveMessageMixin:
         label: str,
         max_steps: int = 20,
     ) -> str:
+        cache_key = str(umo or "")
+        self._framework_captured_send_cache.pop(cache_key, None)
         event = self._proactive_synthetic_event(umo, prompt=prompt, name=name)
         if event is None:
             return ""
@@ -1985,7 +2058,7 @@ class ProactiveMessageMixin:
                     async def _runner_factory():
                         return await build_main_agent(
                             event=event,
-                            plugin_context=self.context,
+                            plugin_context=self._framework_context_for_proactive_agent(),
                             config=build_cfg,
                             req=req,
                         )
@@ -2009,6 +2082,8 @@ class ProactiveMessageMixin:
                         continue
                     raise
         await _run_with_retries()
+        if captured_tool_sends:
+            self._framework_captured_send_cache[cache_key] = list(captured_tool_sends)
         runner = getattr(result, "agent_runner", None) if result else None
         llm_resp = runner.get_final_llm_resp() if runner else None
         text = str(getattr(llm_resp, "completion_text", "") or "").strip()
@@ -2973,15 +3048,29 @@ Output:
 {{"decision":"send|rewrite|drop","text":"","reason":"brief reason"}}
 """.strip()
         started = time.perf_counter()
+        review_provider_id = self._task_provider(self.response_review_provider_id, self.mai_style_provider_id)
+        timeout_seconds = 8.0
+        timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+        timeout_override = (
+            timeout_getter(
+                task="proactive_send_review",
+                provider_id=review_provider_id,
+                timeout_key="RESPONSE_REVIEW_PROVIDER_ID",
+            )
+            if callable(timeout_getter)
+            else None
+        )
+        if timeout_override is not None:
+            timeout_seconds = float(timeout_override)
         try:
             raw = await asyncio.wait_for(
                 self._llm_call(
                     prompt,
                     max_tokens=220,
-                    provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+                    provider_id=review_provider_id,
                     task="proactive_send_review",
                 ),
-                timeout=8.0,
+                timeout=timeout_seconds,
             )
         except Exception as exc:
             logger.warning("[PrivateCompanion] Proactive final content gate unavailable; using local result: %s", _single_line(exc, 120))
@@ -3061,34 +3150,70 @@ Output:
         captured = self._framework_captured_send_cache.pop(str(umo or ""), [])
         if not captured:
             return "", "", []
-        selected_call = None
-        for call in captured:
-            if any(
-                isinstance(item, dict) and str(item.get("type") or "").strip().lower() == "image"
-                for item in call.messages
-            ):
-                selected_call = call
-                break
-        if selected_call is None:
-            selected_call = captured[0]
         text_parts: list[str] = []
         image_path = ""
         extra_components: list[Any] = []
-        for item in selected_call.messages:
-            if not isinstance(item, dict):
+        for call in captured:
+            messages = getattr(call, "messages", [])
+            if not isinstance(messages, list):
                 continue
-            item_type = str(item.get("type") or "").strip().lower()
-            if item_type == "plain":
-                text_value = self._sanitize_captured_plain_text(item.get("text"))
-                if text_value:
-                    text_parts.append(text_value)
-                continue
-            if item_type == "image":
-                path_value = str(item.get("path") or "").strip()
-                if path_value and os.path.exists(path_value) and not image_path:
-                    image_path = path_value
-                continue
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "").strip().lower()
+                if item_type == "plain":
+                    text_value = self._sanitize_captured_plain_text(item.get("text"))
+                    if text_value:
+                        text_parts.append(text_value)
+                    continue
+                if item_type == "image":
+                    path_value = str(item.get("path") or "").strip()
+                    if path_value and os.path.exists(path_value) and not image_path:
+                        image_path = path_value
+                        continue
+                component = self._captured_framework_message_component(item)
+                if component is not None:
+                    extra_components.append(component)
         return "\n".join(part for part in text_parts if part).strip(), image_path, extra_components
+
+    def _captured_framework_message_component(self, item: dict[str, Any]) -> Any | None:
+        item_type = str(item.get("type") or "").strip().lower()
+        path_value = str(item.get("path") or "").strip()
+        url_value = str(item.get("url") or "").strip()
+        if item_type == "mention_user":
+            mention_user_id = item.get("mention_user_id")
+            return At(qq=mention_user_id) if mention_user_id else None
+        if item_type == "image":
+            if url_value:
+                try:
+                    return Image.fromURL(url_value)
+                except Exception:
+                    return None
+            return None
+        if CoreMessageComponents is None:
+            return None
+        if item_type in {"record", "video"}:
+            component_cls = getattr(CoreMessageComponents, item_type.capitalize(), None)
+            if component_cls is None:
+                return None
+            try:
+                if path_value and os.path.exists(path_value):
+                    return component_cls.fromFileSystem(path_value)
+                if url_value:
+                    return component_cls.fromURL(url_value)
+            except Exception:
+                return None
+            return None
+        if item_type == "file":
+            component_cls = getattr(CoreMessageComponents, "File", None)
+            if component_cls is None:
+                return None
+            name = _single_line(item.get("text"), 120) or os.path.basename(path_value or url_value) or "file"
+            if path_value and os.path.exists(path_value):
+                return component_cls(name=name, file=path_value)
+            if url_value:
+                return component_cls(name=name, url=url_value)
+        return None
 
     def _sanitize_captured_plain_text(self, raw_text: Any) -> str:
         text = str(raw_text or "").strip()
@@ -3160,7 +3285,9 @@ Output:
         action: str = "message",
         motive: str = "",
     ) -> str:
+        user.pop("_proactive_render_failure_stage", None)
         if not self.enable_llm_proactive_message:
+            user["_proactive_render_failure_stage"] = "主动消息模型生成已关闭"
             return ""
         raw_text = await self._generate_proactive_message_via_framework(
             user,
@@ -3170,8 +3297,117 @@ Output:
             action=action,
             motive=motive,
         )
-        if not raw_text:
-            return ""
+        failure_stages: list[str] = []
+        if raw_text:
+            finalized, failure_stage = await self._finalize_proactive_generated_text(
+                user,
+                raw_text,
+                name=name,
+                reason=reason,
+                action=action,
+                action_context=action_context,
+                motive=motive,
+            )
+            if finalized:
+                return finalized
+            failure_stages.append(f"框架主链{failure_stage or '处理后为空'}")
+        else:
+            failure_stages.append("框架主链返回空文本")
+
+        fallback_text = await self._generate_proactive_message_direct_fallback(
+            user,
+            name=name,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+            motive=motive,
+        )
+        if fallback_text:
+            finalized, failure_stage = await self._finalize_proactive_generated_text(
+                user,
+                fallback_text,
+                name=name,
+                reason=reason,
+                action=action,
+                action_context=action_context,
+                motive=motive,
+            )
+            if finalized:
+                logger.info(
+                    "[PrivateCompanion] 主动框架主链为空后已由直接人格化兜底恢复: user=%s reason=%s",
+                    _single_line(user.get("user_id"), 40),
+                    reason,
+                )
+                return finalized
+            failure_stages.append(f"直接人格化兜底{failure_stage or '处理后为空'}")
+        else:
+            failure_stages.append("直接人格化兜底返回空文本")
+
+        failure_detail = "；".join(failure_stages)[:240]
+        user["_proactive_render_failure_stage"] = failure_detail
+        logger.warning(
+            "[PrivateCompanion] 主动正文两级生成均未产出: user=%s reason=%s stage=%s",
+            _single_line(user.get("user_id"), 40),
+            reason,
+            failure_detail,
+        )
+        return ""
+
+    async def _generate_proactive_message_direct_fallback(
+        self,
+        user: dict[str, Any],
+        *,
+        name: str,
+        reason: str,
+        action: str,
+        action_context: str = "",
+        motive: str = "",
+    ) -> str:
+        topic = _single_line(user.get("planned_proactive_topic"), 120)
+        planned_motive = _single_line(motive or user.get("planned_proactive_motive"), 220)
+        context = self._format_action_prompt_context(action, action_context)
+        if (
+            (context.startswith("message：") and "图片动作本轮未产出" not in context)
+            or context in {"普通文字", "普通私聊文本"}
+        ):
+            context = ""
+        reference = "\n".join(
+            part
+            for part in (
+                f"主动话题：{topic}" if topic else "",
+                f"想表达：{planned_motive}" if planned_motive else "",
+                f"真实动作上下文：{context}" if context else "",
+            )
+            if part
+        )
+        balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
+        if reason == "low_balance" and callable(balance_hint_getter):
+            balance_hint = balance_hint_getter(user, reason=reason)
+            if balance_hint:
+                reference = f"{reference}\n{balance_hint}" if reference else balance_hint
+        if not reference:
+            reference = f"自然地向{name or '对方'}主动说一句与当前状态有关、低压力且无需立即回复的话。"
+        return await self._rewrite_reference_reply_with_persona(
+            reference,
+            scene=f"主动开口；原因={reason or 'check_in'}；动作={action or 'message'}",
+            user=user,
+            fallback_text="",
+            task="proactive_message_fallback",
+            max_chars=180,
+            allow_fallback=False,
+        )
+
+    async def _finalize_proactive_generated_text(
+        self,
+        user: dict[str, Any],
+        raw_text: str,
+        *,
+        name: str,
+        reason: str,
+        action: str,
+        action_context: str = "",
+        motive: str = "",
+    ) -> tuple[str, str]:
         cleaned = self._sanitize_action_boundaries(
             self._sanitize_proactive_text(raw_text),
             reason=reason,
@@ -3179,6 +3415,8 @@ Output:
             action_context=action_context,
             has_real_image="真实图片文件：" in action_context or "图片路径：" in action_context,
         )
+        if not cleaned:
+            return "", "在动作边界清洗后为空"
         if self._is_overabstract_proactive_text(cleaned, action=action):
             cleaned = self._ground_proactive_text(
                 cleaned,
@@ -3190,6 +3428,8 @@ Output:
         cleaned = self._collapse_multi_candidate_proactive_text(cleaned, user=user, name=name)
         cleaned = self._repair_proactive_subject_drift(cleaned, reason=reason, action=action, action_context=action_context)
         cleaned = self._visible_text_without_tts_reading(cleaned, limit=1000)
+        if not cleaned:
+            return "", "在主客体/可见文本清洗后为空"
         relay_claim_note = self._unexecuted_relay_claim_reason(cleaned, action_context=action_context)
         if relay_claim_note:
             logger.info(
@@ -3197,11 +3437,11 @@ Output:
                 relay_claim_note,
                 _single_line(cleaned, 120),
             )
-            return ""
+            return "", f"含未执行转述承诺：{_single_line(relay_claim_note, 80)}"
         if self._should_drop_vague_generic_proactive(user, reason=reason, action=action, action_context=action_context, text=cleaned):
-            return ""
+            return "", "泛化主动缺少具体由头"
         if self._should_drop_misstaged_proactive_text(cleaned, reason=reason, action=action):
-            return ""
+            return "", "错接旧对话或时段"
         reviewed = await self._review_proactive_message_stance(
             user,
             cleaned,
@@ -3211,10 +3451,11 @@ Output:
             motive=motive,
         )
         if not reviewed:
-            return ""
+            return "", "回复空气复核后为空"
         reviewed = self._trim_proactive_status_inventory(reviewed)
         reviewed = self._trim_performative_self_state_tail(reviewed)
-        return self._normalize_proactive_sentence_flow(reviewed)
+        finalized = self._normalize_proactive_sentence_flow(reviewed)
+        return (finalized, "") if finalized else ("", "最终句式整理后为空")
 
     def _proactive_reply_air_flags(
         self,
@@ -7028,23 +7269,23 @@ Output:
                             kwargs[ek] = ev
             except Exception:
                 logger.warning("[PrivateCompanion] 自定义生图工具额外参数解析失败,已忽略: tool=%s", _single_line(tool_name, 80))
-        event = None
         try:
-            message_obj = AstrBotMessage()
-            message_obj.type = MessageType.GROUP_MESSAGE
-            message_obj.self_id = str(session_key or "custom_tool")
-            message_obj.session_id = str(session_key or "custom_tool")
-            message_obj.message_id = f"custom_tool_{uuid.uuid4().hex[:12]}"
-            message_obj.sender = MessageMember(user_id=str(session_key or "custom_tool"))
-            message_obj.message = []
-            message_obj.message_str = ""
-            message_obj.raw_message = None
-            message_obj.timestamp = int(time.time())
-            event = AstrMessageEvent("", message_obj, None, message_obj.session_id)
+            session = self._parse_message_session(session_key)
+            if session is None:
+                session = MessageSession(
+                    platform_name="private_companion",
+                    message_type=MessageType.FRIEND_MESSAGE,
+                    session_id=str(session_key or "custom_tool"),
+                )
+            event = SyntheticPrivateWakeEvent(
+                context=self.context,
+                session=session,
+                message="",
+                sender_name="PrivateCompanion",
+            )
         except Exception as exc:
-            logger.debug("[PrivateCompanion] 构造自定义工具事件失败: %s", _single_line(exc, 160))
-        if event is None:
-            return "", "无法为函数工具构造事件上下文"
+            logger.warning("[PrivateCompanion] 构造自定义工具事件失败: %s", _single_line(exc, 160))
+            return "", f"无法为函数工具构造事件上下文：{_single_line(exc, 120)}"
         logger.info(
             "[PrivateCompanion] 自定义工具生图提交: tool=%s session=%s kind=%s prompt_chars=%s reference=%s params=%s",
             _single_line(tool_name, 80),

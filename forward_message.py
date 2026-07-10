@@ -975,7 +975,24 @@ class ForwardMessageMixin:
                 continue
             try:
                 start = time.time()
-                timeout = max(0.0, float(getattr(self, "forward_message_image_vision_timeout_seconds", 6.0) or 0.0))
+                timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+                override_timeout = (
+                    timeout_getter(
+                        task="forward_message_image_vision",
+                        provider_id=provider_id,
+                        timeout_key="PLUGIN_VISION_PROVIDER_ID",
+                    )
+                    if callable(timeout_getter)
+                    else None
+                )
+                timeout = max(
+                    0.0,
+                    float(
+                        override_timeout
+                        if override_timeout is not None
+                        else (getattr(self, "forward_message_image_vision_timeout_seconds", 6.0) or 0.0)
+                    ),
+                )
                 if timeout > 0:
                     result = await asyncio.wait_for(provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=260), timeout=timeout)
                 else:

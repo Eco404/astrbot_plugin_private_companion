@@ -3363,6 +3363,18 @@ Local classifier result:
         )
         started = time.perf_counter()
         raw = ""
+        timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+        timeout_override = (
+            timeout_getter(
+                task="smart_silence",
+                provider_id=provider_id,
+                timeout_key="SMART_SILENCE_PROVIDER_ID",
+            )
+            if callable(timeout_getter)
+            else None
+        )
+        if timeout_override is not None:
+            timeout_seconds = float(timeout_override)
         try:
             raw = await asyncio.wait_for(
                 self._llm_call(

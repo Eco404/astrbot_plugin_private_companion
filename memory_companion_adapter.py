@@ -50,6 +50,8 @@ class MemoryCompanionAdapterMixin:
         return True
 
     def _memory_companion_bridge(self) -> Any | None:
+        if not getattr(self, "enable_livingmemory_integration", True):
+            return None
         now = time.monotonic()
         if now < self._bridge_dependency_failure_until:
             return None
@@ -279,7 +281,9 @@ class MemoryCompanionAdapterMixin:
         users = self.data.get("users", {})
         if not isinstance(users, dict):
             return "", {}
-        fallback: tuple[str, dict[str, Any]] = ("", {})
+        owner_checker = getattr(self, "_is_private_companion_owner_user_id", None)
+        if not callable(owner_checker):
+            return "", {}
         for raw_id, raw_user in users.items():
             if not isinstance(raw_user, dict):
                 continue
@@ -288,14 +292,12 @@ class MemoryCompanionAdapterMixin:
                 continue
             if not bool(raw_user.get("enabled", True)):
                 continue
-            if not fallback[0]:
-                fallback = (user_id, raw_user)
             try:
-                if self._private_user_role(raw_user, user_id) == "owner":
+                if owner_checker(user_id):
                     return user_id, raw_user
             except Exception:
                 continue
-        return fallback
+        return "", {}
 
     def _memory_companion_schedule_session_context(self, *, message_text: str = "") -> dict[str, Any]:
         user_id, user = self._memory_companion_schedule_owner_context()
@@ -405,6 +407,7 @@ class MemoryCompanionAdapterMixin:
         top_k: int = 5,
         max_chars: int = 900,
         timeout_seconds: float = 4.0,
+        strict_session_only: bool = False,
     ) -> str:
         if not getattr(self, "enable_memory_companion_feature_context", True):
             return ""
@@ -447,6 +450,7 @@ class MemoryCompanionAdapterMixin:
                 "user_id": user_id,
                 "user_name": user_name,
                 "message_text": clean_query,
+                "strict_session_only": bool(strict_session_only),
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         elif isinstance(user, dict):
@@ -458,6 +462,7 @@ class MemoryCompanionAdapterMixin:
                 "user_id": user_id,
                 "user_name": _single_line(user.get("nickname") or user.get("display_name") or user_id, 80),
                 "message_text": clean_query,
+                "strict_session_only": bool(strict_session_only),
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         else:
@@ -465,6 +470,7 @@ class MemoryCompanionAdapterMixin:
                 "session_id": f"private_companion:{kind}",
                 "scope": "unknown",
                 "message_text": clean_query,
+                "strict_session_only": bool(strict_session_only),
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         try:
@@ -499,6 +505,82 @@ class MemoryCompanionAdapterMixin:
         if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:
             return ""
         return text[: max(240, min(1800, int(max_chars or 900)))]
+
+    @staticmethod
+    def _memory_companion_private_recall_needed(text: Any) -> bool:
+        cleaned = _single_line(text, 280)
+        if len(cleaned) < 2:
+            return False
+        cues = (
+            "还记得",
+            "记得我",
+            "以前",
+            "之前",
+            "上次",
+            "前阵子",
+            "说过",
+            "提过",
+            "答应",
+            "约定",
+            "承诺",
+            "习惯",
+            "偏好",
+            "喜欢",
+            "讨厌",
+            "雷点",
+            "别叫",
+            "怎么称呼",
+            "我叫什么",
+            "我生日",
+        )
+        return any(cue in cleaned for cue in cues)
+
+    async def _memory_companion_compose_private_recall(
+        self,
+        *,
+        event: Any,
+        user: dict[str, Any],
+        user_id: str,
+        text: str,
+    ) -> str:
+        """Return a small, current-session-only memory supplement for private replies."""
+        if not getattr(self, "enable_memory_companion_private_recall", True):
+            return ""
+        if not self._memory_companion_private_recall_needed(text):
+            return ""
+        query = _single_line(
+            "当前私聊用户正在说："
+            f"{_single_line(text, 260)}。"
+            "只检索当前私聊会话中与本轮直接相关的明确约定、称呼、边界或稳定偏好；"
+            "最多保留 3 条，没有可靠依据则返回空。"
+            "禁止引用其他私聊、群聊、公开动态或其他人的信息。",
+            700,
+        )
+        try:
+            recalled = await self._memory_companion_compose_feature_context(
+                kind="private_turn_recall",
+                query=query,
+                user=user,
+                user_id=user_id,
+                event=event,
+                top_k=3,
+                max_chars=min(620, max(240, int(getattr(self, "memory_companion_context_max_chars", 900) or 900))),
+                timeout_seconds=min(1.2, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)),
+                strict_session_only=True,
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="compose_private_recall"):
+                return ""
+            logger.debug("[PrivateCompanion] MemoryCompanion 私聊选择性召回失败: %s", _single_line(exc, 120))
+            return ""
+        recalled = _single_line(recalled, 620)
+        if not recalled:
+            return ""
+        return (
+            "【当前私聊长期记忆补充】\n"
+            f"{recalled}\n"
+            "只在与本轮直接相关时自然接住；不要主动列举记忆、不要提及检索过程，也不要把它当作其他用户的信息。"
+        )
 
     async def _memory_companion_record_daily_plan(self, plan: dict[str, Any]) -> None:
         if not isinstance(plan, dict):

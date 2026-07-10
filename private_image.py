@@ -1358,6 +1358,15 @@ class PrivateImageMixin:
         }
 
     def _private_image_provider_timeout_seconds(self) -> float:
+        timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+        if callable(timeout_getter):
+            override = timeout_getter(
+                task="private_image_vision",
+                provider_id=str(getattr(self, "plugin_vision_provider_id", "") or ""),
+                timeout_key="PLUGIN_VISION_PROVIDER_ID",
+            )
+            if override is not None:
+                return max(3.0, float(override))
         configured = _safe_float(getattr(self, "private_image_provider_timeout_seconds", 12.0), 12.0, 3.0)
         wait_budget = _safe_float(getattr(self, "private_image_vision_wait_seconds", 30.0), 30.0, 0.0)
         if wait_budget > 0:

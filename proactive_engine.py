@@ -802,6 +802,7 @@ class ProactiveEngineMixin:
             "followup": 88,
             "birthday_celebration": 86,
             "daily_greeting": 72,
+            "balance": 82,
             "birthday_curiosity": 68,
             "habit": 64,
             "state": 60,
@@ -6398,15 +6399,68 @@ class ProactiveEngineMixin:
         tool_name = _single_line(getattr(self, "custom_photo_tool_name", ""), 120)
         if not tool_name:
             return None
+
+        context = getattr(self, "context", None)
+        manager_getter = getattr(context, "get_llm_tool_manager", None)
+        if callable(manager_getter):
+            try:
+                manager = manager_getter()
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 获取 LLM Tool Manager 失败: tool=%s error=%s",
+                    tool_name,
+                    _single_line(exc, 160),
+                )
+                manager = None
+            getter = getattr(manager, "get_func", None)
+            if callable(getter):
+                try:
+                    tool = getter(tool_name)
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 获取自定义生图函数工具失败: tool=%s error=%s",
+                        tool_name,
+                        _single_line(exc, 160),
+                    )
+                    tool = None
+                if tool is not None:
+                    handler = getattr(tool, "handler", None)
+                    if callable(handler):
+                        logger.info("[PrivateCompanion] 从 LLM 工具对象获取生图 handler: %s", tool_name)
+                        return handler
+                    if callable(tool):
+                        logger.info("[PrivateCompanion] 自定义生图工具对象本身可调用: %s", tool_name)
+                        return tool
+                    call = getattr(tool, "call", None)
+                    if callable(call):
+                        logger.warning(
+                            "[PrivateCompanion] 自定义生图工具未暴露 handler，回退 tool.call: %s",
+                            tool_name,
+                        )
+                        return call
+                    logger.warning(
+                        "[PrivateCompanion] 自定义生图工具不可调用: tool=%s type=%s",
+                        tool_name,
+                        type(tool).__name__,
+                    )
+                else:
+                    logger.warning("[PrivateCompanion] 自定义生图工具未注册: %s", tool_name)
+            elif manager is not None:
+                logger.warning("[PrivateCompanion] LLM Tool Manager 不支持 get_func: %s", tool_name)
+        else:
+            logger.warning("[PrivateCompanion] LLM Tool Manager 未初始化: %s", tool_name)
+
+        # 兼容旧版 AstrBot 或非 @llm_tool 的注册方式。
         try:
             for handler in star_handlers_registry:
                 handler_name = str(getattr(handler, "handler_name", "") or "")
                 if handler_name == tool_name:
                     callback = getattr(handler, "handler", None) or getattr(handler, "func", None)
                     if callable(callback):
+                        logger.info("[PrivateCompanion] 从旧注册表获取自定义生图 handler: %s", tool_name)
                         return callback
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 查询旧工具注册表失败: tool=%s error=%s", tool_name, _single_line(exc, 120))
         return None
 
     def _custom_tool_photo_available(self) -> bool:
@@ -7361,7 +7415,21 @@ class ProactiveEngineMixin:
         extra_components = list(action_payload.get("extra_components") or [])
         action_summary = _single_line(action_payload.get("summary") or planned_action, 80)
         if not bool(action_payload.get("success", True)):
-            return reason, "", "", [], action_summary, effective_action
+            if "photo_text" in {planned_action, effective_action}:
+                logger.info(
+                    "[PrivateCompanion] 主动图片动作未产出,降级为纯文字分享: user=%s reason=%s topic=%s",
+                    _single_line(user.get("user_id"), 40),
+                    reason,
+                    _single_line(user.get("planned_proactive_topic"), 80),
+                )
+                planned_action = "message"
+                effective_action = "message"
+                extra_components = []
+                raw_action_context = "message：图片动作本轮未产出；只按原话题自然分享，不得声称已拍照、已生成或已发送图片"
+                action_summary = "图片未产出，已降级为文字"
+            else:
+                user["_proactive_render_failure_stage"] = f"主动动作执行失败：{effective_action or planned_action or 'unknown'}"
+                return reason, "", "", [], action_summary, effective_action
         image_path = self._extract_action_image_path(raw_action_context)
         action_context = await self._narrate_action_context(effective_action, raw_action_context)
         if image_path:
@@ -7402,7 +7470,7 @@ class ProactiveEngineMixin:
             recency_repair = getattr(self, "_repair_group_share_recency_text", None)
             if callable(recency_repair):
                 text = recency_repair(user, text)
-        if not text:
+        if not text and not image_path and not extra_components:
             return reason, "", "", [], action_summary, effective_action
         if pre_poke_count > 0:
             action_summary = f"先戳了 {pre_poke_count} 下 + {action_summary}"

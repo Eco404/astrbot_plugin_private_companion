@@ -376,7 +376,51 @@ class PrivateCompanionPageApiQzoneMixin:
             post_uin = 0
         return bool(post_uin and post_uin == int(viewer_uin))
 
+    def _qzone_page_image_items(self, post: Any) -> list[dict[str, str]]:
+        """Normalize QQ Space image variants without forcing a large image into the feed."""
+        raw_items = getattr(post, "image_items", None)
+        if not isinstance(raw_items, list):
+            raw_items = getattr(post, "images", None)
+        if not isinstance(raw_items, list):
+            return []
+
+        def clean(value: Any) -> str:
+            source = self._single_line(value, 2000).strip()
+            return source if source.lower().startswith(("https://", "http://", "//", "data:image/")) else ""
+
+        def pick(item: Any, *keys: str) -> str:
+            if not isinstance(item, dict):
+                return clean(item)
+            for key in keys:
+                source = clean(item.get(key))
+                if source:
+                    return source
+            return ""
+
+        items: list[dict[str, str]] = []
+        for item in raw_items:
+            preview_url = pick(item, "preview_url", "thumbnail_url", "thumb_url", "small_url", "url", "src", "image_url")
+            full_url = pick(
+                item,
+                "full_url",
+                "original_url",
+                "origin_url",
+                "raw_url",
+                "large_url",
+                "big_url",
+                "url",
+                "src",
+                "image_url",
+            )
+            if not (preview_url or full_url):
+                continue
+            normalized = {"preview_url": preview_url or full_url, "full_url": full_url or preview_url}
+            if normalized not in items:
+                items.append(normalized)
+        return items
+
     def _qzone_page_post_payload(self, post: Any, *, include_comments: bool = False, viewer_uin: int = 0) -> dict[str, Any]:
+        image_items = self._qzone_page_image_items(post)
         payload = {
             "id": self._qzone_page_remember_post(post),
             "tid": self._single_line(getattr(post, "tid", ""), 80),
@@ -387,7 +431,8 @@ class PrivateCompanionPageApiQzoneMixin:
             "content": self._multi_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 1200),
             "created_at": int(getattr(post, "create_time", 0) or 0),
             "created_at_text": self.plugin._format_timestamp_elapsed(getattr(post, "create_time", 0)) if callable(getattr(self.plugin, "_format_timestamp_elapsed", None)) else "",
-            "images": list(getattr(post, "images", []) or []),
+            "images": [item["full_url"] for item in image_items],
+            "image_items": image_items,
             "stats": {
                 "likes": self._qzone_page_like_count(post),
                 "comments": len(getattr(post, "comments", []) or []),

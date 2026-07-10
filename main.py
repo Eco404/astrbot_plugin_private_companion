@@ -125,6 +125,7 @@ from .prompt_surface import PromptSurface
 from .qzone_integration import QzoneMixin
 from .segmented_message import flatten_component_chunks, split_plain_component_chain_detailed
 from .token_budget import TokenBudgetMixin
+from .balance_awareness import BalanceAwarenessMixin
 from .worldbook import WorldbookMixin
 from .user_memory import UserMemoryMixin
 from .creative import CreativeMixin
@@ -367,7 +368,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "all": "全部被动链路",
     "inject_passive_states": "被动状态注入",
     "enable_intent_emotion_analysis": "意图/情绪分析",
-    "enable_llm_timer_scheduling": "对话临时预约",
+    "enable_llm_timer_scheduling": "临时预约与动作查岗",
     "enable_passive_topic_suppression": "重复话题抑制",
     "enable_environment_perception": "环境感知",
     "enable_message_debounce": "防抖",
@@ -432,7 +433,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.3",
+    "5.9.4",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -444,6 +445,7 @@ class PrivateCompanionPlugin(
     ForwardMessageMixin,
     QzoneMixin,
     TokenBudgetMixin,
+    BalanceAwarenessMixin,
     WorldbookMixin,
     UserMemoryMixin,
     CreativeMixin,
@@ -565,6 +567,31 @@ class PrivateCompanionPlugin(
         )
         self.timer_pre_silence_minutes = self._cfg_int(c, "timer_pre_silence_minutes", 20, 0, 240)
         self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 12)
+        self.enable_balance_awareness = self._cfg_bool(c, "enable_balance_awareness", False)
+        self.balance_api_url = self._cfg_str(c, "balance_api_url", "")
+        self.balance_api_key = self._cfg_str(c, "balance_api_key", "")
+        self.balance_api_auth_header = self._cfg_str(c, "balance_api_auth_header", "Authorization", "Authorization")
+        self.balance_api_auth_scheme = str(self._cfg_raw(c, "balance_api_auth_scheme", "Bearer") or "").strip()
+        self.balance_api_custom_headers = self._cfg_str(c, "balance_api_custom_headers", "")
+        self.balance_json_path = self._cfg_str(c, "balance_json_path", "")
+        self.balance_total_json_path = self._cfg_str(c, "balance_total_json_path", "")
+        self.balance_used_json_path = self._cfg_str(c, "balance_used_json_path", "")
+        self.balance_value_divisor = self._cfg_float(c, "balance_value_divisor", 1.0, 0.000000000001)
+        self.balance_currency_label = self._cfg_str(c, "balance_currency_label", "元", "元")
+        self.balance_check_interval_minutes = self._cfg_float(c, "balance_check_interval_minutes", 60.0, 5.0)
+        self.balance_request_timeout_seconds = self._cfg_float(c, "balance_request_timeout_seconds", 10.0, 2.0)
+        self.balance_low_threshold = self._cfg_float(c, "balance_low_threshold", 10.0, 0.0)
+        self.balance_critical_threshold = min(
+            self.balance_low_threshold,
+            self._cfg_float(c, "balance_critical_threshold", 3.0, 0.0),
+        )
+        self.balance_low_percent_threshold = self._cfg_float(c, "balance_low_percent_threshold", 15.0, 0.0)
+        self.balance_critical_percent_threshold = min(
+            self.balance_low_percent_threshold,
+            self._cfg_float(c, "balance_critical_percent_threshold", 5.0, 0.0),
+        )
+        self.balance_message_cooldown_hours = self._cfg_float(c, "balance_message_cooldown_hours", 24.0, 1.0)
+        self.balance_include_amount_in_message = self._cfg_bool(c, "balance_include_amount_in_message", True)
         self.inbound_message_debounce_seconds = self._cfg_float(c, "inbound_message_debounce_seconds", 3.0, 0.0)
         self.enable_recall_enhancement = self._cfg_bool(c, "enable_recall_enhancement", True)
         self.enable_recall_cancel_reply = self._cfg_bool(c, "enable_recall_cancel_reply", self.enable_recall_enhancement)
@@ -663,6 +690,9 @@ class PrivateCompanionPlugin(
         self.provider_config_mode = self._normalize_provider_config_mode(
             self._cfg_raw(c, "provider_config_mode", None),
             c,
+        )
+        self.model_timeout_overrides = self._normalize_model_timeout_overrides(
+            self._cfg_raw(c, "model_timeout_overrides", {})
         )
         _page_font = str(self._cfg_raw(c, "page_font_family", "original") or "original").strip().lower()
         self.page_font_family = _page_font if _page_font in {"original", "cheng"} else "original"
@@ -1154,6 +1184,7 @@ class PrivateCompanionPlugin(
         self.enable_memory_companion_dream_fragment = self._cfg_bool(c, "enable_memory_companion_dream_fragment", True)
         self.enable_memory_companion_open_loop_search = self._cfg_bool(c, "enable_memory_companion_open_loop_search", True)
         self.enable_memory_companion_feature_context = self._cfg_bool(c, "enable_memory_companion_feature_context", True)
+        self.enable_memory_companion_private_recall = self._cfg_bool(c, "enable_memory_companion_private_recall", True)
         self.memory_companion_context_top_k = self._cfg_int(c, "memory_companion_context_top_k", 5, 1, 10)
         self.memory_companion_context_max_chars = self._cfg_int(c, "memory_companion_context_max_chars", 900, 240, 1800)
         self.enable_bilibili_integration = self._cfg_bool(c, "enable_bilibili_integration", True)
@@ -4533,8 +4564,27 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             add_spec("skill.growth.match", "skill", 66, lambda: self._format_skill_growth_for_user_text(inbound_text))
         if not self._memory_companion_should_defer_prompt_section("self_timeline", event, req):
             add_spec("self.timeline", "self_timeline", 67, lambda: self._format_self_timeline_context_for_reply(inbound_text, current_user, limit=8))
-        if not self._memory_companion_should_defer_prompt_section("private_context", event, req):
+        private_context_deferred = self._memory_companion_should_defer_prompt_section("private_context", event, req)
+        if not private_context_deferred:
             add_spec("private.context", "companion", 70, lambda: self._format_private_chat_context_injection(current_user))
+        if is_private_chat and not private_context_deferred:
+            try:
+                current_user_id = _single_line(current_user.get("user_id") or event.get_sender_id(), 80)
+            except Exception:
+                current_user_id = _single_line(current_user.get("user_id"), 80)
+            add_spec(
+                "memory.private_recall",
+                "memory_companion",
+                73,
+                lambda: self._memory_companion_compose_private_recall(
+                    event=event,
+                    user=current_user,
+                    user_id=current_user_id,
+                    text=inbound_text,
+                ),
+                timeout=min(1.4, max(0.3, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2))),
+                metadata={"范围": "当前私聊会话", "触发": "记忆线索"},
+            )
         add_spec("companion.planner", "companion", 80, lambda: self._format_companion_planner_injection(current_user))
         if not self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
             add_spec("livingmemory.guidance", "livingmemory", 90, lambda: self._format_livingmemory_guidance(scope="private" if is_private_chat else "group"))
@@ -4564,8 +4614,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if not target_user_id:
                 return ""
             async with self._data_lock:
-                enabled = bool(self._get_user(target_user_id).get("enabled"))
-            return self._format_timer_scheduling_instruction() if enabled else ""
+                timer_user = dict(self._get_user(target_user_id))
+                enabled = bool(timer_user.get("enabled"))
+            return self._format_timer_scheduling_instruction(timer_user) if enabled else ""
 
         add_spec("timer.scheduling", "timer", 95, timer_context, timeout=0.5)
         return await self._collect_prompt_contexts_parallel(specs)
@@ -7638,6 +7689,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if self is None or not self.enabled:
                 release_now = True
                 return
+            if bool(getattr(event, "private_companion_proactive_framework", False)):
+                return
             if self._proactive_only_blocks_passive_event(event, "enable_llm_timer_scheduling"):
                 release_now = True
                 return
@@ -7706,10 +7759,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             _single_line(getattr(event, "unified_msg_origin", ""), 120),
                         )
                     else:
+                        timer_source_text = _single_line(current_user.get("last_user_message"), 260) or working_text
                         await self._schedule_llm_timer(
                             user_id,
                             payloads[-1],
-                            source_text=working_text,
+                            source_text=timer_source_text,
                             source_origin="llm_response",
                             trigger_message_id=self._event_message_id(event),
                             trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
@@ -8592,6 +8646,22 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         existing_reply_preview = self._event_existing_reply_result_preview(event)
         if existing_reply_preview:
+            preview_user_id = self._canonical_private_user_id(user_id)
+            preview_users = self.data.get("users", {})
+            preview_user = preview_users.get(preview_user_id) if isinstance(preview_users, dict) else None
+            if (
+                self._is_target_private_user(
+                    preview_user_id,
+                    preview_user if isinstance(preview_user, dict) else None,
+                )
+                and not (isinstance(preview_user, dict) and not bool(preview_user.get("enabled", True)))
+            ):
+                await self._cancel_activity_followup_on_user_return(
+                    preview_user_id or user_id,
+                    trigger_message_id=self._event_message_id(event),
+                    trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                    source_text=text,
+                )
             logger.info(
                 "[PrivateCompanion] 已有其他链路回复,跳过私聊被动接管: user=%s text=%s result=%s",
                 user_id,
@@ -8615,6 +8685,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "disabled" if existing_user_disabled else "not_target",
             )
             return
+        await self._cancel_activity_followup_on_user_return(
+            canonical_user_id or user_id,
+            trigger_message_id=self._event_message_id(event),
+            trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+            source_text=text,
+        )
         if text and await self._maybe_answer_companion_manual_natural_question(event, text):
             return
         natural_photo_text = _single_line(event.message_str, 800)
@@ -8838,8 +8914,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         rest_silence_early_block = False
         rest_silence_early_text = ""
         async with self._data_lock:
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            existing_user = users.get(user_id) if isinstance(users, dict) else None
+            is_target_user = self._is_target_private_user(user_id, existing_user if isinstance(existing_user, dict) else None) and (
+                not isinstance(existing_user, dict) or bool(existing_user.get("enabled", True))
+            )
+            if not is_target_user:
+                logger.info(
+                    "[PrivateCompanion] 非目标/未启用私聊不记录陪伴资料: user=%s text=%s",
+                    _single_line(user_id, 80),
+                    _single_line(text, 120),
+                )
+                return
             user = self._get_user(user_id)
-            is_target_user = self._is_target_private_user(user_id, user) and bool(user.get("enabled", True))
             if self._is_recent_poke_echo(user, text):
                 logger.info("[PrivateCompanion] 忽略 poke 回流事件,不计入用户新消息: %s", user_id)
                 return
@@ -9847,7 +9934,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         ts = _safe_float(timestamp, 0)
         if ts <= 0:
             return "从未"
-        seconds = max(0, _now_ts() - ts)
+        delta = _now_ts() - ts
+        if delta < -5:
+            seconds = abs(delta)
+            if seconds < 60:
+                return f"{max(1, int(seconds))} 秒后"
+            if seconds < 3600:
+                return f"{max(1, int(seconds // 60))} 分钟后"
+            if seconds < 86400:
+                return f"{max(1, int(seconds // 3600))} 小时后"
+            return f"{max(1, int(seconds // 86400))} 天后"
+        seconds = max(0, delta)
         return self._format_elapsed(seconds)
 
     def _format_elapsed(self, seconds: float) -> str:

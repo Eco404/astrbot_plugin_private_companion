@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _today_key
+from .constants import (
+    MODEL_PROVIDER_KEYS,
+    MODEL_QUICK_TIMEOUT_KEYS,
+    MODEL_TASK_PROVIDER_KEYS,
+    MODEL_TASK_PROVIDER_PREFIXES,
+)
+from .helpers import _flat_get, _now_ts, _safe_float, _safe_int, _single_line, _today_key
 
 class TokenBudgetMixin:
     """Methods split from main.PrivateCompanionPlugin."""
@@ -745,6 +753,77 @@ class TokenBudgetMixin:
     def _resolve_chat_provider_id(self, provider_id: str | None = None, *, umo: str = "") -> str:
         return str(provider_id or self.llm_provider_id or self._default_chat_provider_id(umo) or "").strip()
 
+    @staticmethod
+    def _normalize_model_timeout_overrides(value: Any) -> dict[str, int]:
+        raw = value
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw = {}
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, int] = {}
+        for raw_key, raw_timeout in raw.items():
+            key = str(raw_key or "").strip()
+            if key not in MODEL_PROVIDER_KEYS:
+                continue
+            try:
+                timeout = int(float(raw_timeout))
+            except (TypeError, ValueError):
+                continue
+            if 5 <= timeout <= 600:
+                normalized[key] = timeout
+        return normalized
+
+    def _model_timeout_provider_key(self, task: str, provider_id: str = "", timeout_key: str = "") -> str:
+        explicit_key = str(timeout_key or "").strip()
+        if explicit_key in MODEL_PROVIDER_KEYS:
+            return explicit_key
+        task_key = str(task or "").strip()
+        provider_key = MODEL_TASK_PROVIDER_KEYS.get(task_key, "")
+        if not provider_key:
+            for prefix, candidate_key in MODEL_TASK_PROVIDER_PREFIXES:
+                if task_key.startswith(prefix):
+                    provider_key = candidate_key
+                    break
+        if provider_key and str(getattr(self, "provider_config_mode", "quick") or "quick") == "quick":
+            provider_key = MODEL_QUICK_TIMEOUT_KEYS.get(provider_key, provider_key)
+        overrides = getattr(self, "model_timeout_overrides", {})
+        if provider_key and isinstance(overrides, dict) and provider_key in overrides:
+            return provider_key
+
+        selected_provider = str(provider_id or "").strip()
+        config = getattr(self, "config", {})
+        if selected_provider and isinstance(overrides, dict):
+            matching_keys = [
+                key
+                for key in overrides
+                if key in MODEL_PROVIDER_KEYS
+                and str(_flat_get(config, key, "") or "").strip() == selected_provider
+            ]
+            if len(matching_keys) == 1:
+                return matching_keys[0]
+        return provider_key
+
+    def _model_timeout_seconds_for_call(
+        self,
+        *,
+        task: str,
+        provider_id: str = "",
+        timeout_key: str = "",
+        timeout_seconds: float | None = None,
+    ) -> float | None:
+        if timeout_seconds is not None:
+            explicit = _safe_float(timeout_seconds, 0.0, 0.0)
+            return min(600.0, explicit) if explicit >= 5.0 else None
+        overrides = getattr(self, "model_timeout_overrides", {})
+        if not isinstance(overrides, dict):
+            return None
+        provider_key = self._model_timeout_provider_key(task, provider_id, timeout_key)
+        configured = _safe_float(overrides.get(provider_key), 0.0, 0.0)
+        return min(600.0, configured) if configured >= 5.0 else None
+
     async def _llm_call(
         self,
         prompt: str,
@@ -753,6 +832,8 @@ class TokenBudgetMixin:
         task: str | None = None,
         *,
         system_prompt: str | None = None,
+        timeout_key: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> str | None:
         start = time.time()
         selected_provider = self._resolve_chat_provider_id(provider_id)
@@ -777,7 +858,20 @@ class TokenBudgetMixin:
                 kwargs["max_tokens"] = max_tokens
             if system_prompt:
                 kwargs["system_prompt"] = system_prompt
-            resp = await self.context.llm_generate(**kwargs)
+            effective_timeout = self._model_timeout_seconds_for_call(
+                task=task_key,
+                provider_id=selected_provider,
+                timeout_key=str(timeout_key or ""),
+                timeout_seconds=timeout_seconds,
+            )
+            try:
+                request_call = self.context.llm_generate(**kwargs)
+                if effective_timeout is not None:
+                    resp = await asyncio.wait_for(request_call, timeout=effective_timeout)
+                else:
+                    resp = await request_call
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回") from exc
             if resp and resp.completion_text:
                 completion = resp.completion_text.strip()
                 self._record_llm_usage(

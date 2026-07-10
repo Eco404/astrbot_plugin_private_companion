@@ -80,9 +80,31 @@ window.PrivateCompanionQzonePanel = (() => {
     const summary = state.status?.summary || {};
     const name = document.getElementById("qzoneAccountName");
     const meta = document.getElementById("qzoneAccountMeta");
-    if (name) name.textContent = login.nickname || (login.uin ? `QQ ${login.uin}` : "未绑定");
+    const accountName = login.nickname || (login.uin ? `QQ ${login.uin}` : "未绑定");
+    if (name) name.textContent = accountName;
+    const avatar = document.getElementById("qzoneAccountAvatar");
+    const avatarFallback = document.getElementById("qzoneAccountAvatarFallback");
+    const avatarUrl = text(login.avatar).trim();
+    if (avatar) {
+      if (avatarUrl) avatar.src = avatarUrl;
+      else avatar.removeAttribute("src");
+      avatar.hidden = !avatarUrl;
+    }
+    if (avatarFallback) {
+      avatarFallback.hidden = Boolean(avatarUrl);
+      avatarFallback.textContent = Array.from(accountName.trim())[0] || "Q";
+    }
+    const accountStatus = document.getElementById("qzoneAccountStatus");
+    if (accountStatus) {
+      const tone = !state.status ? "idle" : (summary.enabled ? "ready" : (summary.available ? "warn" : "error"));
+      const label = !state.status ? "同步中" : (summary.enabled ? "已连接" : (summary.available ? "未启用" : "不可用"));
+      accountStatus.dataset.tone = tone;
+      accountStatus.textContent = label;
+    }
     if (meta) {
-      meta.textContent = summary.enabled
+      meta.textContent = !state.status
+        ? "正在读取 QQ 空间状态"
+        : summary.enabled
         ? `QQ 空间已启用 · ${summary.last_status || "等待操作"}`
         : (summary.available ? "QQ 空间模块已加载，但整合开关未开启" : "QQ 空间模块不可用");
     }
@@ -103,22 +125,98 @@ window.PrivateCompanionQzonePanel = (() => {
         ? ([imageNote, designMeta, referenceMeta].filter(Boolean).join(" · ") || `配图概率 ${Math.round(Number(summary.generated_image_probability || 0) * 100)}%`)
         : "说说配图关闭";
       summaryBox.innerHTML = `
-        <article><b>${summary.life_publish_enabled ? "开启" : "关闭"}</b><span>生活说说</span></article>
-        <article><b>${summary.comment_inbox_enabled ? "开启" : "关闭"}</b><span>评论收件箱</span></article>
-        <article title="${state.context.escapeHtml(imageMeta)}"><b>${state.context.escapeHtml(imageLabel)}</b><span>最近配图</span></article>
+        <article data-state="${summary.life_publish_enabled ? "ready" : "idle"}"><span>生活说说</span><b>${summary.life_publish_enabled ? "开启" : "关闭"}</b></article>
+        <article data-state="${summary.comment_inbox_enabled ? "ready" : "idle"}"><span>评论收件箱</span><b>${summary.comment_inbox_enabled ? "开启" : "关闭"}</b></article>
+        <article data-state="info" title="${state.context.escapeHtml(imageMeta)}"><span>最近配图</span><b>${state.context.escapeHtml(imageLabel)}</b></article>
       `;
     }
+  }
+
+  function postAuthorName(post) {
+    return post.author?.nickname || post.author?.uin || "QQ空间用户";
+  }
+
+  function renderPostIdentity(post) {
+    const { escapeHtml } = state.context;
+    const author = postAuthorName(post);
+    const initial = Array.from(String(author).trim())[0] || "Q";
+    return `
+      <div class="qzone-post-identity">
+        <span class="qzone-author-mark" aria-hidden="true">${escapeHtml(initial)}</span>
+        <div>
+          <b>${escapeHtml(author)}</b>
+          <small>${escapeHtml(post.created_at_text || "刚刚")}</small>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPostMetrics(post) {
+    const { escapeHtml } = state.context;
+    return `
+      <div class="qzone-post-feedback" aria-label="互动数据">
+        <span>${escapeHtml(post.stats?.likes ?? 0)} 赞</span>
+        <span>${escapeHtml(post.stats?.comments ?? 0)} 评论</span>
+      </div>
+    `;
+  }
+
+  function qzoneImageItems(post) {
+    const rawItems = Array.isArray(post?.image_items) && post.image_items.length
+      ? post.image_items
+      : (Array.isArray(post?.images) ? post.images : []);
+    return rawItems.map((item) => {
+      if (item && typeof item === "object") {
+        const previewUrl = text(item.preview_url || item.thumbnail_url || item.thumb_url || item.url || item.src || item.image_url).trim();
+        const fullUrl = text(item.full_url || item.original_url || item.origin_url || item.raw_url || item.large_url || item.url || item.src || item.image_url).trim();
+        return { previewUrl: previewUrl || fullUrl, fullUrl: fullUrl || previewUrl };
+      }
+      const source = text(item).trim();
+      return { previewUrl: source, fullUrl: source };
+    }).filter((item) => item.previewUrl || item.fullUrl);
+  }
+
+  function renderPreviewImage(item, post) {
+    const { escapeHtml } = state.context;
+    const author = postAuthorName(post);
+    const alt = `${author}的说说图片`;
+    const meta = ["QQ 空间图片", author, post.created_at_text || "刚刚"].filter(Boolean).join(" · ");
+    const previewUrl = text(item?.previewUrl).trim();
+    const fullUrl = text(item?.fullUrl || previewUrl).trim();
+    if (!previewUrl || !fullUrl) return "";
+    return `<img class="qzone-preview-image" src="${escapeHtml(previewUrl)}" alt="${escapeHtml(alt)}" loading="lazy" data-qzone-preview-image data-qzone-preview-src="${escapeHtml(fullUrl)}" data-qzone-preview-fallback-src="${escapeHtml(previewUrl)}" data-qzone-preview-meta="${escapeHtml(meta)}" tabindex="0" role="button" title="点击放大预览，滚轮缩放" />`;
+  }
+
+  function openImagePreview(image) {
+    if (!image || !state.context) return false;
+    const preview = window.PrivateCompanionDailyOutfit?.openImagePreview;
+    const source = image.dataset.qzonePreviewSrc || image.currentSrc || image.src || image.getAttribute("src") || "";
+    const fallbackSrc = image.dataset.qzonePreviewFallbackSrc || image.currentSrc || image.src || image.getAttribute("src") || "";
+    if (!preview || !source) return false;
+    return preview({ ...state.context, document }, {
+      src: source,
+      fallbackSrc,
+      alt: image.alt || "QQ 空间图片",
+      meta: image.dataset.qzonePreviewMeta || image.alt || "QQ 空间图片",
+    });
   }
 
   function renderFeed() {
     const feed = document.getElementById("qzoneFeed");
     const meta = document.getElementById("qzoneFeedMeta");
+    const feedState = document.getElementById("qzoneFeedState");
     if (!feed || !meta) return;
+    if (feedState) {
+      feedState.dataset.state = state.loading ? "loading" : (state.loaded ? "ready" : "idle");
+      feedState.textContent = state.loading ? "同步中" : (state.loaded ? "已同步" : "待同步");
+    }
     meta.textContent = state.loading
       ? "正在同步动态..."
       : `${state.scope === "profile" ? (state.targetUin || "指定 QQ") : state.scope === "friends" ? "好友动态" : "我的空间"} · ${state.posts.length} 条`;
     if (!state.posts.length) {
-      feed.innerHTML = `<div class="qzone-empty"><b>暂无可显示的说说</b><span>可以先刷新，或切换到指定 QQ 试试。</span></div>`;
+      feed.innerHTML = state.loading
+        ? `<div class="qzone-feed-skeleton" role="status" aria-label="正在同步空间动态"><span></span><span></span><span></span></div>`
+        : `<div class="qzone-empty"><b>暂无可显示的说说</b><span>可以先刷新，或切换到指定 QQ 试试。</span></div>`;
       renderDetail();
       return;
     }
@@ -126,22 +224,22 @@ window.PrivateCompanionQzonePanel = (() => {
     feed.innerHTML = state.posts.map((post) => `
       <article class="qzone-post-card ${state.selectedId === post.id ? "is-active" : ""}" data-qzone-open="${escapeHtml(post.id)}">
         <header>
-          <div>
-            <b>${escapeHtml(post.author?.nickname || post.author?.uin || "QQ空间用户")}</b>
-            <small>${escapeHtml(post.created_at_text || "刚刚")}</small>
-          </div>
+          ${renderPostIdentity(post)}
           <span class="qzone-post-badge">${post.can_delete ? "我的说说" : "动态"}</span>
         </header>
         <p class="qzone-post-text">${escapeHtml(post.content || "无正文")}</p>
-        ${Array.isArray(post.images) && post.images.length ? `
+        ${qzoneImageItems(post).length ? `
           <div class="qzone-post-media">
-            ${post.images.slice(0, 4).map((url) => `<img src="${escapeHtml(url)}" alt="说说图片" loading="lazy" />`).join("")}
+            ${qzoneImageItems(post).slice(0, 4).map((item) => renderPreviewImage(item, post)).join("")}
           </div>
         ` : ""}
         <footer>
-          <button type="button" data-qzone-like="${escapeHtml(post.id)}" ${state.pendingLikes.has(post.id) ? "disabled" : ""}>点赞</button>
-          <button type="button" data-qzone-open="${escapeHtml(post.id)}">评论 ${escapeHtml(post.stats?.comments ?? 0)}</button>
-          ${post.can_delete ? `<button type="button" class="danger-outline" data-qzone-delete="${escapeHtml(post.id)}" ${state.pendingDeletes.has(post.id) ? "disabled" : ""}>删除</button>` : ""}
+          ${renderPostMetrics(post)}
+          <div class="qzone-post-actions">
+            <button type="button" data-qzone-like="${escapeHtml(post.id)}" ${state.pendingLikes.has(post.id) ? "disabled" : ""}>点赞</button>
+            <button type="button" data-qzone-open="${escapeHtml(post.id)}">评论</button>
+            ${post.can_delete ? `<button type="button" class="danger-outline" data-qzone-delete="${escapeHtml(post.id)}" ${state.pendingDeletes.has(post.id) ? "disabled" : ""}>删除</button>` : ""}
+          </div>
         </footer>
       </article>
     `).join("");
@@ -165,21 +263,19 @@ window.PrivateCompanionQzonePanel = (() => {
     detail.innerHTML = `
       <div class="qzone-detail-card">
         <div class="qzone-detail-head">
-          <div>
-            <b>${escapeHtml(post.author?.nickname || post.author?.uin || "QQ空间用户")}</b>
-            <small>${escapeHtml(post.created_at_text || "刚刚")}</small>
-          </div>
+          ${renderPostIdentity(post)}
           <div class="qzone-detail-actions">
             <button type="button" data-qzone-like="${escapeHtml(post.id)}" ${state.pendingLikes.has(post.id) ? "disabled" : ""}>点赞这条</button>
             ${post.can_delete ? `<button type="button" class="danger-outline" data-qzone-delete="${escapeHtml(post.id)}" ${state.pendingDeletes.has(post.id) ? "disabled" : ""}>删除说说</button>` : ""}
           </div>
         </div>
         <p class="qzone-detail-text">${escapeHtml(post.content || "无正文")}</p>
-        ${Array.isArray(post.images) && post.images.length ? `
+        ${qzoneImageItems(post).length ? `
           <div class="qzone-detail-media">
-            ${post.images.map((url) => `<img src="${escapeHtml(url)}" alt="说说图片" loading="lazy" />`).join("")}
+            ${qzoneImageItems(post).map((item) => renderPreviewImage(item, post)).join("")}
           </div>
         ` : ""}
+        ${renderPostMetrics(post)}
       </div>
       <div class="qzone-comment-block">
         <div class="qzone-comment-head">
@@ -435,6 +531,13 @@ window.PrivateCompanionQzonePanel = (() => {
     panel.dataset.bound = "1";
     panel.addEventListener("click", async (event) => {
       const element = event.target instanceof Element ? event.target : null;
+      const previewImage = element?.closest("[data-qzone-preview-image]");
+      if (previewImage && panel.contains(previewImage)) {
+        event.preventDefault();
+        event.stopPropagation();
+        openImagePreview(previewImage);
+        return;
+      }
       const like = element?.closest("[data-qzone-like]");
       if (like) {
         await likePost(like.dataset.qzoneLike || "");
@@ -456,7 +559,11 @@ window.PrivateCompanionQzonePanel = (() => {
       if (scopeButton) {
         state.scope = scopeButton.dataset.qzoneScope || "self";
         state.page = 1;
-        document.querySelectorAll("[data-qzone-scope]").forEach((item) => item.classList.toggle("active", item === scopeButton));
+        document.querySelectorAll("[data-qzone-scope]").forEach((item) => {
+          const active = item === scopeButton;
+          item.classList.toggle("active", active);
+          item.setAttribute("aria-pressed", String(active));
+        });
         state.loaded = false;
         try {
           await loadFeed(true);
@@ -466,13 +573,26 @@ window.PrivateCompanionQzonePanel = (() => {
         return;
       }
     });
+    panel.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const element = event.target instanceof Element ? event.target : null;
+      const previewImage = element?.closest("[data-qzone-preview-image]");
+      if (!previewImage || !panel.contains(previewImage)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openImagePreview(previewImage);
+    });
     document.getElementById("qzoneTargetForm")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const target = document.getElementById("qzoneTargetUin");
       state.targetUin = text(target?.value).trim();
       state.scope = "profile";
       state.page = 1;
-      document.querySelectorAll("[data-qzone-scope]").forEach((item) => item.classList.toggle("active", item.dataset.qzoneScope === "profile"));
+      document.querySelectorAll("[data-qzone-scope]").forEach((item) => {
+        const active = item.dataset.qzoneScope === "profile";
+        item.classList.toggle("active", active);
+        item.setAttribute("aria-pressed", String(active));
+      });
       state.loaded = false;
       try {
         await loadFeed(true);
@@ -502,6 +622,12 @@ window.PrivateCompanionQzonePanel = (() => {
         setNotice(`刷新 Cookies 失败：${error.message}`, "error");
         state.context.showToast(`刷新 Cookies 失败：${error.message}`, "error");
       }
+    });
+    document.getElementById("qzoneAccountAvatar")?.addEventListener("error", (event) => {
+      const avatar = event.currentTarget;
+      const avatarFallback = document.getElementById("qzoneAccountAvatarFallback");
+      avatar.hidden = true;
+      if (avatarFallback) avatarFallback.hidden = false;
     });
   }
 

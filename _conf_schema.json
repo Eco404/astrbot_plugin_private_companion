@@ -77,7 +77,7 @@
       "private_user_aliases": {
         "description": "私聊身份别名归并",
         "type": "text",
-        "hint": "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主用户 ID。每行一个映射,例如：临时ID=主用户ID。留空则不归并。",
+        "hint": "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主用户 ID。每行一个映射,例如：临时ID=主用户ID。别名只用于归并资料与记忆，不授予管理、主要用户或跨用户查询权限。留空则不归并。",
         "default": ""
       },
       "private_user_delivery_aliases": {
@@ -1018,7 +1018,7 @@
     "invisible": true
   },
   "enable_llm_timer_scheduling": {
-    "description": "Legacy flat config: 对话临时预约",
+    "description": "Legacy flat config: 临时预约与动作查岗",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -1498,6 +1498,12 @@
   },
   "enable_memory_companion_feature_context": {
     "description": "Legacy flat config: 功能上下文读取",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_memory_companion_private_recall": {
+    "description": "Legacy flat config: 私聊选择性长期召回",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -3543,6 +3549,12 @@
     ],
     "invisible": true
   },
+  "model_timeout_overrides": {
+    "description": "Legacy flat config: 模型任务超时覆盖",
+    "type": "text",
+    "default": "{}",
+    "invisible": true
+  },
   "model_assignment_config": {
     "description": "模型分流",
     "type": "object",
@@ -3891,6 +3903,159 @@
           "step": 0.5
         },
         "default": 3
+      }
+    }
+  },
+  "balance_awareness_config": {
+    "description": "余额感知与零花钱主动",
+    "type": "object",
+    "hint": "定期读取一个 HTTP JSON 余额接口。余额偏低时只向主要用户投放一个主动念头，再由人格、关系、免打扰、频控和发送复核决定是否以及如何表达；不会把固定讨钱话术直接发出去。",
+    "items": {
+      "enable_balance_awareness": {
+        "description": "启用余额感知",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭。开启前请先配置余额接口地址和取值规则。"
+      },
+      "balance_api_url": {
+        "description": "余额接口地址",
+        "type": "string",
+        "default": "",
+        "hint": "必须是返回 JSON 的完整 HTTP/HTTPS GET 地址。接口失败只会按退避间隔重试，不会触发主动消息。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_api_key": {
+        "description": "余额接口 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "可选。默认以 Authorization: Bearer <Key> 发送；不会写入日志或主动消息。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_api_auth_header": {
+        "description": "鉴权请求头名称",
+        "type": "string",
+        "default": "Authorization",
+        "hint": "接口使用 X-API-Key 等请求头时可修改。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_api_auth_scheme": {
+        "description": "鉴权前缀",
+        "type": "string",
+        "default": "Bearer",
+        "hint": "留空表示直接发送 Key；常见值为 Bearer。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_api_custom_headers": {
+        "description": "余额接口自定义请求头",
+        "type": "string",
+        "default": "",
+        "hint": "可选，每行一个 Key: Value。Host、Content-Length 等连接控制头会被忽略。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_json_path": {
+        "description": "余额 JSON 路径",
+        "type": "string",
+        "default": "",
+        "hint": "例如 data.balance 或 data.accounts[0].remaining。留空会尝试 balance、remaining、available、credit、quota 及其 data 子字段。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_total_json_path": {
+        "description": "总额度 JSON 路径",
+        "type": "string",
+        "default": "",
+        "hint": "可选。用于计算剩余百分比；若余额路径取不到，但总额度和已用额度都能取到，会自动以 总额度 - 已用额度 计算余额。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_used_json_path": {
+        "description": "已用额度 JSON 路径",
+        "type": "string",
+        "default": "",
+        "hint": "可选，与总额度路径配合。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_value_divisor": {
+        "description": "余额数值除数",
+        "type": "float",
+        "default": 1,
+        "hint": "接口返回分、微元或内部 quota 单位时用于换算。例如返回分则填 100；余额、总额和已用额都会统一除以该值。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_currency_label": {
+        "description": "余额单位",
+        "type": "string",
+        "default": "元",
+        "hint": "只用于人格生成上下文和状态展示，例如 元、美元、点、次。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_check_interval_minutes": {
+        "description": "余额检查间隔（分钟）",
+        "type": "float",
+        "default": 60,
+        "slider": {
+          "min": 5,
+          "max": 1440,
+          "step": 5
+        },
+        "hint": "成功后按此间隔再次检查；失败会从 5 分钟起指数退避，最长不超过这里设置的间隔。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_request_timeout_seconds": {
+        "description": "余额接口超时（秒）",
+        "type": "float",
+        "default": 10,
+        "slider": {
+          "min": 2,
+          "max": 60,
+          "step": 1
+        },
+        "condition": "enable_balance_awareness"
+      },
+      "balance_low_threshold": {
+        "description": "低余额阈值",
+        "type": "float",
+        "default": 10,
+        "hint": "余额小于等于该值进入偏低档。填 0 可关闭绝对余额判断，只按剩余比例判断。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_critical_threshold": {
+        "description": "危急余额阈值",
+        "type": "float",
+        "default": 3,
+        "hint": "余额小于等于该值进入危急档；运行时不会高于低余额阈值。填 0 可关闭此项绝对值判断。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_low_percent_threshold": {
+        "description": "低余额比例（%）",
+        "type": "float",
+        "default": 15,
+        "hint": "配置或自动识别到总额度时生效。填 0 可关闭比例判断。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_critical_percent_threshold": {
+        "description": "危急余额比例（%）",
+        "type": "float",
+        "default": 5,
+        "hint": "运行时不会高于低余额比例。填 0 可关闭此项比例判断。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_message_cooldown_hours": {
+        "description": "低余额主动冷却（小时）",
+        "type": "float",
+        "default": 24,
+        "slider": {
+          "min": 1,
+          "max": 168,
+          "step": 1
+        },
+        "hint": "余额持续偏低时，普通低余额最多按此间隔重新尝试；危急档使用一半间隔。首次进入新档位可立即产生一次候选。",
+        "condition": "enable_balance_awareness"
+      },
+      "balance_include_amount_in_message": {
+        "description": "允许人格参考具体余额",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后模型可自然提到具体余额；关闭后只知道余额偏低或危急。无论是否开启，都不会把接口地址、Key、JSON 字段等内部信息交给人格。",
+        "condition": "enable_balance_awareness"
       }
     }
   },
@@ -4509,14 +4674,14 @@
     }
   },
   "timer_config": {
-    "description": "对话临时预约",
+    "description": "临时预约与动作查岗",
     "type": "object",
-    "hint": "识别稍后提醒、叫醒和回头说等临时约定，并交给 AstrBot 官方定时计划执行。",
+    "hint": "识别稍后提醒、叫醒、回头说等明确约定，也可在用户暂时去洗澡、吃饭或短时办事时估计结束时间并预约一次人格化查岗；统一交给 AstrBot 官方定时计划执行。",
     "items": {
       "enable_llm_timer_scheduling": {
-        "description": "对话临时预约",
+        "description": "临时预约与动作查岗",
         "type": "bool",
-        "hint": "开启后，私聊中自然形成的稍后提醒、叫醒、回头说等临时约定会被模型写成内部 <timer> 标签；插件只负责识别、确认和转写 note，然后交给 AstrBot 官方定时计划执行，不再使用插件内部调度。",
+        "hint": "开启后，私聊中自然形成的稍后提醒、叫醒、回头说等明确约定，以及洗澡、吃饭、短时办事等有自然结束点的离开动作，会被模型写成内部 <timer> 念头。动作查岗会同时估计耗时和人格化强度，并直接预约下一次主动消息；插件负责转写 note 和提前返回时取消，执行仍由 AstrBot 官方定时计划完成。",
         "default": true
       },
       "enable_proactive_decorating_hooks": {
@@ -5271,6 +5436,15 @@
         "default": true,
         "condition": {
           "enable_livingmemory_integration": true
+        }
+      },
+      "enable_memory_companion_private_recall": {
+        "description": "私聊选择性长期召回",
+        "type": "bool",
+        "hint": "当用户明确提到以前、约定、称呼、边界或稳定偏好时，从当前私聊会话召回最多 3 条相关长期记忆。普通闲聊不会检索，不读取其他私聊或群聊。",
+        "default": true,
+        "condition": {
+          "enable_memory_companion_feature_context": true
         }
       },
       "memory_companion_context_top_k": {
@@ -6753,7 +6927,7 @@
       "cross_user_memory_owner_only": {
         "description": "仅主要用户可查询跨用户互动",
         "type": "bool",
-        "hint": "开启后，只有配置目标用户能查询 Bot 与其他用户/群聊的互动；关闭后，Bot 管理员也可在私聊中查询。",
+        "hint": "开启后，只有 target_user_ids 中配置的主要用户能查询 Bot 与其他用户/群聊的互动；关闭后，AstrBot 全局管理员 admins_id 也可在私聊中查询。手动启用对象和身份别名不会获得该权限。",
         "default": true,
         "condition": {
           "enable_cross_user_memory_bridge": true

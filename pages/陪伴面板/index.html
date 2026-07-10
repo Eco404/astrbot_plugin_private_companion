@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260709-592-persona-style-stepper" />
+  <link rel="stylesheet" href="./app.css?v=20260711-qzone-image-preview" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260707-font-switch" />
-  <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260707-qzone-mobile" />
+  <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
   <link rel="stylesheet" href="./css/polish.css?v=20260710-config-consolidation" />
   <script>
     (function () {
@@ -1264,32 +1264,45 @@ QQ空间 = 公开札记
         <form id="providerForm" class="provider-groups"></form>
       </section>
 
-      <section class="panel" id="panel-qzone">
+      <section class="panel qzone-panel" id="panel-qzone">
         <div class="section-head">
-          <div>
+          <div class="qzone-title-block">
+            <span class="qzone-kicker">社交动态工作台</span>
             <h2>QQ 空间</h2>
-            <span class="muted">整合查看、点赞、评论和发布说说入口，布局沿用陪伴面板风格。</span>
+            <span class="muted">动态、互动与发布</span>
           </div>
-          <div class="actions compact">
-            <button id="qzoneRefreshCookiesBtn" type="button">刷新 Cookies</button>
-            <button id="qzoneRefreshBtn" type="button">刷新动态</button>
+          <div class="actions compact qzone-top-actions">
+            <button id="qzoneRefreshCookiesBtn" class="qzone-secondary-action" type="button">刷新 Cookies</button>
+            <button id="qzoneRefreshBtn" class="qzone-primary-action" type="button">刷新动态</button>
           </div>
         </div>
         <div class="qzone-shell">
           <aside class="qzone-rail">
             <article class="qzone-card qzone-account-card">
-              <div>
-                <h3 id="qzoneAccountName">QQ 空间</h3>
-                <p id="qzoneAccountMeta" class="muted">等待加载</p>
+              <div class="qzone-account-head">
+                <div class="qzone-account-avatar-wrap">
+                  <img id="qzoneAccountAvatar" class="qzone-account-avatar" alt="" hidden />
+                  <span id="qzoneAccountAvatarFallback" class="qzone-account-avatar-fallback" aria-hidden="true">Q</span>
+                </div>
+                <div class="qzone-account-copy">
+                  <div class="qzone-account-title-row">
+                    <h3 id="qzoneAccountName">QQ 空间</h3>
+                    <span id="qzoneAccountStatus" class="qzone-status-pill" data-tone="idle">等待同步</span>
+                  </div>
+                  <p id="qzoneAccountMeta" class="qzone-account-meta muted">等待加载</p>
+                </div>
               </div>
               <div id="qzoneQuickSummary" class="qzone-mini-summary"></div>
             </article>
 
             <article class="qzone-card qzone-filter-card">
-              <div class="qzone-scope-switch">
-                <button type="button" class="active" data-qzone-scope="friends">好友动态</button>
-                <button type="button" data-qzone-scope="self">我的空间</button>
-                <button type="button" data-qzone-scope="profile">指定 QQ</button>
+              <div class="qzone-card-head">
+                <h3>浏览范围</h3>
+              </div>
+              <div class="qzone-scope-switch" role="group" aria-label="动态范围">
+                <button type="button" class="active" data-qzone-scope="friends" aria-pressed="true">好友动态</button>
+                <button type="button" data-qzone-scope="self" aria-pressed="false">我的空间</button>
+                <button type="button" data-qzone-scope="profile" aria-pressed="false">指定 QQ</button>
               </div>
               <form id="qzoneTargetForm" class="inline-form compact-form">
                 <input id="qzoneTargetUin" inputmode="numeric" placeholder="输入 QQ 号后查看" />
@@ -1298,7 +1311,10 @@ QQ空间 = 公开札记
             </article>
 
             <article class="qzone-card qzone-compose-card">
-              <h3>发布说说</h3>
+              <div class="qzone-card-head">
+                <h3>发布说说</h3>
+                <span class="qzone-public-badge">公开</span>
+              </div>
               <form id="qzonePublishForm" class="stack-form">
                 <textarea id="qzonePublishContent" rows="5" placeholder="写点公开发到 QQ 空间的话"></textarea>
                 <button type="submit">发布到空间</button>
@@ -1310,14 +1326,20 @@ QQ空间 = 公开札记
             <div id="qzoneNotice" class="qzone-notice" hidden></div>
             <div class="qzone-feed-head">
               <div>
+                <span class="qzone-kicker">最新动态</span>
                 <h3>空间动态</h3>
                 <span id="qzoneFeedMeta" class="muted">准备加载</span>
               </div>
+              <span id="qzoneFeedState" class="qzone-feed-state" data-state="idle" aria-live="polite">待同步</span>
             </div>
             <div id="qzoneFeed" class="qzone-feed-list"></div>
           </div>
 
-          <aside class="qzone-detail-pane">
+          <aside class="qzone-detail-pane" aria-label="动态详情">
+            <div class="qzone-detail-pane-head">
+              <span class="qzone-kicker">当前选择</span>
+              <h3>动态详情</h3>
+            </div>
             <div id="qzoneDetailEmpty" class="qzone-empty detail-empty">
               <b>选择一条说说</b>
               <span>这里会显示完整内容和评论。</span>
@@ -1339,14 +1361,14 @@ QQ空间 = 公开札记
     <div class="daily-outfit-preview__dialog" role="dialog" aria-modal="true" aria-label="今日穿搭预览">
       <button id="dailyOutfitPreviewClose" type="button" class="daily-outfit-preview__close" data-preview-dismiss="1" aria-label="关闭预览">×</button>
       <img id="dailyOutfitPreviewImage" class="daily-outfit-preview__image" alt="今日穿搭预览" />
-      <div id="dailyOutfitPreviewMeta" class="daily-outfit-preview__meta"></div>
+      <div id="dailyOutfitPreviewMeta" class="daily-outfit-preview__meta" aria-live="polite"></div>
     </div>
   </div>
 
-  <script src="./js/features/daily-outfit.js?v=20260702-outfit-preview"></script>
+  <script src="./js/features/daily-outfit.js?v=20260711-qzone-preview-context"></script>
   <script src="./js/ui/appearance.js?v=20260707-font-switch"></script>
   <script src="./js/panels/provider-tree.js?v=20260709-provider-tree-static"></script>
-  <script src="./js/panels/qzone-panel.js?v=20260709-qzone-static"></script>
-  <script src="./app.js?v=20260710-tool-photo-settings"></script>
+  <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
+  <script src="./app.js?v=20260711-qzone-preview-context"></script>
 </body>
 </html>
