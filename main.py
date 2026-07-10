@@ -71,6 +71,7 @@ from .constants import (
     DEFAULT_HUMANIZED_STATE,
     DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT,
     DEFAULT_REPLY_STYLE_PROMPT,
+    PAGE_THEME_NAMES,
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
@@ -666,7 +667,7 @@ class PrivateCompanionPlugin(
         _page_font = str(self._cfg_raw(c, "page_font_family", "original") or "original").strip().lower()
         self.page_font_family = _page_font if _page_font in {"original", "cheng"} else "original"
         _page_theme = str(self._cfg_raw(c, "page_theme", "classic") or "classic").strip().lower()
-        self.page_theme = _page_theme if _page_theme in {"classic", "dark", "warm", "forest", "sakura"} else "classic"
+        self.page_theme = _page_theme if _page_theme in PAGE_THEME_NAMES else "classic"
         self.fast_response_provider_id = self._cfg_str(c, "FAST_RESPONSE_PROVIDER_ID", "")
         self.complex_reasoning_provider_id = self._cfg_str(c, "COMPLEX_REASONING_PROVIDER_ID", "")
         self.creative_model_provider_id = self._cfg_str(c, "CREATIVE_MODEL_PROVIDER_ID", "")

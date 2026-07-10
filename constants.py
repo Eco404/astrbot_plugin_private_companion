@@ -4,6 +4,9 @@ import re
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 DATA_VERSION = 1
+PAGE_THEME_NAMES = frozenset(
+    {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"}
+)
 
 DEFAULT_REPLY_STYLE_PROMPT = (
     "每次回复至多三句话；简单的回答尽可能保持在 1~2 句，并尽可能保持口语化与简洁化。"

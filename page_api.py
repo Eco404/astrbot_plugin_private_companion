@@ -21,8 +21,7 @@ from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from quart import request, send_file
 
-from .constants import _REASON_TEXT
-from .constants import DEFAULT_DAILY_PLAN_ITEMS
+from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_THEME_NAMES, _REASON_TEXT
 from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
@@ -803,23 +802,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def get_image_cache_preview(self) -> Any:
         key = self._single_line(request.args.get("key"), 120)
         if not key:
-            return self._error("???? key")
+            return self._error("缺少缓存 key")
         try:
             async with self.plugin._data_lock:
                 cache = self.plugin.data.get("private_image_vision_cache")
                 item = cache.get(key) if isinstance(cache, dict) else None
                 if not isinstance(item, dict):
-                    return self._error("???????")
+                    return self._error("缓存条目不存在")
                 path = self._image_cache_preview_file(key, item)
                 if path is None:
-                    return self._error("??????")
+                    return self._error("缓存预览文件不存在")
                 if self._restore_image_cache_preview_metadata(key, item):
                     self.plugin._save_data_sync()
             response = await send_file(str(path))
             response.headers["Cache-Control"] = "no-store, max-age=0"
             return response
         except Exception as exc:
-            logger.error(f"[PrivateCompanionPage] ??????????: {exc}", exc_info=True)
+            logger.error(f"[PrivateCompanionPage] 获取图片缓存预览失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def delete_image_cache_item(self) -> dict[str, Any]:
@@ -11633,7 +11632,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return
         if key == "page_theme":
             text = str(value or "classic").strip().lower()
-            self.plugin.page_theme = text if text in {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"} else "classic"
+            self.plugin.page_theme = text if text in PAGE_THEME_NAMES else "classic"
             return
         if key == "storage_backend":
             backend = str(value or "json").strip().lower() or "json"
@@ -12661,7 +12660,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return text if text in {"original", "cheng"} else "original"
         if key == "page_theme":
             text = str(value or "classic").strip().lower()
-            return text if text in {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"} else "classic"
+            return text if text in PAGE_THEME_NAMES else "classic"
         if key == "provider_config_mode":
             normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
             if callable(normalizer):

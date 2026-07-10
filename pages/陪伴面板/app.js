@@ -1439,7 +1439,7 @@ const configLabels = {
   external_image_api_size: "在线生图尺寸",
   external_image_api_timeout_seconds: "在线生图超时秒数",
   external_image_api_custom_headers: "在线生图自定义请求头",
-  enable_proactive_message_review: "????????",
+  enable_proactive_message_review: "主动消息发送前复核",
   enable_backup_external_image_api: "启用备选在线 API",
   backup_external_image_api_platform: "备选在线生图平台",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线 API 地址",
@@ -4940,6 +4940,17 @@ function setupGuideDraft() {
     const effective = intensity.effective || {};
     const configured = intensity.configured || {};
     const targetIds = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+    const savedWorldKnowledgePersona = String(settings.schedule_persona_prompt || "").trim();
+    const savedWorldKnowledgeWorld = String(settings.schedule_worldview_prompt || "").trim();
+    const savedWorldKnowledgeUser = String(settings.roleplay_user_profile_prompt || "").trim();
+    const savedWorldKnowledgeExtra = [
+      String(settings.private_image_self_recognition_hint || "").trim()
+        ? `自我识别提示：${String(settings.private_image_self_recognition_hint || "").trim()}`
+        : "",
+      String(settings.worldview_adaptation_mode || "").trim() === "custom" && String(settings.worldview_adaptation_prompt || "").trim()
+        ? `翻译词：\n${String(settings.worldview_adaptation_prompt || "").trim()}`
+        : "",
+    ].filter(Boolean).join("\n\n");
     state.setupGuideDraft = {
       ...setupGuideDraftDefaults,
       targetUserIds: targetIds.join("\n"),
@@ -4974,6 +4985,11 @@ function setupGuideDraft() {
       groupInterjectMinIntervalMinutes: effective.group_interject_min_interval_minutes ?? configured.group_interject_min_interval_minutes ?? setupGuideDraftDefaults.groupInterjectMinIntervalMinutes,
       groupInterjectMaxDaily: effective.group_interject_max_daily ?? configured.group_interject_max_daily ?? setupGuideDraftDefaults.groupInterjectMaxDaily,
       groupInterjectionFeedback: setupGuideBoolValue(settings.enable_group_interjection_feedback, setupGuideDraftDefaults.groupInterjectionFeedback),
+      worldKnowledgePersona: savedWorldKnowledgePersona,
+      worldKnowledgeWorld: savedWorldKnowledgeWorld,
+      worldKnowledgeUser: savedWorldKnowledgeUser,
+      worldKnowledgeExtra: savedWorldKnowledgeExtra,
+      worldKnowledgeConfirmed: Boolean(savedWorldKnowledgePersona || savedWorldKnowledgeWorld || savedWorldKnowledgeUser || savedWorldKnowledgeExtra),
       worldbookEnabled: setupGuideBoolValue(settings.enable_worldbook_member_recognition, setupGuideDraftDefaults.worldbookEnabled),
       worldbookSelfRegistration: setupGuideBoolValue(settings.worldbook_self_registration, setupGuideDraftDefaults.worldbookSelfRegistration),
       worldbookUserId: targetIds[0] || "",
@@ -5636,9 +5652,18 @@ function setupGuideApplyRoleplayDraft(result) {
   };
 }
 
+function setupGuideHasWorldKnowledgeDraft(draft = setupGuideDraft()) {
+  return [
+    draft.worldKnowledgePersona,
+    draft.worldKnowledgeWorld,
+    draft.worldKnowledgeUser,
+    draft.worldKnowledgeExtra,
+  ].some((value) => String(value || "").trim());
+}
+
 function setupGuideWorldKnowledgeEditorHtml() {
   const draft = setupGuideDraft();
-  if (!state.setupGuideRoleplayDraft) {
+  if (!state.setupGuideRoleplayDraft && !setupGuideHasWorldKnowledgeDraft(draft)) {
     return `<div class="setup-guide-empty wk-empty-pending"><span class="wk-empty-icon">⏳</span>等待生成草稿。完成上方第 1 步后，草稿会自动显示在这里。</div>`;
   }
   const result = state.setupGuideRoleplayDraft?.result || {};
@@ -6412,7 +6437,7 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
     `;
   }
   if (index === 2) {
-    const hasDraft = Boolean(state.setupGuideRoleplayDraft);
+    const hasDraft = Boolean(state.setupGuideRoleplayDraft) || setupGuideHasWorldKnowledgeDraft();
     const draftConfirmed = Boolean(setupGuideDraft().worldKnowledgeConfirmed);
     const stepDone = (label) => `<span class="wk-step-done">${escapeHtml(label)}</span>`;
     return `
