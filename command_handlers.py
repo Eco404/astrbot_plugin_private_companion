@@ -561,6 +561,8 @@ class CommandHandlersMixin:
             "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "规则快判生图每日上限"},
             "natural_language_photo_extra_prompt": {"type": "string", "max_len": 5000, "label": "规则快判生图附加提示词"},
             "enable_backup_external_image_api": {"type": "bool", "label": "启用备选在线图片 API"},
+            "external_image_download_proxy": {"type": "string", "max_len": 500, "label": "在线图片结果下载代理"},
+            "external_image_download_use_environment_proxy": {"type": "bool", "label": "在线图片下载继承环境代理"},
             "enable_photo_reference_image": {"type": "bool", "label": "启用人设/穿搭参考图一致性"},
             "backup_external_image_api_platform": {
                 "type": "select",
@@ -639,6 +641,8 @@ class CommandHandlersMixin:
             "external_image_api_platform": {"label": "在线生图平台", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
             "EXTERNAL_IMAGE_API_BASE_URL": {"label": "在线图片 API 地址", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
             "EXTERNAL_IMAGE_API_MODEL": {"label": "在线图片模型", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
+            "external_image_download_proxy": {"label": "在线图片结果下载代理", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
+            "external_image_download_use_environment_proxy": {"label": "在线图片下载继承环境代理", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 在线图片 API"},
             "enable_backup_external_image_api": {"label": "启用备选在线图片 API", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "backup_external_image_api_platform": {"label": "备选在线生图平台", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {"label": "备选在线 API 地址", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
@@ -837,6 +841,10 @@ class CommandHandlersMixin:
             "备选生图API": "enable_backup_external_image_api",
             "备选在线api": "enable_backup_external_image_api",
             "备选在线API": "enable_backup_external_image_api",
+            "生图下载代理": "external_image_download_proxy",
+            "图片下载代理": "external_image_download_proxy",
+            "生图使用系统代理": "external_image_download_use_environment_proxy",
+            "图片下载使用系统代理": "external_image_download_use_environment_proxy",
             "备选生图平台": "backup_external_image_api_platform",
             "备选生图超时": "backup_external_image_api_timeout_seconds",
             "空间评论收件箱": "enable_qzone_comment_inbox",
@@ -4025,11 +4033,15 @@ class CommandHandlersMixin:
             kind=intent_kind,
             reference_label=reference_label,
         )
-        chain = self._build_outbound_chain(caption, image_path)
-        try:
-            await event.send(self._build_result_from_chain(chain))
-        except Exception:
-            await event.send(event.chain_result(chain))
+        delivery = await self._deliver_generated_image_to_event(
+            event,
+            image_path=image_path,
+            caption=caption,
+        )
+        if not delivery.get("sent"):
+            await self._reply(event, _single_line(delivery.get("message"), 180) or "图片未能发送。")
+        elif delivery.get("destination") == "private":
+            await self._reply(event, "图片已私聊发送。")
         event.stop_event()
         return True
 
@@ -4237,11 +4249,15 @@ class CommandHandlersMixin:
             kind=forced_kind,
             reference_label=reference_label,
         )
-        chain = self._build_outbound_chain(caption, image_path)
-        try:
-            await event.send(self._build_result_from_chain(chain))
-        except Exception:
-            await event.send(event.chain_result(chain))
+        delivery = await self._deliver_generated_image_to_event(
+            event,
+            image_path=image_path,
+            caption=caption,
+        )
+        if not delivery.get("sent"):
+            await self._reply(event, _single_line(delivery.get("message"), 180) or "图片未能发送。")
+        elif delivery.get("destination") == "private":
+            await self._reply(event, "图片已私聊发送。")
         event.stop_event()
         return True
 

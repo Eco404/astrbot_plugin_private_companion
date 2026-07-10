@@ -355,6 +355,7 @@ class CoreStoreMixin:
             "daily_diary_last_error": "",
             "daily_diary_postprocess_error": "",
             "daily_outfit_photo": {},
+            "daily_outfit_history": [],
             "recent_photo_generations": [],
             "daily_story_plan": {},
             "daily_story_plan_history": [],
@@ -409,6 +410,7 @@ class CoreStoreMixin:
         data.setdefault("daily_diary_last_error", "")
         data.setdefault("daily_diary_postprocess_error", "")
         data.setdefault("daily_outfit_photo", {})
+        data.setdefault("daily_outfit_history", [])
         data.setdefault("recent_photo_generations", [])
         data.setdefault("daily_story_plan", {})
         data.setdefault("daily_story_plan_history", [])

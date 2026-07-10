@@ -1313,13 +1313,14 @@ class ProactiveMessageMixin:
 【这次可以使用的线索】
 当前时间：{{current_time}}。{{unanswered_hint}}
 开口动机：{{motive}}。话题方向：{{topic}}。刚发生或看到的事：{{action_context}}。
-此刻状态：{{state_hint}}。生活片段：{{current_schedule}}。时段边界：{{time_guard}}。
+此刻状态：{{state_hint}}。生活片段（只作叙事背景，不等同于已执行事实）：{{current_schedule}}。时段边界：{{time_guard}}。
 最近已经主动聊过：{{recent_topics}}。关系事实：{{relationship_fact}}。
 {{timer_hint}}
 
 【先判断，再开口】
 - 从线索中只选一个此刻最真实、最具体、最值得说的切口；无关线索直接忽略。
 - 有明确的人、事、画面或感受时，就贴着它说；不要把多个来源拼成一段“近况播报”。
+- 日程、状态和记忆只能帮助确定语气与话题，不可单独证明某个动作已经完成；只有本轮真实动作结果可以支撑具体的已发生陈述。
 - 线索偏弱、对方尚未回复或时段不适合展开时，把话说得更轻：可以分享、留白或自然收住，但不追问、不催回应、不索取陪伴。
 - 不要凭空补事实，不要把旧事写成刚刚发生；不要为了主动而主动。
 
@@ -1338,6 +1339,23 @@ class ProactiveMessageMixin:
             "这一轮的最终文本会成为对话里的下一句。"
             "请把注意力放在这句聊天内容本身，像平时主动开口那样自然收住；"
             "过程中的执行状态只供系统判断，不需要写进正文。"
+        )
+
+    def _deferred_immediate_share_tense_hint(self, user: dict[str, Any], action: str) -> str:
+        freshness_getter = getattr(self, "_planned_proactive_freshness_class", None)
+        if not callable(freshness_getter):
+            return ""
+        try:
+            if freshness_getter(user) != "immediate":
+                return ""
+        except Exception:
+            return ""
+        if _single_line(user.get("planned_proactive_delivery_state"), 24) != "deferred":
+            return ""
+        return (
+            "【延后分享的时态】\n"
+            "这段生活分享发生在稍早一些的时候，但仍在自然分享窗口内。正文要用已经发生的说法，"
+            "不要暗示拍摄或事件与发送处于同一时刻，也不要提延后、等待、系统或调度。"
         )
 
     async def _build_framework_proactive_prompt(
@@ -1377,6 +1395,7 @@ class ProactiveMessageMixin:
         state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
+        deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
         # Search for unresolved open-loop / promise memories from the memory plugin
         open_loops_hint = ""
@@ -1455,6 +1474,8 @@ class ProactiveMessageMixin:
         delivery_hint = self._proactive_natural_delivery_hint()
         if delivery_hint and "自然交付提醒" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
+        if deferred_share_tense_hint and "延后分享的时态" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{deferred_share_tense_hint}"
         tool_boundary_hint = (
             "【主动生成工具边界】\n"
             "- 这一轮只生成要发给当前私聊对象的一句正文，不调用任何转述、私聊发送、群发、QQ空间或生图发送工具。\n"
@@ -1610,6 +1631,9 @@ class ProactiveMessageMixin:
         hesitation_at = _safe_float(user.get("last_proactive_hesitation_at"), 0)
         if hesitation_note and hesitation_at > 0 and _now_ts() - hesitation_at <= 12 * 3600:
             lines.append(f"前面有过一次犹豫：{hesitation_note}。如果要用，只能变成很淡的语气底色，不要明说系统延后。")
+        deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
+        if deferred_share_tense_hint:
+            lines.append("这段生活分享已不是当下现场：必须使用已发生时态，不要暗示事件与发送同一时刻，也不要解释延后。")
 
         if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
             lines.append("对方最近还没回应：不要连续提问，不要控诉，也不要把沉默写成对方故意不理。")
@@ -3441,8 +3465,10 @@ Output:
         return False
 
     def _proactive_time_mismatch_reason(self, text: str, *, reason: str, action: str) -> str:
+        if str(action or "message").strip() != "message":
+            return ""
         cleaned = _single_line(text, 240)
-        if not cleaned or action != "message":
+        if not cleaned:
             return ""
         now = self._environment_now()
         minutes = now.hour * 60 + now.minute
@@ -5086,9 +5112,17 @@ Output:
                 )
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 每日穿搭 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
+        schedule_hint = self._daily_outfit_schedule_text()
+        weather = self._format_weather_for_prompt() if callable(getattr(self, "_format_weather_for_prompt", None)) else ""
+        outfit_profile = self._select_daily_outfit_profile(
+            schedule_hint=schedule_hint,
+            weather=weather,
+            date_key=today,
+        )
         prompt_text = self._build_daily_outfit_photo_prompt(
             diary if isinstance(diary, dict) else {},
             memory_context=memory_context,
+            outfit_profile=outfit_profile,
         )
         backend_name, image_path, note = await self._generate_photo_image(
             workflow_kind="selfie",
@@ -5105,6 +5139,7 @@ Output:
                 backend=backend_name,
                 prompt=prompt_text,
                 note=note,
+                outfit_profile=outfit_profile,
             )
         return await self._record_daily_outfit_photo_result(
             today,
@@ -5113,6 +5148,7 @@ Output:
             backend=backend_name,
             prompt=prompt_text,
             note=note,
+            outfit_profile=outfit_profile,
         )
 
     async def _record_daily_outfit_photo_result(
@@ -5124,6 +5160,7 @@ Output:
         backend: str = "",
         prompt: str = "",
         note: str = "",
+        outfit_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         item = {
             "date": _single_line(date_key, 20),
@@ -5133,8 +5170,13 @@ Output:
             "prompt": _single_line(prompt, 500),
             "note": _single_line(note, 220),
             "generated_at": _now_ts(),
+            "outfit_profile": self._normalize_daily_outfit_profile(outfit_profile),
         }
         async with self._data_lock:
+            history = self._daily_outfit_history_items(include_current=True)
+            if image_path:
+                history.insert(0, dict(item))
+            self.data["daily_outfit_history"] = history[:30]
             self.data["daily_outfit_photo"] = item
             self._save_data_sync()
         if image_path:
@@ -5170,7 +5212,341 @@ Output:
             lines.append(line)
         return _single_line("；".join(lines), 620)
 
-    def _build_daily_outfit_photo_prompt(self, diary: dict[str, Any], *, memory_context: str = "") -> str:
+    @staticmethod
+    def _normalize_daily_outfit_profile(profile: Any) -> dict[str, str]:
+        if not isinstance(profile, dict):
+            return {}
+        limits = {
+            "look_id": 80,
+            "scene": 32,
+            "weather": 32,
+            "palette": 120,
+            "silhouette": 120,
+            "top": 160,
+            "outer": 160,
+            "bottom": 140,
+            "accessory": 140,
+        }
+        return {
+            key: value
+            for key, maximum in limits.items()
+            if (value := _single_line(profile.get(key), maximum))
+        }
+
+    def _daily_outfit_history_items(self, *, include_current: bool = True) -> list[dict[str, Any]]:
+        data = self.data if isinstance(getattr(self, "data", {}), dict) else {}
+        candidates: list[Any] = []
+        if include_current:
+            candidates.append(data.get("daily_outfit_photo"))
+        raw_history = data.get("daily_outfit_history")
+        if isinstance(raw_history, list):
+            candidates.extend(raw_history)
+
+        history: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_item in candidates:
+            if not isinstance(raw_item, dict):
+                continue
+            path = _single_line(raw_item.get("path"), 300)
+            if not path:
+                continue
+            profile = self._normalize_daily_outfit_profile(raw_item.get("outfit_profile"))
+            item = {
+                "date": _single_line(raw_item.get("date"), 20),
+                "path": path,
+                "generated_at": _single_line(raw_item.get("generated_at"), 40),
+                "outfit_profile": profile,
+            }
+            identity = "|".join(
+                (
+                    item["path"],
+                    item["generated_at"],
+                    item["date"],
+                    profile.get("look_id", ""),
+                )
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            history.append(item)
+        return history[:30]
+
+    def _daily_outfit_rotation_history(self) -> list[dict[str, Any]]:
+        rotation_days = _safe_int(getattr(self, "daily_outfit_rotation_days", 10), 10, 1, 30)
+        cutoff = date.today() - timedelta(days=rotation_days - 1)
+        history: list[dict[str, Any]] = []
+        for item in self._daily_outfit_history_items():
+            profile = self._normalize_daily_outfit_profile(item.get("outfit_profile"))
+            if not profile:
+                continue
+            date_key = _single_line(item.get("date"), 20)
+            try:
+                item_date = datetime.strptime(date_key, "%Y-%m-%d").date()
+            except (TypeError, ValueError):
+                item_date = None
+            if item_date and item_date < cutoff:
+                continue
+            history.append({**item, "outfit_profile": profile})
+        return history[:30]
+
+    @staticmethod
+    def _daily_outfit_scene_kind(schedule_hint: str, weather: str) -> str:
+        text = f"{schedule_hint} {weather}".lower()
+        if any(token in text for token in ("运动", "跑步", "健身", "体育", "workout", "gym", "running")):
+            return "sport"
+        if any(token in text for token in ("校服", "上课", "教室", "学校", "自习", "放学", "school", "class")):
+            return "school"
+        if any(token in text for token in ("上班", "工作", "会议", "通勤", "办公室", "office", "commute", "meeting")):
+            return "commute"
+        if any(token in text for token in ("家", "房间", "卧室", "午休", "起床", "睡前", "入睡", "home", "bedroom")):
+            return "home"
+        return "daily"
+
+    @staticmethod
+    def _daily_outfit_weather_kind(weather: str) -> str:
+        text = _single_line(weather, 240).lower()
+        if any(token in text for token in ("冷", "降温", "低温", "寒", "雪", "snow", "cold")):
+            return "cold"
+        if any(token in text for token in ("热", "高温", "闷", "暑", "hot", "heat")):
+            return "hot"
+        if any(token in text for token in ("雨", "阵雨", "雷", "storm", "rain", "wet")):
+            return "rainy"
+        return "mild"
+
+    @staticmethod
+    def _daily_outfit_outer_options(scene: str, weather_kind: str) -> list[str]:
+        if scene == "sport":
+            options = {
+                "cold": [
+                    "lightweight insulated track jacket",
+                    "technical hooded running jacket",
+                    "short quilted sports jacket",
+                    "fleece zip-up athletic layer",
+                ],
+                "hot": [
+                    "no heavy outer layer, breathable short-sleeve overshirt",
+                    "no outer layer, airy sun-protection layer tied at the waist",
+                    "no outer layer, light mesh sports layer",
+                    "no outer layer, sleeveless technical vest",
+                ],
+                "rainy": [
+                    "water-resistant hooded running jacket",
+                    "compact rain shell with reflective trim",
+                    "light technical windbreaker",
+                    "hooded quick-dry sports jacket",
+                ],
+                "mild": [
+                    "clean zip-up track jacket",
+                    "lightweight athletic windbreaker",
+                    "soft cropped sports jacket",
+                    "open technical overshirt",
+                ],
+            }
+            return options[weather_kind]
+        if scene == "home":
+            options = {
+                "cold": [
+                    "soft oversized knit cardigan",
+                    "warm zip-up hoodie",
+                    "light quilted home jacket",
+                    "plush lounge cardigan",
+                ],
+                "hot": [
+                    "no outer layer, loose breathable overshirt",
+                    "no outer layer, thin open cotton shirt",
+                    "no outer layer, airy short-sleeve layer",
+                    "no outer layer, light linen cardigan",
+                ],
+                "rainy": [
+                    "soft hooded cardigan for a rainy day indoors",
+                    "light zip-up hoodie",
+                    "cozy knit cardigan",
+                    "thin water-resistant overshirt near the doorway",
+                ],
+                "mild": [
+                    "soft open cardigan",
+                    "light zip-up hoodie",
+                    "relaxed cotton overshirt",
+                    "thin knit vest",
+                ],
+            }
+            return options[weather_kind]
+        options = {
+            "cold": [
+                "camel wool coat with a soft scarf",
+                "short dark quilted jacket",
+                "navy duffle coat",
+                "light gray padded jacket",
+            ],
+            "hot": [
+                "no heavy outer layer, breathable overshirt left open",
+                "no outer layer, thin sun-protection cardigan",
+                "no outer layer, rolled-sleeve linen overshirt",
+                "no outer layer, light short-sleeve shirt layer",
+            ],
+            "rainy": [
+                "water-resistant hooded jacket",
+                "light trench coat suitable for rain",
+                "compact windbreaker with a hood",
+                "short rain shell with clean lines",
+            ],
+            "mild": [
+                "soft knit cardigan",
+                "light denim jacket",
+                "short bomber jacket",
+                "unstructured lightweight blazer",
+            ],
+        }
+        return options[weather_kind]
+
+    def _daily_outfit_candidate_profiles(self, scene: str, weather_kind: str) -> list[dict[str, str]]:
+        base_options: dict[str, list[dict[str, str]]] = {
+            "school": [
+                {"palette": "navy, ivory, and muted burgundy", "silhouette": "neat layered campus silhouette", "top": "crisp white shirt with a navy knit vest", "bottom": "straight-cut charcoal trousers", "accessory": "small burgundy ribbon and a simple watch"},
+                {"palette": "pale blue, gray, and silver", "silhouette": "clean relaxed academic silhouette", "top": "pale blue oxford shirt under a fine gray cardigan", "bottom": "neat navy trousers", "accessory": "slim silver hair clip or lapel pin"},
+                {"palette": "cream, forest green, and warm brown", "silhouette": "soft collegiate silhouette", "top": "cream sweatshirt with a collared shirt edge showing", "bottom": "tailored brown trousers", "accessory": "small canvas shoulder bag"},
+                {"palette": "black, white, and dusty rose", "silhouette": "compact modern campus silhouette", "top": "fine striped tee beneath a clean black overshirt", "bottom": "straight dark jeans", "accessory": "subtle rose-toned hair tie or keychain"},
+                {"palette": "sage green, ivory, and charcoal", "silhouette": "quiet knitwear silhouette", "top": "sage knit polo layered over a light tee", "bottom": "relaxed charcoal slacks", "accessory": "small geometric earrings or a simple ring"},
+                {"palette": "lavender, cream, and deep gray", "silhouette": "light preppy silhouette", "top": "lavender crewneck knit over a white collar", "bottom": "clean deep-gray trousers", "accessory": "thin patterned scarf or a neat ribbon"},
+            ],
+            "commute": [
+                {"palette": "charcoal, ivory, and cobalt blue", "silhouette": "clean tailored commute silhouette", "top": "ivory ribbed knit top with a cobalt accent", "bottom": "straight charcoal trousers", "accessory": "minimal metal watch and structured tote"},
+                {"palette": "sand, white, and muted olive", "silhouette": "relaxed smart-casual silhouette", "top": "white shirt under a muted olive knit vest", "bottom": "sand-colored tapered trousers", "accessory": "small leather crossbody bag"},
+                {"palette": "black, soft gray, and wine red", "silhouette": "sleek layered city silhouette", "top": "soft gray mock-neck top with a wine-red scarf accent", "bottom": "black straight-leg pants", "accessory": "simple silver earrings or cufflinks"},
+                {"palette": "dusty blue, cream, and camel", "silhouette": "light professional silhouette", "top": "dusty-blue blouse or shirt with a cream knit layer", "bottom": "camel tailored trousers", "accessory": "thin belt and understated wristwatch"},
+                {"palette": "deep green, black, and ivory", "silhouette": "structured modern silhouette", "top": "deep-green fine knit with a crisp ivory collar", "bottom": "black pleated trousers", "accessory": "small enamel pin and clean shoulder bag"},
+                {"palette": "warm taupe, navy, and white", "silhouette": "comfortable polished silhouette", "top": "warm taupe long-sleeve tee beneath a navy overshirt", "bottom": "white or light-stone straight trousers", "accessory": "subtle patterned scarf"},
+            ],
+            "sport": [
+                {"palette": "cobalt blue, white, and graphite", "silhouette": "clean athletic silhouette", "top": "cobalt quick-dry training tee", "bottom": "graphite track pants", "accessory": "simple sports watch and compact water bottle"},
+                {"palette": "black, lime green, and gray", "silhouette": "light running silhouette", "top": "black technical long-sleeve top with lime trim", "bottom": "gray joggers", "accessory": "small sweatband and running watch"},
+                {"palette": "coral, navy, and white", "silhouette": "bright casual sports silhouette", "top": "coral breathable tee under a navy sleeveless layer", "bottom": "navy athletic pants", "accessory": "minimal cap or hair band"},
+                {"palette": "sage green, cream, and black", "silhouette": "relaxed outdoor exercise silhouette", "top": "sage performance polo with a cream inner layer", "bottom": "black tapered joggers", "accessory": "small crossbody sports pouch"},
+                {"palette": "lavender, charcoal, and silver", "silhouette": "soft technical silhouette", "top": "lavender moisture-wicking zip collar top", "bottom": "charcoal training pants", "accessory": "reflective wrist band"},
+                {"palette": "rust orange, white, and deep blue", "silhouette": "energetic training silhouette", "top": "rust-orange athletic tee with a white panel", "bottom": "deep-blue track pants", "accessory": "compact earbud case or sports watch"},
+            ],
+            "home": [
+                {"palette": "cream, pale blue, and soft gray", "silhouette": "soft relaxed home silhouette", "top": "cream cotton lounge top", "bottom": "pale-blue relaxed pants", "accessory": "simple fabric hair band or soft slippers"},
+                {"palette": "sage green, ivory, and warm brown", "silhouette": "cozy knitwear silhouette", "top": "sage knit tee over an ivory inner layer", "bottom": "warm-brown lounge trousers", "accessory": "small mug held naturally"},
+                {"palette": "lavender, charcoal, and white", "silhouette": "quiet oversized silhouette", "top": "lavender oversized sweatshirt", "bottom": "charcoal soft joggers", "accessory": "thin reading glasses or a simple hair clip"},
+                {"palette": "dusty rose, cream, and gray", "silhouette": "light comfortable silhouette", "top": "dusty-rose long-sleeve tee", "bottom": "cream cotton pants", "accessory": "small pendant necklace"},
+                {"palette": "navy, light gray, and muted yellow", "silhouette": "casual layered home silhouette", "top": "navy striped lounge shirt", "bottom": "light-gray relaxed pants", "accessory": "muted-yellow blanket edge or soft socks"},
+                {"palette": "white, olive, and soft black", "silhouette": "minimal restful silhouette", "top": "white breathable henley shirt", "bottom": "olive lounge pants", "accessory": "small wireless earbud case"},
+            ],
+            "daily": [
+                {"palette": "denim blue, white, and red", "silhouette": "casual layered street silhouette", "top": "white tee under a denim-blue overshirt", "bottom": "dark straight-leg jeans", "accessory": "small red hair tie or keychain"},
+                {"palette": "cream, black, and forest green", "silhouette": "clean relaxed silhouette", "top": "cream ribbed knit top with a forest-green collar layer", "bottom": "black tapered trousers", "accessory": "minimal canvas crossbody bag"},
+                {"palette": "dusty rose, charcoal, and ivory", "silhouette": "soft modern silhouette", "top": "dusty-rose sweatshirt over an ivory tee", "bottom": "charcoal straight trousers", "accessory": "small silver pendant"},
+                {"palette": "sage green, navy, and light gray", "silhouette": "easy outdoor silhouette", "top": "sage polo layered with a light-gray tee", "bottom": "navy relaxed trousers", "accessory": "simple cap or structured backpack"},
+                {"palette": "lavender, white, and deep blue", "silhouette": "light casual silhouette", "top": "lavender knit tee with a white collar detail", "bottom": "deep-blue jeans", "accessory": "thin patterned scarf"},
+                {"palette": "warm brown, ivory, and muted orange", "silhouette": "textured everyday silhouette", "top": "ivory henley shirt beneath a warm-brown knit vest", "bottom": "muted-orange straight trousers", "accessory": "small leather bracelet or watch"},
+            ],
+        }
+        outer_options = self._daily_outfit_outer_options(scene, weather_kind)
+        candidates: list[dict[str, str]] = []
+        for base_index, base in enumerate(base_options.get(scene, base_options["daily"])):
+            for outer_index, outer in enumerate(outer_options):
+                candidates.append(
+                    {
+                        **base,
+                        "scene": scene,
+                        "weather": weather_kind,
+                        "outer": outer,
+                        "look_id": f"{scene}-{base_index + 1}-{outer_index + 1}",
+                    }
+                )
+        return candidates
+
+    def _select_daily_outfit_profile(
+        self,
+        *,
+        schedule_hint: str,
+        weather: str,
+        date_key: str = "",
+    ) -> dict[str, str]:
+        scene = self._daily_outfit_scene_kind(schedule_hint, weather)
+        weather_kind = self._daily_outfit_weather_kind(weather)
+        candidates = self._daily_outfit_candidate_profiles(scene, weather_kind)
+        if not candidates:
+            return {}
+        history = self._daily_outfit_rotation_history()
+        fields = ("palette", "silhouette", "top", "outer", "bottom", "accessory")
+        weights = {
+            "palette": 16,
+            "silhouette": 12,
+            "top": 20,
+            "outer": 18,
+            "bottom": 10,
+            "accessory": 8,
+        }
+
+        def cooldown_score(candidate: dict[str, str]) -> int:
+            score = 0
+            for index, item in enumerate(history):
+                previous = self._normalize_daily_outfit_profile(item.get("outfit_profile"))
+                if not previous:
+                    continue
+                recency_weight = max(1, 8 - index)
+                matching_fields = sum(
+                    1
+                    for field in fields
+                    if candidate.get(field) and candidate.get(field) == previous.get(field)
+                )
+                score += sum(
+                    weights[field] * recency_weight
+                    for field in fields
+                    if candidate.get(field) and candidate.get(field) == previous.get(field)
+                )
+                if candidate.get("look_id") == previous.get("look_id"):
+                    score += 600 * recency_weight
+                if index == 0:
+                    changed_fields = len(fields) - matching_fields
+                    if changed_fields < 2:
+                        score += 10000
+                    elif changed_fields < 3:
+                        score += 800
+            return score
+
+        rotation_seed = f"{date_key or _today_key()}|{len(history)}"
+
+        def tie_breaker(candidate: dict[str, str]) -> int:
+            digest = hashlib.sha1(
+                f"{rotation_seed}|{candidate.get('look_id', '')}".encode("utf-8")
+            ).hexdigest()
+            return int(digest[:12], 16)
+
+        return min(candidates, key=lambda candidate: (cooldown_score(candidate), tie_breaker(candidate)))
+
+    def _daily_outfit_rotation_reference(self) -> str:
+        history = self._daily_outfit_rotation_history()
+        if not history:
+            return ""
+        labels = {
+            "palette": "color palettes",
+            "outer": "outer layers",
+            "silhouette": "silhouettes",
+        }
+        fragments: list[str] = []
+        for field, label in labels.items():
+            values: list[str] = []
+            for item in history:
+                profile = self._normalize_daily_outfit_profile(item.get("outfit_profile"))
+                value = _single_line(profile.get(field), 56)
+                if value and value not in values:
+                    values.append(value)
+                if len(values) >= 2:
+                    break
+            if values:
+                fragments.append(f"{label}: {' / '.join(values)}")
+        return _single_line("; ".join(fragments), 280)
+
+    def _build_daily_outfit_photo_prompt(
+        self,
+        diary: dict[str, Any],
+        *,
+        memory_context: str = "",
+        outfit_profile: dict[str, Any] | None = None,
+    ) -> str:
         persona = self._daily_outfit_role_appearance_text()
         style_name, style_instruction = self._get_photo_style_instruction()
         style_prompt = self._photo_style_prompt_en(style_name, style_instruction)
@@ -5178,7 +5554,15 @@ Output:
         weather = self._format_weather_for_prompt() if callable(getattr(self, "_format_weather_for_prompt", None)) else ""
         schedule_hint = self._daily_outfit_schedule_text()
         state_visual = self._daily_outfit_visual_state_text(state if isinstance(state, dict) else {})
-        outfit_hint = self._daily_outfit_outfit_hint(schedule_hint=schedule_hint, weather=weather)
+        outfit_profile = self._normalize_daily_outfit_profile(outfit_profile)
+        if not outfit_profile:
+            outfit_profile = self._select_daily_outfit_profile(schedule_hint=schedule_hint, weather=weather)
+        outfit_hint = self._daily_outfit_outfit_hint(
+            schedule_hint=schedule_hint,
+            weather=weather,
+            outfit_profile=outfit_profile,
+        )
+        rotation_reference = self._daily_outfit_rotation_reference()
         scene_hint = self._daily_outfit_scene_hint(state if isinstance(state, dict) else {}, schedule_hint=schedule_hint, weather=weather)
         visual_memory = ""
         visual_memory_getter = getattr(self, "_visual_photo_memory_context", None)
@@ -5218,6 +5602,11 @@ Output:
             state_visual or "relaxed natural mood",
             style_prompt,
         ]
+        if rotation_reference:
+            positive.append(
+                "wardrobe rotation: make at least two visible outfit changes from recent daily outfit photos; "
+                f"avoid repeating {rotation_reference}"
+            )
         if diary_hint:
             positive.append(f"daily mood cue: {diary_hint}")
         if visual_memory:
@@ -5254,6 +5643,13 @@ Output:
             "nsfw",
             "revealing outfit",
         ]
+        if rotation_reference:
+            negative.extend(
+                [
+                    "same outfit as a recent daily outfit photo",
+                    f"repeat any recently used outfit element: {rotation_reference}",
+                ]
+            )
         prompt = (
             "Positive prompt: "
             + ", ".join(_single_line(part, 220) for part in positive if _single_line(part, 220))
@@ -5375,7 +5771,30 @@ Output:
             hints.append("hot weather, light breathable clothes")
         return _single_line(", ".join(dict.fromkeys(hints)), 140)
 
-    def _daily_outfit_outfit_hint(self, *, schedule_hint: str = "", weather: str = "") -> str:
+    def _daily_outfit_outfit_hint(
+        self,
+        *,
+        schedule_hint: str = "",
+        weather: str = "",
+        outfit_profile: dict[str, Any] | None = None,
+    ) -> str:
+        profile = self._normalize_daily_outfit_profile(outfit_profile)
+        if profile:
+            fields = (
+                ("palette", "color palette"),
+                ("silhouette", "silhouette"),
+                ("top", "top"),
+                ("outer", "outer layer"),
+                ("bottom", "bottoms"),
+                ("accessory", "accessories"),
+            )
+            hints = ["intentionally distinct coordinated daily outfit"]
+            hints.extend(
+                f"{label}: {profile[key]}"
+                for key, label in fields
+                if profile.get(key)
+            )
+            return _single_line(", ".join(hints), 620)
         text = f"{schedule_hint} {weather}".lower()
         hints: list[str] = []
         if any(token in text for token in ("校服", "上课", "教室", "学校", "高一", "自习", "放学")):
@@ -6135,6 +6554,10 @@ Output:
         style_name, style_instruction = self._get_photo_style_instruction()
         topic_hint = _single_line(user.get("planned_proactive_topic"), 60)
         motive_hint = _single_line(user.get("planned_proactive_motive"), 120)
+        schedule_context = self._format_plan_item_for_prompt(current_item)
+        delayed_scene = bool(self._deferred_immediate_share_tense_hint(user, "photo_text"))
+        if delayed_scene:
+            schedule_context = "本次画面对应较早的生活片段；日程只用于保持人物与场景连续，不可作为发送当下的事实依据。"
         prompt = f"""
 请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
 
@@ -6148,7 +6571,7 @@ Output:
 {self._format_state_for_prompt(state if isinstance(state, dict) else {})}
 
 【当前日程背景】
-{self._format_plan_item_for_prompt(current_item)}
+{schedule_context}
 
 【这次想分享的画面钩子】
 话题：{topic_hint or '（未指定）'}
@@ -6174,8 +6597,8 @@ Output:
 }}
 
 要求：
-1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。
-2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。
+1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。日程是背景参考，不可单独当作动作已经发生的证明。
+2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。若本次来自延后候选，画面应与原话题连续，不应伪装成发送当下的新现场。
 3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
 4. `prompt` 必须使用英文生图提示词形式,优先短语和逗号分隔标签；可以把必要中文专名作为 visual note 保留,但不要写任务说明。
 5. `prompt` 里要明确体现上面的风格要求。
@@ -6205,7 +6628,7 @@ Output:
         if kind in {"scene", "photo", "风景"}:
             kind = "text2img"
         if not image_prompt:
-            current = self._format_plan_item_for_prompt(current_item)
+            current = schedule_context
             image_prompt = (
                 f"社交媒体随手拍,当前背景：{current},温柔自然的生活感,"
                 f"清晰构图,柔和光线,{style_instruction}"
@@ -6217,7 +6640,7 @@ Output:
                     f"reason={reason}",
                     f"topic={topic_hint}",
                     f"motive={motive_hint}",
-                    f"schedule={self._format_plan_item_for_prompt(current_item)}",
+                    f"schedule={schedule_context}",
                 )
                 if _single_line(part, 260)
             )
@@ -7329,6 +7752,15 @@ Output:
             target = "在线图片 API"
         return f"{target}超时（{timeout_seconds}秒内没有返回），可调高在线生图超时秒数或切换/回退本地生图后端"
 
+    def _external_generated_image_output_path(self, *, session_key: str, ext: str = ".png") -> Path:
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        if safe_ext.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            safe_ext = ".png"
+        out_dir = Path(self.data_dir) / "generated_photos"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        session_part = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(session_key or "private_companion"))[:60] or "private_companion"
+        return out_dir / f"{session_part}_{self._environment_now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{safe_ext}"
+
     async def _save_external_generated_image(
         self,
         image_bytes: bytes,
@@ -7338,13 +7770,7 @@ Output:
     ) -> str:
         if not image_bytes:
             return ""
-        safe_ext = ext if ext.startswith(".") else f".{ext}"
-        if safe_ext.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
-            safe_ext = ".png"
-        out_dir = Path(self.data_dir) / "generated_photos"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        session_part = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(session_key or "private_companion"))[:60] or "private_companion"
-        file_path = out_dir / f"{session_part}_{self._environment_now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{safe_ext}"
+        file_path = self._external_generated_image_output_path(session_key=session_key, ext=ext)
         await asyncio.to_thread(file_path.write_bytes, image_bytes)
         logger.info(
             "[PrivateCompanion] 生图文件已保存: session=%s path=%s bytes=%s",
@@ -7354,48 +7780,155 @@ Output:
         )
         return str(file_path)
 
+    def _external_image_download_proxy_url(self) -> str:
+        proxy = str(getattr(self, "external_image_download_proxy", "") or "").strip()
+        if not proxy:
+            return ""
+        try:
+            parsed = urlparse(proxy)
+        except Exception:
+            parsed = None
+        if not parsed or parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            logger.warning("[PrivateCompanion] 在线图片下载代理格式无效，已忽略")
+            return ""
+        return proxy
+
+    async def _get_external_image_download_session(self, *, use_environment_proxy: bool) -> tuple[Any, bool]:
+        import aiohttp
+
+        session = getattr(self, "_external_image_download_session", None)
+        session_trust_env = getattr(self, "_external_image_download_session_trust_env", None)
+        if session is not None and not session.closed and session_trust_env == use_environment_proxy:
+            return session, True
+
+        lock = getattr(self, "_external_image_download_session_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._external_image_download_session_lock = lock
+        async with lock:
+            session = getattr(self, "_external_image_download_session", None)
+            session_trust_env = getattr(self, "_external_image_download_session_trust_env", None)
+            if session is not None and not session.closed and session_trust_env == use_environment_proxy:
+                return session, True
+            if session is not None and not session.closed:
+                await session.close()
+            connector = aiohttp.TCPConnector(limit=8, limit_per_host=4, ttl_dns_cache=300)
+            session = aiohttp.ClientSession(connector=connector, trust_env=use_environment_proxy)
+            self._external_image_download_session = session
+            self._external_image_download_session_trust_env = use_environment_proxy
+            return session, False
+
+    async def _close_external_image_download_session(self) -> None:
+        session = getattr(self, "_external_image_download_session", None)
+        self._external_image_download_session = None
+        self._external_image_download_session_trust_env = None
+        if session is not None and not session.closed:
+            await session.close()
+
     async def _download_external_image_url(self, url: str, *, session_key: str) -> tuple[str, str]:
         target = str(url or "").strip()
         if not target:
             return "", "图片地址为空"
+        configured_timeout = _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 20, 600)
+        # Keep URL retrieval independent from the longer image-generation request.
+        download_timeout = min(configured_timeout, 75)
+        max_bytes = 32 * 1024 * 1024
+        started_at = time.perf_counter()
+        temporary_path: Path | None = None
         try:
             import aiohttp
 
             headers, header_note = self._external_image_download_headers(target)
-            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(target, headers=headers) as response:
-                    if response.status >= 400:
-                        logger.info(
-                            "[PrivateCompanion] 下载在线生图结果失败: status=%s headers=%s url=%s",
-                            response.status,
-                            header_note,
-                            _single_line(target, 180),
-                        )
-                        return "", f"下载图片失败：HTTP {response.status}"
-                    content = await response.read()
-                    content_type = str(response.headers.get("Content-Type", "") or "").lower()
+            use_environment_proxy = bool(getattr(self, "external_image_download_use_environment_proxy", False))
+            proxy_url = self._external_image_download_proxy_url()
+            timeout = aiohttp.ClientTimeout(
+                total=float(download_timeout),
+                sock_connect=min(15.0, float(download_timeout)),
+                sock_read=min(30.0, float(download_timeout)),
+            )
+            session, session_reused = await self._get_external_image_download_session(
+                use_environment_proxy=use_environment_proxy,
+            )
+            request_options: dict[str, Any] = {"headers": headers, "timeout": timeout}
+            if proxy_url:
+                request_options["proxy"] = proxy_url
+            async with session.get(target, **request_options) as response:
+                if response.status >= 400:
                     logger.info(
-                        "[PrivateCompanion] 下载在线生图结果完成: status=%s content_type=%s bytes=%s url=%s",
+                        "[PrivateCompanion] 下载在线生图结果失败: status=%s headers=%s url=%s",
                         response.status,
-                        _single_line(content_type, 80),
-                        len(content),
+                        header_note,
                         _single_line(target, 180),
                     )
-            ext = ".png"
-            if "jpeg" in content_type or "jpg" in content_type:
-                ext = ".jpg"
-            elif "webp" in content_type:
-                ext = ".webp"
-            path = await self._save_external_generated_image(content, session_key=session_key, ext=ext)
-            return path, "ok" if path else "保存下载图片失败"
+                    return "", f"下载图片失败：HTTP {response.status}"
+                content_type = str(response.headers.get("Content-Type", "") or "").lower()
+                declared_size = _safe_int(response.headers.get("Content-Length"), 0, 0)
+                if declared_size > max_bytes:
+                    logger.info(
+                        "[PrivateCompanion] 下载在线生图结果过大,已停止: bytes=%s limit=%s url=%s",
+                        declared_size,
+                        max_bytes,
+                        _single_line(target, 180),
+                    )
+                    return "", f"下载图片过大（超过 {max_bytes // (1024 * 1024)} MB）"
+                ext = ".png"
+                if "jpeg" in content_type or "jpg" in content_type:
+                    ext = ".jpg"
+                elif "webp" in content_type:
+                    ext = ".webp"
+                output_path = self._external_generated_image_output_path(session_key=session_key, ext=ext)
+                temporary_path = output_path.with_name(f"{output_path.name}.part")
+                received_size = 0
+                with temporary_path.open("wb") as output:
+                    async for chunk in response.content.iter_chunked(128 * 1024):
+                        received_size += len(chunk)
+                        if received_size > max_bytes:
+                            logger.info(
+                                "[PrivateCompanion] 下载在线生图结果超过大小上限,已停止: bytes=%s limit=%s url=%s",
+                                received_size,
+                                max_bytes,
+                                _single_line(target, 180),
+                            )
+                            return "", f"下载图片过大（超过 {max_bytes // (1024 * 1024)} MB）"
+                        output.write(chunk)
+                if received_size <= 0:
+                    return "", "下载图片为空"
+                await asyncio.to_thread(temporary_path.replace, output_path)
+                temporary_path = None
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "[PrivateCompanion] 下载在线生图结果完成: status=%s content_type=%s bytes=%s elapsed=%sms reused=%s proxy=%s env_proxy=%s timeout=%ss url=%s",
+                response.status,
+                _single_line(content_type, 80),
+                received_size,
+                elapsed_ms,
+                session_reused,
+                bool(proxy_url),
+                use_environment_proxy,
+                download_timeout,
+                _single_line(target, 180),
+            )
+            logger.info(
+                "[PrivateCompanion] 生图文件已保存: session=%s path=%s bytes=%s",
+                _single_line(session_key, 80),
+                _single_line(str(output_path), 180),
+                received_size,
+            )
+            return str(output_path), "ok"
         except asyncio.TimeoutError:
-            note = self._external_image_timeout_note(download=True)
+            note = f"下载在线图片结果超时（{download_timeout} 秒内未完成），请检查运行 Bot 的服务器是否能直连该图片 URL"
             logger.info("[PrivateCompanion] 下载在线生图结果超时: url=%s note=%s", _single_line(target, 180), note)
             return "", note
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 下载在线生图结果失败: {e}", exc_info=True)
             return "", str(e)
+        finally:
+            if temporary_path is not None:
+                try:
+                    if temporary_path.exists():
+                        await asyncio.to_thread(temporary_path.unlink)
+                except Exception:
+                    pass
 
     async def _run_bailian_multimodal_photo_generation(
         self,

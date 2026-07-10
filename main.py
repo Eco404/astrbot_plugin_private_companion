@@ -431,7 +431,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.2",
+    "5.9.3",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -855,6 +855,15 @@ class PrivateCompanionPlugin(
         self.external_image_api_size = self._cfg_str(c, "external_image_api_size", "1024x1024", "1024x1024")
         self.external_image_api_timeout_seconds = self._cfg_int(c, "external_image_api_timeout_seconds", 180, 20, 600)
         self.external_image_api_custom_headers = self._cfg_str(c, "external_image_api_custom_headers", "")
+        self.external_image_download_proxy = self._cfg_str(c, "external_image_download_proxy", "").strip()
+        self.external_image_download_use_environment_proxy = self._cfg_bool(
+            c,
+            "external_image_download_use_environment_proxy",
+            False,
+        )
+        self._external_image_download_session = None
+        self._external_image_download_session_lock = None
+        self._external_image_download_session_trust_env = None
         self.enable_backup_external_image_api = self._cfg_bool(c, "enable_backup_external_image_api", False)
         self.backup_external_image_api_platform = self._normalize_external_image_api_platform(
             self._cfg_str(c, "backup_external_image_api_platform", "auto", "auto")
@@ -874,6 +883,7 @@ class PrivateCompanionPlugin(
         self.photo_generation_scene_presets = self._cfg_raw(c, "photo_generation_scene_presets", "")
         self.enable_daily_outfit_photo = self._cfg_bool(c, "enable_daily_outfit_photo", False)
         self.daily_outfit_photo_prompt = self._cfg_str(c, "daily_outfit_photo_prompt", "")
+        self.daily_outfit_rotation_days = self._cfg_int(c, "daily_outfit_rotation_days", 10, 1, 30)
         self.enable_natural_language_photo_generation = self._cfg_bool(c, "enable_natural_language_photo_generation", False)
         self.natural_language_photo_generation_mode = self._cfg_str(
             c,
@@ -912,6 +922,11 @@ class PrivateCompanionPlugin(
             c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
         )
         self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
+        self.enable_group_nsfw_private_fallback = self._cfg_bool(c, "enable_group_nsfw_private_fallback", False)
+        self.group_nsfw_image_review_timeout_seconds = min(
+            30.0,
+            self._cfg_float(c, "group_nsfw_image_review_timeout_seconds", 8.0, 3.0),
+        )
         self.enable_screen_glance_action = self._cfg_bool(
             c, "enable_screen_glance_action", bool(self._cfg_raw(c, "allow_screen_peek_action", legacy_screen_enabled))
         )
@@ -1689,6 +1704,14 @@ class PrivateCompanionPlugin(
         self._startup_background_tasks.clear()
         save_task = getattr(self, "_data_save_task", None)
         await cancel_task(save_task, "delayed_data_save")
+        close_image_download_session = getattr(self, "_close_external_image_download_session", None)
+        if callable(close_image_download_session):
+            try:
+                await asyncio.wait_for(close_image_download_session(), timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning("[PrivateCompanion] 终止时关闭在线图片下载会话超时")
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 终止时关闭在线图片下载会话失败: %s", _single_line(exc, 160))
         try:
             await asyncio.wait_for(self._save_data_on_terminate(), timeout=3.0)
         except asyncio.TimeoutError:
@@ -4486,7 +4509,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 }
             )
 
-        add_spec("creative.hidden", "creative", 60, lambda: self._format_hidden_creative_context_for_reply(inbound_text))
+        add_spec("creative.hidden", "creative", 60, lambda: self._format_hidden_creative_context_for_reply(inbound_text, current_user))
         add_spec(
             "bookshelf.secret",
             "bookshelf",
@@ -8458,9 +8481,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 outfit = await outfit_generator(force=False) if callable(outfit_generator) else None
             else:
                 await self._reply(event, "等我换身衣服哦")
-                async with self._data_lock:
-                    self.data.pop("daily_outfit_photo", None)
-                    self._save_data_sync()
                 plan = await self._ensure_daily_plan(force=False)
                 if not plan:
                     plan = await self._ensure_daily_plan(force=True)

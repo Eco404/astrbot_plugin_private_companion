@@ -666,6 +666,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "weather": {
                 "cached": bool(weather),
                 "age": weather_age,
+                "source": self._single_line(weather.get("source"), 40),
+                "summary": self._single_line(weather.get("prompt"), 120),
             },
         }
 
@@ -1356,6 +1358,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "proactive_runtime": proactive_tasks.get("runtime", {}),
                     "token_budget": token_stats.get("budget", {}),
                     "cache": cache,
+                    "tts": tts,
                 }
             )
         except Exception as exc:
@@ -2102,6 +2105,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "planned_proactive_window_start_at",
             "planned_proactive_best_until_at",
             "planned_proactive_expire_at",
+            "planned_proactive_origin_at",
+            "planned_proactive_origin_key",
+            "planned_proactive_freshness",
+            "planned_proactive_delivery_state",
             "planned_proactive_semantic_kind",
             "planned_proactive_anchor_type",
             "planned_proactive_semantic_score",
@@ -2117,6 +2124,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "planned_proactive_trigger_message_id",
             "planned_proactive_trigger_umo",
             "planned_proactive_trigger_ts",
+            "planned_proactive_trigger_inbound_count",
             "planned_proactive_trigger_created_at",
             "llm_timer_event",
             "sent_today",
@@ -2196,6 +2204,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ]
             current["user_id"] = str(current.get("user_id") or target_user_id)
             current["umo"] = umo
+            self.plugin._reset_planned_proactive_delivery_state(current)
             current["next_proactive_at"] = scheduled_ts
             current["planned_proactive_reason"] = "check_in"
             current["planned_proactive_action"] = "message"
@@ -10142,6 +10151,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_persona_reference_image_path",
             "enable_daily_outfit_photo",
             "daily_outfit_photo_prompt",
+            "daily_outfit_rotation_days",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_mode",
             "natural_language_photo_generation_max_daily",
@@ -10158,6 +10168,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "external_image_api_size",
             "external_image_api_timeout_seconds",
             "external_image_api_custom_headers",
+            "external_image_download_proxy",
+            "external_image_download_use_environment_proxy",
             "external_image_api_endpoints",
             "enable_backup_external_image_api",
             "backup_external_image_api_platform",
@@ -11596,6 +11608,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             self.plugin.external_image_api_endpoints = endpoints
             self._sync_legacy_external_image_api_config_from_endpoints(endpoints)
             return
+        if key == "external_image_download_use_environment_proxy":
+            self.plugin.external_image_download_use_environment_proxy = self._normalize_bool_value(value)
+            return
         if key == "provider_config_mode":
             normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
             self.plugin.provider_config_mode = (
@@ -11678,6 +11693,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "EXTERNAL_IMAGE_API_KEY": "external_image_api_key",
             "EXTERNAL_IMAGE_API_MODEL": "external_image_api_model",
             "external_image_api_custom_headers": "external_image_api_custom_headers",
+            "external_image_download_proxy": "external_image_download_proxy",
             "backup_external_image_api_platform": "backup_external_image_api_platform",
             "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": "backup_external_image_api_base_url",
             "BACKUP_EXTERNAL_IMAGE_API_KEY": "backup_external_image_api_key",
@@ -11870,6 +11886,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         enabled_backup = self._config_get("enable_backup_external_image_api")
         if enabled_backup not in ("", None):
             self.plugin.enable_backup_external_image_api = self._normalize_bool_value(enabled_backup)
+        use_environment_proxy = self._config_get("external_image_download_use_environment_proxy")
+        if use_environment_proxy not in ("", None):
+            self.plugin.external_image_download_use_environment_proxy = self._normalize_bool_value(use_environment_proxy)
         mapping = {
             "photo_generation_backend": "photo_generation_backend",
             "custom_photo_tool_name": "custom_photo_tool_name",
@@ -11881,12 +11900,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
             "photo_persona_reference_image_path": "photo_persona_reference_image_path",
             "daily_outfit_photo_prompt": "daily_outfit_photo_prompt",
+            "daily_outfit_rotation_days": "daily_outfit_rotation_days",
             "external_image_api_platform": "external_image_api_platform",
             "EXTERNAL_IMAGE_API_BASE_URL": "external_image_api_base_url",
             "EXTERNAL_IMAGE_API_KEY": "external_image_api_key",
             "EXTERNAL_IMAGE_API_MODEL": "external_image_api_model",
             "external_image_api_size": "external_image_api_size",
             "external_image_api_custom_headers": "external_image_api_custom_headers",
+            "external_image_download_proxy": "external_image_download_proxy",
             "backup_external_image_api_platform": "backup_external_image_api_platform",
             "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": "backup_external_image_api_base_url",
             "BACKUP_EXTERNAL_IMAGE_API_KEY": "backup_external_image_api_key",
@@ -12396,6 +12417,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_persona_reference_image_path",
             "enable_daily_outfit_photo",
             "daily_outfit_photo_prompt",
+            "daily_outfit_rotation_days",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_mode",
             "natural_language_photo_generation_max_daily",
@@ -12412,6 +12434,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "external_image_api_size",
             "external_image_api_timeout_seconds",
             "external_image_api_custom_headers",
+            "external_image_download_proxy",
+            "external_image_download_use_environment_proxy",
             "external_image_api_endpoints",
             "enable_backup_external_image_api",
             "backup_external_image_api_platform",

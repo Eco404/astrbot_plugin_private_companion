@@ -1754,8 +1754,19 @@ class ProactiveMixin:
             if callable(saver):
                 saver()
             return f"情绪/关系 {mode} 收敛中,亲密主动候选已清理"
-        self._mark_planned_candidate_status(user, "deferred", f"情绪 {mode}: 主动候选延后")
-        user["next_proactive_at"] = max(_safe_float(user.get("next_proactive_at"), 0), base_after)
+        defer = getattr(self, "_defer_or_replace_planned_impulse", None)
+        if callable(defer):
+            delay_minutes = max(1.0, (base_after - check_now) / 60)
+            defer(
+                user,
+                now=check_now,
+                note=f"情绪 {mode}: 主动候选延后",
+                delay_minutes=(delay_minutes, delay_minutes + 30.0),
+                block_current=False,
+            )
+        else:
+            self._mark_planned_candidate_status(user, "deferred", f"情绪 {mode}: 主动候选延后")
+            user["next_proactive_at"] = max(_safe_float(user.get("next_proactive_at"), 0), base_after)
         saver = getattr(self, "_schedule_data_save", None)
         if callable(saver):
             saver()
@@ -2336,6 +2347,7 @@ class ProactiveMixin:
             action=action,
             planned_event=event,
         )
+        self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = reason
         user["planned_proactive_action"] = action
@@ -2368,6 +2380,12 @@ class ProactiveMixin:
         check_now = _now_ts() if now is None else now
         return check_now - next_at > self.max_proactive_plan_lag_minutes * 60
 
+    def _reset_planned_proactive_delivery_state(self, user: dict[str, Any]) -> None:
+        user["planned_proactive_origin_at"] = 0
+        user["planned_proactive_origin_key"] = ""
+        user["planned_proactive_freshness"] = ""
+        user["planned_proactive_delivery_state"] = ""
+
     def _clear_pending_proactive_plan(self, user: dict[str, Any]) -> None:
         user["next_proactive_at"] = 0
         user["planned_proactive_reason"] = ""
@@ -2379,6 +2397,7 @@ class ProactiveMixin:
         user["planned_proactive_window_start_at"] = 0
         user["planned_proactive_best_until_at"] = 0
         user["planned_proactive_expire_at"] = 0
+        self._reset_planned_proactive_delivery_state(user)
         user["planned_proactive_semantic_kind"] = ""
         user["planned_proactive_anchor_type"] = ""
         user["planned_proactive_semantic_score"] = 0

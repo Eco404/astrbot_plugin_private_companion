@@ -358,6 +358,25 @@ small {
 .diagnostic-masthead-actions button { min-height: 42px; border-color: var(--diag-signal); background: var(--diag-signal); color: #fff; }
 .diagnostic-live-dot { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .diagnostic-live-dot i { width: 8px; height: 8px; border-radius: 999px; background: #2aa88e; box-shadow: 0 0 0 4px rgba(42,168,142,.14); }
+.diagnostic-problem-picker { display: grid; grid-template-columns: minmax(210px, .7fr) minmax(0, 1.8fr); gap: 18px; align-items: center; padding: 16px; border: 1px solid color-mix(in srgb, var(--diag-signal) 22%, var(--line-soft)); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 78%, var(--accent-soft)); box-shadow: var(--shadow-soft), var(--shadow-ring); }
+.diagnostic-problem-picker > div:first-child { display: grid; gap: 4px; }
+.diagnostic-problem-picker span { color: var(--diag-signal); font-size: 11px; font-weight: 900; }
+.diagnostic-problem-picker h3 { margin: 0; color: var(--diag-ink); font-size: 20px; }
+.diagnostic-problem-picker p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.diagnostic-category-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.diagnostic-category { display: grid; gap: 4px; min-height: 74px; padding: 11px; text-align: left; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); transition: transform .16s ease, border-color .16s ease, background .16s ease; }
+.diagnostic-category:hover { transform: translateY(-1px); border-color: var(--diag-signal); }
+.diagnostic-category.is-active { border-color: var(--diag-signal); background: color-mix(in srgb, var(--diag-signal) 11%, var(--surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--diag-signal) 28%, transparent); }
+.diagnostic-category b { color: var(--diag-ink); font-size: 14px; }
+.diagnostic-category span { color: var(--muted); font-size: 11px; font-weight: 600; line-height: 1.35; }
+.troubleshooting-tts-runtime { display: grid; gap: 11px; margin-bottom: 10px; padding: 13px; border: 1px solid color-mix(in srgb, var(--diag-signal) 28%, var(--line-soft)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--surface) 86%, var(--accent-soft)); }
+.troubleshooting-tts-runtime header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.troubleshooting-tts-runtime header div { display: grid; gap: 2px; }
+.troubleshooting-tts-runtime header span, .troubleshooting-tts-runtime small, .troubleshooting-tts-runtime p span { color: var(--muted); font-size: 12px; }
+.troubleshooting-tts-runtime header b { color: var(--diag-ink); }
+.troubleshooting-tts-runtime > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.troubleshooting-tts-runtime p { display: grid; gap: 2px; margin: 0; padding: 8px; border-radius: 8px; background: color-mix(in srgb, var(--surface) 75%, var(--panel)); }
+.troubleshooting-tts-runtime p b { overflow-wrap: anywhere; font-size: 12px; }
 .diagnostic-priority-zone, .diagnostic-live-lane, .diagnostic-event-lane, .diagnostic-runtime-card { min-width: 0; border: 1px solid var(--line-soft); border-radius: var(--radius); background: rgba(255,255,255,.9); box-shadow: var(--shadow-soft), var(--shadow-ring); }
 .diagnostic-priority-zone { padding: 14px; }
 .diagnostic-zone-head { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
@@ -387,7 +406,7 @@ small {
 .diagnostic-evidence-body { display: grid; gap: 14px; padding: 14px; }
 .diagnostic-evidence-body > article { margin: 0; }
 @media (max-width: 1100px) { .diagnostic-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); } .diagnostic-main-grid { grid-template-columns: 1fr; } .diagnostic-events { max-height: 360px; } }
-@media (max-width: 760px) { .diagnostic-masthead { grid-template-columns: 1fr; } .diagnostic-masthead-actions { justify-items: stretch; } .diagnostic-masthead-actions button { width: 100%; } .diagnostic-zone-head { align-items: flex-start; flex-direction: column; } .diagnostic-checks, .diagnostic-runtime-stack { grid-template-columns: 1fr; } .diagnostic-evidence-drawer > summary { align-items: flex-start; flex-direction: column; } .diagnostic-evidence-drawer > summary small { text-align: left; } }
+@media (max-width: 760px) { .diagnostic-masthead, .diagnostic-problem-picker { grid-template-columns: 1fr; } .diagnostic-masthead-actions { justify-items: stretch; } .diagnostic-masthead-actions button { width: 100%; } .diagnostic-zone-head { align-items: flex-start; flex-direction: column; } .diagnostic-category-list, .diagnostic-checks, .diagnostic-runtime-stack, .troubleshooting-tts-runtime > div { grid-template-columns: 1fr; } .diagnostic-evidence-drawer > summary { align-items: flex-start; flex-direction: column; } .diagnostic-evidence-drawer > summary small { text-align: left; } }
 
 
 /* Common settings disclosure */
@@ -485,26 +504,23 @@ small {
   box-shadow: 0 8px 24px rgba(23, 49, 82, .06), 0 1px 0 rgba(255, 255, 255, .88) inset;
 }
 
-#panel-config .config-common-settings,
-#panel-config .config-module-details {
+#panel-config .config-runtime-details {
   background: linear-gradient(180deg, rgba(255, 255, 255, .98), rgba(247, 250, 254, .93));
 }
 
-#panel-config .config-common-settings > summary,
-#panel-config .config-module-details > summary {
+#panel-config .config-runtime-details > summary {
   min-height: 72px;
   padding: 2px;
   border-radius: 6px;
   transition: background-color .16s ease, box-shadow .16s ease;
 }
 
-#panel-config .config-common-settings > summary:hover,
-#panel-config .config-module-details > summary:hover {
+#panel-config .config-runtime-details > summary:hover {
   background: rgba(231, 240, 252, .58);
 }
 
 #panel-config .config-common-settings > summary:focus-visible,
-#panel-config .config-module-details > summary:focus-visible,
+#panel-config .config-runtime-details > summary:focus-visible,
 #panel-config .migration-summary:focus-visible,
 #panel-config .storage-summary:focus-visible,
 #panel-config .appearance-summary:focus-visible,
@@ -514,12 +530,12 @@ small {
 }
 
 #panel-config .config-common-settings > summary h2,
-#panel-config .config-module-details > summary h2 {
+#panel-config .config-runtime-details > summary h2 {
   margin-bottom: 4px;
 }
 
 #panel-config .config-common-settings > summary p,
-#panel-config .config-module-details > summary p {
+#panel-config .config-runtime-details > summary p {
   max-width: 780px;
   margin: 0;
 }
@@ -647,12 +663,12 @@ small {
   border-radius: 7px;
 }
 
-#panel-config .config-module-details-body {
+#panel-config .config-runtime-details-body {
   padding-top: 16px;
   border-top: 1px solid rgba(160, 182, 211, .32);
 }
 
-#panel-config .config-module-details[open] > summary,
+#panel-config .config-runtime-details[open] > summary,
 #panel-config .config-common-settings[open] > summary {
   margin-bottom: 14px;
 }
@@ -664,7 +680,7 @@ small {
   }
 
   #panel-config .config-common-settings > summary,
-  #panel-config .config-module-details > summary {
+  #panel-config .config-runtime-details > summary {
     min-height: 0;
   }
 
@@ -680,6 +696,203 @@ small {
   #panel-config .appearance-body,
   #panel-config .access-body {
     padding: 12px 13px 13px;
+  }
+}
+
+/* Configuration page consolidation */
+#panel-config .config-common-settings {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#panel-config .config-common-settings > summary {
+  min-height: 0;
+  padding: 0 0 14px;
+  border-radius: 0;
+  border-bottom: 1px solid rgba(160, 182, 211, .42);
+}
+
+#panel-config .config-common-settings > summary:hover {
+  background: transparent;
+}
+
+#panel-config .config-common-settings > summary h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#panel-config .config-common-settings > summary h2::before {
+  content: "";
+  width: 4px;
+  height: 16px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent), var(--blue));
+}
+
+#panel-config .config-common-settings[open] > summary {
+  margin-bottom: 0;
+}
+
+#panel-config .config-common-settings-body {
+  gap: 16px;
+  padding-top: 16px;
+  border-top: 0;
+}
+
+#panel-config .config-common-section-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+#panel-config .config-common-section-head::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  margin-left: 10px;
+  background: rgba(160, 182, 211, .34);
+}
+
+#panel-config .access-coverage-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(160, 182, 211, .34);
+  border-radius: 7px;
+  background: rgba(247, 250, 254, .76);
+}
+
+#panel-config .access-coverage-panel header {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+#panel-config .config-runtime-details {
+  padding: 0;
+}
+
+#panel-config .config-runtime-details > summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 72px;
+  padding: 14px 16px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+#panel-config .config-runtime-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+#panel-config .config-runtime-details > summary::after {
+  content: "展开";
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 5px 12px;
+  border: 1px solid rgba(71, 103, 148, .22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .72);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+#panel-config .config-runtime-details[open] > summary::after {
+  content: "收起";
+}
+
+#panel-config .config-runtime-details[open] > summary {
+  margin-bottom: 0;
+  background: rgba(231, 240, 252, .58);
+}
+
+#panel-config .config-runtime-details-body {
+  padding: 14px 16px 16px;
+  border-top: 1px solid rgba(160, 182, 211, .26);
+}
+
+#panel-config .runtime-settings-form {
+  display: grid;
+  gap: 16px;
+}
+
+#panel-config .runtime-settings-section {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(160, 182, 211, .26);
+}
+
+#panel-config .runtime-settings-section:last-of-type {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+#panel-config .runtime-settings-section-head {
+  display: grid;
+  gap: 4px;
+}
+
+#panel-config .runtime-settings-section-head h3,
+#panel-config .runtime-settings-section-head p {
+  margin: 0;
+}
+
+#panel-config .runtime-settings-section-head h3 {
+  font-size: 15px;
+}
+
+#panel-config .runtime-settings-section-head p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+#panel-config .runtime-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+#panel-config .runtime-settings-grid > .weather-location-option {
+  grid-column: 1 / -1;
+}
+
+#panel-config .runtime-settings-grid .weather-location-option > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+@media (max-width: 760px) {
+  #panel-config .config-common-settings > summary {
+    padding-bottom: 12px;
+  }
+
+  #panel-config .config-runtime-details > summary,
+  #panel-config .config-runtime-details-body {
+    padding-right: 13px;
+    padding-left: 13px;
+  }
+
+  #panel-config .runtime-settings-grid,
+  #panel-config .runtime-settings-grid .weather-location-option > div {
+    grid-template-columns: 1fr;
   }
 }
 

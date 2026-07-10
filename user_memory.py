@@ -2465,6 +2465,17 @@ class UserMemoryMixin:
             and re.search(r"(哈|哈哈|hhh|笑死|啦|嘛|呀|哦|捏|~|～|w)", cleaned, re.IGNORECASE)
         )
 
+    def _is_playful_or_ambiguous_boundary(self, text: str) -> bool:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return False
+        if self._is_soft_playful_boundary(cleaned):
+            return True
+        return bool(
+            re.search(r"(开玩笑|闹着玩|不是认真的|别当真|随口|口嗨|逗你|玩梗)", cleaned)
+            or re.search(r"(哈哈|呵呵|hhh|hha|笑死|绷不住|乐了|233|~|～|qwq|w$)", cleaned, re.IGNORECASE)
+        )
+
     def _action_preference_hint(self, user: dict[str, Any] | None = None) -> str:
         if not isinstance(user, dict):
             return ""
@@ -2521,21 +2532,38 @@ class UserMemoryMixin:
         source = "default"
         reason = ""
         target_hint, third_party_hint = self._intent_target_hint(cleaned)
-        strong_boundary = bool(
-            re.search(r"(别再|不要再|不许|闭嘴|别吵|别烦|别打扰|不要烦|不想理你|离我远点|别靠近|别贴|别撒娇)", cleaned)
-            or re.search(r"(讨厌你|烦你|你.*太吵|你.*打扰)", cleaned)
-        )
         weak_boundary = bool(re.search(r"(别|不要|讨厌|烦)", cleaned))
         soft_play_boundary = self._is_soft_playful_boundary(cleaned)
-        if strong_boundary or (weak_boundary and target_hint and not third_party_hint and not soft_play_boundary):
+        playful_or_ambiguous = self._is_playful_or_ambiguous_boundary(cleaned)
+        durable_boundary = bool(
+            target_hint
+            and not third_party_hint
+            and not playful_or_ambiguous
+            and re.search(
+                r"(?:以后|之后).{0,8}(?:别|不要)|(?:别再|不要再|不许).{0,12}(?:这样|烦|吵|打扰|靠近|贴|撒娇|叫我|问我|说话)|(?:不想|不愿).{0,10}(?:理你|跟你聊|继续聊)|(?:离我远点|别打扰我|别靠近|别贴|别撒娇)",
+                cleaned,
+            )
+        )
+        single_turn_boundary = bool(
+            target_hint
+            and not third_party_hint
+            and not playful_or_ambiguous
+            and re.search(r"(别|不要|讨厌|烦|闭嘴|滚|离远点)", cleaned)
+        )
+        if durable_boundary:
             intent = "boundary"
             emotion = "resistant"
             pressure += 3
             reply_style = "back_off"
-            confidence = 0.9 if strong_boundary else 0.72
-            source = "strong_rule" if strong_boundary else "targeted_boundary_rule"
-            reason = "用户明确对 Bot 表达边界" if target_hint else "用户表达强边界"
-        elif re.search(r"(烦|累|难受|崩溃|不想|想哭|emo|压力|焦虑|失眠|疼|委屈)", cleaned, re.IGNORECASE):
+            confidence = 0.9
+            source = "durable_boundary_rule"
+            reason = "用户明确、持续地对 Bot 表达边界"
+        elif single_turn_boundary:
+            reply_style = "short"
+            confidence = 0.58
+            source = "single_turn_boundary"
+            reason = "单句负向表达，先按当下语境短答，不写入长期关系状态"
+        elif not playful_or_ambiguous and re.search(r"(烦|累|难受|崩溃|不想|想哭|emo|压力|焦虑|失眠|疼|委屈)", cleaned, re.IGNORECASE):
             intent = "comfort"
             emotion = "low"
             pressure += 2
@@ -2573,7 +2601,15 @@ class UserMemoryMixin:
             confidence = 0.62
             source = "short_chat_rule"
             reason = "短句普通接话"
-        emotion_event = self._classify_relationship_emotion_event(cleaned, intent_context={"confidence": confidence, "source": source})
+        emotion_event = self._classify_relationship_emotion_event(
+            cleaned,
+            intent_context={
+                "confidence": confidence,
+                "source": source,
+                "boundary_durable": durable_boundary,
+                "playful_or_ambiguous": playful_or_ambiguous,
+            },
+        )
         return {
             "intent": intent,
             "emotion": emotion,
@@ -2588,6 +2624,8 @@ class UserMemoryMixin:
             "emotion_target": emotion_event.get("target", "none"),
             "emotion_rule": emotion_event.get("rule", ""),
             "emotion_confidence": round(_safe_float(emotion_event.get("confidence"), 0.0), 2),
+            "boundary_durable": durable_boundary,
+            "playful_or_ambiguous": playful_or_ambiguous,
             "text": cleaned,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
@@ -2607,6 +2645,10 @@ class UserMemoryMixin:
                 pass
         lower = cleaned.lower()
         intent_source = str((intent_context or {}).get("source") or "")
+        boundary_durable = bool((intent_context or {}).get("boundary_durable"))
+        playful_or_ambiguous = bool((intent_context or {}).get("playful_or_ambiguous"))
+        if playful_or_ambiguous or intent_source in {"soft_boundary_play_rule", "weak_boundary_ignored", "single_turn_boundary"}:
+            return {"event": "neutral", "intensity": 0, "reason": "玩笑或单句边界不作为情绪余波依据", "target": "none", "rule": "playful_or_single_boundary", "confidence": 0.8}
         target_hint, third_party_hint = self._intent_target_hint(cleaned)
         self_low = bool(re.search(r"(我好|我真|我太|我是不是|我就是|我是).{0,12}(废物|垃圾|没用|傻|笨|恶心|讨厌)", cleaned))
         direct_bot_negative = bool(
@@ -2637,7 +2679,7 @@ class UserMemoryMixin:
         praise = bool(re.search(r"(喜欢你|爱你|可爱|厉害|真好|谢谢你|辛苦|最棒|夸夸)", cleaned))
         if self_low:
             return {"event": "comfort_need", "intensity": 62, "reason": "用户自我否定或低落", "target": "self", "rule": "self_low", "confidence": 0.88}
-        if intent_source in {"strong_rule", "targeted_boundary_rule"} and not direct_bot_negative and not identity_hurt:
+        if intent_source == "durable_boundary_rule" and not direct_bot_negative and not identity_hurt:
             return {"event": "neutral", "intensity": 0, "reason": "用户在表达相处边界", "target": "bot", "rule": "boundary_goes_relationship", "confidence": 0.82}
         if third_party_hint and severe_hurt and not direct_bot_negative:
             return {"event": "external_negative", "intensity": 54, "reason": "用户在评价第三方", "target": "other", "rule": "third_party_negative", "confidence": 0.78}
@@ -2652,7 +2694,7 @@ class UserMemoryMixin:
                 "confidence": confidence,
             }
         if identity_hurt:
-            return {"event": "hurt", "intensity": 76, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84}
+            return {"event": "hurt", "intensity": 76 if boundary_durable else 60, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84 if boundary_durable else 0.68}
         if mild_hurt:
             return {"event": "hurt", "intensity": 48, "reason": "轻度否定或拉开距离", "target": "bot", "rule": "mild_hurt", "confidence": 0.66}
         if apology:
@@ -2677,6 +2719,9 @@ class UserMemoryMixin:
             return False
         if self._is_structured_or_diagnostic_text(text):
             return False
+        source = str(intent.get("source") or "")
+        if bool(intent.get("playful_or_ambiguous")) or source in {"weak_boundary_ignored", "soft_boundary_play_rule", "single_turn_boundary"}:
+            return False
         mode = str(getattr(self, "emotion_judgement_mode", "suspicious") or "suspicious").lower()
         if mode in {"off", "none", "disabled"}:
             return False
@@ -2685,12 +2730,11 @@ class UserMemoryMixin:
         confidence = _safe_float(intent.get("confidence"), 0.5)
         emotion_confidence = _safe_float(intent.get("emotion_confidence"), confidence)
         event = str(intent.get("emotion_event") or "neutral")
-        source = str(intent.get("source") or "")
         return (
             event != "neutral"
             or confidence < 0.72
             or emotion_confidence < 0.72
-            or source in {"weak_boundary_ignored", "soft_boundary_play_rule", "targeted_boundary_rule"}
+            or source == "durable_boundary_rule"
             or bool(re.search(r"(别|不要|讨厌|烦|滚|闭嘴|对不起|抱歉|喜欢你|爱你|摸摸|抱抱)", text))
         )
 
@@ -2715,7 +2759,12 @@ class UserMemoryMixin:
             return None
         local_source = str(base_intent.get("source") or "")
         local_text = _single_line(base_intent.get("text"), 240)
-        if event == "hurt" and local_source in {"strong_rule", "targeted_boundary_rule"}:
+        if event == "hurt" and (
+            bool(base_intent.get("playful_or_ambiguous"))
+            or local_source in {"weak_boundary_ignored", "soft_boundary_play_rule", "single_turn_boundary"}
+        ):
+            return None
+        if event == "hurt" and local_source == "durable_boundary_rule":
             strong_negative = bool(
                 re.search(r"(滚|闭嘴|恶心|废物|垃圾|讨厌你|烦你|不想理你|没感情|假的|别装|别演|工具人)", local_text)
             )
@@ -2852,6 +2901,11 @@ Local classifier result:
             user["relationship_state"] = state
         now = _now_ts()
         previous_mode = str(state.get("mode") or "normal")
+        # Old versions did not mark whether a backoff came from a durable boundary.
+        # Clear those legacy one-shot states on the next interaction.
+        if previous_mode == "backoff" and not bool(state.get("backoff_is_durable")):
+            state["backoff_until"] = 0
+            previous_mode = "normal"
         current = previous_mode
         mood_score = self._decay_relationship_mood_score(state, now=now) if emotion_enabled else 0
         inbound_intent = str(intent.get("intent") or "chat")
@@ -2860,6 +2914,7 @@ Local classifier result:
         intensity = _safe_int(intent.get("emotion_intensity"), 0, 0, 100)
         intent_confidence = _safe_float(intent.get("confidence"), 0.5)
         emotion_confidence = _safe_float(intent.get("emotion_confidence"), intent_confidence)
+        boundary_durable = bool(intent.get("boundary_durable"))
         if emotion_event != "neutral" and emotion_confidence < 0.65:
             emotion_event = "neutral"
             intensity = 0
@@ -2871,7 +2926,7 @@ Local classifier result:
         if refuse_threshold <= hurt_threshold:
             refuse_threshold = min(100, hurt_threshold + 5)
         min_until = _safe_float(state.get("emotion_min_until"), 0)
-        if emotion_enabled and emotion_event == "hurt" and target in {"bot", "ambiguous"} and intensity >= hurt_threshold:
+        if emotion_enabled and emotion_event == "hurt" and target == "bot" and intensity >= hurt_threshold:
             over_threshold = max(0, intensity - hurt_threshold)
             penalty = max(8, 12 + int(over_threshold * 0.65))
             if target == "ambiguous":
@@ -2935,9 +2990,10 @@ Local classifier result:
             and mood_score < 0
         ):
             current = "refusing" if previous_mode == "refusing" or abs(mood_score) >= refuse_threshold else "hurt"
-        elif relation_enabled and inbound_intent == "boundary" and intent_confidence >= 0.68:
+        elif relation_enabled and inbound_intent == "boundary" and boundary_durable and intent_confidence >= 0.82:
             current = "backoff"
             state["backoff_until"] = now + 6 * 3600
+            state["backoff_is_durable"] = True
             state["last_backoff_reason"] = reason or "用户表达边界或不想继续当前互动"
             state["last_backoff_text"] = _single_line(intent.get("text"), 160)
         elif relation_enabled and pressure >= 2 and intent_confidence >= 0.65:
@@ -2954,6 +3010,8 @@ Local classifier result:
             current = "backoff"
         else:
             current = "normal"
+        if current != "backoff":
+            state["backoff_is_durable"] = False
         if current not in {"hurt", "refusing"} and _safe_int(state.get("silence_turns"), 0, 0, 5) > 0:
             state["silence_turns"] = max(0, _safe_int(state.get("silence_turns"), 0, 0, 5) - 1)
         emotion_dimensions = (
@@ -4708,4 +4766,3 @@ Bot 主动后用户回复次数：{reply_count}
             f"气氛状态：{_single_line(self._format_intent_relationship_injection(user), 180) or '暂无'}\n"
             f"媒介偏好：{_single_line(self._action_preference_hint(user), 180) or '暂无'}"
         )
-

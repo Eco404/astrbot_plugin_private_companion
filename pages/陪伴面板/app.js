@@ -67,6 +67,7 @@ const state = {
   imageCacheLoaded: false,
   selectedImageCacheKey: "",
   troubleshootingFilter: "all",
+  troubleshootingCategory: "all",
   tokenSource: "companion",
   tokenView: "today",
   tokenDate: "",
@@ -110,6 +111,7 @@ const hiddenCompatibilityConfigKeys = new Set([
 const featureSwitchNotes = {
   enable_skill_growth_simulation: "自定义技能不在这里填写，请到观察页的“技能成长”卡片新增、隐藏、冻结成长或合并别名。",
   enable_food_menu_recommendation: "候选菜单在本功能详情页管理；观察页不再展示这块内容。",
+  enable_group_companion: "群聊名单和当前覆盖范围在“常用配置”的“群聊名单”中管理。",
 };
 
 const featureSwitchExcludedKeys = new Set([
@@ -804,6 +806,7 @@ const featureMeta = {
   enable_qzone_comment_inbox: ["评论收件箱", "低频查看自己说说下的新评论，并按需公开追加回复。"],
   enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；本地 ComfyUI 可在电脑忙时自动延后。"],
   enable_photo_reference_image: ["参考图一致性", "可选。自拍、人像、头像和角色表情包自动使用人设参考图或今日穿搭图保持外观；关闭后只按提示词生成。"],
+  enable_group_nsfw_private_fallback: ["群聊成图安全审核", "群聊成图先经视觉审核；安全图发群，其余结果仅私聊原请求者。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
   enable_private_reading_ask_recommendation: ["征求推荐", "空档或无聊时，低频私聊询问用户有没有合适的私密阅读推荐。"],
@@ -968,6 +971,7 @@ const embeddedFeatureParentByKey = {
   enable_qzone_comment_inbox: "enable_qzone_integration",
   enable_qzone_emotional_vent_publish: "enable_emotion_simulation",
   enable_photo_reference_image: "enable_photo_text_action",
+  enable_group_nsfw_private_fallback: "enable_photo_text_action",
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
   enable_private_reading_preference_influence: "enable_private_reading_integration",
@@ -1407,12 +1411,18 @@ const configLabels = {
   photo_action_max_daily: "每日主动生图上限",
   proactive_photo_text_probability: "主动带图触发概率",
   photo_generation_backend: "主动生图后端",
+  custom_photo_tool_name: "函数工具名",
+  custom_photo_tool_prompt_param: "提示词参数名",
+  custom_photo_tool_kind_param: "类型参数名",
+  custom_photo_tool_reference_param: "参考图参数名",
+  custom_photo_tool_extra_params: "额外参数（JSON）",
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "文生图工作流",
   COMFYUI_SELFIE_WORKFLOW_NAME: "自拍工作流",
   enable_photo_reference_image: "参考图一致性",
   photo_persona_reference_image_path: "人设参考图路径",
   enable_daily_outfit_photo: "每日穿搭照片",
   daily_outfit_photo_prompt: "每日穿搭提示词",
+  daily_outfit_rotation_days: "穿搭轮换冷却天数",
   enable_natural_language_photo_generation: "允许规则快判生图/改图",
   natural_language_photo_generation_mode: "非指令生图处理方式",
   natural_language_photo_generation_max_daily: "规则快判生图上限",
@@ -1761,6 +1771,7 @@ const configDescriptions = {
   photo_persona_reference_image_path: "可选。仅在参考图一致性开启时使用。png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 不支持参考图。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
   daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
+  daily_outfit_rotation_days: "保留最近成功生成的穿搭档案，并优先避开相同主色、外层和轮廓。每次至少换掉最近一套的两个可见维度，手动重生也会轮换。",
   enable_natural_language_photo_generation: "只控制“规则快判”模式是否允许插件在主链前直接接管生图。默认建议用工具优先，让主链模型调用 pc_generate_photo；工具不稳定时再切到规则快判。",
   natural_language_photo_generation_mode: "tool_first：普通聊天先进主链，由模型调用 pc_generate_photo；rule_fast：插件在主链前用规则直接接管高置信生图请求；off：不做非指令生图前置处理。",
   natural_language_photo_generation_max_daily: "只作用于 rule_fast 规则快判入口，独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭规则快判生图/改图。",
@@ -1919,7 +1930,7 @@ const featureSettingGroups = {
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
-  enable_group_companion: ["group_access_mode", "group_whitelist_ids", "group_blacklist_ids"],
+  enable_group_companion: [],
   enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
   enable_group_air_reply_guard: ["group_air_guard_window_seconds", "group_air_guard_max_bot_replies", "group_air_guard_polite_loop_limit"],
   enable_group_high_intensity_mode: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
@@ -1954,7 +1965,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
@@ -2380,8 +2391,13 @@ const featureSettingSections = {
     },
     {
       title: "后端选择",
-      note: "本地 ComfyUI、SDGen、在线图片 API 和函数工具的优先关系。",
-      keys: ["photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params"],
+      note: "选择自动、在线 API、ComfyUI、SDGen 或函数工具作为生图后端。",
+      keys: ["photo_generation_backend"],
+    },
+    {
+      title: "函数工具生图",
+      note: "选择“函数工具”后，在此填写其他插件注册的工具名及其参数映射。",
+      keys: ["custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params"],
     },
     {
       title: "本地 ComfyUI",
@@ -2394,9 +2410,14 @@ const featureSettingSections = {
       keys: ["enable_photo_reference_image", "photo_persona_reference_image_path"],
     },
     {
+      title: "群聊安全投递",
+      note: "默认关闭。开启后，审核为安全的图发群；任何不适合群内发送或审核失败的图都仅尝试私聊原请求者。",
+      keys: ["enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds"],
+    },
+    {
       title: "每日穿搭",
-      note: "日程生成后额外生成一张角色当天穿搭照，用作拓展页左上角图像。",
-      keys: ["enable_daily_outfit_photo", "daily_outfit_photo_prompt"],
+      note: "日程生成后额外生成一张角色当天穿搭照；会按近期造型轮换主色、层次和版型，用作拓展页左上角图像。",
+      keys: ["enable_daily_outfit_photo", "daily_outfit_photo_prompt", "daily_outfit_rotation_days"],
     },
     {
       title: "非指令生图/改图",
@@ -4655,7 +4676,7 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "不知道选什么就先用自动；如果只配置了其中一种后端，也可以直接指定。选择 tool_call 可调用其他插件注册的函数工具来生图。" },
-        { key: "custom_photo_tool_name", type: "text", label: "自定义生图函数工具名", placeholder: "例如 generate_selfie", description: "生图后端选择 tool_call 时必填。填写其他插件通过 @filter.llm_tool 注册的函数工具名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
+        { key: "custom_photo_tool_name", type: "text", label: "自定义生图函数工具名", placeholder: "例如 generate_selfie", description: "填写其他插件通过 @filter.llm_tool 注册的函数工具名。填写后将生图后端切为“函数工具”；未选择该后端时此项不会生效。" },
         { key: "custom_photo_tool_prompt_param", type: "text", label: "提示词参数名", placeholder: "prompt", description: "调用工具时提示词使用的参数名，默认为 prompt。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
         { key: "custom_photo_tool_kind_param", type: "text", label: "类型参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持传入生图类型（如 selfie/text2img/edit），填写对应参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
         { key: "custom_photo_tool_reference_param", type: "text", label: "参考图参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持参考图/改图，填写参考图路径对应的参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
@@ -4669,6 +4690,8 @@ const setupGuideAdvancedItems = {
         { key: "COMFYUI_SELFIE_WORKFLOW_NAME", type: "text", label: "ComfyUI 自拍工作流", placeholder: "selfie_workflow", description: "用于自拍、人像、头像和角色表情包；没有单独工作流可先填同一个。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。" },
         { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "仅在参考图一致性开启时使用；本地路径和图片 URL 都可以。", showWhen: (draft) => Boolean(draft.enable_photo_reference_image) },
+        { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "feature", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
+        { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => Boolean(draft.enable_group_nsfw_private_fallback) },
         { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
         { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => String(draft.photo_generation_style || "") === "其他" },
         { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
@@ -7671,7 +7694,38 @@ function labeledRoleplayValuePresent(text, label) {
   return Boolean(match && String(match[1] || "").trim());
 }
 
+const troubleshootingCategories = {
+  all: { label: "全部概览", description: "先看所有正在影响功能的信号", keywords: [] },
+  reply: { label: "回复", description: "没有回复、回复异常或内容被带偏", keywords: ["回复", "llm", "防抖", "沉默", "token", "模型", "注入", "上下文", "群聊"] },
+  proactive: { label: "主动", description: "主动消息没有发出、被延后或被丢弃", keywords: ["主动", "候选", "静默", "冷却", "预约", "人格", "配额", "未回复"] },
+  image_generation: { label: "生图", description: "文生图、自拍、参考图或图片下载失败", keywords: ["生图", "图片生成", "文生图", "自拍", "参考图", "comfy", "图像 api", "image"] },
+  image_recognition: { label: "识图", description: "图片识别、视觉模型、转述或窥屏异常", keywords: ["识图", "图片识别", "视觉", "转述", "窥屏", "screen", "vision"] },
+  voice: { label: "语音", description: "TTS 设置、真实语音 Provider 或音频生成失败", keywords: ["tts", "语音", "音频", "朗读", "voice"] },
+};
+
+function troubleshootingCategoryInfo(category) {
+  return troubleshootingCategories[category] || troubleshootingCategories.all;
+}
+
+function troubleshootingCategoryPickerMarkup(selected) {
+  return Object.entries(troubleshootingCategories).map(([key, item]) => `
+    <button type="button" class="diagnostic-category ${key === selected ? "is-active" : ""}" data-troubleshooting-category="${escapeHtml(key)}" role="tab" aria-selected="${key === selected}">
+      <b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.description)}</span>
+    </button>
+  `).join("");
+}
+
+function troubleshootingFilterByCategory(items, category) {
+  const keywords = troubleshootingCategoryInfo(category).keywords;
+  if (!keywords.length) return items;
+  return items.filter((item) => {
+    const text = [item.title, item.text, item.detail, item.source, item.action, item.task, item.key].join(" ").toLowerCase();
+    return keywords.some((keyword) => text.includes(keyword));
+  });
+}
+
 function renderTroubleshooting() {
+  const categoriesEl = $("#troubleshootingCategories");
   const summaryEl = $("#troubleshootingSummary");
   const checksEl = $("#troubleshootingChecks");
   const eventsEl = $("#troubleshootingEvents");
@@ -7680,17 +7734,26 @@ function renderTroubleshooting() {
   const injectionsEl = $("#troubleshootingPromptInjections");
   const debounceEl = $("#troubleshootingDebounceTrace");
   const faqEl = $("#troubleshootingFaq");
+  const runtimeStackEl = $("#troubleshootingRuntimeStack");
   if (!summaryEl || !checksEl || !eventsEl || !sqliteEl || !chainEl || !injectionsEl) return;
   const data = state.troubleshooting || {};
   const summary = data.summary || {};
   const counts = summary.counts || {};
   const level = summary.level || "info";
   const selected = state.troubleshootingFilter || "all";
+  const category = state.troubleshootingCategory || "all";
+  const categoryInfo = troubleshootingCategoryInfo(category);
   const checks = Array.isArray(data.checks) ? data.checks : [];
   const events = Array.isArray(data.recent_events) ? data.recent_events : [];
-  const filteredChecks = selected === "all" ? checks : checks.filter((item) => item.level === selected);
-  const filteredEvents = selected === "all" ? events : events.filter((item) => item.level === selected);
+  const categorizedChecks = troubleshootingFilterByCategory(checks, category);
+  const categorizedEvents = troubleshootingFilterByCategory(events, category);
+  const filteredChecks = selected === "all" ? categorizedChecks : categorizedChecks.filter((item) => item.level === selected);
+  const filteredEvents = selected === "all" ? categorizedEvents : categorizedEvents.filter((item) => item.level === selected);
   const reasonItems = troubleshootingReasonItems(filteredChecks, filteredEvents, selected);
+  if (categoriesEl) categoriesEl.innerHTML = troubleshootingCategoryPickerMarkup(category);
+  $("#troubleshootingChecksTitle")?.replaceChildren(document.createTextNode(`${categoryInfo.label}：需要处理的信号`));
+  $("#troubleshootingChainTitle")?.replaceChildren(document.createTextNode(`${categoryInfo.label}：链路与运行状态`));
+  $("#troubleshootingEventsTitle")?.replaceChildren(document.createTextNode(`${categoryInfo.label}：最近问题`));
   summaryEl.innerHTML = `
     <section class="troubleshooting-head-card ${escapeHtml(level)}">
       <div>
@@ -7709,7 +7772,7 @@ function renderTroubleshooting() {
     ${troubleshootingProactiveIntensityMarkup(data.proactive_intensity || state.overview?.proactive_intensity || {})}
     <section class="troubleshooting-reasons">
       <header>
-        <b>${escapeHtml(selected === "all" ? "近 2 小时待处理原因" : `${troubleshootingLevelLabel(selected)}原因`)}</b>
+        <b>${escapeHtml(selected === "all" ? `近 2 小时${categoryInfo.label}待处理原因` : `${troubleshootingLevelLabel(selected)}原因`)}</b>
         <span>${escapeHtml(selected === "all" ? "只展示近期需要处理的错误和警告；普通信息可点信息查看" : "筛选同时作用于常见问题检查和最近问题")}</span>
       </header>
       ${reasonItems.length ? reasonItems.map((item) => `
@@ -7725,10 +7788,10 @@ function renderTroubleshooting() {
   });
   checksEl.innerHTML = filteredChecks.length
     ? filteredChecks.map((item) => troubleshootingCheckMarkup(item)).join("")
-    : `<div class="empty small">暂无${escapeHtml(selected === "all" ? "" : troubleshootingLevelLabel(selected))}常见问题检查项</div>`;
+    : `<div class="empty small">暂无${escapeHtml(selected === "all" ? "" : troubleshootingLevelLabel(selected))}${escapeHtml(categoryInfo.label)}相关检查项</div>`;
   eventsEl.innerHTML = filteredEvents.length
     ? filteredEvents.map((item) => troubleshootingEventMarkup(item)).join("")
-    : `<div class="empty small">暂无${escapeHtml(selected === "all" ? "" : troubleshootingLevelLabel(selected))}最近问题记录</div>`;
+    : `<div class="empty small">暂无${escapeHtml(selected === "all" ? "" : troubleshootingLevelLabel(selected))}${escapeHtml(categoryInfo.label)}相关问题记录</div>`;
   const sqlite = data.sqlite || {};
   const sqliteItems = Array.isArray(sqlite.items) ? sqlite.items : [];
   sqliteEl.innerHTML = sqliteItems.length
@@ -7745,9 +7808,20 @@ function renderTroubleshooting() {
     data.recent_photo_generations || [],
     data.screen_companion || state.overview?.screen_companion || {},
     data.qzone || state.overview?.qzone || {},
+    data.tts || {},
+    category,
   );
-  injectionsEl.innerHTML = troubleshootingPromptInjectionMarkup(data.prompt_injections || {});
-  if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data);
+  injectionsEl.innerHTML = ["all", "reply", "voice"].includes(category)
+    ? troubleshootingPromptInjectionMarkup(data.prompt_injections || {})
+    : `<div class="empty small">${escapeHtml(categoryInfo.label)}问题通常不需要查看提示词注入记录。</div>`;
+  if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data, category);
+  const showSqlite = ["all", "reply"].includes(category);
+  const showDebounce = ["all", "reply", "proactive"].includes(category);
+  const sqliteCard = sqliteEl?.closest(".diagnostic-runtime-card");
+  const debounceCard = debounceEl?.closest(".diagnostic-runtime-card");
+  if (sqliteCard) sqliteCard.hidden = !showSqlite;
+  if (debounceCard) debounceCard.hidden = !showDebounce;
+  if (runtimeStackEl) runtimeStackEl.hidden = !showSqlite && !showDebounce;
   if (debounceEl) {
     debounceEl.innerHTML = troubleshootingDebounceTraceMarkup(state.overview?.message_debounce || {});
   }
@@ -7896,7 +7970,7 @@ function troubleshootingEventMarkup(item) {
   `;
 }
 
-function troubleshootingFaqMarkup(data = {}) {
+function troubleshootingFaqMarkup(data = {}, category = "all") {
   const chainTests = data.chain_tests || {};
   const proactiveTest = chainTests.proactive_message || {};
   const imageTest = chainTests.image_generation_text2img || chainTests.image_generation || {};
@@ -7914,6 +7988,7 @@ function troubleshootingFaqMarkup(data = {}) {
     : "当前没有可展示的注入链路记录";
   const items = [
     {
+      category: "proactive",
       title: "为什么没有主动消息？",
       meta: proactiveMeta,
       body: [
@@ -7928,6 +8003,7 @@ function troubleshootingFaqMarkup(data = {}) {
       ],
     },
     {
+      category: "image_generation",
       title: "为什么生图失败？",
       meta: imageMeta,
       body: [
@@ -7942,6 +8018,34 @@ function troubleshootingFaqMarkup(data = {}) {
       ],
     },
     {
+      category: "image_recognition",
+      title: "为什么图片没有被识别？",
+      meta: "先确认视觉模型与图片转述路径可用",
+      body: [
+        "检查 AstrBot 图片转文字或插件视觉恢复候选是否可用；视觉 Provider 被冷却、图片 URL 无法下载或文件已失效都会导致识别跳过。",
+        "如果是屏幕观察，先运行“测试窥屏”；如果是聊天图片，再确认图片缓存页面中对应文件可以正常打开。",
+      ],
+      actions: [
+        { label: "看图片缓存", tab: "image-cache" },
+        { label: "看模型页", tab: "models" },
+      ],
+    },
+    {
+      category: "voice",
+      title: "为什么没有发送语音？",
+      meta: "文本转换模型不等于语音合成 Provider",
+      body: [
+        "先看上方“真实语音 Provider”：只有 AstrBot 会话已启用且可取得 TTS Provider，插件才能把语音文本真正合成为音频。",
+        "TTS 文本转换模型只负责判断、翻译或改写朗读内容；它不可替代真正的 TTS Provider。",
+        "运行“测试 TTS 生成”会直接调用当前会话 Provider，并报告返回的音频文件或失败原因。",
+      ],
+      actions: [
+        { label: "测试 TTS 生成", test: "tts_generation" },
+        { label: "看常用配置", tab: "config" },
+      ],
+    },
+    {
+      category: "reply",
       title: "为什么回复像被注入或带偏？",
       meta: "优先看“最近注入内容”和群聊防注入记录",
       body: [
@@ -7955,6 +8059,7 @@ function troubleshootingFaqMarkup(data = {}) {
       ],
     },
     {
+      category: "reply",
       title: "为什么排障页没有注入记录？",
       meta: injectionMeta,
       body: [
@@ -7968,7 +8073,9 @@ function troubleshootingFaqMarkup(data = {}) {
       ],
     },
   ];
-  return items.map((item, index) => `
+  const visibleItems = category === "all" ? items : items.filter((item) => item.category === category);
+  if (!visibleItems.length) return `<div class="empty small">当前问题类型暂时没有额外说明；先运行上方对应的链路测试。</div>`;
+  return visibleItems.map((item, index) => `
     <details class="troubleshooting-faq-item" ${index < 2 ? "open" : ""}>
       <summary>
         <span>
@@ -7994,9 +8101,10 @@ function troubleshootingFaqMarkup(data = {}) {
   `).join("");
 }
 
-function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], screenCompanion = {}, qzone = {}) {
+function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], screenCompanion = {}, qzone = {}, tts = {}, category = "all") {
   const tests = [
     {
+      category: "image_generation",
       type: "image_generation_text2img",
       workflowKind: "text2img",
       title: "文生图",
@@ -8004,6 +8112,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       button: "测试文生图",
     },
     {
+      category: "image_generation",
       type: "image_generation_selfie",
       workflowKind: "selfie",
       title: "自拍/参考图",
@@ -8011,18 +8120,21 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       button: "测试自拍",
     },
     {
+      category: "voice",
       type: "tts_generation",
       title: "TTS 生成",
       text: "实际调用当前会话 TTS provider 并检查音频文件",
       button: "测试 TTS 生成",
     },
     ...(screenCompanion?.available ? [{
+      category: "image_recognition",
       type: "screen_peek",
       title: "窥屏",
       text: "实际调用 screen_companion 识屏入口，确认屏幕观察链路可用",
       button: "测试窥屏",
     }] : []),
     {
+      category: "reply",
       type: "qzone_integration",
       title: "QQ 空间",
       text: qzone?.enabled
@@ -8031,19 +8143,22 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       button: "测试 QQ 空间",
     },
     {
+      category: "proactive",
       type: "proactive_message",
       title: "主动消息",
       text: "预约 1 分钟后的临时主动私聊，检查生成、复核、发送和历史归档",
       button: "测试主动消息",
     },
     {
+      category: "reply",
       type: "model_diagnostics",
       title: "模型数据排障",
       text: "检查技能、群黑话、关系网、长期画像和表达学习里的模型理解杂音；只给建议，不自动修改",
       button: "运行模型排障",
     },
   ];
-  const testsMarkup = tests.map((test) => {
+  const visibleTests = category === "all" ? tests : tests.filter((test) => test.category === category);
+  const testsMarkup = visibleTests.map((test) => {
     const result = results?.[test.type]
       || (test.type === "image_generation_text2img" ? results?.image_generation : null)
       || (test.type === "model_diagnostics" ? results?.skill_similarity : null)
@@ -8081,7 +8196,24 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       </section>
     `;
   }).join("");
-  return `${testsMarkup}${troubleshootingRecentPhotoGenerationMarkup(recentPhotoGenerations)}`;
+  const photoHistory = ["all", "image_generation"].includes(category)
+    ? troubleshootingRecentPhotoGenerationMarkup(recentPhotoGenerations)
+    : "";
+  const empty = visibleTests.length ? "" : `<div class="empty small">当前问题类型没有可直接运行的链路测试。</div>`;
+  return `${category === "voice" ? troubleshootingTtsRuntimeMarkup(tts) : ""}${testsMarkup || empty}${photoHistory}`;
+}
+
+function troubleshootingTtsRuntimeMarkup(tts = {}) {
+  const rows = [
+    ["目标会话", tts.umo || "未找到已启用的私聊会话"],
+    ["TTS 强化", tts.enhancement_enabled ? "已开启" : "未开启"],
+    ["AstrBot 会话 TTS", tts.settings_enabled ? "已启用" : "未启用"],
+    ["真实语音 Provider", tts.provider_available ? (tts.provider_label || "可用") : "当前不可用"],
+  ];
+  const hint = tts.provider_available
+    ? "文本转换模型只负责判断或改写文本；这里显示的是实际生成音频的 Provider。"
+    : "请在 AstrBot 目标会话中启用真实 TTS Provider；文本转换模型不能直接生成语音。";
+  return `<section class="troubleshooting-tts-runtime"><header><div><span>语音运行态</span><b>${escapeHtml(tts.mode || "fast_tag")}</b></div><button type="button" data-troubleshooting-test="tts_generation">运行 TTS 生成测试</button></header><div>${rows.map(([label, value]) => `<p><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></p>`).join("")}</div><small>${escapeHtml(hint)}</small></section>`;
 }
 
 function troubleshootingChainDetailText(test, result, hasResult) {
@@ -14056,35 +14188,51 @@ function renderModuleSettings() {
   fillForm("#roleplayProfileForm", formValues);
   fillForm("#privateAliasForm", formValues);
   fillForm("#quickModuleForm", formValues);
-  fillForm("#environmentModuleForm", formValues);
-  fillForm("#privateModuleForm", formValues);
-  fillForm("#groupModuleForm", formValues);
-  fillForm("#worldbookModuleForm", formValues);
-  fillForm("#memoryModuleForm", formValues);
-  fillForm("#longTermModuleForm", formValues);
-  renderImageApiSwapSummary(settings);
-  setPrivateReadingConfigVisible(isPrivateReadingAvailable());
+  fillForm("#runtimeSettingsForm", formValues);
+  renderWeatherConfigGuide(settings);
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
   renderQuickStartStatus(settings);
   document.querySelectorAll(".module-form").forEach((form) => markModuleFormClean(form));
-  updateMessageDebounceConfigVisibility();
-  updateSegmentedConfigVisibility($("#privateModuleForm"));
-  renderSegmentedPreview();
-  renderNewsSourceManager();
   renderExternalAbilities();
   renderPresetCards();
 }
 
-function renderImageApiSwapSummary(settings = state.overview?.settings || {}) {
-  const box = $("#imageApiSwapSummary");
+function renderWeatherConfigGuide(settings = state.overview?.settings || {}) {
+  const box = $("#weatherConfigSummary");
   if (!box) return;
-  const endpoints = photoApiEndpointInitialList(settings);
-  const ready = endpoints.filter(photoApiEndpointComplete).length;
-  const names = endpoints.slice(0, 4).map((endpoint, index) => `${index + 1}.${endpoint.name || endpoint.model || "在线 API"}`).join(" / ");
-  box.textContent = endpoints.length >= 2
-    ? `当前在线 API 队列：${names}。完整 ${ready}/${endpoints.length} 条；点击后交换前两条优先级。`
-    : `当前在线 API 队列只有 ${endpoints.length} 条；至少配置两条后才能快速切换优先级。`;
+  const overview = state.overview || {};
+  const cache = overview.cache?.weather || {};
+  const enabled = toBool(settings.enable_weather_context);
+  const apiKey = String(settings.weather_api_key || "").trim();
+  const city = String(settings.weather_city || "").trim();
+  const lat = Number(settings.weather_lat || 0);
+  const lon = Number(settings.weather_lon || 0);
+  const hasCoordinates = Number.isFinite(lat) && Number.isFinite(lon) && lat !== 0 && lon !== 0;
+  const screenAvailable = Boolean(overview.screen_companion?.available);
+  const sourceLabels = {
+    private_companion: "本插件 OpenWeatherMap",
+    screen_companion: "screen_companion 回退",
+    disabled: "已关闭",
+    none: "暂无可用来源",
+  };
+  const source = sourceLabels[String(cache.source || "")] || "";
+  let status = "";
+  if (!enabled) {
+    status = "天气上下文已关闭，不会参与日程、日记或主动话题。";
+  } else if (apiKey && (city || hasCoordinates)) {
+    status = `独立查询已就绪：${city ? `城市 ${city}` : "经纬度定位"}。`;
+  } else if (screenAvailable) {
+    status = "未完成独立天气配置，当前会尝试复用 screen_companion 的天气能力。";
+  } else if (apiKey) {
+    status = "已填写 API Key，但还缺少城市或一组经纬度。";
+  } else {
+    status = "尚未配置独立天气；填写 Key 和城市即可启用，或安装 screen_companion 作为回退。";
+  }
+  const runtime = source
+    ? ` 最近结果：${source}${cache.summary ? `，${cache.summary}` : ""}${cache.age ? `（${cache.age}）` : ""}。`
+    : "";
+  box.textContent = status + runtime;
 }
 
 function renderQuickStartStatus(settings) {
@@ -14313,32 +14461,11 @@ function moduleWorkbenchCard(item) {
   `;
 }
 
-function updateMessageDebounceConfigVisibility() {
-  const smartEnabled = Object.prototype.hasOwnProperty.call(state.featureDraft || {}, "enable_smart_message_debounce")
-    ? Boolean(state.featureDraft.enable_smart_message_debounce)
-    : toBool(state.overview?.settings?.enable_smart_message_debounce);
-  document.querySelectorAll("[data-fixed-text-debounce-field]").forEach((row) => {
-    row.hidden = smartEnabled;
-    row.querySelectorAll("[name]").forEach((input) => {
-      input.disabled = smartEnabled;
-    });
-  });
-}
-
 function renderCurrentPersonaStatus(settings) {
   const input = document.getElementById("currentPersonaDisplay");
   if (!input) return;
   const personaId = String(settings.plugin_specific_persona_id || "").trim();
   input.value = personaId ? `插件指定人格 ID：${personaId}` : "继承 AstrBot 当前默认人格";
-}
-
-function setPrivateReadingConfigVisible(visible) {
-  const group = $("#privateReadingModuleGroup");
-  if (!group) return;
-  group.hidden = !visible;
-  group.querySelectorAll("[name]").forEach((input) => {
-    input.disabled = !visible;
-  });
 }
 
 function renderExternalAbilities() {
@@ -14447,7 +14574,6 @@ function fillForm(selector, values) {
       input.value = displaySettingValue(input.name, value);
     }
   });
-  if (selector === "#longTermModuleForm") renderNewsSourceManager();
   if (selector === "#roleplayProfileForm") {
     hydrateRoleplayStandardFields();
     renderRoleplayKnowledgeSources();
@@ -15567,7 +15693,7 @@ function renderSegmentedPreview(panel = null) {
     const input = previewPanel.querySelector("[data-segmented-preview-input], #segmentedPreviewInput");
     const output = previewPanel.querySelector("[data-segmented-preview-output], #segmentedPreviewOutput");
     if (!input || !output) return;
-    const root = previewPanel.closest("[data-feature-param-form], #privateModuleForm") || document;
+    const root = previewPanel.closest("[data-feature-param-form]") || document;
     if (!input.value) input.value = segmentedPreviewExamples.simple;
     let result;
     try {
@@ -15649,14 +15775,14 @@ function bindSegmentedPreview(root = document) {
     if (control.dataset.segmentedConfigBound) return;
     control.dataset.segmentedConfigBound = "1";
     const handler = () => {
-      const owner = control.closest("[data-feature-param-form], #privateModuleForm") || scope;
+      const owner = control.closest("[data-feature-param-form]") || scope;
       updateSegmentedConfigVisibility(owner);
       renderSegmentedPreview();
     };
     control.addEventListener("input", handler);
     control.addEventListener("change", handler);
   });
-  scope.querySelectorAll("[data-feature-param-form], #privateModuleForm").forEach((form) => updateSegmentedConfigVisibility(form));
+  scope.querySelectorAll("[data-feature-param-form]").forEach((form) => updateSegmentedConfigVisibility(form));
   renderSegmentedPreview();
 }
 
@@ -16223,7 +16349,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_photo_text_action") {
     if (settingKey === "photo_persona_reference_image_path") return boolSetting("enable_photo_reference_image");
-    if (settingKey === "daily_outfit_photo_prompt") return boolSetting("enable_daily_outfit_photo");
+    if (["daily_outfit_photo_prompt", "daily_outfit_rotation_days"].includes(settingKey)) return boolSetting("enable_daily_outfit_photo");
     if (settingKey === "enable_natural_language_photo_generation") {
       return String(valueSetting("natural_language_photo_generation_mode", "tool_first")) === "rule_fast";
     }
@@ -21413,6 +21539,13 @@ document.addEventListener("click", async (event) => {
     renderTroubleshooting();
     return;
   }
+  const troubleshootingCategory = element?.closest("[data-troubleshooting-category]");
+  if (troubleshootingCategory) {
+    state.troubleshootingCategory = troubleshootingCategory.dataset.troubleshootingCategory || "all";
+    state.troubleshootingFilter = "all";
+    renderTroubleshooting();
+    return;
+  }
   const troubleshootingRefresh = element?.closest("[data-troubleshooting-refresh]");
   if (troubleshootingRefresh) {
     setActionBusy(troubleshootingRefresh, true);
@@ -22212,16 +22345,16 @@ document.addEventListener("change", (event) => {
 bindRoleplayModeSwitch();
 bindProviderToolbar();
 
-["roleplayProfileForm", "privateAliasForm", "quickModuleForm", "environmentModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
+["roleplayProfileForm", "privateAliasForm", "quickModuleForm", "runtimeSettingsForm"].forEach((formId) => {
   const form = document.getElementById(formId);
   if (!form) return;
   form.addEventListener("input", () => markModuleFormDirty(form));
   form.addEventListener("change", () => markModuleFormDirty(form));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-  await runAction(() => postJson("/settings/update", {
-    settings: collectFormSettings(`#${formId}`),
-  }), "已保存模块调参", event.submitter);
+    await runAction(() => postJson("/settings/update", {
+      settings: collectFormSettings(`#${formId}`),
+    }), formId === "runtimeSettingsForm" ? "已保存运行设置" : "已保存模块调参", event.submitter);
     markModuleFormClean(form);
     if (formId === "privateAliasForm") {
       await loadAll();

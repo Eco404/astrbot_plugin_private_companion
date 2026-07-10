@@ -2015,6 +2015,138 @@ class ProactiveEngineMixin:
             return "tail", f"已过最佳窗口,距过期 {self._format_elapsed(max(0, expire_at - check_now))}"
         return "unknown", "未记录念头窗口"
 
+    def _proactive_item_freshness_class(
+        self,
+        *,
+        action: str,
+        reason: str,
+        source: str,
+        semantic_kind: str = "",
+    ) -> str:
+        normalized_reason = self._normalize_legacy_proactive_text(reason, limit=40)
+        normalized_source = self._normalize_legacy_proactive_text(source, limit=40)
+        normalized_kind = self._normalize_legacy_proactive_text(semantic_kind, limit=40)
+        if normalized_source == "timer" or normalized_reason in {
+            "birthday_eve_hint",
+            "birthday_celebration",
+            "birthday_makeup",
+            "birthday_afterglow",
+            "important_date_share",
+            "bili_video_share",
+            "news_share",
+            "web_exploration_share",
+            "creative_share",
+        }:
+            return "durable"
+        action_parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
+        if {"photo_text", "screen_peek"} & action_parts:
+            return "immediate"
+        if normalized_kind in {"self_share", "observation"} and normalized_source in {
+            "story",
+            "daily_story",
+            "state",
+            "event",
+            "simulation",
+        }:
+            return "immediate"
+        return "contextual"
+
+    def _planned_proactive_delivery_key(self, user: dict[str, Any]) -> str:
+        if not isinstance(user, dict):
+            return ""
+        parts = (
+            _single_line(user.get("planned_candidate_id"), 40),
+            _single_line(user.get("planned_proactive_impulse_id"), 40),
+            self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40),
+            self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40),
+            _single_line(user.get("planned_proactive_topic"), 120),
+            _single_line(user.get("planned_proactive_motive"), 220),
+        )
+        if not any(parts):
+            return ""
+        return hashlib.sha1("\n".join(parts).encode("utf-8", errors="ignore")).hexdigest()
+
+    def _planned_proactive_freshness_class(self, user: dict[str, Any]) -> str:
+        if not isinstance(user, dict):
+            return "contextual"
+        delivery_key = self._planned_proactive_delivery_key(user)
+        if delivery_key and _single_line(user.get("planned_proactive_origin_key"), 80) == delivery_key:
+            stored = _single_line(user.get("planned_proactive_freshness"), 24)
+            if stored in {"immediate", "contextual", "durable"}:
+                return stored
+        return self._proactive_item_freshness_class(
+            action=str(user.get("planned_proactive_action") or "message"),
+            reason=str(user.get("planned_proactive_reason") or ""),
+            source=str(user.get("planned_proactive_source") or ""),
+            semantic_kind=str(user.get("planned_proactive_semantic_kind") or ""),
+        )
+
+    def _ensure_planned_proactive_delivery_state(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(user, dict):
+            return {}
+        check_now = _now_ts() if now is None else now
+        delivery_key = self._planned_proactive_delivery_key(user)
+        if not delivery_key:
+            return {}
+        origin_key = _single_line(user.get("planned_proactive_origin_key"), 80)
+        origin_at = _safe_float(user.get("planned_proactive_origin_at"), 0)
+        freshness = self._planned_proactive_freshness_class(user)
+        if origin_key != delivery_key or origin_at <= 0:
+            origin_at = _safe_float(user.get("planned_proactive_window_start_at"), 0) or _safe_float(user.get("next_proactive_at"), 0) or check_now
+            user["planned_proactive_origin_at"] = origin_at
+            user["planned_proactive_origin_key"] = delivery_key
+            user["planned_proactive_freshness"] = freshness
+            user["planned_proactive_delivery_state"] = "fresh"
+        elif _single_line(user.get("planned_proactive_freshness"), 24) not in {"immediate", "contextual", "durable"}:
+            user["planned_proactive_freshness"] = freshness
+        return {
+            "key": delivery_key,
+            "origin_at": origin_at,
+            "best_until_at": _safe_float(user.get("planned_proactive_best_until_at"), 0),
+            "expire_at": _safe_float(user.get("planned_proactive_expire_at"), 0),
+            "freshness": _single_line(user.get("planned_proactive_freshness"), 24) or freshness,
+            "delivery_state": _single_line(user.get("planned_proactive_delivery_state"), 24) or "fresh",
+        }
+
+    def _planned_proactive_send_freshness_reason(
+        self,
+        user: dict[str, Any],
+        snapshot: dict[str, Any] | None,
+        *,
+        now: float | None = None,
+    ) -> str:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return ""
+        current = self._ensure_planned_proactive_delivery_state(user, now=now)
+        if not current:
+            return "主动候选已被清理或替换"
+        if _single_line(current.get("key"), 80) != _single_line(snapshot.get("key"), 80):
+            return "主动候选在生成期间已变化"
+        check_now = _now_ts() if now is None else now
+        expire_at = _safe_float(current.get("expire_at"), 0)
+        if expire_at > 0 and check_now > expire_at and self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) != "timer":
+            return "主动候选在生成期间已过期"
+        if _single_line(current.get("freshness"), 24) == "immediate":
+            best_until = _safe_float(current.get("best_until_at"), 0)
+            if best_until > 0 and check_now > best_until:
+                return "即时主动已越过自然表达窗口"
+        return ""
+
+    def _is_immediate_life_share_impulse(self, impulse: dict[str, Any]) -> bool:
+        if not isinstance(impulse, dict) or not self._action_has_photo_text(str(impulse.get("action") or "")):
+            return False
+        return self._proactive_item_freshness_class(
+            action=str(impulse.get("action") or ""),
+            reason=str(impulse.get("reason") or ""),
+            source=str(impulse.get("source") or ""),
+            semantic_kind=str(impulse.get("semantic_kind") or ""),
+        ) == "immediate"
+
     def _defer_or_replace_planned_impulse(
         self,
         user: dict[str, Any],
@@ -2027,6 +2159,47 @@ class ProactiveEngineMixin:
         check_now = _now_ts() if now is None else now
         impulse = self._planned_proactive_impulse(user)
         current_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        delivery = self._ensure_planned_proactive_delivery_state(user, now=check_now)
+        freshness = _single_line(delivery.get("freshness"), 24) or "contextual"
+        best_until = _safe_float(delivery.get("best_until_at"), 0)
+        is_immediate = freshness == "immediate"
+        if is_immediate and not block_current and best_until > 0 and check_now >= best_until:
+            expired_note = _single_line(note, 120) or "即时主动已过自然窗口"
+            expired_note = f"{expired_note}；原候选已作废并重新安排"
+            self._mark_planned_candidate_status(user, "blocked", expired_note)
+            if isinstance(impulse, dict):
+                impulse["updated_ts"] = check_now
+                impulse["last_note"] = expired_note
+                impulse["state"] = "blocked"
+            self._clear_pending_proactive_plan(user)
+            if not self._materialize_best_proactive_impulse(user, now=check_now):
+                return False
+            return bool(_single_line(user.get("planned_proactive_impulse_id"), 20) != current_id)
+        if is_immediate and not block_current:
+            self._mark_planned_candidate_status(user, "deferred", note)
+            delay = random.uniform(max(1.0, delay_minutes[0]), max(delay_minutes[0] + 1.0, delay_minutes[1])) * 60
+            next_window = min(check_now + delay, best_until) if best_until > 0 else check_now + delay
+            capped_expire_at = best_until + 8 * 60 if best_until > 0 else 0
+            if isinstance(impulse, dict):
+                impulse["updated_ts"] = check_now
+                impulse["last_note"] = _single_line(note, 160)
+                impulse["state"] = "deferred"
+                impulse["hesitation_count"] = _safe_int(impulse.get("hesitation_count"), 0, 0, 8) + 1
+                impulse["hesitation_at"] = check_now
+                impulse["hesitation_note"] = _single_line(note, 160)
+                impulse["window_start_at"] = next_window
+                impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), next_window)
+                if capped_expire_at > 0:
+                    old_expire_at = _safe_float(impulse.get("expire_at"), 0)
+                    impulse["expire_at"] = min(old_expire_at if old_expire_at > 0 else capped_expire_at, capped_expire_at)
+                self._remember_proactive_hesitation(user, impulse, note=note, now=check_now)
+            user["next_proactive_at"] = next_window
+            user["planned_proactive_window_start_at"] = next_window
+            if capped_expire_at > 0:
+                old_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+                user["planned_proactive_expire_at"] = min(old_expire_at if old_expire_at > 0 else capped_expire_at, capped_expire_at)
+            user["planned_proactive_delivery_state"] = "deferred"
+            return False
         self._mark_planned_candidate_status(user, "blocked" if block_current else "deferred", note)
         if isinstance(impulse, dict):
             impulse["updated_ts"] = check_now
@@ -2046,6 +2219,15 @@ class ProactiveEngineMixin:
                 impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), next_window)
                 impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_window + 25 * 60)
                 impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), next_window + 90 * 60)
+        elif not block_current:
+            delay = random.uniform(max(1.0, delay_minutes[0]), max(delay_minutes[0] + 1.0, delay_minutes[1])) * 60
+            next_window = check_now + delay
+            user["next_proactive_at"] = next_window
+            user["planned_proactive_window_start_at"] = next_window
+            user["planned_proactive_best_until_at"] = next_window + 25 * 60
+            user["planned_proactive_expire_at"] = next_window + 90 * 60
+            user["planned_proactive_delivery_state"] = "deferred"
+            return False
         self._clear_pending_proactive_plan(user)
         if not self._materialize_best_proactive_impulse(user, now=check_now):
             return False
@@ -2166,6 +2348,7 @@ class ProactiveEngineMixin:
             note="由潜在念头池物化为当前主动计划",
             user=user,
         )
+        self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = candidate["scheduled_ts"]
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate["reason"], limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(candidate["action"], limit=40) or "message"
@@ -2401,6 +2584,7 @@ class ProactiveEngineMixin:
         impulse = self._candidate_to_impulse(user, candidate, source=source, now=now)
         if isinstance(impulse, dict):
             self._queue_proactive_impulse(user, impulse)
+        self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate.get("reason"), limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(action, limit=40) or "message"
@@ -2555,6 +2739,8 @@ class ProactiveEngineMixin:
         scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
         if scheduled_ts <= 0 or scheduled_ts > check_now:
             return False
+        if self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) != "timer":
+            self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = scheduled_ts
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(event.get("reason"), limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(event.get("action"), limit=24) or "message"
@@ -2598,6 +2784,8 @@ class ProactiveEngineMixin:
         scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
         if scheduled_ts <= check_now:
             return False
+        if self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) != "timer":
+            self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = scheduled_ts
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(event.get("reason"), limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(event.get("action"), limit=24) or "message"
@@ -2811,6 +2999,23 @@ class ProactiveEngineMixin:
             return False, "用户预约静默窗口"
         if now < next_at:
             return False, "未到候选主动时间"
+        delivery = self._ensure_planned_proactive_delivery_state(user, now=now)
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and _single_line(delivery.get("freshness"), 24) == "immediate"
+            and _safe_float(delivery.get("best_until_at"), 0) > 0
+            and now > _safe_float(delivery.get("best_until_at"), 0)
+        ):
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="即时主动已越过自然表达窗口",
+                block_current=True,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(1.0, 3.0))
+            return False, "即时主动已越过自然表达窗口,已重新挑选"
         if not is_troubleshooting and self._is_proactive_plan_stale(user, now=now) and not due_timer_active:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(1, 4))
@@ -3972,10 +4177,12 @@ class ProactiveEngineMixin:
             return
         sim["events"] = [event for event in events[1:] if isinstance(event, dict)]
         sim["sent_count"] = _safe_int(sim.get("sent_count"), 0, 0) + 1
+        self._reset_planned_proactive_delivery_state(user)
         self._sync_simulation_next_event(user)
 
     def _finish_simulation_mode(self, user: dict[str, Any]) -> None:
         user["simulation_mode"] = {}
+        self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = 0
         user["planned_proactive_reason"] = ""
         user["planned_proactive_action"] = ""
@@ -6307,11 +6514,15 @@ class ProactiveEngineMixin:
 
     def _defer_planned_photo_text_for_load(self, user: dict[str, Any], *, now: float, note: str) -> None:
         delay_seconds = max(60, int(self.local_photo_defer_minutes) * 60)
-        jitter_seconds = random.uniform(0, min(300, delay_seconds * 0.2))
-        user["next_proactive_at"] = now + delay_seconds + jitter_seconds
+        self._defer_or_replace_planned_impulse(
+            user,
+            now=now,
+            note=note,
+            delay_minutes=(delay_seconds / 60, delay_seconds / 60 + min(5.0, delay_seconds / 300)),
+            block_current=False,
+        )
         user["proactive_sending"] = False
         user["proactive_sending_started_at"] = 0
-        self._mark_planned_candidate_status(user, "accepted", note)
 
     def _photo_text_available(self, user: dict[str, Any] | None = None) -> bool:
         if not self.enable_photo_text_action:

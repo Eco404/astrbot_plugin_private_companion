@@ -2693,6 +2693,18 @@
     "default": false,
     "invisible": true
   },
+  "enable_group_nsfw_private_fallback": {
+    "description": "Legacy flat config: 群聊成图安全审核与私聊回退",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "group_nsfw_image_review_timeout_seconds": {
+    "description": "Legacy flat config: 群聊成图安全审核超时秒数",
+    "type": "float",
+    "default": 8,
+    "invisible": true
+  },
   "COMFYUI_TEXT2IMG_WORKFLOW_NAME": {
     "description": "Legacy flat config: 主动拍照文生图工作流名",
     "type": "string",
@@ -2721,6 +2733,12 @@
     "description": "Legacy flat config: 每日穿搭额外提示词",
     "type": "string",
     "default": "",
+    "invisible": true
+  },
+  "daily_outfit_rotation_days": {
+    "description": "Legacy flat config: 穿搭轮换冷却天数",
+    "type": "int",
+    "default": 10,
     "invisible": true
   },
   "enable_natural_language_photo_generation": {
@@ -2822,6 +2840,18 @@
     "description": "Legacy flat config: 在线生图自定义请求头",
     "type": "string",
     "default": "",
+    "invisible": true
+  },
+  "external_image_download_proxy": {
+    "description": "Legacy flat config: 在线图片结果下载代理",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "external_image_download_use_environment_proxy": {
+    "description": "Legacy flat config: 在线图片下载继承环境代理",
+    "type": "bool",
+    "default": false,
     "invisible": true
   },
   "enable_backup_external_image_api": {
@@ -7573,6 +7603,30 @@
           "enable_photo_text_action": true
         }
       },
+      "enable_group_nsfw_private_fallback": {
+        "description": "群聊成图安全审核与私聊回退",
+        "type": "bool",
+        "hint": "默认关闭。开启后，群聊里生成的图片会先交给“插件识图模型”审核：只有安全图片正常发群；其余审核结果（含成人内容、无法确认、超时或模型不可用）都只尝试发送给本次请求者的私聊。仅影响群聊，私聊生图不受影响。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "group_nsfw_image_review_timeout_seconds": {
+        "description": "群聊成图安全审核超时秒数",
+        "type": "float",
+        "hint": "审核视觉模型单次最长等待时间。超时或模型不可用时不会发群，会改为尝试私聊本次请求者。",
+        "slider": {
+          "min": 3,
+          "max": 30,
+          "step": 1
+        },
+        "default": 8,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
       "photo_persona_reference_image_path": {
         "description": "人设参考图路径或图片 URL",
         "type": "string",
@@ -7597,6 +7651,21 @@
         "type": "string",
         "hint": "可选。补充角色今天穿搭的偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
         "default": "",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_daily_outfit_photo": true
+        }
+      },
+      "daily_outfit_rotation_days": {
+        "description": "穿搭轮换冷却天数",
+        "type": "int",
+        "hint": "每日穿搭会记录最近成功生成的造型，并优先避开相同主色、外层和轮廓。本次生成至少会与最近一套改变两个可见维度；手动重生同样遵守。",
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "default": 10,
         "condition": {
           "enable_photo_text_action": true,
           "enable_daily_outfit_photo": true
@@ -7782,6 +7851,24 @@
         "type": "string",
         "hint": "可选。每行一个请求头，格式：Key: Value。例如 X-Custom-Header: 123\nX-Region: cn。会追加到生图 API 的 HTTP 请求头中，可用于鉴权、地区路由或自定义参数。留空则不追加。",
         "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "external_image_download_proxy": {
+        "description": "在线图片结果下载代理",
+        "type": "string",
+        "hint": "可选。仅用于下载在线生图接口返回的图片 URL，格式如 http://127.0.0.1:7890；不影响生图 API 请求或本地 ComfyUI/SDGen。若命令行下载走代理，可填写同一路径。仅支持 HTTP/HTTPS 代理。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "external_image_download_use_environment_proxy": {
+        "description": "在线图片下载继承环境代理",
+        "type": "bool",
+        "hint": "默认关闭。开启后仅下载在线生图结果时读取 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY 环境变量；适合 Bot 与 wget 需要走同一代理路径的部署。",
+        "default": false,
         "condition": {
           "enable_photo_text_action": true
         }
@@ -8390,29 +8477,29 @@
     }
   },
   "weather_config": {
-    "description": "天气与屏幕日记",
+    "description": "天气上下文与屏幕日记",
     "type": "object",
-    "hint": "控制天气上下文和昨日屏幕观察日记摘要注入。",
+    "hint": "推荐先只开启天气上下文：已安装并配置 screen_companion 时会自动复用其天气能力；需要独立查询时，再填写 OpenWeatherMap Key 和一个地点（城市优先，经纬度二选一）。",
     "items": {
       "enable_weather_context": {
         "description": "启用天气上下文",
         "type": "bool",
-        "hint": "开启后会优先使用 private_companion 自己的天气配置查询天气；若未配置，再回退复用 screen_companion 插件的天气能力。",
+        "hint": "开启后优先使用本插件的 OpenWeatherMap 配置；尚未配置自建天气时，会尝试回退复用 screen_companion。天气只作为日程、日记和主动契机的背景，不会每句聊天都提。",
         "default": true
       },
       "weather_api_key": {
         "description": "天气 API Key",
         "type": "string",
-        "hint": "OpenWeatherMap API Key。配置后，private_companion 会优先自己查询天气。",
+        "hint": "仅独立查询时需要。访问 https://home.openweathermap.org/api_keys 创建 Key 后粘贴；还必须再填写“天气城市”或一组经纬度。留空时会尝试复用 screen_companion 的天气能力。",
         "default": "",
         "condition": {
           "enable_weather_context": true
         }
       },
       "weather_city": {
-        "description": "天气城市",
+        "description": "天气城市（推荐）",
         "type": "string",
-        "hint": "例如：Shanghai,CN 或 北京。填写后会按城市查询天气。",
+        "hint": "最省事的定位方式，例如 Beijing,CN、Shanghai,CN。城市已填写时会优先使用它，下面的经纬度会被忽略；不填城市才会使用经纬度。",
         "default": "",
         "condition": {
           "enable_weather_context": true
@@ -8421,7 +8508,7 @@
       "weather_lat": {
         "description": "天气纬度",
         "type": "float",
-        "hint": "如果不想按城市查，可以填纬度；需与 weather_lon 成对使用。",
+        "hint": "只在“天气城市”留空时生效。需与经度成对填写，例如北京约 39.9042。",
         "default": 0,
         "condition": {
           "enable_weather_context": true
@@ -8430,7 +8517,7 @@
       "weather_lon": {
         "description": "天气经度",
         "type": "float",
-        "hint": "如果不想按城市查，可以填经度；需与 weather_lat 成对使用。",
+        "hint": "只在“天气城市”留空时生效。需与纬度成对填写，例如北京约 116.4074。",
         "default": 0,
         "condition": {
           "enable_weather_context": true
@@ -8439,7 +8526,7 @@
       "weather_refresh_minutes": {
         "description": "天气缓存刷新间隔（分钟）",
         "type": "int",
-        "hint": "天气不会每次都重查；在这个时间内会复用最近一次结果。",
+        "hint": "默认 90 分钟。保存新地点或 Key 后，可能仍会短暂使用旧缓存；等待刷新周期或重启插件即可看到新结果。",
         "slider": {
           "min": 10,
           "max": 720,

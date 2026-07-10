@@ -1694,6 +1694,7 @@ class EventDispatchMixin:
         user["planned_proactive_trigger_message_id"] = ""
         user["planned_proactive_trigger_umo"] = ""
         user["planned_proactive_trigger_ts"] = 0
+        user["planned_proactive_trigger_inbound_count"] = -1
 
     def _set_planned_proactive_trigger(
         self,
@@ -1710,6 +1711,7 @@ class EventDispatchMixin:
         user["planned_proactive_trigger_message_id"] = message_id
         user["planned_proactive_trigger_umo"] = _single_line(umo, 160)
         user["planned_proactive_trigger_ts"] = created_at if created_at > 0 else _now_ts()
+        user["planned_proactive_trigger_inbound_count"] = _safe_int(user.get("private_inbound_count"), 0)
 
     def _planned_proactive_quote_message_id(self, user: dict[str, Any], umo: str) -> str:
         if not getattr(self, "enable_proactive_quote_trigger_message", False):
@@ -1725,6 +1727,17 @@ class EventDispatchMixin:
         trigger_ts = _safe_float(user.get("planned_proactive_trigger_ts"), 0)
         if trigger_ts > 0 and _now_ts() - trigger_ts > max(1, self.proactive_reply_context_hours) * 3600:
             return ""
+        trigger_inbound_count = _safe_int(user.get("planned_proactive_trigger_inbound_count"), -1)
+        if trigger_inbound_count >= 0 and _safe_int(user.get("private_inbound_count"), 0) > trigger_inbound_count:
+            return ""
+        if trigger_inbound_count < 0:
+            latest_activity_getter = getattr(self, "_latest_private_user_activity_ts", None)
+            if trigger_ts > 0 and callable(latest_activity_getter):
+                try:
+                    if _safe_float(latest_activity_getter(user), 0) > trigger_ts:
+                        return ""
+                except Exception:
+                    pass
         return message_id
 
     def _quote_cache_key(self, event: AstrMessageEvent | None = None) -> str:
@@ -4184,4 +4197,3 @@ Bot 近期回复：
         updates.append(f"唤醒强度：{strength_label}")
         self._record_group_wakeup_state_adjustment(scene=scene, text=text, state_note=state_note, updates=updates, intensity="轻")
         return {"note": state_note, "updates": updates, "wakeup_word": word, "intensity": "轻", "strength": strength, "strength_label": strength_label, "fatigue": fatigue}
-

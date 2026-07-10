@@ -314,35 +314,15 @@ class LlmToolActionsMixin:
                         self._note_command_photo_generation_attempt(user, image_path=image_path)
                         self._save_data_sync()
         sent = False
+        delivery: dict[str, Any] = {}
         if ok and send_image:
-            try:
-                message = _single_line(caption, 120) or ("" if intent_kind == "sticker" else "生成好了。")
-                chain = self._build_outbound_chain(message, image_path)
-                await event.send(self._build_result_from_chain(chain))
-                sent = True
-            except Exception as exc:
-                if callable(annotator):
-                    annotator(
-                        image_path=image_path,
-                        session_key=generation_session_key,
-                        trigger="llm_tool",
-                        intent_kind=intent_kind,
-                        sent=False,
-                        caption=caption,
-                        scene_preset=preset_text,
-                        tool_name="pc_generate_photo",
-                    )
-                return json.dumps(
-                    {
-                        "status": "error",
-                        "success": False,
-                        "message": f"图片已生成但发送失败：{_single_line(exc, 160)}",
-                        "backend": backend_name,
-                        "path": image_path,
-                        "note": note,
-                    },
-                    ensure_ascii=False,
-                )
+            message = _single_line(caption, 120) or ("" if intent_kind == "sticker" else "生成好了。")
+            delivery = await self._deliver_generated_image_to_event(
+                event,
+                image_path=image_path,
+                caption=message,
+            )
+            sent = bool(delivery.get("sent"))
         if callable(annotator):
             annotator(
                 image_path=image_path,
@@ -373,7 +353,11 @@ class LlmToolActionsMixin:
         result_payload = {
             "status": "success" if ok else "error",
             "success": ok,
-            "message": "图片已生成并发送" if sent else ("图片已生成" if ok else (_single_line(note, 220) or "生图失败")),
+            "message": (
+                _single_line(delivery.get("message"), 220)
+                if ok and send_image and delivery
+                else ("图片已生成并发送" if sent else ("图片已生成" if ok else (_single_line(note, 220) or "生图失败")))
+            ),
             "backend": _single_line(backend_name, 80),
             "path": _single_line(image_path, 260),
             "kind": workflow_kind,
@@ -381,6 +365,8 @@ class LlmToolActionsMixin:
             "used_reference": bool(reference_path and "已使用" in str(note or "")),
             "reference_image_path": _single_line(reference_path, 260),
             "sent": sent,
+            "delivery": _single_line(delivery.get("destination"), 30),
+            "safety_review": _single_line(delivery.get("review_label"), 30),
             "note": _single_line(note, 220),
         }
         if not ok:

@@ -1762,6 +1762,25 @@ class DailyStateMixin:
         if _safe_float(payload.get("expires_at"), 0) <= current:
             self._clear_pending_proactive_send_retry(user)
             return None
+        delivery_key_getter = getattr(self, "_planned_proactive_delivery_key", None)
+        current_delivery_key = delivery_key_getter(user) if callable(delivery_key_getter) else ""
+        retry_delivery_key = _single_line(payload.get("delivery_key"), 80)
+        retry_freshness = _single_line(payload.get("freshness"), 24)
+        retry_fresh_until = _safe_float(payload.get("fresh_until_at"), 0)
+        retry_activity_at = _safe_float(payload.get("private_activity_at"), 0)
+        retry_inbound_count = _safe_int(payload.get("private_inbound_count"), 0)
+        current_activity_at = self._latest_private_user_activity_ts(user)
+        current_inbound_count = _safe_int(user.get("private_inbound_count"), 0)
+        if (
+            not retry_delivery_key
+            or retry_delivery_key != current_delivery_key
+            or retry_freshness != "durable"
+            or retry_fresh_until <= current
+            or current_activity_at > retry_activity_at
+            or current_inbound_count > retry_inbound_count
+        ):
+            self._clear_pending_proactive_send_retry(user)
+            return None
         image_path = str(payload.get("image_path") or "").strip()
         text = _single_line(payload.get("text"), 1200)
         validator = getattr(self, "_validate_proactive_outbound_candidate", None)
@@ -1800,6 +1819,19 @@ class DailyStateMixin:
         if isinstance(user, dict):
             user["pending_proactive_send_retry"] = {}
 
+    def _abandon_failed_proactive_retry_candidate(
+        self,
+        user: dict[str, Any],
+        *,
+        note: str,
+        now: float,
+        delay_hours: tuple[float, float],
+    ) -> None:
+        self._clear_pending_proactive_send_retry(user)
+        self._mark_planned_candidate_status(user, "dropped", note)
+        self._clear_pending_proactive_plan(user)
+        self._schedule_next_proactive(user, now=now, delay_hours=delay_hours)
+
     def _store_or_advance_proactive_send_retry(
         self,
         user: dict[str, Any],
@@ -1816,6 +1848,10 @@ class DailyStateMixin:
         if not isinstance(user, dict):
             return "无法保存待重发内容"
         current = _now_ts() if now is None else float(now)
+        delivery_snapshot_getter = getattr(self, "_ensure_planned_proactive_delivery_state", None)
+        delivery_snapshot = delivery_snapshot_getter(user, now=current) if callable(delivery_snapshot_getter) else {}
+        freshness = _single_line(delivery_snapshot.get("freshness"), 24) if isinstance(delivery_snapshot, dict) else ""
+        delivery_key = _single_line(delivery_snapshot.get("key"), 80) if isinstance(delivery_snapshot, dict) else ""
         existing = user.get("pending_proactive_send_retry")
         previous_count = _safe_int(existing.get("retry_count"), 0, 0, 10) if isinstance(existing, dict) else 0
         retry_count = previous_count + 1
@@ -1830,19 +1866,38 @@ class DailyStateMixin:
             else:
                 error_hint = clean_error
         if retry_count > 2:
-            self._clear_pending_proactive_send_retry(user)
-            self._clear_pending_proactive_plan(user)
-            self._schedule_next_proactive(user, now=current, delay_hours=(12, 24))
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，待重发内容连续失败，已放弃复用并重新排程",
+                now=current,
+                delay_hours=(12, 24),
+            )
             return "发送失败，待重发内容连续失败，已放弃复用并重新排程" + (f"；原因：{error_hint}" if error_hint else "")
+        if freshness != "durable" or not delivery_key:
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，当前候选依赖即时语境，已放弃复用并重新编排",
+                now=current,
+                delay_hours=(1.5, 4.0),
+            )
+            return "发送失败，当前候选依赖即时语境，已放弃复用并重新编排" + (f"；原因：{error_hint}" if error_hint else "")
         if extra_components:
-            self._clear_pending_proactive_send_retry(user)
-            self._schedule_next_proactive(user, now=current, delay_hours=(6, 12))
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，包含复杂组件，已放弃复用并重新排程",
+                now=current,
+                delay_hours=(6, 12),
+            )
             return "发送失败，包含复杂组件，未缓存待重发内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         clean_text = _single_line(text, 1200)
         clean_image = _single_line(image_path, 260)
         if not clean_text and not clean_image:
-            self._clear_pending_proactive_send_retry(user)
-            self._schedule_next_proactive(user, now=current, delay_hours=(6, 12))
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，无可复用内容，已放弃复用并重新排程",
+                now=current,
+                delay_hours=(6, 12),
+            )
             return "发送失败，无可复用内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         validator = getattr(self, "_validate_proactive_outbound_candidate", None)
         unsafe_retry_text = False
@@ -1875,20 +1930,38 @@ class DailyStateMixin:
             except Exception:
                 unsafe_retry_text = False
         if unsafe_retry_text:
-            self._clear_pending_proactive_send_retry(user)
-            self._clear_pending_proactive_plan(user)
-            self._schedule_next_proactive(user, now=current, delay_hours=(2, 6))
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，候选正文疑似内部提示词/执行指令泄漏，已放弃复用并重新排程",
+                now=current,
+                delay_hours=(2, 6),
+            )
             return "发送失败，候选正文疑似内部提示词/执行指令泄漏，已放弃复用并重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         if not clean_text and not clean_image:
-            self._clear_pending_proactive_send_retry(user)
-            self._schedule_next_proactive(user, now=current, delay_hours=(6, 12))
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，清理后无可复用内容，已放弃复用并重新排程",
+                now=current,
+                delay_hours=(6, 12),
+            )
             return "发送失败，清理后无可复用内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
-        delay_hours = 6.0 if retry_count <= 1 else 24.0
+        retry_delay_seconds = 8 * 60 if retry_count <= 1 else 20 * 60
+        planned_expire_at = _safe_float(delivery_snapshot.get("expire_at"), 0) if isinstance(delivery_snapshot, dict) else 0
+        fresh_until_at = min(current + 72 * 3600, planned_expire_at) if planned_expire_at > current else current
+        if fresh_until_at <= current + retry_delay_seconds:
+            self._abandon_failed_proactive_retry_candidate(
+                user,
+                note="发送失败，候选在下一次重试前会失效，已放弃复用并重新编排",
+                now=current,
+                delay_hours=(1.5, 4.0),
+            )
+            return "发送失败，候选在下一次重试前会失效，已重新编排" + (f"；原因：{error_hint}" if error_hint else "")
         user["pending_proactive_send_retry"] = {
             "active": True,
             "created_at": _safe_float(existing.get("created_at"), current) if isinstance(existing, dict) else current,
             "updated_at": current,
             "expires_at": current + 72 * 3600,
+            "fresh_until_at": fresh_until_at,
             "retry_count": retry_count,
             "text": clean_text,
             "image_path": clean_image,
@@ -1896,9 +1969,15 @@ class DailyStateMixin:
             "action": _single_line(action, 40) or "message",
             "action_summary": _single_line(action_summary, 500),
             "last_error": clean_error,
+            "delivery_key": delivery_key,
+            "freshness": freshness,
+            "private_activity_at": self._latest_private_user_activity_ts(user),
+            "private_inbound_count": _safe_int(user.get("private_inbound_count"), 0),
         }
-        user["next_proactive_at"] = current + delay_hours * 3600
-        return f"发送失败，已保留待重发内容，{int(delay_hours)} 小时后第 {retry_count} 次重试" + (f"；原因：{error_hint}" if error_hint else "")
+        user["next_proactive_at"] = current + retry_delay_seconds
+        user["planned_proactive_window_start_at"] = user["next_proactive_at"]
+        user["planned_proactive_delivery_state"] = "retrying"
+        return f"发送失败，已保留待重发内容，约 {max(1, int(retry_delay_seconds // 60))} 分钟后第 {retry_count} 次重试" + (f"；原因：{error_hint}" if error_hint else "")
 
     def _activity_share_global_signature(self, user: dict[str, Any], *, text: str = "", action_summary: str = "") -> str:
         state = self.data.get("daily_state", {})
@@ -3240,21 +3319,32 @@ class DailyStateMixin:
         key = self.weather_api_key
         city = self.weather_city
         lat, lon = self.weather_lat, self.weather_lon
+        params = {
+            "appid": key,
+            "units": "metric",
+            "lang": "zh_cn",
+        }
         if city:
-            return (
-                "http://api.openweathermap.org/data/2.5/weather"
-                f"?q={city}&appid={key}&units=metric&lang=zh_cn"
-            )
-        if -90 <= lat <= 90 and -180 <= lon <= 180 and not (lat == 0 and lon == 0):
-            return (
-                "http://api.openweathermap.org/data/2.5/weather"
-                f"?lat={lat}&lon={lon}&appid={key}&units=metric&lang=zh_cn"
-            )
+            params["q"] = city
+            return f"https://api.openweathermap.org/data/2.5/weather?{urlencode(params)}"
+        if -90 <= lat <= 90 and -180 <= lon <= 180 and lat != 0 and lon != 0:
+            params["lat"] = lat
+            params["lon"] = lon
+            return f"https://api.openweathermap.org/data/2.5/weather?{urlencode(params)}"
         return ""
 
     def _detect_care_feedback(self, text: str) -> dict[str, Any]:
         normalized = str(text or "").strip()
         if not normalized:
+            return {"is_care": False, "tags": []}
+        care_actions = r"吃药|喝药|去拿药|按时吃药|喝水|多喝热水|热水|温水|休息|早点睡|快睡|去睡|别熬夜|多睡会|睡一觉|保暖|别着凉|穿厚|加衣服|盖好|难受|还好吗|没事吧|注意身体|照顾好自己|心疼"
+        self_report = bool(
+            re.search(
+                rf"(?:我|俺|本人|这边|我们|咱们|咱).{{0,12}}(?:{care_actions})",
+                normalized,
+            )
+        )
+        if self_report:
             return {"is_care": False, "tags": []}
         tags: list[str] = []
         if re.search(r"吃药|喝药|去拿药|按时吃药", normalized):
@@ -5481,10 +5571,7 @@ class DailyStateMixin:
         override = self._sleep_delay_override_state(now=now)
         if override:
             until_text = _single_line(override.get("until_text"), 24)
-            source_text = _single_line(override.get("user_text"), 80)
             override_lines.append(f"- 临时延后休息｜强｜今晚：到 {until_text} 前按用户临时陪聊约定处理,不要把当前睡眠段当成必须沉默。")
-            if source_text:
-                override_lines.append(f"  用户原话摘要：{source_text}")
             override_lines.append("  承接要求：只影响今晚；到点后自然收声或回到休息,不要写成长期熬夜习惯。")
         if isinstance(raw, list) and raw:
             for item in raw:
@@ -5501,14 +5588,11 @@ class DailyStateMixin:
                 kept.append(item)
                 note = _single_line(item.get("note"), 120)
                 source = _single_line(item.get("source"), 24)
-                user_text = _single_line(item.get("user_text"), 80)
                 intensity = _single_line(item.get("intensity"), 16)
                 scope = _single_line(item.get("scope"), 30)
                 if note:
                     meta = "｜".join(part for part in (source or "互动", intensity, scope) if part)
                     lines.append(f"- {meta}：{note}")
-                if user_text:
-                    lines.append(f"  用户原话摘要：{user_text}")
                 immediate = _single_line(item.get("immediate_reaction"), 120)
                 if immediate:
                     lines.append(f"  即时反应：{immediate}")
@@ -5877,7 +5961,7 @@ class DailyStateMixin:
             state_updates: list[str],
             intensity: str = "中",
             scope: str = "当前段和下一段",
-            carry_rule: str = "后续细化必须把这次用户介入当成已经发生的事实承接,不要只当成一句无影响的聊天。",
+            carry_rule: str = "后续细化可根据这次用户介入留下合适的状态余味；若没有实际改变任务、作息、边界或共同场景，不必扩写成生活事件。",
             **extra: Any,
         ) -> dict[str, Any]:
             data = {
@@ -6018,7 +6102,13 @@ class DailyStateMixin:
                 scope="当前段和今日后续饭点",
                 carry_rule=f"后续细化如果涉及吃饭、晚餐、休息或外出,要自然承接用户这句饮食反馈：{food_hint}。不要生硬复述,也不要像没有问过一样重置。",
             )
-        if re.search(r"去睡|早点睡|睡觉|休息|别写了|别弄了|先洗澡|先吃饭|吃点|喝水|别熬|躺会|停一下|歇会", normalized):
+        self_reported_care_action = bool(
+            re.search(
+                r"(?:我|俺|本人|这边|我们|咱们|咱).{0,12}(?:去睡|早点睡|睡觉|休息|先洗澡|先吃饭|吃点|喝水|躺会|停一下|歇会)",
+                normalized,
+            )
+        )
+        if not self_reported_care_action and re.search(r"去睡|早点睡|睡觉|休息|别写了|别弄了|先洗澡|先吃饭|吃点|喝水|别熬|躺会|停一下|歇会", normalized):
             return payload(
                 source="用户照顾",
                 note="用户刚刚给了休息或照顾指令；后续节奏应明显调慢,更可能提前收尾、补充休息、喝水吃饭或把任务延后。",
@@ -6028,7 +6118,9 @@ class DailyStateMixin:
                 scope="当前段和今日后续",
                 carry_rule="下一段不能完全无视这句照顾提醒；至少要在节奏、体力或收尾方式上留下影响。",
             )
-        if re.search(r"走吧|出发|出门|出去了|下车|上车|走了|走了走了|走起|走走走|出去|去吃|去逛|去买|去玩|一起去|带你|陪我.*去|跟我.*走|出发了|出门了|换鞋|拿钥匙|等车|打车|坐车|地铁|公交|到了|排队|找位子|点单|点餐|下单|老板.*来|服务员", normalized):
+        shared_location_signal = bool(re.search(r"一起|我们|咱们|咱俩|带你|带我|陪你|陪我|跟你|跟我|走吧|出发吧", normalized))
+        outward_action_signal = bool(re.search(r"出发|出门|出去|去吃|去逛|去买|去玩|上车|下车|走了|走起|换鞋|拿钥匙|等车|打车|坐车|地铁|公交|到了|排队|找位子|点单|点餐|下单", normalized))
+        if shared_location_signal and outward_action_signal:
             self._apply_dialogue_location_override("外面")
             return payload(
                 source="用户带出/同行",
@@ -6039,7 +6131,9 @@ class DailyStateMixin:
                 scope="当前段和今日后续直到回家线索出现",
                 carry_rule="后续细化和状态注入必须把角色位置保持在'外面',直到用户明确说回家、到家或日程自然过渡到居家时段；不要把角色写回沙发、卧室或家里。",
             )
-        if re.search(r"回来了|到家了|回家了|进家门|开门|进门|回到.*家|到家|回来了回来了|安全到家", normalized):
+        shared_return_signal = bool(re.search(r"一起|我们|咱们|咱俩|带你|带我|陪你|陪我|跟你|跟我|回家吧|送你回", normalized))
+        return_home_signal = bool(re.search(r"回来了|到家了|回家了|进家门|开门|进门|回到.*家|到家|安全到家", normalized))
+        if shared_return_signal and return_home_signal:
             self._apply_dialogue_location_override("家里")
             return payload(
                 source="用户带回/回家",
@@ -6050,7 +6144,11 @@ class DailyStateMixin:
                 scope="当前段和下一段",
                 carry_rule="后续细化可以把角色写回家里场景,但不要立刻恢复出门前的精确活动,要体现外出后的余味。",
             )
-        if re.search(r"一起|陪你|陪我|等我|等你|我来|我陪|待会|一会|晚上|明天|等下|约|见面|打电话|语音|开黑|一起看", normalized):
+        explicit_appointment_signal = bool(re.search(
+            r"(?:约好|说好|定了|晚点(?:一起|聊|打电话|语音|开黑|看)|(?:一起|我们|咱们|咱俩|陪你|陪我|等你|等我|跟你|跟我).{0,18}(?:待会|一会|晚上|明天|等下|见面|打电话|语音|开黑|看))",
+            normalized,
+        ))
+        if explicit_appointment_signal:
             return payload(
                 source="用户约定",
                 note="用户刚刚给出陪伴、等待、稍后一起做事或约定线索；后续日程应保留期待/等待/预留空档,不要像没有约定一样推进。",
@@ -6059,15 +6157,6 @@ class DailyStateMixin:
                 intensity="强",
                 scope="今日后续",
                 carry_rule="后续主动契机和细化事件要把这个约定当作开放话头,可以等待、预留时间或轻轻提醒。",
-            )
-        if re.search(r"我在|回你|刚看到|来了|在呢|嗯|好|可以|收到|行|可以呀|好呀|嗯嗯|哦哦", normalized):
-            return payload(
-                source="用户回应",
-                note="用户刚刚回应了角色；当前段应更新等待回复和分享欲状态,后续表达可以更轻快一点。",
-                immediate_reaction="看到回复后,她会很快扫一眼屏幕,刚才悬着的那点等待感落下来。",
-                state_updates=["等待回复：是->否", "情绪：轻快一点", "分享欲：小幅上升"],
-                intensity="中",
-                scope="当前段和下一段",
             )
         care = self._detect_care_feedback(normalized)
         if care.get("is_care"):
@@ -6087,15 +6176,6 @@ class DailyStateMixin:
                 state_updates=["情绪：紧绷->柔和", "亲近感：上升"],
                 intensity="中",
                 scope="当前段和情绪底色",
-            )
-        if re.search(r"开心|好耶|哈哈|笑死|可爱|喜欢|太好了|真好|一起|陪我|想你", normalized):
-            return payload(
-                source="正向互动",
-                note="用户刚刚给了轻松或正向回应；后续日程应多一点回弹、分享欲和轻松停顿。",
-                immediate_reaction="她看到这句会忍不住轻一下,手头事情也没那么难熬了。",
-                state_updates=["情绪：回弹", "分享欲：上升"],
-                intensity="中",
-                scope="当前段和下一段",
             )
         if re.search(r"别生气|不要烦|冷静|别急|别砸|别摔|别骂|别打", normalized):
             return payload(
@@ -6809,9 +6889,97 @@ class DailyStateMixin:
             score += 20
         return score
 
-    def _format_hidden_creative_context_for_reply(self, inbound_text: str) -> str:
+    def _recent_creative_share_snapshot(
+        self,
+        user: dict[str, Any] | None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(user, dict):
+            return {}
+        snapshot = user.get("last_creative_share_snapshot")
+        if not isinstance(snapshot, dict):
+            return {}
+        check_now = _now_ts() if now is None else now
+        sent_at = _safe_float(snapshot.get("sent_at"), 0)
+        expires_at = _safe_float(snapshot.get("expires_at"), 0)
+        if expires_at <= 0 and sent_at > 0:
+            expires_at = sent_at + 12 * 3600
+        if sent_at <= 0 or expires_at <= check_now:
+            return {}
+        return snapshot
+
+    def _remember_recent_creative_share_snapshot(
+        self,
+        user: dict[str, Any],
+        *,
+        creative_context: dict[str, Any] | None,
+        shared_text: str,
+        sent_at: float | None = None,
+    ) -> None:
+        if not isinstance(user, dict):
+            return
+        context = creative_context if isinstance(creative_context, dict) else {}
+        delivered_text = self._visible_text_without_tts_reading(shared_text, limit=1600)
+        source_snippet = _single_line(context.get("snippet"), 420)
+        if not delivered_text and not source_snippet:
+            return
+        delivered_at = _now_ts() if sent_at is None else sent_at
+        user["last_creative_share_snapshot"] = {
+            "project_id": _single_line(context.get("project_id"), 32),
+            "title": _single_line(context.get("title"), 60),
+            "work_type": _single_line(context.get("work_type"), 30),
+            "premise": _single_line(context.get("premise"), 180),
+            "shared_text": _single_line(delivered_text, 1600),
+            "source_snippet": source_snippet,
+            "sent_at": delivered_at,
+            "expires_at": delivered_at + 12 * 3600,
+        }
+
+    def _format_recent_creative_share_snapshot_for_reply(
+        self,
+        user: dict[str, Any] | None,
+        inbound_text: str,
+    ) -> str:
+        snapshot = self._recent_creative_share_snapshot(user)
+        if not snapshot:
+            return ""
+        inbound = _single_line(inbound_text, 220)
+        if not inbound:
+            return ""
+        title = _single_line(snapshot.get("title"), 60)
+        title_mentioned = bool(title and title in inbound)
+        asks_creative = self._user_asks_recent_creative_activity(inbound)
+        asks_activity = self._user_asks_recent_bot_activity(inbound)
+        sent_at = _safe_float(snapshot.get("sent_at"), 0)
+        nearby_short_followup = sent_at > 0 and _now_ts() - sent_at <= 30 * 60 and len(inbound) <= 72
+        if not (title_mentioned or asks_creative or asks_activity or nearby_short_followup):
+            return ""
+        direct_query = title_mentioned or asks_creative or asks_activity
+        shared_text = _single_line(snapshot.get("shared_text"), 1600)
+        source_snippet = _single_line(snapshot.get("source_snippet"), 420)
+        shown_text = shared_text if direct_query else _single_line(shared_text, 360)
+        return "\n".join(
+            part
+            for part in (
+                "【最近一次真实创作分享】",
+                "这是刚刚已实际发送给当前用户的创作内容，不是待发送计划。只有本轮确实在承接这次分享时才使用；无关时完全忽略。",
+                f"作品类型：{_single_line(snapshot.get('work_type'), 30)}" if snapshot.get("work_type") else "",
+                f"标题：{title}" if title else "",
+                f"设定：{_single_line(snapshot.get('premise'), 180)}" if snapshot.get("premise") else "",
+                f"实际分享正文：{shown_text}" if shown_text else "",
+                f"分享时对应片段：{source_snippet}" if source_snippet and source_snippet != shown_text else "",
+                "用户若在追问内容、人物、设定或后续，先围绕这次实际分享回答；不要把后来推进的新片段冒充成刚才发出的内容。",
+            )
+            if part
+        )
+
+    def _format_hidden_creative_context_for_reply(self, inbound_text: str, user: dict[str, Any] | None = None) -> str:
         if not self.enable_creative_writing:
             return ""
+        recent_share_context = self._format_recent_creative_share_snapshot_for_reply(user, inbound_text)
+        if recent_share_context:
+            return recent_share_context
         mentioned_title = self._mentioned_creative_project_title(inbound_text)
         asks_creative = self._user_asks_recent_creative_activity(inbound_text)
         asks_activity = self._user_asks_recent_bot_activity(inbound_text)
@@ -6851,6 +7019,7 @@ class DailyStateMixin:
             if asks_creative
             else "用户正在询问你最近在做什么。"
         )
+        creative_continuity_hint = '如果前文刚提到上述标题或片段，用“我之前写过/发你看过”这类说法会更自然；不必主动解释作者归属。'
         return (
             "【私下创作近况】\n"
             f"{ask_line}你可以提到：你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直在自己慢慢写。\n"
@@ -6858,6 +7027,7 @@ class DailyStateMixin:
             f"标题：{title or '未定标题'}\n"
             f"设定：{premise or '还没完全想清楚'}\n"
             f"进度：约 {progress} 字\n"
+            + f"\n{creative_continuity_hint}\n"
             + (f"最近一句/片段：{snippet}\n" if snippet else "")
             + "如果用户明确问作品/诗/小说/草稿,可以直接概括并给一小句片段；否则这不是必须回答的内容,可以只含糊说“在弄一点小东西”。不要主动汇报系统进度,不要一次给完整正文。"
         )
@@ -7392,7 +7562,6 @@ class DailyStateMixin:
                         continue
                     if _single_line(update.get("source_role"), 20) != "owner":
                         continue
-                    user_text = _single_line(update.get("user_text"), 60)
                     reaction = _single_line(update.get("reaction"), 90)
                     state_updates = update.get("state_updates")
                     state_text = ""
@@ -7406,7 +7575,7 @@ class DailyStateMixin:
                                 continue
                             filtered_updates.append(text)
                         state_text = "；".join(filtered_updates)
-                    pieces = [part for part in (f"用户刚说过“{user_text}”" if user_text else "", reaction, state_text) if part]
+                    pieces = [part for part in (reaction, state_text) if part]
                     if pieces:
                         update_lines.append("，".join(pieces))
                 if update_lines:
@@ -9408,6 +9577,10 @@ class DailyStateMixin:
             "planned_proactive_window_start_at",
             "planned_proactive_best_until_at",
             "planned_proactive_expire_at",
+            "planned_proactive_origin_at",
+            "planned_proactive_origin_key",
+            "planned_proactive_freshness",
+            "planned_proactive_delivery_state",
             "planned_proactive_semantic_kind",
             "planned_proactive_anchor_type",
             "planned_proactive_semantic_score",
@@ -9422,6 +9595,8 @@ class DailyStateMixin:
             "planned_candidate_id",
             "planned_proactive_trigger_message_id",
             "planned_proactive_trigger_umo",
+            "planned_proactive_trigger_ts",
+            "planned_proactive_trigger_inbound_count",
             "planned_proactive_trigger_created_at",
             "proactive_impulses",
             "recent_proactive_hesitations",
@@ -9518,7 +9693,9 @@ class DailyStateMixin:
                     replaced = False
                     handled_by_replacer = False
             if not replaced:
-                if handled_by_replacer and not _single_line(normalize_legacy_tag_text(user.get("planned_proactive_reason")), 40):
+                if handled_by_replacer and _safe_float(user.get("next_proactive_at"), 0) > check_now:
+                    pass
+                elif handled_by_replacer and not _single_line(normalize_legacy_tag_text(user.get("planned_proactive_reason")), 40):
                     self._schedule_next_proactive(user, now=check_now, delay_hours=(max(0.2, delay_minutes[0] / 60), max(0.35, delay_minutes[1] / 60)))
                 else:
                     user["next_proactive_at"] = max(check_now + 5 * 60, quiet_until + random.uniform(2 * 60, 8 * 60))
@@ -9712,21 +9889,28 @@ class DailyStateMixin:
                         async with self._data_lock:
                             current_for_guard = self._get_user(user_id)
                             if _safe_float(current_for_guard.get("next_proactive_at"), 0) <= now:
-                                delay_seconds = random.uniform(30 * 60, 90 * 60)
-                                current_for_guard["next_proactive_at"] = now + delay_seconds
-                                current_for_guard["planned_proactive_window_start_at"] = current_for_guard["next_proactive_at"]
-                                current_for_guard["planned_proactive_best_until_at"] = current_for_guard["next_proactive_at"] + 45 * 60
-                                current_for_guard["planned_proactive_expire_at"] = current_for_guard["next_proactive_at"] + 90 * 60
+                                delay_minutes = (30.0, 90.0)
+                                self._defer_or_replace_planned_impulse(
+                                    current_for_guard,
+                                    now=now,
+                                    note="主动发送检查未通过，候选按当前节奏延后",
+                                    delay_minutes=delay_minutes,
+                                    block_current=False,
+                                )
                                 user["next_proactive_at"] = current_for_guard["next_proactive_at"]
                                 user["planned_proactive_window_start_at"] = current_for_guard["planned_proactive_window_start_at"]
                                 user["planned_proactive_best_until_at"] = current_for_guard["planned_proactive_best_until_at"]
                                 user["planned_proactive_expire_at"] = current_for_guard["planned_proactive_expire_at"]
+                                user["planned_proactive_origin_at"] = current_for_guard.get("planned_proactive_origin_at", 0)
+                                user["planned_proactive_origin_key"] = current_for_guard.get("planned_proactive_origin_key", "")
+                                user["planned_proactive_freshness"] = current_for_guard.get("planned_proactive_freshness", "")
+                                user["planned_proactive_delivery_state"] = current_for_guard.get("planned_proactive_delivery_state", "")
                                 self._save_data_sync()
                                 logger.info(
                                     "[PrivateCompanion] 主动发送检查未通过且无未来调度,已兜底延后: user=%s reason=%s delay=%ss",
                                     user_id,
                                     guard_reason,
-                                    int(delay_seconds),
+                                    int(max(0, _safe_float(current_for_guard.get("next_proactive_at"), now) - now)),
                                 )
                 if is_troubleshooting_for_send and now >= _safe_float(user.get("next_proactive_at"), 0):
                     async with self._data_lock:
@@ -9920,6 +10104,7 @@ class DailyStateMixin:
                     continue
                 current_for_mark["proactive_sending"] = True
                 current_for_mark["proactive_sending_started_at"] = _now_ts()
+                planned_delivery_snapshot = self._ensure_planned_proactive_delivery_state(current_for_mark, now=_now_ts())
                 audit_id = self._append_proactive_audit(
                     user_id,
                     current_for_mark,
@@ -9945,6 +10130,11 @@ class DailyStateMixin:
                 list(user.get("planned_event_chain") or [])
                 if isinstance(user.get("planned_event_chain"), list)
                 else []
+            )
+            creative_share_context_for_send = (
+                dict(user.get("creative_share_context") or {})
+                if isinstance(user.get("creative_share_context"), dict)
+                else {}
             )
             self._ensure_private_user_umo(user_id, user)
             send_umo_for_send = _single_line(user.get("umo"), 180)
@@ -10548,6 +10738,32 @@ class DailyStateMixin:
                         self._update_proactive_audit(audit_id, status="cancelled", note="用户在生成期间发来新消息,已取消本次主动")
                         self._save_data_sync()
                     continue
+            delivery_freshness_reason = ""
+            if not is_troubleshooting_for_send:
+                async with self._data_lock:
+                    current_for_freshness = self._get_user(user_id)
+                    delivery_freshness_reason = self._planned_proactive_send_freshness_reason(
+                        current_for_freshness,
+                        planned_delivery_snapshot,
+                        now=_now_ts(),
+                    )
+                    if delivery_freshness_reason:
+                        current_for_freshness["proactive_sending"] = False
+                        current_for_freshness["proactive_sending_started_at"] = 0
+                        self._mark_planned_candidate_status(current_for_freshness, "blocked", delivery_freshness_reason)
+                        self._clear_pending_proactive_send_retry(current_for_freshness)
+                        self._clear_pending_proactive_plan(current_for_freshness)
+                        self._schedule_next_proactive(current_for_freshness, now=_now_ts(), delay_hours=(1.5, 4.0))
+                        self._update_proactive_audit(audit_id, status="cancelled", note=delivery_freshness_reason)
+                        self._save_data_sync()
+            if delivery_freshness_reason:
+                logger.info(
+                    "[PrivateCompanion] 主动候选在生成期间失效,已取消发送: user=%s reason=%s",
+                    user_id,
+                    _single_line(delivery_freshness_reason, 120),
+                )
+                self._debug_tick_skip(user_id, delivery_freshness_reason, prefix="取消")
+                continue
             async with self._data_lock:
                 current_for_recent_chat = self._get_user(user_id)
                 recent_chat_guard_reason = self._recent_chat_proactive_guard_reason(
@@ -10685,6 +10901,14 @@ class DailyStateMixin:
                     quote_message_id=proactive_quote_message_id,
                     disable_segmenting=reason == "creative_share" or friend_proactive_for_send,
                 )
+                if not is_troubleshooting_for_send and reason == "creative_share":
+                    # Keep a per-user anchor before history archival so an immediate reply has context.
+                    self._remember_recent_creative_share_snapshot(
+                        user,
+                        creative_context=creative_share_context_for_send,
+                        shared_text=text,
+                        sent_at=_now_ts(),
+                    )
                 if is_troubleshooting_for_send:
                     async with self._data_lock:
                         current_after_send = self._get_user(user_id)
@@ -10769,13 +10993,14 @@ class DailyStateMixin:
                             error_text=error_text,
                             now=_now_ts(),
                         )
-                        retry_status = "failed" if "已放弃复用" in retry_note else "deferred"
-                        self._mark_planned_candidate_status(
-                            current_after_failure,
-                            retry_status,
-                            retry_note,
-                            planned_snapshot=planned_snapshot,
-                        )
+                        retry_payload = current_after_failure.get("pending_proactive_send_retry")
+                        if isinstance(retry_payload, dict) and retry_payload.get("active"):
+                            self._mark_planned_candidate_status(
+                                current_after_failure,
+                                "deferred",
+                                retry_note,
+                                planned_snapshot=planned_snapshot,
+                            )
                     self._update_proactive_audit(audit_id, status="failed", note=f"发送失败: {_single_line(error_text, 140)}")
                     self._save_data_sync()
                 continue
@@ -10987,6 +11212,7 @@ class DailyStateMixin:
                         and self._llm_timer_can_use_internal_scheduler(next_timer)
                         and _safe_float(next_timer.get("scheduled_ts"), 0) > _now_ts()
                     ):
+                        self._reset_planned_proactive_delivery_state(current)
                         current["next_proactive_at"] = _safe_float(next_timer.get("scheduled_ts"), 0)
                         current["planned_proactive_reason"] = normalize_legacy_tag_text(next_timer.get("reason")) or "check_in"
                         current["planned_proactive_action"] = normalize_legacy_tag_text(next_timer.get("action")) or "message"
