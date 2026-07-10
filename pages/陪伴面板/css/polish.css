@@ -472,3 +472,214 @@ small {
     margin-top: 4px;
   }
 }
+
+/* Config page system polish */
+#panel-config > .config-grid {
+  gap: 18px;
+  align-items: start;
+}
+
+#panel-config .config-card {
+  border-color: rgba(160, 182, 211, .78);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(23, 49, 82, .06), 0 1px 0 rgba(255, 255, 255, .88) inset;
+}
+
+#panel-config .config-common-settings,
+#panel-config .config-module-details {
+  background: linear-gradient(180deg, rgba(255, 255, 255, .98), rgba(247, 250, 254, .93));
+}
+
+#panel-config .config-common-settings > summary,
+#panel-config .config-module-details > summary {
+  min-height: 72px;
+  padding: 2px;
+  border-radius: 6px;
+  transition: background-color .16s ease, box-shadow .16s ease;
+}
+
+#panel-config .config-common-settings > summary:hover,
+#panel-config .config-module-details > summary:hover {
+  background: rgba(231, 240, 252, .58);
+}
+
+#panel-config .config-common-settings > summary:focus-visible,
+#panel-config .config-module-details > summary:focus-visible,
+#panel-config .migration-summary:focus-visible,
+#panel-config .storage-summary:focus-visible,
+#panel-config .appearance-summary:focus-visible,
+#panel-config .access-card-summary:focus-visible {
+  outline: 3px solid rgba(59, 130, 246, .26);
+  outline-offset: 3px;
+}
+
+#panel-config .config-common-settings > summary h2,
+#panel-config .config-module-details > summary h2 {
+  margin-bottom: 4px;
+}
+
+#panel-config .config-common-settings > summary p,
+#panel-config .config-module-details > summary p {
+  max-width: 780px;
+  margin: 0;
+}
+
+#panel-config .config-common-settings-body {
+  gap: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(160, 182, 211, .32);
+}
+
+#panel-config .config-common-settings-body > .config-card {
+  box-shadow: none;
+}
+
+#panel-config .module-tool-card,
+#panel-config .migration-card,
+#panel-config .storage-collapsible,
+#panel-config .appearance-collapsible,
+#panel-config .access-collapsible {
+  background: rgba(255, 255, 255, .72);
+}
+
+#panel-config .module-tool-card header,
+#panel-config .migration-summary,
+#panel-config .storage-summary,
+#panel-config .appearance-summary,
+#panel-config .access-card-summary {
+  margin-bottom: 0;
+}
+
+#panel-config .module-tool-card header,
+#panel-config .migration-summary,
+#panel-config .storage-summary,
+#panel-config .appearance-summary,
+#panel-config .access-card-summary {
+  min-height: 58px;
+}
+
+#panel-config .module-tool-card header > div,
+#panel-config .migration-summary > div,
+#panel-config .storage-summary > div,
+#panel-config .appearance-summary > div,
+#panel-config .access-card-summary > div {
+  min-width: 0;
+}
+
+#panel-config .module-tool-card header p,
+#panel-config .migration-summary p,
+#panel-config .storage-summary p,
+#panel-config .appearance-summary p,
+#panel-config .access-card-summary p {
+  margin-bottom: 0;
+}
+
+#panel-config .migration-summary,
+#panel-config .storage-summary,
+#panel-config .appearance-summary,
+#panel-config .access-card-summary {
+  padding: 14px 16px;
+}
+
+#panel-config .migration-body,
+#panel-config .storage-body,
+#panel-config .appearance-body,
+#panel-config .access-body {
+  border-top: 1px solid rgba(160, 182, 211, .26);
+}
+
+#panel-config .migration-body,
+#panel-config .storage-body,
+#panel-config .access-body {
+  padding: 14px 16px 16px;
+}
+
+#panel-config .appearance-body {
+  padding: 14px 16px 16px;
+}
+
+#panel-config .module-tool-card header button,
+#panel-config .migration-actions > button,
+#panel-config .migration-flow > button,
+#panel-config .actions > button,
+#panel-config .module-form > button[type="submit"] {
+  min-height: 36px;
+  border-radius: 7px;
+}
+
+#panel-config .module-form,
+#panel-config .storage-config-form,
+#panel-config .access-manager {
+  gap: 14px;
+}
+
+#panel-config .module-subgroup {
+  padding: 12px;
+  border: 1px solid rgba(160, 182, 211, .34);
+  border-radius: 7px;
+  background: rgba(247, 250, 254, .76);
+}
+
+#panel-config .module-subgroup > h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+#panel-config input:not([type="checkbox"]):not([type="radio"]),
+#panel-config select,
+#panel-config textarea {
+  border-color: rgba(143, 169, 202, .62);
+  background: rgba(255, 255, 255, .9);
+}
+
+#panel-config input:not([type="checkbox"]):not([type="radio"]):focus,
+#panel-config select:focus,
+#panel-config textarea:focus {
+  border-color: rgba(59, 130, 246, .78);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, .13);
+}
+
+#panel-config .coverage-grid {
+  gap: 10px;
+}
+
+#panel-config .coverage-grid > * {
+  border-radius: 7px;
+}
+
+#panel-config .config-module-details-body {
+  padding-top: 16px;
+  border-top: 1px solid rgba(160, 182, 211, .32);
+}
+
+#panel-config .config-module-details[open] > summary,
+#panel-config .config-common-settings[open] > summary {
+  margin-bottom: 14px;
+}
+
+@media (max-width: 760px) {
+  #panel-config > .config-grid,
+  #panel-config .config-common-settings-body {
+    gap: 12px;
+  }
+
+  #panel-config .config-common-settings > summary,
+  #panel-config .config-module-details > summary {
+    min-height: 0;
+  }
+
+  #panel-config .migration-summary,
+  #panel-config .storage-summary,
+  #panel-config .appearance-summary,
+  #panel-config .access-card-summary {
+    padding: 13px;
+  }
+
+  #panel-config .migration-body,
+  #panel-config .storage-body,
+  #panel-config .appearance-body,
+  #panel-config .access-body {
+    padding: 12px 13px 13px;
+  }
+}
+

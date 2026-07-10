@@ -1429,6 +1429,7 @@ const configLabels = {
   external_image_api_size: "在线生图尺寸",
   external_image_api_timeout_seconds: "在线生图超时秒数",
   external_image_api_custom_headers: "在线生图自定义请求头",
+  enable_proactive_message_review: "????????",
   enable_backup_external_image_api: "启用备选在线 API",
   backup_external_image_api_platform: "备选在线生图平台",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线 API 地址",
@@ -1883,8 +1884,7 @@ const featureSettingGroups = {
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
-  enable_response_self_review: ["response_review_mode", "enable_smart_silence", "smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "response_review_max_chars"],
-  enable_proactive_message_review: ["proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold"],
+  enable_response_self_review: ["response_review_mode", "enable_proactive_message_review", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "enable_smart_silence", "smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "response_review_max_chars"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
@@ -1954,8 +1954,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
-  enable_backup_external_image_api: ["backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
@@ -15790,6 +15789,7 @@ function renderListCoverage(group, draft = null) {
 function renderFeatureSwitches() {
   const filter = ($("#featureFilter")?.value || "").trim().toLowerCase();
   renderProactiveOnlyModeCard();
+  renderPassiveInjectionPositionForm();
   const knownKeys = new Set(featureGroups.flatMap((group) => group.keys));
   const extraKeys = Object.keys(state.featureDraft || {}).filter((key) => !knownKeys.has(key) && visibleFeatureSwitchKey(key));
   const groups = extraKeys.length
@@ -15952,26 +15952,6 @@ function renderProactiveOnlyModeCard() {
   const injectionPosition = String(settings.passive_injection_position || "prompt");
   root.innerHTML = `
     <div class="proactive-mode-stack">
-      <form class="proactive-mode-injection-card" data-proactive-injection-form>
-        <div class="proactive-mode-copy">
-          <div class="proactive-mode-kicker">被动注入</div>
-          <h3>${escapeHtml(configLabel("passive_injection_position"))}</h3>
-          <p>${escapeHtml(configDescriptions.passive_injection_position || "")}</p>
-          <small class="proactive-mode-code">${escapeHtml("passive_injection_position")}</small>
-        </div>
-        <div class="proactive-mode-injection-control">
-          <select name="passive_injection_position">
-            ${[
-              ["prompt", "当前请求末尾"],
-              ["system_prompt", "系统提示词"],
-              ["auto", "自动（缓存优先）"],
-            ].map(([value, label]) => `<option value="${escapeHtml(value)}"${injectionPosition === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-          </select>
-          <div class="proactive-mode-actions">
-            <button type="submit" class="proactive-mode-button primary">保存位置</button>
-          </div>
-        </div>
-      </form>
       <div class="proactive-mode-settings-row">
         <section class="proactive-mode-card ${checked ? "on" : "off"}">
           <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(key))}">
@@ -15997,9 +15977,20 @@ function renderProactiveOnlyModeCard() {
     state.selectedFeatureKey = key;
     renderFeatureSwitches();
   });
-  root.querySelector("[data-proactive-injection-form]")?.addEventListener("submit", async (event) => {
+
+}
+
+
+function renderPassiveInjectionPositionForm() {
+  const form = $("#passiveInjectionPositionForm");
+  if (!form) return;
+  const settings = state.overview?.settings || {};
+  const select = form.querySelector('[name="passive_injection_position"]');
+  if (select) select.value = String(settings.passive_injection_position || "prompt");
+  if (form.dataset.bound) return;
+  form.dataset.bound = "1";
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const form = event.currentTarget;
     const value = form.querySelector('[name="passive_injection_position"]')?.value || "prompt";
     await runAction(
       () => postJson("/settings/update", { settings: { passive_injection_position: value } }),

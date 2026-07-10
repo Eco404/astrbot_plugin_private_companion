@@ -2243,13 +2243,14 @@ Provider 规则：{emotion_rule}
         if not tts_provider:
             fallback_text = self._tts_visible_fallback_text(text, fallback_plain)
             fallback_text = self._sanitize_tts_visible_text(fallback_text)
+            if not fallback_text:
+                fallback_text = "我这边暂时没有可用的语音通道，先用文字陪你说。"
             if fallback_text:
                 logger.warning(
                     "[PrivateCompanion] TTS强化检测到标签但当前会话没有可用 TTS provider,已隐藏朗读文本并按普通文本发送: %s",
                     _single_line(fallback_text, 160),
                 )
                 return [Plain(fallback_text)]
-            return []
         provider_kind = self._tts_provider_kind(tts_provider, provider_settings)
         output: list[Any] = []
         record_failed = False

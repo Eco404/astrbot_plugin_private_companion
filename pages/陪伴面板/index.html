@@ -932,114 +932,213 @@ QQ空间 = 公开札记
             <summary>
               <div>
                 <h2>常用配置</h2>
-                <p>服务对象、预设、新闻源和外部能力。默认收起，按需展开编辑。</p>
+                <p>只保留日常需要直接管理的主动能力与动态提示词注入位置。</p>
               </div>
               <span class="config-common-settings-disclosure" aria-hidden="true">展开</span>
             </summary>
             <div class="config-common-settings-body">
-          <article class="config-card module-tool-card wide" id="config-quick-start">
-            
-              <header>
-                <div>
-                  <span>常用字段</span>
-                  <p>以下配置项变更后立即生效。</p>
-                </div>
-                <button type="button" data-setup-guide-open>配置引导</button>
-              </header>
-              <div id="quickStartStatus" class="quick-start-status"></div>
-              <form id="quickModuleForm" class="module-form">
-              <div class="module-subgroup">
-                <h3>部署与目标</h3>
-                <label class="wide-field">运行平台
-                  <input name="target_platform" placeholder="如 aiocqhttp / qq_official" />
-                </label>
-                <label class="wide-field">私聊服务对象 ID
-                  <textarea name="target_user_ids" rows="3" placeholder="一行一个用户 ID；OneBot 填 QQ，官方机器人填 openid；私聊 UMO 会自动提取"></textarea>
-                </label>
-                <label class="wide-field">大号→小号转发映射
-                  <textarea name="private_user_delivery_aliases" rows="2" placeholder="格式：主用户ID=投递用户ID，一行一组"></textarea>
-                </label>
-              </div>
-              <div class="module-subgroup">
-                <h3>运行策略与权限</h3>
-                <label>免打扰时段 <input name="quiet_hours" placeholder="如 23:00-08:30" /></label>
-                <label class="toggle-row"><input name="require_private_opt_in" type="checkbox" /> <span>管理命令仅限私聊执行（群聊中不响应状态修改指令）</span></label>
-              </div>
-              <button type="submit">保存配置</button>
-            </form>
-            </article>
-          <article class="config-card module-tool-card wide" id="config-presets">
-            <header>
-              <div>
-                <span>Presets</span>
-                <h3>配置预设</h3>
-                <p>按想要的陪伴节奏选择一整套取向，适合初始化、低打扰、日常陪伴或群聊观察。</p>
-              </div>
-              <button type="button" data-jump-tab="config">查看功能开关</button>
-            </header>
-            <div id="presetCards" class="preset-grid"></div>
-          </article>
-          <article class="config-card module-tool-card" id="config-segmented-preview">
-            <header>
-              <div>
-                <span>Lab</span>
-                <h3>分段效果实验室</h3>
-                <p>用当前分段规则预览主动消息会被拆成几段，适合先试效果再微调。</p>
-              </div>
-              <button type="button" data-jump-tab="config">调整分段配置</button>
-            </header>
-            <section class="segmented-preview-panel" data-segmented-preview-panel>
-              <header>
-                <div>
-                  <h4>分段预览</h4>
-                </div>
-                <div class="segmented-preview-actions">
-                  <button type="button" data-segmented-example="simple">简单示例</button>
-                  <button type="button" data-segmented-example="complex">复杂示例</button>
-                </div>
-              </header>
-              <textarea data-segmented-preview-input rows="4"></textarea>
-              <div data-segmented-preview-output class="segmented-preview-output"></div>
-            </section>
-          </article>
-          <article class="config-card module-tool-card wide" id="config-news-sources">
-            <header>
-              <div>
-                <span>Sources</span>
-                <h3>新闻源管理</h3>
-                <p>管理 RSS、B 站 UP 或单条视频来源，方便调整 Bot 平时会读到的信息入口。</p>
-              </div>
-              <button type="button" data-save-news-sources>保存新闻源</button>
-            </header>
-            <textarea name="news_sources" id="newsSourcesRaw" hidden></textarea>
-            <div class="news-source-manager" id="newsSourceManager"></div>
-          </article>
-          <article class="config-card module-tool-card" id="config-media-cache">
-            <header>
-              <div>
-                <span>Media</span>
-                <h3>媒体缓存与转述</h3>
-                <p>图片/表情包缓存、识图摘要和重复图命中可在缓存页统一管理。</p>
-              </div>
-              <button type="button" data-jump-tab="image-cache">管理图片缓存</button>
-            </header>
-            <div class="module-tool-metrics">
-              <span>重复图缓存会显著减少视觉模型调用</span>
-              <span>误识别可在缓存页直接修正或删除</span>
+              <article class="config-card module-tool-card wide" id="config-external-abilities">
+                <header>
+                  <div>
+                    <span>主动能力</span>
+                    <h3>外部主动能力</h3>
+                    <p>第三方插件注册的主动能力在这里管理，可按需加入主动候选池。</p>
+                  </div>
+                  <button type="button" data-jump-tab="models">查看相关模型</button>
+                </header>
+                <div id="externalAbilityList" class="external-ability-grid"></div>
+              </article>
+              <article class="config-card module-tool-card wide" id="config-prompt-injection-position">
+                <header>
+                  <div>
+                    <span>提示词</span>
+                    <h3>动态提示词注入位置</h3>
+                    <p>决定被动状态、请求级环境感知和转发上下文等动态片段写入当前请求末尾还是系统提示词。</p>
+                  </div>
+                </header>
+                <form class="config-common-inline-form" id="passiveInjectionPositionForm">
+                  <label>
+                    注入位置
+                    <select name="passive_injection_position">
+                      <option value="prompt">当前请求末尾</option>
+                      <option value="system_prompt">系统提示词</option>
+                      <option value="auto">自动（缓存优先）</option>
+                    </select>
+                  </label>
+                  <button type="submit">保存位置</button>
+                </form>
+              </article>
             </div>
-          </article>
-          <article class="config-card module-tool-card wide" id="config-external-abilities">
-            <header>
-              <div>
-                <span>Extensions</span>
-                <h3>外部主动能力</h3>
-                <p>第三方插件注册的主动能力在这里管理；它们不是普通配置项，而是可加入候选池的能力卡。</p>
-              </div>
-              <button type="button" data-jump-tab="models">查看相关模型</button>
-            </header>
-            <div id="externalAbilityList" class="external-ability-grid"></div>
-          </article>
+          </details>
 
+          <details class="config-card wide migration-card migration-collapsible">
+            <summary class="migration-head migration-summary">
+              <div>
+                <h2>配置迁移</h2>
+                <p>导出或导入可迁移配置与关系、群聊、候选菜单等资料；也兼容旧版快照文件。缓存、Token、最近消息和运行日志不会写入备份。</p>
+              </div>
+            </summary>
+            <div class="migration-body">
+              <div class="migration-actions">
+                <button id="exportConfigBtn" type="button">导出配置备份</button>
+                <label class="file-pick">
+                  <input id="importConfigFile" type="file" accept="application/json,.json" />
+                  选择备份文件
+                </label>
+              </div>
+              <div class="migration-options" aria-label="导出内容">
+                <span>导出内容</span>
+                <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
+                <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
+                <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
+                <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
+                <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
+              </div>
+              <div class="migration-flow">
+                <label>
+                  导入方式
+                  <select id="configImportMode">
+                    <option value="merge">合并导入，保留现有资料</option>
+                    <option value="replace">覆盖可迁移资料</option>
+                  </select>
+                </label>
+                <label>
+                  字段冲突
+                  <select id="configImportConflict">
+                    <option value="use_backup">使用备份内容</option>
+                    <option value="keep_current">保留当前内容</option>
+                    <option value="fill_empty">只补当前空字段</option>
+                  </select>
+                </label>
+                <label class="migration-risk-option">
+                  <input id="configAllowChecksumMismatch" type="checkbox" />
+                  校验失败仍继续预览/导入
+                </label>
+                <button id="previewConfigImportBtn" type="button" disabled>预览导入</button>
+                <button id="applyConfigImportBtn" type="button" disabled>确认导入</button>
+              </div>
+              <div id="configMigrationPreview" class="migration-preview">
+                还没有选择备份或快照文件。
+              </div>
+              <div class="migration-aftercare">
+                <div>
+                  <h3>最近自动备份</h3>
+                  <div id="configBackupList" class="migration-backup-list">暂无自动备份。</div>
+                </div>
+                <div>
+                  <h3>导入后检查</h3>
+                  <div id="configImportChecks" class="migration-check-list">导入后会在这里显示轻量检查结果。</div>
+                </div>
+              </div>
+            </div>
+          </details>
+          <details class="config-card storage-collapsible">
+            <summary class="storage-summary">
+              <div>
+                <h2>存储方式</h2>
+                <p>控制陪伴插件主数据的保存后端（json / sqlite）。默认收起，展开后可切换后端与路径。</p>
+              </div>
+            </summary>
+            <div class="storage-body">
+              <form id="storageConfigForm" class="storage-config-form">
+                <div class="form-grid">
+                  <label>
+                    主数据保存方式
+                    <select id="storageBackendSelect" name="storage_backend">
+                      <option value="json">json</option>
+                      <option value="sqlite">sqlite</option>
+                    </select>
+                  </label>
+                  <label id="storageSqlitePathWrap">
+                    SQLite 数据文件路径
+                    <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
+                  </label>
+                </div>
+                <div id="storageConfigSummary" class="storage-config-summary"></div>
+                <p class="storage-config-note">这里控制陪伴插件主数据的保存后端。配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
+                <div class="actions">
+                  <button id="saveStorageConfigBtn" type="submit">保存存储方式</button>
+                </div>
+              </form>
+            </div>
+          </details>
+          <details class="config-card wide appearance-collapsible">
+            <summary class="appearance-summary">
+              <div>
+                <h2>拓展页设置</h2>
+                <p>切换拓展页面的字体与配色主题，即时预览。默认收起，展开后可调整外观偏好。</p>
+              </div>
+            </summary>
+            <div class="appearance-body">
+              <div class="appearance-form">
+                <label class="appearance-field">
+                  <span>页面字体</span>
+                  <select id="appearanceFontSelect" data-page-font-select>
+                    <option value="original">原始字体</option>
+                    <option value="cheng">13.woff2</option>
+                  </select>
+                </label>
+                <div class="appearance-field appearance-theme-field">
+                  <span>配色主题</span>
+                  <div class="appearance-theme-grid" id="appearanceThemeGrid" role="radiogroup" aria-label="配色主题"></div>
+                </div>
+                <div class="appearance-preview" id="appearancePreview" aria-hidden="true">
+                  <div class="appearance-preview-card">
+                    <h3>预览</h3>
+                    <p class="appearance-preview-text">这里是一段示例文字，用来展示当前主题的配色与字体效果。</p>
+                    <div class="appearance-preview-actions">
+                      <button type="button" disabled>示例按钮</button>
+                      <span class="appearance-preview-tag">标签</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+          <article class="config-card wide">
+            <h2>群聊名单覆盖</h2>
+            <div id="listCoverage" class="coverage-grid"></div>
+          </article>
+          <details class="config-card wide access-collapsible">
+            <summary class="access-card-summary">
+              <div>
+                <h2>群聊名单</h2>
+                <p>管理白名单 / 黑名单模式与目标群号。默认收起，展开后可切换模式、快捷勾选或批量编辑群号。</p>
+              </div>
+            </summary>
+            <div class="access-body">
+              <form id="accessForm" class="access-manager">
+              <div class="access-mode-row">
+                <select id="groupAccessMode" aria-label="群聊名单模式">
+                  <option value="whitelist">白名单模式</option>
+                  <option value="blacklist">黑名单模式</option>
+                </select>
+                <div class="access-mode-switch" role="group" aria-label="群聊名单模式">
+                  <label><input type="radio" name="groupAccessModeChoice" value="whitelist"> <span>白名单</span></label>
+                  <label><input type="radio" name="groupAccessModeChoice" value="blacklist"> <span>黑名单</span></label>
+                </div>
+              </div>
+              <div id="accessSummary" class="access-summary"></div>
+              <div id="accessQuickGroups" class="access-quick-groups"></div>
+              <details class="access-advanced">
+                <summary>批量编辑群号</summary>
+                <div class="form-grid">
+                  <label>
+                    白名单群号
+                    <textarea id="groupWhitelist" rows="4" placeholder="一行一个或逗号分隔"></textarea>
+                  </label>
+                  <label>
+                    黑名单群号
+                    <textarea id="groupBlacklist" rows="4" placeholder="一行一个或逗号分隔"></textarea>
+                  </label>
+                </div>
+              </details>
+              <div class="actions">
+                <button type="submit">保存名单</button>
+              </div>
+            </form>
+            </div>
+          </details>
             </div>
           </details>
 
@@ -1306,174 +1405,6 @@ QQ空间 = 公开札记
               <button type="submit">保存长线主动</button>
             </form>
           </article>
-            </div>
-          </details>
-          <details class="config-card wide migration-card migration-collapsible">
-            <summary class="migration-head migration-summary">
-              <div>
-                <h2>配置迁移</h2>
-                <p>导出或导入可迁移配置与关系、群聊、候选菜单等资料；也兼容旧版快照文件。缓存、Token、最近消息和运行日志不会写入备份。</p>
-              </div>
-            </summary>
-            <div class="migration-body">
-              <div class="migration-actions">
-                <button id="exportConfigBtn" type="button">导出配置备份</button>
-                <label class="file-pick">
-                  <input id="importConfigFile" type="file" accept="application/json,.json" />
-                  选择备份文件
-                </label>
-              </div>
-              <div class="migration-options" aria-label="导出内容">
-                <span>导出内容</span>
-                <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
-                <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
-                <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
-                <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
-                <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
-              </div>
-              <div class="migration-flow">
-                <label>
-                  导入方式
-                  <select id="configImportMode">
-                    <option value="merge">合并导入，保留现有资料</option>
-                    <option value="replace">覆盖可迁移资料</option>
-                  </select>
-                </label>
-                <label>
-                  字段冲突
-                  <select id="configImportConflict">
-                    <option value="use_backup">使用备份内容</option>
-                    <option value="keep_current">保留当前内容</option>
-                    <option value="fill_empty">只补当前空字段</option>
-                  </select>
-                </label>
-                <label class="migration-risk-option">
-                  <input id="configAllowChecksumMismatch" type="checkbox" />
-                  校验失败仍继续预览/导入
-                </label>
-                <button id="previewConfigImportBtn" type="button" disabled>预览导入</button>
-                <button id="applyConfigImportBtn" type="button" disabled>确认导入</button>
-              </div>
-              <div id="configMigrationPreview" class="migration-preview">
-                还没有选择备份或快照文件。
-              </div>
-              <div class="migration-aftercare">
-                <div>
-                  <h3>最近自动备份</h3>
-                  <div id="configBackupList" class="migration-backup-list">暂无自动备份。</div>
-                </div>
-                <div>
-                  <h3>导入后检查</h3>
-                  <div id="configImportChecks" class="migration-check-list">导入后会在这里显示轻量检查结果。</div>
-                </div>
-              </div>
-            </div>
-          </details>
-          <details class="config-card storage-collapsible">
-            <summary class="storage-summary">
-              <div>
-                <h2>存储方式</h2>
-                <p>控制陪伴插件主数据的保存后端（json / sqlite）。默认收起，展开后可切换后端与路径。</p>
-              </div>
-            </summary>
-            <div class="storage-body">
-              <form id="storageConfigForm" class="storage-config-form">
-                <div class="form-grid">
-                  <label>
-                    主数据保存方式
-                    <select id="storageBackendSelect" name="storage_backend">
-                      <option value="json">json</option>
-                      <option value="sqlite">sqlite</option>
-                    </select>
-                  </label>
-                  <label id="storageSqlitePathWrap">
-                    SQLite 数据文件路径
-                    <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
-                  </label>
-                </div>
-                <div id="storageConfigSummary" class="storage-config-summary"></div>
-                <p class="storage-config-note">这里控制陪伴插件主数据的保存后端。配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
-                <div class="actions">
-                  <button id="saveStorageConfigBtn" type="submit">保存存储方式</button>
-                </div>
-              </form>
-            </div>
-          </details>
-          <details class="config-card wide appearance-collapsible">
-            <summary class="appearance-summary">
-              <div>
-                <h2>拓展页设置</h2>
-                <p>切换拓展页面的字体与配色主题，即时预览。默认收起，展开后可调整外观偏好。</p>
-              </div>
-            </summary>
-            <div class="appearance-body">
-              <div class="appearance-form">
-                <label class="appearance-field">
-                  <span>页面字体</span>
-                  <select id="appearanceFontSelect" data-page-font-select>
-                    <option value="original">原始字体</option>
-                    <option value="cheng">13.woff2</option>
-                  </select>
-                </label>
-                <div class="appearance-field appearance-theme-field">
-                  <span>配色主题</span>
-                  <div class="appearance-theme-grid" id="appearanceThemeGrid" role="radiogroup" aria-label="配色主题"></div>
-                </div>
-                <div class="appearance-preview" id="appearancePreview" aria-hidden="true">
-                  <div class="appearance-preview-card">
-                    <h3>预览</h3>
-                    <p class="appearance-preview-text">这里是一段示例文字，用来展示当前主题的配色与字体效果。</p>
-                    <div class="appearance-preview-actions">
-                      <button type="button" disabled>示例按钮</button>
-                      <span class="appearance-preview-tag">标签</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </details>
-          <article class="config-card wide">
-            <h2>群聊名单覆盖</h2>
-            <div id="listCoverage" class="coverage-grid"></div>
-          </article>
-          <details class="config-card wide access-collapsible">
-            <summary class="access-card-summary">
-              <div>
-                <h2>群聊名单</h2>
-                <p>管理白名单 / 黑名单模式与目标群号。默认收起，展开后可切换模式、快捷勾选或批量编辑群号。</p>
-              </div>
-            </summary>
-            <div class="access-body">
-              <form id="accessForm" class="access-manager">
-              <div class="access-mode-row">
-                <select id="groupAccessMode" aria-label="群聊名单模式">
-                  <option value="whitelist">白名单模式</option>
-                  <option value="blacklist">黑名单模式</option>
-                </select>
-                <div class="access-mode-switch" role="group" aria-label="群聊名单模式">
-                  <label><input type="radio" name="groupAccessModeChoice" value="whitelist"> <span>白名单</span></label>
-                  <label><input type="radio" name="groupAccessModeChoice" value="blacklist"> <span>黑名单</span></label>
-                </div>
-              </div>
-              <div id="accessSummary" class="access-summary"></div>
-              <div id="accessQuickGroups" class="access-quick-groups"></div>
-              <details class="access-advanced">
-                <summary>批量编辑群号</summary>
-                <div class="form-grid">
-                  <label>
-                    白名单群号
-                    <textarea id="groupWhitelist" rows="4" placeholder="一行一个或逗号分隔"></textarea>
-                  </label>
-                  <label>
-                    黑名单群号
-                    <textarea id="groupBlacklist" rows="4" placeholder="一行一个或逗号分隔"></textarea>
-                  </label>
-                </div>
-              </details>
-              <div class="actions">
-                <button type="submit">保存名单</button>
-              </div>
-            </form>
             </div>
           </details>
           <article class="wide">
