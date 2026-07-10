@@ -2727,110 +2727,83 @@ class CommandHandlersMixin:
         query = _single_line(question, 260)
         if not query:
             return (
-                "可以这样问：\n"
-                "陪伴 答疑 群聊里面老是不回复或者好久才回复是什么情况\n"
-                "陪伴 答疑 群连续对话在哪里进行设置\n"
-                "陪伴 答疑 高强度收口和连续对话会不会冲突\n"
-                "陪伴 答疑 智能收口为什么会等几秒\n"
-                "陪伴 答疑 说句晚安后为什么不回消息了\n"
-                "陪伴 答疑 智能沉默会不会在发送前拦截\n"
-                "陪伴 答疑 自然语言生图怎么关闭"
+                "你直接说刚才发生了什么就行，比如：\n"
+                "- 刚才群里为什么没回我\n"
+                "- 发图后为什么等了几秒\n"
+                "- 主动消息为什么今天没发\n"
+                "- 这个开关开了到底有没有生效\n"
+                "最好带上发生的场景、时间和一张截图；我会先查最可能的一条链路。"
             ), []
         selected = self._companion_manual_select_entries(query)
         if not selected:
             return (
-                "这句我不太确定你想查哪一块功能。\n"
-                "你可以直接问具体场景，比如：群聊不回复、连续对话、高强度收口、智能收口、休息闸门、智能沉默、主动消息、生图、模型配置、QQ 空间。\n"
-                "如果是在查刚刚那次异常，问“为什么刚才没回复/为什么等了几秒/为什么没生图”会更准。"
+                "我还没法把它定位到一条具体链路。\n"
+                "把现象补成“在哪里发生 + Bot 做了什么/没做什么 + 大概什么时候”，我就能按运行态查。\n"
+                "例如：群里 @ 了 Bot 但没回、私聊发图后等了 5 秒、刚才主动消息没发出来。"
             ), []
+        primary = selected[0] if isinstance(selected[0], dict) else {}
+        title = _single_line(primary.get("title"), 60) or "这条功能链路"
+        summary = _single_line(primary.get("summary"), 180)
         issue_tags = self._companion_manual_issue_tags(query)
+        recent_words = ("刚才", "刚刚", "今天", "最近", "没回", "不回", "没回复", "为什么", "失败", "报错")
+        recent_requested = bool(issue_tags & {"recent", "error", "photo", "qzone"}) or any(word in query for word in recent_words)
+        evidence: list[str] = []
+        if recent_requested:
+            evidence.extend(self._companion_manual_recent_no_reply_evidence(event, limit=1))
+        if issue_tags & {"photo", "qzone"} or any(word in query for word in ("测试", "排障", "报错", "失败")):
+            evidence.extend(self._companion_manual_recent_test_evidence(limit=1))
+        runtime_lines = [
+            _single_line(line, 130)
+            for line in self._companion_manual_runtime_snapshot(event).splitlines()
+            if _single_line(line, 130)
+        ]
+        if runtime_lines and ("group" in issue_tags or recent_requested):
+            evidence.append(runtime_lines[0])
+        checks = [_single_line(item, 120) for item in primary.get("checks", []) if _single_line(item, 120)]
+        suggestions = [_single_line(item, 120) for item in primary.get("suggestions", []) if _single_line(item, 120)]
         mentioned_keys = self._companion_manual_mentioned_config_keys(query)
-        for key in self._companion_manual_config_keys_from_alias_text(query, limit=4):
+        for key in self._companion_manual_config_keys_from_alias_text(query, limit=2):
             if key not in mentioned_keys:
                 mentioned_keys.append(key)
-        lines = []
-        group_note = self._companion_manual_current_group_note(event)
-        if group_note:
-            lines.append(group_note)
-        primary = selected[0]
-        if "location" in issue_tags and mentioned_keys:
-            config_lines = []
-            for key in mentioned_keys[:4]:
-                current = self._companion_manual_current_config_value(key)
-                config_lines.append(
-                    f"{self._companion_manual_config_ref(key)}｜当前值：{self._companion_manual_format_config_item_value(key, current)}"
-                )
-            lines.append("你要找的大概是：" + "；".join(config_lines))
-        lines.append(f"我更倾向先看“{primary.get('title')}”。{primary.get('summary')}")
-        if len(selected) > 1:
-            other_titles = [
-                _single_line(item.get("title"), 40)
-                for item in selected[1:3]
-                if isinstance(item, dict) and _single_line(item.get("title"), 40)
-            ]
-            if other_titles:
-                lines.append("也可能牵到：" + "、".join(other_titles))
-        no_reply = self._companion_manual_recent_no_reply_evidence(event, limit=2)
-        if no_reply and ("recent" in issue_tags or any(word in query for word in ("刚才", "刚刚", "没回", "不回", "没回复", "为什么"))):
-            lines.append("最近未回复记录：" + "；".join(no_reply))
-        tests = self._companion_manual_recent_test_evidence(limit=2)
-        if tests and (issue_tags & {"photo", "qzone"} or any(word in query for word in ("测试", "排障"))):
-            lines.append("最近排障测试：" + "；".join(tests))
-        checks = [str(item) for item in primary.get("checks", []) if str(item or "").strip()]
+        lines = [f"这次更像是“{title}”在起作用。{summary}"]
+        if evidence:
+            lines.append("我现在能对上的证据是：" + "；".join(evidence[:2]))
+        elif recent_requested:
+            lines.append("当前没有直接命中这次事件的记录，所以只能先按现象判断，别把它当成确定结论。")
         if checks:
-            lines.append("优先看：" + "；".join(_single_line(item, 130) for item in checks[:3]))
-        suggestions = [str(item) for item in primary.get("suggestions", []) if str(item or "").strip()]
-        if suggestions:
-            lines.append("建议先试：" + "；".join(_single_line(item, 130) for item in suggestions[:2]))
-        settings = [str(item) for item in primary.get("settings", []) if str(item or "").strip()]
-        if settings:
-            lines.append("相关配置：" + "；".join(self._companion_manual_config_ref(item) for item in settings[:5]))
-        snapshot = self._companion_manual_relevant_setting_snapshot(selected, query)
-        if snapshot:
-            lines.append("当前值：" + "；".join(snapshot[:3]))
-        return "\n".join(lines), selected
-
+            lines.append("先看这一处：" + checks[0])
+        elif suggestions:
+            lines.append("下一步先试：" + suggestions[0])
+        if mentioned_keys:
+            key = mentioned_keys[0]
+            current = self._companion_manual_current_config_value(key)
+            lines.append(f"你点名的 {self._companion_manual_config_ref(key, include_location=False)}现在是 {self._companion_manual_format_config_item_value(key, current)}。")
+        elif len(selected) > 1:
+            secondary = _single_line(selected[1].get("title"), 50) if isinstance(selected[1], dict) else ""
+            if secondary:
+                lines.append(f"如果上面不符合，再查“{secondary}”，不用一次把所有开关都翻出来。")
+        return "\n".join(line for line in lines if line), selected
     def _companion_manual_local_hint_text(self, event: AstrMessageEvent, selected: list[dict[str, Any]]) -> str:
         lines: list[str] = []
         group_note = self._companion_manual_current_group_note(event)
         if group_note:
             lines.append(group_note)
         if selected:
-            titles = [
-                _single_line(item.get("title"), 50)
-                for item in selected[:3]
-                if isinstance(item, dict) and _single_line(item.get("title"), 50)
-            ]
-            if titles:
-                lines.append("本地初筛：" + " / ".join(titles))
             primary = selected[0] if isinstance(selected[0], dict) else {}
-            checks_source = primary.get("checks") if isinstance(primary.get("checks"), list) else []
-            suggestions_source = primary.get("suggestions") if isinstance(primary.get("suggestions"), list) else []
+            title = _single_line(primary.get("title"), 60)
+            if title:
+                lines.append("优先链路：" + title)
             checks = [
                 _single_line(item, 120)
-                for item in checks_source[:3]
-                if _single_line(item, 120)
-            ]
-            suggestions = [
-                _single_line(item, 120)
-                for item in suggestions_source[:2]
+                for item in (primary.get("checks") if isinstance(primary.get("checks"), list) else [])[:2]
                 if _single_line(item, 120)
             ]
             if checks:
-                lines.append("优先核对：" + "；".join(checks))
-            if suggestions:
-                lines.append("可参考建议：" + "；".join(suggestions))
-        else:
-            lines.append("本地关键词没有稳定定位，需根据完整说明书和运行状态自行判断。")
-        snapshot = [
-            _single_line(item, 120)
-            for item in self._companion_manual_relevant_setting_snapshot(selected, "")
-            if _single_line(item, 120)
-        ]
-        if snapshot:
-            lines.append("关键配置概览：" + "；".join(snapshot))
+                lines.append("可验证点：" + "；".join(checks))
+        runtime = [_single_line(item, 140) for item in self._companion_manual_runtime_snapshot(event).splitlines() if _single_line(item, 140)]
+        if runtime:
+            lines.append("运行态：" + "；".join(runtime[:2]))
         return "\n".join(line for line in lines if line)
-
     async def _companion_manual_model_answer(
         self,
         event: AstrMessageEvent,
@@ -2911,18 +2884,17 @@ class CommandHandlersMixin:
         prompt = f"""
 你是 AstrBot 陪伴插件当前人格下的答疑助手。用户不是在闲聊,是在问插件功能为什么这样运行。
 
-要求：
-- 根据“完整功能说明书”和“当前运行状态”判断最可能原因,不要泛泛复述所有可能性。
-- 如果“本轮图片/引用图片上下文”有内容,要把它当作用户给的截图/报错/UI 线索一起判断。
-- 如果证据不足,明确说“更像是/需要看日志确认”,不要装作确定。
-- 回复要像当前人格在群里解释,不是后台报告；保留人格语气,但不要编造事实、不要撒娇过头影响清晰度。
-- 默认 4-8 行内说清楚：先一句结论,再说明关键原因,最后给 1-2 条最有用建议。
-- 不要输出“问题/大概结论/优先检查/相关配置/当前关键配置/诊断依据”这种报告标题。
-- 不要把完整配置快照逐条贴给用户；只有真正要调的配置才提。
+回答方式：
+- 把这当成一次小型现场诊断，不是功能说明书问答。先判断用户在问“刚才发生的现象”、配置怎么调，还是功能是否生效。
+- 先给一个最可能结论；只引用能支持这条结论的 1-2 个运行态、截图或记录证据。没有证据就说“更像是”，不要凑多种可能。
+- 默认只给一个下一步动作；用户没有明确问参数时，不要列配置项、位置、阈值或全量开关。
+- 如果用户明确点名某个配置，才说明该配置当前值和它会影响什么；最多提 1 个相关配置。
+- 不要把“完整功能说明书”“关键词初筛”“本地回退”“当前配置快照”等实现过程说给用户，也不要照搬它们的分段结构。
+- 回复 3-6 行，口语、清楚、能行动；不写报告标题、不写表格、不写客服套话。
 - 只能使用“完整功能说明书”里出现过的配置项；不要编造不存在的配置项。
 - 提到配置时必须同时写中文名和参数名,格式类似“高强度唤醒阈值（group_high_intensity_wakeup_threshold）”。
-- 如果“用户明确提到的配置项”不是“无”,回答里要告诉用户它在拓展页配置页的具体位置。
-- 涉及调参时不要只说“改成/设为 X”；必须尽量写成“由 当前值 改为 目标值”。当前值不知道时,写“由当前值确认后改为 X”。
+- 用户明确追问“在哪里设置”时，再给具体位置；否则不要为了完整而附带路径。
+- 涉及调参时，只有在证据支持时才给具体数值；否则先说明要观察什么，不要假装已经知道最佳值。
 - 可执行改配置由本地白名单规则另行生成；你只负责解释和建议,不要声称已经修改配置。
 - 语气口语化,像插件作者在排障,不要写客服套话,不要输出表格。
 - 不要说“内置说明书没匹配到”“关键词没命中”“去扩展页排障中心”这类暴露实现的话；如果不确定,就自然说明需要更具体的现象或日志。
@@ -2991,7 +2963,15 @@ class CommandHandlersMixin:
             return local_answer
         proposals = self._companion_manual_build_config_proposals(query, selected, event)
         token = self._companion_manual_store_pending_config(event, query, proposals)
-        proposal_text = self._companion_manual_format_config_proposals_brief(token, proposals)
+        explicit_config_question = bool(self._companion_manual_mentioned_config_keys(query)) or any(
+            word in query.lower()
+            for word in ("配置", "设置", "参数", "阈值", "开关", "改成", "调到", "调高", "调低", "怎么开", "怎么关")
+        )
+        proposal_text = (
+            self._companion_manual_format_config_proposals_brief(token, proposals)
+            if explicit_config_question
+            else ""
+        )
         model_answer = await self._companion_manual_model_answer(event, query, local_answer, selected, media_context=media_context)
         if model_answer:
             answer = model_answer

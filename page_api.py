@@ -127,6 +127,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/bookshelf/rate", self.rate_bookshelf_item, ["POST"], "Private Companion Page rate bookshelf item"),
             ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
             ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
+            ("/bookshelf/reading_state", self.update_bookshelf_reading_state, ["POST"], "Private Companion Page update bookshelf reading state"),
             ("/qzone/status", self.get_qzone_status, ["GET"], "Private Companion Page qzone status"),
             ("/qzone/health", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
             ("/qzone/summary", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
@@ -759,28 +760,64 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 更新图片缓存失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    def _image_cache_preview_file(self, key: str, raw: dict[str, Any] | None = None) -> Path | None:
+        clean_key = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(key or ""))[:80]
+        if not clean_key:
+            return None
+        base = (Path(getattr(self.plugin, "data_dir", "")) / "private_image_cache_previews").resolve()
+        candidates: list[Path] = []
+        preview_path = self._single_line((raw or {}).get("preview_path"), 260) if isinstance(raw, dict) else ""
+        if preview_path:
+            try:
+                candidates.append(Path(preview_path).resolve())
+            except Exception:
+                pass
+        candidates.extend(base / f"{clean_key}{suffix}" for suffix in (".jpg", ".jpeg", ".png", ".webp", ".gif"))
+        for candidate in candidates:
+            try:
+                if candidate.is_file() and candidate.is_relative_to(base):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    def _restore_image_cache_preview_metadata(self, key: str, raw: dict[str, Any]) -> bool:
+        preview = self._image_cache_preview_file(key, raw)
+        if preview is None:
+            return False
+        changed = False
+        if self._single_line(raw.get("preview_path"), 260) != str(preview):
+            raw["preview_path"] = str(preview)
+            changed = True
+        try:
+            preview_size = preview.stat().st_size
+        except Exception:
+            preview_size = 0
+        if _safe_int(raw.get("preview_size"), 0, 0) != preview_size:
+            raw["preview_size"] = preview_size
+            changed = True
+        return changed
+
     async def get_image_cache_preview(self) -> Any:
         key = self._single_line(request.args.get("key"), 120)
         if not key:
-            return self._error("缺少缓存 key")
+            return self._error("???? key")
         try:
             async with self.plugin._data_lock:
-                cache = deepcopy(self.plugin.data.get("private_image_vision_cache") or {})
-            item = cache.get(key) if isinstance(cache, dict) else None
-            if not isinstance(item, dict):
-                return self._error("缓存条目不存在")
-            preview_path = self._single_line(item.get("preview_path"), 260)
-            if not preview_path:
-                return self._error("该缓存没有预览图")
-            path = Path(preview_path).resolve()
-            base = (Path(getattr(self.plugin, "data_dir", "")) / "private_image_cache_previews").resolve()
-            if not path.is_file() or not path.is_relative_to(base):
-                return self._error("预览图不存在")
-            response = await send_file(path)
-            response.headers["Cache-Control"] = "private, max-age=3600"
+                cache = self.plugin.data.get("private_image_vision_cache")
+                item = cache.get(key) if isinstance(cache, dict) else None
+                if not isinstance(item, dict):
+                    return self._error("???????")
+                path = self._image_cache_preview_file(key, item)
+                if path is None:
+                    return self._error("??????")
+                if self._restore_image_cache_preview_metadata(key, item):
+                    self.plugin._save_data_sync()
+            response = await send_file(str(path))
+            response.headers["Cache-Control"] = "no-store, max-age=0"
             return response
         except Exception as exc:
-            logger.error(f"[PrivateCompanionPage] 获取图片缓存预览失败: {exc}", exc_info=True)
+            logger.error(f"[PrivateCompanionPage] ??????????: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def delete_image_cache_item(self) -> dict[str, Any]:
@@ -824,13 +861,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         created_ts = self._float(raw.get("created_ts"))
         last_hit_ts = self._float(raw.get("last_hit_ts"))
         edited_ts = self._float(raw.get("edited_ts"))
-        preview_path = self._single_line(raw.get("preview_path"), 260)
-        preview_exists = False
-        if preview_path:
-            try:
-                preview_exists = Path(preview_path).is_file()
-            except Exception:
-                preview_exists = False
+        preview_file = self._image_cache_preview_file(key, raw)
+        preview_exists = preview_file is not None
         return {
             "key": self._single_line(key, 120),
             "text": self._single_line(text, 900 if scope == "forward_image" else 600),
@@ -4204,6 +4236,54 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 shutil.rmtree(folder, ignore_errors=True)
             except Exception:
                 pass
+
+    async def update_bookshelf_reading_state(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        access_token = self._bookshelf_request_token(payload)
+        if not self._bookshelf_access_token_valid(access_token):
+            return self._error(self._bookshelf_access_error()["error"])
+        album_id = self._single_line(payload.get("album_id") or payload.get("id"), 32)
+        page = max(1, self._int(payload.get("page")))
+        total_pages = max(0, self._int(payload.get("total_pages")))
+        bookmark = self._single_line(payload.get("bookmark"), 120)
+        if not album_id:
+            return self._error("缺少 album_id")
+        try:
+            async with self.plugin._data_lock:
+                items = self.plugin.data.setdefault("bookshelf_items", [])
+                if not isinstance(items, list):
+                    items = []
+                    self.plugin.data["bookshelf_items"] = items
+                target = next(
+                    (
+                        item for item in items
+                        if isinstance(item, dict)
+                        and str(item.get("type") or "") == "jm_album"
+                        and self._single_line(item.get("album_id") or item.get("id"), 32) == album_id
+                    ),
+                    None,
+                )
+                if target is None:
+                    return self._error("没有找到这本私密阅读记录")
+                safe_total = total_pages or max(0, self._int(target.get("image_count")))
+                if safe_total > 0:
+                    page = min(page, safe_total)
+                target["reading_progress_page"] = page
+                target["reading_progress_total"] = safe_total
+                target["reading_progress_updated_at"] = time.time()
+                target["reading_started_at"] = self._float(target.get("reading_started_at")) or time.time()
+                if bookmark:
+                    target["reading_bookmark"] = bookmark
+                elif "bookmark" in payload:
+                    target["reading_bookmark"] = ""
+                if safe_total > 0 and page >= safe_total:
+                    target["reading_completed_at"] = self._float(target.get("reading_completed_at")) or time.time()
+                self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新书柜阅读进度失败: {exc}", exc_info=True)
+            return self._error(str(exc))
 
     async def rate_bookshelf_item(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -8665,6 +8745,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_expression_learning",
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
+            "enable_proactive_message_review",
             "enable_smart_silence",
             "enable_llm_timer_scheduling",
             "enable_llm_proactive_message",
@@ -12021,6 +12102,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_expression_learning",
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
+            "enable_proactive_message_review",
             "enable_smart_silence",
             "enable_llm_timer_scheduling",
             "enable_llm_proactive_message",
@@ -14650,6 +14732,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         page_comments = page_comment_map.setdefault(page_no, [])
                         if comment_text not in page_comments:
                             page_comments.append(comment_text)
+                reading_progress_page = max(0, self._int(item.get("reading_progress_page")))
+                reading_progress_total = max(0, self._int(item.get("reading_progress_total"))) or len(pages)
+                reading_progress_updated_at = self._float(item.get("reading_progress_updated_at"))
+                reading_bookmark = self._single_line(item.get("reading_bookmark"), 120)
+                reading_completed_at = self._float(item.get("reading_completed_at"))
                 page_items = []
                 for page in pages:
                     if not isinstance(page, dict):
@@ -14689,7 +14776,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "user_rating_reason": user_rating_reason,
                         "user_rated": bool(user_rating),
                         "author": self._single_line(item.get("author"), 40),
-                        "progress": f"{len(page_items) or self._int(item.get('image_count')) or self._int(item.get('photo_count'))} 页",
+                        "progress": (
+                            "已读完"
+                            if reading_completed_at
+                            else f"读至 {min(max(1, reading_progress_page), max(1, reading_progress_total))}/{max(1, reading_progress_total)} 页"
+                            if reading_progress_page > 0
+                            else f"{len(page_items) or self._int(item.get('image_count')) or self._int(item.get('photo_count'))} 页"
+                        ),
                         "created": self.plugin._format_timestamp_elapsed(item.get("created_ts", 0)),
                         "content": "\n\n".join(
                             part
@@ -14724,6 +14817,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "user_tags_updated": bool(item.get("user_tags_updated_ts")),
                         "cover_src": cover_src,
                         "pages": page_items,
+                        "reading_progress_page": reading_progress_page,
+                        "reading_progress_total": reading_progress_total,
+                        "reading_progress_updated_at": reading_progress_updated_at,
+                        "reading_bookmark": reading_bookmark,
+                        "reading_completed_at": reading_completed_at,
                         "page_comment_count": sum(len(comments) for comments in page_comment_map.values()),
                         "page_comments": [
                             {"page": page, "comment": comment}
@@ -14742,6 +14840,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "secret_count": locked_count,
             "diary_count": 1 if diaries else 0,
             "jm_album_count": len(jm_items),
+            "reading_now_count": sum(1 for item in jm_items if self._int(item.get("reading_progress_page")) > 0 and not self._float(item.get("reading_completed_at"))),
             "password_hint": password_hint,
             "public_books": public_books,
             "secret_books": secret_books,

@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="./app.css?v=20260709-592-persona-style-stepper" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260707-font-switch" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260707-qzone-mobile" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260710-panel-polish" />
   <script>
     (function () {
       try {
@@ -116,10 +117,9 @@
         <button class="tab" data-tab="qzone"><i>09</i><span>QQ空间</span></button>
         <button class="tab" data-tab="tokens"><i>10</i><span>Token</span></button>
         <button class="tab" data-tab="troubleshooting"><i>11</i><span>排障</span></button>
-        <button class="tab" data-tab="modules"><i>12</i><span>模块</span></button>
-        <button class="tab" data-tab="config"><i>13</i><span>配置</span></button>
-        <button class="tab" data-tab="models"><i>14</i><span>模型</span></button>
-        <button class="tab" data-tab="experimental"><i>15</i><span>实验</span></button>
+        <button class="tab" data-tab="config"><i>12</i><span>配置</span></button>
+        <button class="tab" data-tab="models"><i>13</i><span>模型</span></button>
+        <button class="tab" data-tab="experimental"><i>14</i><span>实验</span></button>
       </nav>
 
       <section class="panel is-active" id="panel-dashboard">
@@ -168,9 +168,15 @@
             <h2>主动额度</h2>
             <div id="quotaChart" class="chart-box"></div>
           </article>
-          <article>
-            <h2>能力状态</h2>
-            <div id="featureMatrix" class="feature-matrix"></div>
+          <article class="wide dashboard-capability-overview">
+            <div class="section-head">
+              <div>
+                <h2>运行能力</h2>
+                <span class="muted">当前功能状态与常用管理入口</span>
+              </div>
+              <button type="button" data-jump-tab="config">打开配置</button>
+            </div>
+            <div id="moduleWorkbench" class="module-workbench"></div>
           </article>
           <article class="wide">
             <h2>今日新闻见闻</h2>
@@ -468,51 +474,78 @@ QQ空间 = 公开札记
         </div>
       </section>
 
-      <section class="panel" id="panel-worldbook">
-        <div class="section-head">
+      <section class="panel relationship-workspace" id="panel-worldbook">
+        <div class="section-head relationship-head">
           <div>
+            <span class="relationship-kicker">IDENTITY · CONTEXT · BOUNDARY</span>
             <h2>群聊关系网</h2>
+            <p class="section-desc">用明确身份、别名与边界资料辅助群聊判断；待确认观察不会自动写入长期记忆。</p>
           </div>
           <div class="actions compact">
-            <button id="worldbookImportBtn" type="button">刷新关系网</button>
+            <button id="worldbookImportBtn" type="button">同步资料</button>
             <button id="worldbookClearPendingBtn" type="button" class="danger-outline">清理待确认观察</button>
           </div>
         </div>
-        <div id="worldbookSummary" class="worldbook-summary"></div>
-        <div class="worldbook-toolbar">
-          <input id="worldbookMemberFilter" type="search" placeholder="筛选 QQ / B站 / 名字 / 别名" />
-          <span id="worldbookSourceFiles" class="muted"></span>
+
+        <div id="worldbookSummary" class="worldbook-summary relationship-summary"></div>
+
+        <div class="relationship-commandbar">
+          <label class="relationship-search">
+            <span>查找成员</span>
+            <input id="worldbookMemberFilter" type="search" placeholder="QQ、B站身份、名称、别名或群名片" />
+          </label>
+          <span id="worldbookSourceFiles" class="relationship-source muted"></span>
         </div>
-        <div class="worldbook-layout">
-          <article class="wide">
-            <div class="section-head compact-head">
-              <h2>关系节点</h2>
-              <span id="worldbookMemberCount" class="muted"></span>
+
+        <div class="relationship-workspace-grid">
+          <article class="relationship-roster">
+            <div class="relationship-section-head">
+              <div>
+                <span>成员目录</span>
+                <h3>关系节点</h3>
+              </div>
+              <span id="worldbookMemberCount" class="relationship-count muted"></span>
             </div>
-            <form id="worldbookAddMemberForm" class="inline-form manage-form">
-              <label>身份键 <input name="user_id" placeholder="QQ 号或 bili:UID" required /></label>
-              <label>名称 <input name="name" placeholder="成员显示名" /></label>
-              <label>优先级 <input name="priority" type="number" value="120" /></label>
-              <button type="submit">新增节点</button>
-            </form>
-            <div id="worldbookMembers" class="worldbook-members"></div>
+            <details class="relationship-create">
+              <summary>新增关系节点</summary>
+              <form id="worldbookAddMemberForm" class="inline-form manage-form">
+                <label>身份键 <input name="user_id" placeholder="QQ 号或 bili:UID" required /></label>
+                <label>名称 <input name="name" placeholder="成员显示名" /></label>
+                <label>优先级 <input name="priority" type="number" value="120" /></label>
+                <button type="submit">新增节点</button>
+              </form>
+            </details>
+            <div id="worldbookMembers" class="worldbook-members relationship-member-list"></div>
           </article>
-          <article>
-            <h2>群资料</h2>
-            <form id="worldbookAddGroupForm" class="stack-form compact-manage-form">
-              <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
-              <label>名称 <input name="name" placeholder="群资料名称" /></label>
-              <button type="submit">新增群资料</button>
-            </form>
-            <div id="worldbookGroups" class="worldbook-groups"></div>
-          </article>
-          <article>
-            <h2>导入状态</h2>
-            <dl id="worldbookImportState"></dl>
-          </article>
+
+          <aside class="relationship-sidebar">
+            <article class="relationship-context-card">
+              <div class="relationship-section-head compact">
+                <div>
+                  <span>群上下文</span>
+                  <h3>群资料</h3>
+                </div>
+              </div>
+              <form id="worldbookAddGroupForm" class="stack-form compact-manage-form">
+                <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+                <label>名称 <input name="name" placeholder="群资料名称" /></label>
+                <button type="submit">新增群资料</button>
+              </form>
+              <div id="worldbookGroups" class="worldbook-groups"></div>
+            </article>
+
+            <article class="relationship-import-card">
+              <div class="relationship-section-head compact">
+                <div>
+                  <span>数据健康</span>
+                  <h3>同步状态</h3>
+                </div>
+              </div>
+              <dl id="worldbookImportState" class="relationship-import-state"></dl>
+            </article>
+          </aside>
         </div>
       </section>
-
       <section class="panel" id="panel-memory">
         <div class="section-head">
           <h2>生活观察</h2>
@@ -790,113 +823,131 @@ QQ空间 = 公开札记
         </div>
       </section>
 
-      <section class="panel" id="panel-troubleshooting">
+      <section class="panel troubleshooting-command-center" id="panel-troubleshooting">
         <div class="subpage troubleshooting-page">
+          <header class="diagnostic-masthead">
+            <div>
+              <span class="diagnostic-kicker">SYSTEM / SIGNAL / EVIDENCE</span>
+              <h2>排障指挥台</h2>
+              <p>先处理正在影响行为的异常，再查看链路、注入证据和历史记录。</p>
+            </div>
+            <div class="diagnostic-masthead-actions">
+              <button id="refreshTroubleshootingBtn" type="button">执行检查</button>
+              <span class="diagnostic-live-dot"><i></i> 运行态快照</span>
+            </div>
+          </header>
+
+          <div id="troubleshootingSummary" class="troubleshooting-summary"></div>
+
+          <section class="diagnostic-priority-zone">
+            <div class="diagnostic-zone-head">
+              <div>
+                <span>优先队列</span>
+                <h3>需要处理的信号</h3>
+              </div>
+              <div class="troubleshooting-filter diagnostic-filter" role="group" aria-label="问题筛选">
+                <button type="button" data-troubleshooting-filter="all" class="is-active">全部</button>
+                <button type="button" data-troubleshooting-filter="error">错误</button>
+                <button type="button" data-troubleshooting-filter="warn">警告</button>
+                <button type="button" data-troubleshooting-filter="info">信息</button>
+              </div>
+            </div>
+            <div id="troubleshootingChecks" class="troubleshooting-checks diagnostic-checks"></div>
+          </section>
+
+          <div class="diagnostic-main-grid">
+            <section class="diagnostic-live-lane">
+              <div class="diagnostic-zone-head compact">
+                <div><span>实时验证</span><h3>链路与运行状态</h3></div>
+              </div>
+              <div id="troubleshootingChainTests" class="troubleshooting-chain-tests"></div>
+              <div class="diagnostic-runtime-stack">
+                <article class="diagnostic-runtime-card">
+                  <div class="diagnostic-card-head"><h3>SQLite 并发</h3><span>存储</span></div>
+                  <div id="troubleshootingSqlite" class="troubleshooting-sqlite"></div>
+                </article>
+                <article class="diagnostic-runtime-card">
+                  <div class="diagnostic-card-head"><h3>消息收口追踪</h3><span>防抖</span></div>
+                  <div id="troubleshootingDebounceTrace" class="troubleshooting-debounce-trace"></div>
+                </article>
+              </div>
+            </section>
+
+            <aside class="diagnostic-event-lane">
+              <div class="diagnostic-zone-head compact">
+                <div><span>事件时间线</span><h3>最近问题</h3></div>
+              </div>
+              <div id="troubleshootingEvents" class="troubleshooting-events diagnostic-events"></div>
+            </aside>
+          </div>
+
+          <details class="diagnostic-evidence-drawer">
+            <summary><span>证据与深度排查</span><small>提示词注入、常见问题和运行诊断</small></summary>
+            <div class="diagnostic-evidence-body">
+              <article class="troubleshooting-injection-panel">
+                <div><h2>最近注入内容</h2><span class="muted">用于排查污染、错时、TTS 规则和上下文串线</span></div>
+                <div id="troubleshootingPromptInjections" class="troubleshooting-prompt-injections"></div>
+              </article>
+              <article class="troubleshooting-diagnostics-panel">
+                <div><h2>运行诊断</h2><span class="muted">从配置、目标用户、群聊开关和运行态中整理出的诊断项</span></div>
+                <div id="diagnosticPanel" class="diagnostic-list"></div>
+              </article>
+              <article class="troubleshooting-faq-panel">
+                <div><h2>常见问题</h2><span class="muted">自动检查未覆盖时，从这里继续定位</span></div>
+                <div id="troubleshootingFaq" class="troubleshooting-faq"></div>
+              </article>
+            </div>
+          </details>
+        </div>
+      </section>
+      <section class="panel" id="panel-image-cache">
+        <div class="subpage image-cache-page">
           <div class="section-head">
             <div>
-              <h2>排障中心</h2>
-              <span class="muted">集中查看最近异常、主动链路、模型调用、数据库并发和常见问题检查</span>
+              <h2>图片/表情包缓存</h2>
+              <span class="muted">编辑重复图片视觉摘要，删除后下次遇到同图会重新识别</span>
             </div>
             <div class="actions compact">
-              <button id="refreshTroubleshootingBtn" type="button">重新检查</button>
+              <button type="button" data-jump-tab="config">返回配置页</button>
+              <button id="refreshImageCacheBtn" type="button">刷新缓存</button>
             </div>
           </div>
-          <div id="troubleshootingSummary" class="troubleshooting-summary"></div>
-          <article class="troubleshooting-chain-panel">
-            <div>
-              <h2>链路测试</h2>
-              <span class="muted">点按钮后会实际调用对应后端，确认能否生成真实文件</span>
-            </div>
-            <div id="troubleshootingChainTests" class="troubleshooting-chain-tests"></div>
-          </article>
-          <article class="troubleshooting-injection-panel">
-            <div>
-              <h2>最近注入内容</h2>
-                <span class="muted">最近 5 条主链与请求级提示词实际注入内容，用于排查污染、错时、TTS 规则和上下文串线</span>
-            </div>
-            <div id="troubleshootingPromptInjections" class="troubleshooting-prompt-injections"></div>
-          </article>
-          <article class="troubleshooting-debounce-panel">
-            <div>
-              <h2>消息收口追踪</h2>
-              <span class="muted">查看文本、图片、转发补话为什么等待或放行，方便定位防抖和收口策略问题</span>
-            </div>
-            <div id="troubleshootingDebounceTrace" class="troubleshooting-debounce-trace"></div>
-          </article>
-          <div class="troubleshooting-toolbar">
-            <div class="troubleshooting-filter" role="group" aria-label="问题筛选">
-              <button type="button" data-troubleshooting-filter="all" class="is-active">全部</button>
-              <button type="button" data-troubleshooting-filter="error">错误</button>
-              <button type="button" data-troubleshooting-filter="warn">警告</button>
-              <button type="button" data-troubleshooting-filter="info">信息</button>
-            </div>
+          <div id="imageCacheSummary" class="image-cache-summary"></div>
+          <div class="image-cache-toolbar">
+            <input id="imageCacheFilter" type="search" placeholder="筛选摘要 / hash / provider / 类型" />
+            <select id="imageCacheScope" aria-label="缓存范围">
+              <option value="all">全部范围</option>
+            </select>
           </div>
-          <div class="troubleshooting-grid">
-            <article class="wide">
-              <h2>常见问题检查</h2>
-              <div id="troubleshootingChecks" class="troubleshooting-checks"></div>
-            </article>
-            <article>
-              <h2>最近问题</h2>
-              <div id="troubleshootingEvents" class="troubleshooting-events"></div>
-            </article>
-            <article>
-              <h2>SQLite 并发</h2>
-              <div id="troubleshootingSqlite" class="troubleshooting-sqlite"></div>
-            </article>
+          <div class="image-cache-layout">
+            <div id="imageCacheList" class="image-cache-list"></div>
+            <div id="imageCacheDetail" class="image-cache-detail"></div>
           </div>
-          <article class="troubleshooting-faq-panel">
-            <div>
-              <h2>常见问题</h2>
-              <span class="muted">把最常见的排查路径放在这里；如果上方自动检查没报错，可以从这些入口继续定位</span>
-            </div>
-            <div id="troubleshootingFaq" class="troubleshooting-faq"></div>
-          </article>
-          <article class="troubleshooting-diagnostics-panel">
-            <div>
-              <h2>运行诊断</h2>
-              <span class="muted">从配置、目标用户、群聊开关和运行态中整理出的诊断项</span>
-            </div>
-            <div id="diagnosticPanel" class="diagnostic-list"></div>
-          </article>
         </div>
       </section>
 
-      <section class="panel" id="panel-modules">
-        <div class="section-head">
-          <h2>模块工作台</h2>
-          <span class="muted">常用管理 · 模块状态 · 便捷工具</span>
-        </div>
-        <div id="moduleWorkbench" class="module-workbench"></div>
-        <div id="moduleSummary" class="module-summary"></div>
-        <nav class="module-nav" aria-label="模块工作台分组">
-          <a href="#moduleWorkbench">工作台</a>
-          <a href="#module-tool-quick">快速启动</a>
-          <a href="#module-tool-presets">预设</a>
-          <a href="#module-tool-segmented">分段实验室</a>
-          <a href="#module-tool-news">新闻源</a>
-          <a href="#module-tool-media">媒体缓存</a>
-          <a href="#module-tool-external">外部能力</a>
-        </nav>
-        <section class="module-tuning-note">
-          <div>
-            <b>常用模块集中在这里。</b>
-            <span>日常查看、整理和快速操作都可以从这里开始；需要细调参数时再进入配置或模型页。</span>
-          </div>
-          <button type="button" data-jump-tab="config">打开配置页</button>
-        </section>
-        <div class="module-tool-grid">
-          <article class="module-tool-card wide" id="module-tool-quick">
-            <header>
+      <section class="panel" id="panel-config">
+        <div class="config-grid">
+          <details class="config-card wide config-common-settings" id="config-common-settings">
+            <summary>
               <div>
-                <span>Admin Setup</span>
-                <h3>快速启动</h3>
-                <p>设定运行平台、服务对象与权限边界。以下配置项变更后立即生效。</p>
+                <h2>常用配置</h2>
+                <p>服务对象、预设、新闻源和外部能力。默认收起，按需展开编辑。</p>
               </div>
-              <button type="button" data-setup-guide-open>配置引导</button>
-            </header>
-            <div id="quickStartStatus" class="quick-start-status"></div>
-            <form id="quickModuleForm" class="module-form">
+              <span class="config-common-settings-disclosure" aria-hidden="true">展开</span>
+            </summary>
+            <div class="config-common-settings-body">
+          <article class="config-card module-tool-card wide" id="config-quick-start">
+            
+              <header>
+                <div>
+                  <span>常用字段</span>
+                  <p>以下配置项变更后立即生效。</p>
+                </div>
+                <button type="button" data-setup-guide-open>配置引导</button>
+              </header>
+              <div id="quickStartStatus" class="quick-start-status"></div>
+              <form id="quickModuleForm" class="module-form">
               <div class="module-subgroup">
                 <h3>部署与目标</h3>
                 <label class="wide-field">运行平台
@@ -916,8 +967,8 @@ QQ空间 = 公开札记
               </div>
               <button type="submit">保存配置</button>
             </form>
-          </article>
-          <article class="module-tool-card wide" id="module-tool-presets">
+            </article>
+          <article class="config-card module-tool-card wide" id="config-presets">
             <header>
               <div>
                 <span>Presets</span>
@@ -928,7 +979,7 @@ QQ空间 = 公开札记
             </header>
             <div id="presetCards" class="preset-grid"></div>
           </article>
-          <article class="module-tool-card" id="module-tool-segmented">
+          <article class="config-card module-tool-card" id="config-segmented-preview">
             <header>
               <div>
                 <span>Lab</span>
@@ -951,7 +1002,7 @@ QQ空间 = 公开札记
               <div data-segmented-preview-output class="segmented-preview-output"></div>
             </section>
           </article>
-          <article class="module-tool-card wide" id="module-tool-news">
+          <article class="config-card module-tool-card wide" id="config-news-sources">
             <header>
               <div>
                 <span>Sources</span>
@@ -963,12 +1014,12 @@ QQ空间 = 公开札记
             <textarea name="news_sources" id="newsSourcesRaw" hidden></textarea>
             <div class="news-source-manager" id="newsSourceManager"></div>
           </article>
-          <article class="module-tool-card" id="module-tool-media">
+          <article class="config-card module-tool-card" id="config-media-cache">
             <header>
               <div>
                 <span>Media</span>
                 <h3>媒体缓存与转述</h3>
-                <p>图片/表情包缓存、识图摘要和重复图命中更适合在模块页管理。</p>
+                <p>图片/表情包缓存、识图摘要和重复图命中可在缓存页统一管理。</p>
               </div>
               <button type="button" data-jump-tab="image-cache">管理图片缓存</button>
             </header>
@@ -977,7 +1028,7 @@ QQ空间 = 公开札记
               <span>误识别可在缓存页直接修正或删除</span>
             </div>
           </article>
-          <article class="module-tool-card wide" id="module-tool-external">
+          <article class="config-card module-tool-card wide" id="config-external-abilities">
             <header>
               <div>
                 <span>Extensions</span>
@@ -988,27 +1039,20 @@ QQ空间 = 公开札记
             </header>
             <div id="externalAbilityList" class="external-ability-grid"></div>
           </article>
-        </div>
-        <div class="module-grid legacy-module-config-grid" hidden aria-hidden="true">
-          <article class="wide module-card" id="module-presets">
-            <div class="module-card-head">
-              <div>
-                <h2>配置预设</h2>
-              </div>
-              <span class="module-badge">预设</span>
+
             </div>
-            <div id="legacyPresetCards" class="preset-grid"></div>
-          </article>
-          <article class="module-card" id="module-quick" hidden aria-hidden="true">
-            <div class="module-card-head">
+          </details>
+
+          <details class="config-card wide config-module-details">
+            <summary>
               <div>
-                <h2>快速启动（旧）</h2>
+                <h2>详细设置</h2>
+                <p>环境感知、私聊节奏、群聊、关系网、记忆和长线行为。默认收起，按需展开。</p>
               </div>
-              <span class="module-badge">基础</span>
-            </div>
-          </article>
-          <article class="module-card" id="module-environment">
-            <div class="module-card-head">
+            </summary>
+            <div class="config-module-details-body">
+          <article class="config-card module-card" id="module-environment">
+            <div class="config-card module-card-head">
               <div>
                 <h2>环境感知</h2>
               </div>
@@ -1028,8 +1072,8 @@ QQ空间 = 公开札记
               <button type="submit">保存环境感知</button>
             </form>
           </article>
-          <article class="module-card" id="module-private">
-            <div class="module-card-head">
+          <article class="config-card module-card" id="module-private">
+            <div class="config-card module-card-head">
               <div>
                 <h2>私聊频率</h2>
               </div>
@@ -1109,8 +1153,8 @@ QQ空间 = 公开札记
               <button type="submit">保存私聊频率</button>
             </form>
           </article>
-          <article class="module-card" id="module-group">
-            <div class="module-card-head">
+          <article class="config-card module-card" id="module-group">
+            <div class="config-card module-card-head">
               <div>
                 <h2>群聊观察</h2>
               </div>
@@ -1154,8 +1198,8 @@ QQ空间 = 公开札记
               <button type="submit">保存群聊观察</button>
             </form>
           </article>
-          <article class="module-card" id="module-worldbook">
-            <div class="module-card-head">
+          <article class="config-card module-card" id="module-worldbook">
+            <div class="config-card module-card-head">
               <div>
                 <h2>群聊关系网</h2>
               </div>
@@ -1174,8 +1218,8 @@ QQ空间 = 公开札记
               <button type="submit">保存关系网</button>
             </form>
           </article>
-          <article class="module-card" id="module-memory">
-            <div class="module-card-head">
+          <article class="config-card module-card" id="module-memory">
+            <div class="config-card module-card-head">
               <div>
                 <h2>记忆学习</h2>
               </div>
@@ -1200,7 +1244,7 @@ QQ空间 = 公开札记
             </form>
           </article>
           <article class="wide module-card" id="module-longterm">
-            <div class="module-card-head">
+            <div class="config-card module-card-head">
               <div>
                 <h2>长线主动与联动</h2>
               </div>
@@ -1237,8 +1281,6 @@ QQ空间 = 公开札记
                 <label>单源读取条数 <input name="news_max_items_per_source" type="number" min="1" max="30" /></label>
                 <label>热点来源 <input name="news_hot_sources" type="text" maxlength="120" /></label>
                 <label>热点候选数量 <input name="news_hot_max_items" type="number" min="1" max="50" /></label>
-                <textarea name="news_sources" id="legacyNewsSourcesRaw" hidden></textarea>
-                <div class="wide-field news-source-manager" id="legacyNewsSourceManager"></div>
               </div>
               <div class="module-subgroup" id="privateReadingModuleGroup">
                 <h3>夹层阅读素材</h3>
@@ -1264,46 +1306,8 @@ QQ空间 = 公开札记
               <button type="submit">保存长线主动</button>
             </form>
           </article>
-          <article class="wide module-card" id="module-external-abilities">
-            <div class="module-card-head">
-              <div>
-                <h2>外部主动能力</h2>
-              </div>
-              <span class="module-badge">扩展</span>
             </div>
-            <div id="legacyExternalAbilityList" class="external-ability-grid"></div>
-          </article>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-image-cache">
-        <div class="subpage image-cache-page">
-          <div class="section-head">
-            <div>
-              <h2>图片/表情包缓存</h2>
-              <span class="muted">编辑重复图片视觉摘要，删除后下次遇到同图会重新识别</span>
-            </div>
-            <div class="actions compact">
-              <button type="button" data-jump-tab="modules">返回模块工作台</button>
-              <button id="refreshImageCacheBtn" type="button">刷新缓存</button>
-            </div>
-          </div>
-          <div id="imageCacheSummary" class="image-cache-summary"></div>
-          <div class="image-cache-toolbar">
-            <input id="imageCacheFilter" type="search" placeholder="筛选摘要 / hash / provider / 类型" />
-            <select id="imageCacheScope" aria-label="缓存范围">
-              <option value="all">全部范围</option>
-            </select>
-          </div>
-          <div class="image-cache-layout">
-            <div id="imageCacheList" class="image-cache-list"></div>
-            <div id="imageCacheDetail" class="image-cache-detail"></div>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-config">
-        <div class="config-grid">
+          </details>
           <details class="config-card wide migration-card migration-collapsible">
             <summary class="migration-head migration-summary">
               <div>

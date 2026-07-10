@@ -793,6 +793,83 @@ class ProactiveEngineMixin:
             "followup_kind": _single_line(followup_kind, 32),
         }
 
+    def _proactive_impulse_orchestration_priority(self, impulse: dict[str, Any]) -> int:
+        source = _single_line(impulse.get("source"), 40).lower()
+        reason = self._normalize_legacy_proactive_text(impulse.get("reason"), limit=40)
+        priorities = {
+            "timer": 100,
+            "pending_followup": 92,
+            "followup": 88,
+            "birthday_celebration": 86,
+            "daily_greeting": 72,
+            "birthday_curiosity": 68,
+            "habit": 64,
+            "state": 60,
+            "story": 58,
+            "event": 56,
+            "creative": 54,
+            "random": 20,
+        }
+        priority = priorities.get(source, 48)
+        if reason in {"birthday_celebration", "birthday_eve_hint", "birthday_makeup", "important_date_share"}:
+            priority = max(priority, 86)
+        elif reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+            priority = max(priority, 72)
+        elif reason == "quiet_care":
+            priority = max(priority, 74)
+        return priority
+
+    def _proactive_impulse_content_signature(self, impulse: dict[str, Any]) -> str:
+        return self._proactive_topic_signature(
+            impulse.get("topic"),
+            impulse.get("motive"),
+        )
+
+    def _merge_proactive_impulse_timing(self, target: dict[str, Any], incoming: dict[str, Any]) -> None:
+        target_start = _safe_float(target.get("window_start_at"), 0)
+        incoming_start = _safe_float(incoming.get("window_start_at"), 0)
+        target_preferred = _safe_float(target.get("preferred_ts"), 0)
+        incoming_preferred = _safe_float(incoming.get("preferred_ts"), 0)
+        if target_start <= 0 or (incoming_start > 0 and incoming_start < target_start):
+            target["window_start_at"] = incoming_start
+        if target_preferred <= 0 or (incoming_preferred > 0 and incoming_preferred < target_preferred):
+            target["preferred_ts"] = incoming_preferred
+        target["best_until_at"] = max(
+            _safe_float(target.get("best_until_at"), 0),
+            _safe_float(incoming.get("best_until_at"), 0),
+        )
+        target["expire_at"] = max(
+            _safe_float(target.get("expire_at"), 0),
+            _safe_float(incoming.get("expire_at"), 0),
+        )
+
+    def _replace_proactive_impulse_with_higher_priority(
+        self,
+        existing: dict[str, Any],
+        incoming: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing_id = _single_line(existing.get("id"), 20) or uuid.uuid4().hex[:12]
+        existing_created = _safe_float(existing.get("created_ts"), _now_ts())
+        existing_state = _single_line(existing.get("state"), 24) or "queued"
+        replacement = dict(incoming)
+        replacement["id"] = existing_id
+        replacement["created_ts"] = existing_created
+        replacement["updated_ts"] = _now_ts()
+        replacement["state"] = existing_state
+        self._merge_proactive_impulse_timing(replacement, existing)
+        replacement["signature"] = self._proactive_impulse_signature(replacement)
+        replacement["salience"] = max(
+            _safe_float(existing.get("salience"), 0.0),
+            _safe_float(incoming.get("salience"), 0.0),
+        )
+        replacement["urgency"] = max(
+            _safe_float(existing.get("urgency"), 0.0),
+            _safe_float(incoming.get("urgency"), 0.0),
+        )
+        existing.clear()
+        existing.update(replacement)
+        return existing
+
     def _queue_proactive_impulse(
         self,
         user: dict[str, Any],
@@ -888,6 +965,32 @@ class ProactiveEngineMixin:
                 existing["context_key"] = _single_line(impulse.get("context_key"), 60)
                 existing["context"] = dict(impulse.get("context"))
             return existing
+        content_signature = self._proactive_impulse_content_signature(impulse)
+        if content_signature:
+            incoming_priority = self._proactive_impulse_orchestration_priority(impulse)
+            for existing in reversed(pool):
+                if not isinstance(existing, dict):
+                    continue
+                if str(existing.get("state") or "queued") not in {"queued", "deferred"}:
+                    continue
+                existing_signature = self._proactive_impulse_content_signature(existing)
+                if not self._topic_signature_similar(content_signature, existing_signature):
+                    continue
+                existing_priority = self._proactive_impulse_orchestration_priority(existing)
+                if incoming_priority > existing_priority:
+                    return self._replace_proactive_impulse_with_higher_priority(existing, impulse)
+                if incoming_priority == existing_priority:
+                    self._merge_proactive_impulse_timing(existing, impulse)
+                existing["updated_ts"] = _now_ts()
+                existing["salience"] = max(
+                    _safe_float(existing.get("salience"), 0.0),
+                    _safe_float(impulse.get("salience"), 0.0),
+                )
+                existing["urgency"] = max(
+                    _safe_float(existing.get("urgency"), 0.0),
+                    _safe_float(impulse.get("urgency"), 0.0),
+                )
+                return existing
         item = dict(impulse)
         item["id"] = _single_line(item.get("id"), 20) or uuid.uuid4().hex[:12]
         item["signature"] = signature
@@ -1198,7 +1301,7 @@ class ProactiveEngineMixin:
             kind = "care"
         elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share"}:
             kind = "self_share"
-        elif normalized_reason in {"important_date_share"}:
+        elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
             kind = "reminder"
         elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
             kind = "external_share"
@@ -1219,7 +1322,7 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "inner_life", 0.68
         elif normalized_reason in {"background_schedule"} or any(token in evidence_text for token in ("手上", "忙到", "日程", "计划", "刚好停")):
             anchor_type, anchor_score = "current_activity", 0.62
-        elif normalized_reason in {"important_date_share"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
+        elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
             anchor_type, anchor_score = "important_date", 0.78
         elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
             anchor_type, anchor_score = "external_info", 0.66
@@ -1886,7 +1989,7 @@ class ProactiveEngineMixin:
             value += 0.35
         if source in {"pending_followup", "daily_greeting", "story", "state"}:
             value += 0.08
-        if reason in {"important_date_share", "quiet_care", "group_share", "news_share", "creative_share"}:
+        if reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow", "quiet_care", "group_share", "news_share", "creative_share"}:
             value += 0.08
         if self._private_user_role(user) == "friend":
             value -= 0.06
@@ -2009,7 +2112,14 @@ class ProactiveEngineMixin:
         selected: dict[str, Any] | None = None
         review_at = 0.0
         if ready:
-            ready.sort(key=lambda item: self._score_proactive_impulse(user, item, now=check_now), reverse=True)
+            ready.sort(
+                key=lambda item: (
+                    self._score_proactive_impulse(user, item, now=check_now)
+                    + self._proactive_impulse_orchestration_priority(item) / 300.0,
+                    self._proactive_impulse_orchestration_priority(item),
+                ),
+                reverse=True,
+            )
             selected = ready[0]
             review_at = check_now
         else:
@@ -2022,7 +2132,20 @@ class ProactiveEngineMixin:
             )
             if not future:
                 return False
-            selected = future[0]
+            earliest_start = _safe_float(future[0].get("window_start_at"), check_now)
+            near_term = [
+                item
+                for item in future
+                if _safe_float(item.get("window_start_at"), earliest_start) <= earliest_start + 90 * 60
+            ]
+            selected = max(
+                near_term,
+                key=lambda item: (
+                    self._proactive_impulse_orchestration_priority(item),
+                    self._score_proactive_impulse(user, item, now=check_now),
+                    -_safe_float(item.get("window_start_at"), earliest_start),
+                ),
+            )
             review_at = _safe_float(selected.get("window_start_at"), check_now)
         candidate = {
             "source": self._normalize_legacy_proactive_text(selected.get("source"), limit=40) or "impulse",
@@ -2049,6 +2172,8 @@ class ProactiveEngineMixin:
         user["planned_proactive_source"] = self._normalize_legacy_proactive_text(candidate["source"], limit=40) or "impulse"
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(candidate["motive"])
         user["planned_proactive_topic"] = candidate["topic"]
+        if user["planned_proactive_reason"] == "birthday_curiosity":
+            user["birthday_curiosity_asked_at"] = check_now
         user["planned_proactive_impulse_id"] = _single_line(selected.get("id"), 20)
         user["planned_proactive_window_start_at"] = _safe_float(selected.get("window_start_at"), 0)
         user["planned_proactive_best_until_at"] = _safe_float(selected.get("best_until_at"), 0)
@@ -4768,6 +4893,191 @@ class ProactiveEngineMixin:
         candidates.sort(key=lambda item: item[0])
         return candidates[0][1]
 
+    def _birthday_profile_matches_on_date(self, user: dict[str, Any], current: datetime) -> bool:
+        profile = user.get("birthday_profile")
+        if not isinstance(profile, dict):
+            return False
+        month = _safe_int(profile.get("month"), 0)
+        day = _safe_int(profile.get("day"), 0)
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return False
+        if _single_line(profile.get("calendar"), 12).lower() != "lunar":
+            return current.month == month and current.day == day
+        if not (Converter and Solar):
+            return False
+        try:
+            lunar = Converter.Solar2Lunar(Solar(current.year, current.month, current.day))
+            return int(lunar.month) == month and int(lunar.day) == day and not bool(getattr(lunar, "isleap", False))
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 农历生日匹配失败: %s", _single_line(exc, 120))
+            return False
+
+    def _birthday_stage_for_date(self, user: dict[str, Any], current: datetime) -> str:
+        if self._birthday_profile_matches_on_date(user, current):
+            return "birthday"
+        if self._birthday_profile_matches_on_date(user, current + timedelta(days=1)):
+            return "eve"
+        if self._birthday_profile_matches_on_date(user, current - timedelta(days=1)):
+            return "after"
+        return ""
+
+    def _pick_birthday_celebration_event(
+        self,
+        user: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        now = now or _now_ts()
+        if self._private_user_role(user) != "owner" or bool(user.get("birthday_celebration_opt_out")):
+            return None
+        current = self._environment_fromtimestamp(now)
+        stage = self._birthday_stage_for_date(user, current)
+        if not stage:
+            return None
+        event = user.get("birthday_event") if isinstance(user.get("birthday_event"), dict) else {}
+        minute = current.hour * 60 + current.minute
+        year = current.year if stage == "birthday" else (current.year + 1 if stage == "eve" else current.year - 1)
+
+        if stage == "eve":
+            recent_activity = self._latest_private_user_activity_ts(user)
+            if _safe_int(event.get("eve_year"), 0) == year or _safe_int(user.get("ignored_streak"), 0) > 0:
+                return None
+            if recent_activity <= 0 or now - recent_activity > 7 * 24 * 3600 or not (17 * 60 + 30 <= minute < 21 * 60 + 30):
+                return None
+            scheduled = now + random.randint(8, 38) * 60
+            return {
+                "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=48),
+                "reason": "birthday_eve_hint",
+                "action": "message",
+                "why": "明天是一个值得为自己留一点空白的日子，先轻轻递一句，不提前揭开仪式",
+                "topic": "明天给自己留一点空白",
+                "motive": "明天想让你把步子放松一点，先替你留一小段只顾自己的时间",
+                "_scheduled_ts": scheduled,
+                "_birthday_stage": "eve",
+                "context_key": "planned_birthday_event_context",
+                "context": {"observance_year": year},
+            }
+
+        if stage == "birthday":
+            if _safe_int(event.get("celebrated_year"), 0) == year or minute >= 22 * 60:
+                return None
+            if _safe_int(user.get("ignored_streak"), 0, 0) > 0 and minute < 18 * 60:
+                return None
+            if minute < 9 * 60 + 30:
+                scheduled = current.replace(hour=10, minute=random.randint(5, 45), second=0, microsecond=0).timestamp()
+            elif minute < 18 * 60 + 30:
+                scheduled = now + random.randint(12, 75) * 60
+            else:
+                scheduled = now + random.randint(8, 35) * 60
+            action = "photo_text" if self._photo_text_available(user) and random.random() < 0.58 else "message"
+            return {
+                "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=75),
+                "reason": "birthday_celebration",
+                "action": action,
+                "why": "今天是用户明确允许记住的生日，想认真递上一份不造成压力的小惊喜",
+                "topic": "今天只属于你的生日小惊喜",
+                "motive": "今天是你的生日，想认真留一份只属于你的小惊喜；不用特地回复，只希望你今天能多偏爱自己一点",
+                "_scheduled_ts": scheduled,
+                "_birthday_stage": "birthday",
+                "context_key": "planned_birthday_event_context",
+                "context": {"observance_year": year},
+            }
+
+        celebrated_at = _safe_float(event.get("celebrated_at"), 0)
+        if _safe_int(event.get("celebrated_year"), 0) != year:
+            if minute >= 14 * 60:
+                return None
+            scheduled = now + random.randint(8, 35) * 60
+            return {
+                "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=58),
+                "reason": "birthday_makeup",
+                "action": "message",
+                "why": "昨天的生日仪式因时机错过，只在第二天午前低调补上一句",
+                "topic": "迟到一点的生日祝福",
+                "motive": "昨天没能把祝福好好递到你手上，想在还不算晚的时候轻轻补上一句",
+                "_scheduled_ts": scheduled,
+                "_birthday_stage": "makeup",
+                "context_key": "planned_birthday_event_context",
+                "context": {"observance_year": year},
+            }
+        if _safe_int(event.get("afterglow_year"), 0) == year or celebrated_at <= 0:
+            return None
+        last_user_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_user_at <= celebrated_at or minute >= 21 * 60 + 30:
+            return None
+        scheduled = now + random.randint(18, 70) * 60
+        return {
+            "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=55),
+            "reason": "birthday_afterglow",
+            "action": "message",
+            "why": "用户已经在生日祝福后有过回应，轻轻接住那点余温，不再重复庆祝",
+            "topic": "昨天留下的一点开心",
+            "motive": "昨天那点开心好像还没散，想轻轻问一句有没有留下一个自己喜欢的瞬间",
+            "_scheduled_ts": scheduled,
+            "_birthday_stage": "afterglow",
+            "context_key": "planned_birthday_event_context",
+            "context": {"observance_year": year},
+        }
+
+    def _birthday_curiosity_has_known_birthday(self, user: dict[str, Any]) -> bool:
+        profile = user.get("birthday_profile")
+        if isinstance(profile, dict) and (_safe_int(profile.get("month"), 0) or _single_line(profile.get("raw"), 80)):
+            return True
+        memory = user.get("companion_memory")
+        items = memory.get("items") if isinstance(memory, dict) else []
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            text = _single_line(item.get("text"), 260) if isinstance(item, dict) else _single_line(item, 260)
+            if not text or "生日" not in text:
+                continue
+            if re.search(r"(?:不想|不愿|不方便|别|不要|不告诉).{0,8}生日", text):
+                continue
+            if re.search(r"(?:生日.{0,12}(?:是|在|：|:)|(?:农历|公历).{0,8}生日|我.{0,4}生日).{0,30}", text):
+                return True
+        return False
+
+    def _pick_birthday_curiosity_event(
+        self,
+        user: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        now = now or _now_ts()
+        if self._private_user_role(user) != "owner":
+            return None
+        if bool(user.get("birthday_curiosity_opt_out")) or self._birthday_curiosity_has_known_birthday(user):
+            return None
+        if _safe_float(user.get("birthday_curiosity_asked_at"), 0) > 0:
+            return None
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return None
+        last_message_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_message_at <= 0 or now - last_message_at > 14 * 24 * 3600:
+            return None
+        memory = user.get("companion_memory")
+        memory_items = memory.get("items") if isinstance(memory, dict) else []
+        if not isinstance(memory_items, list) or len(memory_items) < 3:
+            return None
+        if _safe_float(user.get("last_sent"), 0) > 0 and now - _safe_float(user.get("last_sent"), 0) < 18 * 3600:
+            return None
+        next_check_at = _safe_float(user.get("birthday_curiosity_next_check_at"), 0)
+        if next_check_at > now:
+            return None
+        user["birthday_curiosity_next_check_at"] = now + random.randint(21, 45) * 24 * 3600
+        if random.random() > 0.16:
+            return None
+        scheduled = now + random.randint(35, 130) * 60
+        scheduled = self._move_timestamp_into_reason_window(scheduled, "birthday_curiosity")
+        return {
+            "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=42),
+            "reason": "birthday_curiosity",
+            "action": "message",
+            "why": "相处了一阵后，想低调地知道一个将来可以认真记住的小日子",
+            "topic": "你的生日是哪一天",
+            "motive": "相处了一阵，忽然有点好奇你的生日是哪一天；如果你不想说也完全没关系",
+            "_scheduled_ts": scheduled,
+            "_birthday_curiosity": True,
+        }
+
     def _pick_story_plan_event(
         self,
         now: float | None = None,
@@ -5627,6 +5937,16 @@ class ProactiveEngineMixin:
         return cleaned
 
     def _choose_proactive_topic(self, reason: str, user: dict[str, Any]) -> str:
+        if reason == "birthday_eve_hint":
+            return "明天给自己留一点空白"
+        if reason == "birthday_celebration":
+            return "今天只属于你的生日小惊喜"
+        if reason == "birthday_makeup":
+            return "迟到一点的生日祝福"
+        if reason == "birthday_afterglow":
+            return "昨天留下的一点开心"
+        if reason == "birthday_curiosity":
+            return "你的生日是哪一天"
         if reason == "group_share":
             share = user.get("group_share_context") if isinstance(user.get("group_share_context"), dict) else {}
             return _single_line(share.get("topic"), 48) or _single_line(share.get("text"), 48) or "群里那段片段"
@@ -6285,6 +6605,17 @@ class ProactiveEngineMixin:
             if lived_line:
                 return self._normalize_internal_motive_text(lived_line)
 
+        if reason == "birthday_eve_hint":
+            return "明天想让你把步子放松一点，先替你留一小段只顾自己的时间"
+        if reason == "birthday_celebration":
+            return "今天是你的生日，想认真留一份只属于你的小惊喜；不用特地回复，只希望你今天能多偏爱自己一点"
+        if reason == "birthday_makeup":
+            return "昨天没能把祝福好好递到你手上，想在还不算晚的时候轻轻补上一句"
+        if reason == "birthday_afterglow":
+            return "昨天那点开心好像还没散，想轻轻问一句有没有留下一个自己喜欢的瞬间"
+        if reason == "birthday_curiosity":
+            return "相处了一阵，忽然有点好奇你的生日是哪一天；如果你不想说也完全没关系"
+
         if reason == "insomnia_night":
             motives = [
                 "夜里一直没睡着，想短短留一句",
@@ -6652,6 +6983,11 @@ class ProactiveEngineMixin:
             "activity_share": [(10 * 60, 18 * 60 + 30)],
             "diary_share": [(19 * 60, 23 * 60)],
             "important_date_share": [(8 * 60 + 30, 22 * 60)],
+            "birthday_curiosity": [(10 * 60, 12 * 60), (15 * 60, 20 * 60 + 30)],
+            "birthday_eve_hint": [(17 * 60 + 30, 21 * 60 + 30)],
+            "birthday_celebration": [(9 * 60 + 30, 21 * 60 + 55)],
+            "birthday_makeup": [(9 * 60 + 30, 13 * 60 + 55)],
+            "birthday_afterglow": [(10 * 60, 21 * 60 + 25)],
             "background_schedule": [(9 * 60, 22 * 60)],
             "check_in": [(9 * 60, 22 * 60 + 30)],
             "morning_greeting": [(7 * 60 + 45, 10 * 60 + 20)],

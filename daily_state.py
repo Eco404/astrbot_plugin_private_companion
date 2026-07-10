@@ -1196,7 +1196,7 @@ class DailyStateMixin:
             return _single_line(cleaned, 90)
         if field == "summary":
             if any(marker in cleaned for marker in ("精神还有点起伏", "状态", "适合")) and not any(marker in cleaned for marker in ("醒", "梦", "路", "雨", "风", "杯", "灯", "窗", "课", "饭", "困")):
-                cleaned = "今天醒得有点慢,但还是一点点把自己拢回现实里。"
+                cleaned = "把手边的一件小事慢慢收好，心里也腾出了一点位置。"
             return _single_line(cleaned, 120)
         return _single_line(cleaned, 520)
 
@@ -1208,11 +1208,11 @@ class DailyStateMixin:
         polished["body"] = self._polish_diary_text(polished.get("body"), field="body")
         polished["share_seed"] = self._polish_diary_text(polished.get("share_seed"), field="share")
         if not polished["summary"]:
-            polished["summary"] = "今天留下了一点很轻的小事,还想再慢慢想一会儿。"
+            polished["summary"] = "把手边的一件小事慢慢收好，心里也腾出了一点位置。"
         if not polished["body"]:
-            polished["body"] = "今天过得不算很响亮,只是有些小事断断续续落在心里。醒来后慢慢把自己拢回现实,到晚一点又觉得有些话不用急着说完,先收在日记里也好。"
+            polished["body"] = "今天整理手边的小东西时，顺手把一件总在碍事的东西放回了原处。动作停下来以后，桌面上空出一点位置，我也没有急着做下一件事。原来有些小小的收拾，并不是为了变得多有效率，只是想让自己坐下来时舒服一点。"
         if not polished["share_seed"]:
-            polished["share_seed"] = "今天有点慢半拍,但也不是坏事"
+            polished["share_seed"] = "刚收好手边的一点东西，忽然觉得今天可以慢一点。"
         return polished
 
     def _generate_fallback_long_term_events(self, state: dict[str, Any]) -> list[dict[str, str]]:
@@ -10096,7 +10096,7 @@ class DailyStateMixin:
                     review_candidate_text = "（无文字，仅随主动消息发送图片）"
                 elif extra_components:
                     review_candidate_text = f"（无文字，仅随主动消息发送 {len(extra_components)} 个附加组件）"
-            if not pending_send_retry and review_candidate_text:
+            if review_candidate_text:
                 try:
                     review_decision = await self._review_proactive_message_send_decision(
                         user,
@@ -10109,8 +10109,7 @@ class DailyStateMixin:
                         image_path=image_path,
                     )
                 except Exception as exc:
-                    review_mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
-                    review_enabled = bool(getattr(self, "enable_response_self_review", True)) and review_mode != "local_only"
+                    review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
                     if review_enabled:
                         review_failure_signature = self._proactive_topic_signature(
                             " ".join(
@@ -10228,27 +10227,19 @@ class DailyStateMixin:
                                     extra_count=len(extra_components),
                                 )
                             self._save_data_sync()
-                elif decision in {"defer", "drop"}:
-                    note = _single_line(review_decision.get("reason"), 120) or (
-                        "发送前价值复核建议延后" if decision == "defer" else "发送前价值复核建议取消"
-                    )
-                    delay_minutes = _safe_int(review_decision.get("delay_minutes"), 45, 30, 90)
+                elif decision == "drop":
+                    note = _single_line(review_decision.get("reason"), 120) or "proactive final content gate dropped the candidate"
                     async with self._data_lock:
                         current_for_review = self._get_user(user_id)
                         current_for_review["proactive_sending"] = False
                         current_for_review["proactive_sending_started_at"] = 0
                         if is_troubleshooting_for_send:
-                            self._append_troubleshooting_proactive_step(
-                                current_for_review,
-                                "发送前价值复核",
-                                "warn" if decision == "defer" else "error",
-                                note,
-                            )
+                            self._append_troubleshooting_proactive_step(current_for_review, "Final content gate", "error", note)
                             self._record_troubleshooting_proactive_result(
                                 user_id,
                                 current_for_review,
                                 ok=False,
-                                detail="主动消息已生成，但发送前价值复核未放行",
+                                detail="Generated proactive message was rejected by the final content gate",
                                 error=note,
                                 text=text or review_candidate_text,
                                 action=effective_action_for_send or planned_action_for_send or "message",
@@ -10256,30 +10247,14 @@ class DailyStateMixin:
                                 extra_count=len(extra_components),
                             )
                             self._restore_troubleshooting_proactive_plan(current_for_review)
-                            self._update_proactive_audit(
-                                audit_id,
-                                status="deferred" if decision == "defer" else "cancelled",
-                                note=note,
-                                text=text or review_candidate_text,
-                            )
-                        elif decision == "defer":
-                            current_for_review["next_proactive_at"] = _now_ts() + delay_minutes * 60
-                            self._mark_planned_candidate_status(current_for_review, "deferred", note)
-                            self._update_proactive_audit(audit_id, status="deferred", note=note, text=text or review_candidate_text)
                         else:
                             self._mark_planned_candidate_status(current_for_review, "blocked", note)
-                            self._update_proactive_audit(audit_id, status="cancelled", note=note, text=text or review_candidate_text)
                             self._clear_pending_proactive_plan(current_for_review)
                             self._schedule_next_proactive(current_for_review, now=_now_ts(), delay_hours=(1.5, 4.0))
+                        self._update_proactive_audit(audit_id, status="cancelled", note=note, text=text or review_candidate_text)
                         self._save_data_sync()
-                    logger.info(
-                        "[PrivateCompanion] 主动消息发送前价值复核%s: user=%s reason=%s text=%s",
-                        "延后" if decision == "defer" else "取消",
-                        user_id,
-                        note,
-                        _single_line(text, 120),
-                    )
-                    self._debug_tick_skip(user_id, note, prefix="延后" if decision == "defer" else "取消")
+                    logger.info("[PrivateCompanion] Proactive final content gate dropped: user=%s reason=%s text=%s", user_id, note, _single_line(text, 120))
+                    self._debug_tick_skip(user_id, note, prefix="dropped")
                     continue
             outbound_validator = getattr(self, "_validate_proactive_outbound_candidate", None)
             if callable(outbound_validator):
@@ -10825,6 +10800,20 @@ class DailyStateMixin:
                 current["last_proactive_sent_at"] = current["last_sent"]
                 current["last_companion_message_at"] = current["last_sent"]
                 current["last_proactive_reason"] = reason
+                if reason in {"birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
+                    birthday_event = current.get("birthday_event") if isinstance(current.get("birthday_event"), dict) else {}
+                    birthday_context = current.get("planned_birthday_event_context") if isinstance(current.get("planned_birthday_event_context"), dict) else {}
+                    birthday_year = _safe_int(birthday_context.get("observance_year"), self._environment_now().year)
+                    if reason == "birthday_eve_hint":
+                        birthday_event["eve_year"] = birthday_year
+                    elif reason in {"birthday_celebration", "birthday_makeup"}:
+                        birthday_event["celebrated_year"] = birthday_year
+                        birthday_event["celebrated_at"] = current["last_sent"]
+                        birthday_event["delivery_mode"] = effective_action_for_send or planned_action_for_send or "message"
+                    else:
+                        birthday_event["afterglow_year"] = birthday_year
+                        birthday_event["afterglow_at"] = current["last_sent"]
+                    current["birthday_event"] = birthday_event
                 current["last_proactive_action"] = effective_action_for_send or planned_action_for_send or "message"
                 current["last_proactive_behavior_summary"] = action_summary
                 current["last_proactive_motive"] = planned_motive_for_send

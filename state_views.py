@@ -34,15 +34,13 @@ class StateViewsMixin:
         tag_text = "、".join(str(tag) for tag in tags) if isinstance(tags, list) else ""
         body = self._polish_diary_text(diary.get("body") or diary.get("summary", ""), field="body")
         summary = self._polish_diary_text(diary.get("summary"), field="summary")
-        share_seed = self._polish_diary_text(diary.get("share_seed"), field="share")
-        return (
-            f"{diary.get('date', _today_key())} 的 Bot 日记：\n"
-            f"{body}\n"
-            f"摘要：{summary}\n"
-            f"可分享碎片：{share_seed}\n"
-            f"标签：{tag_text or '无'}\n"
-            f"{self._format_diary_story_plan(diary)}"
-        )
+        title = summary if summary and summary != body else ""
+        parts = [f"{diary.get('date', _today_key())} 的 Bot 日记：", body]
+        if title:
+            parts.append(f"题眼：{title}")
+        if tag_text:
+            parts.append(f"标签：{tag_text}")
+        return "\n".join(parts)
 
     def _format_diary_story_plan(self, diary: dict[str, Any]) -> str:
         plan = diary.get("story_plan")

@@ -431,7 +431,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.0",
+    "5.9.2",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -942,6 +942,7 @@ class PrivateCompanionPlugin(
         self.enable_expression_style_review = self._cfg_bool(c, "enable_expression_style_review", True)
         self.enable_intent_emotion_analysis = self._cfg_bool(c, "enable_intent_emotion_analysis", True)
         self.enable_response_self_review = self._cfg_bool(c, "enable_response_self_review", True)
+        self.enable_proactive_message_review = self._cfg_bool(c, "enable_proactive_message_review", True)
         self.response_review_mode = self._cfg_str(c, "response_review_mode", "severe_only", "severe_only").lower()
         if self.response_review_mode not in {"local_only", "severe_only", "full"}:
             self.response_review_mode = "severe_only"
@@ -1324,6 +1325,7 @@ class PrivateCompanionPlugin(
         self._recent_inbound_activity_by_scope: dict[str, dict[str, Any]] = {}
         self._recent_outfit_command_sends: dict[str, float] = {}
         self._startup_maintenance_task: asyncio.Task | None = None
+        self._startup_background_tasks: dict[str, asyncio.Task] = {}
         self._qzone_last_bot = None
         startup_load_started = time.perf_counter()
         self.data = self._load_data_sync()
@@ -1534,9 +1536,29 @@ class PrivateCompanionPlugin(
             logger.info("[PrivateCompanion] 主动消息循环已启动")
         if self._startup_maintenance_task is None or self._startup_maintenance_task.done():
             self._startup_maintenance_task = asyncio.create_task(self._run_startup_background_maintenance())
-        asyncio.create_task(self._reset_stale_qq_presence_if_needed())
-        asyncio.create_task(self._startup_prepare_today())
-        asyncio.create_task(self._refresh_passive_injection_cache())
+        self._create_startup_background_task(
+            "reset_stale_qq_presence",
+            self._reset_stale_qq_presence_if_needed,
+        )
+        self._create_startup_background_task("prepare_today", self._startup_prepare_today)
+        self._create_startup_background_task(
+            "refresh_passive_injection_cache",
+            self._refresh_passive_injection_cache,
+        )
+
+    def _create_startup_background_task(self, label: str, operation: Any) -> asyncio.Task:
+        previous = self._startup_background_tasks.get(label)
+        if isinstance(previous, asyncio.Task) and not previous.done():
+            return previous
+        task = asyncio.create_task(operation())
+        self._startup_background_tasks[label] = task
+
+        def discard_finished_task(finished: asyncio.Task) -> None:
+            if self._startup_background_tasks.get(label) is finished:
+                self._startup_background_tasks.pop(label, None)
+
+        task.add_done_callback(discard_finished_task)
+        return task
 
     def _log_registered_command_handlers(self) -> None:
         expected = {
@@ -1661,6 +1683,10 @@ class PrivateCompanionPlugin(
         self._passive_input_status_tasks.clear()
         startup_task = getattr(self, "_startup_maintenance_task", None)
         await cancel_task(startup_task, "startup_maintenance")
+        startup_background_tasks = list(getattr(self, "_startup_background_tasks", {}).items())
+        for label, task in startup_background_tasks:
+            await cancel_task(task, f"startup_{label}")
+        self._startup_background_tasks.clear()
         save_task = getattr(self, "_data_save_task", None)
         await cancel_task(save_task, "delayed_data_save")
         try:
@@ -9134,7 +9160,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     if self.enable_intent_emotion_analysis:
                         user["intent_profile"] = intent_profile
                     if self._should_use_llm_emotion_judgement(text, intent_profile):
-                        # 模型复核不阻塞本轮被动回复；本轮继续使用进入请求前缓存的情绪状态。
+                        # Model review does not block the current passive reply; it keeps using cached emotion state.
                         user["pending_emotion_judgement"] = {
                             "text": _single_line(text, 240),
                             "created_at": _now_ts(),

@@ -1341,6 +1341,13 @@
     "default": true,
     "invisible": true
   },
+  "enable_proactive_message_review": {
+    "description": "Legacy flat config: proactive final content gate",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+
   "enable_smart_silence": {
     "description": "Legacy flat config: 启用智能沉默",
     "type": "bool",
@@ -4922,12 +4929,22 @@
       "enable_response_self_review": {
         "description": "启用回复/主动复核",
         "type": "bool",
-        "hint": "开启后，被动回复保留自检保护；主动消息会在发送前读取最近私聊记录，判断原样发送、轻改写、延后或取消。不会再按旧主动消息改写被动回复。",
+        "hint": "Controls passive reply self-review only. Proactive final content review uses enable_proactive_message_review.",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
         }
       },
+      "enable_proactive_message_review": {
+        "description": "Proactive final content gate",
+        "type": "bool",
+        "hint": "Every proactive message is reviewed immediately before delivery using recent chat, persona, motive, and runtime state. The final decision is send, rewrite, or drop only; this switch does not affect passive reply review.",
+        "default": true,
+        "condition": {
+          "enable_mai_style_integration": true
+        }
+      },
+
       "enable_smart_silence": {
         "description": "启用智能沉默",
         "type": "bool",

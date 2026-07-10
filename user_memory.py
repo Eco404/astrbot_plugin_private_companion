@@ -1088,6 +1088,26 @@ class UserMemoryMixin:
         cleaned = _single_line(text, 260)
         if not cleaned:
             return
+        birthday_asked_at = _safe_float(user.get("birthday_curiosity_asked_at"), 0)
+        asked_recently = birthday_asked_at > 0 and _now_ts() - birthday_asked_at <= 14 * 24 * 3600
+        if asked_recently and re.search(r"(?:不想|不愿|不方便|先不|暂时不|别).{0,10}(?:说|讲|提|问)?.{0,6}生日|生日.{0,12}(?:不想|不愿|不方便|别|不要)", cleaned):
+            user["birthday_curiosity_opt_out"] = True
+            user["birthday_curiosity_asked_at"] = 0
+        else:
+            birthday_match = re.search(r"(?:(农历|公历)\s*)?(\d{1,2})\s*(?:月|[-./])\s*(\d{1,2})\s*(?:日|号)?", cleaned)
+            explicit_birthday = bool(re.search(r"(?:我|我的|本人).{0,6}生日(?:.{0,10}(?:是|在|：|:))?", cleaned))
+            if birthday_match and (asked_recently or explicit_birthday):
+                user["birthday_profile"] = {
+                    "calendar": "lunar" if birthday_match.group(1) == "农历" else "solar",
+                    "month": int(birthday_match.group(2)),
+                    "day": int(birthday_match.group(3)),
+                    "raw": birthday_match.group(0),
+                    "source": "birthday_curiosity_reply" if asked_recently else "user_explicit",
+                    "confirmed_at": _now_ts(),
+                }
+                if asked_recently:
+                    user["birthday_curiosity_answered_at"] = _now_ts()
+                    user["birthday_curiosity_asked_at"] = 0
         memory = user.setdefault("companion_memory", {})
         if not isinstance(memory, dict):
             memory = {}
@@ -2746,27 +2766,19 @@ class UserMemoryMixin:
         if not cleaned or not isinstance(local_intent, dict):
             return
         prompt = f"""
-你是私聊情绪变化判断器。只判断“用户这句话是否会改变 Bot 自身短期情绪余波”，不要生成回复。
+You classify whether one private inbound message changes the Bot's short-term emotional afterglow. Do not write a reply.
 
-可选 event：
-- neutral：不应改变 Bot 自身情绪余波。
-- hurt：用户言行指向 Bot/当前角色，足以让 Bot 被刺到或不满。
-- apology：用户在向 Bot 道歉或修复关系。
-- comfort：用户在安抚 Bot。
-- praise：用户在肯定/夸 Bot。
-- comfort_need：用户自己低落，需要被接住，不代表伤害 Bot。
-- external_negative：用户在骂第三方、代码、作业、日志或别人，不代表伤害 Bot。
+Allowed event values: neutral, hurt, apology, comfort, praise, comfort_need, external_negative.
+target must be bot, self, other, ambiguous, or none.
+Only classify hurt when the message clearly targets the Bot/current character. Be conservative with jokes, flirting, logs, code, and quoted text.
+A boundary such as less intimacy, no flirting, no approaching, or no interruptions should normally be neutral; relationship-distance logic handles it separately.
+Return JSON only:
+{{"event":"neutral|hurt|apology|comfort|praise|comfort_need|external_negative","target":"bot|self|other|ambiguous|none","intensity":0-100,"confidence":0.0-1.0,"reason":"brief reason"}}
 
-target 只能是 bot/self/other/ambiguous/none。
-只有明确指向 Bot/当前角色时，才能判断为 hurt；玩笑、撒娇、日志、代码、转述内容要保守。
-用户只是表达相处边界、要求少贴近、别撒娇、别靠近、别打扰时，优先判为 neutral；这类边界交给关系距离感处理，不属于伤害 Bot。
-输出 JSON，不要解释：
-{{"event":"neutral|hurt|apology|comfort|praise|comfort_need|external_negative","target":"bot|self|other|ambiguous|none","intensity":0-100,"confidence":0.0-1.0,"reason":"20字内原因"}}
-
-用户消息：
+User message:
 {cleaned}
 
-本地快判：
+Local classifier result:
 {json.dumps({k: local_intent.get(k) for k in ("intent", "emotion", "source", "reason", "emotion_event", "emotion_target", "emotion_intensity", "emotion_reason", "emotion_confidence")}, ensure_ascii=False)}
 """.strip()
         provider_id = self._emotion_judgement_provider_id()
@@ -2782,7 +2794,7 @@ target 只能是 bot/self/other/ambiguous/none。
             refined = self._merge_llm_emotion_judgement(local_intent, payload)
         except Exception as exc:
             refined = None
-            logger.debug("[PrivateCompanion] 情绪变化模型判断失败: %s", _single_line(exc, 120))
+            logger.debug("[PrivateCompanion] Emotion judgement request failed: %s", _single_line(exc, 120))
         async with self._data_lock:
             user = self._get_user(user_id)
             pending = user.get("pending_emotion_judgement") if isinstance(user.get("pending_emotion_judgement"), dict) else {}
@@ -2795,7 +2807,7 @@ target 只能是 bot/self/other/ambiguous/none。
             user["pending_emotion_judgement"] = {}
             if refined:
                 logger.info(
-                    "[PrivateCompanion] 情绪变化模型判断完成: user=%s event=%s target=%s intensity=%s confidence=%s reason=%s",
+                    "[PrivateCompanion] Emotion judgement completed: user=%s event=%s target=%s intensity=%s confidence=%s reason=%s",
                     user_id,
                     refined.get("emotion_event"),
                     refined.get("emotion_target"),

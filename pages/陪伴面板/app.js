@@ -93,6 +93,8 @@ const state = {
   dailyOutfitHydrateKey: "",
   pageFontFamily: "original",
   pageTheme: "classic",
+  overviewRefreshedAt: 0,
+  uxReviewShowAll: false,
 };
 
 let setupGuideProactivePollTimer = null;
@@ -721,7 +723,7 @@ const featureMeta = {
   enable_expression_manual_review: ["表达样本审核", "新样本先进入私聊对象的待审核列表，通过后才会参与表达画像。"],
   enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
-  enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息发送前判断是否值得现在发送、是否需要改写或延后。"],
+  enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息在实际发送前按人格和上下文终审：发送、改写或丢弃。"],
   enable_smart_silence: ["智能沉默", "发送前判断用户是否想收住话题；可选择只看明确边界，或交给小模型结合上下文判断。"],
   enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
@@ -1881,7 +1883,8 @@ const featureSettingGroups = {
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
-  enable_response_self_review: ["response_review_mode", "enable_smart_silence", "smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars"],
+  enable_response_self_review: ["response_review_mode", "enable_smart_silence", "smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "response_review_max_chars"],
+  enable_proactive_message_review: ["proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
@@ -3811,6 +3814,7 @@ async function loadAll(options = {}) {
     const overview = await fetchJson("/overview");
     if (requestSeq !== loadAllRequestSeq) return;
     applyOverviewData(overview);
+    state.overviewRefreshedAt = Date.now();
     renderAll();
     void ensureTabData(state.activeTab, true);
     $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载`;
@@ -3874,11 +3878,12 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderTroubleshooting();
   } else if (tabName === "tokens") {
     renderTokens();
-  } else if (tabName === "roleplay" || tabName === "modules") {
+  } else if (tabName === "roleplay") {
     renderModuleSettings();
     renderRoleplayPersonaDraftPanel();
   } else if (tabName === "config") {
     renderConfig();
+    renderModuleSettings();
   } else if (tabName === "models") {
     renderProviders();
   } else if (tabName === "experimental") {
@@ -3943,7 +3948,7 @@ async function loadAvailableProviders(force = false) {
   state.availableProviders = availableProviders.items || [];
   state.lazyLoaded.providers = true;
   if (state.activeTab === "models") renderProviders();
-  if (state.activeTab === "modules" || state.activeTab === "roleplay") renderModuleSettings();
+  if (state.activeTab === "config" || state.activeTab === "roleplay") renderModuleSettings();
   return state.availableProviders;
 }
 
@@ -3979,7 +3984,7 @@ async function ensureTabData(tabName, force = false) {
     await loadTokenStats(force);
   } else if (tabName === "models") {
     await loadAvailableProviders(force);
-  } else if (tabName === "modules" || tabName === "roleplay") {
+  } else if (tabName === "roleplay") {
     loadAvailableProviders(force).catch(() => {});
   } else if (tabName === "config") {
     await loadConfigBackups(force);
@@ -4015,7 +4020,7 @@ const setupGuideStepGroups = [
   {
     title: "主动消息测试",
     tag: "第 4 步 · 约 1 分钟",
-    body: "最后跑一次主动消息测试。默认只生成候选、复核和发送闸结果；真实发送必须二次确认，避免首次配置时误发。测试通过即表示基础链路跑通。",
+    body: "建议最后跑一次主动消息测试。默认只生成候选、复核和发送闸结果；真实发送仍需二次确认。若暂时不想开启主动，也可跳过测试并完成基础配置。",
   },
 ];
 
@@ -4041,7 +4046,7 @@ const setupGuideSteps = [
     groupIndex: 2,
     title: "人格与世界知识",
     tag: "主动功能与其他配置",
-    body: "这里决定插件理解角色和生活背景的来源。首次配置推荐继承 AstrBot 当前人格，并生成一份只给插件使用的世界知识草稿；聊天回复的人格仍然由 AstrBot 本体控制。",
+    body: "首次配置可直接继承 AstrBot 当前人格；世界知识草稿属于增强项，想先跑通基础聊天时可以跳过，之后再补充。聊天回复人格仍由 AstrBot 本体控制。",
     checks: ["确认人格来源", "填写世界知识补充", "确认不会改动 AstrBot 聊天人格"],
   },
   {
@@ -4049,7 +4054,7 @@ const setupGuideSteps = [
     groupIndex: 2,
     title: "主动功能选择",
     tag: "主动功能与其他配置",
-    body: "这里只选择主动能力的大开关。首次配置需要开启私聊主动来跑通最后的主动消息测试；群聊主动可以按需开启，新闻、网页探索、空间、生图、TTS 等更细能力放到进阶配置。",
+    body: "这里只选择主动能力的大开关。私聊主动可按需开启；开启后可在最后做一次主动消息测试。群聊主动同样按需选择，新闻、网页探索、空间、生图、TTS 等更细能力放到进阶配置。",
     checks: ["选择私聊主动", "选择群聊主动", "未选择的主动测试会自动跳过"],
   },
   {
@@ -4057,7 +4062,7 @@ const setupGuideSteps = [
     groupIndex: 2,
     title: "日程与观察",
     tag: "主动功能与其他配置",
-    body: "这里初始化 Bot 的今日生活节奏。首次配置只需要确认链路能跑通，详细日程以后到观察页慢慢看。",
+    body: "这里可初始化 Bot 的今日生活节奏。日程是增强体验，不影响基础聊天和保存；首次配置可跳过，之后再到观察页生成。",
     checks: ["生成今日日程", "细化当前时段", "查看简要结果"],
   },
   {
@@ -4081,7 +4086,7 @@ const setupGuideSteps = [
     groupIndex: 2,
     title: "关系网词条",
     tag: "主动功能与其他配置",
-    body: "这里配置第一条关系网用户词条。字段尽量贴近关系网页的编辑体验，先把身份、别名、资料正文和互动边界写清楚。",
+    body: "这里可配置第一条关系网用户词条。关系网不是首次可用的前提；没有资料时可先跳过，之后再到关系网页补充。",
     checks: ["填写身份 QQ 与名称", "补充别名和关系资料", "确认自登记说明"],
   },
   {
@@ -5251,7 +5256,7 @@ function setupGuideModeHomeHtml() {
     { title: "核心模型", icon: "🧠", done: hasProviders },
     { title: "主动功能", icon: "🎯", done: hasProactive },
     { title: "其他配置", icon: "⚙️", done: hasGroup || hasWorldbook || hasCreative },
-    { title: "主动测试", icon: "✅", done: false },
+    { title: "主动测试", icon: "✅", done: setupGuideProactiveTestPassed() },
   ];
   const firstGuideDoneCount = firstGuideSteps.filter((s) => s.done).length;
   const firstGuidePct = Math.round((firstGuideDoneCount / firstGuideSteps.length) * 100);
@@ -6592,22 +6597,6 @@ function setupGuideStepBlockMessage(targetIndex) {
     const missing = setupGuideProviderTestMissingLabels();
     return `请先完成模型测试：${missing.join("、")}`;
   }
-  if (nextIndex > 2 && !state.setupGuideRoleplayDraft) {
-    return "请先生成世界知识草稿";
-  }
-  if (nextIndex > 3 && !draft.proactivePrivate) {
-    return "首次配置需要开启私聊主动，才能完成最后的主动消息链路测试";
-  }
-  if (nextIndex > 4) {
-    const result = state.setupGuideDailyResult || {};
-    if (!result.ok || result.loading || result.error) return "请先快速生成今日日程";
-  }
-  if (nextIndex > 7 && draft.worldbookEnabled) {
-    if (!String(draft.worldbookUserId || "").trim() || !String(draft.worldbookNickname || "").trim()) {
-      return "请先填写关系网词条的身份 QQ 和名称";
-    }
-    if (!draft.worldbookDraftConfirmed) return "请先确认关系网词条草稿";
-  }
   return "";
 }
 
@@ -6926,7 +6915,7 @@ function setupGuideModalHtml() {
   const advancedLastStep = advancedBlock && advancedItems.length ? advancedStepIndex >= advancedItems.length - 1 : false;
   const proactiveTestPassed = setupGuideProactiveTestPassed();
   const applying = Boolean(state.setupGuideApplying);
-  const firstNextDisabled = applying || (index === 1 && !setupGuideAllProviderTestsPassed()) || (index >= setupGuideSteps.length - 1 && !proactiveTestPassed);
+  const firstNextDisabled = applying || (index === 1 && !setupGuideAllProviderTestsPassed());
   const nextDisabled = mode === "advanced" ? applying || !advancedBlock : firstNextDisabled;
   const nextLabel = mode === "advanced"
     ? applying ? "保存中..." : advancedBlock ? (advancedLastStep ? "保存本板块" : "下一项") : "先选择板块"
@@ -7046,13 +7035,13 @@ function statCard(value, label, jumpTab = "") {
 
 function renderDashboard() {
   renderDashboardPulse();
+  renderModuleWorkbench(state.overview?.settings || {});
   renderStrategyOverview();
   renderSetupProgress();
   renderUxReviewPanel();
   renderRelationshipChart();
   renderGroupBubbleChart();
   renderQuotaChart();
-  renderFeatureMatrix();
   renderNewsInsightPanel();
   renderWebExplorationPanel();
   renderActivityHeatmap();
@@ -7068,6 +7057,12 @@ function renderStrategyOverview() {
     qzone: overview.qzone || {},
     privateReading: overview.private_reading || {},
   });
+}
+
+function dashboardRefreshLabel() {
+  const refreshedAt = Number(state.overviewRefreshedAt || 0);
+  if (!refreshedAt) return "等待刷新";
+  return `已刷新 ${new Date(refreshedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 function renderDashboardPulse() {
@@ -7126,8 +7121,8 @@ function renderDashboardPulse() {
   ];
   $("#dashboardPulse").innerHTML = cards.map((card) => `
     <button type="button" class="pulse-card ${escapeHtml(card.tone)} ${escapeHtml(card.layout || "")}" data-pulse-kind="${escapeHtml(card.tone)}" data-jump-tab="${escapeHtml(card.jump)}">
-      <span>${escapeHtml(card.label)}</span>
-      <b>${escapeHtml(card.value)}</b>
+      <span><em class="pulse-card-label">${escapeHtml(card.label)}</em><em class="pulse-card-freshness">${escapeHtml(dashboardRefreshLabel())}</em></span>
+      <b title="${escapeHtml(card.value)}">${escapeHtml(card.value)}</b>
       <small>${escapeHtml(card.note)}</small>
     </button>
   `).join("");
@@ -7150,7 +7145,7 @@ function renderDashboardPulse() {
         : "去排障页查看",
     ],
     ["image-cache", "图片缓存", `${overview.cache?.private_image_vision?.items || 0}/${overview.cache?.private_image_vision?.max_items || "不限"} 条`],
-    ["modules", "模块工作台", moduleShortcutNote(overview)],
+    ["config", "常用配置", moduleShortcutNote(overview)],
     ["models", "模型分流", providerShortcutNote(overview.providers || {})],
     ["config", "名单与开关", `${overview.group?.access_mode || "whitelist"} · 白 ${overview.group?.whitelist?.length || 0} / 黑 ${overview.group?.blacklist?.length || 0}`],
   ];
@@ -7433,7 +7428,7 @@ function renderSetupProgress() {
       level: targetUsers.length ? "ok" : "warn",
       title: targetUsers.length ? `目标用户已配置（${targetUsers.length} 人）` : "目标用户未配置",
       hint: targetUsers.length ? "Bot 会在私聊中服务这些用户" : "至少填写一个用户 ID，Bot 才知道服务谁",
-      tab: "modules",
+      tab: "config",
       action: "去配置",
       critical: true,
     },
@@ -7512,7 +7507,7 @@ function renderSetupProgress() {
         hasQzone ? "空间" : "",
         hasBili ? "B站" : "",
       ].filter(Boolean).join(" · ") || "新闻、QQ空间、B站联动均未开启",
-      tab: "modules",
+      tab: "config",
       action: "去配置",
       critical: false,
     },
@@ -7637,68 +7632,38 @@ function renderUxReviewPanel() {
   const userReady = userProfileText.length >= 30;
   const imageEnhanceEnabled = Boolean(settings.enable_private_image_self_recognition || features.enable_private_image_self_recognition);
   const items = [
-    {
-      level: personaReady && worldReady && userReady ? "ok" : "warn",
-      title: "世界知识仍是最大收益点",
-      text: personaReady && worldReady && userReady
-        ? (roleFilled >= 6 ? `角色资料 ${roleFilled}/8 项、世界观和用户关系都有内容` : "旧版文案较完整；标准化字段可按需补齐")
-        : `角色资料 ${roleFilled}/8 项；建议补齐外貌识别点、爱好、禁忌和用户关系`,
-      tab: "roleplay",
-    },
-    {
-      level: Number(settings.max_daily_messages || 0) <= 0 || hasPrivateTargets ? "ok" : "warn",
-      title: "私聊主动目标",
-      text: Number(settings.max_daily_messages || 0) <= 0
-        ? "私聊主动关闭，不需要目标列表"
-        : (hasPrivateTargets ? `已识别 ${targetUsers.length || state.users.length} 个私聊对象` : "主动开启但目标列表为空"),
-      tab: "modules",
-    },
-    {
-      level: features.enable_group_companion ? (Number(group.enabled_group_count || 0) > 0 ? "ok" : "warn") : "info",
-      title: "群聊入口",
-      text: features.enable_group_companion
-        ? `${group.enabled_group_count || 0}/${group.group_count || 0} 个群正在观测`
-        : "群聊观察关闭，群聊相关页只保留管理视图",
-      tab: "group",
-    },
-    {
-      level: imageEnhanceEnabled
-        ? (settings.enable_private_image_vision_cache ? "ok" : "warn")
-        : "info",
-      title: "图片转述增强",
-      text: imageEnhanceEnabled
-        ? `缓存 ${imageCache.items || 0}/${imageCache.max_items || "不限"} 条；${settings.enable_private_image_vision_cache ? "重复图会复用视觉摘要" : "缓存关闭，重复表情包会重复调用"}`
-        : "图片转述增强关闭",
-      tab: "image-cache",
-    },
-    {
-      level: featureKeys.length ? "ok" : "info",
-      title: "功能开关已分组",
-      text: featureKeys.length
-        ? `${enabledFeatureCount}/${featureKeys.length} 个主开关开启，已归入 ${activeFeatureGroupCount}/${featureGroups.length} 个分类；子开关和具体参数进详情页查看`
-        : "等待功能开关数据",
-      tab: "config",
-    },
-    {
-      level: news.ai_daily_enabled
-        ? (aiDaily.last_text_readable || aiDaily.status === "already_read_today_video" ? "ok" : "warn")
-        : "info",
-      title: "AI 日报/早报可解释性",
-      text: news.ai_daily_enabled
-        ? (aiDaily.last_text_readable ? `文字版已读 ${formatCompactNumber(aiDaily.last_text_chars || 0)} 字` : `状态：${insightStatus(aiDaily.status)}`)
-        : "AI 日报/早报追踪关闭",
-      tab: "dashboard",
-    },
+    { level: personaReady && worldReady && userReady ? "ok" : "warn", title: "世界知识", text: personaReady && worldReady && userReady ? (roleFilled >= 6 ? `角色资料 ${roleFilled}/8 项，世界观和用户关系已补齐` : "旧版文案已完整；标准化字段可按需补齐") : `角色资料 ${roleFilled}/8 项；补齐外貌识别点、爱好、禁忌和用户关系`, tab: "roleplay" },
+    { level: Number(settings.max_daily_messages || 0) <= 0 || hasPrivateTargets ? "ok" : "warn", title: "私聊主动目标", text: Number(settings.max_daily_messages || 0) <= 0 ? "私聊主动关闭，无需目标列表" : (hasPrivateTargets ? `已识别 ${targetUsers.length || state.users.length} 个私聊对象` : "主动已开启，但目标列表为空"), tab: "config" },
+    { level: features.enable_group_companion ? (Number(group.enabled_group_count || 0) > 0 ? "ok" : "warn") : "info", title: "群聊入口", text: features.enable_group_companion ? `${group.enabled_group_count || 0}/${group.group_count || 0} 个群正在观测` : "群聊观察关闭，相关页仅保留管理视图", tab: "group" },
+    { level: imageEnhanceEnabled ? (settings.enable_private_image_vision_cache ? "ok" : "warn") : "info", title: "图片转述增强", text: imageEnhanceEnabled ? `缓存 ${imageCache.items || 0}/${imageCache.max_items || "不限"} 条；${settings.enable_private_image_vision_cache ? "重复图会复用摘要" : "缓存关闭，重复图会重复调用"}` : "图片转述增强关闭", tab: "image-cache" },
+    { level: featureKeys.length ? "ok" : "info", title: "功能开关", text: featureKeys.length ? `${enabledFeatureCount}/${featureKeys.length} 个主开关开启，归入 ${activeFeatureGroupCount}/${featureGroups.length} 个分类` : "等待功能开关数据", tab: "config" },
+    { level: news.ai_daily_enabled ? (aiDaily.last_text_readable || aiDaily.status === "already_read_today_video" ? "ok" : "warn") : "info", title: "AI 日报/早报", text: news.ai_daily_enabled ? (aiDaily.last_text_readable ? `文字版已读 ${formatCompactNumber(aiDaily.last_text_chars || 0)} 字` : `状态：${insightStatus(aiDaily.status)}`) : "AI 日报/早报追踪关闭", tab: "dashboard" },
   ];
-  $("#uxReviewPanel").innerHTML = items.map((item) => `
-    <button type="button" class="ux-review-item ${escapeHtml(item.level)}" data-jump-tab="${escapeHtml(item.tab)}">
-      <span>${escapeHtml(item.level === "ok" ? "已处理" : item.level === "warn" ? "需关注" : "信息")}</span>
-      <b>${escapeHtml(item.title)}</b>
-      <small>${escapeHtml(item.text)}</small>
-    </button>
-  `).join("");
+  const actionItems = items.filter((item) => item.level === "warn");
+  const visibleItems = state.uxReviewShowAll ? items : actionItems;
+  const root = $("#uxReviewPanel");
+  if (!root) return;
+  const summary = actionItems.length
+    ? `发现 ${actionItems.length} 项需处理，优先完成后再查看其余状态。`
+    : "当前没有必须处理的项目；其余状态可按需查看。";
+  root.innerHTML = `
+    <div class="ux-review-summary ${actionItems.length ? "has-actions" : "clear"}">
+      <div><b>${escapeHtml(actionItems.length ? "优先处理" : "状态正常")}</b><small>${escapeHtml(summary)}</small></div>
+      <button type="button" class="ux-review-toggle" data-ux-review-toggle>${state.uxReviewShowAll ? "只看待处理" : `查看全部 ${items.length} 项`}</button>
+    </div>
+    <div class="ux-review-items">
+      ${visibleItems.length ? visibleItems.map((item) => `
+        <button type="button" class="ux-review-item ${escapeHtml(item.level)}" data-jump-tab="${escapeHtml(item.tab)}">
+          <span>${escapeHtml(item.level === "ok" ? "已处理" : item.level === "warn" ? "需关注" : "信息")}</span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.text)}</small>
+        </button>
+      `).join("") : `<div class="empty small">暂无需要处理的项目。</div>`}
+    </div>
+  `;
+  root.querySelector("[data-ux-review-toggle]")?.addEventListener("click", () => {
+    state.uxReviewShowAll = !state.uxReviewShowAll;
+    renderUxReviewPanel();
+  });
 }
-
 function labeledRoleplayValuePresent(text, label) {
   const source = String(text || "");
   const escaped = escapeRegExp(label);
@@ -7816,7 +7781,7 @@ function troubleshootingProactiveIntensityMarkup(intensity = {}) {
           <span>当前主动强度预设</span>
           <b>${escapeHtml(intensity.label || intensity.preset || "预设已启用")}</b>
         </div>
-        <button type="button" data-jump-tab="modules">修改预设</button>
+        <button type="button" data-jump-tab="config">修改预设</button>
       </header>
       <div class="troubleshooting-intensity-grid">
         ${rows.map(([label, value]) => `
@@ -8798,23 +8763,6 @@ function groupTopicThreadsView(threads) {
       }).join("")}
     </div>
   `;
-}
-
-function renderFeatureMatrix() {
-  const groups = [
-    ["陪伴", ["enable_mai_style_integration", "enable_expression_learning", "enable_response_self_review", "enable_dialogue_episode_memory"]],
-    ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
-    ["记忆", ["enable_companion_memory", "enable_open_loop_tracking", "enable_livingmemory_integration"]],
-    ["主动联动", ["enable_proactive_quote_trigger_message", "enable_unanswered_screen_peek_followup", "enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_news_integration", "enable_ai_daily_watch", "enable_private_reading_integration", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_creative_writing", "creative_hidden_mode"]],
-  ];
-  $("#featureMatrix").innerHTML = groups.map(([label, keys]) => `
-    <section>
-      <h3>${escapeHtml(label)}</h3>
-      <div class="feature-dot-list">
-        ${keys.filter(visibleConfigKey).map((key) => `<span class="feature-dot ${state.overview?.features?.[key] ? "on" : "off"}" title="${escapeHtml(`${featureLabel(key)}：${featureDescription(key)} (${key})`)}">${escapeHtml(featureLabel(key))}</span>`).join("")}
-      </div>
-    </section>
-  `).join("");
 }
 
 function renderActivityHeatmap() {
@@ -10832,14 +10780,21 @@ function renderWorldbook() {
       item.content,
     ].join(" ").toLowerCase();
     return !keyword || haystack.includes(keyword);
+  }).sort((left, right) => {
+    const leftPending = Array.isArray(left.pending_observations) ? left.pending_observations.length : 0;
+    const rightPending = Array.isArray(right.pending_observations) ? right.pending_observations.length : 0;
+    if (rightPending !== leftPending) return rightPending - leftPending;
+    if (Boolean(right.enabled) !== Boolean(left.enabled)) return Number(Boolean(right.enabled)) - Number(Boolean(left.enabled));
+    const priorityDiff = Number(right.priority || 0) - Number(left.priority || 0);
+    if (priorityDiff) return priorityDiff;
+    return String(left.name || left.user_id || "").localeCompare(String(right.name || right.user_id || ""), "zh-CN");
   });
 
   $("#worldbookSummary").innerHTML = [
-    worldbookStat("身份节点", worldbook.enabled_member_count || 0, `${worldbook.member_count || 0} 个关系节点`),
-    worldbookStat("群资料", worldbook.group_count || 0, "可用于群聊上下文"),
-    worldbookStat("待确认观察", worldbook.pending_observation_total || 0, "确认后才写入重要记忆"),
-    worldbookStat("自登记拒绝词", worldbook.self_registration_block_word_count || 0, worldbook.self_registration ? "命中后直接拒绝" : "自登记已关闭"),
-    worldbookStat("识别方式", worldbook.enabled ? "QQ 精确" : "关闭", worldbook.match_aliases ? "称呼辅助开启" : "仅 QQ 确认"),
+    worldbookStat("可用身份", worldbook.enabled_member_count || 0, `${worldbook.member_count || 0} 个节点已登记`),
+    worldbookStat("待确认", worldbook.pending_observation_total || 0, worldbook.pending_observation_total ? "优先审核，确认后才写入记忆" : "当前没有待审核观察"),
+    worldbookStat("群上下文", worldbook.group_count || 0, "用于群聊身份与关系判断"),
+    worldbookStat("匹配策略", worldbook.enabled ? "QQ 精确" : "未启用", worldbook.match_aliases ? "称呼辅助已开启" : "仅按身份键确认"),
   ].join("");
   const clearPendingButton = $("#worldbookClearPendingBtn");
   if (clearPendingButton) clearPendingButton.disabled = !(worldbook.pending_observation_total > 0);
@@ -11926,8 +11881,8 @@ function renderDiaryCards(diaries) {
             <b>${escapeHtml(item.date || "未记录日期")}</b>
             <small>${escapeHtml(item.generated_at || "")}</small>
           </div>
+          ${item.summary ? `<h4>${escapeHtml(item.summary)}</h4>` : ""}
           <p>${escapeHtml(item.body || item.summary || "暂无日记正文")}</p>
-          ${item.share_seed ? `<blockquote>${escapeHtml(item.share_seed)}</blockquote>` : ""}
           <div class="diary-tags">${tags}</div>
         </section>
       `;
@@ -12147,6 +12102,30 @@ function renderBookshelfBook(item) {
 
 function bookshelfBookId(item) {
   return `${item.kind || "book"}:${item.id || item.title || ""}`;
+}
+
+async function saveSelectedBookshelfReadingState() {
+  const book = state.selectedBook;
+  if (!book || book.kind !== "jm_album" || !book.album_id) return;
+  const pages = Array.isArray(book.pages) ? book.pages : [];
+  const currentPage = Math.min(Math.max(1, Number(state.selectedBookSpreadIndex || 0) + 1), Math.max(1, pages.length));
+  const bookmarkInput = document.querySelector("[data-book-bookmark]");
+  const bookmark = bookmarkInput instanceof HTMLInputElement ? bookmarkInput.value.trim() : String(book.reading_bookmark || "").trim();
+  try {
+    const result = await postJson("/bookshelf/reading_state", {
+      album_id: book.album_id,
+      page: currentPage,
+      total_pages: pages.length,
+      bookmark,
+      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+    });
+    state.bookshelfUnlocked = result.bookshelf || state.bookshelfUnlocked;
+    state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
+    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(book.album_id));
+    if (updated) state.selectedBook = updated;
+  } catch (error) {
+    console.debug("保存阅读进度失败", error);
+  }
 }
 
 async function ensureCreativeProjectDetail(book, force = false) {
@@ -12715,6 +12694,10 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
   const firstPage = spread[0]?.index || state.selectedBookSpreadIndex + 1;
   const lastPage = spread[spread.length - 1]?.index || firstPage;
   const isLastSpread = state.selectedBookSpreadIndex + 2 >= pages.length;
+  const progressPage = Math.max(0, Number(book.reading_progress_page || 0));
+  const progressTotal = Math.max(0, Number(book.reading_progress_total || pages.length)) || pages.length;
+  const progressLabel = progressPage > 0 ? (progressPage >= progressTotal ? "已读完" : `上次读到 ${progressPage}/${progressTotal}`) : "尚未开始";
+  const bookmark = String(book.reading_bookmark || "").trim();
   const userRating = Number(book.user_rating || 0);
   const userRatingReason = String(book.user_rating_reason || "").trim();
   const ratingPanel = isLastSpread
@@ -12744,7 +12727,7 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
       </nav>
       <div class="reader-toolbar">
         <button type="button" data-book-back>返回简介</button>
-        <span>${escapeHtml(kindLabel)} · ${escapeHtml(firstPage)}-${escapeHtml(lastPage)} / ${escapeHtml(pages.length)} · 备注 ${escapeHtml(pageCommentCount)} 条</span>
+        <span>${escapeHtml(kindLabel)} · ${escapeHtml(firstPage)}-${escapeHtml(lastPage)} / ${escapeHtml(pages.length)} · ${escapeHtml(progressLabel)} · 备注 ${escapeHtml(pageCommentCount)} 条</span>
         <button type="button" data-book-close>收回书柜</button>
       </div>
       <div class="manga-reader-shell">
@@ -12766,6 +12749,11 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
           </div>
         </header>
         ${readingImpression}
+        <section class="manga-reading-state">
+          <span>${escapeHtml(progressLabel)}</span>
+          <label>书签 <input type="text" maxlength="120" value="${escapeHtml(bookmark)}" placeholder="留一句只给自己看的标记" data-book-bookmark></label>
+          <button type="button" data-book-save-progress>保存书签</button>
+        </section>
         <div class="manga-spread">
           ${spread.map((page, spreadIndex) => {
             const comment = String(page.comment || "").trim();
@@ -14063,7 +14051,6 @@ function renderModuleSettings() {
   const settings = state.overview?.settings || {};
   const formValues = { ...settings, ...(state.featureDraft || {}) };
   renderModuleWorkbench(settings);
-  renderModuleSummary(settings);
   renderCurrentPersonaStatus(settings);
   const newsRaw = $("#newsSourcesRaw");
   if (newsRaw) newsRaw.value = displaySettingValue("news_sources", settings.news_sources);
@@ -14344,82 +14331,6 @@ function renderCurrentPersonaStatus(settings) {
   if (!input) return;
   const personaId = String(settings.plugin_specific_persona_id || "").trim();
   input.value = personaId ? `插件指定人格 ID：${personaId}` : "继承 AstrBot 当前默认人格";
-}
-
-function renderModuleSummary(settings) {
-  const features = state.overview?.features || {};
-  const groups = state.overview?.group || {};
-  const intensity = state.overview?.proactive_intensity || {};
-  const intensityEnabled = Boolean(intensity.enabled);
-  const proactiveMaxDaily = intensityEnabled ? (intensity.effective?.max_daily_messages ?? settings.max_daily_messages) : settings.max_daily_messages;
-  const proactiveMaxDailyText = intensityEnabled
-    ? (intensity.effective?.max_daily_messages_text || formatProactiveLimit(proactiveMaxDaily, intensity.effective?.max_daily_messages_unlimited))
-    : formatProactiveLimit(proactiveMaxDaily);
-  const proactiveIdle = intensityEnabled ? (intensity.effective?.idle_minutes ?? settings.idle_minutes) : settings.idle_minutes;
-  const cards = [
-    {
-      label: "主动触达",
-      value: formatProactiveDailyQuota(proactiveMaxDaily, intensity.effective?.max_daily_messages_unlimited, proactiveMaxDailyText),
-      note: intensityEnabled
-        ? `${intensity.label || intensity.preset || "预设"} · 私聊空闲 ${proactiveIdle ?? 0} 分钟`
-        : `私聊空闲 ${proactiveIdle ?? 0} 分钟`,
-      tone: intensityEnabled ? "warn" : (Number(proactiveMaxDaily || 0) > 0 ? "ok" : "off"),
-    },
-    {
-      label: "群聊观察",
-      value: features.enable_group_companion ? "开启" : "关闭",
-      note: `${groups.enabled_group_count || 0}/${groups.group_count || 0} 个群观测中`,
-      tone: features.enable_group_companion ? "ok" : "off",
-    },
-    {
-      label: "关系网",
-      value: settings.enable_worldbook_member_recognition ? "开启" : "关闭",
-      note: `${state.overview?.worldbook?.enabled_member_count || 0}/${state.overview?.worldbook?.member_count || 0} 个节点启用`,
-      tone: settings.enable_worldbook_member_recognition ? "ok" : "off",
-    },
-    {
-      label: "世界观适配",
-      value: settings.worldview_adaptation_mode || "auto",
-      note: settings.worldview_adaptation_prompt ? "自定义提示已设置" : "使用内置映射",
-      tone: settings.worldview_adaptation_mode === "off" ? "off" : "ok",
-    },
-    {
-      label: "知识库参考",
-      value: `${state.overview?.knowledge?.selected_count || 0} 项`,
-      note: state.overview?.knowledge?.available ? "增强日程与世界观" : "未发现 AstrBot 知识库",
-      tone: Number(state.overview?.knowledge?.selected_count || 0) > 0 ? "ok" : "off",
-    },
-    {
-      label: "记忆整理",
-      value: `${settings.memory_refresh_interval_minutes ?? 0} 分钟`,
-      note: `片段阈值 ${settings.episode_memory_refresh_messages ?? 0} 条消息`,
-      tone: "cost",
-    },
-    {
-      label: "长线行为",
-      value: settings.enable_creative_writing ? "创作开启" : "创作关闭",
-      note: [
-        settings.enable_bilibili_boredom_watch ? "B 站" : "",
-        settings.enable_qzone_life_publish ? "空间说说" : "",
-        isPrivateReadingAvailable() && settings.enable_private_reading_boredom_read ? "夹层阅读" : "",
-        isPrivateReadingAvailable() && settings.enable_private_reading_ask_recommendation ? "征求推荐" : "",
-      ].filter(Boolean).join(" / ") || "联动关闭",
-      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || settings.enable_qzone_life_publish || (isPrivateReadingAvailable() && (settings.enable_private_reading_boredom_read || settings.enable_private_reading_ask_recommendation)) ? "ok" : "off",
-    },
-    {
-      label: "外部能力",
-      value: `${state.overview?.external_abilities?.enabled_count || 0}/${state.overview?.external_abilities?.total || 0}`,
-      note: `${state.overview?.external_abilities?.available_count || 0} 个运行时可用`,
-      tone: Number(state.overview?.external_abilities?.enabled_count || 0) > 0 ? "ok" : "off",
-    },
-  ];
-  $("#moduleSummary").innerHTML = cards.map((item) => `
-    <section class="module-summary-card ${escapeHtml(item.tone)}">
-      <span>${escapeHtml(item.label)}</span>
-      <b>${escapeHtml(item.value)}</b>
-      <small>${escapeHtml(item.note)}</small>
-    </section>
-  `).join("");
 }
 
 function setPrivateReadingConfigVisible(visible) {
@@ -18499,12 +18410,10 @@ function reflectExperimentalToggleChange(key, enabled) {
 }
 
 function renderExperimentalOverview() {
-  const settings = state.overview?.settings || {};
   const features = state.featureDraft || {};
   const cards = experimentalFeatureKeys.map((key) => {
     const meta = experimentalFeatureMeta[key];
     const enabled = toBool(features[key]);
-    const guide = featureDetailGuides[key] || {};
     return `
       <article class="exp-card ${enabled ? "on" : "off"}" data-exp-open="${escapeHtml(key)}">
         <div class="exp-card-head">
@@ -18522,11 +18431,8 @@ function renderExperimentalOverview() {
         <p class="exp-card-desc">${escapeHtml(meta.shortDesc)}</p>
         ${renderExperimentalCardVisual(key)}
         <div class="exp-card-foot">
-          <div class="exp-card-guide">
-            <span>何时生效</span>
-            <small>${escapeHtml(guide.trigger || "对应场景触发时生效。")}</small>
-          </div>
-          <button type="button" class="exp-card-enter" data-exp-open="${escapeHtml(key)}">进入详情 →</button>
+          <span class="exp-card-status ${enabled ? "on" : "off"}">${escapeHtml(enabled ? "运行中" : "默认关闭")}</span>
+          <button type="button" class="exp-card-enter" data-exp-open="${escapeHtml(key)}">查看与配置 →</button>
         </div>
       </article>
     `;
@@ -18539,23 +18445,17 @@ function renderExperimentalOverview() {
           <h2>实验性功能</h2>
           <span class="muted">运行时实验能力在这里开启；配置和整理类工具作为入口单独使用。</span>
         </div>
-        <div class="actions compact">
-          <span class="module-badge">${enabledCount} / ${experimentalFeatureKeys.length} 开启</span>
-        </div>
+        <div class="actions compact"><span class="module-badge">${enabledCount} / ${experimentalFeatureKeys.length} 开启</span></div>
       </div>
       <div class="experimental-overview-note">
-        <b>使用建议</b>
-        <span>以下功能仍处于实验阶段，建议逐项开启观察。除情绪模拟保留原默认值外，其他实验项默认关闭；不会把理论标签写进实际回复正文。</span>
+        <b>建议一次只验证一项</b>
+        <span>先查看当前信号，再开启单项观察；关闭后会立即停止新增实验处理，不会把理论标签输出到聊天正文。</span>
       </div>
       ${renderExperimentalToolEntrances()}
-      ${renderExperimentalOverviewMap()}
-      <div class="exp-card-grid">
-        ${cards}
-      </div>
+      <div class="exp-card-grid">${cards}</div>
     </div>
   `;
 }
-
 function renderPersonaStandardizationToolPage() {
   return `
     <div class="subpage experimental-subpage persona-tool-subpage">
@@ -18658,24 +18558,29 @@ function renderExperimentalSubpage(key) {
       </header>
       ${heroHtml}
       ${meta.caution ? `<div class="exp-caution"><b>注意</b><span>${escapeHtml(meta.caution)}</span></div>` : ""}
-      ${visualHtml}
-      ${matrixHtml}
-      <article class="exp-detail-card exp-theory-card">
-        <h3>理论框架与行为映射</h3>
-        <div class="exp-theory-list">${theoryHtml}</div>
-      </article>
-      ${effectsHtml ? `<article class="exp-detail-card exp-effects-card">
-        <h3>功能效果链路</h3>
-        <div class="exp-effect-list">${effectsHtml}</div>
-      </article>` : ""}
-      <article class="exp-detail-card exp-guide-card">
-        <h3>功能说明</h3>
-        <dl>${guideRows}</dl>
-      </article>
-      <div class="exp-bottom-grid">
+      <div class="exp-bottom-grid exp-priority-grid">
         ${settingsHtml}
         ${runtimeHtml}
       </div>
+      <details class="exp-evidence">
+        <summary><span>原理与行为依据</span><small>理论口径、效果链和完整说明</small></summary>
+        <div class="exp-evidence-body">
+          ${visualHtml}
+          ${matrixHtml}
+          <article class="exp-detail-card exp-theory-card">
+            <h3>理论框架与行为映射</h3>
+            <div class="exp-theory-list">${theoryHtml}</div>
+          </article>
+          ${effectsHtml ? `<article class="exp-detail-card exp-effects-card">
+            <h3>功能效果链路</h3>
+            <div class="exp-effect-list">${effectsHtml}</div>
+          </article>` : ""}
+          <article class="exp-detail-card exp-guide-card">
+            <h3>完整功能说明</h3>
+            <dl>${guideRows}</dl>
+          </article>
+        </div>
+      </details>
       <div class="exp-subpage-footer">
         <button type="button" data-exp-back>← 返回实验功能总览</button>
         <span>参数调整需要点击“保存参数”提交；返回不再自动保存，避免卡顿和误操作。</span>
@@ -20644,7 +20549,7 @@ if (key === "enable_emotion_simulation") {
           <span>余波值：${escapeHtml(String(u.moodScore))}</span>
           ${u.lastEvent && u.lastEvent !== "neutral" ? `<span>事件：${escapeHtml(u.lastEvent)}</span>` : ""}
           ${u.regulation ? `<span>调节：${escapeHtml(u.regulation)}（${u.regulationIntensity}）</span>` : ""}
-          ${u.pendingText ? `<span>复核中：${escapeHtml(u.pendingText)}${u.pendingAge ? `｜${escapeHtml(u.pendingAge)}` : ""}</span>` : ""}
+          ${u.pendingText ? `<span>\u590d\u6838\u4e2d\uff1a${escapeHtml(u.pendingText)}${u.pendingAge ? `\uff5c${escapeHtml(u.pendingAge)}` : ""}</span>` : ""}
           ${u.error ? `<span>复核失败：${escapeHtml(u.error)}</span>` : ""}
           ${u.lastReason ? `<span>原因：${escapeHtml(String(u.lastReason).slice(0, 80))}</span>` : ""}
         </div>
@@ -21185,7 +21090,7 @@ async function saveExperimentalSettings(key, form, successMessage) {
 }
 
 function switchTab(tabName) {
-  tabName = tabName || "dashboard";
+  tabName = tabName === "modules" ? "config" : (tabName || "dashboard");
   if (tabName === state.activeTab) return;
   state.activeTab = tabName;
   document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
@@ -21368,10 +21273,6 @@ document.addEventListener("click", async (event) => {
       return;
     }
     if (index >= setupGuideSteps.length - 1) {
-      if (!setupGuideProactiveTestPassed()) {
-        showToast("请先通过主动消息链路测试", "error");
-        return;
-      }
       const button = target.closest("[data-setup-guide-next]");
       await applySetupGuide({ close: true, advanced: false, control: button instanceof HTMLButtonElement ? button : null });
       return;
@@ -21678,19 +21579,27 @@ document.addEventListener("click", async (event) => {
   }
   if (element?.closest("[data-book-read]")) {
     state.bookshelfPage = "reader";
-    state.selectedBookSpreadIndex = 0;
+    const savedPage = Math.max(1, Number(state.selectedBook?.reading_progress_page || 1));
+    state.selectedBookSpreadIndex = state.selectedBook?.kind === "jm_album" && savedPage > 1 ? Math.max(0, (savedPage - 1) - ((savedPage - 1) % 2)) : 0;
     renderBookDetailPanel();
+    if (state.selectedBook?.kind === "jm_album") void saveSelectedBookshelfReadingState();
     return;
   }
   if (element?.closest("[data-book-prev]")) {
     state.selectedBookSpreadIndex = Math.max(0, Number(state.selectedBookSpreadIndex || 0) - 2);
     renderBookDetailPanel();
+    void saveSelectedBookshelfReadingState();
     return;
   }
   if (element?.closest("[data-book-next]")) {
     const pages = Array.isArray(state.selectedBook?.pages) ? state.selectedBook.pages : [];
     state.selectedBookSpreadIndex = Math.min(Math.max(0, pages.length - 1), Number(state.selectedBookSpreadIndex || 0) + 2);
     renderBookDetailPanel();
+    void saveSelectedBookshelfReadingState();
+    return;
+  }
+  if (element?.closest("[data-book-save-progress]")) {
+    void saveSelectedBookshelfReadingState();
     return;
   }
   const ratingButton = element?.closest("[data-book-rating]");

@@ -1308,14 +1308,28 @@ class ProactiveMessageMixin:
 
     def _default_proactive_prompt_template(self) -> str:
         return """
-你要给 {{name}} 发一条主动私聊。不是回复刚收到的新消息,也不是解释任务。
-当前时间 {{current_time}}。{{unanswered_hint}}
-这会儿想开口的由头是“{{motive}}”,大概想聊“{{topic}}”,刚做的事是“{{action_context}}”,状态底色是“{{state_hint}}”,生活片段是“{{current_schedule}}”,时段情况是“{{time_guard}}”,最近已经说过“{{recent_topics}}”,关系事实是“{{relationship_fact}}”。
+你正在给 {{name}} 发一条主动私聊。这不是回复刚收到的新消息，也不是任务说明、状态汇报或例行打卡。
+
+【这次可以使用的线索】
+当前时间：{{current_time}}。{{unanswered_hint}}
+开口动机：{{motive}}。话题方向：{{topic}}。刚发生或看到的事：{{action_context}}。
+此刻状态：{{state_hint}}。生活片段：{{current_schedule}}。时段边界：{{time_guard}}。
+最近已经主动聊过：{{recent_topics}}。关系事实：{{relationship_fact}}。
 {{timer_hint}}
 
-只取一个最自然的切口开口,不要把洗漱/穿搭/天气/心情/日程逐项列成状态清单；如果已经有一个具体画面或一句话,就停在那里。
-最后留下来的文本就是聊天窗口里的下一句话。像正常聊天一样收住，只保留角色真正要说出口的内容。
-只输出这句正文。
+【先判断，再开口】
+- 从线索中只选一个此刻最真实、最具体、最值得说的切口；无关线索直接忽略。
+- 有明确的人、事、画面或感受时，就贴着它说；不要把多个来源拼成一段“近况播报”。
+- 线索偏弱、对方尚未回复或时段不适合展开时，把话说得更轻：可以分享、留白或自然收住，但不追问、不催回应、不索取陪伴。
+- 不要凭空补事实，不要把旧事写成刚刚发生；不要为了主动而主动。
+
+【成文方式】
+- 像角色在聊天窗口里自然想到后说出的一小句，而不是客服关怀、情绪鸡汤、日记、总结、推荐文或任务汇报。
+- 口语、具体、有一点个人温度；少解释，不复述上下文，不列清单，不使用“检测到/根据/安排/提醒你”等系统或管理口吻。
+- 如果想关心对方，用能自然接住的话表达，不把“在吗”“忙不忙”“怎么不回”“记得回复”当作开场。
+- 一两句即可；一个画面、一点感受或一个轻问题已经足够。说完就停，不追加自我解释或结尾客套。
+
+最终文本会直接成为聊天窗口里的下一句话。只输出要发出的正文，不要标题、引号、前缀、分析或说明。
 """.strip()
 
     def _proactive_natural_delivery_hint(self) -> str:
@@ -1569,7 +1583,17 @@ class ProactiveMessageMixin:
             lines.append("这次由头不算很硬或打扰压力偏高：正文要更短、更轻，最好像把一句话放下，不追问、不求回应。")
         elif semantic_score >= 0.68:
             lines.append("这次有明确由头：正文可以贴着那个由头说一个具体点，但仍然不要解释调度原因。")
-        if kind in {"continuation", "reminder"}:
+        if reason == "birthday_eve_hint":
+            lines.append("这是生日前夜的一点留白：可以温柔地提醒对方明天多偏爱自己一点，但不要说出生日、准备、惊喜或任何剧透；一小句就停，不制造期待压力。")
+        elif reason == "birthday_makeup":
+            lines.append("这是次日午前的低调补送：真诚祝福即可，不要反复道歉、不解释系统或错过原因，也不要把昨天的生日写成今天。")
+        elif reason == "birthday_afterglow":
+            lines.append("这是用户在生日祝福后已经回应过才会出现的余温收尾：只轻轻接住一个开心瞬间，不重复说生日快乐、不追问安排，也不延长成连续庆祝。")
+        elif reason == "birthday_celebration":
+            lines.append("今天是用户明确允许记住的生日，是一年一次的轻量仪式。先送出真诚、具体、低压力的祝福；不要提系统、记录、年龄、出生年份或精确日期，不承诺永远陪伴，也不要求回复或追问庆祝安排。若带图，正文只自然递出，不描述制作过程。")
+        elif reason == "birthday_curiosity":
+            lines.append("这是一次低频的资料好奇：只自然地问生日的月日，可顺带问公历还是农历；明确说不想回答也完全没关系。不要索要出生年份、年龄、证件信息，也不要假装已经准备了生日惊喜。")
+        elif kind in {"continuation", "reminder"}:
             lines.append("这是有来源的续接/提醒：可以顺着来源，但不要写成用户刚刚又发了新消息。")
         elif kind in {"self_share", "external_share", "observation"}:
             lines.append("这是分享/观察型主动：只取一个最小切口，不写成报告、推荐文或观察总结。")
@@ -2778,56 +2802,26 @@ class ProactiveMessageMixin:
         strength: str,
         source: str = "model",
     ) -> dict[str, Any]:
-        """Apply the final review policy after local/model judgement.
-
-        Local and model checks can identify risks or suggest edits, but this
-        policy layer owns whether a soft defer/drop is allowed to affect
-        scheduling. Hard safety blocks still pass through unchanged.
-        """
+        """Normalize the final proactive content gate to send, rewrite, or drop."""
         if not isinstance(payload, dict):
-            return {"decision": "send", "reason": "复核结果为空，按本地安全检查放行"}
+            return {"decision": "send", "reason": "empty review result; local safety gate allowed the message"}
         decision = str(payload.get("decision") or "send").strip().lower()
-        if decision not in {"send", "rewrite", "defer", "drop"}:
-            decision = "send"
         note = _single_line(payload.get("reason"), 120)
         reviewed_text = str(payload.get("text") or "").strip()
-        hard_block = bool(payload.get("hard")) or self._proactive_review_hard_block_reason(note)
-        normalized = dict(payload)
-        normalized["decision"] = decision
-        if note:
-            normalized["reason"] = note
-        if decision in {"send", "rewrite"}:
-            return normalized
-        if hard_block:
-            normalized["hard"] = True
-            return normalized
-        if strength == "strict":
-            return normalized
-        if decision == "drop":
-            if strength == "balanced":
-                normalized["decision"] = "defer"
-                normalized["delay_minutes"] = max(45, _safe_int(normalized.get("delay_minutes"), 45, 30, 90))
-                normalized["reason"] = _single_line(f"{note or '复核偏保守'}；已按标准强度降级为延后", 120)
-                return normalized
-            normalized["decision"] = "rewrite" if reviewed_text else "send"
-            normalized["reason"] = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
-            return normalized
         if decision == "defer":
-            if strength == "balanced":
-                release_reason = (
-                    self._stale_proactive_review_defer_release_reason(user, note=note)
-                    or self._balanced_proactive_defer_release_reason(user, note=note)
-                )
-                if release_reason:
-                    normalized["decision"] = "rewrite" if reviewed_text else "send"
-                    normalized["reason"] = _single_line(f"{note or '复核偏保守'}；{release_reason}", 120)
-                    return normalized
-                normalized["reason"] = note or "标准强度保留具体延后建议"
-                return normalized
-            normalized["decision"] = "rewrite" if reviewed_text else "send"
-            normalized["reason"] = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
-            return normalized
-        return normalized
+            decision = "drop"
+            note = _single_line(f"{note or 'candidate is not suitable now'}; final content gate drops instead of deferring", 120)
+        if decision not in {"send", "rewrite", "drop"}:
+            decision = "send"
+        if decision == "rewrite" and not reviewed_text:
+            decision = "drop"
+            note = _single_line(f"{note or 'rewrite result is empty'}; candidate dropped", 120)
+        return {
+            "decision": decision,
+            "text": reviewed_text if decision == "rewrite" else "",
+            "reason": note or "proactive final content gate",
+            "hard": bool(payload.get("hard")),
+        }
 
     async def _review_proactive_message_send_decision(
         self,
@@ -2857,7 +2851,7 @@ class ProactiveMessageMixin:
         local_decision = str(local.get("decision") or "send").strip().lower()
         local_hard_block = bool(local.get("hard")) or self._proactive_review_hard_block_reason(_single_line(local.get("reason"), 120))
         if local_decision in {"drop", "defer"} and local_hard_block:
-            return local
+            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         if local.get("decision") == "rewrite" and str(local.get("reference_text") or "").strip():
             rewritten_reference = await self._rewrite_reference_reply_with_persona(
                 str(local.get("reference_text") or ""),
@@ -2883,21 +2877,15 @@ class ProactiveMessageMixin:
                 local.pop("reference_text", None)
             else:
                 return {
-                    "decision": "defer",
+                    "decision": "drop",
                     "reason": _single_line(local.get("reason"), 80) or "兜底参考意图未能按人格改写",
-                    "delay_minutes": 60,
                     "hard": True,
                 }
         if local.get("decision") == "rewrite" and bool(local.get("hard")):
             return local
-        if local_decision in {"drop", "defer"} and strength == "strict":
-            return local
-        if not bool(getattr(self, "enable_response_self_review", True)):
+        if local_decision == "drop":
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-        mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
-        if mode not in {"local_only", "severe_only", "full"}:
-            mode = "severe_only"
-        if mode == "local_only":
+        if not bool(getattr(self, "enable_proactive_message_review", True)):
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
         intent_hint = self._format_proactive_generation_intent_hint(
@@ -2920,70 +2908,67 @@ class ProactiveMessageMixin:
             if part
         )
         prompt = f"""
-你是主动私聊发送前的价值复核模型。请判断候选主动消息是否适合现在进入对话。
+You are the final content gate immediately before one proactive private message is sent.
+Return JSON only. You must decide exactly one of send, rewrite, or drop.
 
-只输出 JSON 对象，不要解释。
+Decision contract:
+- send: the candidate is natural, persona-consistent, useful now, and ready to send unchanged. Leave text empty.
+- rewrite: the message still has a concrete reason to exist, but needs a small rewrite to sound natural in this exact conversation. text must be the complete sendable final message.
+- drop: do not send this candidate. Use it for weak, generic, intrusive, fabricated, context-conflicting, reply-to-nothing, internal-status, tool-result, or unsafe content.
 
-可选 decision：
-- send：适合现在发，text 留空。
-- rewrite：内容值得发，但需要改得更自然更短，text 填改写后的正文。
-- defer：仅当“当前运行态”显示用户刚私聊、当前话题明确冲突、候选和最近私聊直接撞车时使用，delay_minutes 填 30 到 90。
-- drop：没有发送价值、像回复空气、像承接刚刚不存在的新消息、太泛泛、容易打扰，直接取消。
+Rules:
+- This is a content gate, not a scheduler. Never output defer, waiting, or a delay.
+- Read the recent conversation and runtime context first. The candidate must read like a natural message from the current persona, not a system-triggered interruption.
+- Do not invent facts or promise tools, searches, media, relays, or actions that were not actually performed.
+- Preserve real media context. Do not claim an image exists when none is attached.
+- A rewrite must be shorter or similarly sized and must not add new factual claims.
+- If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
 
-判断原则：
-- 先读最近私聊记录。候选消息放进去必须像自然聊天，不像突然插入的系统主动。
-- 主动消息不是回复用户刚发来的话；如果它写成“好呀/刚看到/你问/我帮你查”等回复口吻，应 drop 或 rewrite。
-- 如果只是“想你了/来看看你/忙不忙/吃了吗/辛苦了”且没有具体由头，通常 defer 或 drop。
-- 不要把内部动机、犹豫过程或发送理由写进正文，例如“本来想跟你说”“怕说太早”“绕了一圈还是来找你”；这类内容应 rewrite 成具体片段，或 drop。
-- 如果最近用户刚刚在聊正事或刚聊完，倾向 defer；如果候选本身没价值，drop。
-- 你不是调度器，不要因为“感觉稍后更自然/略显突兀/间隔近”就 defer；这种情况应优先 rewrite 成更低压，或者 send。
-- 必须以“当前判定时间”和“运行态”为准。不要沿用旧历史里的“早安、今早、睡前、晚安刚结束”等标签当作当前理由。
-- 如果要 defer，reason 必须说清楚当前仍然不适合的真实原因；如果只是旧的早间/睡前聊天已经过了很久，不要再用“刚结束早安/今早/睡前闲聊”作为理由。
-- 候选消息必须贴合“本轮主动来源”和“内在约束”：分享型要有分享落点，关心型要低压，续接型要有真实来源，虚由头要短。
-- 时间优先级：当前真实时间和最近私聊记录高于旧记忆。旧天气、通勤、身体状态可以作为回想、余波、吐槽或类比出现，但不要强行改写成今天刚发生。
-- 如果候选提到旧天气、通勤或身体状态，先判断它是否自然；只有在明显和当前时段、最近私聊矛盾到会误导用户时，才 rewrite。不要因为出现天气/通勤词就 drop。
-- 如果候选只是在汇报系统动作、发送状态或工具执行结果，而不是角色真正要说出口的聊天内容，decision=drop。
-- rewrite 只能轻改写，不能新增事实，不能添加工具、转述、查询、发图等承诺。
+[Recent conversation]
+{history or "(none)"}
 
-【最近私聊记录】
-{history or "（无可用历史）"}
-
-【当前运行态】
+[Runtime state]
 {runtime_context}
 
-【本地前置检查】
-{local_context or "本地检查通过"}
+[Local safety result]
+{local_context or "local gate passed"}
 
-【本轮主动来源】
-reason={reason or "check_in"}；action={action or "message"}；topic={_single_line(topic, 80) or "无"}；motive={_single_line(motive, 120) or "无"}；summary={_single_line(action_summary, 80) or "无"}
+[Proactive source]
+reason={reason or "check_in"}; action={action or "message"}; topic={_single_line(topic, 80) or "none"}; motive={_single_line(motive, 120) or "none"}; summary={_single_line(action_summary, 80) or "none"}
 
-【内在约束】
-{intent_hint or "（无额外约束）"}
+[Persona and intent constraints]
+{intent_hint or "(none)"}
 
-【主动开口表达风格】
-{proactive_voice or "（无单独主动风格；只按自然私聊低压力原则处理）"}
+[Proactive voice]
+{proactive_voice or "(natural, low-pressure private chat)"}
 
-【候选主动消息】
+[Candidate]
 {text}
 
-请输出：
-{{"decision":"send|rewrite|defer|drop","text":"","delay_minutes":45,"reason":"一句很短的原因"}}
+Output:
+{{"decision":"send|rewrite|drop","text":"","reason":"brief reason"}}
 """.strip()
         started = time.perf_counter()
-        raw = await self._llm_call(
-            prompt,
-            max_tokens=220,
-            provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
-            task="proactive_send_review",
-        )
+        try:
+            raw = await asyncio.wait_for(
+                self._llm_call(
+                    prompt,
+                    max_tokens=220,
+                    provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+                    task="proactive_send_review",
+                ),
+                timeout=8.0,
+            )
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] Proactive final content gate unavailable; using local result: %s", _single_line(exc, 120))
+            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         payload = self._parse_json_object(raw)
         if not isinstance(payload, dict):
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         decision = str(payload.get("decision") or "").strip().lower()
-        if decision not in {"send", "rewrite", "defer", "drop"}:
+        if decision not in {"send", "rewrite", "drop"}:
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         reviewed_text = str(payload.get("text") or "").strip()
-        delay_minutes = _safe_int(payload.get("delay_minutes"), 45, 30, 90)
         note = _single_line(payload.get("reason"), 120)
         original_decision = decision
         if decision == "rewrite":
@@ -3003,7 +2988,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 return {
                     "decision": "drop",
                     "text": "",
-                    "delay_minutes": 90,
                     "reason": "主动候选疑似工具循环/内部发送摘要泄漏",
                 }
             if len(reviewed_text) > max(len(text) + 60, 240):
@@ -3015,7 +2999,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             {
                 "decision": decision,
                 "text": reviewed_text,
-                "delay_minutes": delay_minutes,
                 "reason": note,
             },
             strength=strength,
@@ -3023,7 +3006,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         )
         decision = str(normalized_payload.get("decision") or decision).strip().lower()
         reviewed_text = str(normalized_payload.get("text") or reviewed_text or "").strip()
-        delay_minutes = _safe_int(normalized_payload.get("delay_minutes"), delay_minutes, 30, 90)
         note = _single_line(normalized_payload.get("reason") or note, 120)
         if decision == "send" and str(local.get("decision") or "") == "rewrite" and str(local.get("text") or "").strip():
             reviewed_text = str(local.get("text") or "").strip()
@@ -3033,21 +3015,18 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if decision in {"send", "rewrite"} and self._framework_agent_meta_summary_leak(final_text):
             decision = "drop"
             reviewed_text = ""
-            delay_minutes = 90
             note = "主动候选疑似工具循环/内部发送摘要泄漏"
         logger.info(
-            "[PrivateCompanion] 主动消息发送前价值复核: decision=%s raw=%s strength=%s delay=%s elapsed=%dms reason=%s",
+            "[PrivateCompanion] Proactive final content gate: decision=%s raw=%s strength=%s elapsed=%dms reason=%s",
             decision,
             original_decision,
             strength,
-            delay_minutes if decision == "defer" else "-",
             int((time.perf_counter() - started) * 1000),
-            note or "无",
+            note or "-",
         )
         return {
             "decision": decision,
             "text": reviewed_text,
-            "delay_minutes": delay_minutes,
             "reason": note or "主动发送前价值复核",
         }
 
@@ -3933,8 +3912,17 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             }
         if action == "photo_text":
             context = await self._run_photo_text_action(user, name, reason)
+            image_ready = "真实图片" in context and "图片路径：" in context
+            if not image_ready and reason == "birthday_celebration":
+                return {
+                    "success": True,
+                    "context": "message：生日卡未生成，改为只发送生日祝福正文",
+                    "extra_components": [],
+                    "summary": "生日祝福文字",
+                    "effective_action": "message",
+                }
             return {
-                "success": "真实图片" in context and "图片路径：" in context,
+                "success": image_ready,
                 "context": context,
                 "extra_components": [],
                 "summary": "发图",
@@ -6165,6 +6153,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 【这次想分享的画面钩子】
 话题：{topic_hint or '（未指定）'}
 那一刻的小动机：{motive_hint or '（未指定）'}
+
+【生日卡特殊规则】
+{"如果主动原因是 birthday_celebration：制作一张没有文字、没有姓名、没有日期的温柔生日小卡。只选一个与人格和用户偏好相称的具体意象，不画蛋糕上文字、不出现年龄、不要节庆海报或营销风。" if reason == "birthday_celebration" else "（非生日卡）"}
 
 【内容选择菜单】
 {self._format_content_choice_options_for_prompt("photo_text")}

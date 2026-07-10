@@ -37,6 +37,15 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "jm_cosmos_default_keywords": ("private_reading_default_keywords",),
     "jm_cosmos_blocked_tags": ("private_reading_blocked_tags",),
     "JM_COSMOS_VISION_PROVIDER_ID": ("PRIVATE_READING_VISION_PROVIDER_ID",),
+    "auto_japanese_voice_enabled": ("auto_voice_enabled",),
+    "auto_japanese_voice_full_conversion_enabled": ("auto_voice_full_conversion_enabled",),
+    "auto_japanese_voice_probability": ("auto_voice_probability",),
+    "auto_japanese_voice_max_chars": ("auto_voice_max_chars",),
+    "auto_japanese_voice_cooldown_seconds": ("auto_voice_cooldown_seconds",),
+    "auto_japanese_voice_admin_probability": ("main_user_voice_probability",),
+    "admin_mention_keyword_voice_keywords": ("main_user_mention_voice_keywords",),
+    "admin_mention_keyword_voice_probability": ("main_user_mention_voice_probability",),
+    "admin_mention_keyword_voice_prompt": ("main_user_mention_voice_prompt",),
 }
 
 LEGACY_PROACTIVE_ACTION_FLAG_KEYS: dict[str, str] = {

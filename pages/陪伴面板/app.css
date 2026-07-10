@@ -11967,6 +11967,13 @@ button:disabled {
   gap: 8px;
 }
 
+.diary-card h4 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  font-weight: 650;
+}
+
 .diary-card p {
   margin: 0;
   line-height: 1.65;

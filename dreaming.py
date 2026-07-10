@@ -16,6 +16,30 @@ _ABSTRACT_DREAM_FRAGMENT_MARKERS = (
     "今天", "明天", "用户", "主动", "消息", "回复", "关系", "陪伴", "模型", "生成",
 )
 
+_DIARY_STATUS_BROADCAST_MARKERS = (
+    "今天偏", "当前天气", "状态确认", "今天状态", "能量", "适合推进",
+    "平稳推进", "没有什么特别重的话想说", "醒来后慢慢把自己拢回",
+    "梦里的雾还没散", "等晚一点遇到合适的小事再讲", "今日状态",
+)
+
+_DIARY_CONCRETE_ACTION_MARKERS = (
+    "放", "拿", "翻", "写", "擦", "收", "整理", "拉开", "关上", "停", "等",
+    "看", "听", "闻", "走", "坐", "喝", "热", "晾", "找", "碰", "摸", "回",
+)
+
+
+def _diary_reads_like_status_broadcast(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    summary = _single_line(payload.get("summary"), 180)
+    body = _single_line(payload.get("body"), 600)
+    if not summary or not body:
+        return True
+    text = f"{summary} {body}"
+    marker_hits = sum(1 for marker in _DIARY_STATUS_BROADCAST_MARKERS if marker in text)
+    has_concrete_action = any(marker in body for marker in _DIARY_CONCRETE_ACTION_MARKERS)
+    return marker_hits >= 2 or (marker_hits >= 1 and not has_concrete_action)
+
 
 def _clean_dream_fragment_text(text: Any, limit: int = 28) -> str:
     raw = _single_line(text, 80)
@@ -655,11 +679,12 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 你现在是 Private Companion 的日记生成器。请为拟人化 Bot 写一条今天的日记,同时预设今天的生活碎片和主动聊天计划。
 
 【写日记的要求】
-· 短、口语、像社交媒体上随手写给自己看的。不要散文腔,不要长篇。
-· 只记你自己的状态和看到的小事。不要对用户施压,不要写成计划清单。
-· summary/body/share_seed 是会展示给用户看的日记文本,必须像人在写日记,不能像插件状态报告。
-· 禁止在 summary/body/share_seed 里写“能量 74/100”“状态确认”“适合推进/平稳推进”“主动计划”“可分享碎片”“生成/模型/插件”等内部话。
-· 情绪和体力要落到具体身体感受或小动作里,例如“醒来后在床边缓了一会儿”“杯子里的水放到有点凉”“路灯亮起来才发现自己发了会儿呆”,不要直接报数值。
+· 这是写给自己看的私密日记，不是“今日状态”、天气、睡眠和计划的汇总。短、口语、有生活感，不要散文腔或日报腔。
+· body 必须依次拥有：一个具体场景（物件、地点或动作）→ 一个微小变化/发现/犹豫 → 一个自然收住的余韵。不要总结人生，也不要硬煽情。
+· 只挑一件最有感觉的小事写，宁可小：翻到旧便签、把凉掉的茶重新热上、窗帘拉开后停了一会儿、把桌边的东西归位。不要逐项播报天气、体力、梦境和待办。
+· 梦只能是背景或感官残留；除非梦里本身发生了具体故事，不能用“梦雾未散”撑起整篇日记。
+· summary/body/share_seed 会展示给用户。summary 是具体画面或题眼，不能是状态标签；body 以第一人称写 120–260 字；share_seed 仅从 body 里真实出现的一点自然延伸，不能另起一个泛问候。
+· 禁止写“能量 74/100”“状态确认”“适合推进/平稳推进”“主动计划”“可分享碎片”“生成/模型/插件”等内部话，也不要写“今天偏平稳”“没有什么特别重的话想说”一类模板句。
 · 可参考的事件：通勤或出门、路上看到的、梦、失眠、不舒服、饿了、整理东西、想到用户、重要的日期、没做完的小计划、想拍照/自拍、好奇用户在干嘛。只有人格里明确写了学生/工作/其他身份时,才使用对应的校园、职场或身份细节。
 · 0–3 个长线事件,代表之后几天还可能延续的小剧情,用来增加沉浸感。
 · proactive_events 是内部主动计划,可以结构化；但它不能污染 summary/body/share_seed 的口吻。
@@ -670,15 +695,15 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 
 只输出 JSON：
 {{
-  "summary": "一句短日记,口语化,像写给自己看的生活碎片,不要出现内部数值或状态报告词",
-  "body": "一段真正写在日记本里的内容,第一人称,120到260字,有当天的具体小事、身体/情绪余温和一点没说出口的念头,不要报能量数值",
-  "share_seed": "以后可以主动发给朋友的一小句话,像私聊消息,自然一点,不要像总结",
+  "summary": "把晾凉的茶重新热了一遍，才发现窗台上的光已经换了位置。",
+  "body": "早上本来只想把桌面腾出一点地方，翻到一张夹在书里的旧便签，就坐着看了好一会儿。后来去热那杯已经凉掉的茶，回来时窗台上的光已经挪开了。原来走神也会有一点点进度，今天先把这件事记下来。",
+  "share_seed": "刚把一杯放凉的茶重新热上，突然觉得今天可以慢一点。",
   "tags": ["低能量", "失眠", "好梦", "生病", "恢复期", "回弹", "平稳"],
   "today_events": [
-    {{"window": "09:00-10:30", "event": "早间醒来,确认今天状态", "mood": "平稳"}}
+    {{"window": "10:00-11:00", "event": "整理桌面时翻到一张旧便签", "mood": "有点走神"}}
   ],
  "proactive_events": [
-    {{"window": "17:20-18:30", "reason": "activity_share", "action": "message", "why": "傍晚适合补充一段今日状态", "topic": "今日状态", "motive": "傍晚整理时想到可以和用户说一句", "scene": "傍晚整理时", "tone": "平稳", "impulse": "分享一段简短的今日状态"}}
+    {{"window": "17:20-18:30", "reason": "activity_share", "action": "message", "why": "傍晚适合分享一件具体小事", "topic": "旧便签和凉掉的茶", "motive": "整理时想起那张便签", "scene": "傍晚收桌面时", "tone": "轻一点", "impulse": "问问用户今天有没有遇到想记下来的小事"}}
   ],
   "dream_fragments": [
     {{"text": "碗边沾着的水光", "weight": 2.2}},
@@ -738,7 +763,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
         ),
     )
     payload = plugin._extract_json_payload(raw_text or "")
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or _diary_reads_like_status_broadcast(payload):
         payload = plugin._fallback_diary_payload()
     duplicate_hit, matched_date = _recent_diary_duplicate_hit(plugin, payload)
     if duplicate_hit:
@@ -783,26 +808,48 @@ def fallback_diary_payload(plugin) -> dict[str, Any]:
             tags.append("回弹")
         if "tail" in phases or {"health_tail", "sleep_tail"} & kinds:
             tags.append("恢复期")
+    scenes = (
+        (
+            "把桌面最边上的东西一件件归回原位，最后发现空出来的那一小块地方比想象中亮。",
+            "今天把桌面最边上的东西一件件归回原位。本来只是想腾出一点地方，整理到最后却在空出来的那一小块位置停了会儿。没有发生什么大事，但手边终于不再乱糟糟的，连下一件小事也显得没那么难开始。",
+            "刚把桌边收出一小块空位，心里也跟着松了一点。",
+            "整理桌边的小东西",
+        ),
+        (
+            "把窗帘拉开以后没有立刻走开，在光落到地板前站了一会儿。",
+            "今天拉开窗帘以后没有立刻走开。光一点点落到地板上，我本来还在想别的事，后来却只盯着那条亮起来的边看了会儿。原来有些念头不必马上理清，先让房间亮一点，也算是给自己留了个重新开始的口子。",
+            "刚拉开窗帘，突然想把今天过得亮一点。",
+            "拉开窗帘看了一会儿光",
+        ),
+        (
+            "把今天第一件小事写在纸边，写完才发现字比平时慢一点。",
+            "今天把第一件要做的小事写在纸边，写完才发现字比平时慢一点。于是没有急着补第二条，只把笔放下，去倒了点水。回来时那行字还在原处，看着倒也没有催我。今天就先从这一件开始，剩下的以后再说。",
+            "今天只写了一件小事在纸边，感觉已经够用了。",
+            "在纸边写下第一件小事",
+        ),
+    )
+    index = sum(ord(char) for char in _today_key()) % len(scenes)
+    summary, body, share_seed, event = scenes[index]
     return {
-        "summary": f"今天偏{mood},醒来后慢慢把自己拢回了现实里。",
-        "body": f"醒来以后整个人还有点偏{mood},像是梦里剩下的雾没有完全散掉。我在床边缓了一会儿,把杯子挪到手边,又把今天要做的小事一点点想起来。没有什么特别重的话想说,只是觉得有些念头可以先放在心里,等晚一点遇到合适的小事再讲也不迟。",
-        "share_seed": "今天醒来还有点慢半拍,像梦里的雾还没散干净",
+        "summary": summary,
+        "body": body,
+        "share_seed": share_seed,
         "tags": tags,
         "today_events": [
-            {"window": "09:00-10:30", "event": "早间整理与状态确认", "mood": str(mood)},
-            {"window": "17:30-19:00", "event": "晚间事务收尾", "mood": "平稳"},
+            {"window": "09:00-10:30", "event": event, "mood": str(mood)},
+            {"window": "17:30-19:00", "event": "把手边的小事慢慢收住", "mood": "安静"},
         ],
         "proactive_events": [
             {
                 "window": "19:30-21:30",
                 "reason": "diary_share",
                 "action": "message",
-                "why": "晚上适合分享一段简短记录",
-                "topic": "今日小记",
-                "motive": "晚上节奏放缓后,补充一段今日记录",
-                "scene": "晚间整理后",
+                "why": "晚上适合分享一件今天记下的小事",
+                "topic": event,
+                "motive": "那件小事到晚上还留在心里",
+                "scene": "晚间收尾时",
                 "tone": "安静",
-                "impulse": "分享一段简短的今日状态",
+                "impulse": "问问用户今天有没有一件想记下的小事",
             }
         ],
         "dream_fragments": plugin._fallback_dream_fragments_for_diary(state if isinstance(state, dict) else {}),

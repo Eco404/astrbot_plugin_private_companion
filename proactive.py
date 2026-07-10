@@ -1870,7 +1870,9 @@ class ProactiveMixin:
         queued = 0
         event_sources = (
             ("pending_followup", self._pick_pending_followup_event(user, now)),
+            ("birthday_celebration", self._pick_birthday_celebration_event(user, now)),
             ("daily_greeting", self._pick_daily_greeting_event(user, now)),
+            ("birthday_curiosity", self._pick_birthday_curiosity_event(user, now)),
             ("habit", self._habit_proactive_event_for_user(user, now=now)),
             ("state", self._pick_state_need_event(user, now=now)),
             ("story", self._pick_story_plan_event(now, user=user)),

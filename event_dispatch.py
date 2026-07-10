@@ -3398,20 +3398,6 @@ Bot 近期回复：
         except Exception:
             return "群友"
 
-    def _event_self_id(self, event: AstrMessageEvent) -> str:
-        for name in ("get_self_id", "get_bot_id"):
-            func = getattr(event, name, None)
-            if callable(func):
-                try:
-                    value = str(func() or "").strip()
-                    if value:
-                        return value
-                except Exception:
-                    pass
-        message_obj = getattr(event, "message_obj", None)
-        value = getattr(message_obj, "self_id", None) if message_obj is not None else None
-        return str(value or "").strip()
-
     def _event_components(self, event: AstrMessageEvent) -> list[Any]:
         getter = getattr(event, "get_messages", None)
         if callable(getter):
