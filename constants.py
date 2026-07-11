@@ -228,6 +228,7 @@ _DATA_STORE_KEYS = (
     "inbound_debounce_stats",
     "group_llm_reply_blocks",
     "balance_awareness",
+    "food_menu",
 )
 
 # 触发原因 - 真人化表达
@@ -254,6 +255,8 @@ _REASON_TEXT = {
     "creative_share": "跟{name}分享刚写到的小说片段",
     "jm_cosmos_share": "提起刚翻到的漫画本子",
     "low_balance": "发现自己的零花钱有点不够用了",
+    "meal_care": "惦记{name}有没有按时吃东西",
+    "meal_care_followup": "还想把刚才那顿饭问清楚一点",
 }
 
 # 动作描述 - 生活化
@@ -469,6 +472,11 @@ _DEFAULT_USER_TEMPLATE = {
     "screen_peek_day": "",
     "screen_peek_last_at": 0,
     "last_unanswered_screen_peek_at": 0,
+    "meal_care_day": "",
+    "meal_care_asked": [],
+    "meal_care_satisfied": [],
+    "meal_check_context": {},
+    "planned_meal_care_context": {},
 }
 
 _DEFAULT_GROUP_TEMPLATE = {

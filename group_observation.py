@@ -2344,14 +2344,19 @@ class GroupObservationMixin:
         pace = str(atmosphere.get("pace") or "")
         if pace == "热闹" and mood not in {"玩笑", "求助"}:
             return False, "群聊太热闹,不抢话"
+        probability_getter = getattr(self, "_cycle_group_interject_probability", None)
+
+        def adjusted_probability(value: float) -> float:
+            return probability_getter(value) if callable(probability_getter) else value
+
         if re.search(r"(有没有人|谁懂|救命|怎么回事|咋办)", text):
-            return random.random() < 0.055, "有开放式接话口"
+            return random.random() < adjusted_probability(0.055), "有开放式接话口"
         if re.search(r"(笑死|绷不住|太离谱)", text):
-            return random.random() < (0.018 if mood == "玩笑" else 0.008), "玩笑反应口"
+            return random.random() < adjusted_probability(0.018 if mood == "玩笑" else 0.008), "玩笑反应口"
         if mood == "玩笑":
-            return random.random() < 0.015, "玩笑气氛"
+            return random.random() < adjusted_probability(0.015), "玩笑气氛"
         if mood == "求助":
-            return random.random() < 0.035, "求助气氛"
+            return random.random() < adjusted_probability(0.035), "求助气氛"
         return False, "没有自然插话口"
 
     def _group_repeat_signature(self, text: str) -> str:

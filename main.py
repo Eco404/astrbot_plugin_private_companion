@@ -351,6 +351,8 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_ALIASES = {
     "吃什么": "enable_food_menu_recommendation",
     "吃什么候选": "enable_food_menu_recommendation",
     "候选菜单": "enable_food_menu_recommendation",
+    "饭点关心": "enable_meal_care_proactive",
+    "吃饭关心": "enable_meal_care_proactive",
     "书柜偏好": "enable_private_reading_preference_influence",
     "夹层偏好": "enable_private_reading_preference_influence",
     "关系网": "enable_worldbook_member_recognition",
@@ -368,7 +370,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "all": "全部被动链路",
     "inject_passive_states": "被动状态注入",
     "enable_intent_emotion_analysis": "意图/情绪分析",
-    "enable_llm_timer_scheduling": "临时预约与动作查岗",
+    "enable_llm_timer_scheduling": "预约类主动捕获",
     "enable_passive_topic_suppression": "重复话题抑制",
     "enable_environment_perception": "环境感知",
     "enable_message_debounce": "防抖",
@@ -378,6 +380,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "enable_group_companion": "群聊观察",
     "enable_skill_growth_passive_injection": "技能被动注入",
     "enable_food_menu_recommendation": "吃什么候选",
+    "enable_meal_care_proactive": "饭点主动关心",
     "enable_private_reading_preference_influence": "夹层阅读偏好影响",
     "enable_worldbook_member_recognition": "关系网成员识别",
     "enable_cross_user_memory_bridge": "跨用户记忆互通",
@@ -433,7 +436,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.4",
+    "5.9.6",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -567,6 +570,11 @@ class PrivateCompanionPlugin(
         )
         self.timer_pre_silence_minutes = self._cfg_int(c, "timer_pre_silence_minutes", 20, 0, 240)
         self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 12)
+        self.enable_reply_interception_forward = self._cfg_bool(c, "enable_reply_interception_forward", False)
+        self.reply_interception_forward_target_umo = self._cfg_str(c, "reply_interception_forward_target_umo", "")
+        self.reply_interception_forward_plugin_blocks = self._cfg_bool(c, "reply_interception_forward_plugin_blocks", True)
+        self.reply_interception_forward_rewrites = self._cfg_bool(c, "reply_interception_forward_rewrites", True)
+        self.reply_interception_forward_proactive_blocks = self._cfg_bool(c, "reply_interception_forward_proactive_blocks", True)
         self.enable_balance_awareness = self._cfg_bool(c, "enable_balance_awareness", False)
         self.balance_api_url = self._cfg_str(c, "balance_api_url", "")
         self.balance_api_key = self._cfg_str(c, "balance_api_key", "")
@@ -694,6 +702,15 @@ class PrivateCompanionPlugin(
         self.model_timeout_overrides = self._normalize_model_timeout_overrides(
             self._cfg_raw(c, "model_timeout_overrides", {})
         )
+        self.model_fallback_overrides = self._normalize_model_fallback_overrides(
+            self._cfg_raw(c, "model_fallback_overrides", {})
+        )
+        self.enable_deepseek_peak_replacement = self._cfg_bool(c, "enable_deepseek_peak_replacement", False)
+        self.deepseek_peak_replacement_provider_id = self._cfg_str(c, "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID", "")
+        self.deepseek_peak_windows = self._cfg_str(c, "deepseek_peak_windows", "09:00-12:00\n14:00-18:00")
+        self.deepseek_peak_timezone = self._cfg_str(c, "deepseek_peak_timezone", "Asia/Shanghai", "Asia/Shanghai")
+        self.deepseek_peak_match_keywords = self._cfg_str(c, "deepseek_peak_match_keywords", "deepseek,深度求索")
+        self._deepseek_peak_last_log_key = ""
         _page_font = str(self._cfg_raw(c, "page_font_family", "original") or "original").strip().lower()
         self.page_font_family = _page_font if _page_font in {"original", "cheng"} else "original"
         _page_theme = str(self._cfg_raw(c, "page_theme", "classic") or "classic").strip().lower()
@@ -783,6 +800,7 @@ class PrivateCompanionPlugin(
         self.creative_base_chars_per_hour = self.creative_chars_per_session
         self.creative_max_active_projects = self._cfg_int(c, "creative_max_active_projects", 2, 1, 5)
         self.creative_hidden_mode = self._cfg_bool(c, "creative_hidden_mode", True)
+        self.creative_direction_prompt = self._cfg_str(c, "creative_direction_prompt", "")[:2000]
         self.creative_provider_id = self._cfg_str(c, "CREATIVE_PROVIDER_ID", "")
         self.creative_outline_provider_id = self._cfg_str(c, "CREATIVE_OUTLINE_PROVIDER_ID", "")
         self.creative_review_provider_id = self._cfg_str(c, "CREATIVE_REVIEW_PROVIDER_ID", "")
@@ -793,13 +811,16 @@ class PrivateCompanionPlugin(
         self.proactive_persona_judge_provider_id = self._cfg_str(c, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "")
         self.proactive_persona_judge_send_threshold = self._cfg_int(c, "proactive_persona_judge_send_threshold", 62, 0, 100)
         self.proactive_persona_judge_cache_minutes = self._cfg_int(c, "proactive_persona_judge_cache_minutes", 180, 5, 720)
+        self.proactive_persona_judge_max_daily = self._cfg_int(c, "proactive_persona_judge_max_daily", 12, 0, 100)
         self.enable_maslow_motivation_experiment = self._cfg_bool(c, "enable_maslow_motivation_experiment", False)
         self.enable_maslow_schedule_influence = self._cfg_bool(c, "enable_maslow_schedule_influence", False)
         self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)
         self.enable_personality_iteration_experiment = self._cfg_bool(c, "enable_personality_iteration_experiment", False)
         self.enable_personality_iteration_auto_tune = self._cfg_bool(c, "enable_personality_iteration_auto_tune", False)
         self.enable_persona_standardization_experiment = self._cfg_bool(c, "enable_persona_standardization_experiment", False)
-        self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
+        # 临时预约与动作查岗属于内建主动类别，不再由第二套功能开关控制。
+        # 保留属性名供既有调度、转写和旧配置迁移代码兼容。
+        self.enable_llm_timer_scheduling = True
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
         self.enable_proactive_quote_trigger_message = self._cfg_bool(c, "enable_proactive_quote_trigger_message", False)
@@ -1035,6 +1056,9 @@ class PrivateCompanionPlugin(
         self.enable_open_loop_tracking = self._cfg_bool(c, "enable_open_loop_tracking", True)
         self.enable_user_habit_learning = self._cfg_bool(c, "enable_user_habit_learning", True)
         self.enable_food_menu_recommendation = self._cfg_bool(c, "enable_food_menu_recommendation", True)
+        self.enable_meal_care_proactive = self._cfg_bool(c, "enable_meal_care_proactive", True)
+        self.meal_care_max_daily = self._cfg_int(c, "meal_care_max_daily", 2, 0, 3)
+        self.meal_care_followup_minutes = self._cfg_int(c, "meal_care_followup_minutes", 45, 15, 180)
         self.user_habit_min_count = self._cfg_int(c, "user_habit_min_count", 3, 2, 20)
         self.user_habit_max_items = self._cfg_int(c, "user_habit_max_items", 24, 8, 80)
         self.enable_skill_growth_simulation = self._cfg_bool(c, "enable_skill_growth_simulation", True)
@@ -1588,6 +1612,11 @@ class PrivateCompanionPlugin(
             self._reset_stale_qq_presence_if_needed,
         )
         self._create_startup_background_task("prepare_today", self._startup_prepare_today)
+        if self.enable_balance_awareness:
+            self._create_startup_background_task(
+                "refresh_balance_awareness",
+                self._maybe_refresh_balance_awareness,
+            )
         self._create_startup_background_task(
             "refresh_passive_injection_cache",
             self._refresh_passive_injection_cache,
@@ -1651,6 +1680,7 @@ class PrivateCompanionPlugin(
         run_step("legacy_prompt_trace_cleanup", self._cleanup_legacy_proactive_prompt_traces)
         run_step("framework_meta_leak_cleanup", self._cleanup_framework_meta_leak_records)
         run_step("runtime_social_fact_sanitize", self._sanitize_runtime_social_facts_inplace)
+        run_step("false_sleep_interaction_cleanup", self._cleanup_false_sleep_interaction_updates)
         run_step("private_user_alias_merge", self._merge_private_user_alias_records)
         run_step("group_slang_cleanup", self._cleanup_all_group_slang_terms)
         run_step("recall_image_cache_cleanup", lambda: self._cleanup_recall_message_image_cache(force=True))
@@ -4542,6 +4572,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
 
         add_spec("creative.hidden", "creative", 60, lambda: self._format_hidden_creative_context_for_reply(inbound_text, current_user))
+        add_spec("photo.recent_share", "photo", 61, lambda: self._format_recent_photo_share_snapshot_for_reply(current_user, inbound_text))
         add_spec(
             "bookshelf.secret",
             "bookshelf",
@@ -6186,6 +6217,92 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._schedule_data_save()
         except Exception:
             pass
+        self._schedule_reply_interception_forward(
+            "plugin_block",
+            source=source_text,
+            reason=reason_text,
+            source_session=session,
+            inbound=inbound,
+            after=reply_text,
+            detail=detail_text,
+        )
+
+    def _schedule_reply_interception_forward(
+        self,
+        category: str,
+        *,
+        source: str = "",
+        reason: str = "",
+        source_session: str = "",
+        inbound: str = "",
+        before: str = "",
+        after: str = "",
+        detail: str = "",
+    ) -> None:
+        if not bool(getattr(self, "enable_reply_interception_forward", False)):
+            return
+        enabled = {
+            "plugin_block": bool(getattr(self, "reply_interception_forward_plugin_blocks", False)),
+            "rewrite": bool(getattr(self, "reply_interception_forward_rewrites", False)),
+            "proactive_block": bool(getattr(self, "reply_interception_forward_proactive_blocks", False)),
+        }.get(str(category or ""), False)
+        target = _single_line(getattr(self, "reply_interception_forward_target_umo", ""), 180)
+        if not enabled or not target:
+            return
+        labels = {
+            "plugin_block": "插件阻断消息",
+            "rewrite": "回复已改写",
+            "proactive_block": "主动消息被拦截",
+        }
+        fields = [
+            f"【回复拦截转发】{labels.get(category, category)}",
+            f"时间：{self._environment_now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        for label, value, limit in (
+            ("来源", source, 80),
+            ("原会话", source_session, 180),
+            ("原因", reason, 300),
+            ("用户消息", inbound, 300),
+            ("原消息", before, 500),
+            ("处理后", after, 500),
+            ("补充", detail, 300),
+        ):
+            clean = _single_line(value, limit)
+            if clean:
+                fields.append(f"{label}：{clean}")
+        text = "\n".join(fields)
+        now = _now_ts()
+        signature = hashlib.sha1(f"{target}|{category}|{source_session}|{reason}|{before}|{after}".encode("utf-8", errors="ignore")).hexdigest()[:20]
+        recent = getattr(self, "_reply_interception_forward_recent", None)
+        if not isinstance(recent, dict):
+            recent = {}
+            self._reply_interception_forward_recent = recent
+        recent = {key: ts for key, ts in recent.items() if now - _safe_float(ts, 0) <= 30}
+        self._reply_interception_forward_recent = recent
+        if now - _safe_float(recent.get(signature), 0) <= 5:
+            return
+        recent[signature] = now
+        try:
+            task = asyncio.create_task(self._send_reply_interception_forward(target, text))
+            tasks = getattr(self, "_reply_interception_forward_tasks", None)
+            if not isinstance(tasks, set):
+                tasks = set()
+                self._reply_interception_forward_tasks = tasks
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        except RuntimeError:
+            logger.warning("[PrivateCompanion] 回复拦截转发无法启动：当前没有运行中的事件循环")
+
+    async def _send_reply_interception_forward(self, target_umo: str, text: str) -> None:
+        try:
+            await self.context.send_message(target_umo, MessageChain([Plain(text)]))
+            logger.info("[PrivateCompanion] 已转发回复拦截情况: target=%s", _single_line(target_umo, 120))
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 回复拦截转发失败: target=%s error=%s",
+                _single_line(target_umo, 120),
+                _single_line(exc, 180),
+            )
 
     def _proactive_only_unlock_store(self) -> set[str]:
         data = getattr(self, "data", None)
@@ -6377,6 +6494,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user["ignored_streak"] = 0
             user["friend_unanswered_silenced_since"] = 0
             user["friend_unanswered_silence_note"] = ""
+            if self._private_user_role(user, user_id) == "owner" and text:
+                self._handle_meal_care_inbound(user, text, now=received_ts)
             self._schedule_data_save()
         logger.info(
             "[PrivateCompanion] 主动消息专用模式已跳过私聊被动增强: user=%s text=%s",
@@ -7206,10 +7325,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self._user_asks_recalled_messages(inbound_text):
             prompt_surface.add("recall.query", self._format_recalled_messages_for_natural_query(event, limit=5), priority=52, source="recall")
         food_menu_context = (
-            self._format_food_menu_for_reply(inbound_text, limit=3)
+            self._format_food_menu_for_reply(inbound_text, limit=3, user=current_user)
             if self._feature_enabled_or_temp_unlocked("enable_food_menu_recommendation")
             else ""
         )
+        meal_care_reply_context = self._format_meal_care_reply_context(current_user, inbound_text)
+        if meal_care_reply_context:
+            prompt_surface.add("food.meal_care", meal_care_reply_context, priority=55, source="food")
         if food_menu_context:
             prompt_surface.add("food.menu", food_menu_context, priority=53, source="food")
         if re.search(
@@ -7915,6 +8037,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current["last_companion_message_at"] = _now_ts()
                 self._remember_passive_reply_topic(current, working_text, inbound_text)
                 self._save_data_sync()
+            if working_text != original_text:
+                self._schedule_reply_interception_forward(
+                    "rewrite",
+                    source="私聊回复处理",
+                    reason="回复在发送前经过纠偏、清理或复核改写",
+                    source_session=_single_line(getattr(event, "unified_msg_origin", ""), 180),
+                    inbound=inbound_text,
+                    before=original_text,
+                    after=working_text,
+                )
         except Exception:
             release_now = True
             raise
@@ -8829,6 +8961,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and not bool(getattr(self, "enable_smart_message_debounce", False))
             and self._message_debounce_seconds("text") <= 0
             and self._is_lightweight_private_passive_inbound(text)
+            and not self._meal_care_requires_full_reply(fast_user, text)
             and not self._is_private_image_only_message(event, text)
         ):
             if self._is_recent_poke_echo(fast_user, text):
@@ -8899,6 +9032,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             fast_user["friend_unanswered_silenced_since"] = 0
             fast_user["friend_unanswered_silence_note"] = ""
             fast_user_is_owner = self._private_user_role(fast_user, user_id) == "owner"
+            if fast_user_is_owner:
+                self._handle_meal_care_inbound(fast_user, safe_text or text, now=received_ts)
             if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
             self._schedule_data_save()
@@ -9292,13 +9427,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if user_is_owner and food_feedback_actionable:
                 user["last_food_feedback_at"] = _now_ts()
                 user["last_food_feedback_text"] = _single_line(text, 120)
-            if food_feedback.get("is_food"):
+            active_meal_care = bool(self._meal_care_active_context(user, now=received_ts)) if user_is_owner else False
+            if food_feedback.get("is_food") and not active_meal_care:
                 used_food_items = self._mark_food_menu_item_used_from_text(text) if user_is_owner else []
                 if used_food_items:
                     user["last_food_menu_choice"] = {
                         "ts": _now_ts(),
                         "items": used_food_items,
                         "text": _single_line(text, 120),
+                    }
+            if user_is_owner and text:
+                meal_care_result = self._handle_meal_care_inbound(user, safe_text or text, now=received_ts)
+                if meal_care_result.get("foods"):
+                    user["last_food_menu_choice"] = {
+                        "ts": _now_ts(),
+                        "items": list(meal_care_result.get("foods") or []),
+                        "text": _single_line(text, 120),
+                        "source": "meal_care_reply",
                     }
             care_feedback_applied = bool(text) and user_is_owner and self._apply_care_feedback_to_state(text)
             if care_feedback_applied:

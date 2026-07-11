@@ -530,6 +530,7 @@ class CreativeMixin:
         source_text = _single_line(source.get("text"), 220)
         source_label = _single_line(source.get("label"), 24) or "小灵感"
         persona_context = self._creative_persona_style_context()
+        direction_prompt = str(getattr(self, "creative_direction_prompt", "") or "").strip()[:2000]
         memory_context = ""
         composer = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(composer):
@@ -554,6 +555,9 @@ class CreativeMixin:
 【我会牢牢记住你 创作连续性参考】
 {memory_context or '暂无外部长期创作记忆。'}
 使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。
+
+【用户配置的创作方向】
+{direction_prompt or '未指定，按人格、灵感和连续性自然决定。'}
 
 要求：
 1. 只设计“正在做的创作计划”,不要写正文。
@@ -654,6 +658,7 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        direction_prompt = str(getattr(self, "creative_direction_prompt", "") or "").strip()[:2000]
         companion_memory_ctx = ""
         composer = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(composer):
@@ -683,6 +688,8 @@ class CreativeMixin:
 {character_ctx or '暂无角色表。'}
 人工修订约束：
 {revision_ctx or '暂无人工修订。'}
+用户配置的创作方向：
+{direction_prompt or '未指定。'}
 活跃主题：{', '.join(_single_line(t, 18) for t in story_bible.get('active_themes', []) if _single_line(t, 18)) or '暂无'}
 未解决线索：{', '.join(_single_line(t, 24) for t in story_bible.get('unresolved_threads', []) if _single_line(t, 24)) or '暂无'}
 下一步方向：{_single_line(story_bible.get('next_direction') or project.get('next_hint'), 140)}
@@ -728,6 +735,7 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        direction_prompt = str(getattr(self, "creative_direction_prompt", "") or "").strip()[:2000]
         companion_memory_ctx = ""
         composer = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(composer):
@@ -757,6 +765,8 @@ class CreativeMixin:
 {character_ctx or '暂无角色表。'}
 人工修订约束：
 {revision_ctx or '暂无人工修订。'}
+用户配置的创作方向：
+{direction_prompt or '未指定。'}
 当前大纲：
 {outline or '暂无大纲'}
 最近片段摘要：
@@ -772,7 +782,7 @@ class CreativeMixin:
 2. 是否真的推进了内容，而不是空转、堆辞藻、重复意象。
 3. 是否出现反复抒情、重复句式、重复画面、重复心理活动。
 4. 是否和最近几段太像。
-5. 是否违背人工维护的大纲、角色表或人工修订。
+5. 是否违背人工维护的大纲、角色表、人工修订或用户配置的创作方向。
 
 只输出 JSON：
 {{
@@ -803,6 +813,7 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        direction_prompt = str(getattr(self, "creative_direction_prompt", "") or "").strip()[:2000]
         companion_memory_ctx = ""
         composer = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(composer):
@@ -830,6 +841,8 @@ class CreativeMixin:
 {character_ctx or '暂无角色表。'}
 人工修订约束：
 {revision_ctx or '暂无人工修订。'}
+用户配置的创作方向：
+{direction_prompt or '未指定。'}
 我会牢牢记住你 项目参考：
 {companion_memory_ctx or '暂无外部项目参考。'}
 新片段：{_single_line(new_chunk_text, 420)}
@@ -1097,6 +1110,7 @@ class CreativeMixin:
         manual_outline_ctx = self._creative_manual_outline_context(project)
         character_ctx = self._creative_character_context(project)
         revision_ctx = self._creative_manual_revision_context(project)
+        direction_prompt = str(getattr(self, "creative_direction_prompt", "") or "").strip()[:2000]
         outline = await self._generate_outline_for_chunk(project, story_bible, memories, budget)
         companion_memory_ctx = ""
         composer = getattr(self, "_memory_companion_compose_feature_context", None)
@@ -1135,6 +1149,8 @@ class CreativeMixin:
 {character_ctx or '暂无角色表。'}
 人工修订约束：
 {revision_ctx or '暂无人工修订。'}
+用户配置的创作方向：
+{direction_prompt or '未指定。'}
 相关记忆：
 {memory_ctx or '暂无。'}
 我会牢牢记住你 项目参考：
@@ -1156,7 +1172,7 @@ class CreativeMixin:
 7. {finish_hint}
 8. 本段至少推进一个叙事元素,不能只是换皮重复前文。
 9. 严格参考本段大纲,但要写得自然,不是提纲照抄。
-10. 如果人工维护大纲、角色表或人工修订存在,必须优先服从；本段临时大纲只用于安排这一次写什么。
+10. 如果人工维护大纲、角色表或人工修订存在,必须优先服从；同时遵守用户配置的创作方向。本段临时大纲只用于安排这一次写什么。
 {extra_notice}
 """.strip()
             text = await self._llm_call(

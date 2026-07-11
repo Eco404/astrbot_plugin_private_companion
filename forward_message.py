@@ -976,11 +976,17 @@ class ForwardMessageMixin:
             try:
                 start = time.time()
                 timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+                visual_key_getter = getattr(self, "_private_image_visual_provider_card_key", None)
+                visual_provider_key = (
+                    visual_key_getter()
+                    if callable(visual_key_getter)
+                    else "PLUGIN_VISION_PROVIDER_ID"
+                )
                 override_timeout = (
                     timeout_getter(
                         task="forward_message_image_vision",
                         provider_id=provider_id,
-                        timeout_key="PLUGIN_VISION_PROVIDER_ID",
+                        timeout_key=visual_provider_key,
                     )
                     if callable(timeout_getter)
                     else None
@@ -999,6 +1005,31 @@ class ForwardMessageMixin:
                     result = await provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=260)
                 text = str(getattr(result, "completion_text", result) or "").strip()
                 cleaned_text = _single_line(_strip_internal_message_blocks(text), 900)
+                if not cleaned_text:
+                    empty_note = "合并消息识图模型返回空摘要"
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task="forward_message_image_vision",
+                        prompt=prompt,
+                        completion=text,
+                        resp=result,
+                        elapsed_ms=int((time.time() - start) * 1000),
+                        success=False,
+                        error=empty_note,
+                        budget_exempt=True,
+                    )
+                    self._mark_private_image_provider_failure(
+                        provider_id,
+                        provider_source,
+                        empty_note,
+                        task="forward_message_image_vision",
+                    )
+                    logger.info(
+                        "[PrivateCompanion] 合并消息图片视觉返回空摘要,已尝试下一个 provider: provider=%s source=%s",
+                        provider_id,
+                        provider_source,
+                    )
+                    continue
                 self._record_llm_usage(
                     provider_id=provider_id,
                     task="forward_message_image_vision",

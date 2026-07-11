@@ -39,6 +39,44 @@ window.PrivateCompanionProviderTree = (() => {
     return values;
   }
 
+  function normalizeFallbackValues(raw) {
+    let source = raw;
+    if (typeof source === "string") {
+      try { source = JSON.parse(source || "{}"); } catch (_error) { source = {}; }
+    }
+    if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+    return Object.fromEntries(
+      Object.entries(source)
+        .map(([key, value]) => [key, String(value || "").trim()])
+        .filter(([, value]) => Boolean(value)),
+    );
+  }
+
+  function providerFallbackValuesForRender(context) {
+    const { state } = context;
+    const values = normalizeFallbackValues(state.overview?.settings?.model_fallback_overrides);
+    const draft = state.providerFallbackDraft;
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return values;
+    Object.entries(draft).forEach(([key, value]) => {
+      const providerId = String(value || "").trim();
+      if (providerId) values[key] = providerId;
+      else delete values[key];
+    });
+    return values;
+  }
+
+  function currentProviderFallbackValues(context) {
+    const { document } = context;
+    const values = providerFallbackValuesForRender(context);
+    document.querySelectorAll("[data-provider-fallback-key]").forEach((input) => {
+      const key = input.dataset.providerFallbackKey || "";
+      const providerId = input.value.trim();
+      if (!providerId) delete values[key];
+      else values[key] = providerId;
+    });
+    return values;
+  }
+
   function providerGuideMarkup(context, key) {
     const { providerGuides, providerPreferenceMeta, providerPassiveImpactMeta, escapeHtml } = context;
     const guide = providerGuides[key];
@@ -72,6 +110,24 @@ window.PrivateCompanionProviderTree = (() => {
     return `
       <select data-provider-select="${escapeHtml(key)}">${options}</select>
       <input data-provider-key="${escapeHtml(key)}" value="${escapeHtml(value || "")}" placeholder="自定义 Provider ID" ${customValue ? "" : "hidden"} />
+    `;
+  }
+
+  function providerFallbackSelect(context, key, value) {
+    const { state, escapeHtml } = context;
+    const known = state.availableProviders.some((item) => item.id === value);
+    const customValue = value && !known ? value : "";
+    const options = [
+      `<option value="">不启用备用模型</option>`,
+      ...state.availableProviders.map((item) => {
+        const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
+        return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }),
+      `<option value="__custom__" ${customValue ? "selected" : ""}>手动输入 Provider ID</option>`,
+    ].join("");
+    return `
+      <select data-provider-fallback-select="${escapeHtml(key)}">${options}</select>
+      <input data-provider-fallback-key="${escapeHtml(key)}" value="${escapeHtml(value || "")}" placeholder="自定义备用 Provider ID" ${customValue ? "" : "hidden"} />
     `;
   }
 
@@ -132,10 +188,35 @@ window.PrivateCompanionProviderTree = (() => {
     state.providerTimeoutDraft[key] = normalized;
   }
 
+  function rememberProviderFallbackDraft(context, key) {
+    const { document, state } = context;
+    const input = document.querySelector(`[data-provider-fallback-key="${key}"]`);
+    if (!input) return;
+    state.providerFallbackDraft = { ...(state.providerFallbackDraft || {}) };
+    const value = input.value.trim();
+    // Keep an empty draft as a deletion marker. Removing the key here would
+    // expose the still-saved overview value again on the immediate re-render.
+    state.providerFallbackDraft[key] = value;
+  }
+
   function syncProviderInput(context, select) {
     const { document } = context;
     const key = select.dataset.providerSelect;
     const input = document.querySelector(`[data-provider-key="${key}"]`);
+    if (!input) return;
+    if (select.value === "__custom__") {
+      input.hidden = false;
+      input.focus();
+    } else {
+      input.hidden = true;
+      input.value = select.value;
+    }
+  }
+
+  function syncProviderFallbackInput(context, select) {
+    const { document } = context;
+    const key = select.dataset.providerFallbackSelect;
+    const input = document.querySelector(`[data-provider-fallback-key="${key}"]`);
     if (!input) return;
     if (select.value === "__custom__") {
       input.hidden = false;
@@ -201,6 +282,7 @@ window.PrivateCompanionProviderTree = (() => {
     const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
     const preview = [guide.purpose || "", guide.fit || ""].filter(Boolean).join(" ");
     const timeoutValue = providerTimeoutValuesForRender(context)[key] || "";
+    const fallbackValue = providerFallbackValuesForRender(context)[key] || "";
     return `
       <article class="provider-card ${configured ? "configured" : "inherited"}" data-provider-card="${escapeHtml(key)}">
         <div class="provider-tree-node">
@@ -228,6 +310,10 @@ window.PrivateCompanionProviderTree = (() => {
               <input type="number" min="5" max="600" step="1" inputmode="numeric" data-provider-timeout="${escapeHtml(key)}" value="${escapeHtml(timeoutValue)}" placeholder="默认" aria-label="${escapeHtml(label)}请求超时秒数" />
               <b>秒</b>
             </span>
+          </label>
+          <label class="provider-field provider-fallback-field">
+            <span>备用模型 <small>主模型失败、超时或空响应时尝试一次</small></span>
+            ${providerFallbackSelect(context, key, fallbackValue)}
           </label>
           <div class="provider-current">
             <span>当前使用</span>
@@ -272,6 +358,114 @@ window.PrivateCompanionProviderTree = (() => {
       <div class="provider-summary-card"><span>可选 Provider</span><b>${available}</b><small>${escapeHtml(available ? "来自 AstrBot 当前配置" : "暂无可选项，可手动输入 ID")}</small></div>
       <div class="provider-summary-card"><span>视觉通道</span><b>${escapeHtml(vision)}</b><small>${escapeHtml(providerConfigMode === "quick" ? "图片、识屏与素材理解" : "精准模式不使用快速视觉入口")}</small></div>
     `;
+  }
+
+  function deepseekPeakProviderControl(context, value) {
+    const { state, escapeHtml } = context;
+    const known = state.availableProviders.some((item) => item.id === value);
+    const options = [
+      `<option value="">请选择替代 Provider</option>`,
+      ...state.availableProviders.map((item) => {
+        const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
+        return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }),
+      `<option value="__custom__" ${value && !known ? "selected" : ""}>手动输入 Provider ID</option>`,
+    ].join("");
+    return `
+      <select data-deepseek-peak-provider-select>${options}</select>
+      <input data-deepseek-peak-provider-input value="${escapeHtml(value || "")}" placeholder="自定义 Provider ID" ${value && !known ? "" : "hidden"} />
+    `;
+  }
+
+  function currentDeepseekPeakValues(context) {
+    const { document, state } = context;
+    const settings = state.overview?.settings || {};
+    const providers = state.overview?.providers || {};
+    const checkbox = document.querySelector("[data-deepseek-peak-enabled]");
+    const providerInput = document.querySelector("[data-deepseek-peak-provider-input]");
+    const windows = document.querySelector("[data-deepseek-peak-windows]");
+    const timezone = document.querySelector("[data-deepseek-peak-timezone]");
+    const keywords = document.querySelector("[data-deepseek-peak-keywords]");
+    return {
+      enabled: checkbox ? checkbox.checked : Boolean(settings.enable_deepseek_peak_replacement),
+      provider: providerInput ? providerInput.value.trim() : String(providers.DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID || "").trim(),
+      windows: windows ? windows.value.trim() : String(settings.deepseek_peak_windows || "09:00-12:00\n14:00-18:00").trim(),
+      timezone: timezone ? timezone.value.trim() : String(settings.deepseek_peak_timezone || "Asia/Shanghai").trim(),
+      keywords: keywords ? keywords.value.trim() : String(settings.deepseek_peak_match_keywords || "deepseek,深度求索").trim(),
+    };
+  }
+
+  function renderDeepseekPeakCard(context) {
+    const { document, state, escapeHtml } = context;
+    const root = document.getElementById("deepseekPeakCard");
+    if (!root) return;
+    const values = currentDeepseekPeakValues(context);
+    const runtime = state.overview?.deepseek_peak_routing || {};
+    let statusLabel = "未启用";
+    let statusTone = "off";
+    if (runtime.enabled && !runtime.configured) {
+      statusLabel = "等待选择替代模型";
+      statusTone = "warn";
+    } else if (runtime.active) {
+      statusLabel = "高价时段 · 正在替换";
+      statusTone = "active";
+    } else if (runtime.enabled) {
+      statusLabel = "低价时段 · DeepSeek 直连";
+      statusTone = "ready";
+    }
+    root.innerHTML = `
+      <article class="deepseek-peak-card ${values.enabled ? "enabled" : ""}">
+        <div class="deepseek-peak-head">
+          <div>
+            <span class="deepseek-peak-kicker">成本路由 · 可选</span>
+            <h3>DeepSeek 高价时段替代</h3>
+            <p>仅临时替换插件任务的运行时路由，不改写原有模型分工；离开高价时段会自动恢复。</p>
+          </div>
+          <div class="deepseek-peak-head-actions">
+            <span class="deepseek-peak-status ${escapeHtml(statusTone)}">${escapeHtml(statusLabel)}</span>
+            <label class="switch deepseek-peak-switch"><input type="checkbox" data-deepseek-peak-enabled ${values.enabled ? "checked" : ""} /><span></span></label>
+          </div>
+        </div>
+        <div class="deepseek-peak-body" ${values.enabled ? "" : "hidden"}>
+          <label class="provider-field deepseek-peak-provider-field">
+            <span>高价时段替代模型</span>
+            ${deepseekPeakProviderControl(context, values.provider)}
+          </label>
+          <label class="provider-field">
+            <span>高价时段 <small>每行或逗号分隔，支持跨午夜</small></span>
+            <textarea rows="3" data-deepseek-peak-windows placeholder="09:00-12:00&#10;14:00-18:00">${escapeHtml(values.windows)}</textarea>
+          </label>
+          <label class="provider-field">
+            <span>时区</span>
+            <input data-deepseek-peak-timezone value="${escapeHtml(values.timezone)}" placeholder="Asia/Shanghai" />
+          </label>
+          <label class="provider-field">
+            <span>DeepSeek 匹配关键词 <small>匹配 ID、名称、模型和 API Base</small></span>
+            <textarea rows="2" data-deepseek-peak-keywords>${escapeHtml(values.keywords)}</textarea>
+          </label>
+          <div class="deepseek-peak-runtime">
+            <span>当前时间 <b>${escapeHtml(runtime.current_time || "保存后刷新")}</b></span>
+            <span>下次切换 <b>${escapeHtml(runtime.next_transition || "暂无")}</b></span>
+            <span>当前替代 <b>${escapeHtml(runtime.replacement_provider_id || values.provider || "未配置")}</b></span>
+          </div>
+        </div>
+        <div class="deepseek-peak-note">定价公告：预计 2026 年 7 月中旬启用；北京时间每日 09:00-12:00、14:00-18:00 为高峰，高峰价格为平时 2 倍并适用于所有计费项。公告未给出精确生效日期，请确认正式启用后再打开开关，并以后续官方通知为准。</div>
+      </article>
+    `;
+    const enabled = root.querySelector("[data-deepseek-peak-enabled]");
+    enabled?.addEventListener("change", () => {
+      root.querySelector(".deepseek-peak-card")?.classList.toggle("enabled", enabled.checked);
+      const body = root.querySelector(".deepseek-peak-body");
+      if (body) body.hidden = !enabled.checked;
+    });
+    const select = root.querySelector("[data-deepseek-peak-provider-select]");
+    const input = root.querySelector("[data-deepseek-peak-provider-input]");
+    select?.addEventListener("change", () => {
+      const custom = select.value === "__custom__";
+      input.hidden = !custom;
+      if (!custom) input.value = select.value;
+      if (custom) input.focus();
+    });
   }
 
   function renderProviderFlow(context, providers) {
@@ -355,6 +549,17 @@ window.PrivateCompanionProviderTree = (() => {
     document.querySelectorAll("[data-provider-key]").forEach((input) => {
       input.addEventListener("input", () => rememberProviderDraft(context, input.dataset.providerKey));
     });
+    document.querySelectorAll("[data-provider-fallback-select]").forEach((select) => {
+      syncProviderFallbackInput(context, select);
+      select.addEventListener("change", () => {
+        syncProviderFallbackInput(context, select);
+        rememberProviderFallbackDraft(context, select.dataset.providerFallbackSelect);
+        renderProviders(context);
+      });
+    });
+    document.querySelectorAll("[data-provider-fallback-key]").forEach((input) => {
+      input.addEventListener("input", () => rememberProviderFallbackDraft(context, input.dataset.providerFallbackKey));
+    });
     document.querySelectorAll("[data-provider-timeout]").forEach((input) => {
       input.addEventListener("input", () => rememberProviderTimeoutDraft(context, input));
       input.addEventListener("change", () => {
@@ -375,6 +580,7 @@ window.PrivateCompanionProviderTree = (() => {
     syncProviderConfigModeControls();
     const providers = providerValuesForRender(context);
     renderProviderSummary(context, providers);
+    renderDeepseekPeakCard(context);
     renderProviderFlow(context, providers);
     const entries = Object.entries(providerLabels)
       .filter(([key]) => visibleConfigKey(key))
@@ -429,6 +635,8 @@ window.PrivateCompanionProviderTree = (() => {
     bindProviderToolbar,
     currentProviderValues,
     currentProviderTimeoutValues,
+    currentProviderFallbackValues,
+    currentDeepseekPeakValues,
     testProvider: (context, key) => testProvider(context, key),
   };
 })();

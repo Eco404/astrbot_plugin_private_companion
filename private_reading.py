@@ -678,14 +678,16 @@ class PrivateReadingMixin:
             return {}
         try:
             getter = getattr(self.context, "get_provider_by_id", None)
-            provider_id = _single_line(getattr(self, "jm_cosmos_vision_provider_id", ""), 160)
-            provider = getter(provider_id) if provider_id and callable(getter) else None
-            if not provider_id or provider is None:
+            provider_key, primary_provider_id, fallback_provider_id = self._private_reading_visual_provider_route()
+            providers: list[tuple[str, Any]] = []
+            for candidate_id in (primary_provider_id, fallback_provider_id):
+                provider = getter(candidate_id) if candidate_id and callable(getter) else None
+                if candidate_id and provider is not None and self._provider_supports_image(provider):
+                    providers.append((candidate_id, provider))
+            if not providers:
                 logger.info("[PrivateCompanion] 夹层阅读未配置专用视觉模型，跳过页图批注和读后感生成")
                 return {}
-            if not self._provider_supports_image(provider):
-                logger.warning("[PrivateCompanion] 夹层阅读视觉模型不支持图片输入: provider=%s", provider_id)
-                return {}
+            provider_id, provider = providers[0]
             image_urls = []
             for path in image_paths:
                 suffix = path.suffix.lower()
@@ -749,36 +751,75 @@ class PrivateReadingMixin:
             if self._llm_daily_budget_remaining() == 0:
                 self._record_llm_budget_skip(provider_id=provider_id, task="private_reading_vision", prompt=prompt)
                 return {}
-            start = time.time()
-            timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
-            timeout = (
-                timeout_getter(
-                    task="private_reading_vision",
-                    provider_id=provider_id,
-                    timeout_key="PRIVATE_READING_VISION_PROVIDER_ID",
-                )
-                if callable(timeout_getter)
-                else None
-            )
-            request_call = provider.text_chat(prompt=prompt, image_urls=image_urls)
-            result = await asyncio.wait_for(request_call, timeout=timeout) if timeout is not None else await request_call
-            text = str(getattr(result, "completion_text", result) or "").strip()
-            self._record_llm_usage(
-                provider_id=provider_id,
-                task="private_reading_vision",
-                prompt=prompt,
-                completion=text,
-                elapsed_ms=int((time.time() - start) * 1000),
-                success=bool(text),
-                resp=result,
-            )
-            parsed = self._parse_jm_cosmos_vision_result(text, sampled_pages or [])
-            if parsed.get("impression") or parsed.get("page_comments"):
-                return parsed
-            return {"impression": self._dedupe_private_reading_impression(text), "page_comments": []}
+            for attempt_index, (provider_id, provider) in enumerate(providers):
+                start = time.time()
+                try:
+                    timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
+                    timeout = (
+                        timeout_getter(
+                            task="private_reading_vision",
+                            provider_id=provider_id,
+                            timeout_key=provider_key,
+                        )
+                        if callable(timeout_getter)
+                        else None
+                    )
+                    request_call = provider.text_chat(prompt=prompt, image_urls=image_urls)
+                    result = await asyncio.wait_for(request_call, timeout=timeout) if timeout is not None else await request_call
+                    text = str(getattr(result, "completion_text", result) or "").strip()
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task="private_reading_vision",
+                        prompt=prompt,
+                        completion=text,
+                        elapsed_ms=int((time.time() - start) * 1000),
+                        success=bool(text),
+                        resp=result,
+                    )
+                    if not text and attempt_index + 1 < len(providers):
+                        continue
+                    parsed = self._parse_jm_cosmos_vision_result(text, sampled_pages or [])
+                    if parsed.get("impression") or parsed.get("page_comments"):
+                        return parsed
+                    return {"impression": self._dedupe_private_reading_impression(text), "page_comments": []}
+                except Exception as exc:
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task="private_reading_vision",
+                        prompt=prompt,
+                        completion="",
+                        elapsed_ms=int((time.time() - start) * 1000),
+                        success=False,
+                        error=str(exc),
+                    )
+                    if attempt_index + 1 < len(providers):
+                        logger.warning(
+                            "[PrivateCompanion] 夹层阅读主视觉模型失败,尝试卡片备用模型: primary=%s fallback=%s error=%s",
+                            primary_provider_id,
+                            fallback_provider_id,
+                            _single_line(exc, 120),
+                        )
+                        continue
+                    raise
+            return {}
         except Exception as e:
             logger.debug(f"[PrivateCompanion] 夹层阅读视觉分析失败: {e}")
             return {}
+
+    def _private_reading_visual_provider_card_key(self) -> str:
+        mode = str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower()
+        return "PLUGIN_VISION_PROVIDER_ID" if mode == "quick" else "PRIVATE_READING_VISION_PROVIDER_ID"
+
+    def _private_reading_visual_provider_route(self) -> tuple[str, str, str]:
+        provider_key = self._private_reading_visual_provider_card_key()
+        primary_provider_id = _single_line(getattr(self, "jm_cosmos_vision_provider_id", ""), 160)
+        fallback_getter = getattr(self, "_model_fallback_provider_id", None)
+        fallback_provider_id = (
+            fallback_getter(provider_key, primary_provider_id)
+            if callable(fallback_getter)
+            else ""
+        )
+        return provider_key, primary_provider_id, fallback_provider_id
 
     def _parse_jm_cosmos_vision_result(self, text: str, sampled_pages: list[int]) -> dict[str, Any]:
         raw = str(text or "").strip()

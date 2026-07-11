@@ -126,6 +126,17 @@ def _migrate_flat_config_into_schema_groups(
             continue
         if key not in root:
             continue
+        group_key = str(item.get("group") or "")
+        group = root.get(group_key)
+        if isinstance(group, dict) and key in group:
+            # The grouped value is what AstrBot's official config page exposes.
+            # Once it exists it must be authoritative, including when the user
+            # intentionally changes a setting back to its schema default.
+            visible_value = _coerce_schema_value(group.get(key), item)
+            if root.get(key) != visible_value:
+                root[key] = visible_value
+                changed.append(f"{key}~group-authority")
+            continue
         old_value = root.get(key)
         if old_value == item.get("default"):
             continue

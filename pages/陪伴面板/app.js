@@ -59,6 +59,7 @@ const state = {
   providerConfigMode: "",
   providerDraft: {},
   providerTimeoutDraft: {},
+  providerFallbackDraft: {},
   proactiveCandidateFilter: "all",
   imageCacheItems: [],
   imageCacheTotal: 0,
@@ -97,6 +98,7 @@ const state = {
   pageTheme: "classic",
   overviewRefreshedAt: 0,
   uxReviewShowAll: false,
+  selectedFoodMenuIds: new Set(),
 };
 
 let setupGuideProactivePollTimer = null;
@@ -107,6 +109,7 @@ const hiddenCompatibilityConfigKeys = new Set([
   "semantic_message_debounce_seconds",
   "skill_growth_passive_injection",
   "skill_growth_custom_skills",
+  "auto_voice_full_conversion_enabled",
 ]);
 
 const featureSwitchNotes = {
@@ -176,6 +179,20 @@ function normalizeModelTimeoutOverrides(raw) {
     if (!isProviderConfigKey(key)) return;
     const timeout = Math.round(Number(value));
     if (Number.isFinite(timeout) && timeout >= 5 && timeout <= 600) result[key] = timeout;
+  });
+  return result;
+}
+
+function normalizeModelFallbackOverrides(raw) {
+  let source = raw;
+  if (typeof source === "string") {
+    try { source = JSON.parse(source || "{}"); } catch (_error) { source = {}; }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const result = {};
+  Object.entries(source).forEach(([key, value]) => {
+    const providerId = String(value || "").trim();
+    if (isProviderConfigKey(key) && providerId) result[key] = providerId;
   });
   return result;
 }
@@ -395,7 +412,6 @@ function featureDraftFromOverview(overview = {}) {
     "enable_group_injection_guard",
     "enable_group_persona_denoise",
     "auto_voice_enabled",
-    "auto_voice_full_conversion_enabled",
     "enable_tts_local_playback",
     "enable_tts_local_playback_live_only",
     "enable_tts_live_subtitle_sync",
@@ -743,7 +759,6 @@ const featureMeta = {
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
   enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息在实际发送前按人格和上下文终审：发送、改写或丢弃。"],
   enable_smart_silence: ["智能沉默", "发送前判断用户是否想收住话题；可选择只看明确边界，或交给小模型结合上下文判断。"],
-  enable_llm_timer_scheduling: ["临时预约与动作查岗", "把明确提醒约定或洗澡、吃饭、短时办事等离开动作转成 AstrBot 官方计划；动作查岗会估时、按人格调整强度，并在用户提前回来时取消。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
   enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身被刺到、缓和、恢复和短暂回避的余波。"],
@@ -770,6 +785,7 @@ const featureMeta = {
   enable_forbidden_word_recall: ["违禁词自动撤回", "命中配置词表时，拦截 Bot 待发送内容或尝试撤回群聊/自身消息。"],
   enable_private_image_self_recognition: ["图片转述增强", "处理私聊单图、引用图片、合并转发图片和 GIF 抽帧，并辅助判断角色归属。"],
   enable_environment_perception: ["环境感知", "注入当前时间、日期语境、平台、群聊/私聊和消息媒介信息。"],
+  enable_balance_awareness: ["余额感知", "定期读取可支配余额；余额偏低时生成贴合人设、低压力的主动念头。"],
   enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
   enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
   enable_model_perception: ["模型感知", "识别当前会话 LLM、视觉转述模型和生图后端/图片模型配置。"],
@@ -830,6 +846,7 @@ const featureMeta = {
   enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制、朗读文本清洗和主用户触发。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
+  enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
   enable_maslow_motivation_experiment: ["需求强化功能", "实验性功能第一项：把主动念头按状态、安全、归属、尊重、成长和意义等内部需求层轻量分类，强化候选排序与可选日程倾向。"],
@@ -851,7 +868,6 @@ const featureGroups = [
       "enable_recall_enhancement",
       "enable_private_image_self_recognition",
       "enable_forward_message_adaptation",
-      "enable_llm_timer_scheduling",
       "enable_proactive_quote_trigger_message",
       "enable_tts_enhancement",
     ],
@@ -934,6 +950,7 @@ const featureGroups = [
       "enable_private_reading_ask_recommendation",
       "enable_private_reading_preference_influence",
       "enable_unanswered_screen_peek_followup",
+      "enable_reply_interception_forward",
       "enable_creative_writing",
       "creative_hidden_mode",
     ],
@@ -961,6 +978,7 @@ const embeddedFeatureParentByKey = {
   enable_lunar_perception: "enable_environment_perception",
   enable_solar_term_perception: "enable_environment_perception",
   enable_almanac_perception: "enable_environment_perception",
+  enable_balance_awareness: "enable_environment_perception",
   enable_group_persona_denoise: "enable_group_injection_guard",
   enable_group_reality_promise_guard: "enable_group_injection_guard",
   enable_group_wakeup_question: "enable_group_wakeup_enhancement",
@@ -1006,7 +1024,6 @@ const embeddedFeatureKeys = new Set(Object.keys(embeddedFeatureParentByKey));
 const proactiveOnlyLockedFeatureKeys = new Set([
   "inject_passive_states",
   "enable_intent_emotion_analysis",
-  "enable_llm_timer_scheduling",
   "enable_passive_topic_suppression",
   "enable_environment_perception",
   "enable_message_debounce",
@@ -1131,6 +1148,7 @@ const configLabels = {
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定模型",
   proactive_persona_judge_send_threshold: "人格判定放行阈值",
   proactive_persona_judge_cache_minutes: "人格判定缓存分钟",
+  proactive_persona_judge_max_daily: "人格判定每日模型上限",
   enable_maslow_motivation_experiment: "需求强化功能",
   enable_maslow_schedule_influence: "允许影响日程生成",
   maslow_motivation_strength: "需求强化影响强度",
@@ -1139,6 +1157,9 @@ const configLabels = {
   enable_tts_enhancement: "TTS强化",
   tts_generation_mode: "TTS生成路径",
   tts_voice_language: "TTS语音语种",
+  tts_delivery_mode: "语音发送形态",
+  tts_foreign_text_mode: "外语文字显示",
+  tts_conversion_scope: "语音转换范围",
   tts_conversion_provider_id: "TTS文本转换模型",
   tts_extra_prompt: "TTS补充规则",
   EMOTION_JUDGEMENT_PROVIDER_ID: "情绪变化判断模型",
@@ -1153,6 +1174,9 @@ const configLabels = {
   qzone_emotional_vent_cooldown_hours: "心情动态冷却小时",
   qzone_emotional_vent_probability: "心情动态触发概率",
   enable_food_menu_recommendation: "吃什么候选",
+  enable_meal_care_proactive: "饭点主动关心",
+  meal_care_max_daily: "每日饭点关心上限",
+  meal_care_followup_minutes: "吃饭补问等待分钟",
   response_review_mode: "回复/主动复核模式",
   smart_silence_judge_mode: "智能沉默判断模式",
   SMART_SILENCE_PROVIDER_ID: "智能沉默小模型",
@@ -1301,6 +1325,25 @@ const configLabels = {
   enable_lunar_perception: "农历",
   enable_solar_term_perception: "节气",
   enable_almanac_perception: "轻量黄历",
+  enable_balance_awareness: "余额感知",
+  balance_api_url: "余额接口地址（可选覆盖）",
+  balance_api_key: "余额接口 API Key",
+  balance_api_auth_header: "鉴权请求头",
+  balance_api_auth_scheme: "鉴权前缀",
+  balance_api_custom_headers: "自定义请求头",
+  balance_json_path: "余额 JSON 路径",
+  balance_total_json_path: "总额度 JSON 路径",
+  balance_used_json_path: "已用额度 JSON 路径",
+  balance_value_divisor: "余额数值除数",
+  balance_currency_label: "余额单位",
+  balance_check_interval_minutes: "余额检查间隔（分钟）",
+  balance_request_timeout_seconds: "余额接口超时（秒）",
+  balance_low_threshold: "低余额阈值",
+  balance_critical_threshold: "危急余额阈值",
+  balance_low_percent_threshold: "低余额比例（%）",
+  balance_critical_percent_threshold: "危急余额比例（%）",
+  balance_message_cooldown_hours: "低余额主动冷却（小时）",
+  balance_include_amount_in_message: "允许人格参考具体余额",
   enable_yesterday_screen_diary_context: "昨日屏幕日记",
   screen_diary_context_max_chars: "昨日屏幕日记上下文字数",
   memory_companion_context_timeout_seconds: "外部记忆上下文超时",
@@ -1483,6 +1526,11 @@ const configLabels = {
   creative_share_probability: "创作透露概率",
   creative_chars_per_session: "每次创作字数",
   creative_max_active_projects: "同时创作项目上限",
+  creative_direction_prompt: "创作方向提示词",
+  reply_interception_forward_target_umo: "拦截转发目标会话",
+  reply_interception_forward_plugin_blocks: "转发插件阻断消息",
+  reply_interception_forward_rewrites: "转发回复改写",
+  reply_interception_forward_proactive_blocks: "转发主动消息拦截",
   active_projects: "进行中创作",
   project_count: "创作项目",
   boredom_watch_enabled: "无聊刷视频",
@@ -1507,6 +1555,7 @@ const configDescriptions = {
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "用于主动人格/世界观判定的轻量模型。建议选择 JSON 稳定、判断保守、理解角色边界的小到中型模型。",
   proactive_persona_judge_send_threshold: "模型判定为 send 但分数低于该阈值时，会自动转为延后。越高越克制，越低越容易放行。",
   proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
+  proactive_persona_judge_max_daily: "全体用户每天实际调用主动人格判定模型的上限；缓存命中不计次数，达到上限后改用本地人格与关系规则。填 0 表示不调用该模型。",
   enable_maslow_motivation_experiment: "实验性功能第一项。开启后，主动念头会被归入状态、安全、归属、尊重、成长、意义等内部需求层，再轻量影响候选排序；默认关闭，不改变最终回复正文，也不会让 Bot 把层级词说给用户。",
   enable_experimental_motivation_model: "实验性功能第二项。开启后，主动计划会额外按驱力、诱因和唤醒适配做轻量调权：驱力代表 Bot 内部想开口，诱因代表这个候选是否有值得说的外部价值，唤醒代表当前状态是否适合行动。默认关闭。",
   enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。默认只给建议；若开启“允许自主调节参数”，会临时覆盖少量主动策略参数。",
@@ -1558,6 +1607,25 @@ const configDescriptions = {
   enable_cycle_state: "开启后即视为适用，可能在“当前扮演状态”里出现生理期前、处于生理期或生理期后的相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
+  enable_balance_awareness: "开启后按设定间隔读取余额接口；余额偏低时生成一次贴合人设的主动候选，不会绕过免打扰、频控或发送复核。",
+  balance_api_url: "返回 JSON 的 HTTP/HTTPS 余额接口。地址只用于后台拉取，不会显示在 Token 页或交给人格。",
+  balance_api_key: "可选鉴权密钥；仅用于请求余额接口，不会返回到 Token 页。",
+  balance_api_auth_header: "API Key 所在请求头，默认 Authorization。",
+  balance_api_auth_scheme: "鉴权值前缀，默认 Bearer；接口要求直接发送 Key 时可留空。",
+  balance_api_custom_headers: "可选附加请求头；用于接口要求的租户、账号等固定字段。",
+  balance_json_path: "余额字段路径，例如 data.balance；留空会自动尝试常见字段。",
+  balance_total_json_path: "可选总额度字段路径，用于计算剩余比例。",
+  balance_used_json_path: "可选已用额度字段路径；余额缺失时可用总额度减已用额度推算。",
+  balance_value_divisor: "统一换算余额、总额和已用额；接口返回分时填写 100。",
+  balance_currency_label: "Token 页与人格参考的余额单位，例如元、点或额度。",
+  balance_check_interval_minutes: "两次正常余额拉取之间的间隔；失败时会自动退避重试。",
+  balance_request_timeout_seconds: "单次余额接口请求的最长等待时间。",
+  balance_low_threshold: "余额小于等于该值时进入偏低档；填 0 可关闭绝对值判断。",
+  balance_critical_threshold: "余额小于等于该值时进入危急档。",
+  balance_low_percent_threshold: "剩余比例小于等于该值时进入偏低档。",
+  balance_critical_percent_threshold: "剩余比例小于等于该值时进入危急档。",
+  balance_message_cooldown_hours: "余额持续偏低时，再次尝试生成主动候选的最短间隔。",
+  balance_include_amount_in_message: "开启后人格可以自然参考具体数值；关闭后只知道余额偏低或危急。",
   enable_holiday_perception: "开启后会把节假日、调休和工作日判断注入环境感知。",
   enable_platform_perception: "开启后会识别平台、私聊/群聊和消息媒介类型。",
   enable_model_perception: "开启后会把当前会话 LLM、视觉转述模型，以及可用的生图后端/在线图片模型作为环境信息注入；只供 Bot 判断能力边界，不要求主动报告模型名。",
@@ -1579,6 +1647,9 @@ const configDescriptions = {
   passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
   tts_generation_mode: "先决定语音从哪里来。快速标签模式追求低延迟：主模型可写 <pc_tts>，插件发送前轻处理。后处理模式追求稳定：主模型只写普通回复，发送前由 TTS 文本模型判断是否需要语音并完成翻译/改写。",
   tts_voice_language: "控制真正送入 TTS 的语音正文语种。可让聊天文本保留中文，<pc_tts> 内使用日语、中文或英语朗读；日语模式会尽量避免明显非日语文本直接进入 TTS，并会给缺少说明的外语语音块补中文释义。",
+  tts_delivery_mode: "选择语音成功后是用语音替换对应文字，还是语音和文字一起发送。仅语音不会影响失败兜底：合成失败时仍会发送可读文字。",
+  tts_foreign_text_mode: "日语或英语语音同时发送文字时，可显示最终朗读原文、中文译文，或原文与中文双语。中文译文会参考当前人格，不使用生硬字幕腔。",
+  tts_conversion_scope: "统一控制快速标签自动语音和后处理路径。局部转换只朗读最适合听的一段；全量转换要求朗读整条回复的全部有效内容。",
   tts_conversion_provider_id: "用于后处理判断+翻译、快速标签自动语音、语种修正和中文释义补全的文本模型，不是语音合成模型。转换时会参考当前 AstrBot 人格的语气、称呼和距离感；留空时后处理模式会保持纯文本，显式标签仍可由插件处理。",
   tts_extra_prompt: "只填写本人格或声线的额外要求。基础 <pc_tts> 格式、目标语种和 provider 情绪标签适配规则会自动生成，留空最稳。",
   tts_frequency_control_mode: "选择频率规则。全局频控：用概率影响快速标签模式下 LLM 是否倾向输出 TTS，并控制后处理模式是否进入判断+翻译；弱约束下显式 <pc_tts>/<tts> 不再被概率剥离，只受 provider 和会话间隔保护；强约束下按约束强度硬拦。",
@@ -1596,7 +1667,7 @@ const configDescriptions = {
   tts_live_subtitle_url: "直播插件字幕 overlay 的 /show 接口地址。默认对应 127.0.0.1:18081/show。",
   tts_local_playback_min_interval_seconds: "两次 TTS 本机播放之间的最小间隔。0 表示不限制。",
   auto_voice_enabled: "仅快速标签模式生效。开启后，当模型没有写 <pc_tts>/<tts> 时，普通纯文本回复可以进入自动语音转换；后处理模式不依赖这个开关。",
-  auto_voice_full_conversion_enabled: "仅快速标签模式的自动语音生效。开启后，自动语音尽量把整条回复完整转换成一段语音；关闭时更偏向混合文本+语音。",
+  auto_voice_full_conversion_enabled: "旧版兼容项，已由“语音转换范围”统一替代。",
   auto_voice_probability: "仅旧版行为下生效。控制快速标签自动语音的旧触发概率；全局频控下请使用 TTS 全局触发概率。",
   auto_voice_max_chars: "仅快速标签模式的自动语音生效。普通回复不超过该字数才参与自动语音；填 0 表示不限制。旧版主用户单独概率命中时不受此限制。",
   auto_voice_cooldown_seconds: "仅旧版行为下生效。同一会话成功触发自动语音后，需要等待多少秒才能再次触发；全局频控下请使用 TTS 会话最小间隔秒数。",
@@ -1733,7 +1804,10 @@ const configDescriptions = {
   episode_memory_refresh_minutes: "距离上次整理多久后允许再次整理私聊片段。",
   max_dialogue_episodes: "每个私聊对象最多保留多少条对话片段；实际回复时只择要使用最近或相关片段。",
   user_habit_min_count: "同一时段同类行为至少出现多少次，才被视为用户习惯；旧习惯会衰减，被动回复还要求当前时段和话题相关。",
-  enable_food_menu_recommendation: "用户明确纠结吃什么、点什么或夜宵时，才从候选菜单里取少量贴合项作回复参考。候选本身在这个功能详情页管理。",
+  enable_food_menu_recommendation: "用户明确纠结吃什么、点什么或夜宵时，从候选菜单里取少量贴合项作回复参考；饭点关心中识别到实际吃过的内容也会自动回填。候选本身在这个功能详情页管理。",
+  enable_meal_care_proactive: "早餐、午饭、晚饭窗口独立安排吃饭关心，仅面向主要用户，并继续遵守免打扰、主动额度和未回应降速。",
+  meal_care_max_daily: "每天最多选择几餐主动询问，默认 2，避免三餐都像打卡。",
+  meal_care_followup_minutes: "没有得到具体饮食信息时，等待多久允许一次低压补问；每餐最多补问一次。",
   user_habit_max_items: "每个私聊对象最多保留多少条行为习惯模式。",
   skill_growth_rate: "技能经验增长倍率。1 为默认速度，越高升级越快。",
   skill_growth_custom_skills: "手动补充技能名，可用逗号、换行或 JSON 列表表达。",
@@ -1836,6 +1910,11 @@ const configDescriptions = {
   creative_share_probability: "创作达到节点后自然透露给用户的概率，按百分比填写。",
   creative_chars_per_session: "每次闲暇创作行为大约写多少字；实际字数会受人格和当天能量影响。",
   creative_max_active_projects: "同时保留多少个进行中的创作项目。",
+  creative_direction_prompt: "长期引导私下创作的作品类型、题材、风格、主题和避雷。会作用于新项目和已有项目的后续创作；人工大纲与人工修订优先级更高。",
+  reply_interception_forward_target_umo: "接收拦截通知的 AstrBot 统一会话 ID，例如 default:FriendMessage:123456 或 default:GroupMessage:123456。",
+  reply_interception_forward_plugin_blocks: "插件决定不回复、去重丢弃或其他被动回复拦截时转发原因。",
+  reply_interception_forward_rewrites: "最终回复或主动消息在发送前被纠偏、清理、润色或复核改写时转发前后文本。",
+  reply_interception_forward_proactive_blocks: "主动候选被取消、丢弃，或在组件发送阶段被硬拦截时转发；普通延后不转发。",
   worldbook_auto_import: "启动或打开页面时自动从关系网资料源刷新用户/群资料。",
   worldbook_member_match_aliases: "提到别名或称呼时辅助匹配 QQ 锚点，但 QQ 号仍是身份主锚点。",
   worldbook_self_registration: "群成员 @Bot 说“我是 XX”时，允许进入二次确认的自登记流程。",
@@ -1907,6 +1986,9 @@ const featureSettingGroups = {
     "user_habit_min_count",
     "user_habit_max_items",
     "enable_food_menu_recommendation",
+    "enable_meal_care_proactive",
+    "meal_care_max_daily",
+    "meal_care_followup_minutes",
   ],
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
@@ -1918,8 +2000,9 @@ const featureSettingGroups = {
   enable_dialogue_episode_memory: ["episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
   enable_open_loop_tracking: ["max_dialogue_episodes"],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
-  enable_food_menu_recommendation: [],
-  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
+  enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
+  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"],
+  enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
@@ -1938,7 +2021,8 @@ const featureSettingGroups = {
   enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "quote_group_reply_once_per_target", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
   enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
-  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
+  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
+  enable_balance_awareness: ["balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_holiday_perception: ["holiday_country"],
   enable_platform_perception: [],
   enable_model_perception: [],
@@ -1987,13 +2071,20 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
-  enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
-  enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects"],
+  enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
   creative_hidden_mode: ["creative_share_probability"],
 };
 
 const featureSettingSections = {
+  enable_reply_interception_forward: [
+    {
+      title: "转发目标与范围",
+      note: "选择需要上报的处理结果。通知发送失败不会影响原消息链路。",
+      keys: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
+    },
+  ],
   enable_proactive_only_mode: [
     {
       title: "保留主动链路",
@@ -2003,7 +2094,7 @@ const featureSettingSections = {
     {
       title: "人格/世界观复核",
       note: "到点后先检查这个念头是否像当前角色会说、是否越界、是否该延后。",
-      keys: ["enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
+      keys: ["enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"],
     },
   ],
   enable_livingmemory_integration: [
@@ -2137,6 +2228,11 @@ const featureSettingSections = {
       title: "日期与时令",
       note: "节假日、农历、节气和轻量黄历氛围。",
       keys: ["enable_holiday_perception", "holiday_country", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
+    },
+    {
+      title: "余额与补给",
+      note: "定期读取余额状态；偏低时只生成主动候选，最终表达仍受人格、免打扰和发送复核约束。",
+      keys: ["enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
     },
   ],
   enable_private_image_self_recognition: [
@@ -2374,7 +2470,7 @@ const featureSettingSections = {
     {
       title: "创作方式",
       note: "控制私下创作触发、是否低调提起和单次推进规模。",
-      keys: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects"],
+      keys: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
     },
   ],
   enable_segmented_proactive_reply: [
@@ -2463,27 +2559,37 @@ const featureSettingSections = {
   ],
   enable_tts_enhancement: [
     {
-      title: "1. 生成路径",
-      note: "两条主路径：快速标签追求低延迟，后处理判断+翻译追求稳定。",
-      keys: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt"],
+      title: "1. 最终发送效果",
+      note: "先决定用户实际收到什么：只听语音还是语音配文字，以及外语文字如何显示。",
+      keys: ["tts_delivery_mode", "tts_voice_language", "tts_foreign_text_mode", "tts_conversion_scope"],
     },
     {
-      title: "2. 频率策略",
+      title: "2. 生成与转换",
+      note: "选择低延迟标签路径或发送前模型后处理，并指定负责翻译与改写的文本模型。",
+      keys: ["tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt"],
+    },
+    {
+      title: "3. 触发概率",
       note: "全局频控用默认概率和间隔控制双路径；私聊/群聊覆盖项填 -1 则继承默认值。",
-      keys: ["tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_trigger_probability", "tts_private_min_interval_seconds", "tts_private_trigger_probability", "tts_group_min_interval_seconds", "tts_group_trigger_probability"],
+      keys: ["tts_frequency_control_mode", "tts_constraint_mode", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability"],
     },
     {
-      title: "3. 快速标签自动语音",
+      title: "4. 会话间隔",
+      note: "分别控制默认、私聊和群聊的最小语音间隔；覆盖项填 -1 表示继承默认值。",
+      keys: ["tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds"],
+    },
+    {
+      title: "5. 快速标签自动语音",
       note: "仅快速标签模式使用：模型没写 <pc_tts>/<tts> 时，是否把普通短文本转成语音。",
-      keys: ["auto_voice_enabled", "auto_voice_max_chars", "auto_voice_full_conversion_enabled"],
+      keys: ["auto_voice_enabled", "auto_voice_max_chars"],
     },
     {
-      title: "4. 旧版频率细项",
+      title: "6. 旧版兼容频率",
       note: "仅“旧版行为”使用：保留旧的快速标签自动语音概率、冷却和主用户强触发。",
       keys: ["auto_voice_probability", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
     },
     {
-      title: "5. 本机与直播联动",
+      title: "7. 本机与直播联动",
       note: "TTS 音频生成后可在运行 AstrBot 的电脑播放，并同步推送到直播插件打字机字幕。",
       keys: ["enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url"],
     },
@@ -2493,6 +2599,9 @@ const featureSettingSections = {
 const featureSettingTypes = {
   forward_message_mode: { type: "select", options: [["inject", "注入"], ["transcribe", "转述"]] },
   tts_generation_mode: { type: "select", options: [["fast_tag", "快速标签：主模型写私有标签"], ["postprocess", "后处理：判断+翻译模型"]] },
+  tts_delivery_mode: { type: "select", options: [["voice_only", "仅语音：替换对应文字"], ["voice_and_text", "语音和文字都发送"]] },
+  tts_foreign_text_mode: { type: "select", options: [["original", "显示朗读原文"], ["translation", "显示中文译文"], ["bilingual", "原文和中文都显示"]] },
+  tts_conversion_scope: { type: "select", options: [["partial", "局部转换：只朗读一段"], ["full", "全量转换：朗读整条回复"]] },
   tts_frequency_control_mode: { type: "select", options: [["global", "全局频控：间隔+概率控制双路径"], ["legacy", "旧版行为：按各路径原逻辑触发"]] },
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
@@ -2523,6 +2632,7 @@ const featureSettingTypes = {
   proactive_prompt_template: { type: "textarea" },
   proactive_persona_judge_send_threshold: { type: "number", min: 0, max: 100, step: 1 },
   proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
+  proactive_persona_judge_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   enable_maslow_schedule_influence: { type: "checkbox" },
   maslow_motivation_strength: { type: "number", min: 0, max: 100, step: 1 },
   enable_personality_iteration_auto_tune: { type: "checkbox" },
@@ -2555,6 +2665,8 @@ const featureSettingTypes = {
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   WEB_EXPLORATION_API_KEY: { type: "password" },
+  balance_api_key: { type: "password" },
+  balance_api_custom_headers: { type: "textarea" },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
   segmented_proactive_send_as_forward: { type: "checkbox" },
@@ -2598,6 +2710,7 @@ const featureSettingTypes = {
   segmented_proactive_content_cleanup_words: { type: "textarea" },
   private_reading_default_keywords: { type: "textarea" },
   private_reading_blocked_tags: { type: "textarea" },
+  creative_direction_prompt: { type: "textarea" },
   group_repeat_trigger_threshold: { type: "number", min: 3, max: 20, step: 1 },
   group_wakeup_question_threshold: { type: "number", min: 0, max: 100, step: 1 },
   group_repeat_interrupt_text: { type: "text" },
@@ -3707,6 +3820,7 @@ function applyOverviewData(overview) {
   state.imageApiEndpointDraft = null;
   state.providerConfigMode = inferProviderConfigMode(overview);
   state.providerTimeoutDraft = normalizeModelTimeoutOverrides(overview?.settings?.model_timeout_overrides);
+  state.providerFallbackDraft = normalizeModelFallbackOverrides(overview?.settings?.model_fallback_overrides);
   state.pageFontFamily = String(overview?.settings?.page_font_family || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
   state.pageTheme = normalizePageTheme(overview?.settings?.page_theme);
   applyPageFontFamily();
@@ -4809,6 +4923,7 @@ const setupGuideAdvancedItems = {
         { key: "creative_inspiration_probability", type: "number", label: "灵感触发概率（%）", placeholder: "15", min: 0, max: 100 },
         { key: "creative_chars_per_session", type: "number", label: "每次创作字数", placeholder: "1200", min: 100 },
         { key: "creative_hidden_mode", type: "bool", kind: "feature", label: "隐藏创作模式", description: "更少主动展示创作内容。" },
+        { key: "creative_direction_prompt", type: "textarea", label: "创作方向提示词", placeholder: "例如：优先创作轻悬疑和都市奇幻短篇；避免诗歌和悲剧结局。", description: "长期影响新项目和已有项目的后续创作；人工大纲与人工修订优先。" },
       ],
     },
   ],
@@ -8246,9 +8361,15 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
 }
 
 function troubleshootingTtsRuntimeMarkup(tts = {}) {
+  const deliveryLabels = { voice_only: "仅语音", voice_and_text: "语音 + 文字" };
+  const foreignTextLabels = { original: "显示原文", translation: "显示中文", bilingual: "双语显示" };
+  const scopeLabels = { partial: "局部转换", full: "全量转换" };
   const rows = [
     ["目标会话", tts.umo || "未找到已启用的私聊会话"],
     ["TTS 强化", tts.enhancement_enabled ? "已开启" : "未开启"],
+    ["发送效果", deliveryLabels[tts.delivery_mode] || "语音 + 文字"],
+    ["外语文字", foreignTextLabels[tts.foreign_text_mode] || "显示中文"],
+    ["转换范围", scopeLabels[tts.conversion_scope] || "局部转换"],
     ["AstrBot 会话 TTS", tts.settings_enabled ? "已启用" : "未启用"],
     ["真实语音 Provider", tts.provider_available ? (tts.provider_label || "可用") : "当前不可用"],
   ];
@@ -8992,6 +9113,7 @@ function renderTokens() {
     : (!state.tokenStats && !state.lazyLoaded.tokenStats ? `<div class="empty small">正在加载 Token 统计...</div>` : "");
   renderTokenToolbar(stats, source.dateRows || []);
   renderTokenSourceVisibility(source);
+  renderTokenBalanceStatus(stats.balance || {});
   const showHourlyTrend = state.tokenView === "total" && (source.hours || []).length > 0;
   const hourlyPanel = $("#tokenHourlyPanel");
   if (hourlyPanel) hourlyPanel.hidden = !showHourlyTrend;
@@ -9042,6 +9164,49 @@ function renderTokens() {
   renderTokenMemoryPluginTaskTable(source.source === "memory" ? (source.tasks || []) : [], source.source === "memory" && source.available !== false);
   renderTokenMemoryPluginProviderTable(source.source === "memory" ? (source.providers || []) : [], source.source === "memory" && source.available !== false);
   renderTokenMemoryPluginRecentTable(source.source === "memory" ? (source.recent || []) : [], source.source === "memory" && source.available !== false);
+}
+
+function renderTokenBalanceStatus(balance = {}) {
+  const box = $("#tokenBalanceStatus");
+  const card = $("#tokenBalanceCard");
+  if (!box || !card) return;
+  const enabled = Boolean(balance.enabled);
+  const configured = Boolean(balance.configured);
+  const manualConfigured = Boolean(balance.manual_configured);
+  const autoDiscoveryAvailable = Boolean(balance.auto_discovery_available);
+  const available = Boolean(balance.available);
+  const amount = balance.amount == null ? null : Number(balance.amount);
+  const percent = balance.remaining_percent == null ? null : Number(balance.remaining_percent);
+  const currency = String(balance.currency_label || "元");
+  const tierLabels = { normal: "充足", low: "偏低", critical: "危急", unknown: "未知" };
+  const tier = tierLabels[String(balance.tier || "unknown")] || "未知";
+  const amountText = amount == null || !Number.isFinite(amount)
+    ? "等待首次成功拉取"
+    : `${amount.toLocaleString("zh-CN", { maximumFractionDigits: 4 })}${currency}${percent != null && Number.isFinite(percent) ? ` · 约剩 ${Math.max(0, percent).toFixed(0)}%` : ""}`;
+  let note = "余额感知未开启。可在配置 → 功能开关 → 环境感知 → 余额与补给中启用。";
+  if (enabled && !configured) note = "余额感知已开启，但没有可自动复用的 Provider，也没有填写自定义余额接口。";
+  else if (enabled && configured && !available) note = balance.last_error
+    ? `最近拉取失败：${String(balance.last_error)}`
+    : (manualConfigured ? "正在通过自定义余额接口首次拉取。" : "正在从 AstrBot Provider 自动发现余额查询方式。");
+  else if (available) {
+    const modeText = balance.query_mode === "auto"
+      ? `自动查询${balance.source_label ? ` · ${String(balance.source_label)}` : ""}`
+      : "自定义接口";
+    note = `${modeText} · 最近成功 ${formatRecentTime(balance.last_success_at)}${balance.next_check_at ? ` · 下次检查 ${formatRecentTime(balance.next_check_at)}` : ""}`;
+  }
+  box.innerHTML = `
+    <div class="token-plugin-note">
+      <b>${escapeHtml(amountText)}</b>
+      <span>${escapeHtml(note)}</span>
+    </div>
+    <div class="token-plugin-stats">
+      ${tokenMetricCard("感知开关", enabled ? "已开启" : "未开启")}
+      ${tokenMetricCard("查询方式", manualConfigured ? "自定义接口" : autoDiscoveryAvailable ? "自动发现" : "不可用")}
+      ${tokenMetricCard("当前状态", available ? tier : "暂无数据")}
+      ${tokenMetricCard("最近检查", balance.last_check_at ? formatRecentTime(balance.last_check_at) : "尚未检查")}
+      ${tokenMetricCard("连续失败", formatNumber(balance.consecutive_failures || 0))}
+    </div>
+  `;
 }
 
 function normalizedTokenSource(value = state.tokenSource) {
@@ -9617,7 +9782,7 @@ function renderTokenProviderTable(rows) {
 
 function renderTokenTaskTable(rows) {
   $("#tokenTaskTable").innerHTML = tokenTable(
-    ["任务", "总 Token", "缓存", "输入", "输出", "调用", "失败", "平均 Token"],
+    ["任务", "累计 Token", "缓存", "输入", "输出", "累计调用", "失败", "平均 Token"],
     rows,
     (item) => [
       tokenTaskLabel(item.key),
@@ -11491,6 +11656,12 @@ function renderMemory() {
 function foodMenuFeaturePanelHtml() {
   const menu = state.overview?.food_menu || {};
   const items = Array.isArray(menu.items) ? menu.items : [];
+  const availableIds = new Set(items.map((item) => String(item?.id || "")).filter(Boolean));
+  state.selectedFoodMenuIds = new Set(
+    [...state.selectedFoodMenuIds].filter((itemId) => availableIds.has(itemId)),
+  );
+  const selectedCount = state.selectedFoodMenuIds.size;
+  const allSelected = Boolean(items.length) && selectedCount === items.length;
   const enabled = toBool(state.featureDraft?.enable_food_menu_recommendation)
     || featureTemporarilyUnlockedByProactiveOnly("enable_food_menu_recommendation");
   return `
@@ -11513,6 +11684,16 @@ function foodMenuFeaturePanelHtml() {
         <span>${escapeHtml(menu.hidden_count || 0)} 个收起</span>
         <span>更新 ${escapeHtml(menu.updated || "-")}</span>
       </div>
+      ${items.length ? `
+        <div class="food-selection-toolbar" data-food-selection-toolbar>
+          <label class="food-select-all">
+            <input type="checkbox" data-food-select-all ${allSelected ? "checked" : ""} />
+            <span>全选当前 ${escapeHtml(items.length)} 项</span>
+          </label>
+          <span class="food-selection-count" data-food-selection-count>已选 ${escapeHtml(selectedCount)} 项</span>
+          <button type="button" class="danger-outline" data-food-bulk-delete ${selectedCount ? "" : "disabled"}>删除所选</button>
+        </div>
+      ` : ""}
       <div class="food-feature-entry">
         <form id="foodMenuFeatureAddForm" class="food-quick-add-form">
           <label>快速添加
@@ -11585,10 +11766,14 @@ function renderFoodMenuCard(item) {
   const aliases = Array.isArray(item.aliases) ? item.aliases : [];
   const avoid = Array.isArray(item.avoid) ? item.avoid : [];
   const id = String(item.id || "");
+  const selected = state.selectedFoodMenuIds.has(id);
   return `
-    <article class="food-menu-card ${item.hidden ? "is-hidden-food" : ""} ${item.favorite ? "is-favorite-food" : ""}">
+    <article class="food-menu-card ${item.hidden ? "is-hidden-food" : ""} ${item.favorite ? "is-favorite-food" : ""} ${selected ? "is-selected-food" : ""}" data-food-card-id="${escapeHtml(id)}">
       <header>
-        <div>
+        <label class="food-card-select" title="选择 ${escapeHtml(item.name || "候选")}">
+          <input type="checkbox" data-food-select="${escapeHtml(id)}" ${selected ? "checked" : ""} aria-label="选择 ${escapeHtml(item.name || "候选")}" />
+        </label>
+        <div class="food-card-heading">
           <span>${escapeHtml(item.category || item.type_label || "候选")}</span>
           <h3>${escapeHtml(item.name || "未命名")}</h3>
         </div>
@@ -11673,6 +11858,49 @@ function foodTimeValues(id) {
   return [...document.querySelectorAll(`[data-food-time="${CSS.escape(id)}"]:checked`)].map((input) => input.value);
 }
 
+function resetFoodBulkDeleteConfirmation() {
+  const button = document.querySelector("[data-food-bulk-delete]");
+  if (!(button instanceof HTMLButtonElement) || !button.dataset.confirmKey) return;
+  window.clearTimeout(button._confirmTimer);
+  delete button.dataset.confirmKey;
+  delete button.dataset.confirmAt;
+  button.textContent = button.dataset.originalText || "删除所选";
+  delete button.dataset.originalText;
+}
+
+function syncFoodMenuSelectionUi({ resetConfirmation = false } = {}) {
+  const checkboxes = [...document.querySelectorAll("[data-food-select]")];
+  const availableIds = new Set(
+    checkboxes.map((input) => String(input.dataset.foodSelect || "")).filter(Boolean),
+  );
+  const selectedIds = state.selectedFoodMenuIds instanceof Set
+    ? state.selectedFoodMenuIds
+    : new Set();
+  state.selectedFoodMenuIds = new Set(
+    [...selectedIds].filter((itemId) => availableIds.has(itemId)),
+  );
+
+  checkboxes.forEach((input) => {
+    const itemId = String(input.dataset.foodSelect || "");
+    const selected = state.selectedFoodMenuIds.has(itemId);
+    input.checked = selected;
+    input.closest("[data-food-card-id]")?.classList.toggle("is-selected-food", selected);
+  });
+
+  const selectedCount = state.selectedFoodMenuIds.size;
+  const selectAll = document.querySelector("[data-food-select-all]");
+  if (selectAll instanceof HTMLInputElement) {
+    selectAll.checked = Boolean(checkboxes.length) && selectedCount === checkboxes.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+    selectAll.disabled = !checkboxes.length;
+  }
+  const count = document.querySelector("[data-food-selection-count]");
+  if (count) count.textContent = `已选 ${selectedCount} 项`;
+  const deleteButton = document.querySelector("[data-food-bulk-delete]");
+  if (deleteButton instanceof HTMLButtonElement) deleteButton.disabled = selectedCount === 0;
+  if (resetConfirmation) resetFoodBulkDeleteConfirmation();
+}
+
 function bindFoodMenuActions() {
   document.querySelectorAll("[data-food-save]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -11702,6 +11930,52 @@ function bindFoodMenuActions() {
 }
 
 function bindFoodMenuFeatureActions() {
+  document.querySelectorAll("[data-food-select]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const itemId = String(input.dataset.foodSelect || "");
+      if (!itemId) return;
+      if (input.checked) state.selectedFoodMenuIds.add(itemId);
+      else state.selectedFoodMenuIds.delete(itemId);
+      syncFoodMenuSelectionUi({ resetConfirmation: true });
+    });
+  });
+  const selectAll = document.querySelector("[data-food-select-all]");
+  if (selectAll instanceof HTMLInputElement) {
+    selectAll.addEventListener("change", () => {
+      document.querySelectorAll("[data-food-select]").forEach((input) => {
+        const itemId = String(input.dataset.foodSelect || "");
+        if (!itemId) return;
+        if (selectAll.checked) state.selectedFoodMenuIds.add(itemId);
+        else state.selectedFoodMenuIds.delete(itemId);
+      });
+      syncFoodMenuSelectionUi({ resetConfirmation: true });
+    });
+  }
+  const bulkDeleteButton = document.querySelector("[data-food-bulk-delete]");
+  if (bulkDeleteButton instanceof HTMLButtonElement) {
+    bulkDeleteButton.addEventListener("click", async () => {
+      syncFoodMenuSelectionUi();
+      const ids = [...state.selectedFoodMenuIds];
+      if (!ids.length) {
+        showToast("请先选择要删除的候选");
+        return;
+      }
+      const confirmKey = `food-bulk:${ids.slice().sort().join(",")}`;
+      if (!requireSecondClick(bulkDeleteButton, confirmKey, `再次点击删除已选的 ${ids.length} 个候选`, "再次点击删除")) return;
+      window.clearTimeout(bulkDeleteButton._confirmTimer);
+      bulkDeleteButton.textContent = bulkDeleteButton.dataset.originalText || "删除所选";
+      delete bulkDeleteButton.dataset.originalText;
+      await runAction(
+        async () => {
+          const response = await postJson("/food_menu/bulk_delete", { ids });
+          ids.forEach((itemId) => state.selectedFoodMenuIds.delete(itemId));
+          return response;
+        },
+        "",
+        bulkDeleteButton,
+      );
+    });
+  }
   const formEl = $("#foodMenuFeatureAddForm");
   if (formEl) {
     formEl.addEventListener("submit", async (event) => {
@@ -11710,7 +11984,7 @@ function bindFoodMenuFeatureActions() {
       const name = String(form.get("name") || "").trim();
       if (!name) return;
       const times = Array.from(formEl.querySelectorAll('input[name="times"]:checked')).map((input) => input.value);
-      await runAction(() => postJson("/food_menu/update", {
+      const saved = await runAction(() => postJson("/food_menu/update", {
         name,
         type: form.get("type") || "",
         category: form.get("category") || "",
@@ -11720,7 +11994,7 @@ function bindFoodMenuFeatureActions() {
         favorite: Boolean(form.get("favorite")),
         hidden: false,
       }), "已加入候选", event.submitter);
-      formEl.reset();
+      if (saved) formEl.reset();
     });
   }
   const bulkForm = $("#foodMenuBulkForm");
@@ -11730,11 +12004,11 @@ function bindFoodMenuFeatureActions() {
       const form = new FormData(bulkForm);
       const text = String(form.get("text") || "").trim();
       if (!text) return;
-      await runAction(() => postJson("/food_menu/bulk_update", {
+      const saved = await runAction(() => postJson("/food_menu/bulk_update", {
         text,
         favorite: Boolean(form.get("favorite")),
       }), "已批量加入候选", event.submitter);
-      bulkForm.reset();
+      if (saved) bulkForm.reset();
     });
   }
   document.querySelectorAll("[data-food-preset]").forEach((button) => {
@@ -11767,6 +12041,7 @@ function bindFoodMenuFeatureActions() {
     });
   });
   bindFoodMenuActions();
+  syncFoodMenuSelectionUi();
 }
 
 function renderSkillGrowth() {
@@ -16234,6 +16509,9 @@ function featureRelatedSettings(key) {
       smart_message_debounce_examples_limit: 8,
       tts_generation_mode: "fast_tag",
       tts_voice_language: "ja",
+      tts_delivery_mode: "voice_and_text",
+      tts_foreign_text_mode: "translation",
+      tts_conversion_scope: "partial",
       tts_conversion_provider_id: "",
       tts_extra_prompt: "",
       tts_frequency_control_mode: "global",
@@ -16251,7 +16529,7 @@ function featureRelatedSettings(key) {
       enable_tts_live_subtitle_sync: false,
       tts_live_subtitle_url: "",
       auto_voice_enabled: true,
-      auto_voice_full_conversion_enabled: true,
+      tts_conversion_scope: "full",
       auto_voice_max_chars: 80,
       auto_voice_probability: 20,
       auto_voice_cooldown_seconds: 180,
@@ -16315,7 +16593,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_proactive_only_mode") {
     if (settingKey === "proactive_prompt_template") return boolSetting("enable_llm_proactive_message");
-    if (["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"].includes(settingKey)) {
+    if (["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"].includes(settingKey)) {
       return boolSetting("enable_llm_proactive_persona_judge");
     }
     return true;
@@ -16420,6 +16698,8 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     post: "postprocess",
     llm: "postprocess",
   }[rawGenerationMode] || rawGenerationMode;
+  const deliveryMode = String(valueSetting("tts_delivery_mode", "voice_and_text") || "voice_and_text");
+  const voiceLanguage = String(valueSetting("tts_voice_language", "ja") || "ja");
   const globalOnly = new Set([
     "tts_constraint_mode",
     "tts_session_min_interval_seconds",
@@ -16440,7 +16720,6 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   const fastTagOnly = new Set([
     "tts_constraint_mode",
     "auto_voice_enabled",
-    "auto_voice_full_conversion_enabled",
     "auto_voice_max_chars",
     "auto_voice_probability",
     "auto_voice_cooldown_seconds",
@@ -16450,7 +16729,6 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     "main_user_mention_voice_prompt",
   ]);
   const autoVoiceChildren = new Set([
-    "auto_voice_full_conversion_enabled",
     "auto_voice_max_chars",
   ]);
   const legacyAutoVoiceChildren = new Set([
@@ -16470,6 +16748,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     "tts_live_subtitle_url",
   ]);
   if (generationMode === "postprocess" && fastTagOnly.has(settingKey)) return false;
+  if (settingKey === "tts_foreign_text_mode" && (deliveryMode === "voice_only" || voiceLanguage === "zh")) return false;
   if (autoVoiceChildren.has(settingKey) && !boolSetting("auto_voice_enabled")) return false;
   if (legacyAutoVoiceChildren.has(settingKey) && !boolSetting("auto_voice_enabled")) return false;
   if (localPlaybackChildren.has(settingKey) && !boolSetting("enable_tts_local_playback")) return false;
@@ -17167,6 +17446,12 @@ const featureDetailGuides = {
     enabled: "按子开关决定普通群回复、群主动插话和私聊主动是否引用。普通群回复默认同一对象只首条引用；用户引用 Bot 旧消息追问时，可选择引用当前消息或被引用的旧消息。",
     disabled: "这些消息不主动附带引用，用户需要从上下文判断回复对象。",
   },
+  enable_reply_interception_forward: {
+    summary: "把插件阻断、回复改写和主动消息拦截的诊断信息发送到指定私聊或群聊。",
+    trigger: "被动回复被插件阻断、发送前文本发生改写，或主动候选被取消/丢弃及发送阶段硬拦截时。",
+    enabled: "按三个子开关转发时间、来源、原会话、原因以及可用的前后文本；普通主动延后不会通知。",
+    disabled: "仍保留面板内的执行审计和未回复记录，但不会额外发送诊断通知。",
+  },
   enable_creative_writing: {
     summary: "Bot 会在闲暇时从生活小事、梦境、日记或阅读灵感中可选地写一点文本作品，并放入书柜。",
     trigger: "日程处于休息、摸鱼、读书、写字等空闲片段，且灵感概率命中时。",
@@ -17310,7 +17595,7 @@ function featureDetailPage(key) {
   const paramCardHtml = showParamCard ? `
         <article class="feature-detail-card feature-detail-card-params">
           <h3>关联参数</h3>
-          <form class="feature-param-list" data-feature-param-form="${escapeHtml(key)}">
+          <form class="feature-param-list ${key === "enable_tts_enhancement" ? "tts-config-layout" : ""}" data-feature-param-form="${escapeHtml(key)}">
             ${settingsRows}
             ${extraParamPanel}
             ${related.length ? `<button type="submit" class="feature-param-save">保存关联参数</button>` : ""}
@@ -17479,6 +17764,26 @@ function bindFeatureDetailActions() {
         input.addEventListener("change", () => {
           state.overview.settings = state.overview.settings || {};
           state.overview.settings.tts_generation_mode = input.value || "fast_tag";
+          // Preserve every unsaved field before rebuilding the conditional TTS sections.
+          form.querySelectorAll("[data-feature-param]").forEach((control) => {
+            const key = control.dataset.featureParam;
+            if (!key || isProviderConfigKey(key)) return;
+            state.overview.settings[key] = collectSettingValue(key, control);
+          });
+          renderFeatureSwitches();
+        });
+      }
+      if (
+        state.selectedFeatureKey === "enable_tts_enhancement"
+        && ["tts_delivery_mode", "tts_voice_language"].includes(input.dataset.featureParam)
+      ) {
+        input.addEventListener("change", () => {
+          state.overview.settings = state.overview.settings || {};
+          form.querySelectorAll("[data-feature-param]").forEach((control) => {
+            const key = control.dataset.featureParam;
+            if (!key || isProviderConfigKey(key)) return;
+            state.overview.settings[key] = collectSettingValue(key, control);
+          });
           renderFeatureSwitches();
         });
       }
@@ -17606,6 +17911,7 @@ function renderProviders() {
       providerAllowedInCurrentMode,
       providerNeedsLowLatency,
       currentProviderConfigMode,
+      normalizeModelFallbackOverrides,
       syncProviderConfigModeControls,
       setProviderConfigMode,
       postJson,
@@ -17642,6 +17948,13 @@ function currentProviderTimeoutValues() {
     return window.PrivateCompanionProviderTree.currentProviderTimeoutValues({ document, state });
   }
   return normalizeModelTimeoutOverrides(state.overview?.settings?.model_timeout_overrides);
+}
+
+function currentProviderFallbackValues() {
+  if (window.PrivateCompanionProviderTree?.currentProviderFallbackValues) {
+    return window.PrivateCompanionProviderTree.currentProviderFallbackValues({ document, state });
+  }
+  return normalizeModelFallbackOverrides(state.overview?.settings?.model_fallback_overrides);
 }
 
 function bindProviderToolbar() {
@@ -22253,25 +22566,25 @@ $("#worldbookAddMemberForm").addEventListener("submit", async (event) => {
     alert("关系节点必须使用有效 QQ 号或 B 站外部身份键");
     return;
   }
-  await runAction(() => postJson("/worldbook/member/update", {
+  const saved = await runAction(() => postJson("/worldbook/member/update", {
     user_id: userId,
     name: form.get("name") || userId,
     priority: Number(form.get("priority") || 120),
     enabled: true,
   }), "已添加关系节点", event.submitter);
-  event.currentTarget.reset();
+  if (saved) event.currentTarget.reset();
 });
 $("#worldbookAddGroupForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const groupId = String(form.get("group_id") || "").trim();
   if (!groupId) return;
-  await runAction(() => postJson("/worldbook/group/update", {
+  const saved = await runAction(() => postJson("/worldbook/group/update", {
     group_id: groupId,
     name: form.get("name") || groupId,
     enabled: true,
   }), "已添加群资料", event.submitter);
-  event.currentTarget.reset();
+  if (saved) event.currentTarget.reset();
 });
 $("#skillAddForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -22279,7 +22592,7 @@ $("#skillAddForm").addEventListener("submit", async (event) => {
   const name = String(form.get("name") || "").trim();
   if (!name) return;
   const level = Number(form.get("level") || 1);
-  await runAction(() => postJson("/skill/update", {
+  const saved = await runAction(() => postJson("/skill/update", {
     name,
     category: form.get("category") || "能力",
     level,
@@ -22289,7 +22602,7 @@ $("#skillAddForm").addEventListener("submit", async (event) => {
     hidden: false,
     frozen: false,
   }), "已添加技能", event.submitter);
-  event.currentTarget.reset();
+  if (saved) event.currentTarget.reset();
 });
 $("#resetTokenStatsBtn").addEventListener("click", async () => {
   const button = $("#resetTokenStatsBtn");
@@ -22404,9 +22717,10 @@ bindProviderToolbar();
   form.addEventListener("change", () => markModuleFormDirty(form));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await runAction(() => postJson("/settings/update", {
+    const saved = await runAction(() => postJson("/settings/update", {
       settings: collectFormSettings(`#${formId}`),
     }), formId === "runtimeSettingsForm" ? "已保存运行设置" : "已保存模块调参", event.submitter);
+    if (!saved) return;
     markModuleFormClean(form);
     if (formId === "privateAliasForm") {
       await loadAll();
@@ -22421,12 +22735,12 @@ $("#addUserForm").addEventListener("submit", async (event) => {
   const userId = String(form.get("user_id") || "").trim();
   if (!userId) return;
   state.selectedUserId = userId;
-  await runAction(() => postJson("/user/update", {
+  const saved = await runAction(() => postJson("/user/update", {
     user_id: userId,
     enabled: true,
     nickname: form.get("nickname") || "",
   }), "已添加私聊对象", event.submitter);
-  event.currentTarget.reset();
+  if (saved) event.currentTarget.reset();
 });
 
 $("#addGroupForm").addEventListener("submit", async (event) => {
@@ -22436,21 +22750,22 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
   const listMode = String(form.get("list_mode") || "none");
   if (!groupId) return;
   state.selectedGroupId = groupId;
-  await runAction(async () => {
-    await postJson("/group/update", { group_id: groupId, enabled: true });
+  const saved = await runAction(async () => {
+    let result = await postJson("/group/update", { group_id: groupId, enabled: true });
     if (listMode !== "none") {
       const group = state.overview?.group || {};
       const whitelist = new Set(group.whitelist || []);
       const blacklist = new Set(group.blacklist || []);
       if (listMode === "whitelist") whitelist.add(groupId);
       if (listMode === "blacklist") blacklist.add(groupId);
-      await postJson("/settings/update", {
+      result = await postJson("/settings/update", {
         group_whitelist_ids: [...whitelist],
         group_blacklist_ids: [...blacklist],
       });
     }
+    return result;
   }, "已添加群聊观测", event.submitter);
-  event.currentTarget.reset();
+  if (saved) event.currentTarget.reset();
 });
 
 $("#exportSnapshotBtn").addEventListener("click", async () => {
@@ -22614,21 +22929,35 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   }
   const values = currentProviderValues();
   const timeoutOverrides = currentProviderTimeoutValues();
+  const fallbackOverrides = currentProviderFallbackValues();
+  const deepseekPeak = window.PrivateCompanionProviderTree.currentDeepseekPeakValues({ document, state });
   const provider_config_mode = currentProviderConfigMode();
   const providers = {};
   Object.keys(providerLabels).forEach((key) => {
     if (visibleConfigKey(key)) providers[key] = values[key] || "";
   });
-  await runAction(
-    () => postJson("/settings/update", { settings: { provider_config_mode, model_timeout_overrides: timeoutOverrides }, providers, overwrite_provider_modes: true }),
+  providers.DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID = deepseekPeak.provider;
+  const saved = await runAction(
+    () => postJson("/settings/update", { settings: {
+      provider_config_mode,
+      model_timeout_overrides: timeoutOverrides,
+      model_fallback_overrides: fallbackOverrides,
+      enable_deepseek_peak_replacement: deepseekPeak.enabled,
+      deepseek_peak_windows: deepseekPeak.windows,
+      deepseek_peak_timezone: deepseekPeak.timezone,
+      deepseek_peak_match_keywords: deepseekPeak.keywords,
+    }, providers, overwrite_provider_modes: true }),
     "已保存模型配置，并覆盖 quick / precision 两套分流",
     $("#saveProvidersBtn")
   );
+  if (!saved) return;
   state.overview = state.overview || {};
   state.overview.settings = { ...(state.overview.settings || {}), provider_config_mode };
   state.providerDraft = { ...state.providerDraft, ...providers };
   state.providerTimeoutDraft = { ...timeoutOverrides };
+  state.providerFallbackDraft = { ...fallbackOverrides };
   state.overview.settings.model_timeout_overrides = { ...timeoutOverrides };
+  state.overview.settings.model_fallback_overrides = { ...fallbackOverrides };
   state.providerConfigMode = provider_config_mode;
   renderProviders();
 });

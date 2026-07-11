@@ -776,34 +776,85 @@ class TokenBudgetMixin:
                 normalized[key] = timeout
         return normalized
 
-    def _model_timeout_provider_key(self, task: str, provider_id: str = "", timeout_key: str = "") -> str:
-        explicit_key = str(timeout_key or "").strip()
-        if explicit_key in MODEL_PROVIDER_KEYS:
-            return explicit_key
-        task_key = str(task or "").strip()
-        provider_key = MODEL_TASK_PROVIDER_KEYS.get(task_key, "")
-        if not provider_key:
-            for prefix, candidate_key in MODEL_TASK_PROVIDER_PREFIXES:
-                if task_key.startswith(prefix):
-                    provider_key = candidate_key
-                    break
-        if provider_key and str(getattr(self, "provider_config_mode", "quick") or "quick") == "quick":
+    @staticmethod
+    def _normalize_model_fallback_overrides(value: Any) -> dict[str, str]:
+        raw = value
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw = {}
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for raw_key, raw_provider_id in raw.items():
+            key = str(raw_key or "").strip()
+            provider_id = _single_line(raw_provider_id, 160)
+            if key in MODEL_PROVIDER_KEYS and provider_id:
+                normalized[key] = provider_id
+        return normalized
+
+    def _model_provider_key_for_call(self, task: str, provider_id: str = "", explicit_key: str = "") -> str:
+        key = str(explicit_key or "").strip()
+        if key in MODEL_PROVIDER_KEYS:
+            provider_key = key
+        else:
+            task_key = str(task or "").strip()
+            provider_key = MODEL_TASK_PROVIDER_KEYS.get(task_key, "")
+            if not provider_key:
+                for prefix, candidate_key in MODEL_TASK_PROVIDER_PREFIXES:
+                    if task_key.startswith(prefix):
+                        provider_key = candidate_key
+                        break
+        mode = str(getattr(self, "provider_config_mode", "quick") or "quick")
+        if provider_key and mode == "quick":
             provider_key = MODEL_QUICK_TIMEOUT_KEYS.get(provider_key, provider_key)
-        overrides = getattr(self, "model_timeout_overrides", {})
-        if provider_key and isinstance(overrides, dict) and provider_key in overrides:
+        if provider_key:
             return provider_key
 
         selected_provider = str(provider_id or "").strip()
         config = getattr(self, "config", {})
-        if selected_provider and isinstance(overrides, dict):
-            matching_keys = [
-                key
-                for key in overrides
-                if key in MODEL_PROVIDER_KEYS
-                and str(_flat_get(config, key, "") or "").strip() == selected_provider
-            ]
-            if len(matching_keys) == 1:
-                return matching_keys[0]
+        if not selected_provider:
+            return ""
+        matching_keys = [
+            candidate_key
+            for candidate_key in MODEL_PROVIDER_KEYS
+            if str(_flat_get(config, candidate_key, "") or "").strip() == selected_provider
+        ]
+        if mode == "quick":
+            for candidate_key in (
+                "FAST_RESPONSE_PROVIDER_ID",
+                "COMPLEX_REASONING_PROVIDER_ID",
+                "CREATIVE_MODEL_PROVIDER_ID",
+                "PLUGIN_VISION_PROVIDER_ID",
+            ):
+                if candidate_key in matching_keys:
+                    return candidate_key
+        return matching_keys[0] if len(matching_keys) == 1 else ""
+
+    def _model_fallback_provider_id(self, provider_key: str, primary_provider_id: str = "") -> str:
+        key = str(provider_key or "").strip()
+        fallbacks = getattr(self, "model_fallback_overrides", {})
+        if key not in MODEL_PROVIDER_KEYS or not isinstance(fallbacks, dict):
+            return ""
+        fallback_id = _single_line(fallbacks.get(key), 160)
+        return fallback_id if fallback_id and fallback_id != str(primary_provider_id or "").strip() else ""
+
+    def _model_fallback_provider_for_call(
+        self,
+        *,
+        task: str,
+        primary_provider_id: str,
+        provider_key: str = "",
+    ) -> tuple[str, str]:
+        resolved_key = self._model_provider_key_for_call(task, primary_provider_id, provider_key)
+        return resolved_key, self._model_fallback_provider_id(resolved_key, primary_provider_id)
+
+    def _model_timeout_provider_key(self, task: str, provider_id: str = "", timeout_key: str = "") -> str:
+        provider_key = self._model_provider_key_for_call(task, provider_id, timeout_key)
+        overrides = getattr(self, "model_timeout_overrides", {})
+        if provider_key and isinstance(overrides, dict) and provider_key in overrides:
+            return provider_key
         return provider_key
 
     def _model_timeout_seconds_for_call(
@@ -835,8 +886,10 @@ class TokenBudgetMixin:
         timeout_key: str | None = None,
         timeout_seconds: float | None = None,
     ) -> str | None:
-        start = time.time()
         selected_provider = self._resolve_chat_provider_id(provider_id)
+        peak_router = getattr(self, "_apply_deepseek_peak_replacement", None)
+        if callable(peak_router) and (str(provider_id or "").strip() or str(getattr(self, "llm_provider_id", "") or "").strip()):
+            selected_provider = peak_router(selected_provider)
         task_key = _single_line(task, 40) or self._classify_llm_prompt(prompt)
         budget_exempt = self._is_llm_budget_exempt_task(task_key)
         if not budget_exempt and self._daily_token_soft_limit_should_defer(task_key):
@@ -850,67 +903,105 @@ class TokenBudgetMixin:
         if not budget_exempt and self._llm_daily_budget_remaining() == 0:
             self._record_llm_budget_skip(provider_id=selected_provider, task=task_key, prompt=prompt)
             return None
-        try:
-            if not selected_provider:
-                raise RuntimeError("未找到可用的 AstrBot 默认模型 Provider")
-            kwargs: dict[str, Any] = {"prompt": prompt, "chat_provider_id": selected_provider}
-            if max_tokens and max_tokens > 0:
-                kwargs["max_tokens"] = max_tokens
-            if system_prompt:
-                kwargs["system_prompt"] = system_prompt
-            effective_timeout = self._model_timeout_seconds_for_call(
-                task=task_key,
-                provider_id=selected_provider,
-                timeout_key=str(timeout_key or ""),
-                timeout_seconds=timeout_seconds,
-            )
+        provider_key, fallback_provider = self._model_fallback_provider_for_call(
+            task=task_key,
+            primary_provider_id=selected_provider,
+            provider_key=str(timeout_key or ""),
+        )
+        if fallback_provider and callable(peak_router):
+            fallback_provider = peak_router(fallback_provider)
+        candidates = [selected_provider]
+        if fallback_provider:
+            candidates.append(fallback_provider)
+        for attempt_index, attempt_provider in enumerate(candidates):
+            start = time.time()
             try:
-                request_call = self.context.llm_generate(**kwargs)
-                if effective_timeout is not None:
-                    resp = await asyncio.wait_for(request_call, timeout=effective_timeout)
-                else:
-                    resp = await request_call
-            except asyncio.TimeoutError as exc:
-                raise TimeoutError(f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回") from exc
-            if resp and resp.completion_text:
-                completion = resp.completion_text.strip()
+                if not attempt_provider:
+                    raise RuntimeError("未找到可用的 AstrBot 默认模型 Provider")
+                kwargs: dict[str, Any] = {"prompt": prompt, "chat_provider_id": attempt_provider}
+                if max_tokens and max_tokens > 0:
+                    kwargs["max_tokens"] = max_tokens
+                if system_prompt:
+                    kwargs["system_prompt"] = system_prompt
+                effective_timeout = self._model_timeout_seconds_for_call(
+                    task=task_key,
+                    provider_id=attempt_provider,
+                    timeout_key=provider_key or str(timeout_key or ""),
+                    timeout_seconds=timeout_seconds,
+                )
+                try:
+                    request_call = self.context.llm_generate(**kwargs)
+                    if effective_timeout is not None:
+                        resp = await asyncio.wait_for(request_call, timeout=effective_timeout)
+                    else:
+                        resp = await request_call
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回") from exc
+                if resp and resp.completion_text:
+                    completion = resp.completion_text.strip()
+                    if completion:
+                        self._record_llm_usage(
+                            provider_id=attempt_provider,
+                            task=task_key,
+                            prompt=prompt,
+                            completion=completion,
+                            elapsed_ms=int((time.time() - start) * 1000),
+                            success=True,
+                            resp=resp,
+                            budget_exempt=budget_exempt,
+                        )
+                        if attempt_index > 0:
+                            logger.info(
+                                "[PrivateCompanion] 主模型失败后备用模型调用成功: task=%s card=%s provider=%s",
+                                _single_line(task_key, 80) or "unknown",
+                                provider_key or "unknown",
+                                _single_line(attempt_provider, 120),
+                            )
+                        return completion
                 self._record_llm_usage(
-                    provider_id=selected_provider,
+                    provider_id=attempt_provider,
                     task=task_key,
                     prompt=prompt,
-                    completion=completion,
+                    completion="",
                     elapsed_ms=int((time.time() - start) * 1000),
-                    success=True,
-                    resp=resp,
+                    success=False,
+                    error="empty_response",
+                    resp=resp if "resp" in locals() else None,
                     budget_exempt=budget_exempt,
                 )
-                return completion
-            self._record_llm_usage(
-                provider_id=selected_provider,
-                task=task_key,
-                prompt=prompt,
-                completion="",
-                elapsed_ms=int((time.time() - start) * 1000),
-                success=False,
-                error="empty_response",
-                resp=resp if "resp" in locals() else None,
-                budget_exempt=budget_exempt,
-            )
-        except Exception as e:
-            self._record_llm_usage(
-                provider_id=selected_provider,
-                task=task_key,
-                prompt=prompt,
-                completion="",
-                elapsed_ms=int((time.time() - start) * 1000),
-                success=False,
-                error=str(e),
-                budget_exempt=budget_exempt,
-            )
-            logger.warning(
-                "[PrivateCompanion] LLM 调用失败: task=%s provider=%s error=%s",
-                _single_line(task_key, 80) or "unknown",
-                _single_line(selected_provider, 120) or "default",
-                _single_line(e, 160),
-            )
+                if attempt_index == 0 and fallback_provider:
+                    logger.warning(
+                        "[PrivateCompanion] 主模型返回空结果,尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s",
+                        _single_line(task_key, 80) or "unknown",
+                        provider_key or "unknown",
+                        _single_line(attempt_provider, 120),
+                        _single_line(fallback_provider, 120),
+                    )
+            except Exception as e:
+                self._record_llm_usage(
+                    provider_id=attempt_provider,
+                    task=task_key,
+                    prompt=prompt,
+                    completion="",
+                    elapsed_ms=int((time.time() - start) * 1000),
+                    success=False,
+                    error=str(e),
+                    budget_exempt=budget_exempt,
+                )
+                if attempt_index == 0 and fallback_provider:
+                    logger.warning(
+                        "[PrivateCompanion] 主模型调用失败,尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s error=%s",
+                        _single_line(task_key, 80) or "unknown",
+                        provider_key or "unknown",
+                        _single_line(attempt_provider, 120) or "default",
+                        _single_line(fallback_provider, 120),
+                        _single_line(e, 160),
+                    )
+                    continue
+                logger.warning(
+                    "[PrivateCompanion] LLM 调用失败: task=%s provider=%s error=%s",
+                    _single_line(task_key, 80) or "unknown",
+                    _single_line(attempt_provider, 120) or "default",
+                    _single_line(e, 160),
+                )
         return None

@@ -430,12 +430,57 @@ class ProactiveMixin:
         )
 
     def _effective_group_interject_min_interval_minutes(self) -> int:
-        return self._effective_proactive_int(
+        base_interval = self._effective_proactive_int(
             "group_interject_min_interval_minutes",
             _safe_int(getattr(self, "group_interject_min_interval_minutes", 180), 180, 10, 1440),
             minimum=1,
             maximum=1440,
         )
+        profile = self._cycle_proactive_frequency_profile()
+        return max(1, min(1440, int(round(base_interval * profile["group_interval_multiplier"]))))
+
+    def _cycle_proactive_frequency_profile(self) -> dict[str, Any]:
+        neutral = {
+            "phase": "neutral",
+            "private_interval_multiplier": 1.0,
+            "group_interval_multiplier": 1.0,
+            "group_probability_multiplier": 1.0,
+        }
+        if not bool(getattr(self, "enable_cycle_state", True)):
+            return neutral
+        data = getattr(self, "data", {})
+        state = data.get("daily_state") if isinstance(data, dict) else {}
+        if not isinstance(state, dict) or str(state.get("date") or "") not in {"", _today_key()}:
+            return neutral
+        cycle_text = _single_line(state.get("body_cycle"), 100)
+        if not cycle_text or cycle_text in {"无明显周期影响", "不处于生理期", "生理期模拟未开启"}:
+            return neutral
+        if "后" in cycle_text or "恢复" in cycle_text:
+            return {
+                "phase": "recovery",
+                "private_interval_multiplier": 1.05,
+                "group_interval_multiplier": 1.08,
+                "group_probability_multiplier": 0.92,
+            }
+        if "前" in cycle_text:
+            return {
+                "phase": "pre",
+                "private_interval_multiplier": 1.08,
+                "group_interval_multiplier": 1.12,
+                "group_probability_multiplier": 0.88,
+            }
+        if "生理期" in cycle_text:
+            return {
+                "phase": "period",
+                "private_interval_multiplier": 1.18,
+                "group_interval_multiplier": 1.25,
+                "group_probability_multiplier": 0.76,
+            }
+        return neutral
+
+    def _cycle_group_interject_probability(self, probability: float) -> float:
+        profile = self._cycle_proactive_frequency_profile()
+        return max(0.0, min(1.0, float(probability) * profile["group_probability_multiplier"]))
 
     def _effective_group_interject_max_daily(self) -> int:
         if bool(self._proactive_intensity_effect("ignore_group_interject_daily_limit", False)):
@@ -1132,7 +1177,10 @@ class ProactiveMixin:
         return min(max_multiplier, 1.0 + active_count * 0.35)
 
     def _effective_min_interval_seconds(self, user: dict[str, Any]) -> int:
-        multiplier = self._unanswered_interval_multiplier(user)
+        multiplier = (
+            self._unanswered_interval_multiplier(user)
+            * self._cycle_proactive_frequency_profile()["private_interval_multiplier"]
+        )
         return int(self._effective_user_min_interval_minutes(user) * 60 * multiplier)
 
     def _bot_proactive_drive(self, user: dict[str, Any] | None = None, *, now: float | None = None) -> dict[str, Any]:
@@ -1882,6 +1930,7 @@ class ProactiveMixin:
         event_sources = (
             ("pending_followup", self._pick_pending_followup_event(user, now)),
             ("birthday_celebration", self._pick_birthday_celebration_event(user, now)),
+            ("meal_care", self._pick_meal_care_event(user, now=now)),
             ("daily_greeting", self._pick_daily_greeting_event(user, now)),
             ("birthday_curiosity", self._pick_birthday_curiosity_event(user, now)),
             ("habit", self._habit_proactive_event_for_user(user, now=now)),
@@ -2091,6 +2140,13 @@ class ProactiveMixin:
         if delay_hours is not None and intensity_factor > 0:
             widen = max(0.85, min(1.8, 1.25 - intensity_factor * 0.45))
             delay_hours = (delay_hours[0] * widen, delay_hours[1] * widen)
+        if delay_hours is not None:
+            cycle_multiplier = self._cycle_proactive_frequency_profile()["private_interval_multiplier"]
+            if cycle_multiplier > 1.0:
+                delay_hours = (
+                    delay_hours[0] * cycle_multiplier,
+                    delay_hours[1] * cycle_multiplier,
+                )
         planned_event = self._pick_best_planned_event(user, now)
         default_reason = (
             str(planned_event.get("reason") or "")
@@ -2323,7 +2379,7 @@ class ProactiveMixin:
         *,
         now: float | None = None,
     ) -> bool:
-        if not self.enable_daily_greetings:
+        if not self.enable_daily_greetings and not bool(getattr(self, "enable_meal_care_proactive", True)):
             return False
         if str(user.get("planned_proactive_source") or "") == "timer":
             return False
@@ -2331,11 +2387,17 @@ class ProactiveMixin:
         if current_next <= 0:
             return False
         now = now or _now_ts()
-        event = self._pick_daily_greeting_event(user, now)
-        if not isinstance(event, dict):
+        events = []
+        if self.enable_daily_greetings:
+            events.append(self._pick_daily_greeting_event(user, now))
+        if bool(getattr(self, "enable_meal_care_proactive", True)):
+            events.append(self._pick_meal_care_event(user, now=now))
+        valid_events = [item for item in events if isinstance(item, dict)]
+        if not valid_events:
             return False
+        event = min(valid_events, key=lambda item: self._timestamp_from_story_event(item, str(item.get("reason") or "check_in")))
         reason = str(event.get("reason") or "")
-        if not self._is_sticky_greeting_reason(reason):
+        if not (self._is_sticky_greeting_reason(reason) or bool(event.get("_daily_meal_care"))):
             return False
         scheduled = self._timestamp_from_story_event(event, reason)
         if scheduled <= 0 or scheduled >= current_next - 60:
@@ -2371,6 +2433,10 @@ class ProactiveMixin:
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
         user["planned_proactive_quota_exempt"] = bool(event.get("_free_screen_peek"))
+        context_key = _single_line(event.get("context_key"), 60)
+        context = event.get("context")
+        if context_key and isinstance(context, dict):
+            user[context_key] = dict(context)
         return True
 
     def _is_proactive_plan_stale(self, user: dict[str, Any], *, now: float | None = None) -> bool:

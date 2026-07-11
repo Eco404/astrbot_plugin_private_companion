@@ -1361,6 +1361,140 @@ class ProactiveMessageMixin:
             parts.append(f"用户级备注：{note}")
         return "；".join(parts)
 
+    @staticmethod
+    def _normalize_proactive_address_token(value: Any) -> str:
+        token = _single_line(value, 24).strip(" -*`_【】[]（）()<>《》\"'“”‘’")
+        token = re.sub(r"^[：:]+|[：:，,。.!！?？~～…]+$", "", token).strip()
+        return token
+
+    def _proactive_recipient_allowed_names(self, user: dict[str, Any] | None, name: str = "") -> list[str]:
+        if not isinstance(user, dict):
+            user = {}
+        raw_names: list[Any] = [
+            name,
+            user.get("nickname"),
+            user.get("last_display_name"),
+            user.get("display_name"),
+        ]
+        for key in ("observed_display_names", "aliases"):
+            values = user.get(key)
+            if isinstance(values, list):
+                raw_names.extend(values[:12])
+        names: list[str] = []
+        for value in raw_names:
+            token = self._normalize_proactive_address_token(value)
+            if token and not token.isdigit() and token not in names:
+                names.append(token)
+        return names[:16]
+
+    def _proactive_persona_address_candidates(self) -> list[str]:
+        sources = [
+            str(getattr(self, "persona_proactive_voice_prompt", "") or ""),
+            str(getattr(self, "persona_conversation_voice_prompt", "") or ""),
+        ]
+        try:
+            sources.append(str(self._get_default_persona_prompt() or ""))
+        except Exception:
+            pass
+        patterns = (
+            r"(?:开头常用|常用开头|常用称呼|专属称呼|称呼偏好)\s*[:：]\s*([^\n]{1,100})",
+            r"(?:特定用户|主要用户|专属用户)\s*[（(]\s*([^）)\n]{1,100})[）)]",
+        )
+        fillers = {
+            "哦", "嗯", "唔", "诶", "欸", "啊", "嗨", "嘿", "喂", "哈哈", "早安", "晚安",
+            "你", "您", "对方", "用户", "昵称", "名字", "无", "暂无", "无固定称呼",
+        }
+        candidates: list[str] = []
+        for source in sources:
+            for pattern in patterns:
+                for match in re.finditer(pattern, source, flags=re.IGNORECASE):
+                    for part in re.split(r"[/／、,，;；|]", match.group(1)):
+                        token = self._normalize_proactive_address_token(part)
+                        if (
+                            2 <= len(token) <= 16
+                            and token not in fillers
+                            and not any(word in token for word in ("开头", "称呼", "用户", "例如", "比如", "可用"))
+                            and token not in candidates
+                        ):
+                            candidates.append(token)
+        return candidates[:24]
+
+    def _proactive_forbidden_recipient_addresses(self, user: dict[str, Any] | None, name: str = "") -> list[str]:
+        if not isinstance(user, dict) or self._private_user_role(user) != "friend":
+            return []
+        allowed = self._proactive_recipient_allowed_names(user, name)
+        forbidden: list[str] = []
+        for candidate in self._proactive_persona_address_candidates():
+            if any(candidate == item or candidate in item or item in candidate for item in allowed):
+                continue
+            forbidden.append(candidate)
+        return forbidden
+
+    def _format_proactive_recipient_identity_guard(self, user: dict[str, Any] | None, name: str = "") -> str:
+        if not isinstance(user, dict):
+            return ""
+        role = self._private_user_role(user)
+        labeler = getattr(self, "_private_user_role_label", None)
+        role_label = labeler(role) if callable(labeler) else ("主要用户" if role == "owner" else "次要用户")
+        user_id = _single_line(user.get("user_id") or user.get("id"), 48)
+        allowed = self._proactive_recipient_allowed_names(user, name)
+        forbidden = self._proactive_forbidden_recipient_addresses(user, name)
+        lines = [
+            "【当前主动消息收件人身份锚点】",
+            f"- 稳定 ID：{user_id or '未知'}；关系角色：{role_label}。",
+            f"- 当前对象可用称呼：{'、'.join(allowed) if allowed else '优先直接用“你”，不要猜名字'}。",
+            "- 显示名只能作为当前稳定 ID 的别名，不能把其他私聊对象的关系、称呼或记忆套进来。",
+        ]
+        if role == "friend":
+            lines.append("- 当前对象不是主要用户/恋人/专属陪伴目标；全局人格与主动风格里的固定人名只作语气示例，不要直接拿来称呼当前对象。")
+            if forbidden:
+                lines.append(f"- 这些固定称呼不属于当前对象：{'、'.join(forbidden)}。需要称呼时使用上面的当前昵称，也可以自然省略称呼。")
+        boundary_getter = getattr(self, "_format_private_user_boundary_hint", None)
+        if callable(boundary_getter):
+            try:
+                boundary = str(boundary_getter(user) or "").strip()
+            except Exception:
+                boundary = ""
+            if boundary:
+                lines.append(boundary)
+        return "\n".join(lines)
+
+    def _wrong_proactive_recipient_address(self, text: Any, user: dict[str, Any] | None, name: str = "") -> str:
+        cleaned = _single_line(text, 600)
+        if not cleaned:
+            return ""
+        for address in self._proactive_forbidden_recipient_addresses(user, name):
+            if not address:
+                continue
+            direct_address_pattern = (
+                rf"(?:^|[\n，,。.!！?？~～]\s*)"
+                rf"{re.escape(address)}"
+                rf"(?=$|[\s，,、：:。.!！?？~～])"
+            )
+            if re.search(direct_address_pattern, cleaned):
+                return address
+        return ""
+
+    def _repair_proactive_recipient_address(
+        self,
+        text: str,
+        user: dict[str, Any] | None,
+        name: str = "",
+    ) -> tuple[str, str]:
+        cleaned = str(text or "").strip()
+        wrong = self._wrong_proactive_recipient_address(cleaned, user, name)
+        if not wrong:
+            return cleaned, ""
+        allowed = self._proactive_recipient_allowed_names(user, name)
+        replacement = allowed[0] if allowed else "你"
+        pattern = (
+            rf"(^|[\n，,。.!！?？~～]\s*)"
+            rf"{re.escape(wrong)}"
+            rf"(?=$|[\s，,、：:。.!！?？~～])"
+        )
+        repaired, count = re.subn(pattern, lambda match: f"{match.group(1)}{replacement}", cleaned, count=1)
+        return (repaired, wrong) if count else (cleaned, "")
+
     def _default_proactive_prompt_template(self) -> str:
         return """
 你正在给 {{name}} 发一条主动私聊。这不是回复刚收到的新消息，也不是任务说明、状态汇报或例行打卡。
@@ -1580,7 +1714,7 @@ class ProactiveMessageMixin:
                 top_k=5,
                 max_chars=760,
             )
-            if memory_context:
+        if memory_context:
                 prompt = (
                     f"{prompt.rstrip()}\n\n"
                     "<!-- private_companion_memory_generation_context_v1 -->\n"
@@ -1588,6 +1722,9 @@ class ProactiveMessageMixin:
                     f"{memory_context}\n"
                     "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
                 )
+        identity_guard = self._format_proactive_recipient_identity_guard(user, name)
+        if identity_guard:
+            prompt = f"{prompt.rstrip()}\n\n{identity_guard}"
         return prompt.strip()
 
     def _format_proactive_generation_intent_hint(
@@ -1670,6 +1807,10 @@ class ProactiveMessageMixin:
             if balance_hint:
                 lines.append(balance_hint)
             lines.append("这是用户明确开启的余额感知事件：允许按人格轻轻要零花钱或补给，但只提一次，不催促、不索要回复，也不把服务余额写成用户欠款。")
+        elif reason == "meal_care":
+            lines.append("这是饭点关心：自然问用户这一顿吃了没有。问题主体必须是用户，不要回答成自己吃了什么；像熟悉的人顺口惦记一句，不说教、不盘问，也不要同一条里连续列很多问题。")
+        elif reason == "meal_care_followup":
+            lines.append("这是一次且仅一次的吃饭补问：根据话题判断是确认后来有没有吃上，还是问已经吃过的具体内容。保持很短、低压力，不责怪用户没回，也不要重复上一句原话。")
         elif reason == "birthday_eve_hint":
             lines.append("这是生日前夜的一点留白：可以温柔地提醒对方明天多偏爱自己一点，但不要说出生日、准备、惊喜或任何剧透；一小句就停，不制造期待压力。")
         elif reason == "birthday_makeup":
@@ -1865,11 +2006,34 @@ class ProactiveMessageMixin:
         return "\n".join(captured_text_parts).strip()
 
     def _framework_context_for_proactive_agent(self) -> Any:
-        context = getattr(self, "context", None)
-        tool_manager_getter = getattr(context, "get_llm_tool_manager", None)
-        if not callable(tool_manager_getter):
-            return context
-        return _ProactiveFrameworkContextProxy(context, {"AIsearch"})
+        # AstrBot 4.26.4 validates this value as a concrete Context instance.
+        # Tool filtering therefore happens on the request ToolSet after the
+        # framework has built it, rather than by wrapping the Context object.
+        return getattr(self, "context", None)
+
+    def _filter_incompatible_proactive_framework_tools(
+        self,
+        req: ProviderRequest,
+        names: set[str] | None = None,
+    ) -> list[str]:
+        tool_set = getattr(req, "func_tool", None)
+        remove_tool = getattr(tool_set, "remove_tool", None)
+        if not callable(remove_tool):
+            return []
+        excluded = {str(name).strip() for name in (names or {"AIsearch"}) if str(name).strip()}
+        existing = {
+            str(getattr(tool, "name", "") or "").strip()
+            for tool in list(getattr(tool_set, "tools", []) or [])
+        }
+        removed = sorted(name for name in excluded if name in existing)
+        for name in removed:
+            remove_tool(name)
+        if removed:
+            logger.info(
+                "[PrivateCompanion] 主动主链已隔离不兼容全局工具: %s",
+                ",".join(removed),
+            )
+        return removed
 
     def _framework_agent_meta_summary_leak(self, text: str) -> bool:
         cleaned = _single_line(text, 500).lower()
@@ -2056,12 +2220,14 @@ class ProactiveMessageMixin:
                     req.conversation = conv
 
                     async def _runner_factory():
-                        return await build_main_agent(
+                        runner = await build_main_agent(
                             event=event,
                             plugin_context=self._framework_context_for_proactive_agent(),
                             config=build_cfg,
                             req=req,
                         )
+                        self._filter_incompatible_proactive_framework_tools(req)
+                        return runner
 
                     result, captured_tool_sends = await self._capture_framework_send_message_calls(
                         target_session=umo,
@@ -2277,6 +2443,10 @@ class ProactiveMessageMixin:
                 history = await self._recent_private_conversation_for_proactive_review(user, limit=6)
             except Exception:
                 history = ""
+        recipient_identity = self._format_proactive_recipient_identity_guard(
+            user,
+            _single_line(user.get("nickname"), 40) if isinstance(user, dict) else "",
+        )
         prompt = f"""
 你要把一条“参考意图”改写成当前人格会自然说出的聊天正文。参考意图只说明要表达什么，不是要照抄的句子。
 
@@ -2288,6 +2458,9 @@ class ProactiveMessageMixin:
 
 【最近对话】
 {history or "（无可用历史）"}
+
+【当前收件人】
+{recipient_identity or "当前收件人身份未知；不要猜测名字或套用人格中的专属称呼。"}
 
 【场景】
 {_single_line(scene, 180) or "普通聊天回执"}
@@ -2337,6 +2510,29 @@ class ProactiveMessageMixin:
         cleaned = _single_line(text, 500)
         if not cleaned:
             return {"decision": "drop", "reason": "主动消息为空", "hard": True}
+        wrong_address = self._wrong_proactive_recipient_address(
+            cleaned,
+            user,
+            _single_line(user.get("nickname"), 40),
+        )
+        if wrong_address:
+            repaired_text, repaired_address = self._repair_proactive_recipient_address(
+                cleaned,
+                user,
+                _single_line(user.get("nickname"), 40),
+            )
+            if repaired_address:
+                return {
+                    "decision": "rewrite",
+                    "reason": f"已把收件人称呼纠正为当前昵称：{repaired_address}",
+                    "text": repaired_text,
+                    "hard": True,
+                }
+            return {
+                "decision": "drop",
+                "reason": f"主动正文无法确认收件人称呼：{wrong_address}",
+                "hard": True,
+            }
         outbound_guard = self._validate_proactive_outbound_candidate(
             cleaned,
             reason=reason,
@@ -2915,6 +3111,24 @@ class ProactiveMessageMixin:
         if decision == "rewrite" and not reviewed_text:
             decision = "drop"
             note = _single_line(f"{note or 'rewrite result is empty'}; candidate dropped", 120)
+        if decision == "rewrite" and reviewed_text:
+            recipient_name = _single_line(user.get("nickname"), 40) if isinstance(user, dict) else ""
+            reviewed_text, repaired_address = self._repair_proactive_recipient_address(
+                reviewed_text,
+                user,
+                recipient_name,
+            )
+            remaining_wrong_address = self._wrong_proactive_recipient_address(
+                reviewed_text,
+                user,
+                recipient_name,
+            )
+            if remaining_wrong_address:
+                decision = "drop"
+                reviewed_text = ""
+                note = f"最终改写含其他用户专属称呼：{remaining_wrong_address}"
+            elif repaired_address:
+                note = _single_line(f"{note or 'final rewrite'}; corrected recipient address {repaired_address}", 120)
         return {
             "decision": decision,
             "text": reviewed_text if decision == "rewrite" else "",
@@ -2995,6 +3209,10 @@ class ProactiveMessageMixin:
             action_context=review_context,
         )
         proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
+        recipient_identity = self._format_proactive_recipient_identity_guard(
+            user,
+            _single_line(user.get("nickname"), 40),
+        )
         runtime_context = self._format_proactive_review_runtime_context(user)
         local_context = "；".join(
             part
@@ -3040,6 +3258,9 @@ reason={reason or "check_in"}; action={action or "message"}; topic={_single_line
 
 [Proactive voice]
 {proactive_voice or "(natural, low-pressure private chat)"}
+
+[Recipient identity boundary]
+{recipient_identity or "Use only the current recipient identity. Do not guess or copy an exclusive name from persona examples."}
 
 [Candidate]
 {text}
@@ -3417,6 +3638,17 @@ Output:
         )
         if not cleaned:
             return "", "在动作边界清洗后为空"
+        cleaned, repaired_address = self._repair_proactive_recipient_address(cleaned, user, name)
+        if repaired_address:
+            logger.warning(
+                "[PrivateCompanion] 主动消息已纠正串用户句首称呼: user=%s wrong=%s replacement=%s",
+                _single_line(user.get("user_id"), 40),
+                repaired_address,
+                _single_line(name or user.get("nickname"), 40) or "你",
+            )
+        remaining_wrong_address = self._wrong_proactive_recipient_address(cleaned, user, name)
+        if remaining_wrong_address:
+            return "", f"含其他用户专属称呼：{remaining_wrong_address}"
         if self._is_overabstract_proactive_text(cleaned, action=action):
             cleaned = self._ground_proactive_text(
                 cleaned,
@@ -3452,6 +3684,16 @@ Output:
         )
         if not reviewed:
             return "", "回复空气复核后为空"
+        reviewed, repaired_review_address = self._repair_proactive_recipient_address(reviewed, user, name)
+        if repaired_review_address:
+            logger.warning(
+                "[PrivateCompanion] 主动复核结果已纠正串用户称呼: user=%s wrong=%s",
+                _single_line(user.get("user_id"), 40),
+                repaired_review_address,
+            )
+        remaining_review_address = self._wrong_proactive_recipient_address(reviewed, user, name)
+        if remaining_review_address:
+            return "", f"回复空气复核引入其他用户专属称呼：{remaining_review_address}"
         reviewed = self._trim_proactive_status_inventory(reviewed)
         reviewed = self._trim_performative_self_state_tail(reviewed)
         finalized = self._normalize_proactive_sentence_flow(reviewed)
@@ -4094,6 +4336,8 @@ Output:
             return "都这个点了,你还没收工吗。别一直绷着啦。"
         if reason == "noon_greeting":
             return "中午了诶。你吃东西没有,别又随便糊弄过去。"
+        if reason in {"meal_care", "meal_care_followup"}:
+            return "到饭点了。你吃东西没有呀？"
         if reason in {"activity_share", "diary_share", "background_schedule"}:
             return "有件小事想跟你说一下。"
         return "刚好到能休息一小会儿的时候,想问你一句。"
@@ -5233,10 +5477,19 @@ Output:
         scene = await self._build_photo_scene_prompt(user, name, reason)
         workflow_kind = scene.get("kind", "text2img")
         session_key = str(user.get("umo") or user.get("user_id") or name)
+        reference_image_path = ""
+        if bool(scene.get("use_persona_reference")):
+            # Character-bearing photo_text scenes need identity continuity even when
+            # their rendering workflow is text2img rather than selfie.
+            reference_image_path = await self._photo_persona_reference_image_for_kind_async(
+                "selfie",
+                allow_daily_outfit=True,
+            )
         backend_name, image_path, workflow_note = await self._generate_photo_image(
             workflow_kind=workflow_kind,
             prompt_text=scene["prompt"],
             session_key=session_key,
+            reference_image_path=reference_image_path,
         )
         if not image_path:
             counted_attempt = self._photo_generation_failure_counts_as_attempt(workflow_note)
@@ -5259,6 +5512,7 @@ Output:
             f"后端：{backend_name}\n"
             f"图片路径：{image_path}\n"
             f"画面：{scene['caption']}\n"
+            f"人物参考图：{'已使用' if reference_image_path else '未使用'}\n"
             f"生图提示：{_single_line(scene['prompt'], 240)}"
         )
 
@@ -5780,6 +6034,22 @@ Output:
             if values:
                 fragments.append(f"{label}: {' / '.join(values)}")
         return _single_line("; ".join(fragments), 280)
+
+    def _format_weather_for_prompt(self) -> str:
+        data = getattr(self, "data", None)
+        weather = data.get("daily_weather") if isinstance(data, dict) else None
+        if not isinstance(weather, dict):
+            return ""
+        formatter = getattr(self, "_weather_summary_text", None)
+        if callable(formatter):
+            try:
+                text = _single_line(formatter(weather), 120)
+                if text and text != "暂无天气信息":
+                    return text
+            except Exception:
+                pass
+        text = _single_line(weather.get("prompt"), 120)
+        return "" if text == "暂无天气信息" else text
 
     def _build_daily_outfit_photo_prompt(
         self,
@@ -6788,7 +7058,7 @@ Output:
 
     async def _build_photo_scene_prompt(
         self, user: dict[str, Any], name: str, reason: str
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         persona = self._get_default_persona_prompt()
         state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
@@ -6833,6 +7103,7 @@ Output:
 输出 JSON：
 {{
   "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
+  "use_persona_reference": true,
   "prompt": "English image-generation prompt in this form: Positive prompt: subject, appearance, outfit, scene, lighting, camera, composition, style. Negative prompt: cropped head, faceless, mirror selfie unless explicitly requested, full-length mirror shot, phone covering face, text, watermark, logo, nsfw. Do not write chat tone or explanations.",
   "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
 }}
@@ -6846,6 +7117,7 @@ Output:
 6. 不要包含 NSFW、隐私信息、用户真实电脑画面。
 7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
 8. 不要默认生成全身镜/对镜自拍/手机挡脸自拍；只有话题、动机或当前日程明确出现“镜前/对镜/镜子/全身镜/mirror”时才允许。普通穿搭图用当前地点里的手持自拍、半身或四分之三身环境人像。
+9. `use_persona_reference` 仅表示画面中是否出现 Bot 本人：自拍、人物生活照、人物穿搭图填 true；纯风景、食物、桌面物品、动物、手机屏幕或生日卡填 false。
 """.strip()
         text = await self._llm_call(
             prompt,
@@ -6858,16 +7130,40 @@ Output:
             kind = _single_line(payload.get("kind"), 20).lower()
             image_prompt = _single_line(payload.get("prompt"), 600)
             caption = _single_line(payload.get("caption"), 180)
+            raw_use_reference = payload.get("use_persona_reference")
+            if isinstance(raw_use_reference, bool):
+                use_persona_reference = raw_use_reference
+            elif str(raw_use_reference or "").strip().lower() in {"true", "1", "yes", "是", "使用"}:
+                use_persona_reference = True
+            elif str(raw_use_reference or "").strip().lower() in {"false", "0", "no", "否", "不使用"}:
+                use_persona_reference = False
+            else:
+                use_persona_reference = False
         else:
             kind = "text2img"
             image_prompt = _single_line(text, 600)
             caption = image_prompt
+            # When the scene model is unavailable, prefer a stable character photo
+            # for ordinary proactive sharing instead of allowing an arbitrary face.
+            use_persona_reference = reason != "birthday_celebration"
         if kind not in {"selfie", "portrait", "自拍", "人像", "text2img", "scene", "photo", "风景"}:
             kind = "text2img"
         if kind in {"portrait", "自拍", "人像"}:
             kind = "selfie"
         if kind in {"scene", "photo", "风景"}:
             kind = "text2img"
+        if kind == "selfie":
+            use_persona_reference = True
+        elif isinstance(payload, dict) and payload.get("use_persona_reference") is None:
+            character_text = f"{image_prompt} {caption}"
+            use_persona_reference = bool(
+                re.search(
+                    r"\b(?:girl|woman|female|character|portrait|solo|face|hairstyle|outfit)\b",
+                    character_text,
+                    flags=re.I,
+                )
+                or any(token in character_text for token in ("人物", "角色", "女孩", "少女", "自拍", "人像", "穿搭"))
+            )
         if not image_prompt:
             current = schedule_context
             image_prompt = (
@@ -6892,7 +7188,12 @@ Output:
             )
         if not caption:
             caption = "今天看到一个很适合拍下来分享的小画面。"
-        return {"kind": kind, "prompt": image_prompt, "caption": caption}
+        return {
+            "kind": kind,
+            "prompt": image_prompt,
+            "caption": caption,
+            "use_persona_reference": use_persona_reference,
+        }
 
     def _get_photo_style_instruction(self) -> tuple[str, str]:
         style = str(self.photo_generation_style or "真实").strip()
@@ -7981,6 +8282,27 @@ Output:
         note = f"same_origin={same_origin},auth={auth_sent},custom={custom_count},referer={any(key.lower() == 'referer' for key in headers)}"
         return headers, note
 
+    def _external_image_download_target(self, target_url: str) -> tuple[Any, bool]:
+        """Preserve the exact encoding of temporary object-storage signed URLs."""
+        target = str(target_url or "").strip()
+        lowered = target.lower()
+        signed_markers = (
+            "x-amz-algorithm=",
+            "x-amz-credential=",
+            "x-amz-signature=",
+            "x-oss-signature=",
+        )
+        if not any(marker in lowered for marker in signed_markers):
+            return target, False
+        try:
+            from yarl import URL
+
+            # aiohttp normally canonicalizes URLs. Re-quoting even one signed path or
+            # query byte makes OSS/S3 reject an otherwise valid temporary URL with 403.
+            return URL(target, encoded=True), True
+        except Exception:
+            return target, False
+
     def _external_image_timeout_note(self, *, reference: bool = False, download: bool = False, label: str = "") -> str:
         timeout_seconds = _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1)
         if label:
@@ -8080,6 +8402,8 @@ Output:
             import aiohttp
 
             headers, header_note = self._external_image_download_headers(target)
+            request_target, signed_url_preserved = self._external_image_download_target(target)
+            header_note = f"{header_note},signed_url_preserved={signed_url_preserved}"
             use_environment_proxy = bool(getattr(self, "external_image_download_use_environment_proxy", False))
             proxy_url = self._external_image_download_proxy_url()
             timeout = aiohttp.ClientTimeout(
@@ -8093,7 +8417,7 @@ Output:
             request_options: dict[str, Any] = {"headers": headers, "timeout": timeout}
             if proxy_url:
                 request_options["proxy"] = proxy_url
-            async with session.get(target, **request_options) as response:
+            async with session.get(request_target, **request_options) as response:
                 if response.status >= 400:
                     logger.info(
                         "[PrivateCompanion] 下载在线生图结果失败: status=%s headers=%s url=%s",
@@ -9339,6 +9663,13 @@ Output:
         path = match.group(1).strip().splitlines()[0].strip()
         return path if path and os.path.exists(path) else ""
 
+    def _extract_action_photo_caption(self, action_context: str) -> str:
+        text = str(action_context or "")
+        match = re.search(r"(?:画面|图片画面|画面草稿)[:：]\s*(.+)", text)
+        if not match:
+            return ""
+        return _single_line(match.group(1).splitlines()[0], 220)
+
     def _build_outbound_chain(
         self,
         text: str,
@@ -10026,14 +10357,35 @@ Output:
                 umo,
                 _single_line(hit, 40),
             )
+            notifier = getattr(self, "_schedule_reply_interception_forward", None)
+            if callable(notifier):
+                notifier(
+                    "proactive_block",
+                    source="主动发送组件校验",
+                    reason=f"命中违禁词：{_single_line(hit, 40)}",
+                    source_session=umo,
+                    before=self._chain_text_for_forbidden_recall(chain),
+                )
             return
         processed_chain = await self._trigger_proactive_decorating_hooks(umo, chain)
         if not processed_chain:
+            notifier = getattr(self, "_schedule_reply_interception_forward", None)
+            if callable(notifier):
+                notifier(
+                    "proactive_block",
+                    source="主动发送装饰钩子",
+                    reason="装饰钩子清空了待发送消息",
+                    source_session=umo,
+                    before=self._chain_text_for_forbidden_recall(chain),
+                )
             return
         tts_chain_guard = getattr(self, "_sanitize_outbound_tts_chain_without_event", None)
         if callable(tts_chain_guard):
             processed_chain = await tts_chain_guard(processed_chain, umo=umo)
             if not processed_chain:
+                notifier = getattr(self, "_schedule_reply_interception_forward", None)
+                if callable(notifier):
+                    notifier("proactive_block", source="主动发送 TTS 校验", reason="TTS 校验清空了待发送消息", source_session=umo)
                 return
         hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(processed_chain))
         if hit:
@@ -10042,6 +10394,15 @@ Output:
                 umo,
                 _single_line(hit, 40),
             )
+            notifier = getattr(self, "_schedule_reply_interception_forward", None)
+            if callable(notifier):
+                notifier(
+                    "proactive_block",
+                    source="主动装饰后校验",
+                    reason=f"装饰后命中违禁词：{_single_line(hit, 40)}",
+                    source_session=umo,
+                    before=self._chain_text_for_forbidden_recall(processed_chain),
+                )
             return
         session = self._parse_message_session(umo)
         platform = self._get_platform_for_session(session) if session else None
@@ -10051,6 +10412,9 @@ Output:
                 status = getattr(platform, "status", None)
                 if status is not None and status != PlatformStatus.RUNNING:
                     logger.warning("[PrivateCompanion] 目标平台未运行,跳过主动发送: %s", umo)
+                    notifier = getattr(self, "_schedule_reply_interception_forward", None)
+                    if callable(notifier):
+                        notifier("proactive_block", source="主动发送平台校验", reason="目标平台未运行", source_session=umo, before=self._chain_text_for_forbidden_recall(processed_chain))
                     return
                 session_obj = self._session_for_platform(session, platform)
                 await platform.send_by_session(session_obj, MessageChain(processed_chain))
@@ -10297,6 +10661,11 @@ Output:
         attachment_notes: list[str] = []
         if image_path:
             attachment_notes.append("随消息发送了一张图片")
+            photo_caption = ""
+            if "：" in str(action_summary or "") or ":" in str(action_summary or ""):
+                photo_caption = _single_line(re.split(r"[:：]", str(action_summary), maxsplit=1)[-1], 220)
+            if photo_caption and photo_caption not in {"发图", "图片", "photo_text"}:
+                attachment_notes.append(f"图片画面：{photo_caption}")
         if extra_components:
             tts_notes: list[str] = []
             note_builder = getattr(self, "_tts_component_log_note", None)

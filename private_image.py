@@ -897,14 +897,36 @@ class PrivateImageMixin:
     def _private_image_base_visual_provider_candidates(self, umo: str = "") -> list[tuple[str, str, str]]:
         provider_settings = self._astrbot_provider_settings_for_umo(umo)
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
+        fallback_key = self._private_image_visual_provider_card_key()
+        plugin_provider_id = (
+            self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id)
+            if fallback_key == "PLUGIN_VISION_PROVIDER_ID"
+            else _single_line(getattr(self, "narration_provider_id", ""), 160)
+        )
+        fallback_getter = getattr(self, "_model_fallback_provider_id", None)
+        plugin_fallback_id = (
+            fallback_getter(fallback_key, plugin_provider_id)
+            if callable(fallback_getter)
+            else ""
+        )
         return [
             (_single_line(provider_settings.get("default_image_caption_provider_id"), 160), "astrbot_image_caption", prompt),
-            (self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id), "plugin_vision", prompt),
+            (plugin_provider_id, "plugin_vision", prompt),
+            (plugin_fallback_id, "plugin_vision_fallback", prompt),
         ]
+
+    def _private_image_visual_provider_card_key(self) -> str:
+        mode = str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower()
+        return "PLUGIN_VISION_PROVIDER_ID" if mode == "quick" else "NARRATION_PROVIDER_ID"
 
     @staticmethod
     def _private_image_visual_provider_source_allowed(provider_source: str) -> bool:
-        return _single_line(provider_source, 80) in {"astrbot_image_caption", "plugin_vision", "recent_success"}
+        return _single_line(provider_source, 80) in {
+            "astrbot_image_caption",
+            "plugin_vision",
+            "plugin_vision_fallback",
+            "recent_success",
+        }
 
     def _private_image_visual_provider_state_store(self) -> dict[str, Any]:
         data = getattr(self, "data", None)
@@ -1360,10 +1382,16 @@ class PrivateImageMixin:
     def _private_image_provider_timeout_seconds(self) -> float:
         timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
         if callable(timeout_getter):
+            provider_key = self._private_image_visual_provider_card_key()
+            provider_id = (
+                str(getattr(self, "plugin_vision_provider_id", "") or "")
+                if provider_key == "PLUGIN_VISION_PROVIDER_ID"
+                else str(getattr(self, "narration_provider_id", "") or "")
+            )
             override = timeout_getter(
                 task="private_image_vision",
-                provider_id=str(getattr(self, "plugin_vision_provider_id", "") or ""),
-                timeout_key="PLUGIN_VISION_PROVIDER_ID",
+                provider_id=provider_id,
+                timeout_key=provider_key,
             )
             if override is not None:
                 return max(3.0, float(override))

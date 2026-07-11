@@ -121,12 +121,20 @@ class TtsToolSanitizerMixin:
                         return f"error: messages[{idx}].text is required for plain component."
                     if re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
                         fallback_plain = self._clean_tool_plain_text_tts_markup(text)
-                        processor = getattr(self, "_process_tts_tags", None)
-                        tts_components = (
-                            await processor(text, event, fallback_plain=fallback_plain)
-                            if callable(processor) and bool(getattr(self, "enable_tts_enhancement", False))
-                            else []
-                        )
+                        if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
+                            converter = getattr(self, "_maybe_convert_plain_reply_to_tts", None)
+                            tts_components = (
+                                await converter(fallback_plain, event)
+                                if callable(converter) and bool(getattr(self, "enable_tts_enhancement", False))
+                                else []
+                            )
+                        else:
+                            processor = getattr(self, "_process_tts_tags", None)
+                            tts_components = (
+                                await processor(text, event, fallback_plain=fallback_plain)
+                                if callable(processor) and bool(getattr(self, "enable_tts_enhancement", False))
+                                else []
+                            )
                         if tts_components:
                             components.extend(tts_components)
                         elif fallback_plain:

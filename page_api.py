@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import re
 import shutil
@@ -167,6 +168,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/skill/update", self.update_skill_growth, ["POST"], "Private Companion Page update skill growth"),
             ("/food_menu/update", self.update_food_menu, ["POST"], "Private Companion Page update food menu"),
             ("/food_menu/bulk_update", self.bulk_update_food_menu, ["POST"], "Private Companion Page bulk update food menu"),
+            ("/food_menu/bulk_delete", self.bulk_delete_food_menu, ["POST"], "Private Companion Page bulk delete food menu"),
             ("/external_ability/update", self.update_external_ability, ["POST"], "Private Companion Page update external proactive ability"),
             ("/setup/apply", self.apply_setup_guide, ["POST"], "Private Companion Page apply first setup guide"),
             ("/setup/daily/run", self.run_setup_daily_generation, ["POST"], "Private Companion Page setup guide daily generation"),
@@ -196,7 +198,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     if isinstance(enhanced, dict) and detail_sanitizer(enhanced):
                         self.plugin._save_data_sync()
                 data = self._overview_data_snapshot_locked(self.plugin.data)
-                token_stats = self._token_overview_payload(self.plugin.data.get("token_usage", {}))
+                token_stats = self._token_overview_payload(
+                    self.plugin.data.get("token_usage", {}),
+                    self.plugin.data.get("balance_awareness", {}),
+                )
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
             enabled_users = sum(1 for item in users.values() if isinstance(item, dict) and item.get("enabled", True))
@@ -245,6 +250,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "proactive_only": self._proactive_only_mode_snapshot(),
                 "providers": self._provider_settings(),
                 "settings": self._runtime_settings(),
+                "deepseek_peak_routing": self._deepseek_peak_routing_summary(),
                 "cache": self._cache_summary(data),
                 "livingmemory": self._livingmemory_summary(),
                 "screen_companion": self._screen_companion_summary(data),
@@ -282,7 +288,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
-    def _token_overview_payload(self, usage: Any) -> dict[str, Any]:
+    def _token_overview_payload(self, usage: Any, balance_state: Any = None) -> dict[str, Any]:
         if not isinstance(usage, dict):
             usage = {}
         today_key = _today_key()
@@ -338,6 +344,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "updated_at": self._single_line(usage.get("updated_at"), 24),
             "totals": totals,
             "budget": budget,
+            "balance": self._balance_status_payload(balance_state),
             "memory_plugin": self._token_memory_plugin_payload(self._memory_plugin_token_usage_raw()),
             "partial": True,
         }
@@ -3881,7 +3888,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         try:
             async with self.plugin._data_lock:
                 usage = deepcopy(self.plugin.data.get("token_usage", {}))
-            return self._ok(self._token_stats_payload(usage))
+                balance_state = deepcopy(self.plugin.data.get("balance_awareness", {}))
+            return self._ok(self._token_stats_payload(usage, balance_state))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取 Token 统计失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -3890,8 +3898,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         try:
             async with self.plugin._data_lock:
                 self.plugin.data["token_usage"] = {}
+                balance_state = deepcopy(self.plugin.data.get("balance_awareness", {}))
                 self.plugin._save_data_sync()
-            return self._ok(self._token_stats_payload({}))
+            return self._ok(self._token_stats_payload({}, balance_state))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 重置 Token 统计失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -5320,6 +5329,53 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 批量更新吃什么候选失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def bulk_delete_food_menu(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        raw_ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+        item_ids: list[str] = []
+        for raw_id in raw_ids[:160]:
+            item_id = self._single_line(raw_id, 48)
+            if item_id and item_id not in item_ids:
+                item_ids.append(item_id)
+        if not item_ids:
+            return self._error("请先选择要删除的候选")
+        selected = set(item_ids)
+        try:
+            async with self.plugin._data_lock:
+                state = self.plugin.data.setdefault("food_menu", {})
+                if not isinstance(state, dict):
+                    state = {}
+                    self.plugin.data["food_menu"] = state
+                items = state.get("items") if isinstance(state.get("items"), list) else []
+                existing_ids = {
+                    self._single_line(item.get("id"), 48)
+                    for item in items
+                    if isinstance(item, dict) and self._single_line(item.get("id"), 48)
+                }
+                remaining = [
+                    item
+                    for item in items
+                    if not (isinstance(item, dict) and self._single_line(item.get("id"), 48) in selected)
+                ]
+                deleted_ids = [item_id for item_id in item_ids if item_id in existing_ids]
+                missing_ids = [item_id for item_id in item_ids if item_id not in existing_ids]
+                if deleted_ids:
+                    state["items"] = remaining
+                    state["updated_ts"] = time.time()
+                    self.plugin._save_data_sync()
+                return self._ok(
+                    {
+                        "message": f"已删除 {len(deleted_ids)} 个候选",
+                        "deleted": len(deleted_ids),
+                        "deleted_ids": deleted_ids,
+                        "missing_ids": missing_ids,
+                        "food_menu": self._food_menu_summary(self.plugin.data),
+                    }
+                )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 批量删除吃什么候选失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def update_external_ability(self) -> dict[str, Any]:
@@ -8760,7 +8816,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_response_self_review",
             "enable_proactive_message_review",
             "enable_smart_silence",
-            "enable_llm_timer_scheduling",
             "enable_llm_proactive_message",
             "enable_llm_proactive_persona_judge",
             "enable_maslow_motivation_experiment",
@@ -8797,6 +8852,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_forbidden_word_recall",
             "enable_semantic_message_debounce",
             "enable_environment_perception",
+            "enable_balance_awareness",
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
@@ -8859,6 +8915,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_tts_enhancement",
             "enable_creative_writing",
             "creative_hidden_mode",
+            "enable_reply_interception_forward",
         ]
         values = {key: bool(getattr(self.plugin, key, False)) for key in keys}
         try:
@@ -8904,7 +8961,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         locked_keys = [
             "inject_passive_states",
             "enable_intent_emotion_analysis",
-            "enable_llm_timer_scheduling",
             "enable_passive_topic_suppression",
             "enable_environment_perception",
             "enable_message_debounce",
@@ -8995,6 +9051,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if not values.get("tts_conversion_provider_id"):
             values["tts_conversion_provider_id"] = str(getattr(self.plugin, "tts_conversion_provider_id", "") or "")
         return values
+
+    def _deepseek_peak_routing_summary(self) -> dict[str, Any]:
+        getter = getattr(self.plugin, "_deepseek_peak_status", None)
+        if not callable(getter):
+            return {"enabled": False, "active": False, "configured": False}
+        try:
+            return dict(getter())
+        except Exception as exc:
+            return {
+                "enabled": bool(getattr(self.plugin, "enable_deepseek_peak_replacement", False)),
+                "active": False,
+                "configured": False,
+                "error": self._single_line(exc, 160),
+            }
 
     @staticmethod
     def _normalize_provider_mode_value(value: Any) -> str:
@@ -10015,6 +10085,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "page_theme",
             "provider_config_mode",
             "model_timeout_overrides",
+            "model_fallback_overrides",
+            "enable_deepseek_peak_replacement",
+            "deepseek_peak_windows",
+            "deepseek_peak_timezone",
+            "deepseek_peak_match_keywords",
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
@@ -10024,6 +10099,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "environment_perception_timezone",
             "holiday_country",
             "enable_environment_perception",
+            "enable_balance_awareness",
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
@@ -10040,10 +10116,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "persona_planning_voice_prompt",
             "persona_inner_voice_prompt",
             "persona_proactive_voice_prompt",
-            "enable_llm_timer_scheduling",
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
             "proactive_persona_judge_cache_minutes",
+            "proactive_persona_judge_max_daily",
             "schedule_persona_prompt",
             "schedule_worldview_prompt",
             "roleplay_user_profile_prompt",
@@ -10064,6 +10140,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
+            "tts_delivery_mode",
+            "tts_foreign_text_mode",
+            "tts_conversion_scope",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
             "tts_frequency_control_mode",
@@ -10369,6 +10448,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "creative_chars_per_session",
             "creative_max_active_projects",
             "creative_hidden_mode",
+            "creative_direction_prompt",
             "enable_worldbook_member_recognition",
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
@@ -11441,6 +11521,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enhancement_enabled": bool(getattr(self.plugin, "enable_tts_enhancement", False)),
             "mode": self._single_line(getattr(self.plugin, "tts_generation_mode", ""), 24) or "fast_tag",
             "language": self.plugin._tts_language_label() if hasattr(self.plugin, "_tts_language_label") else "",
+            "delivery_mode": self._single_line(getattr(self.plugin, "tts_delivery_mode", ""), 32) or "voice_and_text",
+            "foreign_text_mode": self._single_line(getattr(self.plugin, "tts_foreign_text_mode", ""), 32) or "translation",
+            "conversion_scope": self._single_line(getattr(self.plugin, "tts_conversion_scope", ""), 24) or "partial",
             "umo": umo,
             "settings_enabled": bool(provider_settings.get("enable", False)),
             "provider_available": provider is not None,
@@ -11628,6 +11711,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             normalizer = getattr(self.plugin, "_normalize_model_timeout_overrides", None)
             self.plugin.model_timeout_overrides = normalizer(value) if callable(normalizer) else {}
             return
+        if key == "model_fallback_overrides":
+            normalizer = getattr(self.plugin, "_normalize_model_fallback_overrides", None)
+            self.plugin.model_fallback_overrides = normalizer(value) if callable(normalizer) else {}
+            return
+        if key == "enable_deepseek_peak_replacement":
+            self.plugin.enable_deepseek_peak_replacement = self._normalize_bool_value(value)
+            return
+        if key in {"deepseek_peak_windows", "deepseek_peak_timezone", "deepseek_peak_match_keywords"}:
+            setattr(self.plugin, key, str(value or "").strip())
+            return
         if key == "proactive_intensity_preset":
             normalizer = getattr(self.plugin, "_normalize_proactive_intensity_preset", None)
             self.plugin.proactive_intensity_preset = (
@@ -11690,6 +11783,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
+            "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID": "deepseek_peak_replacement_provider_id",
             "WEB_EXPLORATION_API_BASE_URL": "web_exploration_api_base_url",
             "WEB_EXPLORATION_API_KEY": "web_exploration_api_key",
             "WEB_EXPLORATION_API_MODEL": "web_exploration_api_model",
@@ -11797,6 +11891,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         tts_runtime_keys = {
             "tts_generation_mode",
             "tts_voice_language",
+            "tts_delivery_mode",
+            "tts_foreign_text_mode",
+            "tts_conversion_scope",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
             "tts_frequency_control_mode",
@@ -11829,6 +11926,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 loader(self._config_overlay(overrides or {key: value}))
             else:
                 setattr(self.plugin, key, value)
+            if key == "tts_generation_mode":
+                # Keep the live value authoritative even when AstrBot's config wrapper
+                # still exposes a stale grouped/default value during the same request.
+                normalized_mode = self._normalize_setting_value("tts_generation_mode", value)
+                self.plugin.tts_generation_mode = normalized_mode
             return
         if key in self._allowed_feature_keys():
             setattr(self.plugin, key, self._normalize_bool_value(value))
@@ -12134,7 +12236,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_response_self_review",
             "enable_proactive_message_review",
             "enable_smart_silence",
-            "enable_llm_timer_scheduling",
             "enable_llm_proactive_message",
             "enable_llm_proactive_persona_judge",
             "enable_maslow_motivation_experiment",
@@ -12170,6 +12271,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_forbidden_word_recall",
             "enable_semantic_message_debounce",
             "enable_environment_perception",
+            "enable_balance_awareness",
             "enable_holiday_perception",
             "enable_platform_perception",
             "enable_model_perception",
@@ -12232,6 +12334,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_tts_enhancement",
             "enable_creative_writing",
             "creative_hidden_mode",
+            "enable_reply_interception_forward",
         }
 
     def _allowed_provider_keys(self) -> set[str]:
@@ -12281,6 +12384,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "page_font_family",
             "page_theme",
             "provider_config_mode",
+            "model_timeout_overrides",
+            "model_fallback_overrides",
+            "enable_deepseek_peak_replacement",
+            "deepseek_peak_windows",
+            "deepseek_peak_timezone",
+            "deepseek_peak_match_keywords",
             "enable_proactive_only_mode",
             "plugin_specific_persona_id",
             "target_user_ids",
@@ -12329,6 +12438,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
             "proactive_persona_judge_cache_minutes",
+            "proactive_persona_judge_max_daily",
             "enable_experimental_motivation_model",
             "enable_personality_iteration_experiment",
             "enable_personality_iteration_auto_tune",
@@ -12346,6 +12456,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
+            "tts_delivery_mode",
+            "tts_foreign_text_mode",
+            "tts_conversion_scope",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
             "tts_frequency_control_mode",
@@ -12637,6 +12750,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "creative_chars_per_session",
             "creative_max_active_projects",
             "creative_hidden_mode",
+            "creative_direction_prompt",
             "enable_worldbook_member_recognition",
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
@@ -12691,6 +12805,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return text if text in {"quick", "precision"} else "quick"
         if key == "model_timeout_overrides":
             normalizer = getattr(self.plugin, "_normalize_model_timeout_overrides", None)
+            normalized = normalizer(value) if callable(normalizer) else {}
+            return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+        if key == "model_fallback_overrides":
+            normalizer = getattr(self.plugin, "_normalize_model_fallback_overrides", None)
             normalized = normalizer(value) if callable(normalizer) else {}
             return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
         if key == "storage_backend":
@@ -12845,6 +12963,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "tts_voice_language":
             lang = str(value or "ja").strip().lower()
             return lang if lang in {"ja", "zh", "en"} else "ja"
+        if key == "tts_delivery_mode":
+            mode = str(value or "voice_and_text").strip().lower()
+            return mode if mode in {"voice_only", "voice_and_text"} else "voice_and_text"
+        if key == "tts_foreign_text_mode":
+            mode = str(value or "translation").strip().lower()
+            return mode if mode in {"original", "translation", "bilingual"} else "translation"
+        if key == "tts_conversion_scope":
+            mode = str(value or "partial").strip().lower()
+            return mode if mode in {"partial", "full"} else "partial"
         if key in {"tts_extra_prompt", "main_user_mention_voice_prompt"}:
             return str(value or "").strip()[:1200]
         if key in {"natural_language_photo_extra_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"}:
@@ -13106,6 +13233,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(5, min(720, int(value)))
             except (TypeError, ValueError):
                 return 180
+        if key == "proactive_persona_judge_max_daily":
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 12
         if key == "enable_maslow_schedule_influence":
             return self._normalize_bool_value(value)
         if key == "enable_experimental_motivation_model":
@@ -16261,7 +16393,58 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         usage.setdefault("counted_in_private_companion_budget", False)
         return usage
 
-    def _token_stats_payload(self, usage: Any) -> dict[str, Any]:
+    def _balance_status_payload(self, state: Any = None) -> dict[str, Any]:
+        raw = state if isinstance(state, dict) else {}
+
+        def optional_number(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        amount = optional_number(raw.get("amount"))
+        total = optional_number(raw.get("total"))
+        remaining_percent = optional_number(raw.get("remaining_percent"))
+        tier = self._single_line(raw.get("tier"), 20) or "unknown"
+        if tier not in {"normal", "low", "critical", "unknown"}:
+            tier = "unknown"
+        enabled = bool(getattr(self.plugin, "enable_balance_awareness", False))
+        manual_configured = bool(str(getattr(self.plugin, "balance_api_url", "") or "").strip())
+        auto_available_getter = getattr(self.plugin, "_balance_auto_discovery_available", None)
+        try:
+            auto_discovery_available = bool(auto_available_getter()) if callable(auto_available_getter) else False
+        except Exception:
+            auto_discovery_available = False
+        configured = manual_configured or auto_discovery_available
+        query_mode = self._single_line(raw.get("query_mode"), 20)
+        if query_mode not in {"manual", "auto"}:
+            query_mode = "manual" if manual_configured else "auto"
+        return {
+            "enabled": enabled,
+            "configured": configured,
+            "manual_configured": manual_configured,
+            "auto_discovery_available": auto_discovery_available,
+            "query_mode": query_mode,
+            "source_label": self._single_line(raw.get("auto_source_id"), 80),
+            "available": bool(enabled and configured and amount is not None and self._float(raw.get("last_success_at")) > 0),
+            "amount": amount,
+            "total": total,
+            "remaining_percent": remaining_percent,
+            "currency_label": self._single_line(
+                raw.get("currency_label") or getattr(self.plugin, "balance_currency_label", "元"),
+                20,
+            ) or "元",
+            "tier": tier,
+            "last_check_at": self._float(raw.get("last_check_at")),
+            "last_success_at": self._float(raw.get("last_success_at")),
+            "next_check_at": self._float(raw.get("next_check_at")),
+            "last_prompted_at": self._float(raw.get("last_prompted_at")),
+            "consecutive_failures": self._int(raw.get("consecutive_failures")),
+            "last_error": self._single_line(raw.get("last_error"), 180),
+        }
+
+    def _token_stats_payload(self, usage: Any, balance_state: Any = None) -> dict[str, Any]:
         if not isinstance(usage, dict):
             usage = {}
         external_usage = usage.get("external") if isinstance(usage.get("external"), dict) else {}
@@ -16368,6 +16551,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "by_day_detail": by_day_detail,
             "by_hour": by_hour,
             "budget": budget,
+            "balance": self._balance_status_payload(balance_state),
             "recent": recent,
             "external": self._token_external_payload(external_usage),
             "memory_plugin": self._token_memory_plugin_payload(memory_plugin_usage),

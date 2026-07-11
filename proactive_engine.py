@@ -802,6 +802,7 @@ class ProactiveEngineMixin:
             "followup": 88,
             "birthday_celebration": 86,
             "daily_greeting": 72,
+            "meal_care": 78,
             "balance": 82,
             "birthday_curiosity": 68,
             "habit": 64,
@@ -1298,6 +1299,8 @@ class ProactiveEngineMixin:
         kind = "check_in"
         if normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
             kind = "greeting"
+        elif normalized_reason in {"meal_care", "meal_care_followup"}:
+            kind = "care"
         elif normalized_reason in {"quiet_care", "state_share"}:
             kind = "care"
         elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share"}:
@@ -1321,6 +1324,8 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "group_context", 0.72
         elif normalized_reason in {"diary_share", "creative_share"} or any(token in evidence_text for token in ("日记", "写到", "作品", "片段")):
             anchor_type, anchor_score = "inner_life", 0.68
+        elif normalized_reason in {"meal_care", "meal_care_followup"} or any(token in evidence_text for token in ("早餐", "早饭", "午饭", "午餐", "晚饭", "晚餐", "吃了吗", "吃了没")):
+            anchor_type, anchor_score = "meal_time", 0.74
         elif normalized_reason in {"background_schedule"} or any(token in evidence_text for token in ("手上", "忙到", "日程", "计划", "刚好停")):
             anchor_type, anchor_score = "current_activity", 0.62
         elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
@@ -1652,27 +1657,24 @@ class ProactiveEngineMixin:
         persona = _single_line(str(self._get_default_persona_prompt() or ""), 800)
         worldview = _single_line(str(self._format_worldview_adaptation_prompt() or ""), 400)
         rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
-        readiness = self._proactive_inner_readiness(user)
         semantics = self._planned_proactive_semantics(user)
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0)
         parts = [
             self._private_user_role(user),
             self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40),
             self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40),
             self._normalize_legacy_proactive_text(user.get("planned_proactive_action"), limit=40),
-            user.get("planned_proactive_topic"),
-            user.get("planned_proactive_motive"),
-            user.get("planned_proactive_impulse_id"),
+            _single_line(user.get("planned_proactive_topic"), 80).casefold(),
+            _single_line(user.get("planned_proactive_motive"), 180).casefold(),
             _single_line(semantics.get("kind"), 40),
             _single_line(semantics.get("anchor_type"), 40),
             _single_line(semantics.get("need_layer"), 40),
             _single_line(semantics.get("need_drive"), 80),
-            f"semantic={_safe_float(semantics.get('score'), 0.5):.2f}",
-            f"pressure={_safe_float(semantics.get('pressure'), 0.4):.2f}",
-            f"risk={_safe_float(semantics.get('risk'), 0.0):.2f}",
+            f"semantic={int(_safe_float(semantics.get('score'), 0.5) * 5)}",
+            f"pressure={int(_safe_float(semantics.get('pressure'), 0.4) * 5)}",
+            f"risk={int(_safe_float(semantics.get('risk'), 0.0) * 5)}",
             rel_state.get("mode") if isinstance(rel_state, dict) else "",
-            user.get("ignored_streak"),
-            f"inner={_safe_float(readiness.get('score'), 0.55):.2f}",
-            _single_line(readiness.get("label"), 80),
+            "ignored=0" if ignored <= 0 else "ignored=1" if ignored == 1 else "ignored=2+",
             persona,
             worldview,
         ]
@@ -1689,14 +1691,44 @@ class ProactiveEngineMixin:
         if not signature:
             return None
         check_now = _now_ts() if now is None else now
-        if _single_line(user.get("planned_proactive_model_judge_signature"), 80) != signature:
-            return None
-        judged_at = _safe_float(user.get("planned_proactive_model_judge_at"), 0)
         ttl = max(5, _safe_int(getattr(self, "proactive_persona_judge_cache_minutes", 180), 180, 5, 720)) * 60
-        if judged_at <= 0 or check_now - judged_at > ttl:
+        cache = user.get("proactive_persona_judge_cache")
+        if isinstance(cache, dict):
+            entry = cache.get(signature)
+            if isinstance(entry, dict):
+                judged_at = _safe_float(entry.get("judged_at"), 0)
+                cached = entry.get("result")
+                if judged_at > 0 and check_now - judged_at <= ttl and isinstance(cached, dict):
+                    return dict(cached)
+        if _single_line(user.get("planned_proactive_model_judge_signature"), 80) == signature:
+            judged_at = _safe_float(user.get("planned_proactive_model_judge_at"), 0)
+            cached = user.get("planned_proactive_model_judge_result")
+            if judged_at > 0 and check_now - judged_at <= ttl and isinstance(cached, dict):
+                return dict(cached)
+        return None
+
+    def _proactive_persona_judge_calls_today(self) -> int:
+        usage = self.data.get("token_usage") if isinstance(getattr(self, "data", None), dict) else {}
+        by_day_task = usage.get("by_day_task") if isinstance(usage, dict) else {}
+        today_tasks = by_day_task.get(_today_key()) if isinstance(by_day_task, dict) else {}
+        task = today_tasks.get("proactive_persona_judge") if isinstance(today_tasks, dict) else {}
+        return _safe_int(task.get("calls"), 0, 0) if isinstance(task, dict) else 0
+
+    def _local_proactive_persona_judgement(self, user: dict[str, Any]) -> dict[str, Any] | None:
+        if self._private_user_role(user) == "friend" or _safe_int(user.get("ignored_streak"), 0, 0) > 0:
             return None
-        cached = user.get("planned_proactive_model_judge_result")
-        return dict(cached) if isinstance(cached, dict) else None
+        semantics = self._planned_proactive_semantics(user)
+        alignment = self._planned_proactive_persona_alignment(user)
+        if (
+            not semantics.get("blocker")
+            and not alignment.get("blocker")
+            and _safe_float(semantics.get("score"), 0.5) >= 0.78
+            and _safe_float(semantics.get("pressure"), 0.4) <= 0.30
+            and _safe_float(semantics.get("risk"), 0.0) <= 0.10
+            and _safe_float(alignment.get("score"), 0.55) >= 0.78
+        ):
+            return {"decision": "send", "score": 90, "reason": "本地高置信人格判定", "local": True}
+        return None
 
     def _normalize_proactive_model_judgement(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
@@ -1862,6 +1894,12 @@ class ProactiveEngineMixin:
         if isinstance(cached, dict):
             cached["cached"] = True
             return cached
+        local_result = self._local_proactive_persona_judgement(user)
+        if isinstance(local_result, dict):
+            return local_result
+        daily_limit = _safe_int(getattr(self, "proactive_persona_judge_max_daily", 12), 12, 0, 100)
+        if daily_limit <= 0 or self._proactive_persona_judge_calls_today() >= daily_limit:
+            return {"decision": "send", "score": 0, "reason": "模型日预算已满，使用本地规则", "local": True}
         prompt = self._format_proactive_model_judge_prompt(user)
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(memory_getter):
@@ -1934,7 +1972,20 @@ class ProactiveEngineMixin:
             for key, value in judgement.items()
             if key in {"decision", "score", "reason", "delay_minutes", "reason_field", "action", "topic", "motive"}
         }
-        user["planned_proactive_model_judge_at"] = _now_ts() if now is None else now
+        judged_at = _now_ts() if now is None else now
+        user["planned_proactive_model_judge_at"] = judged_at
+        cache = user.get("proactive_persona_judge_cache")
+        cache = dict(cache) if isinstance(cache, dict) else {}
+        ttl = max(5, _safe_int(getattr(self, "proactive_persona_judge_cache_minutes", 180), 180, 5, 720)) * 60
+        cache = {
+            key: value for key, value in cache.items()
+            if isinstance(value, dict) and judged_at - _safe_float(value.get("judged_at"), 0) <= ttl
+        }
+        cache[signature] = {"judged_at": judged_at, "result": dict(user["planned_proactive_model_judge_result"])}
+        if len(cache) > 16:
+            newest = sorted(cache.items(), key=lambda item: _safe_float(item[1].get("judged_at"), 0), reverse=True)[:16]
+            cache = dict(newest)
+        user["proactive_persona_judge_cache"] = cache
 
     def _apply_proactive_model_rewrite(self, user: dict[str, Any], judgement: dict[str, Any]) -> bool:
         changed = False
@@ -3970,6 +4021,7 @@ class ProactiveEngineMixin:
         for item in reversed(self._proactive_audit_log()):
             if str(item.get("id") or "") != str(audit_id):
                 continue
+            previous_status = _single_line(item.get("status"), 32)
             item["status"] = _single_line(status, 32) or item.get("status") or "unknown"
             item["updated_ts"] = _now_ts()
             if note:
@@ -3988,6 +4040,26 @@ class ProactiveEngineMixin:
                 item["action"] = _single_line(action, 60)
             if reason:
                 item["reason"] = _single_line(reason, 40)
+            if item.get("status") in {"cancelled", "dropped"} and item.get("status") != previous_status:
+                notifier = getattr(self, "_schedule_reply_interception_forward", None)
+                if callable(notifier):
+                    notifier(
+                        "proactive_block",
+                        source=_single_line(item.get("source"), 60) or "主动消息",
+                        reason=_single_line(item.get("note"), 300) or "主动候选被拦截",
+                        source_session=_single_line(item.get("umo"), 180),
+                        before=_single_line(
+                            item.get("final_text_preview") or item.get("text_preview") or item.get("original_text_preview"),
+                            500,
+                        ),
+                        detail="；".join(
+                            part for part in (
+                                f"状态={item.get('status')}",
+                                f"动作={_single_line(item.get('action'), 60)}" if item.get("action") else "",
+                                f"话题={_single_line(item.get('topic'), 120)}" if item.get("topic") else "",
+                            ) if part
+                        ),
+                    )
             self._compact_proactive_audit_log()
             break
 
@@ -4640,7 +4712,7 @@ class ProactiveEngineMixin:
         normalized = str(action or "message").strip() or "message"
         if normalized != "message":
             return self._fallback_action_for_unavailable(normalized, user)
-        if isinstance(planned_event, dict) and planned_event.get("_daily_greeting"):
+        if isinstance(planned_event, dict) and (planned_event.get("_daily_greeting") or planned_event.get("_daily_meal_care")):
             return "message"
         candidates: list[tuple[str, float]] = []
         event_text = ""
@@ -4688,6 +4760,7 @@ class ProactiveEngineMixin:
         candidates = []
         for event in (
             self._pick_pending_followup_event(user, now),
+            self._pick_meal_care_event(user, now=now),
             self._pick_daily_greeting_event(user, now),
             self._habit_proactive_event_for_user(user, now=now),
             self._pick_state_need_event(user, now=now),
@@ -4801,11 +4874,137 @@ class ProactiveEngineMixin:
 
     @staticmethod
     def _is_sticky_greeting_event(event: dict[str, Any]) -> bool:
-        return bool(event.get("_daily_greeting")) and str(event.get("reason") or "") in {
-            "morning_greeting",
-            "noon_greeting",
-            "evening_greeting",
+        reason = str(event.get("reason") or "")
+        return (
+            bool(event.get("_daily_greeting"))
+            and reason in {"morning_greeting", "noon_greeting", "evening_greeting"}
+        ) or bool(event.get("_daily_meal_care"))
+
+    def _reset_meal_care_day(self, user: dict[str, Any]) -> None:
+        today = _today_key()
+        if str(user.get("meal_care_day") or "") == today:
+            return
+        user["meal_care_day"] = today
+        user["meal_care_asked"] = []
+        user["meal_care_satisfied"] = []
+        context = user.get("meal_check_context")
+        if not isinstance(context, dict) or str(context.get("date") or "") != today:
+            user["meal_check_context"] = {}
+
+    def _meal_care_slots(self) -> tuple[tuple[str, str, str], ...]:
+        return (
+            ("breakfast", "07:50-10:05", "早餐"),
+            ("lunch", "11:40-14:05", "午饭"),
+            ("dinner", "17:40-20:35", "晚饭"),
+        )
+
+    def _meal_care_followup_event(self, user: dict[str, Any], *, now: float) -> dict[str, Any] | None:
+        context = user.get("meal_check_context")
+        if not isinstance(context, dict) or not context.get("active"):
+            return None
+        if str(context.get("date") or "") != _today_key():
+            user["meal_check_context"] = {}
+            return None
+        if _safe_int(context.get("followup_count"), 0, 0, 1) >= 1:
+            return None
+        due_at = _safe_float(context.get("followup_due_at"), 0)
+        expires_at = _safe_float(context.get("expires_at"), 0)
+        if due_at <= 0 or (expires_at > 0 and now > expires_at):
+            return None
+        stage = _single_line(context.get("stage"), 24) or "awaiting_status"
+        meal_label = _single_line(context.get("meal_label"), 12) or "这顿饭"
+        if stage == "awaiting_detail":
+            topic = f"{meal_label}具体吃了什么"
+            motive = f"用户只说已经吃过{meal_label}，还想自然问清具体吃了什么并记住"
+        elif stage == "not_eaten":
+            topic = f"{meal_label}后来有没有吃上"
+            motive = f"用户刚才还没吃{meal_label}，隔一会儿想低压确认有没有垫上"
+        else:
+            topic = f"{meal_label}吃了吗"
+            motive = f"刚才问过用户{meal_label}，还没得到具体饮食信息，想只补问一次"
+        return {
+            "date": _today_key(),
+            "window": self._window_from_delay_minutes(max(1, int((due_at - now) / 60)), width_minutes=20),
+            "reason": "meal_care_followup",
+            "action": "message",
+            "why": "一顿饭的关心还没有落到具体信息，只允许低压补问一次",
+            "topic": topic,
+            "motive": self._normalize_internal_motive_text(motive),
+            "scene": "前一次吃饭关心之后",
+            "tone": "自然、简短，不催促",
+            "impulse": "想确认用户有没有好好吃东西",
+            "_scheduled_ts": due_at,
+            "_daily_meal_care": True,
+            "_meal_care_followup": True,
+            "context_key": "planned_meal_care_context",
+            "context": dict(context),
         }
+
+    def _pick_meal_care_event(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
+        if not bool(getattr(self, "enable_meal_care_proactive", True)):
+            return None
+        if self._private_user_role(user) != "owner":
+            return None
+        self._reset_meal_care_day(user)
+        check_now = _now_ts() if now is None else now
+        followup = self._meal_care_followup_event(user, now=check_now)
+        if isinstance(followup, dict):
+            return followup
+        asked = user.get("meal_care_asked") if isinstance(user.get("meal_care_asked"), list) else []
+        satisfied = user.get("meal_care_satisfied") if isinstance(user.get("meal_care_satisfied"), list) else []
+        max_daily = _safe_int(getattr(self, "meal_care_max_daily", 2), 2, 0, 3)
+        if max_daily <= 0 or len(asked) >= max_daily:
+            return None
+        now_dt = self._environment_fromtimestamp(check_now)
+        minute = now_dt.hour * 60 + now_dt.minute
+        today = now_dt.date()
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for meal_key, window, meal_label in self._meal_care_slots():
+            if meal_key in asked or meal_key in satisfied:
+                continue
+            start, end = self._parse_window_minutes(window)
+            if start is None or end is None or minute >= end:
+                continue
+            start_dt = datetime.combine(today, datetime.min.time(), tzinfo=now_dt.tzinfo) + timedelta(minutes=start)
+            end_dt = datetime.combine(today, datetime.min.time(), tzinfo=now_dt.tzinfo) + timedelta(minutes=end)
+            earliest = max(now_dt + timedelta(minutes=1), start_dt)
+            if earliest >= end_dt:
+                continue
+            latest = min(end_dt, earliest + timedelta(minutes=42))
+            scheduled = random.uniform(earliest.timestamp(), max(earliest.timestamp() + 60, latest.timestamp()))
+            context = {
+                "active": False,
+                "date": _today_key(),
+                "meal_key": meal_key,
+                "meal_label": meal_label,
+                "stage": "planned",
+                "followup_count": 0,
+            }
+            candidates.append(
+                (
+                    scheduled,
+                    {
+                        "date": _today_key(),
+                        "window": window,
+                        "reason": "meal_care",
+                        "action": "message",
+                        "why": f"到了{meal_label}时段，惦记用户有没有按时吃东西",
+                        "topic": f"{meal_label}吃了吗",
+                        "motive": self._normalize_internal_motive_text(f"想自然问问用户{meal_label}吃了没有"),
+                        "scene": f"{meal_label}时段",
+                        "tone": "关心但不管教",
+                        "impulse": "想确认用户有没有好好吃东西",
+                        "_scheduled_ts": scheduled,
+                        "_daily_meal_care": True,
+                        "context_key": "planned_meal_care_context",
+                        "context": context,
+                    },
+                )
+            )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
 
     def _pick_pending_followup_event(
         self, user: dict[str, Any], now: float | None = None
@@ -4821,6 +5020,11 @@ class ProactiveEngineMixin:
         raw = user.get("pending_followup_event")
         if not isinstance(raw, dict):
             return None
+        if raw.get("_meal_care_followup"):
+            context = self._meal_care_active_context(user, now=now)
+            if not context or _safe_int(context.get("followup_count"), 0, 0, 1) >= 1:
+                user["pending_followup_event"] = {}
+                return None
         raw = dict(raw)
         raw["reason"] = self._normalize_legacy_proactive_text(raw.get("reason"), limit=40) or _single_line(raw.get("reason"), 40) or "check_in"
         followup_date = str(raw.get("date") or "")
@@ -7257,7 +7461,9 @@ class ProactiveEngineMixin:
             "check_in": [(9 * 60, 22 * 60 + 30)],
             "morning_greeting": [(7 * 60 + 45, 10 * 60 + 20)],
             "noon_greeting": [(12 * 60 + 5, 13 * 60 + 35)],
-              "evening_greeting": [(20 * 60 + 10, 21 * 60 + 20)],
+            "evening_greeting": [(20 * 60 + 10, 21 * 60 + 20)],
+            "meal_care": [(7 * 60 + 50, 20 * 60 + 35)],
+            "meal_care_followup": [(8 * 60 + 5, 22 * 60)],
         }.get(reason, [(9 * 60, 22 * 60)])
 
     def _is_reason_allowed_now(self, reason: str) -> bool:
@@ -7431,6 +7637,9 @@ class ProactiveEngineMixin:
                 user["_proactive_render_failure_stage"] = f"主动动作执行失败：{effective_action or planned_action or 'unknown'}"
                 return reason, "", "", [], action_summary, effective_action
         image_path = self._extract_action_image_path(raw_action_context)
+        photo_caption = self._extract_action_photo_caption(raw_action_context)
+        if image_path and photo_caption:
+            action_summary = f"发图：{photo_caption}"
         action_context = await self._narrate_action_context(effective_action, raw_action_context)
         if image_path:
             action_context = f"{action_context}\n真实图片文件：{image_path}".strip()

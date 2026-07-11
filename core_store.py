@@ -389,6 +389,7 @@ class CoreStoreMixin:
             "group_llm_reply_blocks": {},
             "cache_metrics": {},
             "balance_awareness": {},
+            "food_menu": {},
         }
 
     @staticmethod
@@ -448,6 +449,7 @@ class CoreStoreMixin:
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("cache_metrics", {})
         data.setdefault("balance_awareness", {})
+        data.setdefault("food_menu", {})
         return data
 
     @staticmethod

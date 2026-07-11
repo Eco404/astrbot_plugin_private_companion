@@ -93,6 +93,12 @@ class TtsEnhancementMixin:
         self.tts_voice_language = self._cfg_str(config, "tts_voice_language", "ja", "ja").lower()
         if self.tts_voice_language not in {"ja", "zh", "en"}:
             self.tts_voice_language = "ja"
+        self.tts_delivery_mode = self._cfg_str(config, "tts_delivery_mode", "voice_and_text", "voice_and_text").lower()
+        if self.tts_delivery_mode not in {"voice_only", "voice_and_text"}:
+            self.tts_delivery_mode = "voice_and_text"
+        self.tts_foreign_text_mode = self._cfg_str(config, "tts_foreign_text_mode", "translation", "translation").lower()
+        if self.tts_foreign_text_mode not in {"original", "translation", "bilingual"}:
+            self.tts_foreign_text_mode = "translation"
         self.tts_conversion_provider_id = self._cfg_str(config, "tts_conversion_provider_id", "")
         self.tts_extra_prompt = self._cfg_str(config, "tts_extra_prompt", "")
         self.tts_frequency_control_mode = self._cfg_str(config, "tts_frequency_control_mode", "global", "global").lower()
@@ -114,11 +120,20 @@ class TtsEnhancementMixin:
         self.tts_private_trigger_probability = self._cfg_int(config, "tts_private_trigger_probability", -1, -1, 100) / 100.0
         self.tts_group_trigger_probability = self._cfg_int(config, "tts_group_trigger_probability", -1, -1, 100) / 100.0
         self.auto_voice_enabled = self._cfg_bool(config, "auto_voice_enabled", self._cfg_bool(config, "auto_japanese_voice_enabled", False))
-        self.auto_voice_full_conversion_enabled = self._cfg_bool(
+        legacy_full_conversion = self._cfg_bool(
             config,
             "auto_voice_full_conversion_enabled",
             self._cfg_bool(config, "auto_japanese_voice_full_conversion_enabled", False),
         )
+        raw_conversion_scope = self._cfg_raw(config, "tts_conversion_scope", None)
+        self.tts_conversion_scope = (
+            str(raw_conversion_scope).strip().lower()
+            if raw_conversion_scope not in (None, "")
+            else ("full" if legacy_full_conversion else "partial")
+        )
+        if self.tts_conversion_scope not in {"partial", "full"}:
+            self.tts_conversion_scope = "partial"
+        self.auto_voice_full_conversion_enabled = self.tts_conversion_scope == "full"
         self.auto_voice_probability = self._cfg_int(
             config,
             "auto_voice_probability",
@@ -890,7 +905,11 @@ TTS 朗读文本：
 
     async def _ensure_tts_blocks_have_visible_chinese(self, text: str, event: Any, *, provider_kind: str) -> str:
         normalized = self._normalize_tts_tags(text)
-        if getattr(self, "tts_voice_language", "ja") == "zh":
+        if (
+            getattr(self, "tts_voice_language", "ja") == "zh"
+            or getattr(self, "tts_delivery_mode", "voice_and_text") == "voice_only"
+            or getattr(self, "tts_foreign_text_mode", "translation") == "original"
+        ):
             return normalized
         matches = list(re.finditer(r"<tts>(.*?)</tts>", normalized, flags=re.IGNORECASE | re.DOTALL))
         if not matches:
@@ -953,6 +972,9 @@ TTS 朗读文本：
         mode = getattr(self, "tts_generation_mode", "fast_tag")
         frequency_mode = getattr(self, "tts_frequency_control_mode", "global")
         voice_lang = getattr(self, "tts_voice_language", "ja")
+        delivery_mode = getattr(self, "tts_delivery_mode", "voice_and_text")
+        foreign_text_mode = getattr(self, "tts_foreign_text_mode", "translation")
+        conversion_scope = getattr(self, "tts_conversion_scope", "partial")
         supports_emotion = self._tts_provider_allows_emotion_tags(provider_kind)
         if mode == "fast_tag":
             if frequency_mode == "legacy":
@@ -964,8 +986,14 @@ TTS 朗读文本：
         positive_emotion, negative_emotion = self._tts_emotion_tag_examples(provider_kind)
         emotion_rule = f"3.{self._tts_emotion_tag_rule(provider_kind)}" if supports_emotion else ""
         language_rule = ""
-        if voice_lang == "zh":
+        if delivery_mode == "voice_only":
+            language_rule = "语音合成成功后只发送语音，不需要在语音块后重复对应文字；生成失败时插件会自动保留文字兜底。"
+        elif voice_lang == "zh":
             language_rule = "<pc_tts> 内也用自然中文；语音块后不强制再写重复翻译。"
+        elif foreign_text_mode == "original":
+            language_rule = f"<pc_tts> 内必须是自然{lang}；可见文字显示最终朗读原文，不要求补中文翻译。"
+        elif foreign_text_mode == "bilingual":
+            language_rule = f"<pc_tts> 内必须是自然{lang}；插件最终会同时显示朗读原文和自然中文译文。"
         elif voice_lang == "en":
             language_rule = "<pc_tts> 内必须是自然英语；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。"
         else:
@@ -996,14 +1024,23 @@ TTS 朗读文本：
         extra = _single_line(getattr(self, "tts_extra_prompt", ""), 800)
         if not extra:
             extra = self._legacy_nondefault_tts_prompt()
-        if voice_lang == "zh":
+        if delivery_mode == "voice_only":
+            first_rule = "1.把适合朗读的内容用一对<pc_tts>包起来；语音成功后对应文字会隐藏，不要在标签外重复同一句；"
+        elif voice_lang == "zh":
             first_rule = "1.自然聊天时用中文文字推进对话，把适合朗读的中文部分用一对<pc_tts>包起来；"
+        elif foreign_text_mode == "original":
+            first_rule = "1.把适合朗读的外语部分用一对<pc_tts>包起来；可见文字会使用最终外语朗读原文，不强制补中文；"
         else:
             first_rule = "1.自然聊天时用中文文字推进对话，把适合朗读的外语部分用一对<pc_tts>包起来，并在后面直接补一句自然中文，不要写“中文含义：”“对应文本：”这类标题；"
+        scope_rule = (
+            "2.选择使用语音时，让语音块覆盖整条回复的全部有效内容，不要只截取一句；"
+            if conversion_scope == "full"
+            else "2.只把最适合听的一小段放进语音块，其余信息继续用普通文字表达；"
+        )
         rules = [
             "【语音消息规则】",
             first_rule,
-            "2.语音块可以出现在回复的开头、中间或结尾，只要读起来像自然聊天即可；",
+            scope_rule,
         ]
         if emotion_rule:
             rules.append(emotion_rule)
@@ -1198,9 +1235,9 @@ TTS 朗读文本：
         if mode == "fast_tag" and self._should_force_tts_for_main_user_event(event) and not strong_block_reason:
             frequency_mode = getattr(self, "tts_frequency_control_mode", "global")
             if frequency_mode == "legacy":
-                force_rule = "这轮消息来自主用户或明确 @ 到主用户。若当前回复适合语音表达，适合采用一段 <pc_tts>...</pc_tts>；由你根据语境判断，仍需遵守目标语种和中文释义。"
+                force_rule = "这轮消息来自主用户或明确 @ 到主用户。若当前回复适合语音表达，适合采用一段 <pc_tts>...</pc_tts>；由你根据语境判断，仍需遵守目标语种、发送形态和文字显示规则。"
             else:
-                force_rule = "这轮消息来自主用户或明确 @ 到主用户。如果语音比纯文字更自然，可以采用一段 <pc_tts>...</pc_tts>；不要刻意使用语音，仍需遵守目标语种、中文释义和会话最小间隔。"
+                force_rule = "这轮消息来自主用户或明确 @ 到主用户。如果语音比纯文字更自然，可以采用一段 <pc_tts>...</pc_tts>；不要刻意使用语音，仍需遵守目标语种、发送形态、文字显示规则和会话最小间隔。"
             force_prompt = f"【本轮 TTS 强化触发】\n{force_rule}"
             placement = append_dynamic_tts_fragment("<!-- private_companion_tts_force_v1 -->", force_prompt, priority=54)
             await record_tts_fragment("TTS 主用户倾向注入", "tts.force", force_prompt, mode="main_user", placement=placement)
@@ -1208,7 +1245,7 @@ TTS 朗读文本：
             user_request_prompt = (
                 "【用户语音请求】\n"
                 "用户本轮明确希望听到语音或你的声音。请以回应用户需求为主：如果当前回复适合用语音表达，可以直接写一段 <pc_tts>...</pc_tts>；"
-                "这类顺应用户请求的语音不受自动语音触发概率限制，但仍需自然克制、遵守目标语种和中文释义，不要为了格式而硬加。"
+                "这类顺应用户请求的语音不受自动语音触发概率限制，但仍需自然克制、遵守目标语种、发送形态和文字显示规则，不要为了格式而硬加。"
             )
             placement = append_dynamic_tts_fragment("<!-- private_companion_tts_user_request_v1 -->", user_request_prompt, priority=54)
             await record_tts_fragment("用户语音请求注入", "tts.user_request", user_request_prompt, mode="user_request", placement=placement)
@@ -1228,11 +1265,13 @@ TTS 朗读文本：
             return
         text = self._normalize_tts_tags(str(getattr(resp, "completion_text", "") or ""))
         if text:
-            if "<tts>" in text.lower() and "</tts>" in text.lower():
+            has_tts_markup = bool(re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE))
+            if has_tts_markup:
                 if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
-                    cleaned = re.sub(r"<tts\b[^>]*>.*?</tts>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
-                    cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip() or self._tts_visible_fallback_text(text)
-                    cleaned = cleaned or self._strip_any_tts_markup(text)
+                    # In postprocess mode every model-authored tag is input noise, including
+                    # the private <pc_tts> form. Only the postprocessor may create a voice block.
+                    cleaned = self._strip_any_tts_markup(text)
+                    cleaned = self._sanitize_tts_visible_text(cleaned) or self._tts_visible_fallback_text(text)
                     resp.completion_text = _normalize_outbound_punctuation_flow(cleaned)
                     logger.info(
                         "[PrivateCompanion] TTS后处理模式已移除主模型自写语音标签,改由发送前后处理判断: session=%s preview=%s",
@@ -1267,11 +1306,19 @@ TTS 朗读文本：
         if not text:
             return
         normalized = self._normalize_tts_tags(text)
-        if "<tts>" in normalized.lower() and "</tts>" in normalized.lower():
+        if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
+            # A tag can also arrive from a tool or an extension that bypasses the LLM response hook.
+            # Treat it as plain source text so it cannot re-enter the fast-tag path.
+            normalized = self._sanitize_tts_visible_text(self._strip_any_tts_markup(normalized))
+            new_chain = await self._maybe_convert_plain_reply_to_tts(normalized, event) if normalized else []
+        elif "<tts>" in normalized.lower() and "</tts>" in normalized.lower():
             new_chain = await self._process_tts_tags(normalized, event)
         else:
             new_chain = await self._maybe_convert_plain_reply_to_tts(normalized, event)
         if not new_chain:
+            if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess" and normalized:
+                event.set_result(self._build_result_from_chain([Plain(normalized)]))
+                return
             if PRIVATE_TTS_BLOCK_TOKEN_PATTERN.search("".join(plain_parts)):
                 fallback_text = self._tts_visible_fallback_text(normalized)
                 event.set_result(self._build_result_from_chain([Plain(fallback_text)] if fallback_text else []))
@@ -1328,7 +1375,11 @@ TTS 朗读文本：
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
         new_chain: list[Any] = []
-        if tts_enabled and re.search(r"<tts\b[^>]*>.*?</tts>", normalized, flags=re.IGNORECASE | re.DOTALL):
+        if (
+            tts_enabled
+            and getattr(self, "tts_generation_mode", "fast_tag") != "postprocess"
+            and re.search(r"<tts\b[^>]*>.*?</tts>", normalized, flags=re.IGNORECASE | re.DOTALL)
+        ):
             new_chain = await self._process_tts_tags(normalized, event)
         if not new_chain:
             fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
@@ -1638,7 +1689,11 @@ TTS 朗读文本：
                 self._set_tts_hard_block(event, "probability_miss")
             return []
         visible_override, suppress_visible = self._tts_proactive_segment_visible_policy(event)
-        converted = await self._convert_text_to_tts_markup(text, event, full=(mode == "postprocess" or self.auto_voice_full_conversion_enabled))
+        converted = await self._convert_text_to_tts_markup(
+            text,
+            event,
+            full=getattr(self, "tts_conversion_scope", "partial") == "full",
+        )
         if not converted:
             return []
         if visible_override or suppress_visible:
@@ -1780,7 +1835,7 @@ TTS 朗读文本：
         voice_lang = getattr(self, "tts_voice_language", "ja")
         mode = getattr(self, "tts_generation_mode", "fast_tag")
         if mode == "postprocess":
-            return await self._postprocess_text_to_tts_markup(source, event, provider_kind=provider_kind)
+            return await self._postprocess_text_to_tts_markup(source, event, provider_kind=provider_kind, full=full)
         extra = _single_line(getattr(self, "main_user_mention_voice_prompt", ""), 500) if self._event_mentions_main_user_with_keyword(event) else ""
         persona_context = await self._format_tts_persona_voice_context(event)
         emotion_rule = self._tts_emotion_tag_rule(provider_kind, subject="<pc_tts> 内")
@@ -1798,10 +1853,16 @@ TTS 朗读文本：
             output_rule = "必须包含一个 <pc_tts>...</pc_tts> 日语语音块，且语音块后必须直接补一句自然中文"
             display_rule = "不要只输出 <pc_tts>...</pc_tts>；最终格式建议为：<pc_tts>日本語の朗読文</pc_tts>\\n我会在这里。中文句子必须完整收口，不要写“中文含义：”“对应文本：”这类标题。"
             language_rule = "语音块内必须完全使用自然日语，不要夹中文评价、中文语气词或中文说明；除极短语气词外必须包含假名，不要只输出汉字词。"
+        scope_rule = (
+            "把原回复的全部有效内容转换成一个完整语音块，不要只截取一句；不要遗漏信息。"
+            if full
+            else "只选择最适合朗读的一小段转换成语音，其余信息保留为可见文字；不要把整条长回复都塞进语音。"
+        )
         prompt = f"""
 请把下面这条回复转换成适合 TTS 朗读的最终输出。
 
 目标语种：{lang}
+转换范围：{scope_rule}
 输出格式：{output_rule}
 显示文本规则：{display_rule}
 语种规则：{language_rule}
@@ -1828,7 +1889,7 @@ Provider 规则：{emotion_rule}
             converted = f"<tts>{converted}</tts>"
         return converted
 
-    async def _postprocess_text_to_tts_markup(self, text: str, event: Any, *, provider_kind: str) -> str:
+    async def _postprocess_text_to_tts_markup(self, text: str, event: Any, *, provider_kind: str, full: bool = False) -> str:
         source = _single_line(text, 1600)
         if not source:
             return ""
@@ -1859,8 +1920,13 @@ Provider 规则：{emotion_rule}
             probability_hint = "命中，正常判断是否适合语音" if probability_allowed else "未命中，除非你判断用户本轮确实在要求语音，否则应保持纯文本"
         else:
             probability_hint = "未记录，按普通后处理规则判断"
+        scope_rule = (
+            "use_tts=true 时，voice_text 必须覆盖原回复的全部有效内容，不得只挑一小段；允许为自然朗读调整句式，但不能遗漏信息。"
+            if full
+            else "use_tts=true 时，只选择一小段最适合朗读的内容，不要把整条长回复都转成语音。"
+        )
         prompt = f"""
-你是 TTS 后处理模型。请判断这条已经生成好的聊天回复是否需要把其中一小段转成语音，并在需要时完成目标语种改写。
+你是 TTS 后处理模型。请判断这条已经生成好的聊天回复是否需要转成语音，并在需要时完成目标语种改写。
 
 目标语种：{lang}
 用户本轮原话：
@@ -1876,7 +1942,7 @@ Provider 规则：{emotion_rule}
 - 如果规则线索为 negative，通常不要使用语音；除非原话里有更强的相反语境，否则 use_tts=false。
 - 如果用户没有明确要求，只有在非常适合被听见、情绪很贴近、短句更有表现力时才使用语音。
 - 不要为了展示功能而使用语音；普通说明、长解释、信息密集回复应保持纯文字。
-- 只选择一小段最适合朗读的内容，不要把整条长回复都转成语音。
+- {scope_rule}
 - {visible_rule}
 - voice_text 是送入 TTS 的朗读文本。{language_rule}
 - {emotion_rule}
@@ -1936,7 +2002,17 @@ Provider 规则：{emotion_rule}
             getter = getattr(self.context, "get_provider_by_id", None)
             if callable(getter):
                 try:
-                    return getter(provider_id)
+                    provider = getter(provider_id)
+                    if provider is not None:
+                        return provider
+                    fallback_getter = getattr(self, "_model_fallback_provider_id", None)
+                    fallback_id = (
+                        fallback_getter("tts_conversion_provider_id", provider_id)
+                        if callable(fallback_getter)
+                        else ""
+                    )
+                    if fallback_id:
+                        return getter(fallback_id)
                 except Exception:
                     pass
         get_using = getattr(self.context, "get_using_provider", None)
@@ -1953,7 +2029,15 @@ Provider 规则：{emotion_rule}
                 return None
         return None
 
-    async def _tts_provider_text_chat(self, provider: Any, prompt: str, *, max_tokens: int = 700, task: str = "tts_conversion") -> Any:
+    async def _tts_provider_text_chat(
+        self,
+        provider: Any,
+        prompt: str,
+        *,
+        max_tokens: int = 700,
+        task: str = "tts_conversion",
+        allow_fallback: bool = True,
+    ) -> Any:
         start = time.time()
         provider_id = ""
         provider_id_getter = getattr(self, "_provider_id_from_instance", None)
@@ -2002,9 +2086,31 @@ Provider 规则：{emotion_rule}
                     prompt=prompt,
                     completion=completion,
                     elapsed_ms=elapsed_ms,
-                    success=True,
+                    success=bool(completion.strip()),
                     resp=resp,
                 )
+            if not completion.strip() and allow_fallback:
+                fallback_getter = getattr(self, "_model_fallback_provider_id", None)
+                fallback_id = (
+                    fallback_getter("tts_conversion_provider_id", provider_id)
+                    if callable(fallback_getter)
+                    else ""
+                )
+                provider_getter = getattr(self.context, "get_provider_by_id", None)
+                fallback_provider = provider_getter(fallback_id) if fallback_id and callable(provider_getter) else None
+                if fallback_provider is not None:
+                    logger.warning(
+                        "[PrivateCompanion] TTS文本主模型返回空结果,尝试卡片备用模型: primary=%s fallback=%s",
+                        _single_line(provider_id, 80) or "default",
+                        _single_line(fallback_id, 80),
+                    )
+                    return await self._tts_provider_text_chat(
+                        fallback_provider,
+                        prompt,
+                        max_tokens=max_tokens,
+                        task=task,
+                        allow_fallback=False,
+                    )
             return resp
         except Exception as exc:
             elapsed_ms = int((time.time() - start) * 1000)
@@ -2030,6 +2136,28 @@ Provider 规则：{emotion_rule}
                     success=False,
                     error=str(exc),
                 )
+            if allow_fallback:
+                fallback_getter = getattr(self, "_model_fallback_provider_id", None)
+                fallback_id = (
+                    fallback_getter("tts_conversion_provider_id", provider_id)
+                    if callable(fallback_getter)
+                    else ""
+                )
+                provider_getter = getattr(self.context, "get_provider_by_id", None)
+                fallback_provider = provider_getter(fallback_id) if fallback_id and callable(provider_getter) else None
+                if fallback_provider is not None:
+                    logger.warning(
+                        "[PrivateCompanion] TTS文本主模型失败,尝试卡片备用模型: primary=%s fallback=%s",
+                        _single_line(provider_id, 80) or "default",
+                        _single_line(fallback_id, 80),
+                    )
+                    return await self._tts_provider_text_chat(
+                        fallback_provider,
+                        prompt,
+                        max_tokens=max_tokens,
+                        task=task,
+                        allow_fallback=False,
+                    )
             raise
 
     def _open_tts_audio_file_local(self, audio_path: str) -> None:
@@ -2228,6 +2356,52 @@ Provider 规则：{emotion_rule}
             return self._sanitize_tts_visible_text(re.sub(TTS_TAG_PATTERN, "", normalized).strip())
         return ""
 
+    async def _finalize_tts_delivery_chain(
+        self,
+        output: list[Any],
+        *,
+        event: Any,
+        provider_kind: str,
+        fallback_plain: str,
+        successful_spoken: list[str],
+        suppress_visible: bool,
+    ) -> list[Any]:
+        records = [comp for comp in output if isinstance(comp, Record)]
+        if not records:
+            return output
+        if getattr(self, "tts_delivery_mode", "voice_and_text") == "voice_only" or suppress_visible:
+            return records
+        plain_text = "\n".join(
+            str(getattr(comp, "text", "") or "").strip()
+            for comp in output
+            if isinstance(comp, Plain) and str(getattr(comp, "text", "") or "").strip()
+        ).strip()
+        spoken_text = "\n".join(item for item in successful_spoken if item).strip()
+        voice_lang = getattr(self, "tts_voice_language", "ja")
+        if voice_lang == "zh":
+            visible_text = self._sanitize_tts_visible_text(fallback_plain or plain_text or spoken_text, max_chars=1200)
+        else:
+            foreign_mode = getattr(self, "tts_foreign_text_mode", "translation")
+            translated_text = ""
+            if fallback_plain and self._tts_visible_text_is_allowed_after_voice(fallback_plain):
+                translated_text = self._sanitize_tts_visible_text(fallback_plain, max_chars=1200)
+            elif self._tts_visible_text_is_allowed_after_voice(plain_text):
+                translated_text = self._sanitize_tts_visible_text(plain_text, max_chars=1200)
+            if not translated_text and foreign_mode in {"translation", "bilingual"} and successful_spoken:
+                translations = [
+                    await self._translate_tts_spoken_to_chinese(item, event, provider_kind=provider_kind)
+                    for item in successful_spoken
+                ]
+                translated_text = "\n".join(item for item in translations if item).strip()
+            if foreign_mode == "original":
+                visible_text = spoken_text
+            elif foreign_mode == "bilingual":
+                visible_text = "\n".join(item for item in (spoken_text, translated_text) if item).strip()
+            else:
+                visible_text = translated_text
+        visible_plain = self._mark_tts_visible_plain(visible_text, max_chars=1400)
+        return records + ([visible_plain] if visible_plain is not None else [])
+
     async def _process_tts_tags(self, text: str, event_or_provider: Any, provider_settings: dict[str, Any] | None = None, config: dict[str, Any] | None = None, fallback_plain: str = "") -> list[Any]:
         if hasattr(event_or_provider, "get_result"):
             event = event_or_provider
@@ -2270,6 +2444,7 @@ Provider 规则：{emotion_rule}
                 return [Plain(fallback_text)]
         provider_kind = self._tts_provider_kind(tts_provider, provider_settings)
         output: list[Any] = []
+        successful_spoken: list[str] = []
         record_failed = False
         pos = 0
         matches = list(re.finditer(r"<tts>(.*?)</tts>", normalized, flags=re.IGNORECASE | re.DOTALL))
@@ -2311,8 +2486,13 @@ Provider 规则：{emotion_rule}
             )
             if record is not None:
                 output.append(record)
+                successful_spoken.append(spoken)
                 self._mark_tts_session_sent(event)
-                if getattr(self, "tts_voice_language", "ja") != "zh":
+                if (
+                    getattr(self, "tts_voice_language", "ja") != "zh"
+                    and getattr(self, "tts_delivery_mode", "voice_and_text") != "voice_only"
+                    and getattr(self, "tts_foreign_text_mode", "translation") in {"translation", "bilingual"}
+                ):
                     next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
                     visible_after_this_block = normalized[match.end():next_start]
                     if not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block):
@@ -2430,7 +2610,14 @@ Provider 规则：{emotion_rule}
             fallback_text = self._sanitize_tts_visible_text(fallback_text)
             if fallback_text:
                 output.append(Plain(fallback_text))
-        return output
+        return await self._finalize_tts_delivery_chain(
+            output,
+            event=event,
+            provider_kind=provider_kind,
+            fallback_plain=fallback_plain,
+            successful_spoken=successful_spoken,
+            suppress_visible=suppress_visible,
+        )
 
     async def _convert_text_to_spoken_language(self, text: str, event: Any, *, provider_kind: str) -> str:
         provider = await self._get_tts_conversion_provider(event) if event is not None else None

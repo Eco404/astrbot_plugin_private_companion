@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260711-qzone-image-preview" />
+  <link rel="stylesheet" href="./app.css?v=20260711-provider-fallback" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260707-font-switch" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
   <link rel="stylesheet" href="./css/polish.css?v=20260710-config-consolidation" />
@@ -765,6 +765,10 @@ QQ空间 = 公开札记
         </div>
         <div class="token-summary" id="tokenSummary"></div>
         <div class="dashboard-grid token-grid">
+          <article class="wide" id="tokenBalanceCard">
+            <h2>账户余额</h2>
+            <div id="tokenBalanceStatus" class="token-plugin-panel"></div>
+          </article>
           <article>
             <h2 id="tokenProviderChartTitle">Provider 消耗排行</h2>
             <div id="tokenProviderChart" class="chart-box"></div>
@@ -1235,6 +1239,7 @@ QQ空间 = 公开札记
           <span class="muted">模型分流</span>
         </div>
         <div id="providerSummary" class="provider-summary"></div>
+        <div id="deepseekPeakCard"></div>
         <div id="providerFlow" class="provider-flow"></div>
         <div class="provider-config-mode-card">
           <div>
@@ -1367,8 +1372,8 @@ QQ空间 = 公开札记
 
   <script src="./js/features/daily-outfit.js?v=20260711-qzone-preview-context"></script>
   <script src="./js/ui/appearance.js?v=20260707-font-switch"></script>
-  <script src="./js/panels/provider-tree.js?v=20260709-provider-tree-static"></script>
+  <script src="./js/panels/provider-tree.js?v=20260711-provider-debug"></script>
   <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
-  <script src="./app.js?v=20260711-qzone-preview-context"></script>
+  <script src="./app.js?v=20260711-provider-debug"></script>
 </body>
 </html>

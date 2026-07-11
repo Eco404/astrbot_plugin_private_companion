@@ -20,25 +20,40 @@ class BalanceAwarenessMixin:
 
     _BALANCE_AUTO_PATHS = (
         "balance",
+        "total_balance",
+        "remaining_balance",
+        "total_available",
         "remaining",
         "available",
         "credit",
         "quota",
+        "balance_infos[0].total_balance",
         "data.balance",
+        "data.total_balance",
+        "data.remaining_balance",
+        "data.total_available",
         "data.remaining",
         "data.available",
         "data.credit",
         "data.quota",
+        "data.limit_remaining",
+        "data.balance_infos[0].total_balance",
+        "data.user.balance",
+        "data.user.quota",
     )
     _BALANCE_TOTAL_AUTO_PATHS = (
         "total",
         "limit",
         "quota_limit",
         "total_granted",
+        "total_credit",
         "data.total",
         "data.limit",
         "data.quota_limit",
         "data.total_granted",
+        "data.total_credit",
+        "data.user.total",
+        "data.user.quota_limit",
     )
     _BALANCE_USED_AUTO_PATHS = (
         "used",
@@ -47,6 +62,19 @@ class BalanceAwarenessMixin:
         "data.used",
         "data.usage",
         "data.total_used",
+        "data.used_quota",
+        "data.user.used",
+        "data.user.used_quota",
+    )
+
+    _BALANCE_GENERIC_ENDPOINT_PATHS = (
+        "/dashboard/billing/credit_grants",
+        "/dashboard/billing/subscription",
+        "/v1/dashboard/billing/subscription",
+        "/api/user/self",
+        "/api/user/amount",
+        "/v1/user/info",
+        "/user/balance",
     )
 
     @staticmethod
@@ -201,6 +229,193 @@ class BalanceAwarenessMixin:
             headers[header] = f"{scheme} {api_key}".strip()
         return headers
 
+    @staticmethod
+    def _balance_provider_source_key(source: dict[str, Any]) -> str:
+        for key in ("key", "api_key", "token", "api_token"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _balance_provider_source_headers(self, source: dict[str, Any]) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "astrbot-private-companion/balance-awareness",
+        }
+        custom = source.get("custom_headers")
+        if isinstance(custom, dict):
+            blocked = {"host", "content-length", "transfer-encoding", "connection"}
+            for raw_key, raw_value in custom.items():
+                key = _single_line(raw_key, 80)
+                value = _single_line(raw_value, 500)
+                if key and value and key.lower() not in blocked:
+                    headers[key] = value
+        api_key = self._balance_provider_source_key(source)
+        if api_key and not any(key.lower() == "authorization" for key in headers):
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
+    def _balance_astrbot_config(self) -> dict[str, Any]:
+        context = getattr(self, "context", None)
+        getter = getattr(context, "get_config", None)
+        if not callable(getter):
+            return {}
+        try:
+            config = getter()
+        except TypeError:
+            try:
+                config = getter(umo="")
+            except Exception:
+                config = {}
+        except Exception:
+            config = {}
+        return config if isinstance(config, dict) else {}
+
+    @staticmethod
+    def _balance_provider_source_id_from_model(value: Any) -> str:
+        text = _single_line(value, 180)
+        return text.split("/", 1)[0].strip() if "/" in text else text
+
+    def _balance_auto_provider_sources(self) -> list[dict[str, Any]]:
+        config = self._balance_astrbot_config()
+        raw_sources = config.get("provider_sources")
+        if not isinstance(raw_sources, list):
+            return []
+        by_id: dict[str, dict[str, Any]] = {}
+        ordered_ids: list[str] = []
+        for raw in raw_sources:
+            if not isinstance(raw, dict) or raw.get("enable") is False:
+                continue
+            source_id = _single_line(raw.get("id") or raw.get("provider_source_id"), 120)
+            api_base = str(raw.get("api_base") or raw.get("base_url") or raw.get("api_base_url") or "").strip()
+            parsed = urlparse(api_base)
+            if not source_id or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+            by_id[source_id] = raw
+
+        preferred_values = [
+            getattr(self, "llm_provider_id", ""),
+            getattr(self, "mai_style_provider_id", ""),
+            getattr(self, "response_review_provider_id", ""),
+            getattr(self, "proactive_persona_judge_provider_id", ""),
+            getattr(self, "fast_response_provider_id", ""),
+        ]
+        settings = config.get("provider_settings") if isinstance(config.get("provider_settings"), dict) else {}
+        preferred_values.extend(
+            [
+                settings.get("default_provider_id"),
+                settings.get("default_llm_provider_id"),
+            ]
+        )
+        for value in preferred_values:
+            source_id = self._balance_provider_source_id_from_model(value)
+            if source_id and source_id in by_id and source_id not in ordered_ids:
+                ordered_ids.append(source_id)
+        for source_id in by_id:
+            if source_id not in ordered_ids:
+                ordered_ids.append(source_id)
+        return [by_id[source_id] for source_id in ordered_ids[:6]]
+
+    def _balance_auto_discovery_available(self) -> bool:
+        return bool(self._balance_auto_provider_sources())
+
+    @staticmethod
+    def _balance_same_origin_url(api_base: str, path: str) -> str:
+        parsed = urlparse(str(api_base or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        clean_path = "/" + str(path or "").lstrip("/")
+        return f"{parsed.scheme}://{parsed.netloc}{clean_path}"
+
+    def _balance_auto_endpoint_urls(self, source: dict[str, Any]) -> list[str]:
+        api_base = str(source.get("api_base") or source.get("base_url") or source.get("api_base_url") or "").strip()
+        parsed = urlparse(api_base)
+        host = parsed.netloc.lower()
+        provider_text = " ".join(
+            _single_line(source.get(key), 120).lower()
+            for key in ("id", "provider", "type", "provider_type")
+        )
+        paths: tuple[str, ...]
+        if "deepseek" in host or "deepseek" in provider_text:
+            paths = ("/user/balance",)
+        elif "openrouter.ai" in host:
+            paths = ("/api/v1/auth/key",)
+        elif "siliconflow" in host:
+            paths = ("/v1/user/info",)
+        elif any(marker in host for marker in ("volces.com", "googleapis.com", "generativelanguage.googleapis.com")):
+            paths = ()
+        else:
+            paths = self._BALANCE_GENERIC_ENDPOINT_PATHS
+        urls: list[str] = []
+        for path in paths:
+            url = self._balance_same_origin_url(api_base, path)
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
+    async def _balance_request_json(self, url: str, headers: dict[str, str]) -> Any:
+        try:
+            import aiohttp
+        except ImportError as exc:
+            raise RuntimeError("当前环境缺少 aiohttp，无法拉取余额") from exc
+        timeout_seconds = min(
+            60.0,
+            max(2.0, _safe_float(getattr(self, "balance_request_timeout_seconds", 10.0), 10.0, 2.0)),
+        )
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"余额接口返回 HTTP {response.status}")
+                try:
+                    return await response.json(content_type=None)
+                except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                    raise ValueError("余额接口没有返回有效 JSON") from exc
+
+    async def _fetch_auto_balance_snapshot(self) -> dict[str, Any]:
+        sources = self._balance_auto_provider_sources()
+        if not sources:
+            raise RuntimeError("没有可用于自动查询余额的 AstrBot Provider")
+        state = self.data.get("balance_awareness") if isinstance(getattr(self, "data", None), dict) else {}
+        cached_source_id = _single_line((state or {}).get("auto_source_id"), 120) if isinstance(state, dict) else ""
+        cached_endpoint = str((state or {}).get("auto_endpoint") or "").strip() if isinstance(state, dict) else ""
+        if cached_source_id:
+            sources.sort(key=lambda item: 0 if _single_line(item.get("id"), 120) == cached_source_id else 1)
+        attempted_sources: list[str] = []
+        attempt_count = 0
+        max_attempts = 12
+        for source in sources:
+            source_id = _single_line(source.get("id") or source.get("provider_source_id"), 120) or "provider"
+            endpoints = self._balance_auto_endpoint_urls(source)
+            api_base = str(source.get("api_base") or source.get("base_url") or source.get("api_base_url") or "").strip()
+            if cached_source_id == source_id and cached_endpoint:
+                cached_url = self._balance_same_origin_url(api_base, cached_endpoint)
+                if cached_url:
+                    endpoints = [cached_url] + [url for url in endpoints if url != cached_url]
+            if not endpoints:
+                continue
+            attempted_sources.append(source_id)
+            headers = self._balance_provider_source_headers(source)
+            for endpoint in endpoints:
+                if attempt_count >= max_attempts:
+                    break
+                attempt_count += 1
+                try:
+                    payload = await self._balance_request_json(endpoint, headers)
+                    snapshot = self._extract_balance_snapshot(payload)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                snapshot["query_mode"] = "auto"
+                snapshot["source_id"] = source_id
+                snapshot["endpoint_path"] = urlparse(endpoint).path
+                return snapshot
+            if attempt_count >= max_attempts:
+                break
+        labels = "、".join(attempted_sources[:6]) or "已配置 Provider"
+        raise RuntimeError(f"未从 {labels} 找到受支持的余额查询接口")
+
     def _balance_safe_error(self, exc: Exception) -> str:
         text = _single_line(exc, 500)
         api_key = str(getattr(self, "balance_api_key", "") or "").strip()
@@ -214,27 +429,17 @@ class BalanceAwarenessMixin:
 
     async def _fetch_balance_snapshot(self) -> dict[str, Any]:
         url = str(getattr(self, "balance_api_url", "") or "").strip()
+        if not url:
+            return await self._fetch_auto_balance_snapshot()
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("余额接口地址必须是有效的 HTTP/HTTPS URL")
-        try:
-            import aiohttp
-        except ImportError as exc:
-            raise RuntimeError("当前环境缺少 aiohttp，无法拉取余额") from exc
-        timeout_seconds = min(
-            60.0,
-            max(2.0, _safe_float(getattr(self, "balance_request_timeout_seconds", 10.0), 10.0, 2.0)),
-        )
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout, headers=self._balance_request_headers()) as session:
-            async with session.get(url) as response:
-                if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"余额接口返回 HTTP {response.status}")
-                try:
-                    payload = await response.json(content_type=None)
-                except (json.JSONDecodeError, ValueError, TypeError) as exc:
-                    raise ValueError("余额接口没有返回有效 JSON") from exc
-        return self._extract_balance_snapshot(payload)
+        payload = await self._balance_request_json(url, self._balance_request_headers())
+        snapshot = self._extract_balance_snapshot(payload)
+        snapshot["query_mode"] = "manual"
+        snapshot["source_id"] = "custom"
+        snapshot["endpoint_path"] = parsed.path
+        return snapshot
 
     def _balance_display(self, snapshot: dict[str, Any]) -> str:
         amount = _safe_float(snapshot.get("amount"), 0.0)
@@ -324,8 +529,6 @@ class BalanceAwarenessMixin:
     async def _maybe_refresh_balance_awareness(self) -> None:
         if not bool(getattr(self, "enable_balance_awareness", False)):
             return
-        if not str(getattr(self, "balance_api_url", "") or "").strip():
-            return
         lock = getattr(self, "_balance_awareness_lock", None)
         if not isinstance(lock, asyncio.Lock):
             lock = asyncio.Lock()
@@ -397,6 +600,9 @@ class BalanceAwarenessMixin:
                     "total": snapshot.get("total"),
                     "remaining_percent": snapshot.get("remaining_percent"),
                     "currency_label": _single_line(getattr(self, "balance_currency_label", "元"), 20),
+                    "query_mode": _single_line(snapshot.get("query_mode"), 20) or "manual",
+                    "auto_source_id": _single_line(snapshot.get("source_id"), 120),
+                    "auto_endpoint": _single_line(snapshot.get("endpoint_path"), 160),
                 }
             )
             if offered > 0:
