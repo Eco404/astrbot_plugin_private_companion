@@ -2998,6 +2998,12 @@
     "default": 1,
     "invisible": true
   },
+  "poke_action_cooldown_minutes": {
+    "description": "Legacy flat config: 主动戳一戳冷却分钟数",
+    "type": "int",
+    "default": 30,
+    "invisible": true
+  },
   "enable_voice_action": {
     "description": "Legacy flat config: 允许主动发语音",
     "type": "bool",
@@ -8423,7 +8429,7 @@
         "default": false
       },
       "poke_action_max_times": {
-        "description": "主动戳一戳最多次数",
+        "description": "每次主动戳一戳最多次数",
         "type": "int",
         "hint": "每次主动 poke 最多戳几下。实际主动行为默认只会轻轻戳一下，这个值主要作为上限兜底。",
         "slider": {
@@ -8432,6 +8438,20 @@
           "step": 1
         },
         "default": 1,
+        "condition": {
+          "enable_poke_action": true
+        }
+      },
+      "poke_action_cooldown_minutes": {
+        "description": "主动戳一戳冷却分钟数",
+        "type": "int",
+        "hint": "同一用户一次主动戳一戳成功后，至少等待多久才允许再次主动戳。用于阻止候选重试、并发调度或正文生成失败造成重复动作；默认 30 分钟，0 表示不设置时间冷却但仍保留并发锁。",
+        "slider": {
+          "min": 0,
+          "max": 1440,
+          "step": 5
+        },
+        "default": 30,
         "condition": {
           "enable_poke_action": true
         }

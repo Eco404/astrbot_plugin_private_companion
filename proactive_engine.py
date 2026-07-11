@@ -4425,7 +4425,7 @@ class ProactiveEngineMixin:
             available.add("screen_peek")
         if self._photo_text_available(user):
             available.add("photo_text")
-        if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0:
+        if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0 and self._poke_action_cooldown_remaining(user) <= 0:
             available.add("poke")
         if self._voice_available(user):
             available.add("voice")
@@ -4746,7 +4746,7 @@ class ProactiveEngineMixin:
             candidates.append(("photo_text", 1.05))
         if self._voice_available(user) and reason in {"quiet_care", "diary_share", "insomnia_night", "evening_greeting"}:
             candidates.append(("voice", 0.82))
-        if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0 and reason in {"check_in", "quiet_care", "morning_greeting", "evening_greeting"}:
+        if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0 and self._poke_action_cooldown_remaining(user) <= 0 and reason in {"check_in", "quiet_care", "morning_greeting", "evening_greeting"}:
             candidates.append(("poke", 0.62))
         if not candidates:
             return "message"
@@ -5506,6 +5506,8 @@ class ProactiveEngineMixin:
         future_events = []
         for event in events:
             if not isinstance(event, dict):
+                continue
+            if _single_line(event.get("lifecycle_status"), 20).lower() in {"cancelled", "canceled", "取消", "已取消"}:
                 continue
             if self._unverified_social_relay_plan_reason(
                 event,
@@ -6887,7 +6889,11 @@ class ProactiveEngineMixin:
                 return False
             if part == "photo_text" and not self._photo_text_available(user):
                 return False
-            if part == "poke" and (not self._poke_available() or self._effective_user_poke_daily_limit(user) <= 0):
+            if part == "poke" and (
+                not self._poke_available()
+                or self._effective_user_poke_daily_limit(user) <= 0
+                or self._poke_action_cooldown_remaining(user) > 0
+            ):
                 return False
             if part == "voice" and not self._voice_available(user):
                 return False
@@ -6959,7 +6965,7 @@ class ProactiveEngineMixin:
             if reason in {"check_in", "quiet_care", "state_share"}:
                 weight *= 0.45
             weighted.append(("photo_text", weight))
-        if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0 and reason in {"check_in", "quiet_care", "state_share", "important_date_share", "morning_greeting", "evening_greeting"}:
+        if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0 and self._poke_action_cooldown_remaining(user) <= 0 and reason in {"check_in", "quiet_care", "state_share", "important_date_share", "morning_greeting", "evening_greeting"}:
             weight = 0.38 + motive_bias["poke"] + affinity_bias["poke"]
             if action_profile["playful"]:
                 weight += 0.22
@@ -7593,7 +7599,22 @@ class ProactiveEngineMixin:
         ):
             user["planned_opener_mode"] = "name_only"
             return reason, self._build_name_only_opener(name), "", [], "先轻轻叫了你一声", "message"
-        action_payload = await self._execute_proactive_action(planned_action, user, name, reason)
+        budget_remaining = getattr(self, "_llm_daily_budget_remaining", None)
+        if callable(budget_remaining) and budget_remaining() == 0:
+            user["_proactive_render_failure_stage"] = "今日 Token 硬限额已耗尽，未执行主动动作"
+            return reason, "", "", [], "Token 硬限额已耗尽", planned_action
+        deferred_poke = planned_action == "poke"
+        action_payload = (
+            {
+                "success": True,
+                "context": "poke：待主动正文确认可发送后再执行；本阶段尚未产生实际戳一戳",
+                "extra_components": [],
+                "summary": "准备戳一下",
+                "effective_action": "poke",
+            }
+            if deferred_poke
+            else await self._execute_proactive_action(planned_action, user, name, reason)
+        )
         effective_action = _single_line(action_payload.get("effective_action") or planned_action, 60) or "message"
         raw_action_context = str(action_payload.get("context") or "")
         if reason == "group_share":
@@ -7646,15 +7667,6 @@ class ProactiveEngineMixin:
         text = await self._generate_proactive_message_with_llm(
             user, name, reason, action_context, action=effective_action, motive=planned_motive
         )
-        pre_poke_count, pre_poke_context = await self._maybe_run_pre_message_poke(
-            user,
-            name,
-            reason,
-            action=effective_action,
-            motive=planned_motive,
-        )
-        if pre_poke_context and not pre_poke_context.startswith("poke：已"):
-            logger.info("[PrivateCompanion] 消息前置戳一戳失败,跳过本次前置戳: %s", _single_line(pre_poke_context, 120))
         captured_text, captured_image_path, captured_extra_components = self._pop_framework_captured_send_payload(
             str(user.get("umo") or "")
         )
@@ -7681,6 +7693,23 @@ class ProactiveEngineMixin:
                 text = recency_repair(user, text)
         if not text and not image_path and not extra_components:
             return reason, "", "", [], action_summary, effective_action
+        if deferred_poke:
+            poke_payload = await self._execute_proactive_action("poke", user, name, reason)
+            if not bool(poke_payload.get("success", False)):
+                user["_proactive_render_failure_stage"] = _single_line(
+                    poke_payload.get("context"), 160
+                ) or "主动戳一戳执行失败"
+                return reason, "", "", [], "戳一戳未执行", "poke"
+            action_summary = _single_line(poke_payload.get("summary"), 80) or "戳了你一下"
+        pre_poke_count, pre_poke_context = await self._maybe_run_pre_message_poke(
+            user,
+            name,
+            reason,
+            action=effective_action,
+            motive=planned_motive,
+        )
+        if pre_poke_context and not pre_poke_context.startswith("poke：已"):
+            logger.info("[PrivateCompanion] 消息前置戳一戳失败,跳过本次前置戳: %s", _single_line(pre_poke_context, 120))
         if pre_poke_count > 0:
             action_summary = f"先戳了 {pre_poke_count} 下 + {action_summary}"
             effective_action = f"poke+{effective_action}" if effective_action != "poke" else "poke"

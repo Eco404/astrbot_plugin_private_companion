@@ -6274,7 +6274,7 @@ function setupGuideDailyResultHtml() {
           <h4>今日粗日程${plan.date ? ` · ${escapeHtml(plan.date)}` : ""}</h4>
           <div class="setup-guide-mini-timeline">
             ${items.length ? items.slice(0, 8).map((item) => `
-              <p><b>${escapeHtml(item.time || "-")}</b><span>${escapeHtml([item.activity, item.mood].filter(Boolean).join(" · ") || "未命名日程")}</span></p>
+              <p><b>${escapeHtml(item.end ? `${item.time || "-"}-${item.end}` : item.time || "-")}</b><span>${escapeHtml([item.activity, item.mood].filter(Boolean).join(" · ") || "未命名日程")}</span></p>
             `).join("") : `<p><span>粗日程还没有可展示条目。</span></p>`}
           </div>
           <h4>当前细化</h4>
@@ -7270,7 +7270,7 @@ function renderDashboardPulse() {
       layout: "wide tall",
       label: "此刻状态",
       value: current.activity || "暂无当前日程",
-      note: [current.time, current.mood, current.message_seed].filter(Boolean).join(" · ") || daily.note || "暂无细化",
+      note: [current.end ? `${current.time}-${current.end}` : current.time, scheduleLifecycleLabel(current.lifecycle), current.mood, current.message_seed].filter(Boolean).join(" · ") || daily.note || "暂无细化",
       jump: "memory",
     },
     {
@@ -12236,7 +12236,7 @@ function renderLifeHero(daily, life) {
   $("#lifeWeather").textContent = daily.weather || "暂无天气";
   const current = life.current_plan || {};
   $("#lifeCurrentActivity").textContent = current.activity || "暂无当前日程";
-  $("#lifeCurrentSeed").textContent = [current.time, current.mood, current.message_seed].filter(Boolean).join(" · ") || "暂无细化";
+  $("#lifeCurrentSeed").textContent = [current.end ? `${current.time}-${current.end}` : current.time, scheduleLifecycleLabel(current.lifecycle), current.mood, current.message_seed].filter(Boolean).join(" · ") || "暂无细化";
 }
 
 function roleplayEnergyLabel(value) {
@@ -14200,23 +14200,37 @@ function renderDailyTimeline() {
     $("#dailyTimeline").innerHTML = `<div class="empty small">暂无细化时间段</div>`;
     return;
   }
-  $("#dailyTimeline").innerHTML = segments.map((segment) => {
+  const planQuality = timeline.plan_quality || {};
+  const qualityIntro = Number.isFinite(Number(planQuality.score))
+    ? `<div class="timeline-quality-summary"><b>全天质量 ${escapeHtml(planQuality.score)}</b><span>${escapeHtml((planQuality.issues || []).slice(0, 2).join(" · ") || "时间与内容检查正常")}</span></div>`
+    : "";
+  $("#dailyTimeline").innerHTML = qualityIntro + segments.map((segment) => {
     const vars = (segment.state_variables || []).slice(0, 4);
-    const events = (segment.today_events || []).slice(0, 3);
+    const events = (segment.today_events || []).slice(0, 5);
     const presence = segment.presence_status || {};
     const statusText = detailSegmentStatusLabel(segment);
     const presenceText = presenceLabel(presence);
-    const metaText = [statusText, presenceText].filter(Boolean).join(" · ");
-    const errorText = String(segment.error || "").trim();
+    const lifecycleText = scheduleLifecycleLabel(segment.lifecycle);
+    const metaText = [...new Set([lifecycleText, statusText, presenceText].filter(Boolean))].join(" · ");
+    const errorText = String(segment.regeneration_error || segment.error || "").trim();
+    const quality = segment.quality || {};
+    const basis = (segment.summary_basis?.length ? segment.summary_basis : segment.basis || []).map(scheduleBasisLabel);
+    const confidence = Number(segment.summary_confidence ?? segment.confidence);
+    const evidenceText = [
+      basis.length ? `依据：${basis.join("、")}` : "",
+      Number.isFinite(confidence) ? `置信度 ${Math.round(confidence * 100)}%` : "",
+      Number.isFinite(Number(quality.score)) ? `质量 ${quality.score}` : "",
+    ].filter(Boolean).join(" · ");
     return `
       <section class="timeline-item">
         <div class="timeline-time">${escapeHtml(segment.window || segment.key)}</div>
         <div class="timeline-body">
           <div class="timeline-head">
             <b>${escapeHtml(segment.summary || "这一段还没有摘要")}</b>
-            <span>${escapeHtml(metaText)}</span>
+            <div><span>${escapeHtml(metaText)}</span><button type="button" class="timeline-regenerate" data-daily-detail-regenerate="${escapeHtml(segment.key || "")}" title="重新细化这一段" aria-label="重新细化这一段">↻</button>${segment.lifecycle !== "cancelled" ? `<button type="button" class="timeline-regenerate danger" data-daily-detail-cancel="${escapeHtml(segment.key || "")}" title="取消这一段" aria-label="取消这一段">×</button>` : ""}</div>
           </div>
           ${errorText ? `<p class="timeline-error">失败原因：${escapeHtml(errorText)}${segment.retry_after ? `，${escapeHtml(segment.retry_after)} 后重试` : ""}</p>` : ""}
+          ${evidenceText ? `<p class="timeline-evidence">${escapeHtml(evidenceText)}</p>` : ""}
           <div class="state-pills">
             ${vars.length ? vars.map((item) => `
               <span title="${escapeHtml(item.note || "")}">
@@ -14225,12 +14239,81 @@ function renderDailyTimeline() {
             `).join("") : `<span>暂无状态变量</span>`}
           </div>
           <ul>
-            ${events.length ? events.map((item) => `<li>${escapeHtml(item.window ? `${item.window} · ${item.text}` : item.text)}</li>`).join("") : `<li>暂无细化事件</li>`}
+            ${events.length ? events.map((item) => `<li><span>${escapeHtml(scheduleLifecycleLabel(item.lifecycle))}</span>${escapeHtml(item.window ? `${item.window} · ${item.text}` : item.text)}</li>`).join("") : `<li>暂无细化事件</li>`}
           </ul>
         </div>
       </section>
     `;
   }).join("");
+  document.querySelectorAll("[data-daily-detail-regenerate]").forEach((button) => {
+    button.addEventListener("click", () => regenerateDailyDetailSegment(button));
+  });
+  document.querySelectorAll("[data-daily-detail-cancel]").forEach((button) => {
+    button.addEventListener("click", () => cancelDailyDetailSegment(button));
+  });
+}
+
+function scheduleLifecycleLabel(value) {
+  return {
+    planned: "计划中",
+    active: "进行中",
+    completed: "已完成",
+    changed: "已变更",
+    cancelled: "已取消",
+  }[String(value || "").toLowerCase()] || "";
+}
+
+function scheduleBasisLabel(value) {
+  return {
+    calendar: "日期",
+    persona: "角色设定",
+    adjustment: "用户介入",
+    state: "当前状态",
+    weather: "天气",
+    continuity: "连续记忆",
+    inspiration: "软灵感",
+    coarse_plan: "粗日程",
+  }[String(value || "").toLowerCase()] || String(value || "");
+}
+
+async function regenerateDailyDetailSegment(button) {
+  const key = String(button?.dataset.dailyDetailRegenerate || "").trim();
+  if (!key || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "…";
+  try {
+    const result = await fetchJson("/daily/detail/regenerate", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    });
+    state.overview = state.overview || {};
+    state.overview.daily_timeline = result.daily_timeline || state.overview.daily_timeline;
+    renderDailyTimeline();
+    showToast("这一段已重新细化", "success");
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "↻";
+    showToast(error.message || "重新细化失败", "error");
+  }
+}
+
+async function cancelDailyDetailSegment(button) {
+  const key = String(button?.dataset.dailyDetailCancel || "").trim();
+  if (!key || button.disabled || !window.confirm("取消这一段日程？已有细化会保留，但不会再作为待执行事件。")) return;
+  button.disabled = true;
+  try {
+    const result = await fetchJson("/daily/detail/regenerate", {
+      method: "POST",
+      body: JSON.stringify({ key, action: "cancel" }),
+    });
+    state.overview = state.overview || {};
+    state.overview.daily_timeline = result.daily_timeline || state.overview.daily_timeline;
+    renderDailyTimeline();
+    showToast("这一段已取消", "success");
+  } catch (error) {
+    button.disabled = false;
+    showToast(error.message || "取消失败", "error");
+  }
 }
 
 function detailSegmentStatusLabel(segment) {
@@ -14241,6 +14324,7 @@ function detailSegmentStatusLabel(segment) {
     done: "已细化",
     generating: "生成中",
     failed: "生成失败",
+    cancelled: "已取消",
   }[value] || (value ? value : "未生成");
   if (value === "generating" && startedAt) return `${label}（${startedAt} 开始）`;
   return label;
@@ -14283,7 +14367,9 @@ function renderInteractionImpact() {
 function presenceLabel(presence) {
   const mode = String(presence?.mode || "unchanged");
   const text = presence?.custom_text || presence?.wording || "";
-  if (mode === "custom" && text) return `自定义状态：${text}`;
+  const duration = Number.parseInt(presence?.duration_minutes, 10);
+  const durationText = Number.isFinite(duration) && duration > 0 ? `（约 ${duration} 分钟）` : "";
+  if (mode === "custom" && text) return `自定义状态：${text}${durationText}`;
   if (mode === "sleep") return "状态：休息中";
   if (mode === "busy") return "状态：忙碌";
   if (mode === "online") return "状态：在线";

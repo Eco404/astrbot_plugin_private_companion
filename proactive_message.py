@@ -295,57 +295,6 @@ class _CapturedFrameworkSendMessage(Exception):
     """Stop the framework agent once its send_message_to_user payload is captured."""
 
 
-class _ProactiveFrameworkToolManagerProxy:
-    """Hide incompatible global tools from the synthetic proactive agent only."""
-
-    def __init__(self, manager: Any, excluded_names: set[str]) -> None:
-        self._manager = manager
-        self._excluded_names = {str(name).strip() for name in excluded_names if str(name).strip()}
-        self._logged_exclusion = False
-
-    def get_full_tool_set(self):
-        tool_set = self._manager.get_full_tool_set()
-        remove_tool = getattr(tool_set, "remove_tool", None)
-        if callable(remove_tool):
-            existing_names = {
-                str(getattr(tool, "name", "") or "").strip()
-                for tool in list(getattr(tool_set, "tools", []) or [])
-            }
-            removed_names = sorted(name for name in self._excluded_names if name in existing_names)
-            for name in self._excluded_names:
-                remove_tool(name)
-            if removed_names and not self._logged_exclusion:
-                self._logged_exclusion = True
-                logger.info(
-                    "[PrivateCompanion] 主动主链已隔离不兼容全局工具: %s",
-                    ",".join(removed_names),
-                )
-        return tool_set
-
-    def get_func(self, name: str):
-        if str(name or "").strip() in self._excluded_names:
-            return None
-        return self._manager.get_func(name)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._manager, name)
-
-
-class _ProactiveFrameworkContextProxy:
-    def __init__(self, context: Any, excluded_tool_names: set[str]) -> None:
-        self._context = context
-        self._tool_manager_proxy = _ProactiveFrameworkToolManagerProxy(
-            context.get_llm_tool_manager(),
-            excluded_tool_names,
-        )
-
-    def get_llm_tool_manager(self):
-        return self._tool_manager_proxy
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._context, name)
-
-
 class ProactiveMessageMixin:
     """主动消息生成、动作执行和发送链路"""
 
@@ -2005,12 +1954,6 @@ class ProactiveMessageMixin:
                     captured_text_parts.append(text_value)
         return "\n".join(captured_text_parts).strip()
 
-    def _framework_context_for_proactive_agent(self) -> Any:
-        # AstrBot 4.26.4 validates this value as a concrete Context instance.
-        # Tool filtering therefore happens on the request ToolSet after the
-        # framework has built it, rather than by wrapping the Context object.
-        return getattr(self, "context", None)
-
     def _filter_incompatible_proactive_framework_tools(
         self,
         req: ProviderRequest,
@@ -2222,7 +2165,8 @@ class ProactiveMessageMixin:
                     async def _runner_factory():
                         runner = await build_main_agent(
                             event=event,
-                            plugin_context=self._framework_context_for_proactive_agent(),
+                            # AstrBot 4.26.2+ validates this as the concrete Context type.
+                            plugin_context=self.context,
                             config=build_cfg,
                             req=req,
                         )
@@ -4651,6 +4595,30 @@ Output:
                 continue
         return None
 
+    def _poke_action_cooldown_remaining(self, user: dict[str, Any] | None, *, now: float | None = None) -> float:
+        if not isinstance(user, dict):
+            return 0.0
+        current_ts = float(now if now is not None else _now_ts())
+        inflight_until = _safe_float(user.get("poke_action_inflight_until"), 0.0)
+        if inflight_until > current_ts:
+            return inflight_until - current_ts
+        cooldown_seconds = max(0, _safe_int(getattr(self, "poke_action_cooldown_minutes", 30), 30, 0, 1440)) * 60
+        last_at = _safe_float(user.get("last_poke_action_at"), 0.0)
+        return max(0.0, last_at + cooldown_seconds - current_ts) if cooldown_seconds > 0 and last_at > 0 else 0.0
+
+    async def _send_single_poke(self, client: Any, *, user_id: str, group_id: str) -> None:
+        if group_id and callable(getattr(client, "group_poke", None)):
+            await client.group_poke(group_id=int(group_id), user_id=int(user_id))
+            return
+        if not group_id and callable(getattr(client, "friend_poke", None)):
+            await client.friend_poke(user_id=int(user_id))
+            return
+        try:
+            from data.plugins.astrbot_plugin_pokepro.core.send_poke import PokeSender
+        except Exception:
+            from astrbot_plugin_pokepro.core.send_poke import PokeSender
+        await PokeSender.poke_func(client=client, user_id=user_id, group_id=group_id or None)
+
     async def _run_poke_action(
         self,
         user: dict[str, Any],
@@ -4668,27 +4636,44 @@ Output:
         if not user_id.isdigit():
             return "poke：目标 QQ 号无效"
         group_id = self._extract_group_id_from_umo(str(user.get("umo") or ""))
+        max_count = min(3, max(0, self._effective_user_poke_daily_limit(user)))
+        if max_count <= 0:
+            return "poke：当前用户未允许主动戳一戳"
+        requested_count = int(explicit_count) if explicit_count is not None else self._choose_poke_repeat_count(user, reason)
+        poke_count = max(1, min(max_count, requested_count))
+        reserved = False
         try:
-            from data.plugins.astrbot_plugin_pokepro.core.send_poke import PokeSender
-        except Exception:
-            try:
-                from astrbot_plugin_pokepro.core.send_poke import PokeSender
-            except Exception as e:
-                return f"poke：pokepro 插件不可用,{e}"
-        try:
-            poke_count = max(1, int(explicit_count)) if explicit_count else self._choose_poke_repeat_count(user, reason)
             async with self._data_lock:
                 current = self._get_user(user_id)
-                current["poke_echo_suppress_until"] = _now_ts() + max(6.0, poke_count * 1.6 + 3.0)
+                now = _now_ts()
+                remaining = self._poke_action_cooldown_remaining(current, now=now)
+                if remaining > 0:
+                    return f"poke：冷却中，约 {max(1, math.ceil(remaining / 60))} 分钟后可再次执行"
+                current["poke_action_inflight_until"] = now + max(30.0, poke_count * 3.0)
+                current["poke_echo_suppress_until"] = now + max(30.0, poke_count * 3.0)
                 self._save_data_sync()
+                reserved = True
             for index in range(poke_count):
-                await PokeSender.poke_func(client=client, user_id=user_id, group_id=group_id)
+                await self._send_single_poke(client, user_id=user_id, group_id=group_id)
                 if index + 1 < poke_count:
                     await asyncio.sleep(random.uniform(0.35, 0.9))
+            async with self._data_lock:
+                current = self._get_user(user_id)
+                current["last_poke_action_at"] = _now_ts()
+                current["poke_action_inflight_until"] = 0
+                self._save_data_sync()
             if poke_count <= 1:
                 return f"poke：已轻轻戳了 {name} 一下\n主动原因：{reason}"
             return f"poke：已轻轻连着戳了 {name} {poke_count} 下\n主动原因：{reason}"
         except Exception as e:
+            if reserved:
+                try:
+                    async with self._data_lock:
+                        current = self._get_user(user_id)
+                        current["poke_action_inflight_until"] = 0
+                        self._save_data_sync()
+                except Exception:
+                    pass
             logger.warning(f"[PrivateCompanion] poke 主动行为失败: {e}")
             return f"poke：失败,{e}"
 
@@ -4731,7 +4716,13 @@ Output:
         action: str = "message",
         motive: str = "",
     ) -> int:
-        if not self._poke_available() or self._effective_user_poke_daily_limit(user) <= 0:
+        if "poke" in {part.strip() for part in str(action or "").split("+") if part.strip()}:
+            return 0
+        if (
+            not self._poke_available()
+            or self._effective_user_poke_daily_limit(user) <= 0
+            or self._poke_action_cooldown_remaining(user) > 0
+        ):
             return 0
         profile = self._persona_action_profile()
         probability = 0.12

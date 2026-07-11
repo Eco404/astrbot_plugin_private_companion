@@ -12,6 +12,7 @@ import hashlib
 import mimetypes
 import secrets
 import sqlite3
+import uuid
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
-from .planning import generate_daily_plan
+from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -172,6 +173,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/external_ability/update", self.update_external_ability, ["POST"], "Private Companion Page update external proactive ability"),
             ("/setup/apply", self.apply_setup_guide, ["POST"], "Private Companion Page apply first setup guide"),
             ("/setup/daily/run", self.run_setup_daily_generation, ["POST"], "Private Companion Page setup guide daily generation"),
+            ("/daily/detail/regenerate", self.regenerate_daily_detail_segment, ["POST"], "Private Companion Page regenerate one daily detail segment"),
             ("/roleplay/personas", self.list_roleplay_personas, ["GET"], "Private Companion Page roleplay personas"),
             ("/roleplay/draft_from_persona", self.generate_roleplay_draft_from_persona, ["POST"], "Private Companion Page roleplay draft from persona"),
             ("/roleplay/standardize_persona", self.standardize_persona_from_questionnaire, ["POST"], "Private Companion Page roleplay persona standardization"),
@@ -192,11 +194,24 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 refresher = getattr(self.plugin, "_refresh_sleep_runtime_state", None)
                 if callable(refresher):
                     refresher()
+                schedule_content_changed = False
+                plan_sanitizer = getattr(self.plugin, "_sanitize_daily_plan_inplace", None)
+                plan = self.plugin.data.get("daily_plan")
+                if callable(plan_sanitizer) and isinstance(plan, dict) and plan_sanitizer(plan):
+                    schedule_content_changed = True
+                if isinstance(plan, dict) and isinstance(plan.get("items"), list) and not isinstance(plan.get("quality"), dict):
+                    plan["quality"] = evaluate_daily_plan_quality(self.plugin, plan.get("items"))
+                    schedule_content_changed = True
                 detail_sanitizer = getattr(self.plugin, "_sanitize_detail_enhanced_segments_inplace", None)
-                if callable(detail_sanitizer):
-                    enhanced = self.plugin.data.get("detail_enhanced_segments")
-                    if isinstance(enhanced, dict) and detail_sanitizer(enhanced):
-                        self.plugin._save_data_sync()
+                enhanced = self.plugin.data.get("detail_enhanced_segments")
+                if callable(detail_sanitizer) and isinstance(enhanced, dict) and detail_sanitizer(enhanced):
+                    schedule_content_changed = True
+                story_sanitizer = getattr(self.plugin, "_sanitize_story_plan_social_facts_inplace", None)
+                story = self.plugin.data.get("daily_story_plan")
+                if callable(story_sanitizer) and isinstance(story, dict) and story_sanitizer(story):
+                    schedule_content_changed = True
+                if schedule_content_changed:
+                    self.plugin._save_data_sync()
                 data = self._overview_data_snapshot_locked(self.plugin.data)
                 token_stats = self._token_overview_payload(
                     self.plugin.data.get("token_usage", {}),
@@ -741,6 +756,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def update_image_cache_item(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         key = self._single_line(payload.get("key"), 120)
+        action = self._single_line(payload.get("action"), 20).lower() or "regenerate"
         if not key:
             return self._error("缺少缓存 key")
         text = str(payload.get("text") or "").strip()
@@ -5927,6 +5943,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "raw": "setup_fallback",
             "items": [dict(item) for item in DEFAULT_DAILY_PLAN_ITEMS],
         }
+        normalizer = getattr(self.plugin, "_normalize_plan_item_intervals", None)
+        if callable(normalizer):
+            normalizer(plan["items"])
         return plan
 
     async def _setup_guide_generate_daily_plan_fast(self, timeout: float = 18.0) -> tuple[dict[str, Any], str, bool]:
@@ -6112,6 +6131,161 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         except Exception as exc:
             logger.warning(f"[PrivateCompanionPage] 首次配置日程生成失败: {exc}", exc_info=True)
             return self._ok({"ok": False, "error": self._single_line(exc, 220)})
+
+    async def regenerate_daily_detail_segment(self) -> dict[str, Any]:
+        try:
+            payload = await request.get_json(silent=True) or {}
+        except Exception:
+            payload = {}
+        key = self._single_line(payload.get("key"), 120)
+        if not key:
+            return self._error("缺少要重生成的时间段")
+        action = self._single_line(payload.get("action"), 24).lower() or "regenerate"
+        if action not in {"regenerate", "cancel"}:
+            return self._error("不支持的日程段操作")
+        previous_snapshot: dict[str, Any] = {}
+        previous_item_state: dict[str, tuple[bool, Any]] = {}
+        generation_id = ""
+        segment: dict[str, Any] = {}
+        try:
+            async with self.plugin._data_lock:
+                plan = deepcopy(self.plugin.data.get("daily_plan", {}))
+                state = deepcopy(self.plugin.data.get("daily_state", {}))
+                segments = self.plugin._collect_detail_segments(plan, {}, include_cancelled=True)
+                segment = next((item for item in segments if self._single_line(item.get("key"), 120) == key), None)
+                if not isinstance(segment, dict):
+                    return self._error("该时间段已不存在或不属于今天的日程")
+                live_plan = self.plugin.data.get("daily_plan", {})
+                live_items = live_plan.get("items") if isinstance(live_plan, dict) else None
+                live_index = self._int(segment.get("index"), -1, -1)
+                live_item = live_items[live_index] if isinstance(live_items, list) and 0 <= live_index < len(live_items) and isinstance(live_items[live_index], dict) else None
+                enhanced = self.plugin.data.setdefault("detail_enhanced_segments", {})
+                if not isinstance(enhanced, dict):
+                    enhanced = {}
+                    self.plugin.data["detail_enhanced_segments"] = enhanced
+                previous_snapshot = deepcopy(enhanced.get(key)) if isinstance(enhanced.get(key), dict) else {}
+                if (
+                    action == "regenerate"
+                    and self._single_line(previous_snapshot.get("status"), 24) == "generating"
+                    and self.plugin._detail_enhancement_snapshot_blocks_generation(previous_snapshot)
+                ):
+                    return self._error("该时间段正在细化中，请等待当前生成完成后再试")
+                if action == "cancel":
+                    if isinstance(live_item, dict):
+                        live_item["lifecycle_status"] = "cancelled"
+                        live_item["changed_at"] = self.plugin._environment_now().strftime("%H:%M")
+                        live_item["change_reason"] = "用户在陪伴面板取消该日程段"
+                        live_item.pop("_detail_generation_id", None)
+                    cancelled = previous_snapshot or {"status": "done", "summary": "这一段已取消。", "today_events": [], "proactive_events": [], "state_variables": []}
+                    for event in list(cancelled.get("today_events") or []) + list(cancelled.get("proactive_events") or []):
+                        if isinstance(event, dict):
+                            event["lifecycle_status"] = "cancelled"
+                    cancelled["status"] = "cancelled"
+                    cancelled["summary"] = self._single_line(cancelled.get("summary"), 120) or "这一段已取消。"
+                    cancelled["cancelled_at"] = self.plugin._environment_now().strftime("%Y-%m-%d %H:%M:%S")
+                    cancelled.pop("generation_id", None)
+                    cancelled.pop("previous_item_state", None)
+                    cancelled.pop("retry_after", None)
+                    cancelled.pop("retry_after_ts", None)
+                    enhanced[key] = cancelled
+                    story = self.plugin._rebuild_story_plan_from_detail_snapshots(str(plan.get("date") or _today_key()))
+                    self.plugin._remember_detail_enhancement_history(str(plan.get("date") or _today_key()), enhanced, story)
+                    self.plugin._save_data_sync()
+                    data = self._overview_data_snapshot_locked(self.plugin.data)
+                    return self._ok({"key": key, "cancelled": True, "daily_timeline": self._daily_timeline_summary(data)})
+                if isinstance(live_item, dict):
+                    for field in ("lifecycle_status", "changed_at", "change_reason", "_detail_generation_id"):
+                        previous_item_state[field] = (field in live_item, deepcopy(live_item.get(field)))
+                    generation_id = uuid.uuid4().hex
+                    live_item["lifecycle_status"] = "changed"
+                    live_item["changed_at"] = self.plugin._environment_now().strftime("%H:%M")
+                    live_item["change_reason"] = "用户在陪伴面板重新细化该日程段"
+                    live_item["_detail_generation_id"] = generation_id
+                    segment_item = segment.get("item") if isinstance(segment.get("item"), dict) else None
+                    if isinstance(segment_item, dict):
+                        segment_item["lifecycle_status"] = "changed"
+                else:
+                    generation_id = uuid.uuid4().hex
+                enhanced[key] = {
+                    "status": "generating",
+                    "started_at": self.plugin._environment_now().strftime("%H:%M"),
+                    "started_ts": time.time(),
+                    "regenerated": True,
+                    "generation_id": generation_id,
+                    "previous_item_state": {
+                        field: {"existed": existed, "value": value}
+                        for field, (existed, value) in previous_item_state.items()
+                    },
+                }
+                self.plugin._save_data_sync()
+
+            detail = await generate_detail_enhancement(self.plugin, segment, plan, state)
+            if not isinstance(detail.get("today_events"), list) or not detail.get("today_events"):
+                raise RuntimeError("局部重生成未返回可用的细化事件")
+
+            async with self.plugin._data_lock:
+                if not self.plugin._detail_generation_is_current(segment, generation_id):
+                    stale_plan = self.plugin.data.get("daily_plan", {})
+                    stale_items = stale_plan.get("items") if isinstance(stale_plan, dict) else None
+                    stale_index = self._int(segment.get("index"), -1, -1)
+                    stale_item = stale_items[stale_index] if isinstance(stale_items, list) and 0 <= stale_index < len(stale_items) and isinstance(stale_items[stale_index], dict) else None
+                    if isinstance(stale_item, dict) and self._single_line(stale_item.get("_detail_generation_id"), 64) == generation_id:
+                        stale_item.pop("_detail_generation_id", None)
+                        self.plugin._save_data_sync()
+                    return self._error("该时间段已被取消、替换或由更新的操作接管，本次迟到结果未写入")
+                current = self.plugin.data.setdefault("detail_enhanced_segments", {})
+                current[key] = {
+                    "status": "done",
+                    "updated_at": self.plugin._environment_now().strftime("%H:%M"),
+                    "summary": self._single_line(detail.get("summary"), 120),
+                    "summary_basis": self.plugin._normalize_schedule_basis(detail.get("summary_basis"), default=["coarse_plan"]),
+                    "summary_confidence": min(1.0, self._float(detail.get("summary_confidence"), 0.75)),
+                    "today_events": detail.get("today_events", []),
+                    "proactive_events": detail.get("proactive_events", []),
+                    "state_variables": detail.get("state_variables", []),
+                    "presence_status": detail.get("presence_status", {}),
+                    "quality": detail.get("quality", {}),
+                    "interaction_updates": previous_snapshot.get("interaction_updates", []),
+                    "regenerated": True,
+                    "regenerated_at": self.plugin._environment_now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                self.plugin._sanitize_detail_enhanced_segments_inplace(current)
+                story = self.plugin._rebuild_story_plan_from_detail_snapshots(str(plan.get("date") or _today_key()))
+                self.plugin._remember_detail_enhancement_history(str(plan.get("date") or _today_key()), current, story)
+                current_plan = self.plugin.data.get("daily_plan", {})
+                current_items = current_plan.get("items") if isinstance(current_plan, dict) else None
+                current_index = self._int(segment.get("index"), -1, -1)
+                current_item = current_items[current_index] if isinstance(current_items, list) and 0 <= current_index < len(current_items) and isinstance(current_items[current_index], dict) else None
+                if isinstance(current_item, dict) and self._single_line(current_item.get("_detail_generation_id"), 64) == generation_id:
+                    current_item.pop("_detail_generation_id", None)
+                self.plugin._refresh_daily_state_location_from_plan(
+                    plan=current_plan if isinstance(current_plan, dict) else plan,
+                    detail=detail,
+                )
+                self.plugin._save_data_sync()
+                data = self._overview_data_snapshot_locked(self.plugin.data)
+            return self._ok({"key": key, "detail": detail, "daily_timeline": self._daily_timeline_summary(data)})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 局部重生成日程细化失败: %s", exc, exc_info=True)
+            async with self.plugin._data_lock:
+                enhanced = self.plugin.data.setdefault("detail_enhanced_segments", {})
+                if isinstance(enhanced, dict) and key and generation_id and self.plugin._detail_generation_is_current(segment, generation_id):
+                    restored = previous_snapshot or {"status": "failed", "today_events": [], "proactive_events": [], "state_variables": []}
+                    restored["regeneration_error"] = self._single_line(exc, 180)
+                    restored["regeneration_failed_at"] = self.plugin._environment_now().strftime("%Y-%m-%d %H:%M:%S")
+                    enhanced[key] = restored
+                    live_plan = self.plugin.data.get("daily_plan", {})
+                    live_items = live_plan.get("items") if isinstance(live_plan, dict) else None
+                    live_index = self._int(segment.get("index"), -1, -1)
+                    live_item = live_items[live_index] if isinstance(live_items, list) and 0 <= live_index < len(live_items) and isinstance(live_items[live_index], dict) else None
+                    if isinstance(live_item, dict) and self._single_line(live_item.get("_detail_generation_id"), 64) == generation_id:
+                        for field, (existed, value) in previous_item_state.items():
+                            if existed:
+                                live_item[field] = value
+                            else:
+                                live_item.pop(field, None)
+                    self.plugin._save_data_sync()
+            return self._error(self._single_line(exc, 180) or "局部重生成失败")
 
     def _normalize_roleplay_draft_scopes(self, raw: Any) -> list[str]:
         allowed = {"persona", "world", "user"}
@@ -16249,9 +16423,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
         story = data.get("daily_story_plan") if isinstance(data.get("daily_story_plan"), dict) else {}
         current_item = {}
+        current_lifecycle = ""
         try:
             picked = self.plugin._get_current_plan_item(plan)
             current_item = picked if isinstance(picked, dict) else {}
+            items = plan.get("items") if isinstance(plan.get("items"), list) else []
+            current_index = next((index for index, item in enumerate(items) if item is picked), -1)
+            if current_item:
+                current_lifecycle = self.plugin._plan_item_runtime_status(plan, current_item, current_index)
         except Exception:
             current_item = {}
 
@@ -16287,6 +16466,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "dream_fragments": self._limited_dream_fragments(fragments),
             "current_plan": {
                 "time": self._single_line(current_item.get("time"), 12),
+                "end": self._single_line(current_item.get("end"), 12),
+                "lifecycle": current_lifecycle,
                 "activity": self._single_line(current_item.get("activity"), 600),
                 "mood": self._single_line(current_item.get("mood"), 40),
                 "message_seed": self._single_line(current_item.get("message_seed"), 500),
@@ -16306,25 +16487,83 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         presence = data.get("qq_presence_state") if isinstance(data.get("qq_presence_state"), dict) else {}
 
         segments: list[dict[str, Any]] = []
+        seen_segment_keys: set[str] = set()
+        plan_items = plan.get("items") if isinstance(plan.get("items"), list) else []
+        normalized_starts = self.plugin._normalized_plan_item_starts(plan_items)
         for key, snapshot in enhanced.items():
             if not isinstance(snapshot, dict):
                 continue
             segment = self._segment_from_key(str(key), plan, snapshot)
+            seen_segment_keys.add(str(key))
+            segment_item = segment.get("item") if isinstance(segment.get("item"), dict) else {}
+            lifecycle = self.plugin._plan_item_runtime_status(
+                plan,
+                segment_item,
+                self._int(segment.get("index"), -1, -1),
+            ) if segment_item else "planned"
             segments.append(
                 {
                     "key": str(key),
                     "window": segment.get("window", str(key)),
                     "start": segment.get("start", 99999),
+                    "end": segment.get("end", 99999),
+                    "lifecycle": lifecycle,
+                    "activity": self._single_line(segment_item.get("activity"), 180),
+                    "basis": self.plugin._normalize_schedule_basis(segment_item.get("basis"), default=["coarse_plan"]),
+                    "confidence": self._float(segment_item.get("confidence"), 0.72, 0.0, 1.0),
                     "status": snapshot.get("status", ""),
                     "started_at": snapshot.get("started_at", ""),
                     "summary": snapshot.get("summary", ""),
+                    "summary_basis": self.plugin._normalize_schedule_basis(snapshot.get("summary_basis"), default=["coarse_plan"]),
+                    "summary_confidence": self._float(snapshot.get("summary_confidence"), 0.75, 0.0, 1.0),
+                    "quality": snapshot.get("quality") if isinstance(snapshot.get("quality"), dict) else {},
+                    "regeneration_error": self._single_line(snapshot.get("regeneration_error"), 180),
                     "error": snapshot.get("error", ""),
                     "retry_after": snapshot.get("retry_after", ""),
                     "state_variables": self._limited_state_variables(snapshot.get("state_variables")),
                     "presence_status": snapshot.get("presence_status") if isinstance(snapshot.get("presence_status"), dict) else {},
                     "interaction_updates": self._limited_interaction_updates(snapshot.get("interaction_updates")),
-                    "today_events": self._limited_story_items(snapshot.get("today_events"), 5),
-                    "proactive_events": self._limited_story_items(snapshot.get("proactive_events"), 4),
+                    "today_events": self._timeline_story_items(snapshot.get("today_events"), 5, str(plan.get("date") or "")),
+                    "proactive_events": self._timeline_story_items(snapshot.get("proactive_events"), 4, str(plan.get("date") or "")),
+                }
+            )
+        for index, item in enumerate(plan_items):
+            if not isinstance(item, dict):
+                continue
+            start_text = self._single_line(item.get("time"), 8)
+            start = normalized_starts[index] if index < len(normalized_starts) else None
+            if start is None:
+                continue
+            key = f"{plan.get('date')}:{index}:{start_text}"
+            if key in seen_segment_keys:
+                continue
+            next_start = None
+            for next_item in plan_items[index + 1 :]:
+                if isinstance(next_item, dict):
+                    next_start = self.plugin._parse_hhmm_to_minutes(next_item.get("time"))
+                    if next_start is not None:
+                        break
+            end = self.plugin._plan_item_end_minutes(start, item, next_start=next_start)
+            segments.append(
+                {
+                    "key": key,
+                    "window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}",
+                    "start": start,
+                    "end": end,
+                    "lifecycle": self.plugin._plan_item_runtime_status(plan, item, index),
+                    "activity": self._single_line(item.get("activity"), 180),
+                    "basis": self.plugin._normalize_schedule_basis(item.get("basis"), default=["coarse_plan"]),
+                    "confidence": self._float(item.get("confidence"), 0.72, 0.0, 1.0),
+                    "status": "",
+                    "summary": self._single_line(item.get("activity"), 180),
+                    "summary_basis": self.plugin._normalize_schedule_basis(item.get("basis"), default=["coarse_plan"]),
+                    "summary_confidence": self._float(item.get("confidence"), 0.72, 0.0, 1.0),
+                    "quality": {},
+                    "state_variables": [],
+                    "presence_status": {},
+                    "interaction_updates": [],
+                    "today_events": [],
+                    "proactive_events": [],
                 }
             )
         segments.sort(key=lambda item: item.get("start", 99999))
@@ -16334,6 +16573,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "story_date": story.get("date", ""),
             "detail_day": data.get("detail_enhanced_day", ""),
             "segment_count": len(segments),
+            "plan_quality": plan.get("quality") if isinstance(plan.get("quality"), dict) else {},
             "segments": segments,
             "story_today_events": self._limited_story_items(story.get("today_events"), 48),
             "story_proactive_events": self._limited_story_items(story.get("proactive_events"), 32),
@@ -16345,7 +16585,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         keyed = re.fullmatch(r"(\d{4}-\d{2}-\d{2}):(\d+):(\d{1,2}:\d{2})", key)
         if keyed:
             index = int(keyed.group(2))
-            start = self.plugin._parse_hhmm_to_minutes(keyed.group(3))
+            key_start_text = keyed.group(3)
+            start = self.plugin._parse_hhmm_to_minutes(key_start_text)
             items = []
             if isinstance(plan, dict):
                 if isinstance(plan.get("items"), list):
@@ -16353,17 +16594,35 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 elif isinstance(plan.get("schedule"), list):
                     items = plan.get("schedule") or []
             end = None
+            current_item = items[index] if isinstance(items, list) and index < len(items) and isinstance(items[index], dict) else None
+            if isinstance(current_item, dict) and self._single_line(current_item.get("time"), 8) == key_start_text:
+                starts = self.plugin._normalized_plan_item_starts(items)
+                if index < len(starts) and starts[index] is not None:
+                    start = starts[index]
+            else:
+                current_item = None
+            if isinstance(current_item, dict):
+                end = self.plugin._parse_hhmm_to_minutes(current_item.get("end"))
+                if start is not None and end is not None and end <= start:
+                    end += 24 * 60
             if isinstance(items, list):
                 for next_item in items[index + 1:]:
+                    if end is not None:
+                        break
                     if isinstance(next_item, dict):
                         end = self.plugin._parse_hhmm_to_minutes(next_item.get("time"))
                         if end is not None:
                             break
             if start is not None:
                 if end is None:
-                    item = items[index] if isinstance(items, list) and index < len(items) and isinstance(items[index], dict) else None
-                    end = self.plugin._segment_end_minutes(start, item)
-                return {"window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}", "start": start}
+                    end = self.plugin._plan_item_end_minutes(start, current_item)
+                return {
+                    "window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}",
+                    "start": start,
+                    "end": end,
+                    "index": index,
+                    "item": current_item or {},
+                }
 
         inferred = self._segment_from_story_windows(snapshot)
         if inferred:
@@ -16818,8 +17077,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             )
         return items
 
+    def _timeline_story_items(self, value: Any, limit: int, plan_date: str) -> list[dict[str, Any]]:
+        items = self._limited_story_items(value, limit)
+        for item in items:
+            start, end = self.plugin._parse_window_minutes(str(item.get("window") or ""))
+            if start is None or end is None:
+                item["lifecycle"] = "planned"
+                continue
+            item["lifecycle"] = self.plugin._schedule_window_runtime_status(
+                start,
+                end,
+                plan_date=plan_date,
+                explicit_status=item.get("lifecycle_status"),
+            )
+        return items
+
     @staticmethod
-    def _limited_story_items(value: Any, limit: int) -> list[dict[str, str]]:
+    def _limited_story_items(value: Any, limit: int) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
         items: list[dict[str, str]] = []
@@ -16846,6 +17120,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "mood": PrivateCompanionPageApi._single_line(item.get("mood"), 24),
                     "action": PrivateCompanionPageApi._single_line(item.get("action"), 24),
                     "reason": PrivateCompanionPageApi._single_line(item.get("reason"), 32),
+                    "lifecycle_status": PrivateCompanionPageApi._single_line(item.get("lifecycle_status"), 20),
+                    "basis": [
+                        PrivateCompanionPageApi._single_line(value, 24)
+                        for value in (item.get("basis") or [])[:3]
+                        if PrivateCompanionPageApi._single_line(value, 24)
+                    ] if isinstance(item.get("basis"), list) else [],
+                    "confidence": min(1.0, PrivateCompanionPageApi._float(item.get("confidence"), 0.72)),
                 }
             )
         return items
@@ -16877,6 +17158,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 {
                     "date": PrivateCompanionPageApi._single_line(item.get("date"), 12),
                     "source": PrivateCompanionPageApi._single_line(item.get("source"), 24),
+                    "scope": PrivateCompanionPageApi._single_line(item.get("scope"), 40),
+                    "scope_key": PrivateCompanionPageApi._single_line(item.get("scope_key"), 24),
                     "note": PrivateCompanionPageApi._single_line(item.get("note"), 140),
                     "reaction": PrivateCompanionPageApi._single_line(item.get("immediate_reaction"), 140),
                     "state_updates": [

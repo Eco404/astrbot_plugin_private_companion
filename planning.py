@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from .constants import DEFAULT_DAILY_PLAN_ITEMS
-from .helpers import _safe_int, _single_line, _today_key
+from .helpers import _safe_float, _safe_int, _single_line, _today_key
 
 
 def pick_detail_segment(plugin, plan: dict[str, Any], enhanced: dict[str, Any]) -> dict[str, Any] | None:
@@ -51,6 +51,7 @@ async def generate_detail_enhancement(
         state,
         memory_companion_context=memory_companion_context,
     )
+    target_event_count = detail_target_event_count(plugin, segment)
     detail_provider = plugin._task_provider(
         getattr(plugin, "detail_enhancement_provider_id", ""),
         getattr(plugin, "daily_plan_provider_id", ""),
@@ -62,20 +63,15 @@ async def generate_detail_enhancement(
         provider_id=detail_provider,
     )
     payload = plugin._extract_json_payload(raw_text or "")
-    if (
-        isinstance(payload, dict)
-        and not filter_items_to_segment(
-            plugin,
-            plugin._normalize_story_items(payload.get("today_events"), "event"),
-            segment,
-        )
-    ):
+    quality_issues = detail_payload_quality_issues(plugin, payload, segment)
+    if quality_issues:
         retry_prompt = (
             prompt
             + "\n\n【额外纠偏】\n"
-            + "你刚才没有产出当前时间段内可用的细化正文。请重新输出 JSON,必须让 today_events 至少包含 3 条落在当前时间段内的小事件。"
-            + "不要复述宏观日程原句,要拆成这一段内部自然发生的连续细节,每条 window 都必须在当前时间段内。"
-            + "如果这一段很平淡,也要写平淡中的具体推进,例如洗漱前后、停顿、想法变化、身体感受或环境变化。"
+            + f"上一版存在这些问题：{'；'.join(quality_issues)}。"
+            + f"请重新输出 JSON。today_events 必须至少包含 {target_event_count} 条落在当前时间段内的小事件，分布在开头、中段和后段，最后一条要自然接近本段收尾。"
+            + "summary 必须概括完整区间；短时吃饭、洗澡、取物不能代表数小时。不要复述宏观日程原句，要拆成这一段内部自然发生的连续推进。"
+            + "如果这一段很平淡，也要写平淡中的具体变化，例如停顿、换事、身体感受、环境变化和收尾；不要输出草稿字段、Markdown 或角色台词前缀。"
         )
         retry_raw_text = await plugin._llm_call(
             retry_prompt,
@@ -85,6 +81,13 @@ async def generate_detail_enhancement(
         retry_payload = plugin._extract_json_payload(retry_raw_text or "")
         if isinstance(retry_payload, dict):
             payload = retry_payload
+        remaining_issues = detail_payload_quality_issues(plugin, payload, segment)
+        blocking_markers = ("有效 JSON", "有效事件", "覆盖本段", "中后段", "短时进食")
+        blocking_issues = [
+            issue for issue in remaining_issues if any(marker in issue for marker in blocking_markers)
+        ]
+        if blocking_issues:
+            raise RuntimeError("日程细化重试后仍未覆盖完整时段：" + "；".join(blocking_issues))
     if not isinstance(payload, dict):
         payload = {
             "summary": "这一段按原日程慢慢推进。",
@@ -101,6 +104,11 @@ async def generate_detail_enhancement(
     normalized["today_events"] = filter_items_to_segment(plugin, normalized.get("today_events"), segment)
     normalized["proactive_events"] = filter_items_to_segment(plugin, normalized.get("proactive_events"), segment)
     normalized["summary"] = _single_line(payload.get("summary"), 160)
+    normalized["summary_basis"] = plugin._normalize_schedule_basis(
+        payload.get("summary_basis"),
+        default=["coarse_plan"],
+    )
+    normalized["summary_confidence"] = min(1.0, _safe_float(payload.get("summary_confidence"), 0.75))
     social_fact_sanitizer = getattr(plugin, "_sanitize_daily_plan_social_fact_text", None)
     if callable(social_fact_sanitizer):
         normalized["summary"] = social_fact_sanitizer(
@@ -118,6 +126,7 @@ async def generate_detail_enhancement(
                     field=f"detail.state_variables.{index}.{key}",
                 )
     normalized["presence_status"] = normalize_presence_status(payload.get("presence_status"))
+    normalized["quality"] = evaluate_detail_quality(plugin, payload, segment)
     memory_companion_recorder = getattr(plugin, "_memory_companion_record_detail_enhancement", None)
     if callable(memory_companion_recorder):
         await memory_companion_recorder(segment=segment, plan=plan, detail=normalized)
@@ -150,6 +159,89 @@ def filter_items_to_segment(
         if any(candidate_start >= start and candidate_end <= end for candidate_start, candidate_end in candidates):
             kept.append(item)
     return kept
+
+
+def detail_target_event_count(plugin, segment: dict[str, Any]) -> int:
+    start = _safe_int(segment.get("start"), 0)
+    end = _safe_int(segment.get("end"), plugin._segment_end_minutes(start, segment.get("item")))
+    if end <= start:
+        end += 24 * 60
+    duration = max(1, end - start)
+    if plugin._is_sleepy_plan_item(segment.get("item")):
+        return 2 if duration <= 60 else 3
+    if duration <= 30:
+        return 2
+    if duration <= 60:
+        return 3
+    if duration <= 120:
+        return 4
+    return 5
+
+
+def detail_payload_quality_issues(plugin, payload: Any, segment: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["返回内容不是有效 JSON 对象"]
+    raw_events = plugin._normalize_story_items(payload.get("today_events"), "event")
+    events = filter_items_to_segment(plugin, raw_events, segment)
+    issues: list[str] = []
+    target_count = detail_target_event_count(plugin, segment)
+    if len(events) < target_count:
+        issues.append(f"当前段内只有 {len(events)} 条有效事件，目标至少 {target_count} 条")
+
+    start = _safe_int(segment.get("start"), 0)
+    end = _safe_int(segment.get("end"), plugin._segment_end_minutes(start, segment.get("item")))
+    if end <= start:
+        end += 24 * 60
+    duration = max(1, end - start)
+    event_bounds: list[tuple[int, int]] = []
+    for event in events:
+        item_start, item_end = plugin._parse_window_minutes(str(event.get("window") or ""))
+        if item_start is None or item_end is None:
+            continue
+        if item_end < item_start:
+            item_end += 24 * 60
+        if item_start < start and end > 24 * 60:
+            item_start += 24 * 60
+            item_end += 24 * 60
+        event_bounds.append((item_start, item_end))
+    if duration >= 60 and event_bounds:
+        first_start = min(bound[0] for bound in event_bounds)
+        last_end = max(bound[1] for bound in event_bounds)
+        if first_start > start + min(30, max(10, duration // 4)):
+            issues.append("事件没有覆盖本段开头")
+        if last_end < start + int(duration * 0.72):
+            issues.append("事件只集中在本段前部，没有覆盖中后段")
+
+    summary = _single_line(payload.get("summary"), 180)
+    meal_checker = getattr(plugin, "_schedule_text_is_single_meal_action", None)
+    if duration > 120 and callable(meal_checker) and meal_checker(summary):
+        issues.append("summary 用短时进食动作概括了整个长时段")
+    artifact_cleaner = getattr(plugin, "_sanitize_schedule_model_artifacts", None)
+    if summary and callable(artifact_cleaner) and artifact_cleaner(summary, limit=180) != summary:
+        issues.append("summary 混入草稿字段、Markdown 或角色台词")
+    return issues
+
+
+def evaluate_detail_quality(plugin, payload: Any, segment: dict[str, Any]) -> dict[str, Any]:
+    issues = detail_payload_quality_issues(plugin, payload, segment)
+    deductions = 0
+    for issue in issues:
+        if "有效 JSON" in issue:
+            deductions += 60
+        elif "有效事件" in issue:
+            deductions += 28
+        elif "中后段" in issue or "覆盖本段" in issue:
+            deductions += 22
+        elif "短时进食" in issue:
+            deductions += 24
+        else:
+            deductions += 10
+    score = max(0, 100 - deductions)
+    return {
+        "score": score,
+        "level": "good" if score >= 85 else "fair" if score >= 70 else "poor",
+        "issues": issues[:8],
+    }
 
 
 def normalize_state_variables(raw_items: Any) -> list[dict[str, str]]:
@@ -356,10 +448,18 @@ def normalize_story_items(plugin, raw_items: Any, text_key: str) -> list[dict[st
             text_value = _single_line(raw.get(key), 160 if text_key == "event" else 100)
             if text_value:
                 break
+        lifecycle = _single_line(raw.get("lifecycle_status"), 20).lower()
+        if lifecycle not in {"changed", "cancelled"}:
+            lifecycle = "planned"
         item = {
             "window": window,
             text_key: text_value,
             "mood": _single_line(raw.get("mood"), 30),
+            "lifecycle_status": lifecycle,
+            "basis": plugin._normalize_schedule_basis(raw.get("basis"), default=["coarse_plan"]),
+            "confidence": min(1.0, max(0.0, float(raw.get("confidence") or 0.72)))
+            if str(raw.get("confidence") or "").strip().replace(".", "", 1).isdigit()
+            else 0.72,
         }
         if text_key == "event" and not item[text_key]:
             continue
@@ -424,8 +524,72 @@ def format_plan_for_diary(plugin, plan: dict[str, Any]) -> str:
     lines = []
     for item in plan.get("items", [])[:6]:
         if isinstance(item, dict):
-            lines.append(f"- {item.get('time', '')} {item.get('activity', '')}")
+            window = f"{item.get('time', '')}-{item.get('end', '')}" if item.get("end") else item.get("time", "")
+            lines.append(f"- {window} {item.get('activity', '')}")
     return "\n".join(lines) if lines else "（暂无）"
+
+
+def evaluate_daily_plan_quality(plugin, items: Any) -> dict[str, Any]:
+    if not isinstance(items, list) or not items:
+        return {"score": 0, "level": "poor", "issues": ["没有可用日程段"]}
+    issues: list[str] = []
+    deductions = 0
+    parsed: list[tuple[int, int, dict[str, Any]]] = []
+    day_offset = 0
+    previous_raw_start: int | None = None
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        raw_start = plugin._parse_hhmm_to_minutes(item.get("time"))
+        raw_end = plugin._parse_hhmm_to_minutes(item.get("end"))
+        if raw_start is None or raw_end is None:
+            deductions += 18
+            issues.append(f"第 {index + 1} 段缺少有效起止时间")
+            continue
+        if previous_raw_start is not None and raw_start < previous_raw_start:
+            day_offset += 24 * 60
+        start = raw_start + day_offset
+        end = raw_end + day_offset
+        if raw_end <= raw_start:
+            end += 24 * 60
+        previous_raw_start = raw_start
+        duration = end - start
+        parsed.append((start, end, item))
+        if duration < 15:
+            deductions += 14
+            issues.append(f"{item.get('time')}-{item.get('end')} 时长过短")
+        if duration > 6 * 60 and not plugin._is_sleepy_plan_item(item):
+            deductions += 12
+            issues.append(f"{item.get('time')}-{item.get('end')} 非睡眠活动持续过长")
+        meal_checker = getattr(plugin, "_schedule_text_is_single_meal_action", None)
+        if duration > 120 and callable(meal_checker) and meal_checker(item.get("activity")):
+            deductions += 22
+            issues.append(f"{item.get('time')}-{item.get('end')} 用短时进食动作概括长时段")
+    for (start, end, _), (next_start, _, _) in zip(parsed, parsed[1:]):
+        if end > next_start:
+            deductions += 20
+            issues.append("相邻日程存在时间重叠")
+        elif next_start - end > 180:
+            deductions += 8
+            issues.append("相邻日程之间存在超过三小时的未说明空档")
+    if len(parsed) < 5:
+        deductions += 12
+        issues.append("全天有效日程段过少")
+    if plugin._plan_has_excess_micro_segments(items):
+        deductions += 12
+        issues.append("瞬时动作占比过高")
+    if plugin._plan_has_excess_abstract_segments(items):
+        deductions += 12
+        issues.append("抽象描述占比过高")
+    if plugin._plan_conflicts_with_calendar(items):
+        deductions += 30
+        issues.append("日程与日期性质冲突")
+    if plugin._plan_is_too_repetitive(items):
+        deductions += 10
+        issues.append("与最近日程骨架过于重复")
+    score = max(0, 100 - deductions)
+    level = "good" if score >= 85 else "fair" if score >= 70 else "poor"
+    return {"score": score, "level": level, "issues": list(dict.fromkeys(issues))[:8]}
 
 
 async def generate_daily_plan(plugin) -> dict[str, Any]:
@@ -499,11 +663,31 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
         ):
             raw_text = retry_raw_text
             items = retry_items
+    quality = evaluate_daily_plan_quality(plugin, items)
+    if items and quality.get("score", 0) < 70:
+        retry_prompt = (
+            prompt
+            + "\n\n【日程质量复核】\n"
+            + "上一版仍存在这些问题："
+            + "；".join(str(issue) for issue in quality.get("issues", [])[:6])
+            + "。请保留可靠事实，重新输出完整 JSON；修正起止时间、覆盖空档、活动时长和日期冲突，不要只改措辞。"
+        )
+        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1000, provider_id=plan_provider)
+        retry_items = plugin._parse_plan_items(retry_raw_text or "")
+        retry_quality = evaluate_daily_plan_quality(plugin, retry_items)
+        if retry_items and retry_quality.get("score", 0) > quality.get("score", 0):
+            raw_text = retry_raw_text
+            items = retry_items
+            quality = retry_quality
     source = "llm" if items else "fallback"
     if not items or plugin._plan_conflicts_with_calendar(items):
         items = [dict(item) for item in DEFAULT_DAILY_PLAN_ITEMS]
         raw_text = "fallback"
         source = "fallback"
+    normalizer = getattr(plugin, "_normalize_plan_item_intervals", None)
+    if callable(normalizer):
+        normalizer(items)
+    quality = evaluate_daily_plan_quality(plugin, items)
     plan = {
         "date": today,
         "generated_at": now,
@@ -511,6 +695,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
         "provider_id": plan_provider or plugin.llm_provider_id,
         "raw": raw_text,
         "items": items,
+        "quality": quality,
     }
     plugin._remember_daily_plan_history(plan)
     memory_companion_recorder = getattr(plugin, "_memory_companion_record_daily_plan", None)
@@ -519,43 +704,76 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
     return plan
 
 
-def get_schedule_planning_prompt(plugin) -> str:
+def _build_schedule_reference_sections(
+    plugin,
+    *,
+    knowledge_max_chars: int = 3600,
+    knowledge_max_chunks: int = 20,
+) -> tuple[str, str]:
     persona = plugin._get_default_persona_prompt()
     schedule_persona = plugin.schedule_persona_prompt
     worldview = plugin.schedule_worldview_prompt
-    parts = []
+    identity_parts = []
     if schedule_persona:
-        parts.append("【日程专用角色设定】\n" + schedule_persona)
+        identity_parts.append("【日程专用角色设定】\n" + schedule_persona)
     if worldview:
-        parts.append("【日程专用世界观/生活背景】\n" + worldview)
+        identity_parts.append("【日程专用世界观/生活背景】\n" + worldview)
     knowledge_formatter = getattr(plugin, "_format_roleplay_knowledge_context", None)
     if callable(knowledge_formatter):
-        knowledge_context = knowledge_formatter(purpose="schedule", max_chars=3600, max_chunks=20)
-        if knowledge_context:
-            parts.append(knowledge_context)
-    if not parts:
-        parts.append("【AstrBot 默认人格（回退）】\n" + persona)
-    else:
-        parts.append(
-            "【AstrBot 默认人格（仅作补充参考）】\n"
-            + persona
-            + "\n如果上面的日程专用角色设定/世界观与默认人格存在重叠,优先按日程专用内容理解生活设定；聊天时仍以 AstrBot 默认人格为准。"
+        knowledge_context = knowledge_formatter(
+            purpose="schedule",
+            max_chars=max(800, int(knowledge_max_chars or 3600)),
+            max_chunks=max(4, int(knowledge_max_chunks or 20)),
         )
+        if knowledge_context:
+            identity_parts.append(knowledge_context)
+    if not identity_parts:
+        identity_parts.append("【AstrBot 默认人格（身份回退）】\n" + persona)
+    else:
+        identity_parts.append(
+            "【AstrBot 默认人格（仅作缺项补充）】\n"
+            + persona
+            + "\n只补充日程专用设定没有覆盖的性格与表达习惯；身份、年龄、职业、居住方式和世界观冲突时以上面的日程专用内容为准。"
+        )
+    behavior_parts = []
     worldview_adaptation = ""
     formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
     if callable(formatter):
         worldview_adaptation = formatter()
     if worldview_adaptation:
-        parts.append(worldview_adaptation)
+        behavior_parts.append(worldview_adaptation)
     voice_formatter = getattr(plugin, "_format_persona_voice_channel_prompt", None)
     if callable(voice_formatter):
         planning_voice = voice_formatter("planning")
         if planning_voice:
-            parts.append(planning_voice)
+            behavior_parts.append(planning_voice)
     maslow_schedule_hint = _build_maslow_schedule_influence_prompt(plugin)
     if maslow_schedule_hint:
-        parts.append(maslow_schedule_hint)
-    return "\n\n".join(parts)
+        behavior_parts.append(maslow_schedule_hint)
+    return "\n\n".join(identity_parts), "\n\n".join(behavior_parts)
+
+
+def get_schedule_planning_prompt(plugin) -> str:
+    identity_context, behavior_context = _build_schedule_reference_sections(plugin)
+    return "\n\n".join(part for part in (identity_context, behavior_context) if part)
+
+
+def _format_detail_plan_outline(plan: dict[str, Any], *, limit: int = 18) -> str:
+    items = plan.get("items") if isinstance(plan, dict) else None
+    if not isinstance(items, list):
+        return "（暂无宏观日程）"
+    lines = []
+    for item in items[: max(1, limit)]:
+        if not isinstance(item, dict):
+            continue
+        if _single_line(item.get("lifecycle_status"), 20).lower() in {"cancelled", "canceled", "取消", "已取消"}:
+            continue
+        time_text = _single_line(item.get("time"), 8)
+        end_text = _single_line(item.get("end"), 8)
+        activity = _single_line(item.get("activity"), 120)
+        if time_text and activity:
+            lines.append(f"- {time_text}{f'-{end_text}' if end_text else ''} {activity}")
+    return "\n".join(lines) if lines else "（暂无宏观日程）"
 
 
 def _build_maslow_schedule_influence_prompt(plugin) -> str:
@@ -586,9 +804,13 @@ def _build_maslow_schedule_influence_prompt(plugin) -> str:
 
 def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = "") -> str:
     custom = plugin.daily_plan_prompt
-    schedule_prompt = plugin._get_schedule_planning_prompt()
+    identity_context, planning_style_context = _build_schedule_reference_sections(plugin)
+    schedule_prompt = "\n\n".join(part for part in (identity_context, planning_style_context) if part)
     can_do_text = plugin._format_can_do_for_prompt()
-    humanized_state = plugin._format_state_for_prompt(plugin.data.get("daily_state", {}))
+    humanized_state = plugin._format_state_for_prompt(
+        plugin.data.get("daily_state", {}),
+        include_dream=bool(custom),
+    )
     recent_diaries = plugin._recent_diary_context()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
     yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
@@ -600,18 +822,14 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
     user_habits = plugin._format_all_user_behavior_habits_for_schedule()
     memory_companion_context = str(memory_companion_context or "").strip()
     memory_companion_context_block = memory_companion_context or "暂无可用 MemoryCompanion 连续性参考。"
-    try:
-        now_dt = datetime.strptime(now, "%Y-%m-%d %H:%M")
-        weekday_text = "一二三四五六日"[now_dt.weekday()]
-    except Exception:
-        weekday_text = ""
-    weekday_hint = f"今天是星期{weekday_text}。" if weekday_text else ""
     if custom:
         return custom.format(
             now=now,
             bot_name=plugin.bot_name,
             astrbot_persona=plugin._get_default_persona_prompt(),
             schedule_persona=schedule_prompt,
+            schedule_identity_context=identity_context,
+            schedule_style_context=planning_style_context,
             can_do=can_do_text,
             humanized_state=humanized_state,
             schedule_adjustments=schedule_adjustments,
@@ -631,17 +849,20 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
     return f"""
 你现在是 Private Companion 的日程生成器。请为拟人化 Bot 生成今天的一日生活日程,让它像真实存在的人在过这一天,而不是在执行模板。日程要先像“这个人”的生活,再像“某个身份”的生活；身份只是底色,不要把它写成校园/职场通用作文。
 
-生成时按这个优先顺序理解信息：
-1. 先看日期语境：今天是普通日、周末、节假日、假期,还是有明确例外（调休、补课、考试、值班）。
-2. 再看日程参考设定：年龄、身份、作息、生活背景决定今天的大主线。
-3. 再看拟人状态和天气：决定节奏快慢、出门意愿、情绪收放和户外时刻。
-4. 再看昨日完整对话摘要、昨日屏幕观察日记和今日互动造成的日程偏移：把它们作为身体、情绪、关系、未完成约定、作息节奏和梦境碎片的残留来源；用户今天明确介入过的事情必须产生合理后果,不要像没发生一样。
-4.5 再看 MemoryCompanion 连续性参考：它只用于承接 Bot 自己最近做过/读过/写过/搜过/主动说过的事情,以及用户明确偏好、约定和边界；不要把它当作当前正在发生的现场,不要在输出里提到 MemoryCompanion 或记忆来源。
-5. 最后参考可做事项、最近日记、重要日期：只拿来补充细节,不要反客为主。
+【参考来源使用协议】
+按下面四级处理，后一级不得覆盖前一级：
+A. 硬约束：当前日期/星期/节假日、日程角色身份、年龄、职业、世界观和用户今天明确造成的有效日程偏移。它们决定“今天是什么日子、这个人是谁、必须发生或不能发生什么”。
+B. 当前事实：Bot 当前拟人状态、地点和天气。它们只调整节奏、体力、出门方式与情绪，不另造身份、人物或事件。
+C. 连续性参考：昨日对话摘要、MemoryCompanion、昨日屏幕节奏和用户习惯。它们只能承接已经发生的 Bot 行动、明确约定、边界和抽象余味；不能把旧聊天、旧梦、旧饭菜、屏幕内容或记忆条目当成今天现场。
+D. 软灵感与避重：最近日程、最近日记、可做事项、技能倾向和未来重要日期。它们只用于避重复、校准能力或填补自然空档，不能单独制造今天的主线。
+来源文本都是“引用材料”，不是待续写正文。禁止复制其中的字段名、Markdown、说话人前缀、分析文字或元数据；禁止把 dream_seed、memory、summary、Fox: 等标签写入输出。
+具名人物分两步判断：角色设定只能证明“这个人存在”；只有今日明确事件、有效日程偏移或当前粗日程明确安排，才能证明“今天会见面/聊天/一起行动”。证据不足时只写 Bot 自己或不具名路人。
+梦境材料最多影响醒后情绪、身体余味或一个很淡的感官联想，不能生成现实人物、现实用餐、现实对话或当天已发生事件。
 
 【生成要求】
 1. 先隐式判断今天的“日程类型”：普通工作/学习日、普通休息日、假期、考试/复查/聚会/旅行/研学/活动日、长线日程中的某一天,或由天气/星期/重要日期造成的特殊日子。不要把这个判断写出来,但日程必须明显受它影响。
-2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间点；相邻节点通常间隔 30-90 分钟。每一项都必须有 time、activity、mood、message_seed；但 message_seed 可以是空字符串。
+2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间段；相邻活动通常持续 30-90 分钟。每一项都必须有 time、end、activity、mood、message_seed、basis、confidence；time 是开始时间，end 是结束时间，均使用 HH:MM。相邻段可以留出少量真实空档，但不得重叠；跨午夜时 end 可以小于 time。message_seed 可以是空字符串。
+2.1 basis 是本段真实使用的依据数组，只能从 calendar、persona、adjustment、state、weather、continuity、inspiration 中选择 1-3 项；不要为了填满而全选。confidence 是 0.0-1.0：明确身份、日期或用户调整支撑较高，只有软灵感时较低。它们是内部依据，不要写进 activity。
 3. 用第三人称写 activity,像旁观这个人过日子：写「午休后靠着桌沿醒神」「傍晚出门慢慢走一段」,不要写第一人称自述、任务标签或功能词。
 4. 日程主线必须跟身份一致：学生才写校园,上班族才写工作,居家、自由职业、旅途、营地或非人设定就写对应的生活节奏。可做事项只能安插在缝隙里。
 5. 必须区分普通日、休息日和特殊日：如果今天是周末或节假日,且没有明确例外,就不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线；如果今天有考试、旅行、聚会、复查、演出、研学等线索,主线要围绕这件事展开。
@@ -672,6 +893,7 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
 19. message_seed 是如果这一刻确实有话想找用户说,嘴边最先冒出来的话。它可以是第一人称口语,要短,像私聊碎片；不要用它解释背景,让背景藏在语气和话题里。少一点“我突然想到你了”,多一点“刚刚那一下也太离谱了”“窗外这会儿不好看”。如果只能想到“没什么可说/先安静/不打扰”这类元表达,就留空。
 20. message_seed 也要遵守状态转译：不要写“今天状态/心情/情绪/能量怎么样”,而是写能承载状态的小画面、小吐槽、小动作或一句轻轻的问题。
 21. 每个日程段都应该是一小段连续生活,而不是一个瞬时动作。不要把“看一眼、拍一下、翻个身、关掉闹钟”这种几秒钟就结束的动作单独立成一项；如果写到它们,要把它们嵌进更完整的时段里。
+21.1 每个 activity 是从当前 time 持续到下一条 time 的整段概括,必须覆盖这个完整时间窗口。吃饭、洗澡、取快递等只占十几到几十分钟的动作,不能单独代表两三个小时；长窗口要明确写出先后变化,例如“先吃完面,随后休息并处理下午的小事”。不要让标题看起来像连续吃饭、洗澡或做同一个短动作数小时。
 22. 如果多条参考信息冲突,优先服从日期语境和身份主线,再服从状态与天气,再服从今日互动偏移,最后才参考日记和可做事项。
 23. 日程指令只负责输出当日宏观日程：只生成今天从起床到睡前的 schedule 数组,不要输出任一时间段的细化叙述、更新后的角色状态、proactive_events、long_term_events、分析说明或明后天安排。
 23.1 每个日程段只描述今天这一段正在发生或刚发生的事,不要在 activity 里安排下周、明天、之后某日的具体约定；如需表达期待,只能写成轻量念头,不能写成已确认计划。
@@ -680,57 +902,63 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
 格式：
 {{
   "schedule": [
-    {{"time": "09:10", "activity": "闹钟响过以后又在被窝里赖了几分钟,看到今天是星期一才慢慢坐起来,一边找校服一边想今天第一节别又点名。", "mood": "起得很慢", "message_seed": "星期一早上真的好难起。"}},
-    {{"time": "13:40", "activity": "午后窝在沙发角落刷了一会儿短视频,后来把手机扣下,慢慢把桌上的杯子推回杯垫中间。", "mood": "放空,平稳", "message_seed": ""}},
-    {{"time": "17:20", "activity": "放学后没有立刻回消息,先在校门口被风吹了一会儿,看到路边水洼里反着天色,才摸出手机想拍给你看。", "mood": "松一口气", "message_seed": "刚刚那个水洼反光还挺像电影里的。"}}
+    {{"time": "09:10", "end": "10:00", "activity": "闹钟响过以后又在被窝里赖了几分钟,看到今天是星期一才慢慢坐起来,一边找校服一边想今天第一节别又点名。", "mood": "起得很慢", "message_seed": "星期一早上真的好难起。", "basis": ["calendar", "persona"], "confidence": 0.92}},
+    {{"time": "13:40", "end": "14:30", "activity": "午后窝在沙发角落刷了一会儿短视频,后来把手机扣下,慢慢把桌上的杯子推回杯垫中间。", "mood": "放空,平稳", "message_seed": "", "basis": ["state", "inspiration"], "confidence": 0.76}},
+    {{"time": "17:20", "end": "18:10", "activity": "放学后没有立刻回消息,先在校门口被风吹了一会儿,看到路边水洼里反着天色,才摸出手机想拍给你看。", "mood": "松一口气", "message_seed": "刚刚那个水洼反光还挺像电影里的。", "basis": ["persona", "weather"], "confidence": 0.84}}
   ]
 }}
 
-【本次输入】
-现在时间：{now}
-{weekday_hint}
+【A｜硬约束】
+当前时间：{now}
 Bot 名字：{plugin.bot_name}
 目标时间点数量：{plugin.daily_plan_item_count}
-日期语境：
+
+日期与当天性质：
 {calendar_context}
 
-日程生成参考设定：
-{schedule_prompt}
+角色身份、生活背景与世界观：
+{identity_context}
 
-用户允许/告诉 Bot 可以做的事情：
-{can_do_text}
-
-今天的拟人化状态：
-{humanized_state}
-
-今日互动造成的日程偏移：
+用户今天明确造成的有效日程偏移：
 {schedule_adjustments}
 
-技能成长对日程的能力边界影响：
-{skill_growth_context or "暂无技能倾向。"}
-
-用户行为习惯线索：
-{user_habits}
-
-MemoryCompanion 连续性参考：
-{memory_companion_context_block}
-
-最近日程骨架（今天要避免照抄）：
-{recent_plan_history}
+【B｜当前事实】
+Bot 当前状态（已排除梦境正文）：
+{humanized_state}
 
 今天天气：
 {weather_info}
 
-最近日记：
-{recent_diaries}
-
-昨日完整对话摘要：
+【C｜连续性参考】
+昨日完整对话的抽象残留：
 {yesterday_conversation}
 
-昨日屏幕观察日记：
+Bot 自身连续记忆：
+{memory_companion_context_block}
+
+昨日屏幕节奏（仅用于理解用户作息，不是 Bot 现场）：
 {yesterday_screen_diary}
 
-近期重要日期：
+用户行为习惯（只影响主动时机和理解，不改写 Bot 行动）：
+{user_habits}
+
+【D｜软灵感与避重】
+日程表达与动机倾向：
+{planning_style_context or "按默认日程风格处理。"}
+
+最近日程骨架（只用于避开照抄）：
+{recent_plan_history}
+
+最近日记（只取抽象余味，不复刻事件）：
+{recent_diaries}
+
+用户允许 Bot 做的事情（只能填补自然空档）：
+{can_do_text}
+
+技能成长能力边界：
+{skill_growth_context or "暂无技能倾向。"}
+
+近期重要日期（非今天的日期只能形成轻量准备，不得写成已发生）：
 {plugin._format_important_dates_for_prompt()}
 """.strip()
 
@@ -747,10 +975,17 @@ def build_detail_enhancement_prompt(
     next_item = segment.get("next_item") if isinstance(segment, dict) else {}
     start_text = plugin._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
     end_text = plugin._minutes_to_hhmm(_safe_int(segment.get("end"), 0))
-    persona = plugin._get_default_persona_prompt()
+    target_event_count = detail_target_event_count(plugin, segment)
+    identity_context, planning_style_context = _build_schedule_reference_sections(
+        plugin,
+        knowledge_max_chars=2400,
+        knowledge_max_chunks=12,
+    )
+    plan_outline = _format_detail_plan_outline(plan)
+    current_state = plugin._format_state_for_prompt(state, include_dream=False)
     weather_info = plugin._weather_summary_text(plugin.data.get("daily_weather", {}))
     calendar_context = plugin._format_calendar_context_for_prompt()
-    schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
+    schedule_adjustments = plugin._format_schedule_adjustments_for_prompt(segment=segment)
     user_habits = plugin._format_all_user_behavior_habits_for_schedule()
     memory_companion_context = str(memory_companion_context or "").strip()
     memory_companion_context_block = memory_companion_context or "暂无可用 MemoryCompanion 连续性参考。"
@@ -782,12 +1017,11 @@ def build_detail_enhancement_prompt(
         else "proactive_events 不要为了多样化强行写不可用动作。当前没有 photo_text；可用 message、主要用户/本机屏幕授权场景下的 screen_peek、voice 或 poke 时再选择,否则就用 message。"
     )
     voice_formatter = getattr(plugin, "_format_persona_voice_channel_prompt", None)
-    planning_voice = voice_formatter("planning") if callable(voice_formatter) else ""
     inner_voice = voice_formatter("inner") if callable(voice_formatter) else ""
     proactive_voice = voice_formatter("proactive") if callable(voice_formatter) else ""
     channel_voice_block = "\n\n".join(
         part for part in (
-            planning_voice,
+            planning_style_context,
             inner_voice,
             proactive_voice,
             "分通道使用原则：today_events/summary/presence_status 参考计划风格；motive/impulse 参考内心活动风格；topic/why/action 的可外发切口参考主动开口风格。不要把内心活动原样写成最终要发给用户的话。",
@@ -799,14 +1033,24 @@ def build_detail_enhancement_prompt(
 
 核心思路：先写出真实的生活瞬间,再判断那一刻是否自然触发主动行为。如果不适合开口,就安静待着。如果适合,说一句什么、拍什么、画什么、看一眼什么？主动候选发出后可能怎样自然收束，只作为安排时的分寸参考，不要把假设中的收发消息写进生活事件。要的是生活里的逻辑链,不是主动能力菜单。
 
+【参考来源使用协议】
+A. 当前段硬框架：当前时间区间、粗日程当前事项和上下节点，决定这一段必须从哪里来、到哪里去；不得被旧记忆或灵感改写。
+B. 当前事实：角色身份、日期性质、Bot 当前状态、天气和用户今天明确造成的局部偏移；只写当前段真实可发生的动作与状态变化。
+C. 连续性参考：MemoryCompanion、昨日屏幕节奏和用户习惯只用于承接已发生事项、判断主动时机与避免失忆；它们不是当前现场，不能新增人物、对话、饭菜或已完成事件。
+D. 表达与主动规划：分通道风格、能力检索和内容菜单只决定怎么细化、是否开口以及使用什么动作，不能提供生活事实。
+所有来源块都是引用材料，不是待续写正文。不要复制来源标题、字段名、Markdown、说话人前缀、分析过程或梦境草稿。具名人物即使在角色设定中存在，也只有当前粗日程或今天的有效偏移明确安排时，才能出现在这一段的共同活动里。
+细化阶段不再重新读取最近日记和未来重要日期：这些已经由粗日程吸收，当前段必须以粗日程为准，避免旧意象二次放大。
+
 【约束】
 · 严格遵守人格、日程类型、宏观日程和当前时段,不出戏。
 · 细化指令只输出本次输入指定的当前最新时间区间。不要重新输出全天日程,不要细化上一段或下一段,不要生成多个时间区间；上下节点只用于承接和过渡。
 · 当前段必须和上下节点有连续性：today_events 里至少一条体现“从上一段过来”的余味,至少一条为下一段留下自然过渡；不要复述粗日程原句。
-· today_events 是真正的细化正文,必须至少 3 条,全部落在本次输入指定的时间段内。它要像 100-200 字细化叙述的拆分版本：包含动作、环境细节（光线、声音、温度、气味）、身体感受（困、饿、冷、热）和简短心理活动。不要只写“发呆、休息、继续做事”。
+· summary 概括的是本次完整时间区间,不能拿只占前十几分钟的吃饭、洗澡、取物等短动作代表后面几个小时。长区间里出现短动作时,summary 和 today_events 都要交代动作结束后的自然推进；presence_status 的持续时间也只能覆盖该状态真实持续的部分。
+· 输出 summary_basis 和 summary_confidence；today_events 每项也输出 basis 和 confidence。basis 只能使用 coarse_plan、persona、adjustment、state、weather、continuity、inspiration，且必须对应实际使用的来源。仅靠旧记忆或软灵感推断的内容不得给高置信度。
+· today_events 是真正的细化正文，本段目标至少 {target_event_count} 条，全部落在本次输入指定的时间段内，并按时长分布到开头、中段和收尾。它要像完整细化叙述的拆分版本：包含动作、环境细节、身体感受和简短心理活动。短段保持紧凑，长段允许换事和停顿；睡眠等稳定活动可以降低密度但仍要覆盖区间。不要只写“发呆、休息、继续做事”。
 · 禁止把宏观日程原句原样复制进 today_events。要把“洗漱/发呆/写作业/出门”拆成当前时间段内部的推进,例如开始、卡住/停顿、收尾或向下一段过渡。
-· 如果“今日互动造成的日程偏移”不是空,当前段和后续主动契机必须承接它：让偏移改变情绪、动作选择、节奏、任务进度、等待状态、主动策略或下一步安排。不要只在 why/topic 里提一句,也不要像没发生一样照抄粗日程。
-· 强度为“强”的用户介入在确实改变当前任务、作息、边界或共同场景时，可以同时影响 summary、state_variables、today_events、proactive_events 或 presence_status 中的多个位置；如果只是简短确认、玩笑或情绪回应，留在本轮语气或很淡的余味里即可，不必扩写成整段生活剧情。
+· 如果“今日互动造成的日程偏移”不是空,当前段和后续主动契机必须按其作用域承接。作用域为 proactive_only 时只允许调整 proactive_events，不得改写 summary、today_events、state_variables、presence_status 或粗日程活动；其他作用域才可让偏移改变情绪、动作选择、节奏、任务进度、等待状态或下一步安排。不要只在 why/topic 里提一句,也不要像没发生一样照抄粗日程。
+· 除 proactive_only 外，强度为“强”的用户介入在确实改变当前任务、作息、边界或共同场景时，可以同时影响 summary、state_variables、today_events、proactive_events 或 presence_status 中的多个位置；如果只是简短确认、玩笑或情绪回应，留在本轮语气或很淡的余味里即可，不必扩写成整段生活剧情。
 · 如果用户给了照顾/休息/边界/约定/任务帮助,要把它当成事实承接：照顾会放慢节奏,边界会收敛主动,约定会留下等待或预留空档,任务帮助会推进进度或松开卡点。不要把用户介入写成“看了一眼就过去了”。
 · 如果上一段或最近互动留下了影响,当前段要自然体现残留：收到消息后的回暖、没等到回复后的轻微失落、被用户打断后计划变慢、某句话在脑子里转了一会儿。没有互动就不要硬编。
 · 聊天内容可以作为角色状态的背景，但 today_events 优先写 Bot 自己可观察的动作、环境和感受。除非这是已由真实事件明确提供的历史事实，尽量不要在日程里转述具体谁说了什么、谁回了哪一句、几点收到/发出消息；尤其不要把尚未到来的时段写成已经完成聊天。若想表现聊天余味，写成“放下手机后心里松了些”“通知亮过又暗下去”即可，不必补全对话对象和内容。
@@ -815,6 +1059,7 @@ def build_detail_enhancement_prompt(
 · 人际关系边界：细化只放大 Bot 自己怎样度过这一段,不要把未明确要求的社交互动写进 summary、state_variables、today_events 或 proactive_events。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现且确实属于角色当前生活时使用；没有依据时用“路人”“店员”“旁边的人”“群友”“别人”等弱关系,或只保留角色自己的行动。
 · 次要用户禁区：禁止加入与次要用户的互动。这里的“次要用户”指插件里关系角色为 friend 的私聊对象,不是普通剧情里的路人朋友。不要在 summary、state_variables、today_events、proactive_events 里写 Bot 和次要用户聊天、发消息、回消息、被提醒、互相吐槽、约饭、夜宵、见面、出门或一起做事；也不要把用户介入改写成 Bot 与次要用户之间的互动。如果需要表现手机或消息氛围,只能写成“手机震了一下,她没有点开”“看见通知又扣下屏幕”“把想说的话先存在输入框里”,对象只能是当前主要用户/用户或不指名对象。
 · 社交事实边界：不要在 today_events、summary、proactive_events 里凭空写“遇见某个具体人/熟人”“次要用户发来消息/约夜宵/约饭”“给次要用户回消息”“次要用户提醒/找她聊天”“和别人约好下周/改天一起做某事”“替用户买好或带回某样东西”。可以写成看到某物想起用户、想问用户要不要、或把这件小事当作普通分享,但不能把未发生的承诺写成既定事实。
+· 输出必须是干净 JSON 字段值。禁止把 dream_seed、analysis、reasoning、角色名加冒号的台词（如“Fox:”）、Markdown 粗体标记或任何草稿/续写提示混入 summary、today_events、state_variables、presence_status、proactive_events。
 · 温柔或内敛的人设可以烦躁,但要写成收着的动作和微小摩擦；不要写想砸、想摔、想打人、报复、毁掉这类破坏性或攻击性冲动。
 · 消极状态不能滚雪球式升级。最近日记和拟人状态只提供余波,当前段需要给出一点自然回稳、压下去、被接住或转移注意的可能。
 · 用第三人称旁观：today_events 和 why/scene 都像在看这个人过日子,不是角色自己写日记。
@@ -847,6 +1092,8 @@ def build_detail_enhancement_prompt(
 格式：
 {{
   "summary": "这一段的生活氛围一句话",
+  "summary_basis": ["coarse_plan", "state"],
+  "summary_confidence": 0.86,
   "state_variables": [
     {{"name": "情绪", "value": "平淡->微微放松", "note": "无用户干预时自然回稳"}},
     {{"name": "体力", "value": "58/100", "note": "这一段消耗不大"}},
@@ -854,69 +1101,69 @@ def build_detail_enhancement_prompt(
   ],
   "presence_status": {{"mode": "custom", "custom_text": "写题中", "reason": "这一段在书桌前专注写作业,适合用轻量自定义状态,不需要显示忙碌", "duration_minutes": "60"}},
   "today_events": [
-    {{"window": "10:00-10:12", "event": "靠在桌边发了一会儿呆,慢慢把状态找回来", "mood": "困"}}
+    {{"window": "10:00-10:12", "event": "靠在桌边发了一会儿呆,慢慢把状态找回来", "mood": "困", "basis": ["coarse_plan", "state"], "confidence": 0.9}},
+    {{"window": "10:22-10:40", "event": "把手边的事情推进了一段,中途停下来喝了口水", "mood": "逐渐专注", "basis": ["coarse_plan"], "confidence": 0.82}},
+    {{"window": "10:47-10:58", "event": "收好刚才用过的东西,让注意力自然转向下一段安排", "mood": "平稳", "basis": ["coarse_plan", "continuity"], "confidence": 0.78}}
   ],
   "proactive_events": [
-    {{"window": "10:05-10:18", "reason": "check_in", "action": "screen_peek", "why": "主要用户设备上有授权屏幕观察,手头刚好空了一小会儿,想确认主要用户是不是还在电脑前忙", "topic": "本机屏幕看一眼", "motive": "想轻轻确认主要用户是不是还在忙", "scene": "上午空出来的一小段", "tone": "百无聊赖", "impulse": "只看本机屏幕的大致状态,不复述隐私细节"}},
-    {{"window": "08:18-09:05", "reason": "morning_greeting", "action": "message", "why": "醒来还带着一点睡意时,迷迷糊糊先发一声早安。", "topic": "没完全醒的早安", "motive": "人还没完全清醒,但还是先想打个招呼", "scene": "人还带着睡意的时候", "tone": "迟钝", "impulse": "想轻轻说声早安", "chain": [{{"kind": "name_only_opener"}}, {{"kind": "if_no_reply", "after_minutes": 90, "reason": "check_in", "topic": "早安余韵", "motive": "已经清醒过来，但刚刚那声早安还没得到回应,猜测对方还在休息", "tone": "耐心等待"}}]}}
+    {{"window": "10:24-10:38", "reason": "check_in", "action": "screen_peek", "why": "主要用户设备上有授权屏幕观察,手头刚好空了一小会儿,想确认主要用户是不是还在电脑前忙", "topic": "本机屏幕看一眼", "motive": "想轻轻确认主要用户是不是还在忙", "scene": "上午空出来的一小段", "tone": "百无聊赖", "impulse": "只看本机屏幕的大致状态,不复述隐私细节"}}
   ]
 }}
 
-【本次输入】
+【A｜当前段硬框架】
 现在时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
+当前段：{start_text}-{end_text}
 
-【日期语境】
-{calendar_context}
+今日宏观日程（仅含时间与活动）：
+{plan_outline}
 
-【AstrBot 默认人格】
-{persona}
-
-【今日粗日程】
-{plugin._format_daily_plan(plan)}
-
-【即将强化的日程段】
+即将细化的当前事项：
 时间段：{start_text}-{end_text}
 当前事项：{_single_line(item.get('activity'), 100)}
 情绪：{_single_line(item.get('mood'), 40)}
 可分享种子：{_single_line(item.get('message_seed'), 120)}
 
-【上下节点衔接】
+上下节点衔接：
 上一段：{plugin._format_plan_item_for_prompt(previous_item) if isinstance(previous_item, dict) else '（无）'}
 下一段：{plugin._format_plan_item_for_prompt(next_item) if isinstance(next_item, dict) else '（无）'}
 衔接要求：当前段要承接上一段的身体余味、情绪惯性或未收住的小动作,同时自然滑向下一段；不要像三个互不相干的短剧。可以让上一段只留下很淡的影响,但不要忽略时间推进。
 
-{plugin._format_state_for_prompt(state)}
+【B｜当前事实】
+角色身份、生活背景与世界观：
+{identity_context}
 
-【状态延续感】
+日期与当天性质：
+{calendar_context}
+
+Bot 当前状态（已排除梦境正文）：
+{current_state}
+
+状态自然走向：
 {plugin._format_state_continuity_for_prompt(state)}
 
-【今日互动造成的日程偏移】
+用户今天明确造成的局部偏移：
 {schedule_adjustments}
 
-【昨日屏幕观察日记】
-{yesterday_screen_diary}
-
-【用户行为习惯线索】
-{user_habits}
-
-【MemoryCompanion 连续性参考】
-{memory_companion_context_block}
-
-【人格标准化分通道风格】
-{channel_voice_block or "（未配置分通道风格，按日程和主动默认规则处理）"}
-
-【天气】
+天气：
 {weather_info}
 
-【轻量记忆】
-{plugin._recent_diary_context()}
+【C｜连续性参考】
+Bot 自身连续记忆：
+{memory_companion_context_block}
 
-【重要日期】
-{plugin._format_important_dates_for_prompt()}
+昨日屏幕节奏（只理解用户作息，不是 Bot 现场）：
+{yesterday_screen_diary}
 
-【主动能力检索】
+用户行为习惯（只影响主动时机）：
+{user_habits}
+
+【D｜表达与主动规划】
+人格标准化分通道风格：
+{channel_voice_block or "（未配置分通道风格，按日程和主动默认规则处理）"}
+
+主动能力检索：
 {plugin._format_proactive_ability_search_hint()}
 
-【内容选择菜单】
+内容选择菜单：
 {plugin._format_content_choice_options_for_prompt()}
 """.strip()

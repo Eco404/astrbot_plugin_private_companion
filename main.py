@@ -991,6 +991,7 @@ class PrivateCompanionPlugin(
         self.enable_qq_presence_sync = self._cfg_bool(c, "enable_qq_presence_sync", True)
         self.enable_qq_custom_presence_sync = self._cfg_bool(c, "enable_qq_custom_presence_sync", False)
         self.poke_action_max_times = self._cfg_int(c, "poke_action_max_times", 1, 1, 3)
+        self.poke_action_cooldown_minutes = self._cfg_int(c, "poke_action_cooldown_minutes", 30, 0, 1440)
         self.voice_action_max_chars = self._cfg_int(c, "voice_action_max_chars", 30, 6, 80)
         self.photo_action_max_daily = self._cfg_int(c, "photo_action_max_daily", 1, 0, 5)
         self.proactive_photo_text_probability = self._cfg_int(c, "proactive_photo_text_probability", 18, 0, 100) / 100
@@ -1588,6 +1589,18 @@ class PrivateCompanionPlugin(
         needs_startup_save = False
         async with self._data_lock:
             changed = False
+            raw_users = self.data.get("users") if isinstance(self.data, dict) else None
+            if isinstance(raw_users, dict):
+                cleaned_habit_users = 0
+                for habit_user in raw_users.values():
+                    if isinstance(habit_user, dict) and self._sanitize_user_behavior_habit_patterns(habit_user):
+                        cleaned_habit_users += 1
+                if cleaned_habit_users:
+                    changed = True
+                    logger.info(
+                        "[PrivateCompanion] 已清理旧版低质量用户习惯记录: users=%s",
+                        cleaned_habit_users,
+                    )
             if self.default_enable_configured_targets:
                 self._sync_configured_targets()
                 changed = True

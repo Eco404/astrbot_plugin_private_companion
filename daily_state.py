@@ -109,6 +109,7 @@ from .helpers import _date_key, _normalize_outbound_punctuation_flow, _now_ts, _
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
+    evaluate_detail_quality,
     format_plan_for_diary,
     generate_daily_plan,
     generate_detail_enhancement,
@@ -424,10 +425,13 @@ class DailyStateMixin:
                     self._save_data_sync()
                 return None
             for segment in segments:
+                generation_id = uuid.uuid4().hex
+                segment["_generation_id"] = generation_id
                 enhanced[segment["key"]] = {
                     "status": "generating",
                     "started_at": self._environment_now().strftime("%H:%M"),
                     "started_ts": _now_ts(),
+                    "generation_id": generation_id,
                 }
             self._save_data_sync()
 
@@ -440,38 +444,62 @@ class DailyStateMixin:
             except Exception as exc:
                 now_ts = _now_ts()
                 retry_after_ts = now_ts + 30 * 60
+                failure_is_current = False
                 async with self._data_lock:
-                    enhanced = self.data.setdefault("detail_enhanced_segments", {})
-                    if not isinstance(enhanced, dict):
-                        enhanced = {}
-                        self.data["detail_enhanced_segments"] = enhanced
-                    retry_after = self._environment_fromtimestamp(retry_after_ts).strftime("%H:%M")
-                    enhanced[segment["key"]] = {
-                        "status": "failed",
-                        "updated_at": self._environment_now().strftime("%H:%M"),
-                        "error": _single_line(exc, 180),
-                        "retry_after": retry_after,
-                        "retry_after_ts": retry_after_ts,
-                        "summary": "这一段细化生成失败，稍后会自动重试。",
-                        "today_events": [],
-                        "proactive_events": [],
-                        "state_variables": [],
-                        "presence_status": {},
-                        "interaction_updates": [],
-                        "coverage_repair_done": bool(segment.get("_coverage_repair")),
-                    }
-                    self._save_data_sync()
-                logger.warning(
-                    "[PrivateCompanion] 日程细化生成失败,已标记为可重试: segment=%s retry_after=%s error=%s",
-                    _single_line(segment.get("key"), 80),
-                    retry_after,
-                    _single_line(exc, 180),
-                )
-                if force:
+                    failure_is_current = self._detail_generation_is_current(
+                        segment,
+                        str(segment.get("_generation_id") or ""),
+                    )
+                    if failure_is_current:
+                        enhanced = self.data.setdefault("detail_enhanced_segments", {})
+                        if not isinstance(enhanced, dict):
+                            enhanced = {}
+                            self.data["detail_enhanced_segments"] = enhanced
+                        retry_after = self._environment_fromtimestamp(retry_after_ts).strftime("%H:%M")
+                        enhanced[segment["key"]] = {
+                            "status": "failed",
+                            "updated_at": self._environment_now().strftime("%H:%M"),
+                            "error": _single_line(exc, 180),
+                            "retry_after": retry_after,
+                            "retry_after_ts": retry_after_ts,
+                            "summary": "这一段细化生成失败，稍后会自动重试。",
+                            "today_events": [],
+                            "proactive_events": [],
+                            "state_variables": [],
+                            "presence_status": {},
+                            "interaction_updates": [],
+                            "coverage_repair_done": bool(segment.get("_coverage_repair")),
+                        }
+                        self._save_data_sync()
+                    else:
+                        retry_after = ""
+                if failure_is_current:
+                    logger.warning(
+                        "[PrivateCompanion] 日程细化生成失败,已标记为可重试: segment=%s retry_after=%s error=%s",
+                        _single_line(segment.get("key"), 80),
+                        retry_after,
+                        _single_line(exc, 180),
+                    )
+                else:
+                    logger.info(
+                        "[PrivateCompanion] 日程细化失败结果已过期,不再回写: segment=%s error=%s",
+                        _single_line(segment.get("key"), 80),
+                        _single_line(exc, 180),
+                    )
+                if force and failure_is_current:
                     raise
                 continue
-            last_detail = detail
+            self._sanitize_detail_snapshot_for_segment_inplace(
+                detail,
+                segment,
+                field=f"detail_enhanced_segments.{segment.get('key') or 'current'}",
+            )
             async with self._data_lock:
+                if not self._detail_generation_is_current(
+                    segment,
+                    str(segment.get("_generation_id") or ""),
+                ):
+                    continue
                 story_plan = self.data.setdefault("daily_story_plan", {})
                 if not isinstance(story_plan, dict) or story_plan.get("date") != plan_date:
                     story_plan = {
@@ -488,10 +516,13 @@ class DailyStateMixin:
                     "status": "done",
                     "updated_at": self._environment_now().strftime("%H:%M"),
                     "summary": _single_line(detail.get("summary"), 120),
+                    "summary_basis": self._normalize_schedule_basis(detail.get("summary_basis"), default=["coarse_plan"]),
+                    "summary_confidence": min(1.0, _safe_float(detail.get("summary_confidence"), 0.75)),
                     "today_events": detail.get("today_events", []),
                     "proactive_events": detail.get("proactive_events", []),
                     "state_variables": detail.get("state_variables", []),
                     "presence_status": detail.get("presence_status", {}),
+                    "quality": detail.get("quality", {}),
                     "interaction_updates": [],
                     "coverage_repair_done": bool(segment.get("_coverage_repair")),
                 }
@@ -505,6 +536,7 @@ class DailyStateMixin:
                 self._refresh_daily_state_location_from_plan(plan=plan, detail=detail)
                 self._reschedule_users_for_new_detail_events(segment)
                 self._save_data_sync()
+                last_detail = detail
             for meal_entry in meal_entries:
                 await self._memory_companion_record_self_meal(meal_entry)
             if meal_entries:
@@ -715,17 +747,20 @@ class DailyStateMixin:
         self,
         plan: dict[str, Any],
         enhanced: dict[str, Any],
+        *,
+        include_cancelled: bool = False,
     ) -> list[dict[str, Any]]:
         if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
             return []
         items = plan.get("items")
         if not isinstance(items, list) or not items:
             return []
+        starts = self._normalized_plan_item_starts(items)
         parsed = []
         for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
-            start = self._parse_hhmm_to_minutes(item.get("time"))
+            start = starts[index] if index < len(starts) else None
             if start is None:
                 continue
             parsed.append((index, start, item))
@@ -733,32 +768,76 @@ class DailyStateMixin:
             return []
         segments: list[dict[str, Any]] = []
         for pos, (index, start, item) in enumerate(parsed):
+            if not include_cancelled and self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
+                continue
             key = f"{plan.get('date')}:{index}:{item.get('time')}"
             if self._detail_enhancement_snapshot_blocks_generation(enhanced.get(key) if isinstance(enhanced, dict) else None):
                 continue
             next_start = (
                 parsed[pos + 1][1]
                 if pos + 1 < len(parsed)
-                else self._segment_end_minutes(start, item)
+                else None
             )
+            end = self._plan_item_end_minutes(start, item, next_start=next_start)
             segments.append(
                 {
                     "key": key,
+                    "plan_date": str(plan.get("date") or ""),
                     "index": index,
                     "start": start,
-                    "end": next_start,
-                    "previous_item": parsed[pos - 1][2] if pos > 0 else None,
+                    "end": end,
+                    "previous_item": next(
+                        (
+                            candidate[2]
+                            for candidate in reversed(parsed[:pos])
+                            if self._normalize_schedule_lifecycle_status(candidate[2].get("lifecycle_status")) != "cancelled"
+                        ),
+                        None,
+                    ),
                     "item": item,
-                    "next_item": parsed[pos + 1][2] if pos + 1 < len(parsed) else None,
+                    "next_item": next(
+                        (
+                            candidate[2]
+                            for candidate in parsed[pos + 1 :]
+                            if self._normalize_schedule_lifecycle_status(candidate[2].get("lifecycle_status")) != "cancelled"
+                        ),
+                        None,
+                    ),
                 }
             )
         return segments
+
+    def _detail_generation_is_current(self, segment: dict[str, Any], generation_id: str) -> bool:
+        key = _single_line(segment.get("key"), 120)
+        if not key or not generation_id:
+            return False
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        snapshot = enhanced.get(key) if isinstance(enhanced, dict) else None
+        if not isinstance(snapshot, dict):
+            return False
+        if _single_line(snapshot.get("status"), 24) != "generating":
+            return False
+        if _single_line(snapshot.get("generation_id"), 64) != generation_id:
+            return False
+        live_plan = self.data.get("daily_plan", {})
+        plan_date = _single_line(segment.get("plan_date"), 16)
+        if not isinstance(live_plan, dict) or _single_line(live_plan.get("date"), 16) != plan_date:
+            return False
+        items = live_plan.get("items")
+        index = _safe_int(segment.get("index"), -1, minimum=-1)
+        if not isinstance(items, list) or not (0 <= index < len(items)) or not isinstance(items[index], dict):
+            return False
+        item = items[index]
+        expected_key = f"{plan_date}:{index}:{item.get('time')}"
+        if expected_key != key:
+            return False
+        return self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) != "cancelled"
 
     def _detail_enhancement_snapshot_blocks_generation(self, snapshot: Any) -> bool:
         if not isinstance(snapshot, dict):
             return False
         status = _single_line(snapshot.get("status"), 24)
-        if status == "done":
+        if status in {"done", "cancelled"}:
             return True
         if status == "failed":
             retry_after_ts = _safe_float(snapshot.get("retry_after_ts"), 0)
@@ -881,8 +960,30 @@ class DailyStateMixin:
                 story_plan[key] = existing
             additions = detail.get(key, [])
             if isinstance(additions, list):
-                existing.extend(item for item in additions if isinstance(item, dict))
+                existing.extend(
+                    item
+                    for item in additions
+                    if isinstance(item, dict)
+                    and self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) != "cancelled"
+                )
                 story_plan[key] = self._trim_story_plan_items(key, existing, limit)
+
+    def _rebuild_story_plan_from_detail_snapshots(self, plan_date: str) -> dict[str, Any]:
+        rebuilt: dict[str, Any] = {
+            "date": _single_line(plan_date, 16),
+            "today_events": [],
+            "proactive_events": [],
+            "long_term_events": [],
+        }
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if isinstance(enhanced, dict):
+            for snapshot in enhanced.values():
+                if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
+                    continue
+                self._merge_detail_enhancement(rebuilt, snapshot)
+        self._sanitize_story_plan_social_facts_inplace(rebuilt)
+        self.data["daily_story_plan"] = rebuilt
+        return rebuilt
 
     def _remember_detail_enhancement_history(
         self,
@@ -5436,6 +5537,141 @@ class DailyStateMixin:
             return min(24 * 60 + 240, start + 240)
         return min(24 * 60 + 120, start + 180)
 
+    def _plan_item_end_minutes(
+        self,
+        start: int,
+        item: dict[str, Any] | None,
+        *,
+        next_start: int | None = None,
+    ) -> int:
+        explicit = self._parse_hhmm_to_minutes((item or {}).get("end")) if isinstance(item, dict) else None
+        if explicit is not None:
+            if explicit <= start:
+                explicit += 24 * 60
+            duration = explicit - start
+            if 10 <= duration <= 12 * 60:
+                if next_start is not None:
+                    normalized_next = next_start + (24 * 60 if next_start <= start else 0)
+                    explicit = min(explicit, normalized_next)
+                return explicit
+        if next_start is not None:
+            return next_start + (24 * 60 if next_start <= start else 0)
+        return self._segment_end_minutes(start, item)
+
+    def _normalized_plan_item_starts(self, items: Any) -> list[int | None]:
+        if not isinstance(items, list):
+            return []
+        normalized: list[int | None] = []
+        day_offset = 0
+        previous_raw: int | None = None
+        for item in items:
+            raw = self._parse_hhmm_to_minutes(item.get("time")) if isinstance(item, dict) else None
+            if raw is None:
+                normalized.append(None)
+                continue
+            if previous_raw is not None and raw < previous_raw:
+                day_offset += 24 * 60
+            normalized.append(raw + day_offset)
+            previous_raw = raw
+        return normalized
+
+    def _normalize_plan_item_intervals(self, items: Any) -> bool:
+        if not isinstance(items, list):
+            return False
+        starts = self._normalized_plan_item_starts(items)
+        changed = False
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or starts[index] is None:
+                continue
+            start = int(starts[index])
+            next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+            end = self._plan_item_end_minutes(start, item, next_start=next_start)
+            end_text = self._minutes_to_hhmm(end)
+            if _single_line(item.get("end"), 8) != end_text:
+                item["end"] = end_text
+                changed = True
+            lifecycle = _single_line(item.get("lifecycle_status"), 20).lower()
+            if lifecycle not in {"planned", "changed", "cancelled"}:
+                item["lifecycle_status"] = "planned"
+                changed = True
+            basis = self._normalize_schedule_basis(item.get("basis"), default=["coarse_plan"])
+            if item.get("basis") != basis:
+                item["basis"] = basis
+                changed = True
+            confidence = min(1.0, _safe_float(item.get("confidence"), 0.72))
+            if item.get("confidence") != confidence:
+                item["confidence"] = confidence
+                changed = True
+        return changed
+
+    @staticmethod
+    def _normalize_schedule_lifecycle_status(value: Any) -> str:
+        aliases = {
+            "planned": "planned", "计划": "planned", "未开始": "planned",
+            "active": "active", "进行": "active", "进行中": "active",
+            "completed": "completed", "完成": "completed", "已完成": "completed",
+            "changed": "changed", "变更": "changed", "已变更": "changed",
+            "cancelled": "cancelled", "canceled": "cancelled", "取消": "cancelled", "已取消": "cancelled",
+        }
+        return aliases.get(_single_line(value, 20).lower(), "")
+
+    @staticmethod
+    def _normalize_schedule_basis(value: Any, *, default: list[str] | None = None) -> list[str]:
+        allowed = {"calendar", "persona", "adjustment", "state", "weather", "continuity", "inspiration", "coarse_plan"}
+        raw = value if isinstance(value, list) else re.split(r"[,，;；\s]+", str(value or ""))
+        result: list[str] = []
+        for item in raw:
+            key = _single_line(item, 24).lower()
+            if key in allowed and key not in result:
+                result.append(key)
+        return result[:3] or list(default or [])[:3]
+
+    def _schedule_window_runtime_status(
+        self,
+        start: int,
+        end: int,
+        *,
+        plan_date: str = "",
+        explicit_status: Any = "",
+    ) -> str:
+        explicit = self._normalize_schedule_lifecycle_status(explicit_status)
+        if explicit == "cancelled":
+            return explicit
+        date_text = _single_line(plan_date, 16)
+        now_minutes = self._effective_plan_now_minutes(date_text) if date_text else self._environment_now_minutes()
+        if now_minutes is None:
+            today = _today_key()
+            return "completed" if date_text and date_text < today else "planned"
+        normalized_end = int(end)
+        if normalized_end <= start:
+            normalized_end += 24 * 60
+        if now_minutes < start:
+            runtime = "planned"
+        elif now_minutes >= normalized_end:
+            runtime = "completed"
+        else:
+            runtime = "active"
+        if explicit == "changed" and runtime != "completed":
+            return "changed"
+        return runtime
+
+    def _plan_item_runtime_status(self, plan: dict[str, Any], item: dict[str, Any], index: int = -1) -> str:
+        items = plan.get("items") if isinstance(plan, dict) else None
+        starts = self._normalized_plan_item_starts(items)
+        start = starts[index] if isinstance(items, list) and 0 <= index < len(starts) else self._parse_hhmm_to_minutes(item.get("time"))
+        if start is None:
+            return "planned"
+        next_start = None
+        if isinstance(items, list) and index >= 0:
+            next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+        end = self._plan_item_end_minutes(start, item, next_start=next_start)
+        return self._schedule_window_runtime_status(
+            start,
+            end,
+            plan_date=str((plan or {}).get("date") or ""),
+            explicit_status=item.get("lifecycle_status"),
+        )
+
     def _parse_hhmm_to_minutes(self, value: Any) -> int | None:
         match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(value or ""))
         if not match:
@@ -6014,7 +6250,22 @@ class DailyStateMixin:
                 lines.append(f"- {text}")
         return "\n".join(lines) if lines else "（暂未设置）"
 
-    def _format_schedule_adjustments_for_prompt(self) -> str:
+    @staticmethod
+    def _normalize_schedule_adjustment_scope(scope: Any) -> str:
+        text = _single_line(scope, 60)
+        if any(token in text for token in ("主动策略", "主动消息", "主动频率")):
+            return "proactive_only"
+        if any(token in text for token in ("直到", "到家", "今晚到", "缓冲期")):
+            return "until_condition"
+        if any(token in text for token in ("今日后续", "今天剩余", "全天后续")):
+            return "rest_of_day"
+        if "下一段" in text:
+            return "current_and_next"
+        if any(token in text for token in ("当前段", "当前休息段")):
+            return "current_only"
+        return "current_and_next"
+
+    def _format_schedule_adjustments_for_prompt(self, segment: dict[str, Any] | None = None) -> str:
         raw = self.data.get("schedule_adjustments", [])
         now = _now_ts()
         kept = []
@@ -6042,8 +6293,23 @@ class DailyStateMixin:
                 source = _single_line(item.get("source"), 24)
                 intensity = _single_line(item.get("intensity"), 16)
                 scope = _single_line(item.get("scope"), 30)
+                scope_key = _single_line(item.get("scope_key"), 24) or self._normalize_schedule_adjustment_scope(scope)
+                if segment is None and scope_key == "proactive_only":
+                    continue
+                if isinstance(segment, dict):
+                    target_index = _safe_int(segment.get("index"), -1, minimum=-1)
+                    anchor_index = _safe_int(item.get("anchor_segment_index"), -1, minimum=-1)
+                    if anchor_index < 0:
+                        current_segment = self._current_detail_segment_for_update()
+                        anchor_index = _safe_int((current_segment or {}).get("index"), target_index, minimum=-1)
+                    if scope_key == "current_only" and target_index != anchor_index:
+                        continue
+                    if scope_key == "current_and_next" and target_index not in {anchor_index, anchor_index + 1}:
+                        continue
+                    if scope_key in {"rest_of_day", "until_condition", "proactive_only"} and target_index < anchor_index:
+                        continue
                 if note:
-                    meta = "｜".join(part for part in (source or "互动", intensity, scope) if part)
+                    meta = "｜".join(part for part in (source or "互动", intensity, scope, f"作用域={scope_key}") if part)
                     lines.append(f"- {meta}：{note}")
                 immediate = _single_line(item.get("immediate_reaction"), 120)
                 if immediate:
@@ -6060,6 +6326,8 @@ class DailyStateMixin:
                 carry = _single_line(item.get("carry_rule"), 120)
                 if carry:
                     lines.append(f"  承接要求：{carry}")
+                if scope_key == "proactive_only":
+                    lines.append("  作用限制：只允许影响 proactive_events，不得改写粗日程、summary、today_events、state_variables 或 presence_status。")
             if len(kept) != len(raw):
                 self.data["schedule_adjustments"] = kept[-12:]
         if override_lines:
@@ -6662,21 +6930,46 @@ class DailyStateMixin:
         now = _now_ts()
         intensity = _single_line(adjustment.get("intensity"), 16) or "中"
         ttl_hours = 18 if intensity == "强" else 10 if intensity == "中" else 6
+        current_segment = self._current_detail_segment_for_update()
+        anchor_index = _safe_int((current_segment or {}).get("index"), -1, minimum=-1)
+        scope_key = self._normalize_schedule_adjustment_scope(adjustment.get("scope"))
+        source = _single_line(adjustment.get("source"), 24)
+        if source == "用户带回/回家":
+            raw[:] = [
+                old
+                for old in raw
+                if not (
+                    isinstance(old, dict)
+                    and (
+                        _single_line(old.get("condition_key"), 32) == "return_home"
+                        or (
+                            _single_line(old.get("scope_key"), 24) == "until_condition"
+                            and "回家" in _single_line(old.get("scope"), 60)
+                        )
+                    )
+                )
+            ]
         item = {
             "date": _today_key(),
-            "source": _single_line(adjustment.get("source"), 24),
+            "source": source,
             "note": note,
             "immediate_reaction": _single_line(adjustment.get("immediate_reaction"), 140),
             "state_updates": adjustment.get("state_updates", []),
             "user_text": _single_line(adjustment.get("user_text"), 120),
             "intensity": intensity,
             "scope": _single_line(adjustment.get("scope"), 40),
+            "scope_key": scope_key,
             "carry_rule": _single_line(adjustment.get("carry_rule"), 160),
             "source_role": "owner",
             "source_user_id": _single_line((user or {}).get("user_id"), 80),
             "created_at": now,
             "expires_at": now + ttl_hours * 3600,
         }
+        if anchor_index >= 0:
+            item["anchor_segment_index"] = anchor_index
+            item["anchor_segment_key"] = _single_line((current_segment or {}).get("key"), 120)
+        if scope_key == "until_condition" and (source == "用户带出/同行" or "回家" in item["scope"]):
+            item["condition_key"] = "return_home"
         sleep_delay_until = _safe_float(adjustment.get("sleep_delay_until_ts"), 0)
         if sleep_delay_until > now:
             item["sleep_delay_until_ts"] = sleep_delay_until
@@ -6692,6 +6985,12 @@ class DailyStateMixin:
                 text=item["user_text"],
             )
         self._record_detail_interaction_update(item)
+        plan = self.data.get("daily_plan", {})
+        current_item = self._get_current_plan_item(plan) if isinstance(plan, dict) else None
+        if isinstance(current_item, dict):
+            current_item["lifecycle_status"] = "changed"
+            current_item["changed_at"] = self._environment_now().strftime("%H:%M")
+            current_item["change_reason"] = _single_line(adjustment.get("source") or note, 80)
         if raw and isinstance(raw[-1], dict) and raw[-1].get("note") == note:
             raw[-1].update(item)
         else:
@@ -6958,10 +7257,14 @@ class DailyStateMixin:
         if isinstance(plan, dict) and isinstance(plan.get("items"), list):
             now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
             nearby: list[tuple[int, str]] = []
-            for item in plan.get("items", []):
+            plan_items = plan.get("items", [])
+            starts = self._normalized_plan_item_starts(plan_items)
+            for index, item in enumerate(plan_items):
                 if not isinstance(item, dict):
                     continue
-                item_minutes = self._parse_hhmm_to_minutes(item.get("time"))
+                if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
+                    continue
+                item_minutes = starts[index] if index < len(starts) else None
                 if item_minutes is None:
                     continue
                 distance = abs(item_minutes - now_minutes) if now_minutes is not None else item_minutes
@@ -7065,7 +7368,7 @@ class DailyStateMixin:
             return "外面"
         return text if text in {"家里", "学校", "工作地点", "外面", "路上"} else ""
 
-    def _format_state_for_prompt(self, state: dict[str, Any]) -> str:
+    def _format_state_for_prompt(self, state: dict[str, Any], *, include_dream: bool = True) -> str:
         if not isinstance(state, dict) or not state:
             state = dict(DEFAULT_HUMANIZED_STATE)
             state.update(self._base_state_values())
@@ -7114,9 +7417,10 @@ class DailyStateMixin:
                 sleep_runtime_text = f"临时晚睡到 {until_text}，这是用户今晚的陪聊约定，不是长期作息"
         if sleep_runtime_text and sleep_runtime_text not in primary_fragments:
             primary_fragments.append(sleep_runtime_text)
-        dream_text = _single_line(state.get("dream"), 80)
-        if dream_text not in {"", "没有记住梦"}:
-            primary_fragments.append(dream_text)
+        if include_dream:
+            dream_text = _single_line(state.get("dream"), 80)
+            if dream_text not in {"", "没有记住梦"}:
+                primary_fragments.append(dream_text)
         health_text = _single_line(state.get("health"), 80)
         if health_text not in {"", "状态正常"} and not self._is_inapplicable_state_text(health_text):
             primary_fragments.append(health_text)
@@ -8093,6 +8397,8 @@ class DailyStateMixin:
         for item in plan.get("today_events", []):
             if not isinstance(item, dict):
                 continue
+            if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
+                continue
             start, end = self._parse_window_minutes(str(item.get("window") or ""))
             if start is None or end is None:
                 continue
@@ -8106,6 +8412,8 @@ class DailyStateMixin:
         current_proactive = None
         for item in plan.get("proactive_events", []):
             if not isinstance(item, dict):
+                continue
+            if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
                 continue
             start, end = self._parse_window_minutes(str(item.get("window") or ""))
             if start is None or end is None:
@@ -9235,12 +9543,36 @@ class DailyStateMixin:
         )
         return any(token in clause for token in relation_tokens) and any(token in clause for token in message_actions)
 
-    @staticmethod
-    def _daily_plan_clause_has_unsafe_social_fact(text: str) -> bool:
+    def _daily_plan_named_entity_is_known(self, name: Any) -> bool:
+        normalized = _single_line(name, 32).casefold()
+        if not normalized:
+            return False
+        known_names = [_single_line(getattr(self, "bot_name", ""), 80)]
+        data = getattr(self, "data", {})
+        users = data.get("users") if isinstance(data, dict) else None
+        if isinstance(users, dict):
+            for user in users.values():
+                if not isinstance(user, dict):
+                    continue
+                known_names.extend(
+                    _single_line(user.get(field), 80)
+                    for field in ("nickname", "display_name", "user_name", "name")
+                )
+        if any(candidate and candidate.casefold() == normalized for candidate in known_names):
+            return True
+        persona_sources = (
+            getattr(self, "schedule_persona_prompt", ""),
+            getattr(self, "schedule_worldview_prompt", ""),
+            getattr(self, "_default_persona_prompt_cache", ""),
+        )
+        boundary = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(normalized)}(?![A-Za-z0-9_])", re.IGNORECASE)
+        return any(boundary.search(str(source or "")) for source in persona_sources)
+
+    def _daily_plan_clause_has_unsafe_social_fact(self, text: str) -> bool:
         clause = _single_line(text, 160)
         if not clause:
             return False
-        if DailyStateMixin._daily_plan_clause_has_named_message_interaction(clause):
+        if self._daily_plan_clause_has_named_message_interaction(clause):
             return True
         future_commitment = (
             "约好",
@@ -9298,20 +9630,105 @@ class DailyStateMixin:
             return True
         if re.search(r"(顺手|顺带|特意|回来时|回来的时候)?.{0,8}给[^，。；;,.]{1,12}(带|买|捎|留|放)了?", clause):
             return True
+        named_companion = re.search(
+            r"(?:与|和|跟)\s*[A-Z][A-Za-z0-9_.-]{1,23}\s*(?:一起)?(?:吃|喝|聊|逛|玩|看|见面|出门)",
+            clause,
+        )
+        if named_companion:
+            name_match = re.search(r"(?:与|和|跟)\s*([A-Z][A-Za-z0-9_.-]{1,23})", named_companion.group(0))
+            if name_match and self._daily_plan_named_entity_is_known(name_match.group(1)):
+                return False
+            return True
         return False
 
-    def _sanitize_daily_plan_social_fact_text(self, text: str, *, field: str = "") -> str:
+    @staticmethod
+    def _sanitize_schedule_model_artifacts(text: Any, *, limit: int = 180) -> str:
+        """Remove model scratch fields and speaker continuations from schedule prose."""
+        source = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not source:
+            return ""
+        source = source.replace("```json", "").replace("```", "")
+        source = source.replace("**", "").replace("__", "").replace("`", "")
+
+        scratch_pattern = re.compile(
+            r"(?:^|[\s，。；;!?！？])(?:dream[_\s-]*seed|analysis|reasoning(?:_content)?|角色草稿|续写提示)\s*[:：]",
+            re.IGNORECASE,
+        )
+        scratch = scratch_pattern.search(source)
+        if scratch:
+            source = source[: scratch.start()].rstrip(" ，。；;:：")
+
+        speaker_pattern = re.compile(
+            r"(?:^|[\s，。；;!?！？])(?:Fox|Assistant|Character|Bot|[A-Z][A-Za-z0-9_.-]{1,20})\s*[:：]"
+        )
+        speaker = speaker_pattern.search(source)
+        if speaker:
+            if not source[: speaker.start()].strip(" ，。；;:："):
+                return ""
+            source = source[: speaker.start()].rstrip(" ，。；;:：")
+        return _single_line(source, limit)
+
+    @staticmethod
+    def _schedule_text_is_single_meal_action(text: Any) -> bool:
+        source = _single_line(text, 240)
+        if not source:
+            return False
+        meal_action = re.search(
+            r"吃(?:着|了|完|过|点|一|顿|碗)?|用餐|进餐|品尝|享用|早餐|早饭|午餐|午饭|晚餐|晚饭|夜宵|喝粥",
+            source,
+        )
+        if not meal_action:
+            return False
+        return not re.search(
+            r"吃完|饭后|餐后|随后|然后|之后|接着|再去|再把|转而|余下|剩下|后来|收拾完.*(?:休息|做|处理|出门)",
+            source,
+        )
+
+    @staticmethod
+    def _sanitize_schedule_meal_time_wording(text: Any, start_minutes: int | None) -> str:
         source = _single_line(text, 180)
+        if not source or start_minutes is None:
+            return source
+        minute = int(start_minutes) % (24 * 60)
+        if minute < 16 * 60:
+            source = re.sub(r"吃(?:晚饭|晚餐)", "吃点东西", source)
+            source = re.sub(r"(?:晚饭|晚餐)", "用餐", source)
+        if minute >= 15 * 60:
+            source = re.sub(r"吃(?:早餐|早饭)", "吃点东西", source)
+            source = re.sub(r"(?:早餐|早饭)", "用餐", source)
+        return _single_line(source, 180)
+
+    @classmethod
+    def _sanitize_overlong_schedule_activity(cls, text: Any, duration_minutes: int | None) -> str:
+        source = _single_line(text, 180)
+        if not source or duration_minutes is None or duration_minutes <= 120:
+            return source
+        if not cls._schedule_text_is_single_meal_action(source):
+            return source
+        stem = source.rstrip("。；;，, ")
+        return _single_line(f"这段开始时，{stem}；吃完后便按这段时间的节奏休息或处理手边的事。", 180)
+
+    def _sanitize_daily_plan_social_fact_text(self, text: str, *, field: str = "") -> str:
+        source = self._sanitize_schedule_model_artifacts(text, limit=180)
         if not source:
             return ""
         if not self._daily_plan_clause_has_unsafe_social_fact(source):
             return source
         raw_clauses = [part for part in re.split(r"[，,。；;]+", source) if _single_line(part, 120)]
-        kept = [
-            _single_line(part, 120)
-            for part in raw_clauses
-            if not self._daily_plan_clause_has_unsafe_social_fact(part)
-        ]
+        unsafe_flags = [self._daily_plan_clause_has_unsafe_social_fact(part) for part in raw_clauses]
+        kept = []
+        for index, part in enumerate(raw_clauses):
+            if unsafe_flags[index]:
+                continue
+            cleaned_part = _single_line(part, 120)
+            if (
+                index + 1 < len(raw_clauses)
+                and unsafe_flags[index + 1]
+                and len(cleaned_part) <= 20
+                and re.search(r"(?:时|的时候|期间|过程中)$", cleaned_part)
+            ):
+                continue
+            kept.append(cleaned_part)
         cleaned = "，".join(kept).strip("，,。；; ")
         if not cleaned:
             cleaned = "放慢节奏处理手边的小事，把这段时间过得轻一点"
@@ -9384,8 +9801,12 @@ class DailyStateMixin:
         raw_items = plan.get("items") if isinstance(plan.get("items"), list) else plan.get("schedule")
         if not isinstance(raw_items, list):
             return False
-        changed = False
-        for item in raw_items:
+        changed = self._normalize_plan_item_intervals(raw_items)
+        parsed_starts = [
+            self._parse_hhmm_to_minutes(item.get("time")) if isinstance(item, dict) else None
+            for item in raw_items
+        ]
+        for index, item in enumerate(raw_items):
             if not isinstance(item, dict):
                 continue
             for field in ("activity", "message_seed"):
@@ -9393,6 +9814,16 @@ class DailyStateMixin:
                 if not original:
                     continue
                 cleaned = self._sanitize_daily_plan_social_fact_text(original, field=field)
+                if field == "activity":
+                    start = parsed_starts[index]
+                    next_start = next(
+                        (candidate for candidate in parsed_starts[index + 1 :] if candidate is not None),
+                        None,
+                    )
+                    end = self._plan_item_end_minutes(start, item, next_start=next_start) if start is not None else None
+                    duration = end - start if start is not None and end is not None else None
+                    cleaned = self._sanitize_schedule_meal_time_wording(cleaned, start)
+                    cleaned = self._sanitize_overlong_schedule_activity(cleaned, duration)
                 if field == "message_seed":
                     cleaned = self._sanitize_empty_daily_plan_message_seed(cleaned)
                 if cleaned != original:
@@ -9686,6 +10117,98 @@ class DailyStateMixin:
             story_plan["sanitized_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M:%S")
         return changed
 
+    def _detail_segment_bounds_for_snapshot_key(self, key: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"\d{4}-\d{2}-\d{2}:(\d+):(\d{1,2}:\d{2})", str(key or ""))
+        if not match:
+            return None
+        plan = getattr(self, "data", {}).get("daily_plan", {})
+        items = plan.get("items") if isinstance(plan, dict) else None
+        if not isinstance(items, list):
+            return None
+        index = _safe_int(match.group(1), -1, minimum=-1)
+        start = self._parse_hhmm_to_minutes(match.group(2))
+        if index < 0 or start is None:
+            return None
+        next_start = None
+        for next_item in items[index + 1 :]:
+            if not isinstance(next_item, dict):
+                continue
+            next_start = self._parse_hhmm_to_minutes(next_item.get("time"))
+            if next_start is not None:
+                break
+        current_item = items[index] if index < len(items) and isinstance(items[index], dict) else None
+        end = self._plan_item_end_minutes(start, current_item, next_start=next_start)
+        return start, end
+
+    def _sanitize_detail_snapshot_for_segment_inplace(
+        self,
+        snapshot: dict[str, Any],
+        segment: dict[str, Any] | tuple[int, int] | None,
+        *,
+        field: str = "detail",
+    ) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        if isinstance(segment, tuple):
+            start, end = segment
+        elif isinstance(segment, dict):
+            start = _safe_int(segment.get("start"), 0)
+            end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+            if end <= start:
+                end += 24 * 60
+        else:
+            start = end = None
+        duration = end - start if start is not None and end is not None else None
+        changed = False
+
+        original_summary = _single_line(snapshot.get("summary"), 180)
+        if original_summary:
+            summary = self._sanitize_daily_plan_social_fact_text(original_summary, field=f"{field}.summary")
+            summary = self._sanitize_schedule_meal_time_wording(summary, start)
+            summary = self._sanitize_overlong_schedule_activity(summary, duration)
+            if summary != original_summary:
+                snapshot["summary"] = summary
+                changed = True
+
+        meal_event_minutes: list[int] = []
+        for index, item in enumerate(snapshot.get("today_events") or []):
+            if not isinstance(item, dict):
+                continue
+            original = _single_line(item.get("event"), 180)
+            if not original:
+                continue
+            event_start = start
+            window = _single_line(item.get("window"), 24)
+            window_match = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*[-~—–至]\s*(\d{1,2}:\d{2})\s*", window)
+            event_end = None
+            if window_match:
+                event_start = self._parse_hhmm_to_minutes(window_match.group(1))
+                event_end = self._parse_hhmm_to_minutes(window_match.group(2))
+                if event_start is not None and event_end is not None:
+                    if event_end <= event_start:
+                        event_end += 24 * 60
+                    if self._schedule_text_is_single_meal_action(original):
+                        meal_event_minutes.append(max(1, event_end - event_start))
+            cleaned = self._sanitize_daily_plan_social_fact_text(
+                original,
+                field=f"{field}.today_events.{index}.event",
+            )
+            cleaned = self._sanitize_schedule_meal_time_wording(cleaned, event_start)
+            if cleaned != original:
+                item["event"] = cleaned
+                changed = True
+
+        presence = snapshot.get("presence_status")
+        if isinstance(presence, dict) and duration is not None and duration > 120:
+            custom_text = _single_line(presence.get("custom_text") or presence.get("wording"), 28)
+            if self._schedule_text_is_single_meal_action(custom_text):
+                cap = min(60, max(meal_event_minutes) if meal_event_minutes else 45)
+                configured = _safe_int(presence.get("duration_minutes"), cap, minimum=1)
+                if configured > cap or not _single_line(presence.get("duration_minutes"), 12):
+                    presence["duration_minutes"] = str(cap)
+                    changed = True
+        return changed
+
     def _sanitize_detail_enhanced_segments_inplace(self, enhanced: dict[str, Any]) -> bool:
         if not isinstance(enhanced, dict):
             return False
@@ -9698,12 +10221,49 @@ class DailyStateMixin:
                 _single_line(snapshot.get("status"), 24) == "generating"
                 and not self._detail_enhancement_snapshot_blocks_generation(snapshot)
             ):
+                stale_generation_id = _single_line(snapshot.get("generation_id"), 64)
                 snapshot["status"] = "failed"
                 snapshot["updated_at"] = self._environment_now().strftime("%H:%M")
                 snapshot["error"] = _single_line(snapshot.get("error"), 180) or "上次细化生成中断或超时"
                 snapshot["retry_after"] = ""
                 snapshot["retry_after_ts"] = 0
                 snapshot["summary"] = _single_line(snapshot.get("summary"), 120) or "这一段细化生成中断，稍后会自动重试。"
+                stored_previous_state = snapshot.get("previous_item_state") if isinstance(snapshot.get("previous_item_state"), dict) else {}
+                snapshot.pop("generation_id", None)
+                snapshot.pop("previous_item_state", None)
+                keyed = re.fullmatch(r"(\d{4}-\d{2}-\d{2}):(\d+):(\d{1,2}:\d{2})", str(key))
+                live_plan = self.data.get("daily_plan", {})
+                live_items = live_plan.get("items") if isinstance(live_plan, dict) else None
+                if keyed and isinstance(live_items, list):
+                    index = int(keyed.group(2))
+                    live_item = live_items[index] if 0 <= index < len(live_items) and isinstance(live_items[index], dict) else None
+                    if isinstance(live_item, dict) and _single_line(live_item.get("_detail_generation_id"), 64) == stale_generation_id:
+                        if stored_previous_state:
+                            for field, state in stored_previous_state.items():
+                                if not isinstance(state, dict):
+                                    continue
+                                if bool(state.get("existed")):
+                                    live_item[field] = state.get("value")
+                                else:
+                                    live_item.pop(field, None)
+                        else:
+                            live_item.pop("_detail_generation_id", None)
+                changed = True
+                snapshot_changed = True
+            bounds = self._detail_segment_bounds_for_snapshot_key(str(key))
+            if bounds and not isinstance(snapshot.get("quality"), dict):
+                snapshot["quality"] = evaluate_detail_quality(
+                    self,
+                    snapshot,
+                    {"start": bounds[0], "end": bounds[1], "item": {}},
+                )
+                changed = True
+                snapshot_changed = True
+            if self._sanitize_detail_snapshot_for_segment_inplace(
+                snapshot,
+                bounds,
+                field=f"detail_enhanced_segments.{key}",
+            ):
                 changed = True
                 snapshot_changed = True
             summary = _single_line(snapshot.get("summary"), 180)
@@ -9937,12 +10497,17 @@ class DailyStateMixin:
             items.append(
                 {
                     "time": item_time,
+                    "end": _single_line(item.get("end") or item.get("end_time"), 8),
                     "activity": activity,
                     "mood": mood,
                     "message_seed": message_seed,
+                    "basis": self._normalize_schedule_basis(item.get("basis"), default=["inspiration"]),
+                    "confidence": min(1.0, _safe_float(item.get("confidence"), 0.7)),
                 }
             )
-        return sorted(items[: self.daily_plan_item_count], key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
+        items = sorted(items[: self.daily_plan_item_count], key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
+        self._normalize_plan_item_intervals(items)
+        return items
 
     def _skill_levels_for_plan_bounds(self) -> dict[str, int]:
         if not self.enable_skill_growth_simulation or not self.enable_skill_growth_schedule_influence:
@@ -10148,27 +10713,32 @@ class DailyStateMixin:
         if current_minutes is None:
             return None
         selected = None
-        for item in items:
+        selected_start: int | None = None
+        starts = self._normalized_plan_item_starts(items)
+        for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
-            item_minutes = self._parse_hhmm_to_minutes(item.get("time"))
+            if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
+                continue
+            item_minutes = starts[index] if index < len(starts) else None
             if item_minutes is None:
                 continue
-            if item_minutes <= current_minutes:
+            next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+            item_end = self._plan_item_end_minutes(item_minutes, item, next_start=next_start)
+            if item_minutes <= current_minutes < item_end:
                 selected = item
-            else:
+                selected_start = item_minutes
                 break
         if isinstance(selected, dict):
             plan_date = str(plan.get("date") or "").strip()
-            selected_minutes = self._parse_hhmm_to_minutes(selected.get("time"))
             if (
                 plan_date
                 and plan_date != _today_key()
                 and current_minutes >= 24 * 60
-                and selected_minutes is not None
+                and selected_start is not None
                 and self._is_sleepy_plan_item(selected)
             ):
-                elapsed = max(0, current_minutes - selected_minutes)
+                elapsed = max(0, current_minutes - selected_start)
                 carried = dict(selected)
                 carried["time"] = self._minutes_to_hhmm(current_minutes)
                 runtime = {}
@@ -10194,7 +10764,7 @@ class DailyStateMixin:
                     carried["message_seed"] = "正在收声准备睡，语气会更轻。"
                 return carried
             return selected
-        return items[0] if items and isinstance(items[0], dict) else None
+        return None
 
     def _format_daily_plan(self, plan: dict[str, Any]) -> str:
         if not plan or not plan.get("items"):
@@ -10212,7 +10782,8 @@ class DailyStateMixin:
             if not isinstance(item, dict):
                 continue
             mood = f"｜{item.get('mood')}" if item.get("mood") else ""
-            lines.append(f"{item.get('time')} {item.get('activity')}{mood}")
+            window = f"{item.get('time')}-{item.get('end')}" if item.get("end") else str(item.get("time") or "")
+            lines.append(f"{window} {item.get('activity')}{mood}")
         return "\n".join(lines)
 
     @staticmethod
@@ -10409,6 +10980,8 @@ class DailyStateMixin:
         kept: list[dict[str, Any]] = []
         for item in raw_items:
             if not isinstance(item, dict):
+                continue
+            if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
                 continue
             item_start, item_end = self._parse_window_minutes(str(item.get("window") or ""))
             if item_start is None or item_end is None:

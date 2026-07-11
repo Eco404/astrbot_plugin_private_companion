@@ -2010,13 +2010,28 @@ class UserMemoryMixin:
         lowered = cleaned.lower()
         if not cleaned:
             return "", "", ""
-        category = "聊天话题"
-        topic = cleaned
+        compact = re.sub(r"\s+", "", cleaned)
+        if self._user_habit_message_is_noise(cleaned):
+            return "", "", ""
+        category = ""
+        topic = ""
         profile = self._detect_private_user_retrieval_habit(cleaned)
         if profile:
             category = "固定检索"
             topic = _single_line(profile.get("topic"), 80) or cleaned
-        elif any(token in cleaned for token in ("吃饭", "午饭", "晚饭", "早饭", "早餐", "午餐", "晚餐", "夜宵", "饿", "饱")):
+        elif re.fullmatch(r"(?:早|早安|早上好|午安|中午好|晚上好|晚安)(?:呀|啊|哦|喔|啦|～|~|！|!)?", compact):
+            category = "互动习惯"
+            topic = "日常问候"
+        elif re.fullmatch(r"(?:摸摸|抱抱|贴贴|亲亲){1,4}(?:呀|啊|哦|啦|～|~|！|!)?", compact):
+            category = "互动习惯"
+            topic = "亲昵互动"
+        elif re.fullmatch(r"(?:你)?(?:在干嘛|在做什么|做什么呢|在吗)(?:呀|啊|呢|？|\?)?", compact):
+            category = "互动习惯"
+            topic = "询问近况"
+        elif any(token in cleaned for token in ("喜欢", "讨厌", "想要", "以后", "每天", "经常", "总是", "习惯")):
+            category = "偏好习惯"
+            topic = cleaned
+        elif self._user_habit_has_self_state(cleaned, "饮食"):
             category = "饮食节奏"
             if any(token in cleaned for token in ("还没", "没吃", "没来得及", "没饭", "没到饭点")):
                 topic = "还没吃/饭点偏晚"
@@ -2024,7 +2039,7 @@ class UserMemoryMixin:
                 topic = "已经吃过饭"
             else:
                 topic = "吃饭相关"
-        elif any(token in cleaned for token in ("睡", "起床", "醒", "熬夜", "困", "晚安", "早安")):
+        elif self._user_habit_has_self_state(cleaned, "作息"):
             category = "作息节奏"
             if any(token in cleaned for token in ("还没睡", "睡不着", "熬夜")):
                 topic = "夜里还没睡"
@@ -2032,20 +2047,47 @@ class UserMemoryMixin:
                 topic = "起床/刚醒"
             else:
                 topic = "睡眠相关"
-        elif any(token in cleaned for token in ("作业", "上课", "下课", "考试", "题", "学习", "上班", "下班", "工作", "摸鱼")):
+        elif self._user_habit_has_self_state(cleaned, "学习工作"):
             category = "学习工作"
             topic = "学习/工作节奏"
-        elif any(token in cleaned for token in ("游戏", "视频", "番", "漫画", "小说", "直播", "刷", "看")):
+        elif self._user_habit_has_self_state(cleaned, "娱乐"):
             category = "娱乐习惯"
             topic = "娱乐/刷内容"
-        elif re.search(r"[？?]|什么|多少|颜色|吗|呢|怎么|有没有|可不可以|要不要", cleaned):
-            category = "固定提问"
-            topic = re.sub(r"\d+", "", cleaned)
-        elif any(token in cleaned for token in ("喜欢", "讨厌", "想要", "以后", "每天", "经常", "总是", "习惯")):
-            category = "偏好习惯"
-            topic = cleaned
-        signature = self._proactive_topic_signature(category, topic or cleaned, lowered)
+        if not category or not topic:
+            return "", "", ""
+        signature_core = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_]+", "", topic.casefold())[:80]
+        signature = f"{category}|{signature_core}"
         return category, _single_line(topic, 80), signature
+
+    @staticmethod
+    def _user_habit_message_is_noise(text: str) -> bool:
+        cleaned = _single_line(text, 240)
+        lowered = cleaned.lower()
+        if not cleaned or len(cleaned) > 180:
+            return True
+        if any(token in lowered for token in (
+            "bili_live_probe", "bili状态", "photo_share", "private_companion", "<timer", "<tts",
+            "我转发了一段聊天记录", "你看看里面在说什么", "合并转发", "聊天记录",
+        )):
+            return True
+        if re.search(r"^(?:私聊|群聊)?(?:告诉|转告|提醒|叫|转发给).{1,40}", cleaned):
+            return True
+        if re.search(r"(?:帮我|能去|可以去).{0,12}(?:告诉|叫|转告|提醒).{1,40}", cleaned):
+            return True
+        return False
+
+    @staticmethod
+    def _user_habit_has_self_state(text: str, kind: str) -> bool:
+        cleaned = _single_line(text, 180)
+        if not cleaned or re.search(r"(?:你|他|她|它|别人|群里).{0,8}", cleaned[:20]):
+            return False
+        markers = {
+            "饮食": r"(?:我.{0,10}(?:吃|饿|饱)|(?:还没吃|没吃|刚吃|吃完|饿了|好饿|饱了|去吃饭|准备吃))",
+            "作息": r"(?:我.{0,10}(?:睡|醒|困|起床|熬夜)|(?:睡觉啦|准备睡|去睡了|刚睡醒|醒了|起床了|困了|睡不着|还没睡))",
+            "学习工作": r"(?:我.{0,12}(?:学习|上班|下班|工作|上课|下课|写作业|考试|摸鱼)|(?:去上班|下班了|上课了|下课了|写作业|准备考试))",
+            "娱乐": r"(?:我.{0,12}(?:玩|看|刷|追)|(?:在玩|去玩|在看|刚看|最近看|正在刷|准备看).{0,20}(?:游戏|视频|番|漫画|小说|直播)?)",
+        }
+        return bool(re.search(markers.get(kind, r"$^"), cleaned))
 
     def _detect_private_user_retrieval_habit(self, text: str) -> dict[str, Any]:
         cleaned = _single_line(text, 220)
@@ -2097,6 +2139,7 @@ class UserMemoryMixin:
         if not category or not signature:
             return
         now_dt = datetime.now()
+        day_key = now_dt.strftime("%Y-%m-%d")
         bucket, minute = self._time_bucket_for_user_habit(now_dt)
         habits = user.setdefault("behavior_habits", {})
         if not isinstance(habits, dict):
@@ -2106,6 +2149,8 @@ class UserMemoryMixin:
         if not isinstance(patterns, list):
             patterns = []
             habits["patterns"] = patterns
+        self._sanitize_user_behavior_habit_patterns(user)
+        patterns = habits.get("patterns") if isinstance(habits.get("patterns"), list) else []
         key = f"{bucket}|{category}|{signature}"
         matched = None
         for item in patterns:
@@ -2147,6 +2192,11 @@ class UserMemoryMixin:
         matched["avg_minute"] = round((old_avg * max(0, count - 1) + minute) / max(1, count), 1)
         matched["last_seen_ts"] = _now_ts()
         matched["last_seen_text"] = cleaned
+        evidence_days = matched.get("evidence_days")
+        if not isinstance(evidence_days, list):
+            evidence_days = []
+        evidence_days.append(day_key)
+        matched["evidence_days"] = list(dict.fromkeys(str(item) for item in evidence_days if str(item)))[-30:]
         examples = matched.get("examples")
         if not isinstance(examples, list):
             examples = []
@@ -2162,6 +2212,30 @@ class UserMemoryMixin:
         del patterns[self.user_habit_max_items:]
         habits["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M")
         self._maybe_sync_user_behavior_habit_to_memory_companion(user, matched)
+
+    def _sanitize_user_behavior_habit_patterns(self, user: dict[str, Any]) -> bool:
+        habits = user.get("behavior_habits") if isinstance(user, dict) else None
+        if not isinstance(habits, dict):
+            return False
+        patterns = habits.get("patterns")
+        if not isinstance(patterns, list):
+            return False
+        allowed_categories = {
+            "固定检索", "互动习惯", "偏好习惯", "饮食节奏", "作息节奏", "学习工作", "娱乐习惯",
+        }
+        kept: list[dict[str, Any]] = []
+        for item in patterns:
+            if not isinstance(item, dict) or str(item.get("category") or "") not in allowed_categories:
+                continue
+            evidence_days = item.get("evidence_days")
+            if not isinstance(evidence_days, list) or not any(str(day) for day in evidence_days):
+                continue
+            kept.append(item)
+        if len(kept) == len(patterns):
+            return False
+        habits["patterns"] = kept[: self.user_habit_max_items]
+        habits["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return True
 
     def _maybe_sync_user_behavior_habit_to_memory_companion(self, user: dict[str, Any], habit: dict[str, Any]) -> None:
         if not isinstance(user, dict) or not isinstance(habit, dict):
@@ -2197,7 +2271,12 @@ class UserMemoryMixin:
 
     def _user_habit_effective_score(self, item: dict[str, Any], *, now: float | None = None) -> float:
         now = now or _now_ts()
-        count = _safe_int(item.get("count"), 0, 0)
+        evidence_days = item.get("evidence_days")
+        count = (
+            len(set(str(day) for day in evidence_days if str(day)))
+            if isinstance(evidence_days, list)
+            else 0
+        )
         age_days = max(0.0, (now - _safe_float(item.get("last_seen_ts"), now)) / 86400)
         if age_days <= 7:
             recency = 1.0
@@ -2208,6 +2287,7 @@ class UserMemoryMixin:
         return count * recency
 
     def _qualified_user_behavior_habits(self, user: dict[str, Any]) -> list[dict[str, Any]]:
+        self._sanitize_user_behavior_habit_patterns(user)
         habits = user.get("behavior_habits")
         if not isinstance(habits, dict):
             return []
@@ -2223,6 +2303,9 @@ class UserMemoryMixin:
             if now - _safe_float(item.get("last_seen_ts"), now) > 30 * 86400:
                 continue
             if _safe_int(item.get("count"), 0, 0) < min_count:
+                continue
+            evidence_days = item.get("evidence_days")
+            if not isinstance(evidence_days, list) or len(set(str(day) for day in evidence_days if str(day))) < min_count:
                 continue
             if self._user_habit_effective_score(item, now=now) < max(1.6, min_count * 0.45):
                 continue

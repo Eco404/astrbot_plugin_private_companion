@@ -458,6 +458,8 @@ _DEFAULT_USER_TEMPLATE = {
     "last_creative_share_at": 0,
     "last_creative_share_snapshot": {},
     "poke_echo_suppress_until": 0,
+    "poke_action_inflight_until": 0,
+    "last_poke_action_at": 0,
     "llm_timer_event": {},
     "greeting_sent_day": "",
     "greetings_sent": [],

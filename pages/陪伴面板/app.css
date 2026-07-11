@@ -1687,6 +1687,58 @@ h2 {
   white-space: nowrap;
 }
 
+.timeline-head > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.timeline-regenerate {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.timeline-regenerate:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.timeline-regenerate:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+.timeline-regenerate.danger {
+  color: var(--danger, #a33b2f);
+}
+
+.timeline-evidence,
+.timeline-quality-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timeline-quality-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.timeline-quality-summary b {
+  color: var(--ink);
+}
+
 .timeline-error {
   margin: 0;
   color: var(--danger, #a33b2f);
@@ -1698,6 +1750,14 @@ h2 {
   padding-left: 18px;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.timeline-item li > span {
+  display: inline-block;
+  min-width: 48px;
+  margin-right: 6px;
+  color: var(--accent-strong);
+  font-size: 11px;
 }
 
 .state-pills {
@@ -17310,6 +17370,14 @@ pre {
   .timeline-head,
   .impact-item div:first-child {
     flex-direction: column;
+  }
+
+  .timeline-head > div {
+    justify-content: flex-start;
+  }
+
+  .timeline-head span {
+    white-space: normal;
   }
 
   .donut-wrap {
