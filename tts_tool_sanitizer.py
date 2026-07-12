@@ -8,7 +8,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _single_line, _strip_nonstandard_chat_control_tags
+from .helpers import _redact_outbound_secrets, _single_line, _strip_nonstandard_chat_control_tags
 
 
 class TtsToolSanitizerMixin:
@@ -59,6 +59,7 @@ class TtsToolSanitizerMixin:
             copied = dict(item)
             if str(copied.get("type") or "").strip().lower() == "plain":
                 cleaned_text = self._clean_tool_plain_text_tts_markup(copied.get("text"))
+                cleaned_text = _redact_outbound_secrets(cleaned_text, self)
                 if cleaned_text != copied.get("text"):
                     changed = True
                     copied["text"] = cleaned_text
@@ -116,7 +117,7 @@ class TtsToolSanitizerMixin:
                 return f"error: messages[{idx}].type is required."
             try:
                 if msg_type == "plain":
-                    text = str(msg.get("text") or "").strip()
+                    text = _redact_outbound_secrets(msg.get("text"), self).strip()
                     if not text:
                         return f"error: messages[{idx}].text is required for plain component."
                     if re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
@@ -160,7 +161,7 @@ class TtsToolSanitizerMixin:
                     elif url:
                         components.append(Comp.Record.fromURL(url=url))
                     else:
-                        text = str(msg.get("text") or msg.get("content") or msg.get("message") or "").strip()
+                        text = _redact_outbound_secrets(msg.get("text") or msg.get("content") or msg.get("message"), self).strip()
                         if not text:
                             return f"error: messages[{idx}] must include path or url for record component."
                         processor = getattr(self, "_process_tts_tags", None)

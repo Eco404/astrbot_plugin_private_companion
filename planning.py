@@ -575,6 +575,16 @@ def evaluate_daily_plan_quality(plugin, items: Any) -> dict[str, Any]:
     if len(parsed) < 5:
         deductions += 12
         issues.append("全天有效日程段过少")
+    if parsed:
+        last_start, last_end, _ = parsed[-1]
+        if last_start < 17 * 60 or last_end < 20 * 60:
+            deductions += 24
+            issues.append("日程在傍晚前结束，没有覆盖晚间生活")
+        evening_count = sum(1 for start, _, _ in parsed if start >= 17 * 60)
+        expected_evening = max(2, (len(parsed) + 2) // 3)
+        if evening_count < expected_evening:
+            deductions += 16
+            issues.append(f"晚间节点不足：{evening_count} 段，至少需要 {expected_evening} 段")
     if plugin._plan_has_excess_micro_segments(items):
         deductions += 12
         issues.append("瞬时动作占比过高")
@@ -605,7 +615,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
         getattr(plugin, "daily_plan_provider_id", ""),
         getattr(plugin, "mai_style_provider_id", ""),
     )
-    raw_text = await plugin._llm_call(prompt, max_tokens=900, provider_id=plan_provider)
+    raw_text = await plugin._llm_call(prompt, max_tokens=1500, provider_id=plan_provider)
     items = plugin._parse_plan_items(raw_text or "")
     if items and plugin._plan_has_excess_micro_segments(items):
         retry_prompt = (
@@ -615,7 +625,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             + "不要把“看一眼、拍一下、翻个身、关掉闹钟”这种瞬时动作单独立成一项；"
             + "如果要写到这些动作,要把它们嵌进更完整的时段里,比如“起床后赖床一会儿,顺手看了一眼窗外”。"
         )
-        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=900, provider_id=plan_provider)
+        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1500, provider_id=plan_provider)
         retry_items = plugin._parse_plan_items(retry_raw_text or "")
         if retry_items and not plugin._plan_has_excess_micro_segments(retry_items):
             raw_text = retry_raw_text
@@ -627,7 +637,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             + "减少“漂亮但空”的句子。不要只写“思绪飘忽、梦里全是模糊碎片、心情随着光线变软、脑海里闪过今天的画面”这类抽象描述；"
             + "每个日程段都先给出一个能看见的动作、位置或手边的小东西，再让情绪贴在上面。"
         )
-        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=900, provider_id=plan_provider)
+        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1500, provider_id=plan_provider)
         retry_items = plugin._parse_plan_items(retry_raw_text or "")
         if retry_items and not plugin._plan_has_excess_abstract_segments(retry_items):
             raw_text = retry_raw_text
@@ -639,7 +649,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             + "今天属于周末或节假日语境。除非上面的设定、重要日期或备注明确写了调休、补课、补班、考试、值班等例外，"
             + "否则不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线。"
         )
-        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=900, provider_id=plan_provider)
+        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1500, provider_id=plan_provider)
         retry_items = plugin._parse_plan_items(retry_raw_text or "")
         if retry_items and not plugin._plan_conflicts_with_calendar(retry_items):
             raw_text = retry_raw_text
@@ -652,7 +662,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             + "不要再写同一套“起床洗漱-整理小事-专注做事-休息-收尾睡觉”；至少一半时间点的场景、对象、占用事项或小意外要和最近日程不同。"
             + "如果今天确实有固定事项,也要改变切入角度、地点、阻碍、同行/独处状态或情绪走向。"
         )
-        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=900, provider_id=plan_provider)
+        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1500, provider_id=plan_provider)
         retry_items = plugin._parse_plan_items(retry_raw_text or "")
         if (
             retry_items
@@ -672,7 +682,7 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             + "；".join(str(issue) for issue in quality.get("issues", [])[:6])
             + "。请保留可靠事实，重新输出完整 JSON；修正起止时间、覆盖空档、活动时长和日期冲突，不要只改措辞。"
         )
-        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1000, provider_id=plan_provider)
+        retry_raw_text = await plugin._llm_call(retry_prompt, max_tokens=1600, provider_id=plan_provider)
         retry_items = plugin._parse_plan_items(retry_raw_text or "")
         retry_quality = evaluate_daily_plan_quality(plugin, retry_items)
         if retry_items and retry_quality.get("score", 0) > quality.get("score", 0):
@@ -818,7 +828,15 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
     calendar_context = plugin._format_calendar_context_for_prompt()
     schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
     recent_plan_history = plugin._format_recent_daily_plan_history_for_prompt()
-    skill_growth_context = plugin._format_skill_growth_schedule_context()
+    personal_goal_context_getter = getattr(plugin, "_format_personal_goals_schedule_context", None)
+    skill_growth_context = "\n\n".join(
+        part
+        for part in (
+            plugin._format_skill_growth_schedule_context(),
+            personal_goal_context_getter() if callable(personal_goal_context_getter) else "",
+        )
+        if part
+    )
     user_habits = plugin._format_all_user_behavior_habits_for_schedule()
     memory_companion_context = str(memory_companion_context or "").strip()
     memory_companion_context_block = memory_companion_context or "暂无可用 MemoryCompanion 连续性参考。"
@@ -861,7 +879,7 @@ D. 软灵感与避重：最近日程、最近日记、可做事项、技能倾�
 
 【生成要求】
 1. 先隐式判断今天的“日程类型”：普通工作/学习日、普通休息日、假期、考试/复查/聚会/旅行/研学/活动日、长线日程中的某一天,或由天气/星期/重要日期造成的特殊日子。不要把这个判断写出来,但日程必须明显受它影响。
-2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间段；相邻活动通常持续 30-90 分钟。每一项都必须有 time、end、activity、mood、message_seed、basis、confidence；time 是开始时间，end 是结束时间，均使用 HH:MM。相邻段可以留出少量真实空档，但不得重叠；跨午夜时 end 可以小于 time。message_seed 可以是空字符串。
+2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间段；数量是全天总量，不得在上午或下午提前用完。至少保留约三分之一节点给 17:00 后，最后一段必须覆盖晚间收尾或入睡前。相邻活动通常持续 30-90 分钟。每一项都必须有 time、end、activity、mood、message_seed、basis、confidence；time 是开始时间，end 是结束时间，均使用 HH:MM。相邻段可以留出少量真实空档，但不得重叠；跨午夜时 end 可以小于 time。message_seed 可以是空字符串。
 2.1 basis 是本段真实使用的依据数组，只能从 calendar、persona、adjustment、state、weather、continuity、inspiration 中选择 1-3 项；不要为了填满而全选。confidence 是 0.0-1.0：明确身份、日期或用户调整支撑较高，只有软灵感时较低。它们是内部依据，不要写进 activity。
 3. 用第三人称写 activity,像旁观这个人过日子：写「午休后靠着桌沿醒神」「傍晚出门慢慢走一段」,不要写第一人称自述、任务标签或功能词。
 4. 日程主线必须跟身份一致：学生才写校园,上班族才写工作,居家、自由职业、旅途、营地或非人设定就写对应的生活节奏。可做事项只能安插在缝隙里。
@@ -1068,7 +1086,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 · 主动 action 只使用“主动能力检索”清单里的名字；没有合适动作时就是 message。
 · 主动图片能力状态：{photo_action_hint}
 · 主动动作贴当前情境。{photo_menu_hint}图片动作常见于独处、半独处、课间、路上、睡前、发呆、刚拿到手机等时机。
-· 早安只适合作为当天早上的第一句主动消息；如果今天已经有别的主动、或者已经和对方有来回互动，就别再产出 morning_greeting，改成 check_in、activity_share 或 quiet_care。
+· 早安只适合作为 Bot 当天早上的第一句主动消息；如果 Bot 今天已经发过别的主动,就别再产出 morning_greeting,改成 check_in、activity_share 或 quiet_care。用户先自然来聊不代表 Bot 已经醒来,不能据此删掉首次起床问候。
 · {photo_instruction_hint}
 · {photo_detail_hint}
 · 如果 action 是 voice,topic 或 motive 要像语音本身或语音前后的自然文字,例如“我跟你说啊……”；不要写成“发了一段语音给你”这种旁白式命令。
@@ -1082,7 +1100,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 · {photo_mix_hint}
 · motive 是心里一闪而过的小想法,10–40 字；不要写“想和用户说一句/告诉用户/确认用户在不在”这类后台措辞。
 · scene / tone / impulse 是可选的抽象引导：scene 是当时场景,tone 是语气底色,impulse 是想靠近的那股劲。
-· 如果是当天早上的第一句主动开口,可以带 chain 做分支逻辑：先只叫名字,没回->隔久一点再轻轻放一句；早晨未回复不需要马上追,也不要把没回理解成故意不理。若当天已经有别的主动或已有互动,就不要再走 morning_greeting。
+· 如果是当天早上的第一句主动开口,可以带 chain 做分支逻辑：先只叫名字,没回->隔久一点再轻轻放一句；早晨未回复不需要马上追,也不要把没回理解成故意不理。若 Bot 当天已经发过别的主动,就不要再走 morning_greeting；用户先自然来聊不等于 Bot 已经醒来,不能据此取消首次起床问候。
 · 输出中的 summary 要相当于“更新后的角色状态摘要”：一句话写出当前段结束后的情绪、体力走向和最多两个残留状态,方便下一时间段承接。例如“情绪平淡但有点等回复,体力约 58/100,还惦记刚才那张没发出去的图。”
 · 同时输出 state_variables,作为这个时间段的状态机变量。它们既要描述无用户干预时自然发展到当前段结束的大致状态,也要吸收“今日互动造成的日程偏移”里已经发生的用户介入。例如作业完成度、情绪、体力、等待回复、是否想发消息、特殊能力冷却、是否预留空档等。变量要短,方便后续用户事件做局部更新。
 · 同时输出 presence_status,由细化模型决定这个时间段适合的 QQ 全局状态表现。它只用于平台侧同步,不是角色正文。mode 只能使用 online / custom / sleep / unchanged；禁止输出 away / invisible / dnd / do_not_disturb / 请勿打扰 / 勿扰。普通可聊天时 online；想表现“写作业/发呆/吃饭/路上/看剧/专注”等生活状态时优先用 custom,并必须填写 custom_text（2-8 个中文字符,像“写题中”“路上”“犯困中”“看剧中”）；睡眠段倾向 sleep；不确定或不想影响账号时 unchanged。不要频繁改变,一段最多一个状态。

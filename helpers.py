@@ -45,17 +45,107 @@ def _safe_int(value: Any, default: int, minimum: int = 0, maximum: int | None = 
     return parsed
 
 
-def _safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
+def _safe_float(
+    value: Any,
+    default: float,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         parsed = default
-    return max(minimum, parsed)
+    parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
 
 
 def _single_line(text: Any, limit: int = 80) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     return normalized[:limit]
+
+
+_SECRET_FIELD_PATTERN = re.compile(
+    r"(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|auth[_ -]?token|secret|password|passwd|cookie|密钥|令牌|口令)",
+    flags=re.IGNORECASE,
+)
+
+
+def _runtime_secret_values(owner: Any) -> list[str]:
+    """Collect configured credentials without exposing them to logs or prompts."""
+    values: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, (str, bytes)):
+            text = value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else value
+            text = text.strip()
+            if len(text) >= 6:
+                values.add(text)
+
+    for attr in (
+        "external_image_api_key",
+        "backup_external_image_api_key",
+        "balance_api_key",
+        "weather_api_key",
+        "web_exploration_api_key",
+    ):
+        add(getattr(owner, attr, ""))
+    endpoints = getattr(owner, "external_image_api_endpoints", None)
+    if isinstance(endpoints, list):
+        for endpoint in endpoints[:24]:
+            if not isinstance(endpoint, dict):
+                continue
+            for key, value in endpoint.items():
+                if _SECRET_FIELD_PATTERN.search(str(key or "")):
+                    add(value)
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 5:
+            return
+        try:
+            items = value.items() if hasattr(value, "items") else None
+        except Exception:
+            items = None
+        if items is not None:
+            try:
+                for key, child in list(items)[:500]:
+                    if _SECRET_FIELD_PATTERN.search(str(key or "")):
+                        add(child)
+                    elif isinstance(child, (dict, list, tuple)) or hasattr(child, "items"):
+                        walk(child, depth + 1)
+            except Exception:
+                return
+        elif isinstance(value, (list, tuple)):
+            for child in value[:100]:
+                if isinstance(child, (dict, list, tuple)) or hasattr(child, "items"):
+                    walk(child, depth + 1)
+
+    walk(getattr(owner, "config", None))
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact_outbound_secrets(text: Any, owner: Any = None) -> str:
+    """Redact credentials from chat-bound text while preserving the useful reply."""
+    cleaned = str(text or "")
+    if not cleaned:
+        return ""
+    for secret in _runtime_secret_values(owner) if owner is not None else []:
+        cleaned = cleaned.replace(secret, "[密钥已隐藏]")
+    patterns = (
+        (r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer [密钥已隐藏]"),
+        (r"(?i)\b(?:sk|pk|rk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{10,}", "[密钥已隐藏]"),
+        (r"\bAIza[A-Za-z0-9_-]{20,}\b", "[密钥已隐藏]"),
+        (r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", "[密钥已隐藏]"),
+        (r"(?i)([?&](?:api[_-]?key|access_token|refresh_token|token|secret|key)=)[^&#\s]+", r"\1[密钥已隐藏]"),
+        (
+            r"(?i)((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|auth[_ -]?token|secret|password|passwd|密钥|令牌|口令)\s*(?::|：|=)\s*[\"']?)[^\s,，;；\"']{6,}",
+            r"\1[密钥已隐藏]",
+        ),
+    )
+    for pattern, replacement in patterns:
+        cleaned = re.sub(pattern, replacement, cleaned)
+    return cleaned
 
 
 _OPTIONAL_MODEL_DEPENDENCIES = {

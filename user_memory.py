@@ -1777,7 +1777,7 @@ class UserMemoryMixin:
         anchor_type = _single_line(user.get("planned_proactive_anchor_type"), 40)
         semantic_score = _safe_int(user.get("planned_proactive_semantic_score"), 50, 0, 100)
         ignored = _safe_int(user.get("ignored_streak"), 0, 0)
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share"} or semantic_kind == "external_share":
+        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "environment_change"} or semantic_kind == "external_share":
             label = "刚把一个外部小发现递过去，先看它会不会被接住"
             next_tendency = "稍后若还没回应，不要继续补同类分享"
         elif semantic_kind in {"self_share", "observation"} or reason in {"activity_share", "diary_share", "creative_share", "background_schedule"}:
@@ -3519,6 +3519,109 @@ Local classifier result:
         )
         return result
 
+    @staticmethod
+    def _looks_like_private_fact_correction(text: Any) -> bool:
+        cleaned = _single_line(text, 220)
+        if not cleaned or len(cleaned) > 180:
+            return False
+        patterns = (
+            r"明明(?:是|就是)",
+            r"(?:你|我|他|她|它)才(?:是|没有|没|先|刚)",
+            r"(?:不是|并非)(?:你|我|他|她|它)[^。！？!?]{0,24}(?:说|提|想|做|拿|问|告诉|推荐)",
+            r"不是[^。！？!?]{1,40}[，,](?:而是|是)(?:你|我|他|她|它|[\u4e00-\u9fffA-Za-z0-9_]{1,16}(?:大人|主人|先生|小姐)?)[^。！？!?]{0,24}",
+            r"(?:说|记|弄|搞|认|写|理解)(?:反|错|偏)了",
+            r"(?:主语|对象|人|名字|称呼)(?:反了|错了|不对)",
+        )
+        return any(re.search(pattern, cleaned, re.IGNORECASE) for pattern in patterns)
+
+    def _record_recent_private_fact_correction(self, user: dict[str, Any], inbound_text: str) -> bool:
+        if not isinstance(user, dict) or not self._looks_like_private_fact_correction(inbound_text):
+            return False
+        correction = _single_line(inbound_text, 180)
+        inbound_count = _safe_int(user.get("private_inbound_count"), 0, 0)
+        existing = user.get("recent_fact_correction")
+        if (
+            isinstance(existing, dict)
+            and _single_line(existing.get("text"), 180) == correction
+            and inbound_count == _safe_int(existing.get("inbound_count"), -1)
+        ):
+            return False
+        user["recent_fact_correction"] = {
+            "text": correction,
+            "at": _now_ts(),
+            "inbound_count": inbound_count,
+        }
+        return True
+
+    def _active_private_fact_correction(self, user: dict[str, Any], inbound_text: str = "") -> str:
+        current = _single_line(inbound_text, 180)
+        if self._looks_like_private_fact_correction(current):
+            return current
+        if not isinstance(user, dict):
+            return ""
+        record = user.get("recent_fact_correction")
+        if not isinstance(record, dict):
+            return ""
+        text = _single_line(record.get("text"), 180)
+        corrected_at = _safe_float(record.get("at"), 0)
+        corrected_count = _safe_int(record.get("inbound_count"), -1)
+        current_count = _safe_int(user.get("private_inbound_count"), 0, 0)
+        if not text or corrected_at <= 0 or _now_ts() - corrected_at > 30 * 60:
+            return ""
+        if corrected_count >= 0 and current_count - corrected_count > 2:
+            return ""
+        return text
+
+    def _format_private_fact_attribution_guard(self, user: dict[str, Any], inbound_text: str = "") -> str:
+        correction = self._active_private_fact_correction(user, inbound_text)
+        lines = [
+            "【事实主语与归属边界】",
+            "- 使用结构化记忆时先确认记录的叙述视角：Bot 自我/人格生活和本私聊的 Bot 视角摘要中，“我”是当前 Bot/人格，收件人昵称才是用户。",
+            "- 不得把“Bot 提过、Bot 想去、Bot 看见、Bot 推荐”改写成“用户提过、用户想去、用户先拿来诱惑 Bot”，反向亦然；视角不清时省略主语，不要猜。",
+            "- 当前消息和最近原始对话高于旧摘要；用户纠正事实归属后，先承认并沿用，不得在后一句又翻回原来的错误。",
+        ]
+        if correction:
+            lines.extend(
+                [
+                    f"- 最近的高优先级纠正：{correction}",
+                    "- 这条纠正只用于稳定眼前话题的主客体，不要扩写成用户没说过的新事实，也不要反过来埋怨用户。",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _response_claims_user_prior_action(self, text: str, user: dict[str, Any]) -> bool:
+        cleaned = _single_line(text, 500)
+        if not cleaned:
+            return False
+        names = ["你"]
+        if isinstance(user, dict):
+            for key in ("nickname", "last_display_name", "display_name"):
+                name = _single_line(user.get(key), 24)
+                if name and not name.isdigit() and name not in names:
+                    names.append(name)
+        subject = "|".join(re.escape(name) for name in names)
+        titled_name = r"[\u4e00-\u9fffA-Za-z0-9_]{1,16}(?:大人|主人|先生|小姐)"
+        return bool(
+            re.search(
+                rf"(?:{subject}|{titled_name})[^。！？!?\n]{{0,18}}(?:上次|之前|先|早就|原来)[^。！？!?\n]{{0,18}}(?:说|提|想|拿|问|做|告诉|推荐|诱惑)",
+                cleaned,
+            )
+            or re.search(r"明明是[^。！？!?\n]{1,24}先[^。！？!?\n]{0,18}(?:说|提|想|拿|问|做|告诉|推荐|诱惑)", cleaned)
+        )
+
+    @staticmethod
+    def _response_denies_existing_creative_work(response_text: str, creative_context: str) -> bool:
+        response = _single_line(response_text, 500)
+        context = str(creative_context or "")
+        if not response or "真实创作记录：共有" not in context:
+            return False
+        denial_patterns = (
+            r"(?:没|没有|还没|从没|并没|未曾)[^。！？!?\n]{0,10}(?:写过|写|创作过|创作|完成)[^。！？!?\n]{0,10}(?:书|小说|作品|故事|诗|随笔|散文|剧本|手稿)",
+            r"(?:没|没有|还没有|并没有)[^。！？!?\n]{0,8}(?:自己写的|自己的|成型的)?[^。！？!?\n]{0,5}(?:书|小说|作品|故事|手稿)",
+            r"(?:我)?哪有[^。！？!?\n]{0,12}(?:书|小说|作品|手稿)",
+        )
+        return any(re.search(pattern, response, re.IGNORECASE) for pattern in denial_patterns)
+
     async def _review_and_rewrite_response(
         self,
         user: dict[str, Any],
@@ -3526,6 +3629,7 @@ Local classifier result:
         response_text: str,
         *,
         music_album_context: dict[str, Any] | None = None,
+        creative_context: str = "",
     ) -> str:
         relay_claim_checker = getattr(self, "_unexecuted_relay_claim_reason", None)
         if callable(relay_claim_checker):
@@ -3552,6 +3656,9 @@ Local classifier result:
         if not bool(getattr(self, "enable_response_self_review", True)):
             return self._fallback_temporal_or_continuity_confused_reply(inbound_text, response_text, user=user) or response_text
         flags = self._response_review_flags(response_text, user, inbound_text=inbound_text)
+        if self._response_denies_existing_creative_work(response_text, creative_context):
+            flags.append("denies_existing_creative_work")
+            flags = list(dict.fromkeys(flags))
         if not flags:
             return response_text
         review_mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
@@ -3578,6 +3685,9 @@ Local classifier result:
                 "repeats_last_bot_message",
                 "invalid_current_time_anchor",
                 "false_no_reply_claim",
+                "fact_attribution_after_correction",
+                "unverified_fact_attribution",
+                "denies_existing_creative_work",
             }
             if not any(flag in critical_flags for flag in effective_flags):
                 return response_text
@@ -3585,6 +3695,16 @@ Local classifier result:
         allow_repeat = self._inbound_explicitly_requests_repeat(inbound_text)
         last_message = _single_line(user.get("last_companion_message"), 300)
         last_message_label = "用户本轮明确要求复述上一条,仅用于确认原文" if allow_repeat else "刚才 Bot 已经说过，禁止复述或换皮重复"
+        persona = ""
+        persona_resolver = getattr(self, "_resolve_proactive_persona_prompt", None)
+        if callable(persona_resolver):
+            try:
+                persona = str(await persona_resolver(user) or "").strip()
+            except Exception:
+                persona = ""
+        reply_style = self._format_reply_style_prompt() if callable(getattr(self, "_format_reply_style_prompt", None)) else ""
+        attribution_guard = self._format_private_fact_attribution_guard(user, inbound_text)
+        creative_review_context = str(creative_context or "").strip()[:3200]
         prompt = f"""
 把下面这条回复改写成更像真实私聊里的自然回复。
 保留原意,不要新增事实,不要解释你在改写。
@@ -3607,6 +3727,17 @@ Local classifier result:
 【真实当前时间】
 {self._environment_now().strftime('%Y-%m-%d %H:%M')}
 
+【当前人格】
+{persona[:2600] if persona else '（沿用原回复已有的人格语气，不要另造通用助手口吻）'}
+
+【回复风格】
+{reply_style or '（保持当前私聊的自然表达）'}
+
+{attribution_guard}
+
+【本轮真实创作记录】
+{creative_review_context or '（本轮没有创作记录上下文）'}
+
 要求：
 - 只输出改写后的正文
 - 不要标题、列表、JSON、括号动作、系统/AI/提示词字眼
@@ -3623,6 +3754,9 @@ Local classifier result:
 - 如果问题是表达学习过头、异常断句或照抄用户样本,保留意思,改成自然中文私聊；不要为了模仿口癖而加奇怪逗号、空格、断句或复读用户原话
 - 如果问题是 invalid_current_time_anchor,删除或改正“快十一点/该睡了/晚安”等与真实当前时间冲突的说法；不要继续围绕错误时间展开
 - 如果问题是 false_no_reply_claim,不要说“看你没回我/等你回话/你没理我”；用户本轮已经发来消息,直接解释上一句或重新接住当前问题
+- 如果问题是 fact_attribution_after_correction，必须以用户刚才的纠正和上一条 Bot 已承认的内容为准；不要换个说法再次把 Bot 的行为安到用户身上
+- 如果问题是 unverified_fact_attribution，原回复正在断言“用户之前/先做过某事”，但当前短句没有提供这个归属；没有明确依据就改成中性主语或只谈那件事本身
+- 如果问题是 denies_existing_creative_work，必须依据本轮真实创作记录承认已有文本作品；不得把“未正式出版”偷换成“没写过”，也不要虚构出版、发行或实体书经历
 """.strip()
         started = time.perf_counter()
         try:
@@ -3693,6 +3827,9 @@ Local classifier result:
             "weather_overexplained",
             "invalid_current_time_anchor",
             "false_no_reply_claim",
+            "fact_attribution_after_correction",
+            "unverified_fact_attribution",
+            "denies_existing_creative_work",
         }
         if self._expression_style_review_enabled():
             severe.update({"unnatural_punctuation", "expression_overfit", "copied_user_expression_sample"})
@@ -3836,7 +3973,11 @@ Local classifier result:
             and self._habit_topic_is_greeting_like(planned_topic)
             and self._recent_activity_suppresses_habit_greeting(user, now=now, topic=planned_topic)
         )
-        if self._inbound_satisfies_greeting(planned_reason, now=now) or planned_is_greeting_habit:
+        preserve_wakeup_greeting = self._is_initial_wakeup_greeting(user)
+        if (
+            (self._inbound_satisfies_greeting(planned_reason, now=now) and not preserve_wakeup_greeting)
+            or planned_is_greeting_habit
+        ):
             next_at = _safe_float(user.get("next_proactive_at"), 0)
             if next_at > 0:
                 if self._inbound_satisfies_greeting(planned_reason, now=now):
@@ -4604,6 +4745,17 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             flags.append("invalid_current_time_anchor")
         if self._response_has_false_no_reply_claim(cleaned, inbound_text, user):
             flags.append("false_no_reply_claim")
+        correction = self._active_private_fact_correction(user, inbound_text)
+        if self._looks_like_private_fact_correction(inbound_text):
+            flags.append("fact_attribution_after_correction")
+        claims_user_prior_action = self._response_claims_user_prior_action(cleaned, user)
+        inbound_claims_ownership = bool(
+            re.search(r"(?:我|你|他|她|它|谁)[^。！？!?\n]{0,18}(?:上次|之前|先|说|提|想|拿|问|做|告诉|推荐|诱惑)", inbound_text)
+        )
+        if claims_user_prior_action and correction:
+            flags.append("fact_attribution_after_correction")
+        elif claims_user_prior_action and not inbound_claims_ownership and len(self._compact_repeat_text(inbound_text)) <= 32:
+            flags.append("unverified_fact_attribution")
         if self._expression_style_review_enabled():
             flags.extend(self._expression_review_flags(cleaned, user))
         signature = self._proactive_topic_signature(cleaned)

@@ -112,6 +112,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/proactive/candidate/prune", self.prune_proactive_candidates, ["POST"], "Private Companion Page prune proactive candidates"),
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
             ("/troubleshooting", self.get_troubleshooting, ["GET"], "Private Companion Page troubleshooting"),
+            ("/troubleshooting/warnings/update", self.update_troubleshooting_warning_suppression, ["POST"], "Private Companion Page update troubleshooting warning suppression"),
             ("/troubleshooting/test", self.run_troubleshooting_test, ["POST"], "Private Companion Page troubleshooting test"),
             ("/token/stats", self.get_token_stats, ["GET"], "Private Companion Page token stats"),
             ("/token/reset", self.reset_token_stats, ["POST"], "Private Companion Page reset token stats"),
@@ -167,6 +168,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/worldbook/observations/clear", self.clear_worldbook_pending_observations, ["POST"], "Private Companion Page clear worldbook pending observations"),
             ("/worldbook/group/update", self.update_worldbook_group, ["POST"], "Private Companion Page update worldbook group"),
             ("/skill/update", self.update_skill_growth, ["POST"], "Private Companion Page update skill growth"),
+            ("/personal_goal/update", self.update_personal_goal, ["POST"], "Private Companion Page update personal goal"),
             ("/food_menu/update", self.update_food_menu, ["POST"], "Private Companion Page update food menu"),
             ("/food_menu/bulk_update", self.bulk_update_food_menu, ["POST"], "Private Companion Page bulk update food menu"),
             ("/food_menu/bulk_delete", self.bulk_delete_food_menu, ["POST"], "Private Companion Page bulk delete food menu"),
@@ -282,6 +284,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "creative": self._creative_summary(data),
                 "bookshelf": await self._bookshelf_summary(data, unlocked=False),
                 "skill_growth": self._skill_growth_summary(data),
+                "personal_goals": self._personal_goal_summary(data),
                 "food_menu": self._food_menu_summary(data),
                 "external_abilities": self._external_ability_summary(data),
                 "life_observation": self._life_observation_summary(data),
@@ -487,6 +490,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "jm_cosmos_integration",
             "private_reading_state",
             "skill_growth",
+            "personal_goal_state",
             "food_menu",
             "external_proactive_abilities",
             "proactive_runtime",
@@ -507,6 +511,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("schedule_adjustments", 24),
             ("bookshelf_items", 60),
             ("creative_projects", 24),
+            ("personal_goals", 80),
             ("external_event_pool", 80),
         ):
             data[key] = list_tail(raw_data.get(key), limit)
@@ -976,6 +981,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             apply_overrides = dict(changed)
             if storage_changed:
                 apply_overrides["__defer_storage_rebuild"] = True
+                flush_save = getattr(self.plugin, "_flush_scheduled_data_save", None)
+                if callable(flush_save):
+                    await flush_save()
             for key, value in changed.items():
                 self._apply_config_value(key, value, apply_overrides)
             if storage_changed:
@@ -1293,6 +1301,228 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 压缩主动候选失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    def _troubleshooting_warning_type(self, scope: str, *parts: Any) -> str:
+        source = "\x1f".join(
+            self._single_line(part, 180).strip().lower()
+            for part in (scope, *parts)
+            if self._single_line(part, 180).strip()
+        )
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
+        return f"warning:{digest}"
+
+    def _troubleshooting_semantic_warning_type(self, code: Any) -> str:
+        normalized = re.sub(r"[^a-z0-9_.:-]+", "_", self._single_line(code, 120).lower()).strip("_.:-")
+        return self._troubleshooting_warning_type("semantic", normalized or "unknown")
+
+    def _troubleshooting_proactive_warning_code(self, kind: str, item: dict[str, Any], note: str) -> str:
+        text = " ".join(
+            self._single_line(value, 180).lower()
+            for value in (item.get("reason"), item.get("source"), item.get("action"), note)
+            if value
+        )
+        categories = (
+            ("timeout", ("超时", "timeout", "timed out")),
+            ("provider", ("provider", "模型", "不可用", "api", "鉴权", "401", "403")),
+            ("send", ("发送失败", "投递失败", "send", "发送异常")),
+            ("storage", ("保存失败", "写入失败", "database", "sqlite", "locked", "存储")),
+            ("media", ("生图", "图片", "photo", "image", "参考图", "下载")),
+            ("voice", ("tts", "语音", "音频")),
+            ("tool", ("工具", "tool", "调用失败")),
+        )
+        category = next((name for name, tokens in categories if any(token in text for token in tokens)), "other")
+        action = re.sub(r"[^a-z0-9_]+", "_", self._single_line(item.get("action"), 40).lower()).strip("_") or "message"
+        return f"proactive.{kind}.{category}.{action}"
+
+    def _troubleshooting_chain_warning_code(self, test_type: str, text: Any) -> str:
+        warning = self._single_line(text, 360).lower()
+        categories = (
+            ("timeout_budget", ("测试外层最多等待", "测试层截断")),
+            ("fallback_delay", ("备选在线图片 api", "回退链路")),
+            ("sdgen_timeout", ("sdgen",)),
+            ("auto_backend", ("当前为自动后端",)),
+            ("reference_missing", ("没有解析到可用本地参考图",)),
+            ("reference_scope", ("参考图", "文生图")),
+            ("serial_queue", ("全局串行锁", "先排队")),
+            ("gateway_buffer", ("cloudflare", "网关", "缓冲")),
+            ("test_scope", ("只检查生成文件", "不覆盖后续")),
+        )
+        category = next((name for name, tokens in categories if any(token in warning for token in tokens)), "other")
+        normalized_test = re.sub(r"[^a-z0-9_]+", "_", self._single_line(test_type, 60).lower()).strip("_") or "chain"
+        return f"chain.{normalized_test}.{category}"
+
+    def _troubleshooting_chain_tests_with_warning_items(
+        self,
+        results: dict[str, Any],
+        suppressed_keys: set[str],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        decorated = deepcopy(results) if isinstance(results, dict) else {}
+        all_items: list[dict[str, Any]] = []
+        for test_type, raw_result in decorated.items():
+            if not isinstance(raw_result, dict):
+                continue
+            warning_items: list[dict[str, Any]] = []
+            for warning in raw_result.get("warnings", []) if isinstance(raw_result.get("warnings"), list) else []:
+                text = self._single_line(warning, 360)
+                if not text:
+                    continue
+                code = self._troubleshooting_chain_warning_code(str(test_type), text)
+                warning_items.append(
+                    {
+                        "level": "warn",
+                        "title": self._single_line(text, 90),
+                        "text": text,
+                        "source": "链路测试",
+                        "warning_code": code,
+                        "warning_type": self._troubleshooting_semantic_warning_type(code),
+                    }
+                )
+            all_items.extend(warning_items)
+            visible_items = self._filter_suppressed_troubleshooting_warnings(warning_items, suppressed_keys)
+            raw_result["warning_items"] = visible_items
+            raw_result["warnings"] = [item["text"] for item in visible_items]
+        return decorated, all_items
+
+    def _troubleshooting_legacy_warning_code(self, title: Any) -> str:
+        normalized = self._single_line(title, 90)
+        aliases = {
+            "TTS 配置已开但 provider 不可用": "tts.provider_unavailable",
+            "TTS 强化已开但会话 TTS 未启用": "tts.provider_unavailable",
+            "TTS 强化开启但合成 provider 不可用": "tts.provider_unavailable",
+            "暂无启用的私聊对象": "proactive.no_enabled_users",
+            "主动消息没有私聊对象": "proactive.no_enabled_users",
+            "私聊主动已关闭": "proactive.daily_limit_zero",
+            "私聊主动总额度为 0": "proactive.daily_limit_zero",
+            "Token 软限额正在暂缓后台任务": "token.soft_limit_active",
+            "每日 Token 软限额已接管": "token.soft_limit_active",
+            "SQLite 并发状态需要关注": "sqlite.wal",
+            "主动循环心跳不新鲜": "proactive.loop_stale",
+            "私聊图片识别调度状态读取失败": "vision.runtime_unreadable",
+            "私聊图片识别暂无可用模型": "vision.no_available_provider",
+            "有识图模型被临时降权": "vision.provider_cooldown",
+            "配置诊断仍有待处理项": "diagnostic.pending",
+        }
+        return aliases.get(normalized, "")
+
+    def _troubleshooting_warning_records(self, data: dict[str, Any] | None) -> list[dict[str, Any]]:
+        raw = data.get("troubleshooting_suppressed_warning_types") if isinstance(data, dict) else []
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        seen_raw: set[str] = set()
+        for item in raw if isinstance(raw, list) else []:
+            record = item if isinstance(item, dict) else {"key": item}
+            raw_key = self._single_line(record.get("key"), 64)
+            if raw_key and raw_key in seen_raw:
+                continue
+            if raw_key:
+                seen_raw.add(raw_key)
+            code = re.sub(r"[^a-z0-9_.:-]+", "_", self._single_line(record.get("code"), 120).lower()).strip("_.:-")
+            if not code:
+                code = self._troubleshooting_legacy_warning_code(record.get("title"))
+            key = self._troubleshooting_semantic_warning_type(code) if code else raw_key
+            if not re.fullmatch(r"warning:[0-9a-f]{20}", key) or key in seen:
+                continue
+            seen.add(key)
+            records.append(
+                {
+                    "key": key,
+                    "title": self._single_line(record.get("title"), 90) or "未命名警告类型",
+                    "source": self._single_line(record.get("source"), 40) or "排障检查",
+                    "suppressed_at": self._float(record.get("suppressed_at")),
+                    "code": code,
+                }
+            )
+        return records[:120]
+
+    def _troubleshooting_diagnostics_with_types(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        decorated: list[dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            code = self._single_line(item.get("warning_code"), 120)
+            item["warning_type"] = self._single_line(item.get("warning_type"), 64) or (
+                self._troubleshooting_semantic_warning_type(code)
+                if code
+                else self._troubleshooting_warning_type("diagnostic", item.get("title"))
+            )
+            decorated.append(item)
+        return decorated
+
+    def _filter_suppressed_troubleshooting_warnings(
+        self,
+        items: list[dict[str, Any]],
+        suppressed_keys: set[str],
+    ) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in items
+            if not (
+                self._single_line(item.get("level"), 12) == "warn"
+                and self._single_line(item.get("warning_type"), 64) in suppressed_keys
+            )
+        ]
+
+    def _troubleshooting_suppression_payload(
+        self,
+        records: list[dict[str, Any]],
+        *item_groups: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        active_counts: dict[str, int] = {}
+        for items in item_groups:
+            for item in items:
+                if not isinstance(item, dict) or self._single_line(item.get("level"), 12) != "warn":
+                    continue
+                key = self._single_line(item.get("warning_type"), 64)
+                if key:
+                    active_counts[key] = active_counts.get(key, 0) + 1
+        return [{**record, "current_count": active_counts.get(record["key"], 0)} for record in records]
+
+    async def update_troubleshooting_warning_suppression(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        action = self._single_line(payload.get("action"), 24).lower()
+        if action not in {"suppress", "restore", "restore_all"}:
+            return self._error("action 只能是 suppress、restore 或 restore_all")
+        key = self._single_line(payload.get("key"), 64)
+        code = re.sub(r"[^a-z0-9_.:-]+", "_", self._single_line(payload.get("code"), 120).lower()).strip("_.:-")
+        if action == "suppress" and code:
+            key = self._troubleshooting_semantic_warning_type(code)
+        if action != "restore_all" and not re.fullmatch(r"warning:[0-9a-f]{20}", key):
+            return self._error("无效的警告类型")
+        try:
+            async with self.plugin._data_lock:
+                records = self._troubleshooting_warning_records(self.plugin.data)
+                previous = list(records)
+                if action == "suppress":
+                    record = {
+                        "key": key,
+                        "title": self._single_line(payload.get("title"), 90) or "未命名警告类型",
+                        "source": self._single_line(payload.get("source"), 40) or "排障检查",
+                        "suppressed_at": time.time(),
+                        "code": code,
+                    }
+                    records = [item for item in records if item.get("key") != key]
+                    records.append(record)
+                    records = records[-120:]
+                elif action == "restore":
+                    records = [item for item in records if item.get("key") != key]
+                else:
+                    records = []
+                changed = records != previous
+                self.plugin.data["troubleshooting_suppressed_warning_types"] = records
+                if changed:
+                    self.plugin._save_data_sync()
+            return self._ok(
+                {
+                    "items": records,
+                    "count": len(records),
+                    "changed": changed,
+                    "message": "已屏蔽此类警告" if action == "suppress" else ("已恢复全部警告类型" if action == "restore_all" else "已恢复此类警告"),
+                }
+            )
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 更新排障警告屏蔽失败: %s", self._single_line(exc, 160), exc_info=True)
+            return self._error(str(exc))
+
     async def get_diagnostics(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
@@ -1300,12 +1530,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 raw_groups = self.plugin.data.get("groups") if isinstance(self.plugin.data.get("groups"), dict) else {}
                 users = {str(key): dict(value) for key, value in raw_users.items() if isinstance(value, dict)}
                 groups = {str(key): dict(value) for key, value in raw_groups.items() if isinstance(value, dict)}
+                suppression_records = self._troubleshooting_warning_records(self.plugin.data)
             tune_result = await self._maybe_apply_personality_iteration_auto_tune(users, groups)
             items = self._build_diagnostics(users, groups)
             tune_item = self._personality_auto_tune_diagnostic_item(tune_result)
             if tune_item:
                 items.append(tune_item)
-            return self._ok({"items": items})
+            items = self._troubleshooting_diagnostics_with_types(items)
+            visible_items = self._filter_suppressed_troubleshooting_warnings(
+                items,
+                {record["key"] for record in suppression_records},
+            )
+            return self._ok(
+                {
+                    "items": visible_items,
+                    "suppressed_warning_types": self._troubleshooting_suppression_payload(suppression_records, items),
+                }
+            )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取诊断失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -1318,27 +1559,41 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
             tune_result = await self._maybe_apply_personality_iteration_auto_tune(users, groups)
-            diagnostics = self._build_diagnostics(users, groups)
+            suppression_records = self._troubleshooting_warning_records(data)
+            suppressed_keys = {record["key"] for record in suppression_records}
+            all_diagnostics = self._build_diagnostics(users, groups)
             tune_item = self._personality_auto_tune_diagnostic_item(tune_result)
             if tune_item:
-                diagnostics.append(tune_item)
+                all_diagnostics.append(tune_item)
+            all_diagnostics = self._troubleshooting_diagnostics_with_types(all_diagnostics)
+            diagnostics = self._filter_suppressed_troubleshooting_warnings(all_diagnostics, suppressed_keys)
             proactive_tasks = self._proactive_task_summary(data)
             proactive_candidates = self._proactive_candidate_summary(data)
             token_stats = self._token_stats_payload(data.get("token_usage", {}))
             cache = self._cache_summary(data)
             tts = self._tts_runtime_summary(users)
             sqlite_status = await self._sqlite_wal_status_summary()
+            all_sqlite_items: list[dict[str, Any]] = []
+            for raw_item in sqlite_status.get("items", []) if isinstance(sqlite_status.get("items"), list) else []:
+                if not isinstance(raw_item, dict):
+                    continue
+                item = dict(raw_item)
+                if self._single_line(item.get("level"), 12) == "warn":
+                    item["warning_code"] = "sqlite.wal"
+                    item["warning_type"] = self._troubleshooting_semantic_warning_type("sqlite.wal")
+                all_sqlite_items.append(item)
+            sqlite_status = {**sqlite_status, "items": all_sqlite_items}
             passive_no_reply = self._passive_no_reply_summary(data)
             screen_companion = self._screen_companion_summary(data)
             qzone = self._qzone_summary(data)
-            recent_events = self._troubleshooting_recent_events(
+            all_recent_events = self._troubleshooting_recent_events(
                 diagnostics=diagnostics,
                 proactive_tasks=proactive_tasks,
                 proactive_candidates=proactive_candidates,
                 token_stats=token_stats,
                 passive_no_reply=passive_no_reply,
             )
-            checks = self._troubleshooting_checks(
+            all_checks = self._troubleshooting_checks(
                 data=data,
                 users=users,
                 groups=groups,
@@ -1350,6 +1605,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 tts=tts,
                 sqlite_status=sqlite_status,
             )
+            recent_events = self._filter_suppressed_troubleshooting_warnings(all_recent_events, suppressed_keys)
+            checks = self._filter_suppressed_troubleshooting_warnings(all_checks, suppressed_keys)
+            visible_sqlite_items = self._filter_suppressed_troubleshooting_warnings(all_sqlite_items, suppressed_keys)
+            visible_sqlite_status = {**sqlite_status, "items": visible_sqlite_items}
+            chain_tests, all_chain_warning_items = self._troubleshooting_chain_tests_with_warning_items(
+                self._troubleshooting_test_results(data),
+                suppressed_keys,
+            )
+            suppression_payload = self._troubleshooting_suppression_payload(
+                suppression_records,
+                all_diagnostics,
+                all_recent_events,
+                all_checks,
+                all_sqlite_items,
+                all_chain_warning_items,
+            )
+            active_suppressed_count = sum(self._int(item.get("current_count")) for item in suppression_payload)
             counts = {
                 "error": sum(1 for item in recent_events if item.get("level") == "error") + sum(1 for item in checks if item.get("level") == "error"),
                 "warn": sum(1 for item in recent_events if item.get("level") == "warn") + sum(1 for item in checks if item.get("level") == "warn"),
@@ -1357,20 +1629,26 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "ok": sum(1 for item in checks if item.get("level") == "ok"),
             }
             headline_level = "error" if counts["error"] else ("warn" if counts["warn"] else "ok")
-            headline = "发现需要处理的异常" if headline_level == "error" else ("有可关注项" if headline_level == "warn" else "运行状态正常")
+            headline = "发现需要处理的异常" if headline_level == "error" else (
+                "有可关注项"
+                if headline_level == "warn"
+                else ("未发现未屏蔽异常" if active_suppressed_count else "运行状态正常")
+            )
             return self._ok(
                 {
                     "summary": {
                         "level": headline_level,
                         "headline": headline,
                         "counts": counts,
+                        "suppressed_count": active_suppressed_count,
+                        "suppressed_types": len(suppression_payload),
                         "generated_at": self.plugin._format_timestamp_elapsed(time.time()),
                     },
                     "recent_events": recent_events[:80],
                     "checks": checks,
                     "diagnostics": diagnostics,
-                    "sqlite": sqlite_status,
-                    "chain_tests": self._troubleshooting_test_results(data),
+                    "sqlite": visible_sqlite_status,
+                    "chain_tests": chain_tests,
                     "recent_photo_generations": self._recent_photo_generation_summary(data),
                     "passive_no_reply": passive_no_reply,
                     "prompt_injections": self._prompt_injection_summary(data),
@@ -1381,6 +1659,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "token_budget": token_stats.get("budget", {}),
                     "cache": cache,
                     "tts": tts,
+                    "suppressed_warning_types": suppression_payload,
                 }
             )
         except Exception as exc:
@@ -3395,7 +3674,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
 
-        def add(level: str, source: str, title: str, detail: str = "", *, ts: float = 0, action: str = "", jump: str = "") -> None:
+        def add(
+            level: str,
+            source: str,
+            title: str,
+            detail: str = "",
+            *,
+            ts: float = 0,
+            action: str = "",
+            jump: str = "",
+            warning_type: str = "",
+            warning_code: str = "",
+        ) -> None:
+            resolved_type = warning_type or (
+                self._troubleshooting_semantic_warning_type(warning_code)
+                if warning_code
+                else self._troubleshooting_warning_type("event", source, title)
+            )
             events.append(
                 {
                     "level": level,
@@ -3406,6 +3701,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "jump": self._single_line(jump, 40),
                     "ts": self._float(ts),
                     "time": self.plugin._format_timestamp_elapsed(ts) if ts else "",
+                    "warning_type": resolved_type,
+                    "warning_code": warning_code,
                 }
             )
 
@@ -3413,7 +3710,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             level = self._single_line(item.get("level"), 12)
             if level not in {"error", "warn"}:
                 continue
-            add(level, "配置诊断", item.get("title", ""), item.get("text", ""), action=item.get("action", ""), jump="troubleshooting")
+            add(
+                level,
+                "配置诊断",
+                item.get("title", ""),
+                item.get("text", ""),
+                action=item.get("action", ""),
+                jump="troubleshooting",
+                warning_type=self._single_line(item.get("warning_type"), 64),
+                warning_code=self._single_line(item.get("warning_code"), 120),
+            )
 
         for item in proactive_tasks.get("audit_items", [])[:40]:
             status = self._single_line(item.get("status"), 24)
@@ -3434,7 +3740,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 ]
                 if part
             )
-            add(level, "主动审计", title, detail, ts=self._float(item.get("updated_ts") or item.get("created_ts")), jump="proactive")
+            add(
+                level,
+                "主动审计",
+                title,
+                detail,
+                ts=self._float(item.get("updated_ts") or item.get("created_ts")),
+                jump="proactive",
+                warning_code=self._troubleshooting_proactive_warning_code("audit", item, note),
+            )
 
         for item in proactive_candidates.get("items", [])[:40]:
             if self._single_line(item.get("status"), 24) != "blocked":
@@ -3452,7 +3766,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 ]
                 if part
             )
-            add("warn", "主动候选", title, detail, ts=self._float(item.get("last_seen_ts") or item.get("created_ts")), jump="proactive")
+            add(
+                "warn",
+                "主动候选",
+                title,
+                detail,
+                ts=self._float(item.get("last_seen_ts") or item.get("created_ts")),
+                jump="proactive",
+                warning_code=self._troubleshooting_proactive_warning_code("candidate", item, note),
+            )
 
         for item in self._active_token_failures(token_stats.get("recent", []), limit=50):
             title = f"{self._token_task_label(item.get('task'))}失败"
@@ -3464,7 +3786,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 ]
                 if part
             )
-            add("error", "模型调用", title, detail, ts=self._float(item.get("ts")), jump="tokens")
+            add(
+                "error",
+                "模型调用",
+                title,
+                detail,
+                ts=self._float(item.get("ts")),
+                jump="tokens",
+                warning_code=f"model_call.{re.sub(r'[^a-z0-9_]+', '_', self._single_line(item.get('task'), 40).lower()).strip('_') or 'unknown'}",
+            )
 
         passive_items = passive_no_reply.get("items", []) if isinstance(passive_no_reply, dict) else []
         for item in passive_items[:40]:
@@ -3492,6 +3822,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 ts=self._float(item.get("last_ts")),
                 action="同类原因已合并计数，刷新后可查看最近样本",
                 jump="troubleshooting",
+                warning_code=f"passive_no_reply.{re.sub(r'[^a-z0-9_]+', '_', self._single_line(item.get('key'), 40).lower()).strip('_') or hashlib.sha256(reason.encode('utf-8')).hexdigest()[:12]}",
             )
 
         events.sort(key=lambda item: self._float(item.get("ts")), reverse=True)
@@ -3717,16 +4048,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     ) -> list[dict[str, Any]]:
         checks: list[dict[str, Any]] = []
 
-        def add(level: str, title: str, text: str, action: str = "", jump: str = "") -> None:
-            checks.append(
-                {
-                    "level": level,
-                    "title": self._single_line(title, 90),
-                    "text": self._single_line(text, 240),
-                    "action": self._single_line(action, 180),
-                    "jump": self._single_line(jump, 40),
-                }
-            )
+        def add(level: str, title: str, text: str, action: str = "", jump: str = "", warning_code: str = "") -> None:
+            item = {
+                "level": level,
+                "title": self._single_line(title, 90),
+                "text": self._single_line(text, 240),
+                "action": self._single_line(action, 180),
+                "jump": self._single_line(jump, 40),
+                "warning_code": warning_code,
+                "warning_type": self._troubleshooting_semantic_warning_type(warning_code)
+                if warning_code
+                else self._troubleshooting_warning_type("check", title),
+            }
+            checks.append(item)
 
         llm_blocks = []
         raw_llm_blocks = data.get("group_llm_reply_blocks")
@@ -3749,6 +4083,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 f"{len(llm_blocks)} 个群已关闭所有 LLM 回复，首个：{label}。这是手动开关状态，不会被最近记录清理。",
                 "在对应群发送：陪伴群 开启LLM",
                 "troubleshooting",
+                "group.llm_breaker",
             )
 
         enabled_users = [item for item in users.values() if isinstance(item, dict) and item.get("enabled", True)]
@@ -3756,18 +4091,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         daily_limit = self._int(getattr(self.plugin, "max_daily_messages", 0))
         budget = token_stats.get("budget", {})
         if not enabled_users:
-            add("warn", "主动消息没有私聊对象", "当前没有启用的私聊对象，主动消息不会有目标。", "到私聊页新增或启用对象", "private")
+            add("warn", "主动消息没有私聊对象", "当前没有启用的私聊对象，主动消息不会有目标。", "到私聊页新增或启用对象", "private", "proactive.no_enabled_users")
         elif daily_limit <= 0:
-            add("warn", "私聊主动总额度为 0", "每日主动上限为 0 时，主动消息不会发送。", "到模块配置调高每日主动上限", "modules")
+            add("warn", "私聊主动总额度为 0", "每日主动上限为 0 时，主动念头、候选、主动行为生成与发送均已停止。", "到模块配置调高每日主动上限", "modules", "proactive.daily_limit_zero")
         elif not runtime.get("healthy"):
-            add("warn", "主动循环心跳不新鲜", runtime.get("last_tick_error") or "最近没有检测到主动循环心跳。", "查看主动页的循环状态", "proactive")
+            add("warn", "主动循环心跳不新鲜", runtime.get("last_tick_error") or "最近没有检测到主动循环心跳。", "查看主动页的循环状态", "proactive", "proactive.loop_stale")
         else:
             add("ok", "主动循环可运行", f"启用对象 {len(enabled_users)} 个，最近心跳 {runtime.get('last_tick_started') or '-'}。", "", "proactive")
 
         if budget.get("exceeded"):
             add("error", "今日 Token 硬限额已耗尽", f"今日已用 {budget.get('used')}，硬限额 {budget.get('limit')}。", "调高每日 Token 限额或等待明日重置", "tokens")
         elif budget.get("soft_active"):
-            add("warn", "Token 软限额正在暂缓后台任务", f"今日已用 {budget.get('used')}，软限额 {budget.get('soft_limit')}；主动生图、新闻、创作等低优先级任务会延后。", "到 Token 页或模块配置检查限额", "tokens")
+            add("warn", "Token 软限额正在暂缓后台任务", f"今日已用 {budget.get('used')}，软限额 {budget.get('soft_limit')}；主动生图、新闻、创作等低优先级任务会延后。", "到 Token 页或模块配置检查限额", "tokens", "token.soft_limit_active")
         else:
             add("ok", "Token 预算未阻塞", f"今日已用 {budget.get('used', 0)}；软限额剩余 {budget.get('soft_remaining') if budget.get('soft_remaining') is not None else '不限'}。", "", "tokens")
 
@@ -3782,11 +4117,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if not self._proactive_candidate_block_is_normal(self._single_line(item.get("note"), 180))
         ]
         if not photo_enabled:
-            add("warn", "主动带图功能未开启", "enable_photo_text_action 关闭时不会生成主动图片。", "到功能开关打开主动拍照/生图", "config")
+            add("warn", "主动带图功能未开启", "enable_photo_text_action 关闭时不会生成主动图片。", "到功能开关打开主动拍照/生图", "config", "image.proactive_disabled")
         elif not photo_available:
-            add("warn", "主动带图后端或额度不可用", "生图后端不可用、每日生图额度用完，或当前对象不允许 photo_text。", "检查生图后端、每日生图上限和用户关系角色", "modules")
+            add("warn", "主动带图后端或额度不可用", "生图后端不可用、每日生图额度用完，或当前对象不允许 photo_text。", "检查生图后端、每日生图上限和用户关系角色", "modules", "image.proactive_backend_unavailable")
         elif photo_blocked_abnormal:
-            add("warn", "近期带图候选被拦截", self._single_line(photo_blocked_abnormal[0].get("note"), 160) or "最近 photo_text 候选没有进入发送。", "到主动页筛选 photo_text", "proactive")
+            add("warn", "近期带图候选被拦截", self._single_line(photo_blocked_abnormal[0].get("note"), 160) or "最近 photo_text 候选没有进入发送。", "到主动页筛选 photo_text", "proactive", "image.proactive_candidate_blocked")
         else:
             add("ok", "主动带图链路可尝试", "开关和可用性检查通过；是否出现取决于主动动机、天气/日程和候选权重。", "", "proactive")
 
@@ -3794,13 +4129,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if bool(tts.get("provider_available")):
                 add("ok", "TTS provider 可用", f"模式 {tts.get('mode')}，语种 {tts.get('language')}，provider {tts.get('provider_label') or '-'}。", "", "modules")
             else:
-                add("warn", "TTS 强化开启但合成 provider 不可用", "插件能处理 TTS 标签，但真实语音合成需要 AstrBot 当前会话启用 TTS provider。", "到 AstrBot 会话 TTS 配置启用 provider", "modules")
+                add("warn", "TTS 强化开启但合成 provider 不可用", "插件能处理 TTS 标签，但真实语音合成需要 AstrBot 当前会话启用 TTS provider。", "到 AstrBot 会话 TTS 配置启用 provider", "modules", "tts.provider_unavailable")
         else:
             add("info", "TTS 强化未开启", "模型不应被要求生成 TTS 标签；如仍出现标签，发送前会清理。", "", "modules")
 
         sqlite_bad = [item for item in sqlite_status.get("items", []) if item.get("level") in {"warn", "error"}]
         if sqlite_bad:
-            add("warn", "SQLite 并发状态需要关注", sqlite_bad[0].get("text") or "有数据库未处于 WAL 或检查失败。", "重启插件后查看是否仍有 database is locked", "troubleshooting")
+            add("warn", "SQLite 并发状态需要关注", sqlite_bad[0].get("text") or "有数据库未处于 WAL 或检查失败。", "重启插件后查看是否仍有 database is locked", "troubleshooting", "sqlite.wal")
         else:
             add("ok", "SQLite WAL 检查通过", f"已检查 {len(sqlite_status.get('items', []))} 个数据库文件。", "", "troubleshooting")
 
@@ -3825,7 +4160,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         provider_cooldowns = provider_runtime.get("cooldowns") if isinstance(provider_runtime.get("cooldowns"), list) else []
         last_success = provider_runtime.get("last_success") if isinstance(provider_runtime.get("last_success"), dict) else {}
         if provider_runtime.get("error"):
-            add("warn", "私聊图片识别调度状态读取失败", provider_runtime.get("error") or "无法读取当前视觉模型状态。", "刷新排障页或查看日志", "troubleshooting")
+            add("warn", "私聊图片识别调度状态读取失败", provider_runtime.get("error") or "无法读取当前视觉模型状态。", "刷新排障页或查看日志", "troubleshooting", "vision.runtime_unreadable")
         elif not usable_vision:
             add(
                 "warn",
@@ -3833,6 +4168,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 f"候选 {len(provider_candidates)} 个，但没有同时满足可用、支持图片且不在冷却的模型。",
                 "检查快速配置/精准配置里的插件识图模型，或等待临时降权结束",
                 "config",
+                "vision.no_available_provider",
             )
         elif last_success.get("provider_id"):
             add(
@@ -3853,13 +4189,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 f"{first_cooldown.get('provider_id') or '-'}：{first_cooldown.get('error') or '最近调用失败'}；到期 {first_cooldown.get('until') or '-'}。",
                 "如果反复出现，换掉插件识图模型或调高单次超时",
                 "config",
+                "vision.provider_cooldown",
             )
 
         diag_warns = [item for item in diagnostics if item.get("level") in {"warn", "error"}]
         if diag_warns:
-            add("warn", "配置诊断仍有待处理项", f"{len(diag_warns)} 项需要关注：{diag_warns[0].get('title') or '-'}。", diag_warns[0].get("action") or "查看下方最近异常", "troubleshooting")
+            add("warn", "配置诊断仍有待处理项", f"{len(diag_warns)} 项需要关注：{diag_warns[0].get('title') or '-'}。", diag_warns[0].get("action") or "查看下方最近异常", "troubleshooting", "diagnostic.pending")
         else:
-            add("ok", "配置诊断无警告", "现有诊断项没有 warn/error。", "", "dashboard")
+            add("ok", "配置诊断无待处理警告", "现有未屏蔽诊断项没有 warn/error。", "", "dashboard")
         return checks
 
     async def _sqlite_wal_status_summary(self) -> dict[str, Any]:
@@ -5016,6 +5353,105 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return self._ok({"message": "已保存技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新技能失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_personal_goal(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        goal_id = self._single_line(payload.get("id"), 40)
+        title = self._single_line(payload.get("title"), 60)
+        if not goal_id and not title:
+            return self._error("缺少目标名称")
+
+        def parse_terms(value: Any) -> list[str]:
+            raw = value if isinstance(value, list) else re.split(r"[,，、\n]+", str(value or ""))
+            terms: list[str] = []
+            for item in raw:
+                term = self._single_line(item, 32)
+                if term and term not in terms:
+                    terms.append(term)
+            return terms[:16]
+
+        try:
+            async with self.plugin._data_lock:
+                goals = self.plugin.data.setdefault("personal_goals", [])
+                if not isinstance(goals, list):
+                    goals = []
+                    self.plugin.data["personal_goals"] = goals
+                index = next(
+                    (idx for idx, item in enumerate(goals) if isinstance(item, dict) and self._single_line(item.get("id"), 40) == goal_id),
+                    -1,
+                )
+                if payload.get("delete"):
+                    if index >= 0:
+                        goals.pop(index)
+                    self.plugin._save_data_sync()
+                    return self._ok({"changed": index >= 0, "message": "已删除个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
+                if not title:
+                    return self._error("缺少目标名称")
+                category = self._single_line(payload.get("category"), 24) or "生活"
+                if any(token in category for token in ("创作", "写作", "绘画创作", "作品")):
+                    return self._error("创作型目标请继续使用创作项目，这里只管理非创作型个人目标")
+                existing = goals[index] if index >= 0 and isinstance(goals[index], dict) else {}
+                if index < 0 and any(self._single_line(item.get("title"), 60) == title for item in goals if isinstance(item, dict)):
+                    return self._error("已经存在同名个人目标")
+                status = self.plugin._personal_goal_status(payload.get("status") or existing.get("status"))
+                old_progress = max(0, min(100, self._int(existing.get("progress"))))
+                progress = max(0, min(100, self._int(payload.get("progress")) if payload.get("progress") is not None else self._int(existing.get("progress"))))
+                if status == "completed":
+                    progress = 100
+                elif progress >= 100:
+                    status = "completed"
+                now = time.time()
+                keywords = parse_terms(payload.get("keywords")) if "keywords" in payload else parse_terms(existing.get("keywords"))
+                if index < 0 and not keywords:
+                    keywords = [title]
+                goal = dict(existing)
+                goal.update(
+                    {
+                        "id": goal_id or uuid.uuid4().hex[:12],
+                        "title": title,
+                        "category": category,
+                        "status": status,
+                        "progress": progress,
+                        "next_step": self._single_line(payload.get("next_step") if "next_step" in payload else existing.get("next_step"), 100),
+                        "note": self._single_line(payload.get("note") if "note" in payload else existing.get("note"), 160),
+                        "keywords": keywords,
+                        "auto_step": max(1, min(50, self._int(payload.get("auto_step")) or self._int(existing.get("auto_step")) or 10)),
+                        "created_at": self._float(existing.get("created_at")) or now,
+                        "updated_at": now,
+                        "last_progress_at": self._float(existing.get("last_progress_at")) or now,
+                        "recent_logs": existing.get("recent_logs") if isinstance(existing.get("recent_logs"), list) else [],
+                    }
+                )
+                if progress > old_progress:
+                    goal["last_progress_at"] = now
+                    goal["stalled_notified_at"] = 0
+                    logs = goal.setdefault("recent_logs", [])
+                    if not isinstance(logs, list):
+                        logs = []
+                        goal["recent_logs"] = logs
+                    logs.append({"ts": now, "kind": "manual_progress", "progress": progress, "evidence": "在陪伴面板中手动更新"})
+                    del logs[:-12]
+                    if progress >= 100:
+                        goal["pending_share_event"] = {"kind": "completed", "evidence": "在陪伴面板中手动更新为已完成"}
+                    elif progress // 25 > old_progress // 25:
+                        goal["pending_share_event"] = {"kind": "progress", "milestone": (progress // 25) * 25, "evidence": "在陪伴面板中手动更新进度"}
+                elif progress < old_progress:
+                    goal.pop("pending_share_event", None)
+                if status in {"paused", "abandoned"}:
+                    goal.pop("pending_share_event", None)
+                if status == "completed" and not self._float(goal.get("completed_at")):
+                    goal["completed_at"] = now
+                elif status != "completed":
+                    goal["completed_at"] = 0
+                if index >= 0:
+                    goals[index] = goal
+                else:
+                    goals.append(goal)
+                self.plugin._save_data_sync()
+                return self._ok({"message": "已保存个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新个人目标失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     @staticmethod
@@ -8877,6 +9313,53 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "items": items[:120],
         }
 
+    def _personal_goal_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        goals = data.get("personal_goals") if isinstance(data.get("personal_goals"), list) else []
+        items: list[dict[str, Any]] = []
+        status_labels = {"active": "进行中", "paused": "已暂停", "completed": "已完成", "abandoned": "已放弃"}
+        for raw in goals:
+            if not isinstance(raw, dict):
+                continue
+            status = self.plugin._personal_goal_status(raw.get("status"))
+            logs = raw.get("recent_logs") if isinstance(raw.get("recent_logs"), list) else []
+            items.append(
+                {
+                    "id": self._single_line(raw.get("id"), 40),
+                    "title": self._single_line(raw.get("title"), 60),
+                    "category": self._single_line(raw.get("category"), 24) or "生活",
+                    "status": status,
+                    "status_label": status_labels.get(status, status),
+                    "progress": max(0, min(100, self._int(raw.get("progress")))),
+                    "next_step": self._single_line(raw.get("next_step"), 100),
+                    "note": self._single_line(raw.get("note"), 160),
+                    "keywords": [self._single_line(item, 32) for item in (raw.get("keywords") or []) if self._single_line(item, 32)][:16],
+                    "auto_step": max(1, min(50, self._int(raw.get("auto_step")) or 10)),
+                    "created": self.plugin._format_timestamp_elapsed(raw.get("created_at", 0)),
+                    "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_at", 0)),
+                    "last_progress": self.plugin._format_timestamp_elapsed(raw.get("last_progress_at", 0)),
+                    "recent_logs": [
+                        {
+                            "kind": self._single_line(log.get("kind"), 24),
+                            "progress": self._int(log.get("progress")),
+                            "evidence": self._single_line(log.get("evidence"), 100),
+                            "time": self.plugin._format_timestamp_elapsed(log.get("ts", 0)),
+                        }
+                        for log in logs[-5:]
+                        if isinstance(log, dict)
+                    ],
+                }
+            )
+        items.sort(key=lambda item: ({"active": 0, "paused": 1, "completed": 2, "abandoned": 3}.get(item["status"], 4), -item["progress"], item["title"]))
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_personal_goals", True)),
+            "auto_progress": bool(getattr(self.plugin, "enable_personal_goal_auto_progress", True)),
+            "share_cooldown_hours": float(getattr(self.plugin, "personal_goal_share_cooldown_hours", 12.0) or 12.0),
+            "stall_days": int(getattr(self.plugin, "personal_goal_stall_days", 3) or 3),
+            "active_count": sum(1 for item in items if item["status"] == "active"),
+            "completed_count": sum(1 for item in items if item["status"] == "completed"),
+            "items": items[:80],
+        }
+
     def _food_menu_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("food_menu") if isinstance(data.get("food_menu"), dict) else {}
         raw_items = state.get("items") if isinstance(state.get("items"), list) else []
@@ -11191,8 +11674,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _build_diagnostics(self, users: dict[str, Any], groups: dict[str, Any]) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
 
-        def add(level: str, title: str, text: str, action: str = "") -> None:
-            items.append({"level": level, "title": title, "text": text, "action": action})
+        def add(level: str, title: str, text: str, action: str = "", warning_code: str = "") -> None:
+            item = {"level": level, "title": title, "text": text, "action": action}
+            if warning_code:
+                item["warning_code"] = warning_code
+                item["warning_type"] = self._troubleshooting_semantic_warning_type(warning_code)
+            items.append(item)
 
         features = self._feature_flags()
         providers = self._provider_settings()
@@ -11230,6 +11717,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "预设只覆盖运行态有效频率，不改写手动参数，也不会绕过免打扰、休息、用户拒绝、隐私和硬限额。"
                 ),
                 "需要恢复原配置时，将“主动强度预设”改为关闭",
+                "proactive.intensity_preset",
             )
         else:
             add(
@@ -11252,6 +11740,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "TTS 配置已开但 provider 不可用",
                     f"会话 {tts_summary.get('umo') or '-'} 已启用 TTS 设置，但当前取不到可用 TTS provider",
                     "在 AstrBot 会话 TTS 配置里选择并启用真实语音合成 provider",
+                    "tts.provider_unavailable",
                 )
             else:
                 add(
@@ -11259,6 +11748,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "TTS 强化已开但会话 TTS 未启用",
                     "本插件只能处理 <tts> 标签和文本转换；真正合成音频需要 AstrBot 当前会话启用 TTS provider",
                     "到 AstrBot 配置中为目标会话启用 TTS provider",
+                    "tts.provider_unavailable",
                 )
         else:
             add(
@@ -11270,7 +11760,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if enabled_users:
             add("ok", "私聊对象已就绪", f"已启用 {enabled_users} 个私聊对象")
         else:
-            add("warn", "暂无启用的私聊对象", "私聊主动陪伴没有明确目标", "在私聊页新增对象或配置 target_user_ids")
+            add("warn", "暂无启用的私聊对象", "私聊主动陪伴没有明确目标", "在私聊页新增对象或配置 target_user_ids", "proactive.no_enabled_users")
 
         max_daily = int(getattr(self.plugin, "max_daily_messages", 0) or 0)
         effective_max_daily = max_daily
@@ -11291,7 +11781,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 detail += "，当前最高档不按每日主动次数封顶"
             add("ok", "私聊主动额度可用", detail)
         else:
-            add("warn", "私聊主动已关闭", "每日主动上限为 0", "在模块配置里调高每日主动上限")
+            add("warn", "私聊主动已关闭", "每日主动上限为 0", "在模块配置里调高每日主动上限", "proactive.daily_limit_zero")
 
         if getattr(self.plugin, "enable_daily_token_soft_limit", True):
             soft_limit = int(getattr(self.plugin, "daily_token_soft_limit", 0) or 0)
@@ -11303,12 +11793,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "warn",
                         "Token 软限额已触发但最高档放行",
                         f"今日已用约 {today_tokens} Token；当前主动强度最高档会忽略软限额降载，低优先级任务仍可继续运行",
+                        warning_code="token.soft_limit_ignored",
                     )
                 else:
                     add(
                         "warn",
                         "每日 Token 软限额已接管",
                         f"今日已用约 {today_tokens} Token，低优先级后台 LLM 任务会暂缓",
+                        warning_code="token.soft_limit_active",
                     )
             elif soft_limit > 0:
                 add("ok", "每日 Token 软限额已启用", f"软限额 {soft_limit}，当前约 {today_tokens}")
@@ -11320,7 +11812,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if features.get("enable_companion_memory") and features.get("enable_expression_learning"):
             add("ok", "私聊学习链路完整", "长期画像与表达学习均已打开")
         else:
-            add("warn", "私聊学习链路不完整", "画像记忆或表达学习未开启", "在配置页打开对应功能开关")
+            add("warn", "私聊学习链路不完整", "画像记忆或表达学习未开启", "在配置页打开对应功能开关", "memory.learning_incomplete")
 
         if features.get("enable_livingmemory_integration"):
             living_summary = self._livingmemory_summary()
@@ -11331,7 +11823,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 living_text = f"当前使用：{living_summary.get('selected_plugin_name')}"
             else:
                 living_text = "已启用协同，但当前未检测到可用记忆插件"
-            add(living_level, "记忆插件协同", living_text)
+            add(
+                living_level,
+                "记忆插件协同",
+                living_text,
+                warning_code="memory.integration_conflict" if living_summary.get("conflict") else "memory.integration_unavailable",
+            )
 
         if features.get("enable_bilibili_integration"):
             bili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
@@ -11357,6 +11854,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         "warn" if load_state.get("busy") else "ok",
                         "本地生图负载保护",
                         str(load_state.get("reason") or "负载正常"),
+                        warning_code="image.local_load_busy" if load_state.get("busy") else "",
                     )
                 else:
                     add("info", "本地生图负载保护未采样", str(load_state.get("reason") or "无法读取系统负载"))
@@ -11380,6 +11878,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "检测到 LLMPerception 插件",
                     "本插件已内置时间、节假日、农历节气和平台环境感知；两者同时启用会重复注入并增加 Token 消耗",
                     "建议手动二选一；本插件不会再自动改写 enable_environment_perception",
+                    "integration.environment_duplicate",
                 )
             else:
                 add("ok", "环境感知由外部插件接管", "检测到 LLMPerception，且本插件内置环境感知当前为关闭")
@@ -11395,7 +11894,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
         if getattr(self.plugin, "enable_group_companion", False):
             if group_mode == "whitelist" and not whitelist:
-                add("warn", "群聊白名单为空", "白名单模式下所有群都会被拦截", "在配置页加入群号或切换为黑名单模式")
+                add("warn", "群聊白名单为空", "白名单模式下所有群都会被拦截", "在配置页加入群号或切换为黑名单模式", "group.whitelist_empty")
             elif group_mode == "blacklist":
                 add("ok", "群聊黑名单模式", f"已屏蔽 {len(blacklist)} 个群，其余群可观察")
             else:
@@ -11417,7 +11916,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 suffix = "" if limit_text == "不限" else " 次"
                 add("ok", "群聊插话可用", f"每群每日上限 {limit_text}{suffix}")
             else:
-                add("warn", "群聊插话开关已开但额度为 0", "功能不会真正触发", "在模块配置里调高每群每日插话上限")
+                add("warn", "群聊插话开关已开但额度为 0", "功能不会真正触发", "在模块配置里调高每群每日插话上限", "group.interject_limit_zero")
         elif getattr(self.plugin, "enable_group_companion", False):
             add("info", "群聊以观察为主", "当前只积累群上下文，不主动插话")
 
@@ -11429,6 +11928,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "检测到上下文场景感知增强插件",
                     "不会造成代码级冲突，但若两个插件同时注入群聊场景，会增加重复上下文和 Token 消耗",
                     "建议手动二选一；本插件不会再自动改写 enable_group_scene_awareness",
+                    "integration.context_aware_duplicate",
                 )
             else:
                 add("ok", "群聊场景感知由外部插件接管", "检测到 context_aware，且本插件对应内置功能当前为关闭")
@@ -11441,26 +11941,30 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "检测到艾特群友插件",
                     "本插件已内置跨群转述与 @ 群友工具；两者同时启用可能让模型看到重复工具",
                     "建议手动二选一；本插件不会再自动改写 enable_atrelay_tools",
+                    "integration.atrelay_duplicate",
                 )
             else:
                 add("ok", "跨群转述由外部插件接管", "检测到 atrelay，且本插件对应内置工具当前为关闭")
 
         if not features.get("enable_group_privacy_guard"):
-            add("warn", "群聊隐私保护未开启", "私聊记忆注入群聊时缺少额外防护", "建议打开 enable_group_privacy_guard")
+            add("warn", "群聊隐私保护未开启", "私聊记忆注入群聊时缺少额外防护", "建议打开 enable_group_privacy_guard", "group.privacy_guard_disabled")
 
         refresh_minutes = int(getattr(self.plugin, "memory_refresh_interval_minutes", 0) or 0)
         if refresh_minutes and refresh_minutes < 60:
-            add("warn", "长期记忆整理过于频繁", f"当前 {refresh_minutes} 分钟，可能增加模型调用量", "建议设置为 120 分钟以上")
+            add("warn", "长期记忆整理过于频繁", f"当前 {refresh_minutes} 分钟，可能增加模型调用量", "建议设置为 120 分钟以上", "memory.refresh_too_frequent")
 
         if features.get("enable_personality_iteration_experiment"):
             suggestions = self._personality_iteration_suggestions(users, groups)
             if suggestions:
                 for suggestion in suggestions:
+                    dimension = self._single_line(suggestion.get("dimension"), 40)
+                    dimension_code = hashlib.sha256(dimension.encode("utf-8")).hexdigest()[:12]
                     add(
                         self._single_line(suggestion.get("level"), 12) or "info",
-                        f"角色贴合校准：{self._single_line(suggestion.get('dimension'), 40)}",
+                        f"角色贴合校准：{dimension}",
                         self._single_line(suggestion.get("text"), 260),
                         self._single_line(suggestion.get("action"), 160),
+                        f"personality.{dimension_code}",
                     )
             else:
                 add(
@@ -11903,6 +12407,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 else str(value or "off").strip().lower()
             )
             return
+        if key == "max_daily_messages":
+            self.plugin.max_daily_messages = max(0, self._int(value))
+            kicker = getattr(self.plugin, "_kick_proactive_loop_once", None)
+            if callable(kicker):
+                try:
+                    asyncio.create_task(kicker())
+                except RuntimeError:
+                    pass
+            return
         if key == "page_font_family":
             text = str(value or "original").strip().lower()
             self.plugin.page_font_family = text if text in {"original", "cheng"} else "original"
@@ -12024,6 +12537,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             self.plugin.plugin_specific_persona_id = str(value or "").strip()
             self.plugin._default_persona_prompt_cache = ""
             self.plugin._default_persona_prompt_cache_persona_id = ""
+            self.plugin._default_persona_prompt_cache_by_scope = {}
             return
         if key == "private_user_aliases":
             self.plugin.private_user_aliases = self.plugin._parse_private_user_aliases(value)
@@ -14368,6 +14882,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         state = data.get("news_integration") if isinstance(data.get("news_integration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         latest_items = state.get("latest_items") if isinstance(state.get("latest_items"), list) else []
+        history = [
+            item
+            for item in self._browsing_history_entries(data)
+            if item.get("source") == "news"
+        ]
         ai_daily = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
         ai_digest = ai_daily.get("last_digest") if isinstance(ai_daily.get("last_digest"), dict) else {}
         ai_digest_items = ai_digest.get("items") if isinstance(ai_digest.get("items"), list) else []
@@ -14416,6 +14935,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "daily_hot_enabled": bool(getattr(self.plugin, "enable_news_daily_hot_read", False)),
             "ai_daily_enabled": bool(getattr(self.plugin, "enable_ai_daily_watch", False)),
             "source_count": source_count,
+            "history_count": len(history),
+            "history": history,
             "last_read_at": self.plugin._format_timestamp_elapsed(state.get("last_read_at", 0)),
             "last_status": self._single_line(state.get("last_status"), 80),
             "ai_daily": {
@@ -14501,7 +15022,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         state = data.get("web_exploration") if isinstance(data.get("web_exploration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         notes = state.get("notes") if isinstance(state.get("notes"), list) else []
-        history = self._browsing_history_entries(data)
+        history = [
+            item
+            for item in self._browsing_history_entries(data)
+            if item.get("source") != "news"
+        ]
         custom_available = bool(getattr(self.plugin, "_custom_web_exploration_search_configured", lambda: False)())
         try:
             astrbot_available = bool(getattr(self.plugin, "_astrbot_any_web_search_available", lambda: False)())
@@ -15205,6 +15730,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "bookshelf_recommendation_request": "想问你要不要推荐阅读",
             "web_exploration_share": "分享主动搜索后的发现",
             "news_share": "分享刚读到的新闻",
+            "environment_change": "注意到外面的环境突然变了",
+            "personal_goal_progress": "自己的一个长期目标有了新进展",
             "timer": "聊天中形成的临时约定",
             "troubleshooting_test": "排障测试触发",
         }
@@ -15240,6 +15767,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "group_share": {"label": "群聊见闻", "note": ""},
             "web_exploration": {"label": "主动搜索", "note": ""},
             "news": {"label": "新闻阅读", "note": ""},
+            "environment_change": {"label": "环境突变", "note": "实时环境出现明显变化后形成的短时主动。"},
+            "personal_goal": {"label": "个人目标", "note": "非创作型长期目标在真实推进、停滞或完成后形成的主动。"},
             "candidate": {"label": "主动候选", "note": ""},
             "followup": {"label": "补一句", "note": "前面的话还差个具体点，所以顺手再接一句。"},
             "external": {"label": "外部主动能力", "note": ""},

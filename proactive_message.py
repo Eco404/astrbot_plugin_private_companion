@@ -111,6 +111,7 @@ from .helpers import (
     _date_key,
     _normalize_outbound_punctuation_flow,
     _now_ts,
+    _redact_outbound_secrets,
     _safe_float,
     _safe_int,
     _single_line,
@@ -1398,6 +1399,8 @@ class ProactiveMessageMixin:
             lines.append("- 当前对象不是主要用户/恋人/专属陪伴目标；全局人格与主动风格里的固定人名只作语气示例，不要直接拿来称呼当前对象。")
             if forbidden:
                 lines.append(f"- 这些固定称呼不属于当前对象：{'、'.join(forbidden)}。需要称呼时使用上面的当前昵称，也可以自然省略称呼。")
+        else:
+            lines.append("- 如果人格明确规定了对主要用户的专属称呼，优先遵循该称呼；不要把当前显示名自行拼接后缀来发明新称呼。")
         boundary_getter = getattr(self, "_format_private_user_boundary_hint", None)
         if callable(boundary_getter):
             try:
@@ -1407,6 +1410,27 @@ class ProactiveMessageMixin:
             if boundary:
                 lines.append(boundary)
         return "\n".join(lines)
+
+    async def _resolve_proactive_persona_prompt(self, user: dict[str, Any] | None = None, *, umo: str = "") -> str:
+        session = str(umo or (user.get("umo") if isinstance(user, dict) else "") or "").strip()
+        refresher = getattr(self, "_refresh_default_persona_prompt", None)
+        if callable(refresher):
+            try:
+                resolved = await refresher(session)
+                text = str(resolved or "").strip()
+                if text:
+                    return text
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 主动链解析会话人格失败: session=%s error=%s", _single_line(session, 100), _single_line(exc, 120))
+        getter = getattr(self, "_get_default_persona_prompt", None)
+        if callable(getter):
+            try:
+                return str(getter(session) or "").strip()
+            except TypeError:
+                return str(getter() or "").strip()
+            except Exception:
+                pass
+        return ""
 
     def _wrong_proactive_recipient_address(self, text: Any, user: dict[str, Any] | None, name: str = "") -> str:
         cleaned = _single_line(text, 600)
@@ -1562,6 +1586,7 @@ class ProactiveMessageMixin:
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
         unanswered_hint = f"这是第 {unanswered_count} 次主动后还没等到回复。" if unanswered_count > 0 else ""
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
+        persona = await self._resolve_proactive_persona_prompt(user)
         recent_history_hint = ""
         try:
             recent_history_hint = await self._recent_private_conversation_for_proactive_review(user, limit=5)
@@ -1605,6 +1630,15 @@ class ProactiveMessageMixin:
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
+        persona_marker = "<!-- private_companion_proactive_persona_v1 -->"
+        if persona and persona_marker not in prompt:
+            prompt = (
+                f"{prompt.rstrip()}\n\n{persona_marker}\n"
+                "【当前主动消息必须遵循的人格】\n"
+                f"{persona[:2600]}\n"
+                "这份人格约束最终说话者的身份、性格、关系站位、称呼和措辞。"
+                "日程、记忆、主动动机及工具结果只能提供本轮内容，不能覆盖或改写人格。"
+            )
         proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
         proactive_voice_marker = "<!-- private_companion_proactive_voice_v1 -->"
         if proactive_voice and proactive_voice_marker not in prompt:
@@ -1636,6 +1670,16 @@ class ProactiveMessageMixin:
             balance_hint = balance_hint_getter(user, reason=reason)
             if balance_hint:
                 prompt = f"{prompt.rstrip()}\n\n{balance_hint}"
+        environment_hint_getter = getattr(self, "_format_environment_change_prompt", None)
+        if callable(environment_hint_getter):
+            environment_hint = environment_hint_getter(user, reason=reason)
+            if environment_hint:
+                prompt = f"{prompt.rstrip()}\n\n{environment_hint}"
+        personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
+        if callable(personal_goal_hint_getter):
+            personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
+            if personal_goal_hint:
+                prompt = f"{prompt.rstrip()}\n\n{personal_goal_hint}"
         if open_loops_hint and "未完成话题候选" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
@@ -1756,6 +1800,18 @@ class ProactiveMessageMixin:
             if balance_hint:
                 lines.append(balance_hint)
             lines.append("这是用户明确开启的余额感知事件：允许按人格轻轻要零花钱或补给，但只提一次，不催促、不索要回复，也不把服务余额写成用户欠款。")
+        elif reason == "environment_change":
+            environment_hint_getter = getattr(self, "_format_environment_change_prompt", None)
+            environment_hint = environment_hint_getter(user, reason=reason) if callable(environment_hint_getter) else ""
+            if environment_hint:
+                lines.append(environment_hint)
+            lines.append("这是有短时效的环境变化：只贴着刚发生的变化说一个具体点，不扩写预报，不假设用户正在室外，也不解释信息来源。")
+        elif reason == "personal_goal_progress":
+            personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
+            personal_goal_hint = personal_goal_hint_getter(user, reason=reason) if callable(personal_goal_hint_getter) else ""
+            if personal_goal_hint:
+                lines.append(personal_goal_hint)
+            lines.append("这是 Bot 自己的非创作型长期目标变化：只说一个真实进展、停滞或完成结果，不向用户索取监督，不把百分比写成系统汇报。")
         elif reason == "meal_care":
             lines.append("这是饭点关心：自然问用户这一顿吃了没有。问题主体必须是用户，不要回答成自己吃了什么；像熟悉的人顺口惦记一句，不说教、不盘问，也不要同一条里连续列很多问题。")
         elif reason == "meal_care_followup":
@@ -2120,6 +2176,24 @@ class ProactiveMessageMixin:
             sender_name=name or "PrivateCompanion",
         )
 
+    def _proactive_conversation_with_configured_persona(self, conversation: Any) -> Any:
+        specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+        if conversation is None or not specific_id:
+            return conversation
+        if str(getattr(conversation, "persona_id", "") or "").strip() == specific_id:
+            return conversation
+        try:
+            scoped = deepcopy(conversation)
+            scoped.persona_id = specific_id
+            return scoped
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 无法为主动主链应用插件指定人格,继续使用会话人格: persona=%s error=%s",
+                _single_line(specific_id, 80),
+                _single_line(exc, 120),
+            )
+            return conversation
+
     async def _run_framework_agent_text(
         self,
         *,
@@ -2160,7 +2234,7 @@ class ProactiveMessageMixin:
             for attempt in range(3):
                 try:
                     conv = await self._get_current_conversation_safely(umo, label=f"{label}_framework_read")
-                    req.conversation = conv
+                    req.conversation = self._proactive_conversation_with_configured_persona(conv)
 
                     async def _runner_factory():
                         runner = await build_main_agent(
@@ -2370,13 +2444,7 @@ class ProactiveMessageMixin:
             umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
         if not umo and isinstance(user, dict):
             umo = str(user.get("umo") or "").strip()
-        refresher = getattr(self, "_refresh_default_persona_prompt", None)
-        if callable(refresher):
-            try:
-                await refresher(umo)
-            except Exception:
-                pass
-        persona = self._get_default_persona_prompt()
+        persona = await self._resolve_proactive_persona_prompt(user, umo=umo)
         proactive_rewrite = str(task or "").startswith("proactive")
         if proactive_rewrite:
             reply_style = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
@@ -3144,6 +3212,7 @@ class ProactiveMessageMixin:
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         if not bool(getattr(self, "enable_proactive_message_review", True)):
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+        persona = await self._resolve_proactive_persona_prompt(user)
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
         intent_hint = self._format_proactive_generation_intent_hint(
             user,
@@ -3196,6 +3265,9 @@ Rules:
 
 [Proactive source]
 reason={reason or "check_in"}; action={action or "message"}; topic={_single_line(topic, 80) or "none"}; motive={_single_line(motive, 120) or "none"}; summary={_single_line(action_summary, 80) or "none"}
+
+[Full persona]
+{persona[:2600] if persona else "(No explicit persona was resolved. Preserve the candidate instead of inventing a new voice.)"}
 
 [Persona and intent constraints]
 {intent_hint or "(none)"}
@@ -3260,6 +3332,17 @@ Output:
                 has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
             )
             reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
+            reviewed_text, repaired_address = self._repair_proactive_recipient_address(
+                reviewed_text,
+                user,
+                _single_line(user.get("nickname"), 40),
+            )
+            if repaired_address:
+                logger.warning(
+                    "[PrivateCompanion] 主动发送前复核改写已纠正串用户称呼: user=%s wrong=%s",
+                    _single_line(user.get("user_id"), 40),
+                    repaired_address,
+                )
             if not reviewed_text:
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if self._framework_agent_meta_summary_leak(reviewed_text):
@@ -3550,6 +3633,16 @@ Output:
             balance_hint = balance_hint_getter(user, reason=reason)
             if balance_hint:
                 reference = f"{reference}\n{balance_hint}" if reference else balance_hint
+        environment_hint_getter = getattr(self, "_format_environment_change_prompt", None)
+        if reason == "environment_change" and callable(environment_hint_getter):
+            environment_hint = environment_hint_getter(user, reason=reason)
+            if environment_hint:
+                reference = f"{reference}\n{environment_hint}" if reference else environment_hint
+        personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
+        if reason == "personal_goal_progress" and callable(personal_goal_hint_getter):
+            personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
+            if personal_goal_hint:
+                reference = f"{reference}\n{personal_goal_hint}" if reference else personal_goal_hint
         if not reference:
             reference = f"自然地向{name or '对方'}主动说一句与当前状态有关、低压力且无需立即回复的话。"
         return await self._rewrite_reference_reply_with_persona(
@@ -3724,6 +3817,12 @@ Output:
             motive=motive,
             action_context=action_context,
         )
+        persona = await self._resolve_proactive_persona_prompt(user)
+        proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
+        recipient_identity = self._format_proactive_recipient_identity_guard(
+            user,
+            _single_line(user.get("nickname"), 40),
+        )
         prompt = f"""
 把下面这条主动私聊消息改成真正的主动开口。
 它不是在回复用户刚发来的消息；聊天历史只能当背景。
@@ -3747,6 +3846,15 @@ Output:
 【内在约束】
 {intent_hint or "（无额外约束）"}
 
+【完整人格】
+{persona[:2600] if persona else "（没有解析到显式人格；尽量保留原文语气，不要另造一种通用陪伴人格）"}
+
+【主动开口风格】
+{proactive_voice or "（无额外主动风格；保持原文已有的人格语气）"}
+
+【当前收件人】
+{recipient_identity or "不要猜名字或套用其他对象的专属称呼。"}
+
 要求：
 - 只输出要发送的正文
 - 不要把“用户”“对方”“收信人”这类内部称呼写进正文；需要称呼时用自然的“你”或对方昵称
@@ -3755,6 +3863,7 @@ Output:
 - 没有真实图片或工具结果时，只写聊天内容本身，不描述动作结果
 - 如果原文只是过程状态或工具结果，请不要改写成另一种状态汇报；改不成自然聊天就输出空文本
 - 改写后仍要贴合内在约束里的候选语义；不能把分享型改成泛泛问候，也不能把低压关心改成追问
+- 只修正“回复空气”的问题；不得把原文改成另一种人格，也不得降低或升级当前关系亲密度
 - 尽量 1 到 2 句，像自然想起对方后随手说一句
 """.strip()
         started = time.perf_counter()
@@ -4064,7 +4173,9 @@ Output:
             re.split(r"[，,。！？!?…\s]", text, maxsplit=1)[0][:6] == current_opening
             for text in recent_texts
         )
-        if repeated_opening:
+        proactive_voice = str(getattr(self, "persona_proactive_voice_prompt", "") or "")
+        # Repetition control must not erase an opening explicitly defined by the persona.
+        if repeated_opening and current_opening not in proactive_voice:
             cleaned = re.sub(r"^(唔|嗯|诶|啊|欸)[…\.。!！?？~～\s，,]*", "", cleaned).strip()
             cleaned = re.sub(r"^(刚好|突然|我就是|我来|来找你)[^，,。！？!?…\n]{0,16}[，,。！？!?…\s]*", "", cleaned).strip()
         if sum(cleaned.count(token) for token in ("唔", "嗯", "诶", "呀", "啦", "嘛", "哦", "呢")) >= 5:
@@ -6106,8 +6217,9 @@ Output:
         ]
         if rotation_reference:
             positive.append(
-                "wardrobe rotation: make at least two visible outfit changes from recent daily outfit photos; "
-                f"avoid repeating {rotation_reference}"
+                "wardrobe rotation: show exactly one character wearing one coherent new outfit in this single image; "
+                "make that one outfit differ from recent daily outfit photos in at least two design dimensions, "
+                f"but never display the old outfit or multiple alternatives; avoid repeating {rotation_reference}"
             )
         if diary_hint:
             positive.append(f"daily mood cue: {diary_hint}")
@@ -6140,6 +6252,17 @@ Output:
             "watermark",
             "logo",
             "other people",
+            "duplicate character",
+            "twins",
+            "multiple people",
+            "multiple outfits",
+            "outfit comparison",
+            "before and after",
+            "split screen",
+            "side-by-side panels",
+            "diptych",
+            "collage",
+            "character sheet",
             "user in frame",
             "private screen",
             "nsfw",
@@ -6695,16 +6818,42 @@ Output:
         normalized = str(workflow_kind or "").strip().lower()
         if normalized not in {"selfie", "portrait", "自拍", "人像"}:
             return _single_line(prompt, 1800)
-        if self._photo_generation_explicit_mirror_request(prompt):
-            return _single_line(prompt, 1800)
-        guard = (
-            "Default selfie composition guard: no mirror selfie or full-length mirror shot unless explicitly requested; "
-            "keep the face visible, avoid phone covering face, use upper-body to three-quarter framing, and place the character naturally in the current scene."
-        )
+        explicit_mirror = self._photo_generation_explicit_mirror_request(prompt)
+        if explicit_mirror:
+            guard = (
+                "Selfie composition guard: exactly one real character wearing exactly one coherent outfit in one continuous scene; "
+                "a single mirror reflection of that same outfit is allowed, but do not create outfit alternatives, comparison panels, duplicated subjects, or a collage; "
+                "keep the face visible and avoid the phone covering the face."
+            )
+        else:
+            guard = (
+                "Default selfie composition guard: exactly one character wearing exactly one coherent outfit in one continuous scene; "
+                "no duplicated subject, outfit alternatives, comparison layout, split screen, side-by-side panels, diptych, collage, or character sheet; "
+                "no mirror selfie or full-length mirror shot unless explicitly requested; keep the face visible, avoid phone covering face, "
+                "use upper-body to three-quarter framing, and place the character naturally in the current scene."
+            )
         merged = f"{prompt}\n\n{guard}".strip()
+        negative_terms = [
+            "duplicate character",
+            "twins",
+            "multiple people",
+            "multiple outfits",
+            "outfit comparison",
+            "before and after",
+            "split screen",
+            "side-by-side panels",
+            "diptych",
+            "collage",
+            "character sheet",
+        ]
+        if not explicit_mirror:
+            negative_terms.extend(
+                ["mirror selfie", "full-length mirror selfie", "full body mirror shot", "dressing room mirror"]
+            )
+        negative_terms.append("phone covering face")
         return self._append_photo_negative_terms(
             merged,
-            ["mirror selfie", "full-length mirror selfie", "full body mirror shot", "dressing room mirror", "phone covering face"],
+            negative_terms,
             limit=1800,
         )
 
@@ -6719,7 +6868,8 @@ Output:
                 "clear costume theme, tasteful outfit, convention snapshot or room fitting photo feeling"
             ),
             "日常穿搭": (
-                "daily outfit portrait without mirror, handheld selfie or natural environmental portrait, "
+                "daily outfit portrait without mirror, exactly one character wearing one coherent outfit in one continuous frame, "
+                "no outfit comparison, no split screen, no side-by-side panels, handheld selfie or natural environmental portrait, "
                 "upper-body to three-quarter framing, visible face, clear clothing layers and color palette, "
                 "location-appropriate background, no phone covering face, not body-only"
             ),
@@ -7707,10 +7857,12 @@ Output:
         normalizer = getattr(self, "_normalize_external_image_api_platform", None)
         configured = getattr(self, "external_image_api_platform", "auto")
         platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
-        if platform in {"openai", "bailian", "modelscope", "doubao", "gemini"}:
+        if platform in {"openai", "bailian", "modelscope", "doubao", "gemini", "sensenova"}:
             return platform
         base = self._normalized_external_image_api_base_url(platform=platform).lower()
         model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        if "token.sensenova.cn" in base or model in {"senova-u1-fast", "sensenova-u1-fast"}:
+            return "sensenova"
         if any(token in base for token in ("volces.com", "volcengine.com", "ark.cn-", "ark.ap-", "visual.volcengineapi.com")):
             return "doubao"
         if model.startswith(("doubao", "seedream")) or "seedream" in model:
@@ -7849,6 +8001,8 @@ Output:
             return "Gemini"
         if resolved == "openai":
             return "OpenAI 兼容"
+        if resolved == "sensenova":
+            return "SenseNova 日日新"
         return "在线图片 API"
 
     def _external_image_endpoint(self, endpoint_type: str = "generations") -> str:
@@ -7895,6 +8049,27 @@ Output:
     def _sanitize_bailian_image_size(self, override: str = "") -> str:
         size = self._sanitize_external_image_size(override)
         return size.replace("x", "*")
+
+    def _sanitize_sensenova_image_size(self, override: str = "") -> str:
+        supported = (
+            (1664, 2496), (2496, 1664), (1760, 2368), (2368, 1760),
+            (1824, 2272), (2272, 1824), (2048, 2048), (2752, 1536),
+            (1536, 2752), (3072, 1376), (1344, 3136),
+        )
+        raw = str(override or getattr(self, "external_image_api_size", "") or "2752x1536").strip().lower()
+        match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", raw)
+        if not match:
+            return "2752x1536"
+        width, height = int(match.group(1)), int(match.group(2))
+        if (width, height) in supported:
+            return f"{width}x{height}"
+        ratio = width / max(1, height)
+        closest = min(supported, key=lambda item: abs((item[0] / item[1]) - ratio))
+        return f"{closest[0]}x{closest[1]}"
+
+    def _sensenova_image_model(self) -> str:
+        model = str(getattr(self, "external_image_api_model", "") or "").strip()
+        return "sensenova-u1-fast" if model.lower() == "senova-u1-fast" else model
 
     def _bailian_api_root(self) -> str:
         base = self._normalized_external_image_api_base_url(platform="bailian").rstrip("/")
@@ -8211,6 +8386,10 @@ Output:
             return ""
         if platform == "gemini" and any(token in lowered for token in ("image", "imagen", "nano-banana")):
             return ""
+        if platform == "sensenova":
+            if lowered in {"senova-u1-fast", "sensenova-u1-fast"}:
+                return ""
+            return "SenseNova 日日新信息图模型必须填写官方 Model ID：sensenova-u1-fast"
         if lowered.startswith(text_model_prefixes) and not any(token in lowered for token in image_tokens):
             return f"在线图片模型填成了文本/聊天模型：{model}。请改成该平台的图片模型名，例如支持 /images/generations 或 /images/edits 的模型。"
         return ""
@@ -8224,6 +8403,38 @@ Output:
             )
         prefix = "参考图接口" if reference else ""
         endpoint_note = f"端点 {endpoint} " if endpoint else ""
+        platform_getter = getattr(self, "_resolved_external_image_api_platform", None)
+        platform = platform_getter() if callable(platform_getter) else ""
+        if platform == "sensenova" and int(status) == 403:
+            return (
+                f"{prefix}{endpoint_note}HTTP 403：SenseNova 官方错误码表示当前请求语言不受支持。"
+                "请把提示词改为中文或英文，并避免仅使用无法识别的混合符号/小语种后重试。"
+                f"返回：{_single_line(text, 120)}"
+            )
+        if platform == "sensenova" and int(status) == 401:
+            if "authorization not found" in lowered or "missing authorization" in lowered:
+                return (
+                    f"{prefix}{endpoint_note}HTTP 401：SenseNova 未识别到 Authorization。"
+                    "应使用 Authorization: Bearer <控制台 API Key>。"
+                )
+            return (
+                f"{prefix}{endpoint_note}HTTP 401：SenseNova 已收到 Bearer，但 API Key 无效或当前额度不足。"
+                "请在 platform.sensenova.cn 控制台检查 Key 状态与 Token Plan。"
+                f"返回：{_single_line(text, 120)}"
+            )
+        if int(status) in {401, 403}:
+            if "authorization not found" in lowered or "missing authorization" in lowered:
+                return (
+                    f"{prefix}{endpoint_note}HTTP {status}：服务未识别到鉴权信息。"
+                    "OpenAI 兼容链路应使用 Authorization: Bearer <API Key>；请检查自定义请求头是否覆盖或删除了 Authorization。"
+                )
+            permission_causes = "API Key 无效、已过期、被停用，或没有该图片模型/接口权限"
+            if int(status) == 403:
+                permission_causes += "；也可能命中账号/IP 白名单或网关 WAF"
+            return (
+                f"{prefix}{endpoint_note}HTTP {status}：鉴权已送达但服务拒绝访问。"
+                f"常见原因：{permission_causes}。返回：{_single_line(text, 120)}"
+            )
         if int(status) == 404:
             return (
                 f"{prefix}{endpoint_note}HTTP 404：未找到生图接口。"
@@ -9350,6 +9561,8 @@ Output:
                 reference_image_path=reference_image_path,
                 image_size=image_size,
             )
+        if platform == "sensenova" and reference_image_path:
+            return "", "SenseNova U1 Fast 官方接口不支持参考图输入，请使用纯文生图或切换其他参考图后端"
         if reference_image_path and os.path.exists(reference_image_path):
             logger.info(
                 "[PrivateCompanion] 在线图片 API 尝试参考图接口: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
@@ -9376,10 +9589,12 @@ Output:
             import aiohttp
 
             payload = {
-                "model": self.external_image_api_model,
+                "model": self._sensenova_image_model() if platform == "sensenova" else self.external_image_api_model,
                 "prompt": prompt_text,
-                "size": self._sanitize_external_image_size(image_size),
+                "size": self._sanitize_sensenova_image_size(image_size) if platform == "sensenova" else self._sanitize_external_image_size(image_size),
             }
+            if platform == "sensenova":
+                payload["n"] = 1
             headers = {
                 "Authorization": f"Bearer {self.external_image_api_key}",
                 "Content-Type": "application/json",
@@ -10167,7 +10382,7 @@ Output:
         target_id = _single_line(target_id, 80)
         if target_type not in {"private", "group"} or not target_id:
             return False
-        raw_segments = [str(item or "").strip() for item in segments if str(item or "").strip()]
+        raw_segments = [_redact_outbound_secrets(item, self).strip() for item in segments if str(item or "").strip()]
         if len(raw_segments) <= 1:
             return False
         if getattr(self, "enable_tts_enhancement", False) and any(re.search(r"</?t{2,}s\b", item, flags=re.IGNORECASE) for item in raw_segments):
@@ -10341,6 +10556,11 @@ Output:
         return False, error or f"OneBot 原生动作 {action} 返回失败"
 
     async def _send_chain_components(self, umo: str, chain: list[Any]) -> None:
+        chain_redactor = getattr(self, "_redact_outbound_chain_secrets", None)
+        if callable(chain_redactor):
+            chain, redacted = chain_redactor(chain)
+            if redacted:
+                logger.error("[PrivateCompanion] 主动发送前检测到敏感凭据并已脱敏: umo=%s stage=before_hooks", _single_line(umo, 120))
         hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(chain))
         if hit:
             logger.warning(
@@ -10370,6 +10590,10 @@ Output:
                     before=self._chain_text_for_forbidden_recall(chain),
                 )
             return
+        if callable(chain_redactor):
+            processed_chain, redacted = chain_redactor(processed_chain)
+            if redacted:
+                logger.error("[PrivateCompanion] 主动装饰后检测到敏感凭据并已脱敏: umo=%s stage=after_hooks", _single_line(umo, 120))
         tts_chain_guard = getattr(self, "_sanitize_outbound_tts_chain_without_event", None)
         if callable(tts_chain_guard):
             processed_chain = await tts_chain_guard(processed_chain, umo=umo)
@@ -11149,10 +11373,6 @@ Output:
             ("冒个泡", ""),
             ("冒个头", ""),
             ("顺手冒了个头", ""),
-            ("突然想起你", ""),
-            ("刚好想到你", ""),
-            ("我刚刚想到你了。", ""),
-            ("我刚刚想到你了", ""),
             ("没什么大不了的,就是", ""),
             ("没什么大道理,就是", ""),
             ("免得你又忘了我", "怕你忙过头"),

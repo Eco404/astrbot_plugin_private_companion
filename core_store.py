@@ -389,6 +389,9 @@ class CoreStoreMixin:
             "group_llm_reply_blocks": {},
             "cache_metrics": {},
             "balance_awareness": {},
+            "environment_change_awareness": {},
+            "personal_goal_state": {},
+            "personal_goals": [],
             "food_menu": {},
         }
 
@@ -449,6 +452,9 @@ class CoreStoreMixin:
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("cache_metrics", {})
         data.setdefault("balance_awareness", {})
+        data.setdefault("environment_change_awareness", {})
+        data.setdefault("personal_goal_state", {})
+        data.setdefault("personal_goals", [])
         data.setdefault("food_menu", {})
         return data
 
@@ -540,6 +546,158 @@ class CoreStoreMixin:
             data["proactive_candidate_repeat_sanitized_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return changed
 
+    @staticmethod
+    def _store_history_item_timestamp(item: dict[str, Any]) -> float:
+        return max(
+            _safe_float(item.get("updated_ts"), 0),
+            _safe_float(item.get("created_ts"), 0),
+            _safe_float(item.get("scheduled_ts"), 0),
+            _safe_float(item.get("last_seen_ts"), 0),
+            _safe_float(item.get("ts"), 0),
+        )
+
+    @staticmethod
+    def _compact_external_history_items(items: Any, *, limit: int) -> list[dict[str, Any]]:
+        if not isinstance(items, list):
+            return []
+        text_limits = {
+            "key": 120,
+            "id": 120,
+            "title": 300,
+            "headline": 300,
+            "topic": 200,
+            "source": 100,
+            "source_title": 300,
+            "summary": 1200,
+            "note": 1200,
+            "impression": 1200,
+            "reason": 400,
+            "link": 800,
+            "url": 800,
+            "source_url": 800,
+            "published_at": 80,
+            "published": 80,
+            "date": 80,
+        }
+        compacted: list[dict[str, Any]] = []
+        for raw in items[: max(0, limit)]:
+            if not isinstance(raw, dict):
+                continue
+            item: dict[str, Any] = {}
+            for key, max_len in text_limits.items():
+                value = raw.get(key)
+                if value is not None and str(value).strip():
+                    item[key] = _single_line(value, max_len)
+            for key in ("created_ts", "published_ts", "score", "rank", "text_readable", "video_subtitle_readable"):
+                value = raw.get(key)
+                if isinstance(value, (int, float, bool)):
+                    item[key] = value
+            if item:
+                compacted.append(item)
+        return compacted
+
+    def _compact_store_history_inplace(self, data: Any) -> dict[str, int]:
+        if not isinstance(data, dict):
+            return {}
+        changed: dict[str, int] = {}
+
+        pool = data.get("proactive_candidate_pool")
+        if isinstance(pool, list) and len(pool) > 600:
+            candidates = [item for item in pool if isinstance(item, dict)]
+            users = data.get("users") if isinstance(data.get("users"), dict) else {}
+            planned_ids = {
+                _single_line(user.get("planned_candidate_id"), 40)
+                for user in users.values()
+                if isinstance(user, dict) and _single_line(user.get("planned_candidate_id"), 40)
+            }
+            active_statuses = {"", "accepted", "deferred", "queued", "pending", "unknown"}
+            protected = [item for item in candidates if _single_line(item.get("id"), 40) in planned_ids]
+            protected_ids = {_single_line(item.get("id"), 40) for item in protected}
+            active = [
+                item
+                for item in candidates
+                if _single_line(item.get("id"), 40) not in protected_ids
+                and _single_line(item.get("status"), 24).lower() in active_statuses
+            ]
+            completed = [
+                item
+                for item in candidates
+                if _single_line(item.get("id"), 40) not in protected_ids
+                and _single_line(item.get("status"), 24).lower() not in active_statuses
+            ]
+            active.sort(key=self._store_history_item_timestamp, reverse=True)
+            completed.sort(key=self._store_history_item_timestamp, reverse=True)
+            remaining = max(0, 600 - len(protected))
+            kept_active = active[:remaining]
+            kept_completed = completed[: max(0, remaining - len(kept_active))]
+            kept = protected + kept_active + kept_completed
+            kept.sort(key=self._store_history_item_timestamp)
+            data["proactive_candidate_pool"] = kept[-600:]
+            changed["proactive_candidate_pool"] = len(pool) - len(data["proactive_candidate_pool"])
+
+        news = data.get("news_integration")
+        if isinstance(news, dict):
+            digests = news.get("digests")
+            if isinstance(digests, list):
+                compacted_digests: list[dict[str, Any]] = []
+                removed_payloads = 0
+                for raw in digests[-32:]:
+                    if not isinstance(raw, dict):
+                        continue
+                    digest = dict(raw)
+                    for key in ("items", "results", "raw_items", "articles"):
+                        if key in digest:
+                            digest.pop(key, None)
+                            removed_payloads += 1
+                    compacted_digests.append(digest)
+                if len(compacted_digests) != len(digests) or removed_payloads:
+                    news["digests"] = compacted_digests
+                    changed["news_digests"] = max(0, len(digests) - len(compacted_digests)) + removed_payloads
+            latest_items = news.get("latest_items")
+            if isinstance(latest_items, list):
+                compacted_latest = self._compact_external_history_items(latest_items, limit=12)
+                if compacted_latest != latest_items:
+                    news["latest_items"] = compacted_latest
+                    changed["news_latest_items"] = len(latest_items)
+            last_digest = news.get("last_digest")
+            if isinstance(last_digest, dict) and isinstance(last_digest.get("items"), list):
+                compacted_items = self._compact_external_history_items(last_digest.get("items"), limit=8)
+                if compacted_items != last_digest.get("items"):
+                    last_digest["items"] = compacted_items
+                    changed["news_last_digest_items"] = len(compacted_items)
+
+        web = data.get("web_exploration")
+        if isinstance(web, dict):
+            notes = web.get("notes")
+            if isinstance(notes, list):
+                compacted_notes: list[dict[str, Any]] = []
+                removed_payloads = 0
+                for raw in notes[-40:]:
+                    if not isinstance(raw, dict):
+                        continue
+                    note = dict(raw)
+                    for key in ("results", "raw_results", "pages"):
+                        if key in note:
+                            note.pop(key, None)
+                            removed_payloads += 1
+                    compacted_notes.append(note)
+                if len(compacted_notes) != len(notes) or removed_payloads:
+                    web["notes"] = compacted_notes
+                    changed["web_notes"] = max(0, len(notes) - len(compacted_notes)) + removed_payloads
+            latest_results = web.get("latest_results")
+            if isinstance(latest_results, list):
+                compacted_results = self._compact_external_history_items(latest_results, limit=8)
+                if compacted_results != latest_results:
+                    web["latest_results"] = compacted_results
+                    changed["web_latest_results"] = len(latest_results)
+            last_digest = web.get("last_digest")
+            if isinstance(last_digest, dict) and isinstance(last_digest.get("results"), list):
+                compacted_results = self._compact_external_history_items(last_digest.get("results"), limit=6)
+                if compacted_results != last_digest.get("results"):
+                    last_digest["results"] = compacted_results
+                    changed["web_last_digest_results"] = len(compacted_results)
+        return changed
+
     def _load_data_sync(self) -> dict[str, Any]:
         manager = getattr(self, "store_manager", None)
         if manager is not None:
@@ -547,10 +705,13 @@ class CoreStoreMixin:
                 data = manager.load_initial_store()
                 changed = self._sanitize_store_control_tags_inplace(data)
                 repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
+                compacted = self._compact_store_history_inplace(data)
                 if changed:
                     logger.warning("[PrivateCompanion] 启动读取数据时清理非标准控制标签: fields=%s", changed)
                 if repeat_changed:
                     logger.warning("[PrivateCompanion] 启动读取数据时压缩主动候选重复计数: items=%s", repeat_changed)
+                if compacted:
+                    logger.info("[PrivateCompanion] 启动读取数据时压缩历史存储: %s", compacted)
                 return data
             except Exception as exc:
                 logger.warning("[PrivateCompanion] StoreManager 读取失败,回退 JSON: %s", _single_line(exc, 160))
@@ -564,16 +725,30 @@ class CoreStoreMixin:
             data = self._ensure_store_defaults(data)
             changed = self._sanitize_store_control_tags_inplace(data)
             repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
+            compacted = self._compact_store_history_inplace(data)
             if changed:
                 logger.warning("[PrivateCompanion] 启动读取 JSON 时清理非标准控制标签: fields=%s", changed)
             if repeat_changed:
                 logger.warning("[PrivateCompanion] 启动读取 JSON 时压缩主动候选重复计数: items=%s", repeat_changed)
+            if compacted:
+                logger.info("[PrivateCompanion] 启动读取 JSON 时压缩历史存储: %s", compacted)
             return data
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 读取数据失败,将使用空数据: {e}")
             return self._new_store()
 
     def _save_data_sync(self):
+        compacted = self._compact_store_history_inplace(self.data)
+        if compacted:
+            logger.info("[PrivateCompanion] 保存前压缩历史存储: %s", compacted)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._save_data_now_sync()
+            return
+        self._schedule_data_save(delay=0.35)
+
+    def _save_data_now_sync(self) -> None:
         changed = self._sanitize_store_control_tags_inplace(self.data)
         repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(self.data)
         if changed:
@@ -607,6 +782,7 @@ class CoreStoreMixin:
 
     def _write_data_snapshot_sync(self, data: dict[str, Any]) -> None:
         changed = self._sanitize_store_control_tags_inplace(data)
+        self._compact_store_history_inplace(data)
         if changed:
             logger.warning("[PrivateCompanion] 保存快照前清理非标准控制标签: fields=%s", changed)
         manager = getattr(self, "store_manager", None)
@@ -686,6 +862,18 @@ class CoreStoreMixin:
             self._data_save_task = asyncio.create_task(_runner())
         except RuntimeError:
             self._save_data_sync()
+
+    async def _flush_scheduled_data_save(self) -> None:
+        """Wait until all coalesced writes, including writes queued while waiting, finish."""
+        while True:
+            task = getattr(self, "_data_save_task", None)
+            if isinstance(task, asyncio.Task) and not task.done():
+                await asyncio.shield(task)
+                continue
+            if bool(getattr(self, "_data_save_dirty", False)):
+                self._schedule_data_save(delay=0.0)
+                continue
+            return
 
     async def _reset_plugin_store(self) -> None:
         async with self._data_lock:

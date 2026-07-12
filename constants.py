@@ -228,6 +228,8 @@ _DATA_STORE_KEYS = (
     "inbound_debounce_stats",
     "group_llm_reply_blocks",
     "balance_awareness",
+    "environment_change_awareness",
+    "personal_goal_state",
     "food_menu",
 )
 
@@ -255,6 +257,8 @@ _REASON_TEXT = {
     "creative_share": "跟{name}分享刚写到的小说片段",
     "jm_cosmos_share": "提起刚翻到的漫画本子",
     "low_balance": "发现自己的零花钱有点不够用了",
+    "environment_change": "注意到外面的环境突然变了",
+    "personal_goal_progress": "自己的一个长期目标有了新进展",
     "meal_care": "惦记{name}有没有按时吃东西",
     "meal_care_followup": "还想把刚才那顿饭问清楚一点",
 }

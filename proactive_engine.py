@@ -296,7 +296,7 @@ class ProactiveEngineMixin:
                 planned[str(user_id)] = candidate_id
         return planned
 
-    def _trim_proactive_candidate_total(self, items: list[dict[str, Any]], *, limit: int = 2000) -> list[dict[str, Any]]:
+    def _trim_proactive_candidate_total(self, items: list[dict[str, Any]], *, limit: int = 600) -> list[dict[str, Any]]:
         if len(items) <= limit:
             return items
         planned_ids = set(self._planned_candidate_ids_by_user().values())
@@ -447,7 +447,7 @@ class ProactiveEngineMixin:
             if anchor > 0 and now - anchor <= ttl:
                 kept.append(item)
         kept, _ = self._apply_per_user_pending_candidate_cap(kept)
-        self.data["proactive_candidate_pool"] = self._trim_proactive_candidate_total(kept, limit=2000)
+        self.data["proactive_candidate_pool"] = self._trim_proactive_candidate_total(kept, limit=600)
         return self.data["proactive_candidate_pool"]
 
     def _proactive_impulse_pool(self, user: dict[str, Any]) -> list[dict[str, Any]]:
@@ -635,7 +635,7 @@ class ProactiveEngineMixin:
     def _proactive_impulse_default_window_seconds(self, reason: str) -> tuple[float, float]:
         if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
             return 70 * 60.0, 35 * 60.0
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share"}:
+        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "environment_change"}:
             return 45 * 60.0, 60 * 60.0
         if reason in {"quiet_care", "check_in", "state_share"}:
             return 55 * 60.0, 80 * 60.0
@@ -877,6 +877,9 @@ class ProactiveEngineMixin:
         user: dict[str, Any],
         impulse: dict[str, Any],
     ) -> dict[str, Any]:
+        disabled = getattr(self, "_proactive_generation_disabled", None)
+        if callable(disabled) and disabled(user):
+            return {}
         pool = self._cleanup_proactive_impulses(user)
         signature = self._proactive_impulse_signature(impulse)
         reason = _single_line(impulse.get("reason"), 40)
@@ -1010,6 +1013,9 @@ class ProactiveEngineMixin:
         now: float | None = None,
     ) -> dict[str, Any] | None:
         if not isinstance(candidate, dict):
+            return None
+        disabled = getattr(self, "_proactive_generation_disabled", None)
+        if callable(disabled) and disabled(user):
             return None
         check_now = _now_ts() if now is None else now
         reason = _single_line(candidate.get("reason"), 40) or "check_in"
@@ -1303,11 +1309,11 @@ class ProactiveEngineMixin:
             kind = "care"
         elif normalized_reason in {"quiet_care", "state_share"}:
             kind = "care"
-        elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share"}:
+        elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share", "personal_goal_progress"}:
             kind = "self_share"
         elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
             kind = "reminder"
-        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
+        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share", "environment_change"}:
             kind = "external_share"
         elif normalized_source in {"pending_followup", "followup"}:
             kind = "continuation"
@@ -1330,7 +1336,7 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "current_activity", 0.62
         elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
             anchor_type, anchor_score = "important_date", 0.78
-        elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
+        elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share", "environment_change"}:
             anchor_type, anchor_score = "external_info", 0.66
         elif normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
             anchor_type, anchor_score = "time_ritual", 0.55
@@ -1776,7 +1782,8 @@ class ProactiveEngineMixin:
                 [
                     "【来源专项改写：日常招呼】",
                     "这类来源的价值在“当天这个时段的第一句主动开口”，不是在任何空档里补一声问候。",
-                    "如果今天已经发过别的主动、或者已经和对方有来回互动，就别再硬写 morning_greeting/noon_greeting/evening_greeting。",
+                    "如果今天已经发过别的主动，就别再硬写 morning_greeting；用户先自然来聊不等于 Bot 已经醒来，不能因此取消首次起床问候。",
+                    "noon_greeting/evening_greeting 仍要避开刚刚发生的来回互动。",
                     "rewrite 后必须落在当前时段的一个小片段上：早晨刚醒/洗漱/出门前，中午刚吃完/发懒/准备午休，晚上收尾/回家/窝下来。",
                     "最终效果要像这个时段第一次顺手冒头，不像模板化签到，也不像聊到一半又补来的礼貌问候。",
                 ]
@@ -2078,6 +2085,8 @@ class ProactiveEngineMixin:
         normalized_reason = self._normalize_legacy_proactive_text(reason, limit=40)
         normalized_source = self._normalize_legacy_proactive_text(source, limit=40)
         normalized_kind = self._normalize_legacy_proactive_text(semantic_kind, limit=40)
+        if normalized_reason == "environment_change" or normalized_source == "environment_change":
+            return "immediate"
         if normalized_source == "timer" or normalized_reason in {
             "birthday_eve_hint",
             "birthday_celebration",
@@ -2452,6 +2461,13 @@ class ProactiveEngineMixin:
         note: str = "",
         user: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        disabled = getattr(self, "_proactive_generation_disabled", None)
+        target_user = user
+        if not isinstance(target_user, dict):
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            target_user = users.get(str(user_id)) if isinstance(users.get(str(user_id)), dict) else None
+        if callable(disabled) and disabled(target_user):
+            return {}
         now = _now_ts()
         topic = _single_line(candidate.get("topic"), 80)
         motive = _single_line(candidate.get("motive"), 160)
@@ -2577,8 +2593,13 @@ class ProactiveEngineMixin:
         if social_relay_note:
             self._record_proactive_candidate(user_id, candidate, status="blocked", note=social_relay_note, user=user)
             return False
-        rest_until = self._user_rest_silence_until(user, now=now)
-        if rest_until > now and scheduled < rest_until and source != "timer":
+        rest_until = self._proactive_rest_block_until(
+            user,
+            now=now,
+            reason=candidate.get("reason"),
+            source=source,
+        )
+        if rest_until > now and scheduled < rest_until:
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="用户明确休息中", user=user)
             return False
         if not self._user_enabled_for_proactive(str(user_id), user):
@@ -2629,7 +2650,7 @@ class ProactiveEngineMixin:
         if not self._action_is_available(action, user):
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="动作不可用或媒体额度不足", user=user)
             return False
-        if self._proactive_candidate_repeated(user, candidate):
+        if source != "environment_change" and self._proactive_candidate_repeated(user, candidate):
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="近期主题过于相似", user=user)
             return False
         item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划", user=user)
@@ -2879,6 +2900,12 @@ class ProactiveEngineMixin:
         if not self._user_enabled_for_proactive(user_id, user):
             self._clear_pending_proactive_plan(user)
             return False, "私聊对象未启用"
+        if self._proactive_generation_disabled(user):
+            self._suspend_user_proactive_generation(user)
+            reason_formatter = getattr(self, "_format_daily_limit_disabled_reason", None)
+            if callable(reason_formatter):
+                return False, reason_formatter(user)
+            return False, "每日上限为 0，主动生成已停止"
         if user.get("proactive_sending"):
             return False, "上一条主动消息仍在发送中"
         umo_filled = False
@@ -2896,14 +2923,14 @@ class ProactiveEngineMixin:
                 _single_line(user_id, 40),
                 _single_line(user.get("umo"), 120),
             )
-        if self._simulation_active(user):
-            return self._should_send_simulation(user)
         daily_limit = self._effective_user_daily_limit(user)
-        if not is_troubleshooting and daily_limit <= 0:
+        if daily_limit <= 0:
             reason_formatter = getattr(self, "_format_daily_limit_disabled_reason", None)
             if callable(reason_formatter):
                 return False, reason_formatter(user)
             return False, "每日上限为 0"
+        if self._simulation_active(user):
+            return self._should_send_simulation(user)
         now = _now_ts()
         due_timer_active = self._has_due_llm_timer(user, now=now)
         if not is_troubleshooting and planned_source == "timer" and not due_timer_active:
@@ -2928,9 +2955,13 @@ class ProactiveEngineMixin:
         if (
             not is_troubleshooting
             and
-            self._user_rest_silence_until(user, now=now) > now
+            self._proactive_rest_block_until(
+                user,
+                now=now,
+                reason=user.get("planned_proactive_reason"),
+                source=planned_source,
+            ) > now
             and not due_timer_active
-            and planned_source != "timer"
         ):
             return False, "用户明确休息中"
         if not is_troubleshooting and self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
@@ -3110,6 +3141,7 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and planned_reason in suppressed_greetings
             and self._is_greeting_reason(planned_reason)
+            and not self._is_initial_wakeup_greeting(user)
             and planned_source != "timer"
             and not due_timer_active
         ):
@@ -3140,7 +3172,12 @@ class ProactiveEngineMixin:
             return False, "已达每日上限"
         idle_minutes = self._effective_user_idle_minutes(user)
         recent_activity_at = self._latest_private_user_activity_ts(user)
-        if not is_troubleshooting and not due_timer_active and now - recent_activity_at < idle_minutes * 60:
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and not self._is_initial_wakeup_greeting(user)
+            and now - recent_activity_at < idle_minutes * 60
+        ):
             idle_limit = (
                 self._effective_user_greeting_idle_minutes(user) * 60
                 if self._is_greeting_reason(planned_reason)
@@ -3555,8 +3592,13 @@ class ProactiveEngineMixin:
 
         due_timer_active = self._has_due_llm_timer(user, now=now)
         source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40)
-        rest_until = self._user_rest_silence_until(user, now=now)
-        rest_blocked = rest_until > now and not due_timer_active and source != "timer"
+        rest_until = self._proactive_rest_block_until(
+            user,
+            now=now,
+            reason=user.get("planned_proactive_reason"),
+            source=source,
+        )
+        rest_blocked = rest_until > now and not due_timer_active
         add(
             "rest",
             "休息静默",
@@ -5230,6 +5272,76 @@ class ProactiveEngineMixin:
         topic = _single_line(item.get("topic"), 30)
         return f"{reason}|{daypart}|{topic}"
 
+    def _daily_plan_morning_wake_minutes(self) -> int | None:
+        """Return the Bot wake point represented by the active daily plan."""
+        plan_getter = getattr(self, "_get_active_plan", None)
+        plan = plan_getter() if callable(plan_getter) else self.data.get("daily_plan", {})
+        if not isinstance(plan, dict):
+            return None
+        items = plan.get("items")
+        if not isinstance(items, list) or not items:
+            return None
+
+        starts_getter = getattr(self, "_normalized_plan_item_starts", None)
+        starts = starts_getter(items) if callable(starts_getter) else []
+        if not isinstance(starts, list) or len(starts) != len(items):
+            return None
+
+        sleeping_ends: list[tuple[int, int]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or starts[index] is None or not self._is_sleepy_plan_item(item):
+                continue
+            start = int(starts[index])
+            next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+            end = self._plan_item_end_minutes(start, item, next_start=next_start)
+            wake_minute = end % (24 * 60)
+            if 4 * 60 <= wake_minute <= 11 * 60 + 30:
+                sleeping_ends.append((end, wake_minute))
+        if sleeping_ends:
+            return max(sleeping_ends, key=lambda value: value[0])[1]
+
+        # Some plans begin at waking and omit the preceding overnight sleep segment.
+        waking_items: list[tuple[int, int]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or starts[index] is None:
+                continue
+            text = " ".join(
+                _single_line(item.get(key), 100)
+                for key in ("activity", "mood", "message_seed")
+                if _single_line(item.get(key), 100)
+            )
+            wake_minute = int(starts[index]) % (24 * 60)
+            if 4 * 60 <= wake_minute <= 11 * 60 + 30 and re.search(r"睡醒|醒来|醒后|刚醒|起床|洗漱", text):
+                waking_items.append((int(starts[index]), wake_minute))
+        return min(waking_items, key=lambda value: value[0])[1] if waking_items else None
+
+    def _morning_greeting_window(self) -> tuple[int, int]:
+        wake_minute = self._daily_plan_morning_wake_minutes()
+        if wake_minute is None:
+            return 7 * 60 + 45, 10 * 60 + 20
+        start = wake_minute + 3
+        end = min(12 * 60, wake_minute + 50)
+        if end - start < 15:
+            return 7 * 60 + 45, 10 * 60 + 20
+        return start, end
+
+    def _is_initial_wakeup_greeting(
+        self,
+        user: dict[str, Any] | None,
+        *,
+        reason: str = "",
+        source: str = "",
+    ) -> bool:
+        if not isinstance(user, dict):
+            return False
+        normalized_reason = self._normalize_legacy_proactive_text(
+            reason or user.get("planned_proactive_reason"), limit=40
+        )
+        normalized_source = self._normalize_legacy_proactive_text(
+            source or user.get("planned_proactive_source"), limit=40
+        )
+        return normalized_reason == "morning_greeting" and normalized_source == "daily_greeting"
+
     def _pick_daily_greeting_event(
         self, user: dict[str, Any], now: float | None = None
     ) -> dict[str, Any] | None:
@@ -5244,18 +5356,26 @@ class ProactiveEngineMixin:
         if not isinstance(suppressed, list):
             suppressed = []
             user["greetings_suppressed_by_inbound"] = suppressed
+        elif "morning_greeting" in suppressed:
+            suppressed[:] = [reason for reason in suppressed if reason != "morning_greeting"]
         now_dt = self._environment_fromtimestamp(now or _now_ts())
         minute = now_dt.hour * 60 + now_dt.minute
         recent_activity_at = self._latest_private_user_activity_ts(user)
+        morning_start, morning_end = self._morning_greeting_window()
         anchors = [
-            ("morning_greeting", "07:45-10:20", "刚睡醒，想第一时间和用户说声早安", "早上刚醒来"),
+            (
+                "morning_greeting",
+                f"{self._minutes_to_hhmm(morning_start)}-{self._minutes_to_hhmm(morning_end)}",
+                "刚睡醒，想第一时间和用户说声早安",
+                "早上刚醒来",
+            ),
             ("noon_greeting", "12:05-13:35", "中午有些犯困，想短短打声招呼", "午后犯困"),
             ("evening_greeting", "20:10-21:20", "晚上闲下来时，想短短说一句", "晚间问候"),
         ]
         today = now_dt.date()
         candidates = []
         for reason, window, why, topic in anchors:
-            if reason in sent or reason in suppressed:
+            if reason in sent or (reason != "morning_greeting" and reason in suppressed):
                 continue
             start, end = self._parse_window_minutes(window)
             if start is None or end is None:
@@ -5266,7 +5386,11 @@ class ProactiveEngineMixin:
                 bucket = self._proactive_daypart_bucket_for_minute(start)
                 if _safe_int(self._today_proactive_daypart_counts(user).get(bucket), 0, 0) >= 1:
                     continue
-            if recent_activity_at > 0 and self._inbound_satisfies_greeting(reason, now=recent_activity_at):
+            if (
+                reason != "morning_greeting"
+                and recent_activity_at > 0
+                and self._inbound_satisfies_greeting(reason, now=recent_activity_at)
+            ):
                 if reason not in suppressed:
                     suppressed.append(reason)
                 continue
@@ -6092,7 +6216,7 @@ class ProactiveEngineMixin:
         if not isinstance(user, dict) or activity_ts <= 0:
             return False
         changed = False
-        for reason in ("morning_greeting", "noon_greeting", "evening_greeting"):
+        for reason in ("noon_greeting", "evening_greeting"):
             if self._inbound_satisfies_greeting(reason, now=activity_ts):
                 changed = self._mark_greeting_satisfied_by_inbound(user, reason) or changed
         return changed
@@ -7445,14 +7569,18 @@ class ProactiveEngineMixin:
 
     def _reason_windows(self, reason: str) -> list[tuple[int, int]]:
         reason = self._normalize_legacy_proactive_text(reason, limit=40)
+        if reason == "morning_greeting":
+            return [self._morning_greeting_window()]
         return {
             "insomnia_night": [(23 * 60, 24 * 60), (0, 6 * 60)],
             "group_share": [(9 * 60, 23 * 60)],
             "bili_video_share": [(10 * 60, 23 * 60)],
             "news_share": [(8 * 60, 23 * 60)],
             "web_exploration_share": [(9 * 60, 23 * 60)],
+            "environment_change": [(6 * 60, 23 * 60 + 30)],
             "jm_cosmos_recommendation_request": [(10 * 60, 23 * 60)],
             "creative_share": [(10 * 60, 23 * 60)],
+            "personal_goal_progress": [(8 * 60, 22 * 60)],
             "state_share": [(8 * 60, 22 * 60 + 30)],
             "quiet_care": [(9 * 60, 22 * 60 + 30)],
             "activity_share": [(10 * 60, 18 * 60 + 30)],
@@ -7465,7 +7593,6 @@ class ProactiveEngineMixin:
             "birthday_afterglow": [(10 * 60, 21 * 60 + 25)],
             "background_schedule": [(9 * 60, 22 * 60)],
             "check_in": [(9 * 60, 22 * 60 + 30)],
-            "morning_greeting": [(7 * 60 + 45, 10 * 60 + 20)],
             "noon_greeting": [(12 * 60 + 5, 13 * 60 + 35)],
             "evening_greeting": [(20 * 60 + 10, 21 * 60 + 20)],
             "meal_care": [(7 * 60 + 50, 20 * 60 + 35)],

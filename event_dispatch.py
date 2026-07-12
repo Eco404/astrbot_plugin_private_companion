@@ -3527,6 +3527,8 @@ Bot 近期回复：
             user = users.get(target_id)
             if not isinstance(user, dict):
                 continue
+            if self._user_rest_kind(user) not in self._ACTIVE_REST_KINDS:
+                continue
             rest_until = self._user_rest_silence_until(user, now=check_now)
             if rest_until <= check_now:
                 continue

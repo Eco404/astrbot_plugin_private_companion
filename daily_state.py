@@ -3069,6 +3069,243 @@ class DailyStateMixin:
     ) -> tuple[str, str, int, int] | None:
         return await generate_enhanced_dream_pick(self, weather)
 
+    def _environment_weather_observation(self, weather: dict[str, Any] | None) -> dict[str, Any]:
+        text = self._weather_summary_text(weather)
+        if text == "暂无天气信息":
+            return {}
+        compact = text.lower()
+        category = "other"
+        severity = 1
+        category_rules = (
+            ("thunder", 4, ("雷暴", "雷阵雨", "打雷", "雷电")),
+            ("heavy_rain", 4, ("暴雨", "大暴雨", "特大暴雨", "大雨")),
+            ("snow", 4, ("暴雪", "大雪", "中雪", "小雪", "雨夹雪", "降雪")),
+            ("dust", 4, ("沙尘暴", "扬沙", "浮尘")),
+            ("rain", 3, ("阵雨", "中雨", "小雨", "降雨", "下雨", "雨天")),
+            ("fog", 3, ("大雾", "浓雾", "雾霾", "雾")),
+            ("wind", 3, ("大风", "强风", "狂风", "阵风")),
+            ("clear", 1, ("晴朗", "晴天", "晴")),
+            ("cloud", 1, ("阴天", "多云", "阴")),
+        )
+        for candidate, candidate_severity, markers in category_rules:
+            if any(marker in compact for marker in markers):
+                category = candidate
+                severity = candidate_severity
+                break
+        temperature = None
+        match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°\s*c|℃|摄氏度)", compact, flags=re.I)
+        if match:
+            try:
+                temperature = float(match.group(1))
+            except (TypeError, ValueError):
+                temperature = None
+        return {
+            "text": _single_line(text, 120),
+            "category": category,
+            "severity": severity,
+            "temperature": temperature,
+            "fetched_ts": _safe_float((weather or {}).get("fetched_ts"), 0),
+        }
+
+    def _detect_environment_weather_change(
+        self,
+        previous: dict[str, Any] | None,
+        current: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        before = self._environment_weather_observation(previous)
+        after = self._environment_weather_observation(current)
+        if not before or not after:
+            return {}
+        old_category = _single_line(before.get("category"), 24)
+        new_category = _single_line(after.get("category"), 24)
+        old_temp = before.get("temperature")
+        new_temp = after.get("temperature")
+        category_labels = {
+            "thunder": "突然开始打雷",
+            "heavy_rain": "雨势突然变大",
+            "rain": "外面开始下雨",
+            "snow": "外面开始下雪",
+            "fog": "外面突然起雾",
+            "wind": "外面的风突然变大",
+            "dust": "外面出现沙尘天气",
+            "clear": "外面的天突然放晴",
+            "cloud": "外面的天色明显转阴",
+        }
+        wet_categories = {"rain", "heavy_rain", "thunder", "snow"}
+        kind = ""
+        topic = ""
+        score = 0
+        if old_category != new_category and new_category in category_labels:
+            if old_category in wet_categories and new_category in {"clear", "cloud", "other"}:
+                kind = "precipitation_stopped"
+                topic = "外面的雨雪停了"
+                score = 78
+            elif new_category in {"thunder", "heavy_rain", "snow", "dust"}:
+                kind = f"weather_to_{new_category}"
+                topic = category_labels[new_category]
+                score = 92
+            elif new_category in {"rain", "fog", "wind"}:
+                kind = f"weather_to_{new_category}"
+                topic = category_labels[new_category]
+                score = 86
+            elif old_category in wet_categories and new_category == "clear":
+                kind = "weather_cleared"
+                topic = category_labels[new_category]
+                score = 76
+
+        temperature_delta = None
+        if isinstance(old_temp, (int, float)) and isinstance(new_temp, (int, float)):
+            temperature_delta = float(new_temp) - float(old_temp)
+            if abs(temperature_delta) >= 5.0 and not kind:
+                kind = "temperature_jump"
+                topic = "气温突然升高了" if temperature_delta > 0 else "气温突然降下来了"
+                score = 84 if abs(temperature_delta) >= 8.0 else 78
+        if not kind:
+            return {}
+        fingerprint = f"{kind}:{old_category}>{new_category}:{round(float(new_temp), 1) if isinstance(new_temp, (int, float)) else 'na'}"
+        return {
+            "kind": kind,
+            "topic": topic,
+            "score": score,
+            "fingerprint": fingerprint,
+            "previous": before,
+            "current": after,
+            "temperature_delta": temperature_delta,
+        }
+
+    def _environment_change_owner_users(self) -> list[tuple[str, dict[str, Any]]]:
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(users, dict):
+            return []
+        targets: list[tuple[str, dict[str, Any]]] = []
+        for raw_user_id, user in users.items():
+            user_id = str(raw_user_id or "").strip()
+            if not user_id or not isinstance(user, dict) or not user.get("umo"):
+                continue
+            if self._private_user_role(user, user_id) != "owner":
+                continue
+            if not self._user_enabled_for_proactive(user_id, user):
+                continue
+            targets.append((user_id, user))
+        return targets
+
+    def _queue_environment_change_candidates_locked(self, change: dict[str, Any], *, now: float) -> int:
+        if not isinstance(change, dict) or not _single_line(change.get("topic"), 80):
+            return 0
+        current = self._environment_fromtimestamp(now)
+        minute = current.hour * 60 + current.minute
+        if not (6 * 60 <= minute < 23 * 60 + 30):
+            return 0
+        offered = 0
+        for user_id, user in self._environment_change_owner_users():
+            scheduled = now + random.uniform(1.0, 3.0) * 60.0
+            candidate = {
+                "source": "environment_change",
+                "reason": "environment_change",
+                "action": "message",
+                "scheduled_ts": scheduled,
+                "window_start_at": scheduled,
+                "preferred_ts": scheduled,
+                "best_until_at": scheduled + 20 * 60,
+                "expire_at": scheduled + 45 * 60,
+                "topic": _single_line(change.get("topic"), 80),
+                "motive": "刚注意到外界环境发生了明显变化，想趁变化还新鲜时自然提一句",
+                "score": _safe_int(change.get("score"), 82, 0, 100),
+                "context_key": "planned_environment_change_context",
+                "context": deepcopy(change),
+            }
+            if self._offer_proactive_candidate(user_id, user, candidate):
+                offered += 1
+        return offered
+
+    def _format_environment_change_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
+        if reason != "environment_change" or not isinstance(user, dict):
+            return ""
+        context = user.get("planned_environment_change_context")
+        if not isinstance(context, dict):
+            return ""
+        before = context.get("previous") if isinstance(context.get("previous"), dict) else {}
+        after = context.get("current") if isinstance(context.get("current"), dict) else {}
+        return (
+            "【刚发生的环境变化】\n"
+            f"- 变化前：{_single_line(before.get('text'), 120) or '无可靠信息'}\n"
+            f"- 当前：{_single_line(after.get('text'), 120) or '无可靠信息'}\n"
+            f"- 可用切口：{_single_line(context.get('topic'), 80)}\n"
+            "这是刚刷新到的实时环境变化，只能贴着上述事实自然说一句。不要说监测、接口、天气缓存或系统提醒；"
+            "不要扩写成天气预报，也不要虚构用户正在室外。"
+        )
+
+    async def _maybe_refresh_environment_change(self) -> None:
+        if not bool(getattr(self, "enable_environment_change_proactive", True)) or not self.enable_weather_context:
+            return
+        lock = getattr(self, "_environment_change_lock", None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            self._environment_change_lock = lock
+        async with lock:
+            now = _now_ts()
+            state = self.data.setdefault("environment_change_awareness", {})
+            if not isinstance(state, dict):
+                state = {}
+                self.data["environment_change_awareness"] = state
+            if now < _safe_float(state.get("next_check_at"), 0):
+                return
+            initialized = bool(state.get("initialized"))
+            interval_minutes = max(
+                5,
+                _safe_int(getattr(self, "environment_change_check_minutes", 10), 10, 5, 60),
+            )
+            state["next_check_at"] = now + interval_minutes * 60
+            previous = deepcopy(self.data.get("daily_weather", {}))
+            current = await self._ensure_weather_context(force=True)
+            state["last_check_at"] = now
+            state["last_observation"] = self._environment_weather_observation(current)
+            state["initialized"] = True
+            if not initialized:
+                self._schedule_data_save(delay=0.5)
+                return
+            change = self._detect_environment_weather_change(previous, current)
+            if not change:
+                self._schedule_data_save(delay=0.5)
+                return
+            fingerprint = _single_line(change.get("fingerprint"), 160)
+            cooldown_minutes = max(
+                20,
+                _safe_int(getattr(self, "environment_change_cooldown_minutes", 90), 90, 20, 360),
+            )
+            last_prompted_at = _safe_float(state.get("last_prompted_at"), 0)
+            recent_fingerprints = state.get("recent_fingerprints")
+            if not isinstance(recent_fingerprints, dict):
+                recent_fingerprints = {}
+                state["recent_fingerprints"] = recent_fingerprints
+            cutoff = now - cooldown_minutes * 60
+            for old_key, old_ts in list(recent_fingerprints.items()):
+                if _safe_float(old_ts, 0) < cutoff:
+                    recent_fingerprints.pop(old_key, None)
+            recently_repeated = _safe_float(recent_fingerprints.get(fingerprint), 0) >= cutoff
+            too_soon = now - last_prompted_at < 20 * 60 and _safe_int(change.get("score"), 0) < 90
+            if recently_repeated or too_soon:
+                self._schedule_data_save(delay=0.5)
+                return
+            offered = 0
+            async with self._data_lock:
+                offered = self._queue_environment_change_candidates_locked(change, now=now)
+                state["last_change"] = deepcopy(change)
+                state["last_change_at"] = now
+                if offered:
+                    state["last_fingerprint"] = fingerprint
+                    state["last_prompted_at"] = now
+                    state["last_prompted_users"] = offered
+                    recent_fingerprints[fingerprint] = now
+                self._save_data_sync()
+            if offered:
+                logger.info(
+                    "[PrivateCompanion] 环境突变已进入即时主动候选: kind=%s targets=%s topic=%s",
+                    _single_line(change.get("kind"), 40),
+                    offered,
+                    _single_line(change.get("topic"), 80),
+                )
+
     async def _ensure_weather_context(self, force: bool = False) -> dict[str, Any]:
         today = _today_key()
         if not self.enable_weather_context:
@@ -6044,9 +6281,67 @@ class DailyStateMixin:
     ) -> str:
         return build_detail_enhancement_prompt(self, segment, plan, state, memory_companion_context=memory_companion_context)
 
-    def _get_default_persona_prompt(self) -> str:
+    @staticmethod
+    def _persona_prompt_cache_scope(umo: str = "", specific_id: str = "") -> str:
+        if specific_id:
+            return f"persona:{specific_id}"
+        if umo:
+            return f"session:{umo}"
+        return "default"
+
+    def _cached_persona_prompt_for_scope(self, umo: str = "", specific_id: str = "") -> tuple[str, float]:
+        scope = self._persona_prompt_cache_scope(umo, specific_id)
+        entries = getattr(self, "_default_persona_prompt_cache_by_scope", None)
+        if isinstance(entries, dict):
+            entry = entries.get(scope)
+            if isinstance(entry, dict):
+                return (
+                    str(entry.get("prompt") or "").strip(),
+                    _safe_float(entry.get("cached_at"), 0.0),
+                )
+        return "", 0.0
+
+    def _store_persona_prompt_for_scope(self, prompt: str, *, umo: str = "", specific_id: str = "") -> str:
+        cleaned = str(prompt or "").strip()
+        if not cleaned:
+            return ""
+        entries = getattr(self, "_default_persona_prompt_cache_by_scope", None)
+        if not isinstance(entries, dict):
+            entries = {}
+            self._default_persona_prompt_cache_by_scope = entries
+        now = _now_ts()
+        entries[self._persona_prompt_cache_scope(umo, specific_id)] = {
+            "prompt": cleaned,
+            "cached_at": now,
+            "umo": umo,
+            "persona_id": specific_id,
+        }
+        if len(entries) > 64:
+            newest = sorted(
+                entries.items(),
+                key=lambda item: _safe_float(item[1].get("cached_at"), 0.0) if isinstance(item[1], dict) else 0.0,
+                reverse=True,
+            )[:64]
+            self._default_persona_prompt_cache_by_scope = dict(newest)
+        # Keep legacy fields synchronized for code paths that do not have a session key.
+        self._default_persona_prompt_cache = cleaned
+        self._default_persona_prompt_cache_at = now
+        self._default_persona_prompt_cache_umo = umo
+        self._default_persona_prompt_cache_persona_id = specific_id
+        return cleaned
+
+    def _get_default_persona_prompt(self, umo: str = "") -> str:
+        specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+        scoped, _ = self._cached_persona_prompt_for_scope(umo, specific_id)
+        if scoped:
+            return scoped
         cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
-        if cached:
+        cached_persona_id = str(getattr(self, "_default_persona_prompt_cache_persona_id", "") or "")
+        cached_umo = str(getattr(self, "_default_persona_prompt_cache_umo", "") or "")
+        if cached and (
+            (specific_id and cached_persona_id == specific_id)
+            or (not specific_id and not cached_persona_id and (not umo or cached_umo == umo))
+        ):
             return cached
         return DEFAULT_PERSONA_PROMPT_FALLBACK
 
@@ -6068,14 +6363,19 @@ class DailyStateMixin:
     async def _refresh_default_persona_prompt(self, umo: str = "") -> str:
         try:
             specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
-            cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
-            cached_at = _safe_float(getattr(self, "_default_persona_prompt_cache_at", 0.0), 0.0)
-            cached_umo = str(getattr(self, "_default_persona_prompt_cache_umo", "") or "")
-            cached_persona_id = str(getattr(self, "_default_persona_prompt_cache_persona_id", "") or "")
+            cached, cached_at = self._cached_persona_prompt_for_scope(umo, specific_id)
+            if not cached:
+                legacy_cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
+                legacy_umo = str(getattr(self, "_default_persona_prompt_cache_umo", "") or "")
+                legacy_persona_id = str(getattr(self, "_default_persona_prompt_cache_persona_id", "") or "")
+                if (
+                    (specific_id and legacy_persona_id == specific_id)
+                    or (not specific_id and not legacy_persona_id and (not umo or legacy_umo == umo))
+                ):
+                    cached = legacy_cached
+                    cached_at = _safe_float(getattr(self, "_default_persona_prompt_cache_at", 0.0), 0.0)
             cache_fresh = cached and (_now_ts() - cached_at < 300.0)
-            cache_matches_specific = specific_id and cached_persona_id == specific_id
-            cache_matches_default = not specific_id and not cached_persona_id and (not umo or cached_umo == umo)
-            if cache_fresh and (cache_matches_specific or cache_matches_default):
+            if cache_fresh:
                 return cached
 
             manager = getattr(getattr(self, "context", None), "persona_manager", None)
@@ -6088,19 +6388,15 @@ class DailyStateMixin:
                             result = await asyncio.wait_for(result, timeout=2.0)
                         prompt = self._extract_default_persona_prompt(result)
                         if prompt:
-                            self._default_persona_prompt_cache = prompt
-                            self._default_persona_prompt_cache_at = _now_ts()
-                            self._default_persona_prompt_cache_umo = umo
-                            self._default_persona_prompt_cache_persona_id = specific_id
-                            return prompt
+                            return self._store_persona_prompt_for_scope(prompt, umo=umo, specific_id=specific_id)
                 except asyncio.TimeoutError:
                     logger.warning("[PrivateCompanion] 读取插件指定人格超时(ID: %s),本轮使用缓存人格", specific_id)
-                    return self._get_default_persona_prompt()
+                    return cached or self._get_default_persona_prompt(umo)
                 except Exception as e:
                     logger.warning(f"[PrivateCompanion] 读取插件指定人格失败(ID: {specific_id}): {e}")
             getter = getattr(manager, "get_default_persona_v3", None) if manager else None
             if not callable(getter):
-                return self._get_default_persona_prompt()
+                return cached or self._get_default_persona_prompt(umo)
             try:
                 result = getter(umo=umo)
             except TypeError:
@@ -6112,36 +6408,40 @@ class DailyStateMixin:
                 result = await asyncio.wait_for(result, timeout=2.0)
             prompt = self._extract_default_persona_prompt(result)
             if prompt:
-                self._default_persona_prompt_cache = prompt
-                self._default_persona_prompt_cache_at = _now_ts()
-                self._default_persona_prompt_cache_umo = umo
-                return prompt
+                return self._store_persona_prompt_for_scope(prompt, umo=umo, specific_id="")
         except asyncio.TimeoutError:
             logger.warning("[PrivateCompanion] 读取 AstrBot 默认人格超时,本轮使用缓存人格")
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 读取 AstrBot 默认人格失败: {e}")
-        return self._get_default_persona_prompt()
+        return self._get_default_persona_prompt(umo)
 
     def _schedule_default_persona_prompt_refresh(self, umo: str = "") -> None:
         specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
-        cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
-        cached_at = _safe_float(getattr(self, "_default_persona_prompt_cache_at", 0.0), 0.0)
-        cached_umo = str(getattr(self, "_default_persona_prompt_cache_umo", "") or "")
-        cached_persona_id = str(getattr(self, "_default_persona_prompt_cache_persona_id", "") or "")
+        cached, cached_at = self._cached_persona_prompt_for_scope(umo, specific_id)
         cache_fresh = cached and (_now_ts() - cached_at < 300.0)
-        cache_matches_specific = specific_id and cached_persona_id == specific_id
-        cache_matches_default = not specific_id and not cached_persona_id and (not umo or cached_umo == umo)
-        if cache_fresh and (cache_matches_specific or cache_matches_default):
+        if cache_fresh:
             return
-        task = getattr(self, "_default_persona_prompt_refresh_task", None)
+        scope = self._persona_prompt_cache_scope(umo, specific_id)
+        tasks = getattr(self, "_default_persona_prompt_refresh_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._default_persona_prompt_refresh_tasks = tasks
+        task = tasks.get(scope)
         if isinstance(task, asyncio.Task) and not task.done():
             return
 
         async def _runner() -> None:
-            await self._refresh_default_persona_prompt(umo)
+            try:
+                await self._refresh_default_persona_prompt(umo)
+            finally:
+                current_tasks = getattr(self, "_default_persona_prompt_refresh_tasks", None)
+                if isinstance(current_tasks, dict):
+                    current_tasks.pop(scope, None)
 
         try:
-            self._default_persona_prompt_refresh_task = asyncio.create_task(_runner())
+            task = asyncio.create_task(_runner())
+            tasks[scope] = task
+            self._default_persona_prompt_refresh_task = task
         except RuntimeError:
             pass
 
@@ -7721,7 +8021,25 @@ class DailyStateMixin:
             return True
         if re.search(r"(有什么|写了啥|写了什么|能不能看看|给我看看).{0,14}(创作|作品|草稿|诗|小说|随笔|剧本|设定|片段)", normalized):
             return True
+        if self._user_asks_creative_work_existence(normalized):
+            return True
         return False
+
+    @staticmethod
+    def _user_asks_creative_work_existence(text: str) -> bool:
+        normalized = _single_line(text, 220)
+        if not normalized:
+            return False
+        work_terms = r"书|小说|故事|作品|诗|随笔|散文|剧本|手稿|草稿|设定集"
+        author_actions = r"写过|写了|写完|写着|在写|写没写|有没有写|没写过|没写|会写|创作过|做过|出过|出版过"
+        patterns = (
+            rf"(?:你|自己|本人)[^。！？!?\n]{{0,12}}(?:{author_actions})[^。！？!?\n]{{0,10}}(?:{work_terms})",
+            rf"(?:{author_actions})[^。！？!?\n]{{0,10}}(?:{work_terms})",
+            rf"(?:有|有没有|没有|没)[^。！？!?\n]{{0,8}}(?:自己写的|自己创作的|自己的)[^。！？!?\n]{{0,5}}(?:{work_terms})",
+            rf"(?:你|自己)[^。！？!?\n]{{0,8}}(?:的)?(?:{work_terms})[^。！？!?\n]{{0,8}}(?:呢|吗|嘛|在哪|叫什么|有几(?:本|篇|个))",
+            rf"(?:那|这|哪|几)[^。！？!?\n]{{0,4}}(?:本书|本小说|篇作品)[^。！？!?\n]{{0,10}}(?:写到|写完|续写|后续|进度|作品内容|作品名字|作品标题)",
+        )
+        return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in patterns)
 
     def _mentioned_creative_project_title(self, text: str) -> str:
         normalized = _single_line(text, 260)
@@ -7930,13 +8248,19 @@ class DailyStateMixin:
             return recent_share_context
         mentioned_title = self._mentioned_creative_project_title(inbound_text)
         asks_creative = self._user_asks_recent_creative_activity(inbound_text)
+        asks_existence = self._user_asks_creative_work_existence(inbound_text)
         asks_activity = self._user_asks_recent_bot_activity(inbound_text)
         if not (mentioned_title or asks_creative or asks_activity):
             return ""
-        candidates = []
-        for project in reversed(self._creative_projects()):
+        available_projects: list[dict[str, Any]] = []
+        for project in self._creative_projects():
             if project.get("status") not in {"drafting", "finished"}:
                 continue
+            chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+            if chunks:
+                available_projects.append(project)
+        candidates = []
+        for project in reversed(available_projects):
             chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
             latest = next((item for item in reversed(chunks) if isinstance(item, dict) and _single_line(item.get("text"), 180)), None)
             score = self._creative_query_work_type_score(
@@ -7963,19 +8287,41 @@ class DailyStateMixin:
             f"用户提到了你私下创作过的作品《{mentioned_title}》。"
             if mentioned_title
             else
+            "用户正在确认你是否写过自己的书、小说或其他文本作品。"
+            if asks_existence
+            else
             "用户正在明确询问你最近的创作、写作、草稿或某类作品。"
             if asks_creative
             else "用户正在询问你最近在做什么。"
         )
         creative_continuity_hint = '如果前文刚提到上述标题或片段，用“我之前写过/发你看过”这类说法会更自然；不必主动解释作者归属。'
+        finished_count = sum(1 for item in available_projects if item.get("status") == "finished")
+        drafting_count = sum(1 for item in available_projects if item.get("status") == "drafting")
+        recent_titles = [
+            _single_line(item.get("title"), 50)
+            for item in reversed(available_projects)
+            if _single_line(item.get("title"), 50)
+        ][:3]
+        inventory_hint = (
+            f"真实创作记录：共有 {len(available_projects)} 个已有正文的文本作品，其中已完成 {finished_count} 个、仍在写 {drafting_count} 个。"
+            + (f"近期标题示例：{'、'.join(recent_titles)}。" if recent_titles else "")
+        )
+        existence_rule = (
+            "用户问的是是否写过作品：必须明确承认这些真实创作记录，不能回答“没写过书/没有自己的作品”。"
+            "这些记录证明写过文本作品，但不等于正式出版或发行过实体书；若用户明确问出版，只能如实区分。"
+            if asks_existence
+            else ""
+        )
         return (
             "【私下创作近况】\n"
             f"{ask_line}你可以提到：你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直在自己慢慢写。\n"
+            f"{inventory_hint}\n"
             f"作品类型：{work_type}\n"
             f"标题：{title or '未定标题'}\n"
             f"设定：{premise or '还没完全想清楚'}\n"
             f"进度：约 {progress} 字\n"
             + f"\n{creative_continuity_hint}\n"
+            + (f"{existence_rule}\n" if existence_rule else "")
             + (f"最近一句/片段：{snippet}\n" if snippet else "")
             + "如果用户明确问作品/诗/小说/草稿,可以直接概括并给一小句片段；否则这不是必须回答的内容,可以只含糊说“在弄一点小东西”。不要主动汇报系统进度,不要一次给完整正文。"
         )
@@ -8265,6 +8611,251 @@ class DailyStateMixin:
                 del processed[:-120]
             if changed:
                 state["updated_ts"] = now_ts
+                self._save_data_sync()
+
+    @staticmethod
+    def _personal_goal_status(value: Any) -> str:
+        normalized = _single_line(value, 20).lower()
+        return normalized if normalized in {"active", "paused", "completed", "abandoned"} else "active"
+
+    def _personal_goal_terms(self, goal: dict[str, Any]) -> list[str]:
+        raw_terms = goal.get("keywords") if isinstance(goal.get("keywords"), list) else []
+        terms: list[str] = []
+        # Category is display metadata, not evidence. Using broad labels such as
+        # "阅读" here would advance every goal in that category from one activity.
+        for raw in [goal.get("title"), goal.get("next_step"), *raw_terms]:
+            term = _single_line(raw, 32)
+            if term and term not in terms:
+                terms.append(term)
+        return terms[:16]
+
+    def _personal_goal_matches_activity(self, goal: dict[str, Any], activity_text: str) -> bool:
+        text = _single_line(activity_text, 500)
+        if not text:
+            return False
+        terms = self._personal_goal_terms(goal)
+        if not terms:
+            return False
+        return any(len(term) >= 2 and term in text for term in terms)
+
+    def _personal_goal_owner_users(self) -> list[tuple[str, dict[str, Any]]]:
+        users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        targets: list[tuple[str, dict[str, Any]]] = []
+        for raw_user_id, user in users.items():
+            user_id = str(raw_user_id or "").strip()
+            if not user_id or not isinstance(user, dict) or not user.get("umo"):
+                continue
+            if self._private_user_role(user, user_id) != "owner":
+                continue
+            if not self._user_enabled_for_proactive(user_id, user):
+                continue
+            targets.append((user_id, user))
+        return targets
+
+    def _queue_personal_goal_candidate_locked(
+        self,
+        goal: dict[str, Any],
+        event: dict[str, Any],
+        *,
+        now: float,
+    ) -> int:
+        title = _single_line(goal.get("title"), 60)
+        if not title or not isinstance(event, dict):
+            return 0
+        event_kind = _single_line(event.get("kind"), 24) or "progress"
+        progress = _safe_int(goal.get("progress"), 0, 0, 100)
+        if event_kind == "completed":
+            topic = f"{title}终于完成了"
+            motive = "自己持续推进的目标终于完成，想自然分享这次真实结果"
+            score = 90
+        elif event_kind == "stalled":
+            topic = f"{title}最近一直没顾上"
+            motive = "意识到自己的长期目标停了一阵，想低压力提一句，不把责任推给用户"
+            score = 70
+        else:
+            topic = f"{title}推进到 {progress}%"
+            motive = "自己持续推进的目标跨过了一个明确里程碑，想简短分享进展"
+            score = 80
+        offered = 0
+        context = {
+            "goal_id": _single_line(goal.get("id"), 40),
+            "title": title,
+            "category": _single_line(goal.get("category"), 24),
+            "status": self._personal_goal_status(goal.get("status")),
+            "progress": progress,
+            "next_step": _single_line(goal.get("next_step"), 100),
+            "note": _single_line(goal.get("note"), 140),
+            "event": deepcopy(event),
+        }
+        for user_id, user in self._personal_goal_owner_users():
+            scheduled = now + random.uniform(5, 20) * 60
+            candidate = {
+                "source": "personal_goal",
+                "reason": "personal_goal_progress",
+                "action": "message",
+                "scheduled_ts": scheduled,
+                "window_start_at": scheduled,
+                "preferred_ts": scheduled,
+                "best_until_at": scheduled + 2 * 3600,
+                "expire_at": scheduled + 6 * 3600,
+                "topic": topic,
+                "motive": motive,
+                "score": score,
+                "context_key": "planned_personal_goal_context",
+                "context": deepcopy(context),
+            }
+            if self._offer_proactive_candidate(user_id, user, candidate):
+                offered += 1
+        return offered
+
+    def _format_personal_goal_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
+        if reason != "personal_goal_progress" or not isinstance(user, dict):
+            return ""
+        context = user.get("planned_personal_goal_context")
+        if not isinstance(context, dict):
+            return ""
+        event = context.get("event") if isinstance(context.get("event"), dict) else {}
+        return (
+            "【非创作型个人目标】\n"
+            f"- 目标：{_single_line(context.get('title'), 60)}\n"
+            f"- 当前进度：{_safe_int(context.get('progress'), 0, 0, 100)}%\n"
+            f"- 本次变化：{_single_line(event.get('kind'), 24)}；证据：{_single_line(event.get('evidence'), 120) or '目标状态记录'}\n"
+            f"- 下一步：{_single_line(context.get('next_step'), 100) or '尚未指定'}\n"
+            "只表达这次真实进展、停滞或完成，不虚构做过的步骤，不写后台进度字段，不把目标变成向用户索取监督的任务。"
+        )
+
+    def _format_personal_goals_schedule_context(self, limit: int = 5) -> str:
+        if not bool(getattr(self, "enable_personal_goals", True)):
+            return ""
+        goals = self.data.get("personal_goals") if isinstance(self.data.get("personal_goals"), list) else []
+        active = [goal for goal in goals if isinstance(goal, dict) and self._personal_goal_status(goal.get("status")) == "active"]
+        if not active:
+            return ""
+        lines = [
+            "【Bot 自己的非创作型个人目标】",
+            "这些目标已经明确建立，可以在身份主线、状态和当天硬安排允许时留出少量真实推进时间；不要每天全部安排，也不要伪造已经完成。",
+        ]
+        for goal in active[: max(1, int(limit or 1))]:
+            lines.append(
+                f"- {_single_line(goal.get('title'), 60)}｜进度 {_safe_int(goal.get('progress'), 0, 0, 100)}%｜"
+                f"下一步：{_single_line(goal.get('next_step'), 100) or '自然推进'}｜匹配词：{'、'.join(self._personal_goal_terms(goal)[:6])}"
+            )
+        return "\n".join(lines)
+
+    async def _maybe_settle_personal_goals(self, *, force: bool = False) -> None:
+        if not bool(getattr(self, "enable_personal_goals", True)):
+            return
+        now = _now_ts()
+        async with self._data_lock:
+            goals = self.data.get("personal_goals")
+            if not isinstance(goals, list) or not goals:
+                return
+            state = self.data.setdefault("personal_goal_state", {})
+            if not isinstance(state, dict):
+                state = {}
+                self.data["personal_goal_state"] = state
+            if not force and now - _safe_float(state.get("last_check_at"), 0) < 20 * 60:
+                return
+            state["last_check_at"] = now
+            plan = self.data.get("daily_plan", {})
+            items = plan.get("items") if isinstance(plan, dict) and isinstance(plan.get("items"), list) else []
+            day_key = _single_line(plan.get("date"), 20) if isinstance(plan, dict) else ""
+            day_key = day_key or _today_key()
+            processed = state.get("processed_schedule_keys") if isinstance(state.get("processed_schedule_keys"), list) else []
+            if state.get("processed_day") != day_key:
+                processed = []
+                state["processed_schedule_keys"] = processed
+                state["processed_day"] = day_key
+            now_minutes = self._effective_plan_now_minutes(day_key)
+            starts = self._normalized_plan_item_starts(items)
+            auto_progress = bool(getattr(self, "enable_personal_goal_auto_progress", True))
+            changed = False
+            if auto_progress:
+                for index, item in enumerate(items):
+                    if not isinstance(item, dict):
+                        continue
+                    if self._plan_item_runtime_status(plan, item, index) != "completed":
+                        continue
+                    time_text = _single_line(item.get("time"), 8)
+                    start = starts[index] if index < len(starts) else None
+                    next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+                    end = self._plan_item_end_minutes(int(start), item, next_start=next_start) if start is not None else None
+                    if start is None or end is None or now_minutes is None or end > now_minutes:
+                        continue
+                    activity = " ".join(
+                        _single_line(item.get(field), 120)
+                        for field in ("activity", "message_seed", "mood")
+                        if _single_line(item.get(field), 120)
+                    )
+                    signature = hashlib.sha1(
+                        f"{time_text}|{_single_line(item.get('end'), 8)}|{activity}".encode("utf-8")
+                    ).hexdigest()[:12]
+                    key = f"{day_key}|{index}|{signature}"
+                    if key in processed:
+                        continue
+                    for goal in goals:
+                        if not isinstance(goal, dict) or self._personal_goal_status(goal.get("status")) != "active":
+                            continue
+                        if not self._personal_goal_matches_activity(goal, activity):
+                            continue
+                        old_progress = _safe_int(goal.get("progress"), 0, 0, 100)
+                        step = _safe_int(goal.get("auto_step"), 10, 1, 50)
+                        new_progress = min(100, old_progress + step)
+                        if new_progress <= old_progress:
+                            continue
+                        old_bucket = old_progress // 25
+                        new_bucket = new_progress // 25
+                        goal["progress"] = new_progress
+                        goal["last_progress_at"] = now
+                        goal["updated_at"] = now
+                        goal["stalled_notified_at"] = 0
+                        logs = goal.setdefault("recent_logs", [])
+                        if not isinstance(logs, list):
+                            logs = []
+                            goal["recent_logs"] = logs
+                        logs.append({"ts": now, "kind": "progress", "progress": new_progress, "evidence": _single_line(activity, 120)})
+                        del logs[:-12]
+                        if new_progress >= 100:
+                            goal["status"] = "completed"
+                            goal["completed_at"] = now
+                            goal["pending_share_event"] = {"kind": "completed", "evidence": _single_line(activity, 120)}
+                        elif new_bucket > old_bucket:
+                            goal["pending_share_event"] = {"kind": "progress", "milestone": new_bucket * 25, "evidence": _single_line(activity, 120)}
+                        changed = True
+                    processed.append(key)
+                    changed = True
+            stall_seconds = max(1, _safe_int(getattr(self, "personal_goal_stall_days", 3), 3, 1, 30)) * 86400
+            for goal in goals:
+                if not isinstance(goal, dict) or self._personal_goal_status(goal.get("status")) != "active":
+                    continue
+                last_progress = _safe_float(goal.get("last_progress_at"), 0) or _safe_float(goal.get("created_at"), 0)
+                if last_progress <= 0 or now - last_progress < stall_seconds or _safe_float(goal.get("stalled_notified_at"), 0) > 0:
+                    continue
+                if not isinstance(goal.get("pending_share_event"), dict):
+                    goal["pending_share_event"] = {"kind": "stalled", "evidence": f"已连续 {max(1, int((now - last_progress) / 86400))} 天没有匹配到真实推进"}
+                    changed = True
+            del processed[:-160]
+            cooldown_hours = min(168.0, max(1.0, _safe_float(getattr(self, "personal_goal_share_cooldown_hours", 12.0), 12.0)))
+            cooldown = cooldown_hours * 3600
+            pending_events = [
+                (goal, goal.get("pending_share_event"))
+                for goal in goals
+                if isinstance(goal, dict)
+                and self._personal_goal_status(goal.get("status")) in {"active", "completed"}
+                and isinstance(goal.get("pending_share_event"), dict)
+            ]
+            for goal, event in pending_events:
+                if event.get("kind") != "completed" and now - _safe_float(goal.get("last_shared_at"), 0) < cooldown:
+                    continue
+                if self._queue_personal_goal_candidate_locked(goal, event, now=now) > 0:
+                    goal["last_shared_at"] = now
+                    goal["last_shared_event"] = _single_line(event.get("kind"), 24)
+                    if event.get("kind") == "stalled":
+                        goal["stalled_notified_at"] = now
+                    goal.pop("pending_share_event", None)
+                    changed = True
+            if changed:
+                state["updated_at"] = now
                 self._save_data_sync()
 
     def _format_skill_growth_for_prompt(self, limit: int = 8) -> str:
@@ -10505,7 +11096,8 @@ class DailyStateMixin:
                     "confidence": min(1.0, _safe_float(item.get("confidence"), 0.7)),
                 }
             )
-        items = sorted(items[: self.daily_plan_item_count], key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
+        items = sorted(items, key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
+        items = items[: self.daily_plan_item_count]
         self._normalize_plan_item_intervals(items)
         return items
 
@@ -11159,6 +11751,8 @@ class DailyStateMixin:
             return ""
         check_now = _now_ts() if now is None else now
         reason = normalize_legacy_tag_text(planned_reason or user.get("planned_proactive_reason"))
+        if self._is_initial_wakeup_greeting(user, reason=reason, source=source):
+            return ""
         idle_minutes = (
             self._effective_user_greeting_idle_minutes(user)
             if self._is_greeting_reason(reason)
@@ -11350,6 +11944,8 @@ class DailyStateMixin:
         return recovered
 
     async def _run_proactive_maintenance_tasks(self) -> None:
+        if self._proactive_generation_disabled():
+            return
         for label, task_factory in (
             ("技能成长结算", self._maybe_settle_skill_growth),
             ("B站无聊观看", self._maybe_trigger_bilibili_boredom_watch),
@@ -11372,6 +11968,33 @@ class DailyStateMixin:
             if isinstance(runtime, dict):
                 runtime["last_tick_started_at"] = _now_ts()
                 runtime["last_tick_error"] = ""
+            if self._proactive_generation_disabled():
+                changed = False
+                users_root = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+                for user in users_root.values():
+                    if isinstance(user, dict):
+                        changed = self._suspend_user_proactive_generation(user) or changed
+                pool = self.data.get("proactive_candidate_pool")
+                if isinstance(pool, list):
+                    for candidate in pool:
+                        if not isinstance(candidate, dict):
+                            continue
+                        status = _single_line(candidate.get("status"), 24).lower()
+                        if status in {"", "accepted", "deferred", "queued", "pending", "unknown"}:
+                            candidate["status"] = "blocked"
+                            candidate["note"] = "每日主动上限为 0，主动生成已停止"
+                            candidate["updated_ts"] = _now_ts()
+                            changed = True
+                if isinstance(runtime, dict):
+                    runtime["generation_disabled"] = True
+                    runtime["generation_disabled_reason"] = "max_daily_messages=0"
+                    runtime["last_tick_finished_at"] = _now_ts()
+                if changed:
+                    self._save_data_sync()
+                return
+            if isinstance(runtime, dict):
+                runtime["generation_disabled"] = False
+                runtime["generation_disabled_reason"] = ""
             if self._maybe_schedule_bilibili_video_share():
                 self._save_data_sync()
             users = list(self.data.get("users", {}).items())
@@ -11587,6 +12210,7 @@ class DailyStateMixin:
                     not is_troubleshooting_for_send
                     and not due_timer_id
                     and self._is_greeting_reason(current_reason)
+                    and not self._is_initial_wakeup_greeting(current_for_mark)
                 ):
                     suppressed_greetings = current_for_mark.get("greetings_suppressed_by_inbound", [])
                     if isinstance(suppressed_greetings, list) and current_reason in suppressed_greetings:
@@ -12318,6 +12942,12 @@ class DailyStateMixin:
                     _single_line(delivery_freshness_reason, 120),
                 )
                 self._debug_tick_skip(user_id, delivery_freshness_reason, prefix="取消")
+                continue
+            if self._proactive_generation_disabled(user):
+                async with self._data_lock:
+                    current_disabled = self._get_user(str(user_id))
+                    if self._suspend_user_proactive_generation(current_disabled):
+                        self._save_data_sync()
                 continue
             async with self._data_lock:
                 current_for_recent_chat = self._get_user(user_id)

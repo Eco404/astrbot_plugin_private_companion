@@ -3008,7 +3008,13 @@ class NewsExplorationMixin:
                     item[key] = _single_line(value, 160)
             share_attempts.append(item)
 
-        digests.append({**digest, "reason": reason})
+        history_digest = {
+            key: value
+            for key, value in digest.items()
+            if key not in {"items", "results", "raw_items", "articles"}
+        }
+        digests.append({**history_digest, "reason": reason})
+        del digests[:-32]
 
         def _sync_digest_share_status() -> None:
             if not digests or not isinstance(digests[-1], dict):
@@ -3366,8 +3372,13 @@ class NewsExplorationMixin:
         if not isinstance(digests, list):
             digests = []
             state["digests"] = digests
-        digests.append({**digest, "reason": "ai_daily"})
-        del digests[:-80]
+        history_digest = {
+            key: value
+            for key, value in digest.items()
+            if key not in {"items", "results", "raw_items", "articles"}
+        }
+        digests.append({**history_digest, "reason": "ai_daily"})
+        del digests[:-32]
         read_keys = state.setdefault("read_keys", [])
         if isinstance(read_keys, list):
             selected_key = _single_line(digest.get("selected_key"), 32)
@@ -4392,7 +4403,14 @@ class NewsExplorationMixin:
         wish = await self._build_external_event_wish(digest, source_type="web_exploration")
         if wish:
             digest["self_link"] = wish
-        notes.append(digest)
+        notes.append(
+            {
+                key: value
+                for key, value in digest.items()
+                if key not in {"results", "raw_results", "pages"}
+            }
+        )
+        del notes[:-40]
         state["last_explore_at"] = now
         state["last_status"] = "explored"
         state["last_query"] = query_info

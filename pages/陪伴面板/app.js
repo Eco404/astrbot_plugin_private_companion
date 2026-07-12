@@ -776,6 +776,7 @@ const featureMeta = {
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
   enable_cycle_state: ["生理期模拟", "开启后即视为适用，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
   enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到观察页的技能成长卡片管理。"],
+  enable_personal_goals: ["个人目标", "明确创建非创作型长期目标，并按真实完成的日程推进。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
   enable_smart_message_debounce: ["智能文本收口", "先本地快判明确完整文本；“知道吗/问你个事/你猜”等短引子会先等补话。"],
   enable_recall_enhancement: ["撤回增强", "感知撤回事件，支持发送前取消回复、短期防撤回转述和违禁词自动撤回。"],
@@ -864,6 +865,7 @@ const featureGroups = [
       "inject_passive_states",
       "enable_cycle_state",
       "enable_skill_growth_simulation",
+      "enable_personal_goals",
       "enable_message_debounce",
       "enable_recall_enhancement",
       "enable_private_image_self_recognition",
@@ -1876,7 +1878,7 @@ const configDescriptions = {
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
   local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
   local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini。auto 会根据 API 地址和模型名自动判断；魔搭社区会按异步任务提交并轮询，Gemini 会走 generateContent 图片返回。",
+  external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini、sensenova。auto 会根据 API 地址和模型名自动判断；SenseNova U1 Fast 会自动纠正模型别名并映射官方 2K 尺寸。",
   EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口；魔搭可填 https://api-inference.modelscope.cn/v1；豆包/火山方舟可填 https://ark.cn-beijing.volces.com/api/v3；Gemini 可填 https://generativelanguage.googleapis.com/v1beta。",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
   EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写普通聊天/文本模型。示例：gpt-image-1、qwen-image、wanx、seedream、gemini-*-image 或 imagen。",
@@ -1884,7 +1886,7 @@ const configDescriptions = {
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
   external_image_api_custom_headers: "可选。每行一个请求头，格式：Key: Value。会追加到在线生图 API 请求；下载同源结果图时也会安全复用。",
   enable_backup_external_image_api: "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选 API，再回退本地 ComfyUI/SDGen。",
-  backup_external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选 API 生效时使用。",
+  backup_external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini、sensenova。含义与主在线生图平台一致，只在备选 API 生效时使用。",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线生图接口地址。主在线 API 失败后才会使用。",
   BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
   BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选平台的图片模型名，不要填写聊天/文本模型。",
@@ -2013,6 +2015,7 @@ const featureSettingGroups = {
   enable_hunger_state: ["humanized_state_intensity"],
   enable_cycle_state: ["humanized_state_intensity"],
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
+  enable_personal_goals: ["enable_personal_goal_auto_progress", "personal_goal_share_cooldown_hours", "personal_goal_stall_days"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
   enable_recall_enhancement: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb", "enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_recall_cancel_reply: ["recall_message_cache_ttl_seconds"],
@@ -2660,8 +2663,8 @@ const featureSettingTypes = {
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"]] },
-  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
-  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   WEB_EXPLORATION_API_KEY: { type: "password" },
@@ -2810,6 +2813,7 @@ function collectSettingValue(key, input) {
 const PHOTO_API_PLATFORM_OPTIONS = [
   ["auto", "自动识别"],
   ["openai", "OpenAI 兼容"],
+  ["sensenova", "SenseNova 日日新"],
   ["bailian", "阿里云百炼"],
   ["modelscope", "魔搭社区"],
   ["doubao", "豆包/火山方舟"],
@@ -2822,6 +2826,9 @@ function normalizePhotoApiPlatform(value) {
     "openai-compatible": "openai",
     "openai_compatible": "openai",
     "openai兼容": "openai",
+    "sensenova": "sensenova",
+    "sense-nova": "sensenova",
+    "日日新": "sensenova",
     "百炼": "bailian",
     "阿里云百炼": "bailian",
     "dashscope": "bailian",
@@ -3899,7 +3906,6 @@ function renderAfterUserGroupListsLoaded() {
   renderDashboardPulse();
   renderRelationshipChart();
   renderGroupBubbleChart();
-  renderQuotaChart();
   if (state.activeTab === "private") {
     renderUsers();
   } else if (state.activeTab === "group") {
@@ -4812,7 +4818,7 @@ const setupGuideAdvancedItems = {
         { key: "custom_photo_tool_kind_param", type: "text", label: "类型参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持传入生图类型（如 selfie/text2img/edit），填写对应参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
         { key: "custom_photo_tool_reference_param", type: "text", label: "参考图参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持参考图/改图，填写参考图路径对应的参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
         { key: "custom_photo_tool_extra_params", type: "textarea", label: "额外参数（JSON）", placeholder: '{"size":"1024x1024"}', description: "JSON 格式的额外参数，调用工具时会一并传入。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
-        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]], description: "只有在线 API 或自动模式需要。魔搭会轮询任务，Gemini 支持参考图，豆包按 Seedream 文生图处理。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]], description: "SenseNova U1 Fast 使用独立信息图接口和官方 2K 固定尺寸，不支持参考图。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_BASE_URL", type: "text", label: "在线图片 API 地址", placeholder: "https://.../v1/images/generations", description: "可填完整生图接口，也可填平台根地址；留空则不会走在线 API。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_KEY", type: "password", label: "在线图片 API Key", placeholder: "sk-...", description: "只用于在线图片 API；不走在线后端可以留空。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / qwen-image / seedream / gemini-*-image", description: "请填写图片模型，不要填普通聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
@@ -7214,13 +7220,9 @@ function statCard(value, label, jumpTab = "") {
 
 function renderDashboard() {
   renderDashboardPulse();
-  renderModuleWorkbench(state.overview?.settings || {});
   renderStrategyOverview();
-  renderSetupProgress();
-  renderUxReviewPanel();
   renderRelationshipChart();
   renderGroupBubbleChart();
-  renderQuotaChart();
   renderNewsInsightPanel();
   renderWebExplorationPanel();
   renderActivityHeatmap();
@@ -7244,38 +7246,266 @@ function dashboardRefreshLabel() {
   return `已刷新 ${new Date(refreshedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-function renderDashboardPulse() {
-  const overview = state.overview || {};
+function dashboardLifeText(value, fallback = "暂无数据") {
+  if (Array.isArray(value)) {
+    const joined = value.map((item) => dashboardLifeText(item, "")).filter(Boolean).join("、");
+    return joined || fallback;
+  }
+  if (value && typeof value === "object") {
+    const picked = value.label || value.summary || value.status || value.phase || value.name || value.text;
+    return dashboardLifeText(picked, fallback);
+  }
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function renderDashboardLifeDesk(overview = {}) {
   const daily = overview.daily_state || {};
   const life = overview.life_observation || {};
   const current = life.current_plan || {};
+  const timeline = overview.daily_timeline || {};
+  const outfit = overview.daily_outfit || {};
+  const worldbook = overview.worldbook || {};
+  const livingmemory = overview.livingmemory || {};
+  const date = daily.date || timeline.plan_date || new Date().toLocaleDateString("zh-CN");
+  const dateNode = $("#dashboardLifeDate");
+  if (dateNode) dateNode.textContent = `${date} · ${dashboardRefreshLabel()}`;
+
+  const factRoot = $("#dashboardTodayFacts");
+  if (factRoot) {
+    const facts = [
+      ["天气", daily.weather],
+      ["地点", daily.location],
+      ["心情", normalizeRoleplayStateText(daily.mood_bias) || daily.note],
+      ["日程", `${timeline.segment_count || 0} 个时间段`],
+      ["健康", daily.health],
+      ["穿搭", outfit.available ? "今日穿搭已生成" : (outfit.error || "暂无穿搭图")],
+      ["睡眠", daily.sleep_phase || daily.sleep],
+      ["身体", daily.body_cycle || daily.hunger],
+    ];
+    factRoot.innerHTML = facts.map(([label, value]) => `
+      <div class="life-fact-item">
+        <span>${escapeHtml(label)}</span>
+        <b title="${escapeHtml(dashboardLifeText(value))}">${escapeHtml(dashboardLifeText(value))}</b>
+      </div>
+    `).join("");
+  }
+
+  const currentRoot = $("#dashboardCurrentState");
+  if (currentRoot) {
+    const energy = Math.max(0, Math.min(100, Number(daily.energy || 0)));
+    const activityMeta = [
+      current.end ? `${current.time || "--:--"}-${current.end}` : current.time,
+      scheduleLifecycleLabel(current.lifecycle),
+      current.mood,
+    ].filter(Boolean).join(" · ");
+    const states = [
+      ["体力", daily.energy === undefined || daily.energy === "" ? "暂无" : `${Math.round(energy)}/100`],
+      ["状态", daily.health],
+      ["睡眠", daily.sleep_phase || daily.sleep],
+      ["饥饿", daily.hunger],
+      ["梦境", daily.dream],
+      ["位置", daily.location],
+    ];
+    currentRoot.innerHTML = `
+      <div class="life-current-activity">
+        <small>${escapeHtml(activityMeta || "当前日程")}</small>
+        <b>${escapeHtml(dashboardLifeText(current.activity, "暂无当前日程"))}</b>
+        <span>${escapeHtml(dashboardLifeText(current.message_seed || daily.note, "暂无状态补充"))}</span>
+      </div>
+      <div class="life-energy-track" role="meter" aria-label="当前体力" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(energy)}"><i style="width:${energy}%"></i></div>
+      <div class="life-state-grid">${states.map(([label, value]) => `
+        <div><span>${escapeHtml(label)}</span><b>${escapeHtml(dashboardLifeText(value, "暂无"))}</b></div>
+      `).join("")}</div>
+    `;
+  }
+
+  const timelineRoot = $("#dashboardTimelinePreview");
+  if (timelineRoot) {
+    const segments = Array.isArray(timeline.segments) ? timeline.segments : [];
+    const storyEvents = Array.isArray(timeline.story_today_events) ? timeline.story_today_events : [];
+    const adjustments = Array.isArray(timeline.adjustments) ? timeline.adjustments : [];
+    const timeMinutes = (value) => {
+      const match = String(value || "").match(/(?:^|\s)(\d{1,2}):(\d{2})/);
+      if (!match) return null;
+      const hour = Number(match[1]);
+      const minute = Number(match[2]);
+      return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 ? hour * 60 + minute : null;
+    };
+    const segmentIsCurrent = (segment) => {
+      const lifecycle = String(segment?.lifecycle || "").toLowerCase();
+      return lifecycle === "active"
+        || Boolean(current.time && String(segment?.window || "").startsWith(String(current.time)));
+    };
+    const currentSegmentIndex = segments.findIndex(segmentIsCurrent);
+    const timelineMeta = $("#dashboardTimelineMeta");
+    if (timelineMeta) {
+      timelineMeta.textContent = currentSegmentIndex >= 0
+        ? `当前第 ${currentSegmentIndex + 1} / ${segments.length} 段`
+        : `全天 ${segments.length} 段`;
+    }
+    const scheduleEntries = segments.slice(0, 24).map((segment, index) => ({
+      kind: "schedule",
+      sort: Number.isFinite(Number(segment.start)) ? Number(segment.start) : (timeMinutes(segment.window) ?? 2000 + index),
+      segment,
+    }));
+    const changeEntries = [
+      ...adjustments.map((item) => ({
+        label: item.date || item.at || item.window || "变动",
+        text: item.reaction || item.note || item.content || "生活节奏发生调整",
+      })),
+      ...storyEvents.map((item) => ({
+        label: item.window || item.time || "事件",
+        text: item.text || item.summary || item.activity || item.title || "生活事件",
+      })),
+    ].filter((item) => String(item.text || "").trim()).slice(-10).map((item, index) => ({
+      kind: "change",
+      sort: timeMinutes(item.label) ?? 3000 + index,
+      item,
+    }));
+    const entries = [...scheduleEntries, ...changeEntries].sort((left, right) => left.sort - right.sort);
+    timelineRoot.innerHTML = entries.length ? entries.map((entry) => {
+      if (entry.kind === "change") {
+        return `
+          <li class="life-timeline-row is-change">
+            <time class="life-timeline-time is-change-time"><strong>${escapeHtml(entry.item.label)}</strong></time>
+            <div class="life-timeline-content">
+              <b>${escapeHtml(entry.item.text)}</b>
+              <span><em class="life-schedule-status is-change-status">生活变化</em></span>
+            </div>
+          </li>
+        `;
+      }
+      const segment = entry.segment;
+      const lifecycle = String(segment.lifecycle || "planned").toLowerCase();
+      const isCurrent = segmentIsCurrent(segment);
+      const summary = segment.summary || segment.activity || "这一段尚未细化";
+      const windowText = String(segment.window || "未定");
+      const windowMatch = windowText.match(/^(\d{1,2}:\d{2})\s*[-~至]\s*(\d{1,2}:\d{2})$/);
+      const startText = windowMatch ? windowMatch[1] : windowText;
+      const endText = windowMatch ? windowMatch[2] : "";
+      return `
+        <li class="life-timeline-row is-${escapeHtml(lifecycle)}${isCurrent ? " is-current" : ""}"${isCurrent ? ' aria-current="step"' : ""}>
+          <time class="life-timeline-time">
+            <strong>${escapeHtml(startText)}</strong>
+            ${endText ? `<small>至 ${escapeHtml(endText)}</small>` : ""}
+          </time>
+          <div class="life-timeline-content">
+            <b>${escapeHtml(summary)}</b>
+            <span>${isCurrent
+              ? '<em class="life-current-marker">当前日程</em>'
+              : `<em class="life-schedule-status is-${escapeHtml(lifecycle)}">${escapeHtml(scheduleLifecycleLabel(lifecycle) || "计划中")}</em>`}</span>
+          </div>
+        </li>
+      `;
+    }).join("") : `<li class="life-desk-empty">暂无时间轴</li>`;
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        const active = timelineRoot.querySelector(".is-current");
+        if (!active || timelineRoot.clientHeight <= 0) return;
+        timelineRoot.scrollTop = Math.max(
+          0,
+          active.offsetTop - (timelineRoot.clientHeight - active.offsetHeight) / 2,
+        );
+      });
+    }
+  }
+
+  const memoryRoot = $("#dashboardMemoryDrawer");
+  if (memoryRoot) {
+    const diaryCount = Array.isArray(life.diaries) ? life.diaries.length : 0;
+    const fragmentCount = Array.isArray(life.dream_fragments) ? life.dream_fragments.length : 0;
+    const memoryPlugin = livingmemory.selected_plugin_name
+      || livingmemory.memory_companion_display_name
+      || (livingmemory.compatible_available ? "长期记忆可用" : "未接入长期记忆");
+    const rows = [
+      ["worldbook", "关系", `${worldbook.enabled_member_count || 0}/${worldbook.member_count || 0} 个已启用`],
+      ["worldbook", "待整理观察", `${worldbook.pending_observation_total || 0} 条`],
+      ["memory", "生活记录", `${diaryCount} 篇日记 · ${fragmentCount} 个梦境片段`],
+      ["memory", "长期记忆", memoryPlugin],
+    ];
+    memoryRoot.innerHTML = `
+      <div class="life-memory-list">${rows.map(([tab, label, value]) => `
+        <button type="button" data-jump-tab="${escapeHtml(tab)}"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></button>
+      `).join("")}</div>
+      ${livingmemory.conflict ? `<p class="life-memory-warning">${escapeHtml(livingmemory.conflict_warning || "检测到多个长期记忆来源")}</p>` : ""}
+    `;
+  }
+
+  const capabilityRoot = $("#dashboardCapabilitySummary");
+  if (capabilityRoot) {
+    const privateInfo = overview.private || {};
+    const groupInfo = overview.group || {};
+    const intensity = overview.proactive_intensity || {};
+    const providers = overview.providers || {};
+    const proactiveLimit = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
+    const fastProvider = String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim();
+    const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
+    const capabilities = [
+      {
+        tab: "private",
+        label: "私聊陪伴",
+        value: `${privateInfo.enabled_user_count || 0}/${privateInfo.user_count || 0} 个对象`,
+        ready: Number(privateInfo.enabled_user_count || 0) > 0,
+      },
+      {
+        tab: "group",
+        label: "群聊观察",
+        value: `${groupInfo.enabled_group_count || 0}/${groupInfo.group_count || 0} 个群`,
+        ready: Boolean(groupInfo.enabled) && Number(groupInfo.enabled_group_count || 0) > 0,
+      },
+      {
+        tab: "proactive",
+        label: "主动消息",
+        value: Number(proactiveLimit || 0) > 0 ? `每日上限 ${proactiveLimit}` : "当前未启用",
+        ready: Number(proactiveLimit || 0) > 0,
+      },
+      {
+        tab: "models",
+        label: "模型分流",
+        value: fastProvider && complexProvider ? "快速与复杂模型已配置" : "需要补充模型",
+        ready: Boolean(fastProvider && complexProvider),
+      },
+    ];
+    capabilityRoot.innerHTML = capabilities.map((item) => `
+      <button type="button" class="${item.ready ? "is-ready" : "is-pending"}" data-jump-tab="${escapeHtml(item.tab)}">
+        <i aria-hidden="true"></i>
+        <span>${escapeHtml(item.label)}</span>
+        <b>${escapeHtml(item.value)}</b>
+      </button>
+    `).join("");
+  }
+}
+
+function renderDashboardPulse() {
+  const overview = state.overview || {};
+  renderDashboardLifeDesk(overview);
   const proactive = overview.proactive_candidates || {};
   const proactiveCounts = proactive.counts || {};
+  const creative = overview.creative || {};
   const news = overview.news || {};
   const exploration = overview.web_exploration || {};
-  const creative = overview.creative || {};
-  const bookshelf = state.bookshelfUnlocked || overview.bookshelf || {};
   const nextUser = state.users
     .filter((item) => Number(item.next_proactive_ts || 0) > 0)
     .sort((a, b) => Number(a.next_proactive_ts || 0) - Number(b.next_proactive_ts || 0))[0];
+  const creativeTitle = creative.latest_title || "";
   const newsTitle = news.last_digest?.headline || news.last_digest?.topic || "";
   const explorationTitle = exploration.last_digest?.topic || exploration.last_query?.query || "";
-  const bookshelfNote = [
-    creative.latest_title || "",
-    bookshelf.secret_count ? `夹层 ${bookshelf.secret_count}` : "",
-  ].filter(Boolean).join(" · ");
+  const latestContent = creativeTitle
+    || newsTitle
+    || explorationTitle
+    || "暂无新内容";
+  const latestContentNote = creativeTitle
+    ? `长线创作 · ${creative.active_projects || 0} 个项目进行中`
+    : (newsTitle
+      ? `新闻 · ${news.last_read_at || "未标记时间"}`
+      : (explorationTitle
+        ? `主动搜索 · ${exploration.last_explore_at || "未标记时间"}`
+        : "新闻、搜索与创作暂无更新"));
   const cards = [
     {
-      tone: "life",
-      layout: "wide tall",
-      label: "此刻状态",
-      value: current.activity || "暂无当前日程",
-      note: [current.end ? `${current.time}-${current.end}` : current.time, scheduleLifecycleLabel(current.lifecycle), current.mood, current.message_seed].filter(Boolean).join(" · ") || daily.note || "暂无细化",
-      jump: "memory",
-    },
-    {
       tone: "proactive",
-      layout: "wide compact",
+      layout: "compact",
       label: "下一次主动",
       value: nextUser ? (nextUser.nickname || nextUser.user_id) : "暂无计划",
       note: nextUser ? `${nextUser.next_proactive} · ${proactiveActionLabel(nextUser.planned_action || "message")}` : `${proactiveCounts.accepted || 0} 个候选已进入计划`,
@@ -7283,57 +7513,26 @@ function renderDashboardPulse() {
     },
     {
       tone: "news",
-      layout: "wide tall",
-      label: "今日见闻",
-      value: newsTitle || explorationTitle || "暂无记录",
-      note: newsTitle && explorationTitle ? `搜索：${explorationTitle}` : (news.last_read_at || exploration.last_explore_at || "新闻阅读和主动搜索会在这里留下痕迹"),
-      jump: "bookshelf",
-    },
-    {
-      tone: "bookcase",
-      layout: "wide compact",
-      label: "书柜与长线",
-      value: creative.latest_title || "暂无新书",
-      note: bookshelfNote || `${creative.active_projects || 0} 个创作进行中`,
-      jump: "bookshelf",
+      layout: "compact",
+      label: "最新内容",
+      value: latestContent,
+      note: latestContentNote,
+      jump: creativeTitle ? "bookshelf" : "dashboard",
+      scrollTarget: !creativeTitle && newsTitle
+        ? "dashboardNewsCard"
+        : (!creativeTitle && explorationTitle ? "dashboardWebExplorationCard" : ""),
     },
   ];
-  $("#dashboardPulse").innerHTML = cards.map((card) => `
-    <button type="button" class="pulse-card ${escapeHtml(card.tone)} ${escapeHtml(card.layout || "")}" data-pulse-kind="${escapeHtml(card.tone)}" data-jump-tab="${escapeHtml(card.jump)}">
+  const pulseRoot = $("#dashboardPulse");
+  if (!pulseRoot) return;
+  pulseRoot.innerHTML = cards.map((card) => `
+    <button type="button" class="pulse-card ${escapeHtml(card.tone)} ${escapeHtml(card.layout || "")}" data-pulse-kind="${escapeHtml(card.tone)}" ${card.scrollTarget ? `data-scroll-target="${escapeHtml(card.scrollTarget)}"` : `data-jump-tab="${escapeHtml(card.jump || "dashboard")}"`}>
       <span><em class="pulse-card-label">${escapeHtml(card.label)}</em><em class="pulse-card-freshness">${escapeHtml(dashboardRefreshLabel())}</em></span>
       <b title="${escapeHtml(card.value)}">${escapeHtml(card.value)}</b>
       <small>${escapeHtml(card.note)}</small>
     </button>
   `).join("");
 
-  const shortcuts = [
-    ["group", "群聊观测", `${overview.group?.enabled_group_count || 0}/${overview.group?.group_count || 0} 个群`],
-    ["worldbook", "关系网", `${overview.worldbook?.enabled_member_count || 0}/${overview.worldbook?.member_count || 0} 个节点`],
-    [
-      "tokens",
-      "Token",
-      state.tokenStats
-        ? `${formatCompactNumber(state.tokenStats?.totals?.total_tokens || 0)} · ${formatCompactNumber(state.tokenStats?.totals?.calls || 0)} 次`
-        : "后台加载中",
-    ],
-    [
-      "troubleshooting",
-      "排障中心",
-      state.lazyLoaded.diagnostics
-        ? `${(state.diagnostics || []).filter((item) => ["warn", "error"].includes(item.level)).length} 个诊断项`
-        : "去排障页查看",
-    ],
-    ["image-cache", "图片缓存", `${overview.cache?.private_image_vision?.items || 0}/${overview.cache?.private_image_vision?.max_items || "不限"} 条`],
-    ["config", "常用配置", moduleShortcutNote(overview)],
-    ["models", "模型分流", providerShortcutNote(overview.providers || {})],
-    ["config", "名单与开关", `${overview.group?.access_mode || "whitelist"} · 白 ${overview.group?.whitelist?.length || 0} / 黑 ${overview.group?.blacklist?.length || 0}`],
-  ];
-  $("#dashboardShortcuts").innerHTML = shortcuts.map(([tab, label, note]) => `
-    <button type="button" class="shortcut-chip" data-jump-tab="${escapeHtml(tab)}">
-      <b>${escapeHtml(label)}</b>
-      <span>${escapeHtml(note)}</span>
-    </button>
-  `).join("");
 }
 
 function formatCompactNumber(value) {
@@ -7365,10 +7564,34 @@ function insightStatus(value) {
   return labels[text] || text || "暂无";
 }
 
+function browsingHistoryItemHtml(item, fallbackLabel) {
+  const sourceLabel = item.source_label || fallbackLabel;
+  const queryText = item.query ? `搜索：${item.query}` : "";
+  const sourceText = item.source_title ? `来源：${item.source_title}` : "";
+  return `
+    <li class="browsing-history-item ${escapeHtml(item.source || "web_exploration")}">
+      <div>
+        <span class="history-badge">${escapeHtml(sourceLabel)}</span>
+        <small>${escapeHtml(item.generated_at || item.date || "")}</small>
+      </div>
+      <b>${escapeHtml(item.title || item.query || "浏览记录")}</b>
+      <p>${escapeHtml(item.intro || item.content || "这次没有留下详细记录。")}</p>
+      ${queryText || sourceText ? `<footer>${escapeHtml([queryText, sourceText].filter(Boolean).join(" · "))}</footer>` : ""}
+    </li>
+  `;
+}
+
+function historyWithoutLatest(items) {
+  return items.length > 1 ? items.slice(0, -1).reverse() : [];
+}
+
 function renderNewsInsightPanel() {
   const news = state.overview?.news || {};
   const digest = news.last_digest || {};
   const items = Array.isArray(news.latest_items) ? news.latest_items : [];
+  const newsHistory = (Array.isArray(news.history) ? news.history : [])
+    .filter((item) => item && item.source === "news");
+  const earlierNewsHistory = historyWithoutLatest(newsHistory);
   const enabled = Boolean(news.enabled);
   const dailyHot = Boolean(news.daily_hot_enabled);
   const aiDaily = news.ai_daily || {};
@@ -7396,6 +7619,17 @@ function renderNewsInsightPanel() {
       </li>
     `).join("")
     : `<li class="empty-line">暂无候选记录</li>`;
+  const historyHtml = earlierNewsHistory.length
+    ? `
+      <div class="insight-history-head">
+        <b>更早见闻</b>
+        <span>共 ${escapeHtml(news.history_count ?? newsHistory.length)} 条</span>
+      </div>
+      <ul class="browsing-history-list compact-history-list">
+        ${earlierNewsHistory.map((item) => browsingHistoryItemHtml(item, "新闻阅读")).join("")}
+      </ul>
+    `
+    : "";
   $("#newsInsightPanel").innerHTML = `
     <div class="insight-head">
       <div>
@@ -7414,6 +7648,7 @@ function renderNewsInsightPanel() {
       <span>${news.boredom_read_enabled ? "空档阅读开启" : "空档阅读关闭"}</span>
     </div>
     <ul class="insight-list">${itemHtml}</ul>
+    ${historyHtml}
   `;
 }
 
@@ -7421,9 +7656,11 @@ function renderWebExplorationPanel() {
   const exploration = state.overview?.web_exploration || {};
   const digest = exploration.last_digest || {};
   const query = exploration.last_query || {};
-  const history = Array.isArray(exploration.history) ? exploration.history : [];
+  const history = (Array.isArray(exploration.history) ? exploration.history : [])
+    .filter((item) => item && item.source !== "news");
   const enabled = Boolean(exploration.enabled);
-  const recentWebHistory = history.slice().reverse().find((item) => item && item.source !== "news") || {};
+  const recentWebHistory = history[history.length - 1] || {};
+  const earlierWebHistory = historyWithoutLatest(history);
   const displayTitle = digest.topic || recentWebHistory.title || query.query || "暂无主动搜索记录";
   const displayNote = digest.note || recentWebHistory.intro || recentWebHistory.content || (enabled ? "等待下一次主动搜索留下笔记。" : "主动搜索未开启");
   const displayTime = exploration.last_explore_at || recentWebHistory.generated_at || recentWebHistory.date || "未搜索";
@@ -7432,24 +7669,9 @@ function renderWebExplorationPanel() {
     : exploration.search_backend === "astrbot"
       ? "AstrBot 网页搜索"
       : "搜索未配置";
-  const historyHtml = history.length
-    ? history.slice().reverse().map((item) => {
-      const sourceLabel = item.source_label || (item.source === "news" ? "新闻阅读" : "主动搜索");
-      const queryText = item.query ? `搜索：${item.query}` : "";
-      const sourceText = item.source_title ? `来源：${item.source_title}` : "";
-      return `
-        <li class="browsing-history-item ${escapeHtml(item.source || "web_exploration")}">
-          <div>
-            <span class="history-badge">${escapeHtml(sourceLabel)}</span>
-            <small>${escapeHtml(item.generated_at || item.date || "")}</small>
-          </div>
-          <b>${escapeHtml(item.title || item.query || "浏览记录")}</b>
-          <p>${escapeHtml(item.intro || item.content || "这次没有留下详细记录。")}</p>
-          ${queryText || sourceText ? `<footer>${escapeHtml([queryText, sourceText].filter(Boolean).join(" · "))}</footer>` : ""}
-        </li>
-      `;
-    }).join("")
-    : `<li class="empty-line browsing-history-empty">暂无浏览记录</li>`;
+  const historyHtml = earlierWebHistory.length
+    ? earlierWebHistory.map((item) => browsingHistoryItemHtml(item, "主动搜索")).join("")
+    : `<li class="empty-line browsing-history-empty">暂无更早搜索记录</li>`;
   $("#webExplorationPanel").innerHTML = `
     <div class="insight-head">
       <div>
@@ -7463,7 +7685,11 @@ function renderWebExplorationPanel() {
       <span>${escapeHtml(insightStatus(exploration.last_status))}</span>
       <span>${escapeHtml(backendLabel)}</span>
       <span>${exploration.boredom_search_enabled ? "空档搜索开启" : "空档搜索关闭"}</span>
-      <span>历史 ${escapeHtml(exploration.history_count ?? history.length)} 条</span>
+      <span>搜索历史 ${escapeHtml(exploration.history_count ?? history.length)} 条</span>
+    </div>
+    <div class="insight-history-head">
+      <b>更早搜索</b>
+      <span>最近一次已在上方展示</span>
     </div>
     <ul class="browsing-history-list">${historyHtml}</ul>
   `;
@@ -7777,6 +8003,7 @@ function renderDiagnostics() {
           <b>${escapeHtml(item.title || "")}</b>
           <p>${escapeHtml(item.text || "")}</p>
           ${item.action ? `<small>${escapeHtml(item.action)}</small>` : ""}
+          ${troubleshootingSuppressionButtonMarkup(item, "运行诊断")}
         </div>
       </div>
     `).join("")
@@ -7881,6 +8108,91 @@ function troubleshootingFilterByCategory(items, category) {
   });
 }
 
+function troubleshootingSuppressionButtonMarkup(item, source) {
+  if (String(item?.level || "") !== "warn" || !String(item?.warning_type || "").startsWith("warning:")) return "";
+  return `
+    <button
+      type="button"
+      class="diagnostic-warning-suppress"
+      data-troubleshooting-warning-action="suppress"
+      data-warning-key="${escapeHtml(item.warning_type)}"
+      data-warning-code="${escapeHtml(item.warning_code || "")}"
+      data-warning-title="${escapeHtml(item.title || "未命名警告类型")}"
+      data-warning-source="${escapeHtml(source || item.source || "排障检查")}"
+      title="以后不再显示这一类警告"
+    >屏蔽此类</button>
+  `;
+}
+
+function renderTroubleshootingSuppressedWarnings(data = {}) {
+  const manager = $("#troubleshootingSuppressedWarningManager");
+  const countEl = $("#troubleshootingSuppressedWarningCount");
+  const listEl = $("#troubleshootingSuppressedWarnings");
+  if (!manager || !countEl || !listEl) return;
+  const items = Array.isArray(data.suppressed_warning_types) ? data.suppressed_warning_types : [];
+  manager.hidden = items.length === 0;
+  countEl.textContent = String(items.length);
+  listEl.innerHTML = items.length
+    ? `
+      <div class="diagnostic-suppressed-list-head">
+        <span>${escapeHtml(items.length)} 类警告已隐藏</span>
+        <button type="button" data-troubleshooting-warning-action="restore_all">全部恢复</button>
+      </div>
+      ${items.map((item) => `
+        <div class="diagnostic-suppressed-item">
+          <div>
+            <b>${escapeHtml(item.title || "未命名警告类型")}</b>
+            <span>${escapeHtml(item.source || "排障检查")}${Number(item.current_count || 0) > 0 ? ` · 当前命中 ${escapeHtml(item.current_count)} 条` : " · 当前未命中"}</span>
+          </div>
+          <button
+            type="button"
+            data-troubleshooting-warning-action="restore"
+            data-warning-key="${escapeHtml(item.key || "")}"
+          >恢复</button>
+        </div>
+      `).join("")}
+    `
+    : "";
+}
+
+async function updateTroubleshootingWarningSuppression(control) {
+  const action = String(control?.dataset?.troubleshootingWarningAction || "").trim();
+  if (!action) return;
+  const payload = { action };
+  if (action !== "restore_all") {
+    payload.key = String(control.dataset.warningKey || "").trim();
+  }
+  if (action === "suppress") {
+    payload.code = String(control.dataset.warningCode || "").trim();
+    payload.title = String(control.dataset.warningTitle || "").trim();
+    payload.source = String(control.dataset.warningSource || "").trim();
+  }
+  setActionBusy(control, true);
+  let result = null;
+  try {
+    result = await postJson("/troubleshooting/warnings/update", payload);
+  } catch (error) {
+    showToast(`更新警告屏蔽失败：${error.message}`, "error");
+    setActionBusy(control, false);
+    return;
+  }
+  try {
+    const refreshResults = await Promise.allSettled([
+      loadTroubleshooting({ silent: true, skipExperimentalRender: true }),
+      loadDiagnostics(true, { skipExperimentalRender: true }),
+    ]);
+    const refreshFailed = refreshResults.some((item) => item.status === "rejected");
+    renderTroubleshooting();
+    if (refreshFailed) {
+      showToast(`${result?.message || "警告屏蔽已保存"}，但自动刷新失败，请重新检查`, "error");
+    } else {
+      showToast(result?.message || (action === "suppress" ? "已屏蔽此类警告" : "已恢复警告类型"));
+    }
+  } finally {
+    setActionBusy(control, false);
+  }
+}
+
 function renderTroubleshooting() {
   const categoriesEl = $("#troubleshootingCategories");
   const summaryEl = $("#troubleshootingSummary");
@@ -7907,6 +8219,7 @@ function renderTroubleshooting() {
   const filteredChecks = selected === "all" ? categorizedChecks : categorizedChecks.filter((item) => item.level === selected);
   const filteredEvents = selected === "all" ? categorizedEvents : categorizedEvents.filter((item) => item.level === selected);
   const reasonItems = troubleshootingReasonItems(filteredChecks, filteredEvents, selected);
+  renderTroubleshootingSuppressedWarnings(data);
   if (categoriesEl) categoriesEl.innerHTML = troubleshootingCategoryPickerMarkup(category);
   $("#troubleshootingChecksTitle")?.replaceChildren(document.createTextNode(`${categoryInfo.label}：需要处理的信号`));
   $("#troubleshootingChainTitle")?.replaceChildren(document.createTextNode(`${categoryInfo.label}：链路与运行状态`));
@@ -7916,7 +8229,7 @@ function renderTroubleshooting() {
       <div>
         <span>${escapeHtml(summary.generated_at || "等待检查")}</span>
         <b>${escapeHtml(summary.headline || "尚未加载排障信息")}</b>
-        <small>${escapeHtml(troubleshootingSummaryText(counts))}</small>
+        <small>${escapeHtml(troubleshootingSummaryText(counts, summary))}</small>
       </div>
       <button type="button" data-troubleshooting-refresh>重新检查</button>
     </section>
@@ -7957,6 +8270,7 @@ function renderTroubleshooting() {
         <b>${escapeHtml(item.name || "database")}</b>
         <span>${escapeHtml(item.text || "-")}</span>
         <small>${escapeHtml(item.path || "")}</small>
+        ${troubleshootingSuppressionButtonMarkup(item, "SQLite 并发")}
       </section>
     `).join("")
     : `<div class="empty small">没有检测到候选 SQLite 数据库文件</div>`;
@@ -8069,13 +8383,18 @@ function troubleshootingDisplayTitle(title, item = {}) {
   return rawTitle || "-";
 }
 
-function troubleshootingSummaryText(counts) {
+function troubleshootingSummaryText(counts, summary = {}) {
   if (!counts) return "等待数据";
   const error = Number(counts.error || 0);
   const warn = Number(counts.warn || 0);
   const info = Number(counts.info || 0);
   const ok = Number(counts.ok || 0);
-  return `错误 ${error} · 警告 ${warn} · 信息 ${info} · 正常 ${ok}`;
+  const suppressedTypes = Number(summary.suppressed_types || 0);
+  const suppressedCount = Number(summary.suppressed_count || 0);
+  const suppressed = suppressedTypes > 0
+    ? ` · 已屏蔽 ${suppressedTypes} 类${suppressedCount > 0 ? `（当前命中 ${suppressedCount} 条）` : ""}`
+    : "";
+  return `错误 ${error} · 警告 ${warn} · 信息 ${info} · 正常 ${ok}${suppressed}`;
 }
 
 function troubleshootingLevelLabel(level) {
@@ -8105,7 +8424,10 @@ function troubleshootingCheckMarkup(item) {
         <p>${escapeHtml(item.text || "")}</p>
         ${item.action ? `<small>${escapeHtml(item.action)}</small>` : ""}
       </div>
-      ${item.jump ? `<button type="button" data-jump-tab="${escapeHtml(item.jump)}">查看</button>` : ""}
+      <div class="troubleshooting-check-actions">
+        ${item.jump ? `<button type="button" data-jump-tab="${escapeHtml(item.jump)}">查看</button>` : ""}
+        ${troubleshootingSuppressionButtonMarkup(item, "常见检查")}
+      </div>
     </section>
   `;
 }
@@ -8121,7 +8443,10 @@ function troubleshootingEventMarkup(item) {
       ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
       <footer>
         ${item.action ? `<span>${escapeHtml(item.action)}</span>` : ""}
-        ${item.jump ? `<button type="button" data-jump-tab="${escapeHtml(item.jump)}">查看</button>` : ""}
+        <div class="troubleshooting-event-actions">
+          ${item.jump ? `<button type="button" data-jump-tab="${escapeHtml(item.jump)}">查看</button>` : ""}
+          ${troubleshootingSuppressionButtonMarkup(item, item.source || "最近问题")}
+        </div>
       </footer>
     </section>
   `;
@@ -8463,12 +8788,19 @@ function troubleshootingChainPreviewMarkup(type, result) {
   }
   if (result.text_preview && !result.final_text_preview) parts.push(`<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>`);
   if (result.prompt) parts.push(`<small class="path">提示词：${escapeHtml(result.prompt)}</small>`);
-  const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
-  if ((type === "image_generation_text2img" || type === "image_generation_selfie" || type === "image_generation") && warnings.length) {
+  const warningItems = Array.isArray(result.warning_items)
+    ? result.warning_items.filter((item) => item && item.text)
+    : (Array.isArray(result.warnings) ? result.warnings.filter(Boolean).map((text) => ({ text })) : []);
+  if ((type === "image_generation_text2img" || type === "image_generation_selfie" || type === "image_generation") && warningItems.length) {
     parts.push(`
       <details class="chain-test-steps chain-test-preview">
         <summary>查看真实出图超时风险</summary>
-        ${warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+        ${warningItems.map((item) => `
+          <div class="diagnostic-chain-warning">
+            <p>${escapeHtml(item.text || "")}</p>
+            ${troubleshootingSuppressionButtonMarkup(item, item.source || "链路测试")}
+          </div>
+        `).join("")}
       </details>
     `);
   }
@@ -11648,6 +11980,7 @@ function renderMemory() {
   renderDl("#dailyState", normalizeDailyStateForDisplay(daily));
   renderDailyTimeline();
   renderSkillGrowth();
+  renderPersonalGoals();
   renderInteractionImpact();
   renderMemoryComposition();
   renderSlangCloud();
@@ -12073,6 +12406,65 @@ function renderSkillGrowth() {
   bindSkillGrowthActions();
 }
 
+function renderPersonalGoals() {
+  const goals = state.overview?.personal_goals || {};
+  const panel = $("#personalGoalPanel");
+  if (!panel) return;
+  if (!goals.enabled) {
+    panel.innerHTML = `<div class="empty small">个人目标功能未开启</div>`;
+    return;
+  }
+  const items = Array.isArray(goals.items) ? goals.items : [];
+  if (!items.length) {
+    panel.innerHTML = `<div class="empty small">暂无个人目标，只会跟进你明确创建的目标</div>`;
+    return;
+  }
+  panel.innerHTML = `<div class="skill-growth-head"><span>进行中 ${escapeHtml(goals.active_count || 0)}</span><span>已完成 ${escapeHtml(goals.completed_count || 0)}</span><span>${goals.auto_progress ? "按已完成日程推进" : "仅手动推进"}</span></div><div class="skill-growth-grid">${items.map((item) => `
+    <article class="skill-card is-collapsed">
+      <button type="button" class="skill-card-toggle" data-goal-toggle aria-expanded="false"><header><div><span>${escapeHtml(item.category || "生活")}</span><h3>${escapeHtml(item.title || "未命名目标")}</h3></div><b>${escapeHtml(item.status_label || "进行中")}</b></header></button>
+      <div class="skill-level-line"><span>${escapeHtml(item.next_step ? `下一步：${item.next_step}` : "尚未填写下一步")}</span><small>${escapeHtml(item.progress || 0)}%</small></div>
+      <div class="skill-meter"><i style="width:${escapeHtml(item.progress || 0)}%"></i></div>
+      <div class="skill-card-body">
+        ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
+        <div class="skill-meta"><span>最近推进 ${escapeHtml(item.last_progress || "暂无")}</span><span>每次 +${escapeHtml(item.auto_step || 10)}%</span></div>
+        ${Array.isArray(item.recent_logs) && item.recent_logs.length ? `<div class="skill-log">${item.recent_logs.slice().reverse().map((log) => `<p><b>${escapeHtml(log.kind === "manual_progress" ? "手动" : `到 ${log.progress || 0}%`)}</b><span>${escapeHtml(log.evidence || "进度记录")}</span><small>${escapeHtml(log.time || "")}</small></p>`).join("")}</div>` : ""}
+        <details class="skill-editor"><summary>管理</summary><div class="skill-editor-grid">
+          <label>目标 <input data-goal-title="${escapeHtml(item.id)}" value="${escapeHtml(item.title || "")}" maxlength="60" /></label>
+          <label>分类 <input data-goal-category="${escapeHtml(item.id)}" value="${escapeHtml(item.category || "")}" maxlength="24" /></label>
+          <label>状态 <select data-goal-status="${escapeHtml(item.id)}">${[["active","进行中"],["paused","已暂停"],["completed","已完成"],["abandoned","已放弃"]].map(([value,label]) => `<option value="${value}" ${item.status === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+          <label>进度 <input data-goal-progress="${escapeHtml(item.id)}" type="number" min="0" max="100" value="${escapeHtml(item.progress || 0)}" /></label>
+          <label>每次推进 <input data-goal-auto_step="${escapeHtml(item.id)}" type="number" min="1" max="50" value="${escapeHtml(item.auto_step || 10)}" /></label>
+          <label class="wide-field">下一步 <input data-goal-next_step="${escapeHtml(item.id)}" value="${escapeHtml(item.next_step || "")}" maxlength="100" /></label>
+          <label class="wide-field">匹配词 <input data-goal-keywords="${escapeHtml(item.id)}" value="${escapeHtml((item.keywords || []).join(", "))}" maxlength="200" /></label>
+          <label class="wide-field">备注 <input data-goal-note="${escapeHtml(item.id)}" value="${escapeHtml(item.note || "")}" maxlength="160" /></label>
+        </div><div class="skill-editor-actions"><button type="button" data-goal-save="${escapeHtml(item.id)}">保存目标</button><button type="button" class="danger-outline" data-goal-delete="${escapeHtml(item.id)}">删除</button></div></details>
+      </div>
+    </article>`).join("")}</div>`;
+  bindPersonalGoalActions();
+}
+
+function goalField(id, field) {
+  return document.querySelector(`[data-goal-${field}="${CSS.escape(id)}"]`);
+}
+
+function bindPersonalGoalActions() {
+  document.querySelectorAll("[data-goal-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const card = button.closest(".skill-card");
+    if (!card) return;
+    const collapsed = card.classList.toggle("is-collapsed");
+    button.setAttribute("aria-expanded", String(!collapsed));
+  }));
+  document.querySelectorAll("[data-goal-save]").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.dataset.goalSave || "";
+    await runAction(() => postJson("/personal_goal/update", {id, title: goalField(id,"title")?.value || "", category: goalField(id,"category")?.value || "生活", status: goalField(id,"status")?.value || "active", progress: Number(goalField(id,"progress")?.value || 0), auto_step: Number(goalField(id,"auto_step")?.value || 10), next_step: goalField(id,"next_step")?.value || "", keywords: goalField(id,"keywords")?.value || "", note: goalField(id,"note")?.value || ""}), "已保存个人目标", button);
+  }));
+  document.querySelectorAll("[data-goal-delete]").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.dataset.goalDelete || "";
+    if (!requireSecondClick(button, `goal:${id}`, "再次点击删除目标", "再次点击删除")) return;
+    await runAction(() => postJson("/personal_goal/update", {id, delete: true}), "已删除个人目标", button);
+  }));
+}
+
 function renderSkillCategoryGroups(items) {
   const groups = new Map();
   items.forEach((item) => {
@@ -12492,7 +12884,7 @@ function renderBookCategoryShelves(items, options = {}) {
       <section class="drawer-book-group book-category-group ${escapeHtml(categorySlug(group.title))}">
         <header>
           <span>${escapeHtml(group.title)} <b>${escapeHtml(group.books.length)}</b></span>
-          <small>${escapeHtml(note)}</small>
+          ${note ? `<small>${escapeHtml(note)}</small>` : ""}
         </header>
         <div class="${escapeHtml(rowClass)}">${booksForRender.map(renderBookshelfBook).join("")}</div>
       </section>
@@ -12513,7 +12905,7 @@ function bookshelfCategoryTitle(book) {
 function bookshelfCategoryNote(title, books) {
   const kind = books[0]?.kind || "";
   if (kind === "browsing") return "新闻阅读和主动搜索会在这里留痕";
-  if (kind === "creative") return "Bot 自己慢慢推进的文本作品";
+  if (kind === "creative") return "";
   if (kind === "diary") return "按日期翻阅";
   if (kind === "jm_album") return "夹层内的私密阅读记录";
   return `${books.length} 本`;
@@ -12534,14 +12926,19 @@ function renderBookshelfBook(item) {
   }[kind] || kind;
   const bookId = bookshelfBookId(item);
   const title = item.title || "未命名";
-  const meta = item.progress || item.created || item.status || item.tone || "";
+  const rawMeta = item.progress || item.created || item.status || item.tone || "";
+  const meta = item.progress
+    ? String(rawMeta).replace(/\s*\/\s*/g, "/").replace(/\s+字/g, "字")
+    : String(rawMeta);
+  const metaClass = meta.length > 10 ? "is-long" : "";
+  const titleClass = Array.from(String(title)).length > 9 ? "is-long" : "";
+  const ariaLabel = [kindLabel, title, meta].filter(Boolean).join("，");
   return `
-    <button type="button" class="shelf-book ${escapeHtml(kind)}" data-book-id="${escapeHtml(bookId)}" title="${escapeHtml(title)}">
+    <button type="button" class="shelf-book ${escapeHtml(kind)}" data-book-id="${escapeHtml(bookId)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(ariaLabel)}">
       <div class="book-spine">
         <i class="book-shine"></i>
-        <span>${escapeHtml(kindLabel)}</span>
-        <b>${escapeHtml(title)}</b>
-        ${meta ? `<small>${escapeHtml(meta)}</small>` : `<small>书柜藏本</small>`}
+        <b class="${titleClass}">${escapeHtml(title)}</b>
+        ${meta ? `<small class="${metaClass}">${escapeHtml(meta)}</small>` : `<small>书柜藏本</small>`}
         <em></em>
       </div>
     </button>
@@ -21657,20 +22054,56 @@ async function saveExperimentalSettings(key, form, successMessage) {
   }
 }
 
+let activeTabTransition = null;
+
 function switchTab(tabName) {
   tabName = tabName === "modules" ? "config" : (tabName || "dashboard");
   if (tabName === state.activeTab) return;
-  state.activeTab = tabName;
-  document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
-  document.querySelectorAll(".panel").forEach((item) => {
-    item.classList.remove("is-leaving");
-    item.classList.toggle("is-active", item.id === `panel-${tabName}`);
-  });
-  renderActiveTab(state.activeTab);
-  ensureTabData(state.activeTab).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
+  const tabs = [...document.querySelectorAll(".annotations .tab[data-tab]")];
+  const previousIndex = tabs.findIndex((item) => item.dataset.tab === state.activeTab);
+  const nextIndex = tabs.findIndex((item) => item.dataset.tab === tabName);
+  const direction = nextIndex >= 0 && previousIndex >= 0 && nextIndex < previousIndex ? "previous" : "next";
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  document.documentElement.dataset.tabDirection = direction;
+
+  const commit = (fallbackMotion = false) => {
+    state.activeTab = tabName;
+    tabs.forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
+    document.querySelectorAll(".panel").forEach((item) => {
+      item.classList.remove("is-entering", "is-leaving");
+      item.classList.toggle("is-active", item.id === `panel-${tabName}`);
+    });
+    const activePanel = document.getElementById(`panel-${tabName}`);
+    if (fallbackMotion && activePanel) {
+      void activePanel.offsetWidth;
+      activePanel.classList.add("is-entering");
+      activePanel.addEventListener("animationend", () => activePanel.classList.remove("is-entering"), { once: true });
+    }
+    renderActiveTab(state.activeTab);
+  };
+
+  if (!reduceMotion && typeof document.startViewTransition === "function") {
+    activeTabTransition?.skipTransition?.();
+    try {
+      const transition = document.startViewTransition(() => commit(false));
+      activeTabTransition = transition;
+      transition.finished.finally(() => {
+        if (activeTabTransition === transition) {
+          activeTabTransition = null;
+          delete document.documentElement.dataset.tabDirection;
+        }
+      });
+    } catch (_error) {
+      commit(true);
+      activeTabTransition = null;
+    }
+  } else {
+    commit(!reduceMotion);
+  }
+  ensureTabData(tabName).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
 }
 
-document.querySelectorAll(".tab").forEach((button) => {
+document.querySelectorAll(".annotations .tab[data-tab]").forEach((button) => {
   button.addEventListener("click", () => {
     switchTab(button.dataset.tab);
   });
@@ -21984,6 +22417,11 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const warningSuppression = element?.closest("[data-troubleshooting-warning-action]");
+  if (warningSuppression) {
+    await updateTroubleshootingWarningSuppression(warningSuppression);
+    return;
+  }
   const troubleshootingFilter = element?.closest("[data-troubleshooting-filter]");
   if (troubleshootingFilter) {
     state.troubleshootingFilter = troubleshootingFilter.dataset.troubleshootingFilter || "all";
@@ -22015,7 +22453,9 @@ document.addEventListener("click", async (event) => {
     const targetId = scrollTarget.dataset.scrollTarget || "";
     const targetEl = targetId ? document.getElementById(targetId) : null;
     if (targetEl) {
-      targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      const disclosure = targetEl.closest("details");
+      if (disclosure) disclosure.open = true;
+      requestAnimationFrame(() => targetEl.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
     return;
   }
@@ -22688,6 +23128,14 @@ $("#skillAddForm").addEventListener("submit", async (event) => {
     hidden: false,
     frozen: false,
   }), "已添加技能", event.submitter);
+  if (saved) event.currentTarget.reset();
+});
+$("#personalGoalAddForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const title = String(form.get("title") || "").trim();
+  if (!title) return;
+  const saved = await runAction(() => postJson("/personal_goal/update", {title, category: form.get("category") || "生活", progress: Number(form.get("progress") || 0), auto_step: Number(form.get("auto_step") || 10), next_step: form.get("next_step") || "", keywords: form.get("keywords") || title, note: form.get("note") || "", status: "active"}), "已添加个人目标", event.submitter);
   if (saved) event.currentTarget.reset();
 });
 $("#resetTokenStatsBtn").addEventListener("click", async () => {

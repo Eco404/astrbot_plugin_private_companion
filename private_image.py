@@ -2012,7 +2012,15 @@ class PrivateImageMixin:
             "这图是什么", "这个图是什么", "这张图是什么", "这是啥", "这是什么", "什么内容",
             "看到了什么", "你看到了什么", "画了什么", "写了什么", "什么意思",
         )
-        return any(item in compact for item in patterns)
+        if any(item in compact for item in patterns):
+            return True
+        return bool(
+            re.search(
+                r"(?:图里|图片里|照片里|画面里|这图|这张图).{0,10}(?:几个人|几个|是谁|像谁|有没有|哪里|哪儿|什么字|哪些字|什么细节)",
+                compact,
+            )
+            or re.search(r"(?:几个人|几个角色|谁在图里|谁在图片里)", compact)
+        )
 
     def _private_image_reply_objective(self, ownership_line: str, vision_text: str = "", user_text: str = "") -> str:
         kind = self._private_image_ownership_kind(ownership_line)
@@ -2029,7 +2037,8 @@ class PrivateImageMixin:
             )
         if image_kind in {"photo", "screenshot", "manga", "chat"}:
             return (
-                "回复目标：按普通图片/截图/漫画/聊天记录处理。先看主体、文字和场景，再回应用户的疑问、吐槽或分享意图。"
+                "回复目标：用户没有要求看图说明时，把图片当作聊天中的一次分享，优先自然评价、接梗、回应情绪或追问重点；"
+                "最多顺带提一个最显眼的细节，不要从主体、服装、背景到文字逐项复述，不要输出看图报告。"
             )
         if kind == "bot_sticker":
             return (
@@ -2046,7 +2055,8 @@ class PrivateImageMixin:
                 "回复目标：回应用户借图表达的意思；归属指向用户本人时，不要说成当前角色自己。"
             )
         return (
-            "回复目标：优先回应用户借图表达的意思；归属不明时不要强行认定。"
+            "回复目标：优先像正常聊天一样回应用户借图表达的意思；最多顺带提一个显眼细节，"
+            "不要把视觉摘要改写成逐项图片描述；归属不明时不要强行认定。"
         )
 
     def _private_image_user_has_specific_vision_request(self, text: str) -> bool:
@@ -3699,6 +3709,8 @@ class PrivateImageMixin:
             boundary_prompt = (
                 "【本轮图片回复边界】\n"
                 f"{boundary_intro}"
+                "用户没有明确问‘图里是什么/写了什么/有几个人’时，不要逐项描述主体、衣服、背景和文字；"
+                "把图当作对方递来的一句话，按人格自然评价、接梗、回应情绪或追问一个重点，最多顺带点出一个最显眼细节。\n"
                 "如果最近对话上下文里有用户对本轮图片或下一张图片的明确回复限制,例如“只回复某句话”“不要回复其他内容”,必须优先遵守；这不是旧话题。\n"
                 "不要把聊天历史、长期记忆、主动消息、旧 TTS 文本或压缩摘要里的邀约当成当前输入；"
                 "不要顺便提下午、五点、放学、出去走走、陪你、到时候叫我等旧约定。"
@@ -3908,6 +3920,7 @@ class PrivateImageMixin:
                 else:
                     fallback_prompt = (
                         "用户只发了一张图片。请用当前私聊人格短句回应，不要提模型、插件、视觉转述或路径。\n"
+                        "除非用户明确问图片内容，否则不要把摘要逐项复述成看图报告；像正常聊天一样评价、接梗、回应情绪或追问重点，最多提一个显眼细节。\n"
                         "如果最近对话上下文里用户明确要求这张/下一张图只回复某句话或不要回复其他内容,必须优先照做。\n"
                         f"{self._private_image_identity_disambiguation_instruction()}\n"
                         f"{reply_objective}\n"

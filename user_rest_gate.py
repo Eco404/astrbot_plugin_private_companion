@@ -15,6 +15,8 @@ from .helpers import _now_ts, _safe_float, _single_line
 class UserRestGateMixin:
     """Detect and maintain per-user rest silence windows."""
 
+    _ACTIVE_REST_KINDS = frozenset({"sleep", "nap", "rest"})
+
     @staticmethod
     def _user_rest_text_is_meta_discussion(cleaned: str) -> bool:
         if not cleaned:
@@ -98,46 +100,55 @@ class UserRestGateMixin:
             user["user_rest_until"] = 0
             user["user_rest_reason"] = ""
             user["user_rest_set_at"] = 0
+            user["user_rest_kind"] = ""
             logger.info("[PrivateCompanion] 已清理误判的用户休息静默: user=%s", user.get("user_id") or user.get("id") or "")
             return 0.0
         if rest_until <= check_now:
             user["user_rest_until"] = 0
             user["user_rest_reason"] = ""
             user["user_rest_set_at"] = 0
+            user["user_rest_kind"] = ""
+            return 0.0
+        rest_kind = self._user_rest_kind(user)
+        rest_set_at = _safe_float(user.get("user_rest_set_at"), 0)
+        last_activity_at = max(
+            _safe_float(user.get("last_activity_at"), 0),
+            _safe_float(user.get("last_user_message_at"), 0),
+        )
+        if (
+            rest_kind in self._ACTIVE_REST_KINDS
+            and rest_set_at > 0
+            and last_activity_at > rest_set_at + 0.001
+        ):
+            user["user_rest_until"] = 0
+            user["user_rest_reason"] = ""
+            user["user_rest_set_at"] = 0
+            user["user_rest_kind"] = ""
+            logger.info(
+                "[PrivateCompanion] 检测到休息后用户再次活动,已解除休息静默: user=%s kind=%s activity_at=%.3f",
+                user.get("user_id") or user.get("id") or "",
+                rest_kind,
+                last_activity_at,
+            )
             return 0.0
         return rest_until
 
-    def _next_user_rest_morning_ts(self, *, now: float) -> float:
-        timezone_name = _single_line(getattr(self, "environment_perception_timezone", ""), 64) or "Asia/Shanghai"
-        try:
-            tz = zoneinfo.ZoneInfo(timezone_name)
-        except Exception:
-            tz = zoneinfo.ZoneInfo("Asia/Shanghai")
-        current = datetime.fromtimestamp(now, tz)
-        target = current.replace(hour=8, minute=30, second=0, microsecond=0)
-        if target.timestamp() <= now + 3600:
-            target += timedelta(days=1)
-        return max(target.timestamp(), now + 6 * 3600)
-
-    def _detect_user_rest_silence_until(self, text: str, *, now: float | None = None) -> float:
+    def _classify_user_rest_signal(self, text: str) -> str:
         cleaned = _single_line(text, 260).lower()
         if not cleaned:
-            return 0.0
-        check_now = _now_ts() if now is None else now
-        # Avoid treating keyword discussions or quoted histories as real rest requests.
+            return ""
         if self._user_rest_text_is_meta_discussion(cleaned):
-            return 0.0
-        quoted_or_report = self._user_rest_text_is_quoted_or_report(cleaned)
+            return ""
         cancel_pattern = (
             r"(?:我|俺|咱|人家).{0,10}(?:醒了|起床了|睡醒了|不睡了|回来了|可以聊)"
             r"|(?:睡醒了|起床了|不睡了|可以聊了|回来了)"
         )
         if re.search(cancel_pattern, cleaned):
-            return -1.0
-        if quoted_or_report:
-            return 0.0
+            return "cancel"
+        if self._user_rest_text_is_quoted_or_report(cleaned):
+            return ""
         if self._user_rest_text_is_scoped_reply_instruction(cleaned):
-            return 0.0
+            return ""
         no_reply_boundary = r"(?:了|啦|吧|我(?!的?(?:图|图片|照片|截图|表情包|画面|内容|文字))|这(?:个|条|句|段)(?:消息|话|话题|内容|问题)?|这(?:条)?消息|本条消息|消息|哈|噢|哦|$|[，。！？,.!?])"
         hard_quiet = re.search(
             r"(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}(?:打扰|吵|主动|发消息|找我)"
@@ -158,11 +169,67 @@ class UserRestGateMixin:
             r"(?:我|俺|咱|人家).{0,10}(?:要|先|去|准备|现在|马上)(?:休息(?:一下|会儿?|一会儿?)?|歇一下|躺一下|缓一会儿?)",
             cleaned,
         )
-        if hard_quiet or tomorrow or sleep:
-            return self._next_user_rest_morning_ts(now=check_now)
+        if sleep:
+            return "sleep"
         if nap:
-            return check_now + 90 * 60
+            return "nap"
         if rest:
+            return "rest"
+        if tomorrow:
+            return "until_morning"
+        if hard_quiet:
+            return "quiet"
+        return ""
+
+    def _user_rest_kind(self, user: dict[str, Any]) -> str:
+        kind = _single_line(user.get("user_rest_kind"), 24).lower()
+        if kind in self._ACTIVE_REST_KINDS or kind in {"quiet", "until_morning"}:
+            return kind
+        inferred = self._classify_user_rest_signal(_single_line(user.get("user_rest_reason"), 260))
+        if inferred not in {"", "cancel"}:
+            user["user_rest_kind"] = inferred
+            return inferred
+        return ""
+
+    def _proactive_rest_block_until(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+        reason: Any = "",
+        source: Any = "",
+    ) -> float:
+        normalized_reason = _single_line(reason, 40).lower()
+        normalized_source = _single_line(source, 40).lower()
+        rest_until = self._user_rest_silence_until(user, now=now)
+        if normalized_source == "timer":
+            return 0.0
+        if normalized_source == "daily_greeting" and normalized_reason == "morning_greeting":
+            return 0.0
+        return rest_until
+
+    def _next_user_rest_morning_ts(self, *, now: float) -> float:
+        timezone_name = _single_line(getattr(self, "environment_perception_timezone", ""), 64) or "Asia/Shanghai"
+        try:
+            tz = zoneinfo.ZoneInfo(timezone_name)
+        except Exception:
+            tz = zoneinfo.ZoneInfo("Asia/Shanghai")
+        current = datetime.fromtimestamp(now, tz)
+        target = current.replace(hour=8, minute=30, second=0, microsecond=0)
+        if target.timestamp() <= now + 3600:
+            target += timedelta(days=1)
+        return max(target.timestamp(), now + 6 * 3600)
+
+    def _detect_user_rest_silence_until(self, text: str, *, now: float | None = None) -> float:
+        check_now = _now_ts() if now is None else now
+        kind = self._classify_user_rest_signal(text)
+        if kind == "cancel":
+            return -1.0
+        if kind in {"quiet", "until_morning", "sleep"}:
+            return self._next_user_rest_morning_ts(now=check_now)
+        if kind == "nap":
+            return check_now + 90 * 60
+        if kind == "rest":
             return check_now + 2 * 3600
         return 0.0
 
@@ -206,6 +273,7 @@ class UserRestGateMixin:
                 user["user_rest_until"] = 0
                 user["user_rest_reason"] = ""
                 user["user_rest_set_at"] = 0
+                user["user_rest_kind"] = ""
                 logger.info("[PrivateCompanion] 用户休息静默已解除: user=%s", user.get("user_id") or user.get("id") or "")
                 return True
             return False
@@ -214,6 +282,7 @@ class UserRestGateMixin:
         user["user_rest_until"] = rest_until
         user["user_rest_reason"] = _single_line(text, 120)
         user["user_rest_set_at"] = check_now
+        user["user_rest_kind"] = self._classify_user_rest_signal(text)
         if str(user.get("planned_proactive_source") or "") != "timer":
             self._clear_user_rest_pending_plan_fallback(user)
         logger.info(

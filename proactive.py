@@ -678,34 +678,71 @@ class ProactiveMixin:
 
     def _effective_user_daily_limit(self, user: dict[str, Any]) -> int:
         override = self._user_profile_override_int(user, "proactive_daily_limit")
+        max_daily_messages = self._runtime_max_daily_messages()
+        if max_daily_messages <= 0 or override == 0:
+            return 0
         if self._proactive_intensity_ignores_daily_limit():
-            if override == 0:
-                return 0
             return self._PROACTIVE_DAILY_LIMIT_UNLIMITED
         if override is not None:
             return override
-        max_daily_messages = self._runtime_max_daily_messages()
         if self._private_user_role(user) == "friend":
             return min(max_daily_messages, 2) if max_daily_messages > 0 else 0
         return max(0, max_daily_messages)
 
     def _runtime_max_daily_messages(self) -> int:
-        if self._proactive_intensity_ignores_daily_limit():
-            return self._PROACTIVE_DAILY_LIMIT_UNLIMITED
         runtime_value = _safe_int(getattr(self, "max_daily_messages", 8), 8, 0, 12)
-        if runtime_value > 0:
-            return self._effective_proactive_int("max_daily_messages", runtime_value, minimum=0, maximum=60)
         config = getattr(self, "config", None)
         getter = getattr(config, "get", None)
         if callable(getter):
             try:
                 configured_value = _safe_int(getter("max_daily_messages", runtime_value), runtime_value, 0, 12)
-                if configured_value > 0:
+                if configured_value != runtime_value:
                     self.max_daily_messages = configured_value
-                    return self._effective_proactive_int("max_daily_messages", configured_value, minimum=0, maximum=60)
+                    runtime_value = configured_value
             except Exception:
                 pass
-        return runtime_value
+        if runtime_value <= 0:
+            return 0
+        effective_value = self._effective_proactive_int("max_daily_messages", runtime_value, minimum=0, maximum=60)
+        if effective_value <= 0:
+            return 0
+        if self._proactive_intensity_ignores_daily_limit():
+            return self._PROACTIVE_DAILY_LIMIT_UNLIMITED
+        return effective_value
+
+    def _proactive_generation_disabled(self, user: dict[str, Any] | None = None) -> bool:
+        if self._runtime_max_daily_messages() <= 0:
+            return True
+        if isinstance(user, dict) and self._user_profile_override_int(user, "proactive_daily_limit") == 0:
+            return True
+        return False
+
+    def _suspend_user_proactive_generation(self, user: dict[str, Any]) -> bool:
+        if not isinstance(user, dict):
+            return False
+        tracked = (
+            "next_proactive_at",
+            "planned_proactive_reason",
+            "planned_proactive_action",
+            "planned_proactive_source",
+            "planned_proactive_motive",
+            "planned_proactive_topic",
+            "planned_candidate_id",
+            "proactive_impulses",
+            "pending_followup_event",
+            "suspended_proactive",
+            "pending_proactive_send_retry",
+            "proactive_sending",
+        )
+        before = {key: deepcopy(user.get(key)) for key in tracked}
+        self._clear_pending_proactive_plan(user)
+        user["proactive_impulses"] = []
+        user["pending_followup_event"] = {}
+        user["suspended_proactive"] = {}
+        user["pending_proactive_send_retry"] = {}
+        user["proactive_sending"] = False
+        user["proactive_sending_started_at"] = 0
+        return any(before.get(key) != user.get(key) for key in tracked)
 
     def _format_daily_limit_disabled_reason(self, user: dict[str, Any]) -> str:
         override = user.get("proactive_daily_limit", -1) if isinstance(user, dict) else -1
@@ -1925,7 +1962,6 @@ class ProactiveMixin:
         *,
         now: float,
     ) -> int:
-        rest_until = self._user_rest_silence_until(user, now=now)
         queued = 0
         event_sources = (
             ("pending_followup", self._pick_pending_followup_event(user, now)),
@@ -2008,7 +2044,13 @@ class ProactiveMixin:
             impulse = self._candidate_to_impulse(user, candidate, source=source, now=now)
             if not isinstance(impulse, dict):
                 continue
-            if rest_until > now and _safe_float(impulse.get("window_start_at"), 0) < rest_until and source != "timer":
+            rest_until = self._proactive_rest_block_until(
+                user,
+                now=now,
+                reason=reason,
+                source=source,
+            )
+            if rest_until > now and _safe_float(impulse.get("window_start_at"), 0) < rest_until:
                 shift = rest_until - _safe_float(impulse.get("window_start_at"), 0) + random.uniform(20 * 60, 90 * 60)
                 impulse["window_start_at"] = _safe_float(impulse.get("window_start_at"), 0) + shift
                 impulse["preferred_ts"] = _safe_float(impulse.get("preferred_ts"), 0) + shift
@@ -2112,6 +2154,9 @@ class ProactiveMixin:
         user_id = str(user.get("user_id") or user.get("id") or "")
         if not self._user_enabled_for_proactive(user_id, user):
             self._clear_pending_proactive_plan(user)
+            return
+        if self._proactive_generation_disabled(user):
+            self._suspend_user_proactive_generation(user)
             return
         now = now or _now_ts()
         timer_event = self._get_active_llm_timer(user)
@@ -2413,7 +2458,13 @@ class ProactiveMixin:
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = reason
         user["planned_proactive_action"] = action
-        user["planned_proactive_source"] = "event"
+        user["planned_proactive_source"] = (
+            "daily_greeting"
+            if event.get("_daily_greeting")
+            else "meal_care"
+            if event.get("_daily_meal_care")
+            else "event"
+        )
         user["planned_proactive_motive"] = motive
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
         user["planned_proactive_impulse_id"] = ""
@@ -2524,7 +2575,7 @@ class ProactiveMixin:
                 )
             except asyncio.TimeoutError:
                 await self._tick()
-                for label, task_factory in (
+                maintenance_tasks = (
                     ("日常状态", self._ensure_daily_state),
                     ("今日日程", self._ensure_daily_plan),
                     ("当前细化", self._ensure_detail_enhancement),
@@ -2532,9 +2583,15 @@ class ProactiveMixin:
                     ("日记", self._ensure_daily_diary),
                     ("每日穿搭", self._ensure_daily_outfit_photo),
                     ("创作推进", self._maybe_advance_creative_projects),
+                    ("个人目标", self._maybe_settle_personal_goals),
+                    ("环境突变", self._maybe_refresh_environment_change),
                     ("余额感知", self._maybe_refresh_balance_awareness),
                     ("被动注入缓存", self._refresh_passive_injection_cache),
-                ):
+                )
+                if self._proactive_generation_disabled():
+                    passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "被动注入缓存"}
+                    maintenance_tasks = tuple(item for item in maintenance_tasks if item[0] in passive_labels)
+                for label, task_factory in maintenance_tasks:
                     try:
                         if self._maintenance_task_blocked_by_failure(label):
                             continue
@@ -2551,7 +2608,7 @@ class ProactiveMixin:
     async def _kick_proactive_loop_once(self) -> None:
         try:
             await self._tick()
-            for label, task_factory in (
+            maintenance_tasks = (
                 ("日常状态", self._ensure_daily_state),
                 ("今日日程", self._ensure_daily_plan),
                 ("当前细化", self._ensure_detail_enhancement),
@@ -2559,9 +2616,15 @@ class ProactiveMixin:
                 ("日记", self._ensure_daily_diary),
                 ("每日穿搭", self._ensure_daily_outfit_photo),
                 ("创作推进", self._maybe_advance_creative_projects),
+                ("个人目标", self._maybe_settle_personal_goals),
+                ("环境突变", self._maybe_refresh_environment_change),
                 ("余额感知", self._maybe_refresh_balance_awareness),
                 ("被动注入缓存", self._refresh_passive_injection_cache),
-            ):
+            )
+            if self._proactive_generation_disabled():
+                passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "被动注入缓存"}
+                maintenance_tasks = tuple(item for item in maintenance_tasks if item[0] in passive_labels)
+            for label, task_factory in maintenance_tasks:
                 try:
                     if self._maintenance_task_blocked_by_failure(label):
                         continue

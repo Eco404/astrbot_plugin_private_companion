@@ -1161,6 +1161,30 @@
     "default": true,
     "invisible": true
   },
+  "enable_personal_goals": {
+    "description": "Legacy flat config: 启用非创作型个人目标",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_personal_goal_auto_progress": {
+    "description": "Legacy flat config: 日程完成后自动推进个人目标",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "personal_goal_share_cooldown_hours": {
+    "description": "Legacy flat config: 个人目标主动分享冷却小时",
+    "type": "int",
+    "default": 12,
+    "invisible": true
+  },
+  "personal_goal_stall_days": {
+    "description": "Legacy flat config: 个人目标停滞天数",
+    "type": "int",
+    "default": 3,
+    "invisible": true
+  },
   "skill_growth_rate": {
     "description": "Legacy flat config: 技能成长倍率",
     "type": "float",
@@ -3250,6 +3274,24 @@
     "default": 90,
     "invisible": true
   },
+  "enable_environment_change_proactive": {
+    "description": "Legacy flat config: 环境突变主动消息",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "environment_change_check_minutes": {
+    "description": "Legacy flat config: 环境突变检测间隔（分钟）",
+    "type": "int",
+    "default": 10,
+    "invisible": true
+  },
+  "environment_change_cooldown_minutes": {
+    "description": "Legacy flat config: 环境突变消息冷却（分钟）",
+    "type": "int",
+    "default": 90,
+    "invisible": true
+  },
   "enable_yesterday_screen_diary_context": {
     "description": "Legacy flat config: 读取昨日屏幕观察日记",
     "type": "bool",
@@ -3958,7 +4000,7 @@
       "max_daily_messages": {
         "description": "每日最多主动消息数",
         "type": "int",
-        "hint": "每个用户每天最多收到多少条主动陪伴消息。设为 0 可完全禁止主动发送。",
+        "hint": "每个用户每天最多收到多少条主动陪伴消息。设为 0 会停止主动念头、候选、主动行为的生成与发送；被动聊天和日程状态等基础维护不受影响。",
         "slider": {
           "min": 0,
           "max": 12,
@@ -5005,6 +5047,35 @@
         "type": "bool",
         "hint": "让 Bot 根据人格、世界观、可做事项和日程片段形成自己的能力熟悉度，并在对应日程中缓慢变化。能力状态只作为自我认知和表现参考，不会让 Bot 变成万能。",
         "default": true
+      },
+      "enable_personal_goals": {
+        "description": "启用非创作型个人目标",
+        "type": "bool",
+        "hint": "允许在陪伴面板中明确创建阅读、学习、健康、生活整理等长期目标。模型不会自行发明目标。",
+        "default": true
+      },
+      "enable_personal_goal_auto_progress": {
+        "description": "按已完成日程自动推进",
+        "type": "bool",
+        "hint": "只有目标关键词与已经结束的日程片段相符时才推进，不会把计划中或进行中的活动算作完成。",
+        "default": true,
+        "condition": {"enable_personal_goals": true}
+      },
+      "personal_goal_share_cooldown_hours": {
+        "description": "目标进展分享冷却（小时）",
+        "type": "int",
+        "hint": "只有跨越里程碑、长时间停滞或完成时才形成主动候选。",
+        "slider": {"min": 1, "max": 168, "step": 1},
+        "default": 12,
+        "condition": {"enable_personal_goals": true}
+      },
+      "personal_goal_stall_days": {
+        "description": "停滞提醒天数",
+        "type": "int",
+        "hint": "进行中的目标超过该天数没有真实推进时，可形成一次低压力的主动分享。",
+        "slider": {"min": 1, "max": 30, "step": 1},
+        "default": 3,
+        "condition": {"enable_personal_goals": true}
       },
       "skill_growth_rate": {
         "description": "技能成长倍率",
@@ -7436,10 +7507,10 @@
       "daily_plan_item_count": {
         "description": "每日日程条目数",
         "type": "int",
-        "hint": "控制每日粗日程尽量生成多少个时间点。条目更多会更细碎、更像一整天的生活。",
+        "hint": "控制每日粗日程尽量生成多少个时间点。节点会覆盖从起床到入睡前，并为傍晚和夜间保留容量；条目更多会更细碎、更像一整天的生活。",
         "slider": {
           "min": 5,
-          "max": 16,
+          "max": 24,
           "step": 1
         },
         "default": 10,
@@ -8125,7 +8196,7 @@
       "external_image_api_platform": {
         "description": "在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、bailian、modelscope、doubao、gemini。openai 适用于 OpenAI 兼容 /images/generations；bailian 适用于阿里云百炼 / DashScope 原生生图接口；modelscope 适用于魔搭社区 api-inference 文生图接口并支持异步任务轮询；doubao 适用于豆包/火山方舟 Seedream 文生图；gemini 适用于 Gemini generateContent 图片返回；auto 会按地址和模型名自动识别。",
+        "hint": "可填：auto、openai、sensenova、bailian、modelscope、doubao、gemini。sensenova 适用于 SenseNova U1 Fast 独立信息图接口，会使用官方 Model ID、固定 2K 尺寸且不支持参考图；auto 会按地址和模型名自动识别。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true
@@ -8134,7 +8205,7 @@
       "EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "在线图片 API 地址",
         "type": "string",
-        "hint": "当平台为 openai 时，可填写完整的 /images/generations 地址，或只填 API 根地址；插件会自动补齐。平台为 bailian 时，可填写百炼 / DashScope 的 API 根地址（如 /api/v1），也可直接填写多模态或异步生图完整接口地址。平台为 modelscope 时可填写 https://api-inference.modelscope.cn/v1 或完整 /v1/images/generations 地址。平台为 doubao 时可填写 https://ark.cn-beijing.volces.com/api/v3 或完整 /images/generations 地址。平台为 gemini 时可填写 https://generativelanguage.googleapis.com/v1beta 或完整 /models/{model}:generateContent 地址。",
+        "hint": "SenseNova 日日新填写 https://token.sensenova.cn/v1 或完整 /v1/images/generations；官方模型为 sensenova-u1-fast。其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -8220,7 +8291,7 @@
       "backup_external_image_api_platform": {
         "description": "备选在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
+        "hint": "可填：auto、openai、sensenova、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true,
@@ -8230,7 +8301,7 @@
       "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "备选在线图片 API 地址",
         "type": "string",
-        "hint": "主在线图片 API 失败后才会使用。支持 OpenAI 兼容 images 接口、阿里云百炼 / DashScope 原生生图接口、魔搭社区 api-inference 文生图接口、豆包/火山方舟 Seedream 和 Gemini generateContent 图片接口。",
+        "hint": "主在线图片 API 失败后才会使用。支持 SenseNova U1 Fast、OpenAI 兼容 images、阿里云百炼、魔搭社区、豆包/火山方舟 Seedream 和 Gemini 图片接口。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true,
@@ -8938,6 +9009,45 @@
         "default": 90,
         "condition": {
           "enable_weather_context": true
+        }
+      },
+      "enable_environment_change_proactive": {
+        "description": "环境突变主动消息",
+        "type": "bool",
+        "hint": "开启后独立轮询天气变化；首次只建立基线，之后仅在开始降雨/雷暴/降雪、雨雪停止、明显起雾或温差突变时生成短时主动候选。",
+        "default": true,
+        "condition": {
+          "enable_weather_context": true
+        }
+      },
+      "environment_change_check_minutes": {
+        "description": "环境突变检测间隔（分钟）",
+        "type": "int",
+        "hint": "决定突变发现速度，默认每 10 分钟强制刷新一次天气。间隔越短越及时，也会增加天气接口请求次数。",
+        "slider": {
+          "min": 5,
+          "max": 60,
+          "step": 5
+        },
+        "default": 10,
+        "condition": {
+          "enable_weather_context": true,
+          "enable_environment_change_proactive": true
+        }
+      },
+      "environment_change_cooldown_minutes": {
+        "description": "环境突变消息冷却（分钟）",
+        "type": "int",
+        "hint": "相同环境变化在冷却期内不会重复进入主动候选。不同类型的明显突变仍可及时触发。",
+        "slider": {
+          "min": 20,
+          "max": 360,
+          "step": 10
+        },
+        "default": 90,
+        "condition": {
+          "enable_weather_context": true,
+          "enable_environment_change_proactive": true
         }
       },
       "enable_yesterday_screen_diary_context": {

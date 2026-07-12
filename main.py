@@ -107,6 +107,7 @@ from .helpers import (
     _missing_optional_model_dependency,
     _normalize_outbound_punctuation_flow,
     _now_ts,
+    _redact_outbound_secrets,
     _safe_float,
     _safe_int,
     _set_today_key_timezone,
@@ -436,7 +437,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.6",
+    "5.9.8",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -499,8 +500,14 @@ class PrivateCompanionPlugin(
         return _safe_int(_flat_get(config, key, default), default, minimum, maximum)
 
     @staticmethod
-    def _cfg_float(config: AstrBotConfig, key: str, default: float, minimum: float = 0.0) -> float:
-        return _safe_float(_flat_get(config, key, default), default, minimum)
+    def _cfg_float(
+        config: AstrBotConfig,
+        key: str,
+        default: float,
+        minimum: float = 0.0,
+        maximum: float | None = None,
+    ) -> float:
+        return _safe_float(_flat_get(config, key, default), default, minimum, maximum)
 
     @staticmethod
     def _cfg_unit_interval(config: AstrBotConfig, key: str, default: float, minimum: float = 0.0) -> float:
@@ -740,7 +747,7 @@ class PrivateCompanionPlugin(
             self._cfg_raw(c, "roleplay_knowledge_source_ids", [])
         )
         self.private_image_self_recognition_hint = self._cfg_str(c, "private_image_self_recognition_hint", "")
-        self.daily_plan_item_count = self._cfg_int(c, "daily_plan_item_count", 10, 5, 16)
+        self.daily_plan_item_count = self._cfg_int(c, "daily_plan_item_count", 10, 5, 24)
         self.enable_humanized_states = self._cfg_bool(c, "enable_humanized_states", True)
         self.enable_health_state = self._cfg_bool(c, "enable_health_state", True)
         self.enable_hunger_state = self._cfg_bool(c, "enable_hunger_state", True)
@@ -958,6 +965,9 @@ class PrivateCompanionPlugin(
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)
+        self.enable_environment_change_proactive = self._cfg_bool(c, "enable_environment_change_proactive", True)
+        self.environment_change_check_minutes = self._cfg_int(c, "environment_change_check_minutes", 10, 5, 60)
+        self.environment_change_cooldown_minutes = self._cfg_int(c, "environment_change_cooldown_minutes", 90, 20, 360)
         self.enable_yesterday_screen_diary_context = self._cfg_bool(c, "enable_yesterday_screen_diary_context", True)
         self.screen_diary_context_max_chars = self._cfg_int(c, "screen_diary_context_max_chars", 700, 200, 1600)
         self.detail_enhancement_lead_minutes = self._cfg_int(c, "detail_enhancement_lead_minutes", 3, 0, 180)
@@ -1068,6 +1078,10 @@ class PrivateCompanionPlugin(
         self.enable_skill_growth_passive_injection = self._cfg_bool(c, "enable_skill_growth_passive_injection", False)
         self.enable_skill_growth_schedule_influence = self._cfg_bool(c, "enable_skill_growth_schedule_influence", True)
         self.skill_growth_schedule_influence_strength = self._cfg_unit_interval(c, "skill_growth_schedule_influence_strength", 0.35, 0.0)
+        self.enable_personal_goals = self._cfg_bool(c, "enable_personal_goals", True)
+        self.enable_personal_goal_auto_progress = self._cfg_bool(c, "enable_personal_goal_auto_progress", True)
+        self.personal_goal_share_cooldown_hours = self._cfg_float(c, "personal_goal_share_cooldown_hours", 12.0, 1.0, 168.0)
+        self.personal_goal_stall_days = self._cfg_int(c, "personal_goal_stall_days", 3, 1, 30)
         self.memory_refresh_interval_minutes = self._cfg_int(c, "memory_refresh_interval_minutes", 360, 30, 4320)
         self.max_companion_memory_items = self._cfg_int(c, "max_companion_memory_items", 36, 8, 120)
         self.max_learned_expression_items = self._cfg_int(c, "max_learned_expression_items", 18, 4, 60)
@@ -1385,6 +1399,8 @@ class PrivateCompanionPlugin(
         self._default_persona_prompt_cache_umo = ""
         self._default_persona_prompt_cache_persona_id = ""
         self._default_persona_prompt_refresh_task: asyncio.Task | None = None
+        self._default_persona_prompt_cache_by_scope: dict[str, dict[str, Any]] = {}
+        self._default_persona_prompt_refresh_tasks: dict[str, asyncio.Task] = {}
         self._passive_light_injection_cache: dict[str, Any] = {}
         self._passive_state_session_cache: dict[str, dict[str, Any]] = {}
         self._data_save_task: asyncio.Task | None = None
@@ -1777,8 +1793,12 @@ class PrivateCompanionPlugin(
         for label, task in startup_background_tasks:
             await cancel_task(task, f"startup_{label}")
         self._startup_background_tasks.clear()
-        save_task = getattr(self, "_data_save_task", None)
-        await cancel_task(save_task, "delayed_data_save")
+        try:
+            await self._flush_scheduled_data_save()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 等待后台合并保存时收到异常: %s", _single_line(exc, 160))
         close_image_download_session = getattr(self, "_close_external_image_download_session", None)
         if callable(close_image_download_session):
             try:
@@ -1796,7 +1816,8 @@ class PrivateCompanionPlugin(
 
     async def _save_data_on_terminate(self) -> None:
         async with self._data_lock:
-            self._save_data_sync()
+            snapshot = deepcopy(self.data)
+        await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
     async def observe_recall_enhancement_events(self, event: AstrMessageEvent, *args, **kwargs):
@@ -3890,8 +3911,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "google_ai": "gemini",
             "generativelanguage": "gemini",
             "nano-banana": "gemini",
+            "sensenova": "sensenova",
+            "sense-nova": "sensenova",
+            "日日新": "sensenova",
+            "商汤日日新": "sensenova",
         }
-        return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"} else "auto")
+        return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini", "sensenova"} else "auto")
 
     @staticmethod
     def _normalize_external_image_endpoint_enabled(value: Any, default: bool = True) -> bool:
@@ -3984,6 +4009,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 or ""
             ).strip(),
         }
+        base_lower = str(endpoint.get("base_url") or "").lower()
+        model_lower = str(endpoint.get("model") or "").lower()
+        if endpoint["platform"] == "auto" and ("token.sensenova.cn" in base_lower or model_lower in {"senova-u1-fast", "sensenova-u1-fast"}):
+            endpoint["platform"] = "sensenova"
+        if endpoint["platform"] == "sensenova" and model_lower == "senova-u1-fast":
+            endpoint["model"] = "sensenova-u1-fast"
         return endpoint
 
     def _normalize_external_image_api_endpoints(self, value: Any) -> list[dict[str, Any]]:
@@ -4873,12 +4904,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "帮我", "怎么", "为什么", "是什么", "怎么办", "分析", "解释", "总结",
             "日程", "状态", "近况", "在干嘛", "做什么", "忙什么",
             "书柜", "夹层", "抽屉", "阅读", "读过", "看过", "素材", "本子", "漫画", "藏本",
+            "创作", "作品", "写作", "写书", "写过书", "小说", "随笔", "散文", "剧本", "手稿", "草稿", "出版",
             "新闻", "说说", "空间", "发给", "转告", "@",
         )
         if any(token in cleaned for token in heavy_tokens):
             return False
         bookshelf_checker = getattr(self, "_user_asks_bookshelf_reading_memory", None)
         if callable(bookshelf_checker) and bookshelf_checker(cleaned):
+            return False
+        creative_checker = getattr(self, "_user_asks_recent_creative_activity", None)
+        if callable(creative_checker) and creative_checker(cleaned):
             return False
         return True
 
@@ -6308,13 +6343,46 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     async def _send_reply_interception_forward(self, target_umo: str, text: str) -> None:
         try:
-            await self.context.send_message(target_umo, MessageChain([Plain(text)]))
+            safe_text = _redact_outbound_secrets(text, self)
+            await self.context.send_message(target_umo, MessageChain([Plain(safe_text)]))
             logger.info("[PrivateCompanion] 已转发回复拦截情况: target=%s", _single_line(target_umo, 120))
         except Exception as exc:
             logger.warning(
                 "[PrivateCompanion] 回复拦截转发失败: target=%s error=%s",
                 _single_line(target_umo, 120),
                 _single_line(exc, 180),
+            )
+
+    def _redact_outbound_chain_secrets(self, chain: list[Any]) -> tuple[list[Any], bool]:
+        changed = False
+        for comp in list(chain or []):
+            if not isinstance(comp, Plain):
+                continue
+            original = str(getattr(comp, "text", "") or "")
+            cleaned = _redact_outbound_secrets(original, self)
+            if cleaned == original:
+                continue
+            changed = True
+            try:
+                comp.text = cleaned
+            except Exception:
+                pass
+        return chain, changed
+
+    @filter.on_decorating_result()
+    async def redact_outbound_secrets_before_send(self, event: AstrMessageEvent, *args, **kwargs):
+        """Final passive-reply guard against API keys, tokens and passwords."""
+        if self is None or not self.enabled:
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain:
+            return
+        _, changed = self._redact_outbound_chain_secrets(chain)
+        if changed:
+            logger.error(
+                "[PrivateCompanion] 发送前检测到敏感凭据并已脱敏: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             )
 
     def _proactive_only_unlock_store(self) -> set[str]:
@@ -7131,6 +7199,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         reply_style_prompt = self._format_reply_style_prompt()
         if reply_style_prompt:
             prompt_surface.add("reply.style", reply_style_prompt, priority=12, source="reply_style")
+        if self._record_recent_private_fact_correction(current_user, inbound_text):
+            self._schedule_data_save()
+        fact_attribution_guard = self._format_private_fact_attribution_guard(current_user, inbound_text)
+        if fact_attribution_guard:
+            prompt_surface.add(
+                "identity.fact_attribution",
+                fact_attribution_guard,
+                priority=11,
+                source="identity",
+            )
         state_changed = False
         state_update_reason = "legacy"
         if bool(getattr(self, "enable_passive_state_delta_injection", True)):
@@ -7642,6 +7720,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current_user=current_user,
                 is_private_chat=is_private_chat,
             )
+            creative_reply_context = next(
+                (
+                    str(item.get("content") or "").strip()
+                    for item in collected_contexts
+                    if isinstance(item, dict) and _single_line(item.get("key"), 80) == "creative.hidden"
+                ),
+                "",
+            )
+            if creative_reply_context:
+                setattr(event, "private_companion_creative_reply_context", creative_reply_context)
             self._add_collected_prompt_contexts(prompt_surface, collected_contexts)
         static_fragment_keys = {"reply.style"}
         static_injection, dynamic_injection = prompt_surface.render_partition(
@@ -7965,6 +8053,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 inbound_text,
                 working_text,
                 music_album_context=music_album_context if isinstance(music_album_context, dict) else None,
+                creative_context=str(getattr(event, "private_companion_creative_reply_context", "") or ""),
             )
             if bool(getattr(self, "enable_response_self_review", True)) and self._is_response_review_drop_marker(reviewed_text):
                 setattr(event, "_private_companion_response_review_drop", True)
