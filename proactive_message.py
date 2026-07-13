@@ -1812,6 +1812,8 @@ class ProactiveMessageMixin:
             if personal_goal_hint:
                 lines.append(personal_goal_hint)
             lines.append("这是 Bot 自己的非创作型长期目标变化：只说一个真实进展、停滞或完成结果，不向用户索取监督，不把百分比写成系统汇报。")
+        elif reason == "morning_greeting":
+            lines.append("这是当天第一次普通早安：只自然打招呼或递出一个很轻的早晨片段，说完就停。用户还没有回应，禁止问早餐/早饭、吃了吗、吃什么，也不要追加起床查岗、健康确认或其他需要回答的问题；饮食关心会在用户回应后的独立时机处理。")
         elif reason == "meal_care":
             lines.append("这是饭点关心：自然问用户这一顿吃了没有。问题主体必须是用户，不要回答成自己吃了什么；像熟悉的人顺口惦记一句，不说教、不盘问，也不要同一条里连续列很多问题。")
         elif reason == "meal_care_followup":
@@ -1887,7 +1889,7 @@ class ProactiveMessageMixin:
         _, period_guard = self._current_time_period_label()
         prefix = f"先遵守当前真实时段：{period_guard}"
         if reason == "morning_greeting":
-            return f"{prefix} 这次只能像早晨刚醒、赖床、洗漱或刚开始一天时那样开口；不要写成下午、傍晚或睡前。"
+            return f"{prefix} 这次只能像早晨刚醒、赖床、洗漱或刚开始一天时那样开口；只做自然问候，不问早餐、吃了吗或吃什么，也不要附带健康和查岗问题。"
         if reason == "noon_greeting":
             return f"{prefix} 这次只能像中午、吃东西、发懒、午间发呆或午休前后那样开口；不要写成刚醒起床或准备睡觉。"
         if reason == "evening_greeting":
@@ -3696,6 +3698,8 @@ Output:
         cleaned = self._apply_proactive_style_variation(cleaned, user)
         cleaned = self._collapse_multi_candidate_proactive_text(cleaned, user=user, name=name)
         cleaned = self._repair_proactive_subject_drift(cleaned, reason=reason, action=action, action_context=action_context)
+        if reason == "morning_greeting":
+            cleaned = self._strip_morning_meal_questions(cleaned)
         cleaned = self._visible_text_without_tts_reading(cleaned, limit=1000)
         if not cleaned:
             return "", "在主客体/可见文本清洗后为空"
@@ -3733,8 +3737,34 @@ Output:
             return "", f"回复空气复核引入其他用户专属称呼：{remaining_review_address}"
         reviewed = self._trim_proactive_status_inventory(reviewed)
         reviewed = self._trim_performative_self_state_tail(reviewed)
+        if reason == "morning_greeting":
+            reviewed = self._strip_morning_meal_questions(reviewed)
         finalized = self._normalize_proactive_sentence_flow(reviewed)
         return (finalized, "") if finalized else ("", "最终句式整理后为空")
+
+    @staticmethod
+    def _strip_morning_meal_questions(text: str) -> str:
+        """Keep a morning greeting while removing an accidentally appended meal question."""
+        source = str(text or "").strip()
+        if not source:
+            return ""
+        query_pattern = re.compile(
+            r"(?:早餐|早饭).{0,12}(?:吗|没|没有|什么|啥|呢|[？?])"
+            r"|(?:吃|喝).{0,6}(?:了吗|了没|没有|什么|啥)(?:呢|[？?])?"
+        )
+        kept: list[str] = []
+        for unit in re.split(r"(?<=[。！？!?])\s*|\n+", source):
+            candidate = unit.strip()
+            if not candidate:
+                continue
+            match = query_pattern.search(candidate)
+            if not match:
+                kept.append(candidate)
+                continue
+            prefix = candidate[: match.start()].rstrip(" ，,；;、")
+            if prefix:
+                kept.append(prefix)
+        return "\n".join(kept).strip()
 
     def _proactive_reply_air_flags(
         self,
@@ -11510,7 +11540,7 @@ Output:
             return reason, "低能量或状态余波下的轻量问候；只给一个具体切口，不写成关心清单。"
 
         if reason == "morning_greeting":
-            return reason, "当前时段的首次早间开口；贴近早晨片段，不写模板早安。"
+            return reason, "当前时段的首次早间开口；贴近早晨片段，只做普通问候，不问早餐、吃了吗或吃什么，等用户回应后再关心。"
 
         if reason == "noon_greeting":
             return reason, "午间短开口；可以围绕吃饭、午休或短暂放松，不催促。"

@@ -1237,7 +1237,7 @@ QQ空间 = 公开札记
             <summary>
               <div>
                 <h2>运行设置</h2>
-                <p>仅保留未归入功能开关的主动节奏、资源配额与天气来源。</p>
+                <p>仅保留未归入功能开关的主动节奏与资源配额。</p>
               </div>
             </summary>
             <div class="config-runtime-details-body">
@@ -1262,26 +1262,6 @@ QQ空间 = 公开札记
                     <label>每日插件 Token 限额 <input name="daily_token_limit" type="number" min="0" step="10000" /></label>
                     <label class="toggle-row"><input name="enable_daily_token_soft_limit" type="checkbox" /> <span>启用每日 Token 软限额</span></label>
                     <label>每日 Token 软限额 <input name="daily_token_soft_limit" type="number" min="0" step="10000" /></label>
-                  </div>
-                </section>
-                <section class="runtime-settings-section">
-                  <header class="runtime-settings-section-head">
-                    <h3>天气上下文</h3>
-                    <p id="weatherConfigSummary" class="section-desc">读取天气配置状态中...</p>
-                  </header>
-                  <div class="runtime-settings-grid">
-                    <label class="toggle-row"><input name="enable_weather_context" type="checkbox" /> <span>启用天气上下文</span></label>
-                    <label>天气刷新间隔（分钟） <input name="weather_refresh_minutes" type="number" min="10" max="720" step="10" /></label>
-                    <label class="weather-config-key">OpenWeatherMap API Key <input name="weather_api_key" type="password" autocomplete="off" placeholder="独立查询时填写" /></label>
-                    <label>天气城市（推荐） <input name="weather_city" placeholder="Beijing,CN" /></label>
-                    <details class="weather-location-option">
-                      <summary>改用经纬度定位</summary>
-                      <p>只有城市留空时才会使用经纬度；纬度和经度必须一起填写。</p>
-                      <div>
-                        <label>纬度 <input name="weather_lat" type="number" min="-90" max="90" step="0.0001" placeholder="39.9042" /></label>
-                        <label>经度 <input name="weather_lon" type="number" min="-180" max="180" step="0.0001" placeholder="116.4074" /></label>
-                      </div>
-                    </details>
                   </div>
                 </section>
                 <div class="actions">

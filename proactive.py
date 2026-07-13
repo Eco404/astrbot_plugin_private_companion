@@ -1189,9 +1189,22 @@ class ProactiveMixin:
             user["greeting_sent_day"] = today
             user["greetings_sent"] = []
             user["greetings_suppressed_by_inbound"] = []
+            user["morning_greeting_sent_at"] = 0
+            user["morning_greeting_reply_at"] = 0
         if user.get("proactive_daypart_day") != today:
             user["proactive_daypart_day"] = today
             user["proactive_daypart_counts"] = {}
+
+    def _note_morning_greeting_reply(self, user: dict[str, Any], *, now: float | None = None) -> bool:
+        """Record the first inbound message after today's morning greeting."""
+        self._reset_daily_counter_if_needed(user)
+        reply_at = _now_ts() if now is None else now
+        sent_at = _safe_float(user.get("morning_greeting_sent_at"), 0)
+        previous_reply_at = _safe_float(user.get("morning_greeting_reply_at"), 0)
+        if sent_at <= 0 or reply_at < sent_at or previous_reply_at >= sent_at:
+            return False
+        user["morning_greeting_reply_at"] = reply_at
+        return True
 
     def _unanswered_slowdown_count(self, user: dict[str, Any]) -> int:
         ignored_streak = _safe_int(user.get("ignored_streak"), 0)

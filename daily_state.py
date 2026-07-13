@@ -12206,6 +12206,38 @@ class DailyStateMixin:
                     self._debug_tick_skip(user_id, "主动发送仍在进行中")
                     continue
                 current_reason = normalize_legacy_tag_text(current_for_mark.get("planned_proactive_reason"))
+                planned_meal_context = (
+                    current_for_mark.get("planned_meal_care_context")
+                    if isinstance(current_for_mark.get("planned_meal_care_context"), dict)
+                    else {}
+                )
+                if (
+                    not is_troubleshooting_for_send
+                    and not due_timer_id
+                    and current_reason == "meal_care"
+                    and self._food_prompt_cooldown_remaining(current_for_mark, now=_now_ts()) > 0
+                ):
+                    self._mark_planned_candidate_status(current_for_mark, "blocked", "近期已经聊过饮食，饭点关心进入共享冷却")
+                    self._clear_pending_proactive_plan(current_for_mark)
+                    current_for_mark["planned_meal_care_context"] = {}
+                    self._schedule_next_proactive(current_for_mark, now=_now_ts())
+                    self._save_data_sync()
+                    self._debug_tick_skip(user_id, "近期已经聊过饮食，饭点关心进入共享冷却", prefix="取消")
+                    continue
+                if (
+                    not is_troubleshooting_for_send
+                    and not due_timer_id
+                    and current_reason == "meal_care"
+                    and _single_line(planned_meal_context.get("meal_key"), 20) == "breakfast"
+                    and self._breakfast_waiting_for_morning_reply(current_for_mark)
+                ):
+                    self._mark_planned_candidate_status(current_for_mark, "blocked", "早餐关心等待用户回应早安")
+                    self._clear_pending_proactive_plan(current_for_mark)
+                    current_for_mark["planned_meal_care_context"] = {}
+                    self._schedule_next_proactive(current_for_mark, now=_now_ts())
+                    self._save_data_sync()
+                    self._debug_tick_skip(user_id, "早餐关心等待用户回应早安", prefix="取消")
+                    continue
                 if (
                     not is_troubleshooting_for_send
                     and not due_timer_id
@@ -13253,7 +13285,7 @@ class DailyStateMixin:
                         normalize_legacy_tag_text(current.get("planned_proactive_reason")),
                     )
                 )
-                if any(token in food_prompt_hint for token in ("吃什么", "吃点", "饭", "饭点", "嘴馋", "饿", "吃的")):
+                if reason in {"meal_care", "meal_care_followup"} or any(token in food_prompt_hint for token in ("吃什么", "吃点", "饭", "饭点", "嘴馋", "饿", "吃的")):
                     current["last_food_prompt_at"] = current["last_sent"]
                 self._remember_proactive_topic(
                     current,
@@ -13438,6 +13470,9 @@ class DailyStateMixin:
                             current["greetings_sent"] = sent_greetings
                         if reason not in sent_greetings:
                             sent_greetings.append(reason)
+                    if reason == "morning_greeting":
+                        current["morning_greeting_sent_at"] = _safe_float(current.get("last_sent"), 0) or _now_ts()
+                        current["morning_greeting_reply_at"] = 0
                     self._mark_textual_greeting_sent(current, visible_text or text, sent_at=current["last_sent"])
                     self._clear_llm_timer_event(current, event_id=due_timer_id)
                     next_timer = self._get_active_llm_timer(current)

@@ -5275,13 +5275,13 @@
       "meal_care_max_daily": {
         "description": "每日最多饭点关心次数",
         "type": "int",
-        "hint": "早餐、午饭、晚饭每餐最多首次询问一次；默认每天最多选择其中两餐，避免三餐都像打卡。填 0 可关闭首次饭点询问。",
+        "hint": "早餐、午饭、晚饭每餐最多首次询问一次；默认每天只选择其中一餐，避免频繁像打卡。早餐会等早安发出且用户回应后才进入候选。填 0 可关闭首次饭点询问。",
         "slider": {
           "min": 0,
           "max": 3,
           "step": 1
         },
-        "default": 2,
+        "default": 1,
         "condition": {
           "enable_meal_care_proactive": true
         }

@@ -4852,6 +4852,10 @@ class ProactiveEngineMixin:
         top = ranked[:3]
         return random.choice(top)[1]
 
+    @staticmethod
+    def _food_prompt_cooldown_remaining(user: dict[str, Any], *, now: float) -> float:
+        return max(0.0, _safe_float(user.get("last_food_prompt_at"), 0) + 7 * 3600 - now)
+
     def _pick_state_need_event(
         self,
         user: dict[str, Any],
@@ -4865,7 +4869,7 @@ class ProactiveEngineMixin:
         hunger_text = _single_line(state.get("hunger"), 80)
         if hunger_text in {"", "饥饿感平稳", "该人格不适用饥饿状态"}:
             return None
-        if _safe_float(user.get("last_food_prompt_at"), 0) + 5 * 3600 > now:
+        if self._food_prompt_cooldown_remaining(user, now=now) > 0:
             return None
         if _safe_float(user.get("last_food_feedback_at"), 0) + 2 * 3600 > now:
             return None
@@ -4940,6 +4944,14 @@ class ProactiveEngineMixin:
             ("dinner", "17:40-20:35", "晚饭"),
         )
 
+    def _breakfast_waiting_for_morning_reply(self, user: dict[str, Any]) -> bool:
+        if not bool(getattr(self, "enable_daily_greetings", True)):
+            return False
+        self._reset_daily_counter_if_needed(user)
+        morning_sent_at = _safe_float(user.get("morning_greeting_sent_at"), 0)
+        morning_reply_at = _safe_float(user.get("morning_greeting_reply_at"), 0)
+        return morning_sent_at <= 0 or morning_reply_at < morning_sent_at
+
     def _meal_care_followup_event(self, user: dict[str, Any], *, now: float) -> dict[str, Any] | None:
         context = user.get("meal_check_context")
         if not isinstance(context, dict) or not context.get("active"):
@@ -4992,9 +5004,11 @@ class ProactiveEngineMixin:
         followup = self._meal_care_followup_event(user, now=check_now)
         if isinstance(followup, dict):
             return followup
+        if self._food_prompt_cooldown_remaining(user, now=check_now) > 0:
+            return None
         asked = user.get("meal_care_asked") if isinstance(user.get("meal_care_asked"), list) else []
         satisfied = user.get("meal_care_satisfied") if isinstance(user.get("meal_care_satisfied"), list) else []
-        max_daily = _safe_int(getattr(self, "meal_care_max_daily", 2), 2, 0, 3)
+        max_daily = _safe_int(getattr(self, "meal_care_max_daily", 1), 1, 0, 3)
         if max_daily <= 0 or len(asked) >= max_daily:
             return None
         now_dt = self._environment_fromtimestamp(check_now)
@@ -5003,6 +5017,8 @@ class ProactiveEngineMixin:
         candidates: list[tuple[float, dict[str, Any]]] = []
         for meal_key, window, meal_label in self._meal_care_slots():
             if meal_key in asked or meal_key in satisfied:
+                continue
+            if meal_key == "breakfast" and self._breakfast_waiting_for_morning_reply(user):
                 continue
             start, end = self._parse_window_minutes(window)
             if start is None or end is None or minute >= end:

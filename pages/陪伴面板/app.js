@@ -766,7 +766,10 @@ const featureMeta = {
   enable_open_loop_tracking: ["未完话头", "记住对话里还留着、之后可能会回头接的事。"],
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
   enable_food_menu_recommendation: ["吃什么候选", "管理常吃菜、菜馆和外卖；用户纠结吃什么时，只取少量贴合项作为回复参考。"],
-  enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
+  enable_humanized_states: ["拟人生活状态", "统一管理生活日程、日程细化、日记，以及精力、睡眠、梦境、健康、饥饿和周期等扮演状态。"],
+  enable_daily_plan: ["每日拟人化日程", "每天按设定时间生成 Bot 从起床到入睡前的生活节奏。"],
+  enable_detail_enhancement: ["日程细化", "临近当前日程段时补充小事件、状态变化和可能的主动契机。"],
+  enable_daily_diary: ["每日 Bot 日记", "每天写一条短日记，作为次日状态延续和自然分享素材。"],
   enable_health_state: ["健康/不适状态", "开启后视为可用，允许当前扮演状态出现生病、不舒服或恢复尾声。"],
   enable_hunger_state: ["饥饿/胃口状态", "开启后视为可用，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
   enable_qq_presence_sync: ["同步 QQ 在线状态", "让日程细化把在线/忙碌等基础状态同步到 QQ；不包含自定义短状态。"],
@@ -786,6 +789,8 @@ const featureMeta = {
   enable_forbidden_word_recall: ["违禁词自动撤回", "命中配置词表时，拦截 Bot 待发送内容或尝试撤回群聊/自身消息。"],
   enable_private_image_self_recognition: ["图片转述增强", "处理私聊单图、引用图片、合并转发图片和 GIF 抽帧，并辅助判断角色归属。"],
   enable_environment_perception: ["环境感知", "注入当前时间、日期语境、平台、群聊/私聊和消息媒介信息。"],
+  enable_weather_context: ["天气上下文", "读取当前天气作为日程、日记和主动契机的生活背景。"],
+  enable_environment_change_proactive: ["环境突变主动消息", "天气出现降雨、雷暴、降雪、雾、大风或明显温差时生成短时主动候选。"],
   enable_balance_awareness: ["余额感知", "定期读取可支配余额；余额偏低时生成贴合人设、低压力的主动念头。"],
   enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
   enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
@@ -838,6 +843,9 @@ const featureMeta = {
   enable_qzone_generated_image_publish: ["说说配图", "发布生活说说时可按概率调用主动生图能力生成配图。"],
   enable_qzone_comment_inbox: ["评论收件箱", "低频查看自己说说下的新评论，并按需公开追加回复。"],
   enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；本地 ComfyUI 可在电脑忙时自动延后。"],
+  enable_screen_glance_action: ["主动识屏", "允许 Bot 在合适动机下低频看一眼屏幕，并统一管理沉默后的额外识屏。"],
+  enable_poke_action: ["主动戳一戳", "允许 Bot 在想轻轻刷存在感或逗一下用户时主动戳一戳。"],
+  enable_voice_action: ["主动语音", "允许 Bot 在合适的主动场景里留一小句语音；需要当前会话有可用 TTS provider。"],
   enable_photo_reference_image: ["参考图一致性", "可选。自拍、人像、头像和角色表情包自动使用人设参考图或今日穿搭图保持外观；关闭后只按提示词生成。"],
   enable_group_nsfw_private_fallback: ["群聊成图安全审核", "群聊成图先经视觉审核；安全图发群，其余结果仅私聊原请求者。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
@@ -951,10 +959,18 @@ const featureGroups = [
       "enable_private_reading_boredom_read",
       "enable_private_reading_ask_recommendation",
       "enable_private_reading_preference_influence",
-      "enable_unanswered_screen_peek_followup",
       "enable_reply_interception_forward",
       "enable_creative_writing",
       "creative_hidden_mode",
+    ],
+  },
+  {
+    title: "主动动作",
+    note: "识屏、戳一戳和语音等实际对外动作；各动作独立控制额度与冷却。",
+    keys: [
+      "enable_screen_glance_action",
+      "enable_poke_action",
+      "enable_voice_action",
     ],
   },
 ];
@@ -966,6 +982,11 @@ const embeddedFeatureParentByKey = {
   enable_hunger_state: "enable_humanized_states",
   enable_cycle_state: "enable_humanized_states",
   enable_rest_reply_simulation: "enable_humanized_states",
+  enable_daily_plan: "enable_humanized_states",
+  enable_detail_enhancement: "enable_humanized_states",
+  enable_daily_diary: "enable_humanized_states",
+  enable_daily_greetings: "enable_humanized_states",
+  enable_enhanced_dreams: "enable_humanized_states",
   enable_recall_cancel_reply: "enable_recall_enhancement",
   enable_recall_message_cache: "enable_recall_enhancement",
   enable_recall_transcribe_command: "enable_recall_enhancement",
@@ -973,6 +994,7 @@ const embeddedFeatureParentByKey = {
   enable_semantic_message_debounce: "enable_message_debounce",
   enable_smart_message_debounce: "enable_message_debounce",
   enable_private_image_gif_enhancement: "enable_private_image_self_recognition",
+  enable_context_image_captioning: "enable_private_image_self_recognition",
   enable_holiday_perception: "enable_environment_perception",
   enable_platform_perception: "enable_environment_perception",
   enable_model_perception: "enable_environment_perception",
@@ -981,6 +1003,8 @@ const embeddedFeatureParentByKey = {
   enable_solar_term_perception: "enable_environment_perception",
   enable_almanac_perception: "enable_environment_perception",
   enable_balance_awareness: "enable_environment_perception",
+  enable_weather_context: "enable_environment_perception",
+  enable_environment_change_proactive: "enable_environment_perception",
   enable_group_persona_denoise: "enable_group_injection_guard",
   enable_group_reality_promise_guard: "enable_group_injection_guard",
   enable_group_wakeup_question: "enable_group_wakeup_enhancement",
@@ -1011,6 +1035,7 @@ const embeddedFeatureParentByKey = {
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
   enable_private_reading_preference_influence: "enable_private_reading_integration",
+  enable_unanswered_screen_peek_followup: "enable_screen_glance_action",
   auto_voice_enabled: "enable_tts_enhancement",
   auto_voice_full_conversion_enabled: "enable_tts_enhancement",
   enable_tts_local_playback: "enable_tts_enhancement",
@@ -1298,7 +1323,18 @@ const configLabels = {
   enable_daily_token_soft_limit: "启用每日 Token 软限额",
   daily_token_soft_limit: "每日 Token 软限额",
   humanized_state_intensity: "拟人状态强度",
-  enable_humanized_states: "拟人身体状态",
+  enable_humanized_states: "拟人生活状态",
+  enable_daily_plan: "每日拟人化日程",
+  daily_plan_time: "每日生成日程时间",
+  daily_plan_item_count: "每日日程条目数",
+  include_schedule_in_messages: "主动消息参考当前日程",
+  enable_detail_enhancement: "日程细化",
+  detail_enhancement_lead_minutes: "提前细化日程段（分钟）",
+  enable_daily_diary: "每日 Bot 日记",
+  daily_diary_time: "每日写日记时间",
+  max_diary_entries: "保留 Bot 日记数量",
+  important_date_lookahead_days: "重要日期提前关注天数",
+  daily_plan_prompt: "自定义每日日程提示词",
   enable_health_state: "健康/不适状态",
   enable_hunger_state: "饥饿/胃口状态",
   enable_qq_presence_sync: "同步 QQ 在线状态",
@@ -1321,6 +1357,15 @@ const configLabels = {
   enable_worldview_perception: "世界观适配感知",
   environment_perception_timezone: "环境感知时区",
   holiday_country: "节假日地区",
+  enable_weather_context: "天气上下文",
+  weather_api_key: "OpenWeatherMap API Key",
+  weather_city: "天气城市（推荐）",
+  weather_lat: "天气纬度",
+  weather_lon: "天气经度",
+  weather_refresh_minutes: "天气刷新间隔（分钟）",
+  enable_environment_change_proactive: "环境突变主动消息",
+  environment_change_check_minutes: "环境突变检测间隔（分钟）",
+  environment_change_cooldown_minutes: "环境突变消息冷却（分钟）",
   enable_holiday_perception: "节假日/工作日",
   enable_platform_perception: "平台与消息类型",
   enable_model_perception: "当前模型配置",
@@ -1533,6 +1578,36 @@ const configLabels = {
   reply_interception_forward_plugin_blocks: "转发插件阻断消息",
   reply_interception_forward_rewrites: "转发回复改写",
   reply_interception_forward_proactive_blocks: "转发主动消息拦截",
+  default_enable_configured_targets: "启动时预热私聊目标",
+  proactive_reply_context_hours: "主动回复上下文保留小时",
+  enable_proactive_decorating_hooks: "主动消息走装饰钩子",
+  enable_precise_platform_send: "优先精确平台发送",
+  max_proactive_plan_lag_minutes: "主动候选过期重排分钟",
+  enable_daily_greetings: "启用早午晚锚点问候",
+  greeting_idle_minutes: "问候前空闲门槛",
+  allow_insomnia_night_message: "允许失眠时深夜主动消息",
+  enable_enhanced_dreams: "启用强化梦境生成",
+  dream_afterglow_mode: "梦境余韵影响强度",
+  enable_mixed_dream_themes: "允许梦境题材轻微混搭",
+  enable_intimate_dream_theme: "允许暧昧梦境题材",
+  dream_theme_candidates: "梦境题材候选",
+  recall_message_cache_text_chars: "撤回缓存文本长度",
+  enable_context_image_captioning: "上下文图片摘要补全",
+  context_image_caption_max_items: "单轮补全图片数",
+  context_image_caption_timeout_seconds: "图片补全等待秒数",
+  forward_message_image_vision_timeout_seconds: "合并消息图片视觉等待秒数",
+  max_group_topic_threads: "群聊话题线程上限",
+  group_episode_refresh_minutes: "群聊片段整理间隔",
+  group_slang_summary_minutes: "群黑话语义整理间隔",
+  max_group_episodes: "群聊片段保留上限",
+  max_group_relationship_edges: "群友互动边保留上限",
+  external_image_download_proxy: "在线图片下载代理",
+  external_image_download_use_environment_proxy: "图片下载继承环境代理",
+  screen_peek_max_daily: "每日主动识屏上限",
+  screen_peek_cooldown_minutes: "主动识屏冷却分钟",
+  poke_action_max_times: "单次戳一戳上限",
+  poke_action_cooldown_minutes: "主动戳一戳冷却分钟",
+  voice_action_max_chars: "主动语音最大字数",
   active_projects: "进行中创作",
   project_count: "创作项目",
   boredom_watch_enabled: "无聊刷视频",
@@ -1544,6 +1619,7 @@ const configLabels = {
   enable_memory_companion_dream_fragment: "梦境碎片写入",
   enable_memory_companion_open_loop_search: "未完成话题取材",
   enable_memory_companion_feature_context: "功能上下文读取",
+  enable_memory_companion_private_recall: "私聊选择性长期召回",
   memory_companion_context_top_k: "上下文召回条数",
   memory_companion_context_max_chars: "上下文最大字符数",
   external_image_api_endpoints: "在线生图 API 队列",
@@ -1580,7 +1656,18 @@ const configDescriptions = {
   schedule_worldview_prompt: "给陪伴插件判断生活背景和世界规则，适合写所在世界、日常规则、居住/学校/城市环境和与用户的生活关系。",
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
-  enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
+  enable_humanized_states: "统一展示 Bot 的生活节奏与扮演状态设置。关闭后不再生成拟人身体/梦境状态；日程、细化和日记仍分别遵循各自子开关，不会被这个状态总开关连带关闭。",
+  enable_daily_plan: "开启后每天到指定时间生成 Bot 当天的粗日程。",
+  daily_plan_time: "每天超过该时间且存在已启用用户时生成一次，格式为 HH:MM。",
+  daily_plan_item_count: "控制每日粗日程尽量生成多少个时间点；默认 10，最多 24，并为傍晚和夜间保留容量。",
+  include_schedule_in_messages: "允许主动私聊偶尔自然带上当前正在做什么，不会每次汇报日程。",
+  enable_detail_enhancement: "开启后临近每个粗日程段时调用细化模型，推演小事件、状态变化与主动契机。",
+  detail_enhancement_lead_minutes: "在日程段开始前多少分钟允许尝试细化；建议保持较短。",
+  enable_daily_diary: "每天生成一条 Bot 自己的短日记，作为次日状态转移和主动分享素材。",
+  daily_diary_time: "超过该时间后每天生成一次日记，格式为 HH:MM。",
+  max_diary_entries: "日记用于状态延续和分享素材；超出数量后只保留最近记录。",
+  important_date_lookahead_days: "新增重要日期时默认提前关注多少天；临近日期可进入日程和主动判断。",
+  daily_plan_prompt: "高级设置。留空使用内置日程提示词；自定义内容必须继续要求模型输出包含 schedule 数组的 JSON。",
   enable_health_state: "开启后健康/不适状态视为可用，拟人状态可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
   enable_hunger_state: "开启后饥饿/胃口状态视为可用，拟人状态可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
   enable_qq_presence_sync: "开启后，日程细化会通过 OneBot 的 set_online_status 尝试同步在线/忙碌等基础 QQ 状态；不包含自定义短状态。离开、隐身、请勿打扰会自动降级为在线。",
@@ -1609,6 +1696,15 @@ const configDescriptions = {
   enable_cycle_state: "开启后即视为适用，可能在“当前扮演状态”里出现生理期前、处于生理期或生理期后的相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
+  enable_weather_context: "开启后优先使用本插件的 OpenWeatherMap 配置；未配置独立天气时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
+  weather_api_key: "仅独立查询天气时需要。还需填写天气城市，或同时填写一组经纬度；留空时会尝试复用 screen_companion。",
+  weather_city: "例如 Beijing,CN、Shanghai,CN。填写城市后优先使用城市定位，并忽略经纬度。",
+  weather_lat: "仅在天气城市留空时使用，需与经度成对填写。",
+  weather_lon: "仅在天气城市留空时使用，需与纬度成对填写。",
+  weather_refresh_minutes: "天气缓存的刷新间隔；更换地点或 Key 后会在下一次刷新时使用新配置。",
+  enable_environment_change_proactive: "独立轮询天气变化，只在开始或停止降水、雷暴、降雪、明显雾风和温差突变时生成短时主动候选。",
+  environment_change_check_minutes: "检查实时天气是否出现明显变化的间隔。",
+  environment_change_cooldown_minutes: "相同或相近环境变化再次形成主动候选前的最小间隔。",
   enable_balance_awareness: "开启后按设定间隔读取余额接口；余额偏低时生成一次贴合人设的主动候选，不会绕过免打扰、频控或发送复核。",
   balance_api_url: "返回 JSON 的 HTTP/HTTPS 余额接口。地址只用于后台拉取，不会显示在 Token 页或交给人格。",
   balance_api_key: "可选鉴权密钥；仅用于请求余额接口，不会返回到 Token 页。",
@@ -1954,6 +2050,37 @@ const configDescriptions = {
   qzone_emotional_vent_cooldown_hours: "两次公开心情动态之间的最小间隔。",
   qzone_emotional_vent_probability: "达到条件后实际尝试公开心情动态的概率，按百分比填写。",
   qzone_publish_style_prompt: "约束 QQ 空间说说口吻；留空使用内置轻量生活碎片风格，避免哲理化和文案腔。",
+  default_enable_configured_targets: "开启后会在启动时为已配置的私聊目标建立主动来源。",
+  proactive_reply_context_hours: "用户在 Bot 主动消息后这段时间内回复时，会带上上一条主动消息，避免误判成新话题。",
+  enable_proactive_decorating_hooks: "让主动消息发送前经过 AstrBot 消息装饰钩子，供其他装饰插件处理。",
+  enable_precise_platform_send: "优先按统一会话来源调用对应平台发送；平台不可用时跳过，失败时回退核心发送。",
+  max_proactive_plan_lag_minutes: "停机或阻塞导致主动候选过期太久时丢弃并重排，避免重启后补发旧消息。",
+  enable_daily_greetings: "每天生成早午晚随机候选问候窗口，仍受主动额度、间隔和免打扰限制。",
+  greeting_idle_minutes: "问候前需要用户空闲多久；该门槛独立于普通主动消息。",
+  allow_insomnia_night_message: "失眠或浅睡状态下可低概率产生一条低压力深夜消息，仍受额度和间隔限制。",
+  enable_enhanced_dreams: "根据近期日记、生活片段、重要日期和天气生成梦境；失败时回退默认梦境池。",
+  dream_afterglow_mode: "控制梦境对第二天前半段状态的影响；自动模式按梦境内容和强度调节。",
+  enable_mixed_dream_themes: "允许梦境在主主题之外轻微混入另一个题材。",
+  enable_intimate_dream_theme: "允许强化梦境候选中出现含蓄的暧昧题材，默认关闭。",
+  dream_theme_candidates: "用逗号分隔可选梦境题材；生成时会随机抽取并按配置轻微混搭。",
+  recall_message_cache_text_chars: "单条撤回文本或转述内容最多缓存多少字符。",
+  enable_context_image_captioning: "把历史上下文中的图片占位补成视觉摘要；优先复用缓存，失败时保留原占位。",
+  context_image_caption_max_items: "单次请求最多补全多少条历史图片，超出部分保留占位。",
+  context_image_caption_timeout_seconds: "历史图片补全的单次等待预算；超时不会阻塞整轮回复。",
+  enable_memory_companion_private_recall: "仅在用户明确提到以前、约定、称呼、边界或稳定偏好时，从当前私聊选择性召回长期记忆。",
+  forward_message_image_vision_timeout_seconds: "合并消息图片识别最多等待多久；超时后先按文字记录回复并保留图片占位。",
+  max_group_topic_threads: "每个群最多保留多少条近期话题线。",
+  group_episode_refresh_minutes: "同一群两次群聊片段总结之间的最小间隔。",
+  group_slang_summary_minutes: "同一群两次黑话语义整理之间的最小间隔。",
+  max_group_episodes: "每个群最多保留多少段群聊片段记忆。",
+  max_group_relationship_edges: "每个群最多保留多少组群友近期互动统计。",
+  external_image_download_proxy: "仅用于下载在线生图接口返回的图片 URL，不影响生图请求或本地后端。",
+  external_image_download_use_environment_proxy: "下载在线图片结果时读取 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY。",
+  screen_peek_max_daily: "按用户计算的每日主动识屏次数；开始识屏即消耗额度。",
+  screen_peek_cooldown_minutes: "同一用户两次主动识屏之间的最小间隔。",
+  poke_action_max_times: "单次主动戳一戳最多执行几次，通常保持 1。",
+  poke_action_cooldown_minutes: "同一用户主动戳一戳成功后至少等待多久，避免并发或重试重复动作。",
+  voice_action_max_chars: "限制单条主动语音实际说话长度，越短越接近自然私聊语音。",
 };
 
 const featureSettingGroups = {
@@ -1966,31 +2093,6 @@ const featureSettingGroups = {
     "persona_planning_voice_prompt",
     "persona_inner_voice_prompt",
     "persona_proactive_voice_prompt",
-    "enable_companion_memory",
-    "memory_refresh_interval_minutes",
-    "max_companion_memory_items",
-    "enable_expression_learning",
-    "expression_learning_mode",
-    "enable_expression_manual_review",
-    "enable_expression_style_review",
-    "max_learned_expression_items",
-    "enable_intent_emotion_analysis",
-    "enable_response_self_review",
-    "enable_passive_topic_suppression",
-    "passive_topic_memory_hours",
-    "enable_relationship_state_machine",
-    "enable_dialogue_episode_memory",
-    "episode_memory_refresh_messages",
-    "episode_memory_refresh_minutes",
-    "max_dialogue_episodes",
-    "enable_open_loop_tracking",
-    "enable_user_habit_learning",
-    "user_habit_min_count",
-    "user_habit_max_items",
-    "enable_food_menu_recommendation",
-    "enable_meal_care_proactive",
-    "meal_care_max_daily",
-    "meal_care_followup_minutes",
   ],
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
@@ -2000,14 +2102,17 @@ const featureSettingGroups = {
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
   enable_dialogue_episode_memory: ["episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
-  enable_open_loop_tracking: ["max_dialogue_episodes"],
+  enable_open_loop_tracking: [],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
-  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"],
+  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
-  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state", "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
+  enable_daily_plan: ["daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "daily_plan_prompt"],
+  enable_detail_enhancement: ["detail_enhancement_lead_minutes"],
+  enable_daily_diary: ["daily_diary_time", "max_diary_entries", "important_date_lookahead_days"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
@@ -2017,14 +2122,15 @@ const featureSettingGroups = {
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_personal_goals: ["enable_personal_goal_auto_progress", "personal_goal_share_cooldown_hours", "personal_goal_stall_days"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
-  enable_recall_enhancement: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb", "enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
+  enable_recall_enhancement: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_cache_text_chars", "recall_message_image_cache_max_mb", "enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_recall_cancel_reply: ["recall_message_cache_ttl_seconds"],
   enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "quote_group_reply_once_per_target", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
-  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit", "forward_message_image_vision_timeout_seconds"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
-  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
+  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_balance_awareness: ["balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_holiday_perception: ["holiday_country"],
   enable_platform_perception: [],
@@ -2032,6 +2138,8 @@ const featureSettingGroups = {
   enable_lunar_perception: ["environment_perception_timezone"],
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
+  enable_weather_context: ["weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+  enable_environment_change_proactive: ["environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [],
   enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
@@ -2040,7 +2148,7 @@ const featureSettingGroups = {
   enable_group_context_injection: ["max_group_recent_messages", "enable_group_scene_awareness", "group_scene_recent_limit", "FORWARD_MESSAGE_PROVIDER_ID"],
   enable_group_injection_guard: ["enable_group_privacy_guard", "enable_group_persona_denoise", "enable_group_reality_promise_guard"],
   enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit", "group_wakeup_debounce_pending_penalty", "enable_group_interjection", "group_interject_min_interval_minutes", "group_interject_max_daily", "enable_group_interjection_feedback", "GROUP_INTERJECT_PROVIDER_ID"],
-  enable_group_member_profiles: ["enable_group_relationship_graph", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths", "enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_web_search_terms", "group_slang_web_search_results", "enable_group_topic_threads", "enable_group_episode_memory", "GROUP_SLANG_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID"],
+  enable_group_member_profiles: ["enable_group_relationship_graph", "max_group_relationship_edges", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths", "enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_summary_minutes", "group_slang_web_search_terms", "group_slang_web_search_results", "enable_group_topic_threads", "max_group_topic_threads", "enable_group_episode_memory", "group_episode_refresh_minutes", "max_group_episodes", "GROUP_SLANG_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID"],
   enable_group_slang_learning: ["max_group_slang_terms", "max_group_recent_messages", "enable_group_slang_meanings", "enable_group_slang_web_search", "group_slang_web_search_terms", "group_slang_web_search_results"],
   enable_group_slang_meanings: ["max_group_slang_terms", "enable_group_slang_web_search"],
   enable_group_slang_web_search: ["group_slang_web_search_terms", "group_slang_web_search_results"],
@@ -2054,7 +2162,7 @@ const featureSettingGroups = {
   enable_worldbook_member_recognition: ["worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
   enable_cross_user_memory_bridge: ["cross_user_memory_owner_only"],
   enable_atrelay_tools: ["atrelay_require_worldbook_first", "atrelay_member_cache_minutes", "atrelay_sensitive_confirm", "enable_atrelay_llm_rewrite", "atrelay_default_relay_style", "atrelay_multi_target_limit"],
-  enable_livingmemory_integration: ["livingmemory_tool_name", "memory_companion_context_timeout_seconds", "enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
+  enable_livingmemory_integration: ["livingmemory_tool_name", "memory_companion_context_timeout_seconds", "enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "enable_memory_companion_private_recall", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
   enable_bilibili_integration: ["enable_bilibili_boredom_watch", "bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_bilibili_boredom_watch: ["bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_sources", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
@@ -2062,13 +2170,16 @@ const featureSettingGroups = {
   enable_ai_daily_watch: ["ai_daily_sources", "ai_daily_prefer_text_version"],
   enable_news_boredom_read: ["news_min_interval_hours", "news_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
-  enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
-  enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
+  enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
+  enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "web_exploration_max_results", "WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
   enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "qzone_publish_image_style_prompt", "enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
+  enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
+  enable_voice_action: ["voice_action_max_chars"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
@@ -2099,6 +2210,16 @@ const featureSettingSections = {
       note: "到点后先检查这个念头是否像当前角色会说、是否越界、是否该延后。",
       keys: ["enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"],
     },
+    {
+      title: "启动与回复衔接",
+      note: "预热已配置对象，并保留用户对上一条主动消息的回复上下文。",
+      keys: ["default_enable_configured_targets", "proactive_reply_context_hours"],
+    },
+    {
+      title: "发送兼容与计划有效期",
+      note: "高级运行项。控制装饰钩子、精确平台发送和过期候选重排，通常保持默认。",
+      keys: ["enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
+    },
   ],
   enable_livingmemory_integration: [
     {
@@ -2114,7 +2235,7 @@ const featureSettingSections = {
     {
       title: "记忆插件桥接联动",
       note: "仅在检测到“我会牢牢记住你”/MemoryCompanion 桥接时显示。控制情绪漂移、梦境碎片、未完成话题取材和功能上下文读取。",
-      keys: ["enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
+      keys: ["enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "enable_memory_companion_private_recall", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
     },
   ],
   enable_maslow_motivation_experiment: [
@@ -2142,23 +2263,38 @@ const featureSettingSections = {
       note: "从稳定对话风格校准沉淀出的短规则；对话、创作、计划、内心和主动开口分别使用。",
       keys: ["enable_persona_voice_channels", "persona_conversation_voice_prompt", "persona_creative_voice_prompt", "persona_planning_voice_prompt", "persona_inner_voice_prompt", "persona_proactive_voice_prompt"],
     },
-    {
-      title: "记忆与表达",
-      note: "沉淀长期画像、表达习惯和共同经历。",
-      keys: ["enable_companion_memory", "memory_refresh_interval_minutes", "max_companion_memory_items", "enable_expression_learning", "expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items", "enable_dialogue_episode_memory", "episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
-    },
-    {
-      title: "回复策略",
-      note: "意图画像、回复/主动复核和重复话题抑制。",
-      keys: ["enable_intent_emotion_analysis", "enable_response_self_review", "response_review_mode", "enable_smart_silence", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
-    },
-    {
-      title: "关系与习惯",
-      note: "关系距离、未完话头和用户时段习惯。Bot 自身短期余波在“实验性功能 → 情绪模拟”里配置。",
-      keys: ["enable_relationship_state_machine", "proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours", "enable_open_loop_tracking", "enable_user_habit_learning", "user_habit_min_count", "user_habit_max_items", "enable_food_menu_recommendation"],
-    },
   ],
   enable_humanized_states: [
+    {
+      title: "生活日程",
+      note: "生成从起床到入睡前的粗日程；默认 10 个节点，可按需要提高到 24。",
+      keys: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages"],
+    },
+    {
+      title: "日程细化",
+      note: "在当前日程段开始前补充小事件、状态变化和主动契机。",
+      keys: ["enable_detail_enhancement", "detail_enhancement_lead_minutes"],
+    },
+    {
+      title: "日记与重要日期",
+      note: "日记负责生活连续性；重要日期提前关注范围独立生效。",
+      keys: ["enable_daily_diary", "daily_diary_time", "max_diary_entries", "important_date_lookahead_days"],
+    },
+    {
+      title: "日常问候",
+      note: "早午晚问候与失眠夜间消息都只形成候选，仍遵守额度、间隔和免打扰边界。",
+      keys: ["enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message"],
+    },
+    {
+      title: "梦境",
+      note: "根据日记、生活片段和环境生成梦境，并控制第二天状态余韵。",
+      keys: ["enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
+    },
+    {
+      title: "日程生成高级",
+      note: "通常保持留空；仅在需要完全自定义日程生成约束时修改。",
+      keys: ["daily_plan_prompt"],
+    },
     {
       title: "状态生成",
       note: "控制身体余波和强度，只作为扮演状态，不当成真实用户事实。",
@@ -2201,7 +2337,7 @@ const featureSettingSections = {
     {
       title: "撤回处理",
       note: "控制发送前取消、短期缓存和用户主动查看撤回内容。",
-      keys: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
+      keys: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_cache_text_chars", "recall_message_image_cache_max_mb"],
     },
     {
       title: "违禁词撤回",
@@ -2233,6 +2369,11 @@ const featureSettingSections = {
       keys: ["enable_holiday_perception", "holiday_country", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
     },
     {
+      title: "天气上下文",
+      note: "优先使用独立 OpenWeatherMap 配置，也可回退复用 screen_companion；地点优先填写城市。",
+      keys: ["enable_weather_context", "weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+    },
+    {
       title: "余额与补给",
       note: "定期读取余额状态；偏低时只生成主动候选，最终表达仍受人格、免打扰和发送复核约束。",
       keys: ["enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
@@ -2243,6 +2384,11 @@ const featureSettingSections = {
       title: "视觉等待",
       note: "收口结束后等待图片转述结果；视觉提前完成会直接进入主链。",
       keys: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds"],
+    },
+    {
+      title: "历史图片摘要补全",
+      note: "把上下文里的图片占位补成缓存或视觉摘要；超时与数量上限只影响本轮补全。",
+      keys: ["enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds"],
     },
     {
       title: "GIF 动图强化",
@@ -2258,6 +2404,18 @@ const featureSettingSections = {
       title: "角色自我识别",
       note: "把当前角色名字、人设和自定义线索交给视觉模型，辅助判断图里是不是当前角色自己。",
       keys: ["private_image_self_recognition_hint"],
+    },
+  ],
+  enable_forward_message_adaptation: [
+    {
+      title: "读取范围",
+      note: "控制合并消息的整理方式、节点数量、字符上限和嵌套展开。",
+      keys: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested"],
+    },
+    {
+      title: "合并消息图片",
+      note: "识别转发记录里的图片，并限制图片数量与视觉等待时间。",
+      keys: ["forward_message_image_vision", "forward_message_image_limit", "forward_message_image_vision_timeout_seconds"],
     },
   ],
   enable_group_companion: [
@@ -2338,17 +2496,17 @@ const featureSettingSections = {
     {
       title: "成员与关系网",
       note: "近期成员观察、群友互动边、关系网身份识别和自登记都在这里。",
-      keys: ["enable_group_relationship_graph", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
+      keys: ["enable_group_relationship_graph", "max_group_relationship_edges", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
     },
     {
       title: "黑话学习",
       note: "记录群里特殊表达，并可生成释义或少量联网参考；黑话模型附在这里。",
-      keys: ["enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_web_search_terms", "group_slang_web_search_results", "GROUP_SLANG_PROVIDER_ID"],
+      keys: ["enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_summary_minutes", "group_slang_web_search_terms", "group_slang_web_search_results", "GROUP_SLANG_PROVIDER_ID"],
     },
     {
       title: "话题与片段",
       note: "维护群聊话题线和阶段性群聊片段；群片段整理模型附在这里。",
-      keys: ["enable_group_topic_threads", "enable_group_episode_memory", "GROUP_EPISODE_PROVIDER_ID"],
+      keys: ["enable_group_topic_threads", "max_group_topic_threads", "enable_group_episode_memory", "group_episode_refresh_minutes", "max_group_episodes", "GROUP_EPISODE_PROVIDER_ID"],
     },
   ],
   enable_group_repeat_follow: [
@@ -2421,11 +2579,6 @@ const featureSettingSections = {
       title: "自定义搜索接口",
       note: "只接管主动搜索的联网检索；选题和整理仍使用上方“搜索决策/整理”模型。",
       keys: ["WEB_EXPLORATION_API_BASE_URL", "WEB_EXPLORATION_API_KEY", "WEB_EXPLORATION_API_MODEL"],
-    },
-    {
-      title: "外界信息自我关联",
-      note: "把搜索和新闻结果先转成内部意愿，再进入主动候选。",
-      keys: ["enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours"],
     },
   ],
   enable_qzone_integration: [
@@ -2550,6 +2703,11 @@ const featureSettingSections = {
       keys: ["external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "external_image_api_custom_headers"],
     },
     {
+      title: "图片结果下载",
+      note: "仅影响在线生图结果 URL 的下载，不改变生图 API 请求或本地后端。",
+      keys: ["external_image_download_proxy", "external_image_download_use_environment_proxy"],
+    },
+    {
       title: "备选在线图片 API",
       note: "主在线 API 失败后先尝试这组配置，再回退本地后端。",
       keys: ["enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers"],
@@ -2558,6 +2716,32 @@ const featureSettingSections = {
       title: "画面风格",
       note: "只影响提示词组织，不改变后端配置。",
       keys: ["photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+    },
+  ],
+  enable_screen_glance_action: [
+    {
+      title: "主动识屏额度",
+      note: "按用户限制每日次数与冷却；开始识屏即计入额度，避免失败后立即重试。",
+      keys: ["screen_peek_max_daily", "screen_peek_cooldown_minutes"],
+    },
+    {
+      title: "主动后沉默识屏",
+      note: "用户长时间未回复时可额外看一眼屏幕；仍受独立等待与冷却限制。",
+      keys: ["enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
+    },
+  ],
+  enable_poke_action: [
+    {
+      title: "戳一戳限制",
+      note: "控制单次最多次数和同一用户的动作冷却。",
+      keys: ["poke_action_max_times", "poke_action_cooldown_minutes"],
+    },
+  ],
+  enable_voice_action: [
+    {
+      title: "主动语音长度",
+      note: "只限制主动动作语音的字数；普通回复 TTS 仍由 TTS 强化卡片管理。",
+      keys: ["voice_action_max_chars"],
     },
   ],
   enable_tts_enhancement: [
@@ -2608,6 +2792,34 @@ const featureSettingTypes = {
   tts_frequency_control_mode: { type: "select", options: [["global", "全局频控：间隔+概率控制双路径"], ["legacy", "旧版行为：按各路径原逻辑触发"]] },
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
+  enable_daily_plan: { type: "checkbox" },
+  daily_plan_item_count: { type: "number", min: 5, max: 24, step: 1 },
+  include_schedule_in_messages: { type: "checkbox" },
+  enable_detail_enhancement: { type: "checkbox" },
+  detail_enhancement_lead_minutes: { type: "number", min: 0, max: 180, step: 1 },
+  enable_daily_diary: { type: "checkbox" },
+  max_diary_entries: { type: "number", min: 1, max: 60, step: 1 },
+  important_date_lookahead_days: { type: "number", min: 0, max: 60, step: 1 },
+  daily_plan_prompt: { type: "textarea" },
+  proactive_reply_context_hours: { type: "number", min: 1, max: 72, step: 1 },
+  max_proactive_plan_lag_minutes: { type: "number", min: 5, max: 1440, step: 5 },
+  greeting_idle_minutes: { type: "number", min: 0, max: 240, step: 5 },
+  dream_afterglow_mode: { type: "select", options: [["auto", "自动"], ["轻", "轻"], ["标准", "标准"], ["明显", "明显"]] },
+  dream_theme_candidates: { type: "textarea" },
+  recall_message_cache_text_chars: { type: "number", min: 80, max: 2000, step: 20 },
+  context_image_caption_max_items: { type: "number", min: 0, max: 50, step: 1 },
+  context_image_caption_timeout_seconds: { type: "number", min: 0, max: 30, step: 0.5 },
+  forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 60, step: 1 },
+  max_group_topic_threads: { type: "number", min: 3, max: 40, step: 1 },
+  group_episode_refresh_minutes: { type: "number", min: 30, max: 1440, step: 30 },
+  group_slang_summary_minutes: { type: "number", min: 60, max: 2880, step: 60 },
+  max_group_episodes: { type: "number", min: 3, max: 40, step: 1 },
+  max_group_relationship_edges: { type: "number", min: 10, max: 300, step: 10 },
+  screen_peek_max_daily: { type: "number", min: 0, max: 5, step: 1 },
+  screen_peek_cooldown_minutes: { type: "number", min: 0, max: 1440, step: 10 },
+  poke_action_max_times: { type: "number", min: 1, max: 3, step: 1 },
+  poke_action_cooldown_minutes: { type: "number", min: 0, max: 1440, step: 5 },
+  voice_action_max_chars: { type: "number", min: 6, max: 80, step: 2 },
   rest_reply_awake_grace_minutes: { type: "number", min: 0, max: 240, step: 5 },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   expression_learning_mode: { type: "select", options: [["light", "轻量：只学节奏"], ["balanced", "标准：当前行为"], ["aggressive", "激进：参考审核样本"]] },
@@ -2615,6 +2827,14 @@ const featureSettingTypes = {
   smart_silence_judge_mode: { type: "select", options: [["boundary_only", "明确边界才判断"], ["contextual", "上下文模型判断"]] },
   proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴：不省成本"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
+  enable_weather_context: { type: "checkbox" },
+  weather_api_key: { type: "password" },
+  weather_lat: { type: "number", min: -90, max: 90, step: 0.0001 },
+  weather_lon: { type: "number", min: -180, max: 180, step: 0.0001 },
+  weather_refresh_minutes: { type: "number", min: 10, max: 720, step: 10 },
+  enable_environment_change_proactive: { type: "checkbox" },
+  environment_change_check_minutes: { type: "number", min: 5, max: 60, step: 5 },
+  environment_change_cooldown_minutes: { type: "number", min: 20, max: 360, step: 10 },
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   smart_silence_min_confidence: { type: "number", min: 0, max: 100, step: 1 },
   smart_silence_model_timeout_seconds: { type: "number", min: 0.2, max: 5, step: 0.1 },
@@ -14992,7 +15212,6 @@ function renderModuleSettings() {
   fillForm("#privateAliasForm", formValues);
   fillForm("#quickModuleForm", formValues);
   fillForm("#runtimeSettingsForm", formValues);
-  renderWeatherConfigGuide(settings);
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
   renderQuickStartStatus(settings);
@@ -15001,9 +15220,7 @@ function renderModuleSettings() {
   renderPresetCards();
 }
 
-function renderWeatherConfigGuide(settings = state.overview?.settings || {}) {
-  const box = $("#weatherConfigSummary");
-  if (!box) return;
+function weatherConfigStatusText(settings = state.overview?.settings || {}) {
   const overview = state.overview || {};
   const cache = overview.cache?.weather || {};
   const enabled = toBool(settings.enable_weather_context);
@@ -15035,7 +15252,16 @@ function renderWeatherConfigGuide(settings = state.overview?.settings || {}) {
   const runtime = source
     ? ` 最近结果：${source}${cache.summary ? `，${cache.summary}` : ""}${cache.age ? `（${cache.age}）` : ""}。`
     : "";
-  box.textContent = status + runtime;
+  return status + runtime;
+}
+
+function environmentWeatherStatusHtml() {
+  return `
+    <section class="feature-param-status" aria-label="天气来源状态">
+      <b>天气来源状态</b>
+      <span>${escapeHtml(weatherConfigStatusText())}</span>
+    </section>
+  `;
 }
 
 function renderQuickStartStatus(settings) {
@@ -17066,13 +17292,14 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       "enable_memory_companion_dream_fragment",
       "enable_memory_companion_open_loop_search",
       "enable_memory_companion_feature_context",
+      "enable_memory_companion_private_recall",
       "memory_companion_context_top_k",
       "memory_companion_context_max_chars",
     ]);
     if (settingKey === "livingmemory_tool_name" && !livingmemoryAvailable) return false;
     if (companionOnlyKeys.has(settingKey) && !memoryCompanionActive) return false;
     if (settingKey === "enable_memory_companion_cross_window_emotion" && !boolSetting("enable_memory_companion_emotional_drift")) return false;
-    if (["memory_companion_context_top_k", "memory_companion_context_max_chars"].includes(settingKey) && !boolSetting("enable_memory_companion_feature_context")) return false;
+    if (["enable_memory_companion_private_recall", "memory_companion_context_top_k", "memory_companion_context_max_chars"].includes(settingKey) && !boolSetting("enable_memory_companion_feature_context")) return false;
   }
   if (featureKey === "enable_proactive_only_mode") {
     if (settingKey === "proactive_prompt_template") return boolSetting("enable_llm_proactive_message");
@@ -17082,6 +17309,21 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return true;
   }
   if (featureKey === "enable_humanized_states") {
+    const dailyPlanChildren = new Set([
+      "daily_plan_time",
+      "daily_plan_item_count",
+      "include_schedule_in_messages",
+      "enable_detail_enhancement",
+      "detail_enhancement_lead_minutes",
+      "daily_plan_prompt",
+    ]);
+    const diaryChildren = new Set(["daily_diary_time", "max_diary_entries"]);
+    if (dailyPlanChildren.has(settingKey) && !boolSetting("enable_daily_plan")) return false;
+    if (settingKey === "detail_enhancement_lead_minutes" && !boolSetting("enable_detail_enhancement")) return false;
+    if (diaryChildren.has(settingKey) && !boolSetting("enable_daily_diary")) return false;
+    if (settingKey === "greeting_idle_minutes" && !boolSetting("enable_daily_greetings")) return false;
+    const dreamChildren = new Set(["dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"]);
+    if (dreamChildren.has(settingKey) && !boolSetting("enable_enhanced_dreams")) return false;
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
     if (settingKey === "enable_qq_custom_presence_sync") {
       return boolSetting("enable_qq_presence_sync");
@@ -17096,6 +17338,23 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     }
     return true;
   }
+  if (featureKey === "enable_environment_perception") {
+    const weatherChildren = new Set([
+      "weather_api_key",
+      "weather_city",
+      "weather_lat",
+      "weather_lon",
+      "weather_refresh_minutes",
+      "enable_environment_change_proactive",
+      "environment_change_check_minutes",
+      "environment_change_cooldown_minutes",
+    ]);
+    if (weatherChildren.has(settingKey) && !boolSetting("enable_weather_context")) return false;
+    if (["environment_change_check_minutes", "environment_change_cooldown_minutes"].includes(settingKey)) {
+      return boolSetting("enable_environment_change_proactive");
+    }
+    return true;
+  }
   if (featureKey === "enable_worldbook_member_recognition") {
     if (["worldbook_self_registration_block_words", "worldbook_self_registration_block_reply"].includes(settingKey)) {
       return boolSetting("worldbook_self_registration");
@@ -17104,6 +17363,35 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_message_debounce") {
     if (settingKey === "text_message_debounce_seconds" && boolSetting("enable_smart_message_debounce")) return false;
+    return true;
+  }
+  if (featureKey === "enable_recall_enhancement") {
+    if (settingKey === "recall_message_cache_text_chars" && !boolSetting("enable_recall_message_cache")) return false;
+    return true;
+  }
+  if (featureKey === "enable_private_image_self_recognition") {
+    if (["context_image_caption_max_items", "context_image_caption_timeout_seconds"].includes(settingKey)) {
+      return boolSetting("enable_context_image_captioning");
+    }
+    return true;
+  }
+  if (featureKey === "enable_forward_message_adaptation") {
+    if (["forward_message_image_limit", "forward_message_image_vision_timeout_seconds"].includes(settingKey)) {
+      return boolSetting("forward_message_image_vision");
+    }
+    return true;
+  }
+  if (featureKey === "enable_group_member_profiles") {
+    if (settingKey === "max_group_relationship_edges") return boolSetting("enable_group_relationship_graph");
+    if (settingKey === "group_slang_summary_minutes") return boolSetting("enable_group_slang_learning");
+    if (settingKey === "max_group_topic_threads") return boolSetting("enable_group_topic_threads");
+    if (["group_episode_refresh_minutes", "max_group_episodes"].includes(settingKey)) return boolSetting("enable_group_episode_memory");
+    return true;
+  }
+  if (featureKey === "enable_screen_glance_action") {
+    if (["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"].includes(settingKey)) {
+      return boolSetting("enable_unanswered_screen_peek_followup");
+    }
     return true;
   }
   if (featureKey === "enable_group_slang_learning") {
@@ -17396,6 +17684,9 @@ function featureDependencyLines(key) {
   if (key === "enable_qzone_emotional_vent_publish") dependencies.push(["依赖", "情绪模拟 + QQ 空间动态层"]);
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI、SDGen 或在线图片 API"]);
   if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);
+  if (key === "enable_screen_glance_action") dependencies.push(["依赖", "screen_companion 屏幕观察能力"]);
+  if (key === "enable_poke_action") dependencies.push(["依赖", "当前平台支持戳一戳"]);
+  if (key === "enable_voice_action") dependencies.push(["依赖", "当前会话 TTS provider"]);
   if (key === "enable_yesterday_screen_diary_context") dependencies.push(["依赖", "screen_companion 昨日观察日记"]);
   if (key === "enable_livingmemory_integration") {
     const livingmemory = state.overview?.livingmemory || {};
@@ -17534,10 +17825,10 @@ const featureDetailGuides = {
     disabled: "候选仍可在这里管理，但不会进入普通回复参考。",
   },
   enable_humanized_states: {
-    summary: "生成精力、睡眠、梦境、健康、饥饿和周期等当前扮演状态，让 Bot 像有自己的身体节奏。",
-    trigger: "日程生成、状态刷新、主动消息和被动回复注入时。",
-    enabled: "当前扮演状态会影响日程、主动行为和被动回复的语气、长短、节奏。",
-    disabled: "状态退化为较平稳的基础信息，拟人生活感会明显减少。",
+    summary: "统一管理生活日程、日程细化、日记，以及精力、睡眠、梦境、健康、饥饿和周期等拟人生活状态。",
+    trigger: "每日生活生成、当前日程细化、状态刷新、主动消息和被动回复注入时。",
+    enabled: "身体与梦境状态会影响日程、主动行为和被动回复；日程与日记继续按各自子开关运行。",
+    disabled: "身体状态退化为较平稳的基础信息；日程、细化和日记子开关保持独立，不会被连带关闭。",
   },
   enable_health_state: {
     summary: "控制健康、不舒服和恢复尾声这类身体余波是否参与当前扮演状态。",
@@ -17610,6 +17901,24 @@ const featureDetailGuides = {
     trigger: "私聊图片进入视觉转述链路、引用图片被解析、合并转发含图片或动态 GIF 需要抽帧时。",
     enabled: "视觉摘要会结合当前角色名字、人设和自定义线索，并尽量区分“当前角色/用户/无关图片/无法判断”。",
     disabled: "不再额外做插件侧图片转述增强和角色自我识别；图片收口等待仍由“消息收口防抖”控制。",
+  },
+  enable_screen_glance_action: {
+    summary: "让 Bot 在合适动机下低频观察屏幕，并在用户长时间未回复时按独立规则决定是否再看一眼。",
+    trigger: "主动候选选择识屏动作，或主动消息后用户持续沉默且跟进规则通过时。",
+    enabled: "识屏会按用户计算额度和冷却，结果只作为当轮上下文，不应直接暴露隐私细节。",
+    disabled: "不会主动调用屏幕观察；普通图片识别和昨日屏幕日记不受影响。",
+  },
+  enable_poke_action: {
+    summary: "允许 Bot 用一次轻量戳一戳表达刷存在感、关心或逗一下用户。",
+    trigger: "主动候选明确选择戳一戳动作，且次数上限和用户冷却均通过时。",
+    enabled: "动作成功后才会自然补一句短消息，并记录冷却防止并发重复。",
+    disabled: "主动候选只会选择文字、图片、语音等其他可用动作。",
+  },
+  enable_voice_action: {
+    summary: "允许 Bot 在夜间、状态分享或更适合说出来的主动场景里留一小句语音。",
+    trigger: "主动候选选择语音动作，且当前会话存在可用 TTS provider 时。",
+    enabled: "主动语音受独立字数上限约束；普通回复是否转语音仍由 TTS 强化管理。",
+    disabled: "不会由主动动作直接发送语音，TTS 强化的普通回复路径不受影响。",
   },
   enable_environment_perception: {
     summary: "提供当前时间、日期、平台、聊天类型和消息媒介，让日程与回复不脱离现实语境。",
@@ -17988,6 +18297,8 @@ function featureImpactLines(key) {
     lines.push(["场景", "群回复 / 群主动 / 私聊主动"]);
   } else if (key === "enable_tts_enhancement") {
     lines.push(["场景", "私聊 / 群聊 / 主动语音"]);
+  } else if (["enable_screen_glance_action", "enable_poke_action", "enable_voice_action"].includes(key)) {
+    lines.push(["场景", "私聊主动动作"]);
   } else if (key.startsWith("enable_group_") || key === "enable_atrelay_tools" || key === "enable_cross_user_memory_bridge" || key === "enable_worldbook_member_recognition") {
     lines.push(["场景", "群聊 / 转述 / 关系网"]);
   } else if (key === "enable_private_image_self_recognition") {
@@ -18054,12 +18365,16 @@ function featureDetailPage(key) {
       const items = (section.keys || []).map((name) => relatedMap[name]).filter(Boolean);
       items.forEach((item) => renderedSectionKeys.add(item.key));
       if (!items.length) return "";
+      const sectionStatus = key === "enable_environment_perception" && section.title === "天气上下文"
+        ? environmentWeatherStatusHtml()
+        : "";
       return `
         <section class="feature-param-section">
           <header>
             <b>${escapeHtml(section.title || "参数")}</b>
             ${section.note ? `<span>${escapeHtml(section.note)}</span>` : ""}
           </header>
+          ${sectionStatus}
           ${items.map(settingRow).join("")}
         </section>
       `;
@@ -18178,20 +18493,61 @@ function bindFeatureDetailActions() {
           if (paramKey && Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, paramKey)) {
             state.overview.settings[paramKey] = input.checked;
           }
+          const preserveFeatureParamDraft = () => {
+            form.querySelectorAll("[data-feature-param]").forEach((control) => {
+              const draftKey = control.dataset.featureParam || "";
+              if (!draftKey) return;
+              const draftValue = collectSettingValue(draftKey, control);
+              if (isProviderConfigKey(draftKey)) {
+                state.overview.providers = state.overview.providers || {};
+                state.overview.providers[draftKey] = String(draftValue || "").trim();
+                return;
+              }
+              state.overview.settings = state.overview.settings || {};
+              state.overview.settings[draftKey] = draftValue;
+              if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, draftKey)) {
+                state.featureDraft[draftKey] = toBool(draftValue);
+              }
+            });
+          };
           const syncSettingBackedFeatureParam = (paramKey, { rerender = false } = {}) => {
             state.featureDraft[paramKey] = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings[paramKey] = input.checked;
-            if (rerender) renderFeatureSwitches();
+            if (rerender) {
+              preserveFeatureParamDraft();
+              renderFeatureSwitches();
+            }
           };
           if (state.selectedFeatureKey === "enable_humanized_states" && input.dataset.featureParam === "enable_rest_reply_simulation") {
             syncSettingBackedFeatureParam("enable_rest_reply_simulation", { rerender: input.checked });
+          }
+          if (
+            state.selectedFeatureKey === "enable_humanized_states"
+            && ["enable_daily_plan", "enable_detail_enhancement", "enable_daily_diary", "enable_daily_greetings", "enable_enhanced_dreams"].includes(input.dataset.featureParam)
+          ) {
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
           if (state.selectedFeatureKey === "enable_message_debounce" && input.dataset.featureParam === "enable_smart_message_debounce") {
             syncSettingBackedFeatureParam("enable_smart_message_debounce", { rerender: true });
           }
           if (state.selectedFeatureKey === "enable_response_self_review" && input.dataset.featureParam === "enable_smart_silence") {
             syncSettingBackedFeatureParam("enable_smart_silence", { rerender: true });
+          }
+          if (state.selectedFeatureKey === "enable_livingmemory_integration" && input.dataset.featureParam === "enable_memory_companion_feature_context") {
+            syncSettingBackedFeatureParam("enable_memory_companion_feature_context", { rerender: true });
+          }
+          if (state.selectedFeatureKey === "enable_recall_enhancement" && input.dataset.featureParam === "enable_recall_message_cache") {
+            syncSettingBackedFeatureParam("enable_recall_message_cache", { rerender: true });
+          }
+          if (state.selectedFeatureKey === "enable_private_image_self_recognition" && input.dataset.featureParam === "enable_context_image_captioning") {
+            syncSettingBackedFeatureParam("enable_context_image_captioning", { rerender: true });
+          }
+          if (state.selectedFeatureKey === "enable_forward_message_adaptation" && input.dataset.featureParam === "forward_message_image_vision") {
+            syncSettingBackedFeatureParam("forward_message_image_vision", { rerender: true });
+          }
+          if (state.selectedFeatureKey === "enable_screen_glance_action" && input.dataset.featureParam === "enable_unanswered_screen_peek_followup") {
+            syncSettingBackedFeatureParam("enable_unanswered_screen_peek_followup", { rerender: true });
           }
           if (
             state.selectedFeatureKey === "enable_tts_enhancement"
@@ -18203,8 +18559,20 @@ function bindFeatureDetailActions() {
             syncSettingBackedFeatureParam("enable_llm_emotion_judgement", { rerender: true });
           }
           if (
+            state.selectedFeatureKey === "enable_environment_perception"
+            && ["enable_weather_context", "enable_environment_change_proactive"].includes(input.dataset.featureParam)
+          ) {
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
+          }
+          if (
             ["enable_group_slang_learning", "enable_group_member_profiles"].includes(state.selectedFeatureKey)
             && ["enable_group_slang_meanings", "enable_group_slang_web_search"].includes(input.dataset.featureParam)
+          ) {
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
+          }
+          if (
+            state.selectedFeatureKey === "enable_group_member_profiles"
+            && ["enable_group_relationship_graph", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_episode_memory"].includes(input.dataset.featureParam)
           ) {
             syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }

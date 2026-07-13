@@ -107,6 +107,7 @@ from .helpers import (
     _missing_optional_model_dependency,
     _normalize_outbound_punctuation_flow,
     _now_ts,
+    _normalize_timezone_name,
     _redact_outbound_secrets,
     _safe_float,
     _safe_int,
@@ -687,11 +688,13 @@ class PrivateCompanionPlugin(
         self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
         self.enable_environment_perception = self._cfg_bool(c, "enable_environment_perception", True)
         timezone_default = self._cfg_str(c, "timezone", "Asia/Shanghai", "Asia/Shanghai")
-        self.environment_perception_timezone = self._cfg_str(
-            c,
-            "environment_perception_timezone",
-            timezone_default,
-            "Asia/Shanghai",
+        self.environment_perception_timezone = _normalize_timezone_name(
+            self._cfg_str(
+                c,
+                "environment_perception_timezone",
+                timezone_default,
+                "Asia/Shanghai",
+            )
         )
         _set_today_key_timezone(self.environment_perception_timezone)
         self.enable_holiday_perception = self._cfg_bool(c, "enable_holiday_perception", True)
@@ -1068,7 +1071,7 @@ class PrivateCompanionPlugin(
         self.enable_user_habit_learning = self._cfg_bool(c, "enable_user_habit_learning", True)
         self.enable_food_menu_recommendation = self._cfg_bool(c, "enable_food_menu_recommendation", True)
         self.enable_meal_care_proactive = self._cfg_bool(c, "enable_meal_care_proactive", True)
-        self.meal_care_max_daily = self._cfg_int(c, "meal_care_max_daily", 2, 0, 3)
+        self.meal_care_max_daily = self._cfg_int(c, "meal_care_max_daily", 1, 0, 3)
         self.meal_care_followup_minutes = self._cfg_int(c, "meal_care_followup_minutes", 45, 15, 180)
         self.user_habit_min_count = self._cfg_int(c, "user_habit_min_count", 3, 2, 20)
         self.user_habit_max_items = self._cfg_int(c, "user_habit_max_items", 24, 8, 80)
@@ -6545,6 +6548,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user["last_activity_at"] = received_ts
             self._note_private_inbound_activity(user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts)
+            self._note_morning_greeting_reply(user, now=received_ts)
             if self._cancel_inbound_conflicting_greeting(user, now=received_ts):
                 logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
                 if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
@@ -9085,6 +9089,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             fast_user["last_activity_at"] = received_ts
             self._note_private_inbound_activity(fast_user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(fast_user, activity_ts=received_ts)
+            self._note_morning_greeting_reply(fast_user, now=received_ts)
             if self._cancel_inbound_conflicting_greeting(fast_user, now=received_ts):
                 logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
                 if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
@@ -9443,6 +9448,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user["last_activity_at"] = received_ts or _now_ts()
             self._note_private_inbound_activity(user, received_ts or _now_ts(), text=text)
             self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts or _now_ts())
+            self._note_morning_greeting_reply(user, now=received_ts or _now_ts())
             if text:
                 user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
             user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1

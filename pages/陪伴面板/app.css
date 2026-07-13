@@ -14864,6 +14864,26 @@ textarea {
   line-height: 1.5;
 }
 
+.feature-param-status {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 5%);
+}
+
+.feature-param-status b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.feature-param-status span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .tts-config-layout {
   gap: 0;
 }

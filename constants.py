@@ -468,6 +468,8 @@ _DEFAULT_USER_TEMPLATE = {
     "greeting_sent_day": "",
     "greetings_sent": [],
     "greetings_suppressed_by_inbound": [],
+    "morning_greeting_sent_at": 0,
+    "morning_greeting_reply_at": 0,
     "proactive_daypart_counts": {},
     "proactive_daypart_day": "",
     "photo_sent_today": 0,

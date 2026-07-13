@@ -25,7 +25,7 @@ from quart import request, send_file
 
 from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_THEME_NAMES, _REASON_TEXT
 from .config_migration import _ensure_config_parent_dir
-from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
+from .helpers import _flat_get, _normalize_timezone_name, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
@@ -9494,12 +9494,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_quote_group_interjection",
             "enable_quote_private_proactive",
             "enable_photo_text_action",
+            "enable_screen_glance_action",
+            "enable_poke_action",
+            "enable_voice_action",
             "enable_photo_reference_image",
             "inject_passive_states",
             "enable_passive_state_delta_injection",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
             "enable_skill_growth_passive_injection",
+            "enable_personal_goals",
             "enable_message_debounce",
             "enable_smart_message_debounce",
             "enable_recall_enhancement",
@@ -12393,6 +12397,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             normalizer = getattr(self.plugin, "_normalize_model_fallback_overrides", None)
             self.plugin.model_fallback_overrides = normalizer(value) if callable(normalizer) else {}
             return
+        if key == "environment_perception_timezone":
+            timezone_name = _normalize_timezone_name(value)
+            self.plugin.environment_perception_timezone = timezone_name
+            _set_today_key_timezone(timezone_name)
+            return
         if key == "enable_deepseek_peak_replacement":
             self.plugin.enable_deepseek_peak_replacement = self._normalize_bool_value(value)
             return
@@ -13463,6 +13472,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
         if key in self._schema_bool_keys():
             return self._normalize_bool_value(value)
+        if key in {"environment_perception_timezone", "deepseek_peak_timezone"}:
+            return _normalize_timezone_name(value)
         if key == "target_user_ids":
             return self._normalize_private_target_id_list(value)
         if key == "plugin_specific_persona_id":

@@ -16,9 +16,18 @@ def _now_ts() -> float:
     return time.time()
 
 
+def _normalize_timezone_name(timezone_name: Any, default: str = "Asia/Shanghai") -> str:
+    candidate = str(timezone_name or "").strip() or default
+    try:
+        zoneinfo.ZoneInfo(candidate)
+        return candidate
+    except Exception:
+        return default
+
+
 def _set_today_key_timezone(timezone_name: Any) -> None:
     global _today_key_timezone
-    _today_key_timezone = str(timezone_name or "").strip()
+    _today_key_timezone = _normalize_timezone_name(timezone_name)
 
 
 def _today_key() -> str:
