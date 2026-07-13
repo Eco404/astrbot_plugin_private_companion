@@ -35,6 +35,12 @@ from .segmented_message import split_plain_component_chain
 class PrivateImageMixin:
     """Methods split from main.PrivateCompanionPlugin."""
 
+    def _private_image_framework_context(self) -> Any | None:
+        resolver = getattr(self, "_proactive_framework_context", None)
+        if callable(resolver):
+            return resolver()
+        return getattr(self, "context", None)
+
     def _private_event_has_image(self, event: AstrMessageEvent) -> bool:
         for comp in self._event_components(event):
             class_name = comp.__class__.__name__.lower()
@@ -1024,6 +1030,8 @@ class PrivateImageMixin:
                 fallback_prompt = prompt
             if clean_id and clean_id not in by_provider:
                 by_provider[clean_id] = (clean_id, provider_source, prompt)
+        if not by_provider:
+            return []
         state = self._private_image_visual_provider_state_store()
         recent = state.get("recent_successes") if isinstance(state, dict) else []
         clean_umo = _single_line(umo, 160)
@@ -1033,10 +1041,10 @@ class PrivateImageMixin:
 
         for provider_id, provider_source, prompt in base:
             clean_id = _single_line(provider_id, 160)
-            if clean_id and provider_source == "astrbot_image_caption" and clean_id not in used:
-                ordered.append((clean_id, provider_source, prompt))
-                used.add(clean_id)
-                break
+            if not clean_id or clean_id in used:
+                continue
+            ordered.append((clean_id, provider_source, prompt))
+            used.add(clean_id)
 
         if isinstance(recent, list):
             rows: list[tuple[int, dict[str, Any]]] = [
@@ -1063,12 +1071,6 @@ class PrivateImageMixin:
                     candidate = (provider_id, "recent_success", fallback_prompt)
                 ordered.append(candidate)
                 used.add(provider_id)
-        for provider_id, provider_source, prompt in base:
-            clean_id = _single_line(provider_id, 160)
-            if not clean_id or clean_id in used:
-                continue
-            ordered.append((clean_id, provider_source, prompt))
-            used.add(clean_id)
         return ordered
 
     def _select_private_image_visual_provider(self, umo: str = "") -> tuple[str, str, str, Any]:
@@ -1145,11 +1147,20 @@ class PrivateImageMixin:
         failure_tokens = (
             "无法查看图片", "无法看到图片", "无法识别图片", "无法读取图片", "无法打开图片",
             "看不到图片", "看不见图片", "不能查看图片", "不能识别图片", "图片无法显示",
-            "没有收到图片", "未收到图片", "没有图片可供", "imagecannot", "cannotview",
+            "没有收到图片", "未收到图片", "没有图片可供", "不支持视觉", "不支持图片输入",
+            "没有视觉能力", "不能看图", "imagecannot", "cannotview", "cannotseeimage",
+            "doesnotsupportvision", "doesn'tsupportvision", "notsupportimage",
         )
         if any(token in compact.lower() for token in failure_tokens):
             visible = re.sub(r"\s+", "", self._private_image_visible_line(text))
-            return not visible or visible in {"可见内容：无法判断", "可见内容：无", "可见内容：无法识别"}
+            if not visible:
+                return True
+            # A screenshot can legitimately contain an error sentence such as
+            # "模型不支持视觉". Preserve it only when the model also identified
+            # concrete screenshot/chat content; otherwise treat it as a refusal.
+            if self._private_image_type_kind(text) in {"screenshot", "chat"}:
+                return False
+            return True
         return False
 
     def _private_image_visual_provider_runtime_summary(self, umo: str = "") -> dict[str, Any]:
@@ -1401,6 +1412,12 @@ class PrivateImageMixin:
             configured = min(configured, max(3.0, wait_budget))
         return max(3.0, configured)
 
+    def _private_image_vision_wait_budget_seconds(self) -> float:
+        return max(
+            0.0,
+            _safe_float(getattr(self, "private_image_vision_wait_seconds", 30.0), 30.0, 0.0),
+        )
+
     def _private_image_model_image_items(self, image_sources: list[str]) -> list[tuple[str, str]]:
         items, _source_count, _has_gif_frames = self._private_image_model_image_items_with_meta(image_sources)
         return items
@@ -1562,7 +1579,25 @@ class PrivateImageMixin:
     def _provider_supports_image(provider: Any) -> bool:
         config = getattr(provider, "provider_config", None) or getattr(provider, "config", None) or {}
         modalities = config.get("modalities") if isinstance(config, dict) else None
+        if modalities == []:
+            # AstrBot treats an empty migrated list as unspecified/all modalities.
+            return True
         return isinstance(modalities, list) and "image" in modalities
+
+    @staticmethod
+    def _private_image_delivery_mode(
+        *,
+        has_visual_provider: bool,
+        main_provider_supports_image: bool,
+        has_dynamic_gif: bool,
+    ) -> str:
+        # A configured caption route is an explicit user choice and carries its
+        # own fallback chain. Only direct-attach when no caption route is usable.
+        if has_visual_provider:
+            return "caption"
+        if main_provider_supports_image and not has_dynamic_gif:
+            return "direct"
+        return "no_vision"
 
     def _event_main_provider_supports_image(self, event: AstrMessageEvent) -> bool:
         provider = None
@@ -1608,12 +1643,52 @@ class PrivateImageMixin:
     def _exception_indicates_image_input_unsupported(exc: Exception) -> bool:
         text = str(exc or "").lower()
         return bool(
-            "image_url" in text
-            and (
-                "do not support image" in text
-                or "not support image" in text
-                or "image input" in text
-                or "invalidparameter" in text
+            (
+                "image_url" in text
+                and (
+                    "do not support image" in text
+                    or "not support image" in text
+                    or "image input" in text
+                    or "invalidparameter" in text
+                )
+            )
+            or "does not support vision" in text
+            or "doesn't support vision" in text
+            or "不支持视觉" in text
+            or "不支持图片输入" in text
+        )
+
+    @staticmethod
+    def _private_image_reply_denies_image_capability(text: str) -> bool:
+        cleaned = _single_line(text, 500).lower()
+        if not cleaned:
+            return False
+        if any(
+            marker in cleaned
+            for marker in (
+                "不支持视觉",
+                "不支持图片输入",
+                "没有视觉能力",
+                "无法查看图片",
+                "无法读取图片",
+                "无法识别图片",
+                "不能查看图片",
+                "不能读取图片",
+                "不能看图",
+                "看不到你发的图片",
+                "can't view images",
+                "cannot view images",
+                "can't see images",
+                "cannot see images",
+                "does not support vision",
+                "doesn't support vision",
+            )
+        ):
+            return True
+        return bool(
+            re.search(
+                r"(?:我|当前模型|该模型|这个模型|模型|助手).{0,12}(?:无法|不能|不支持|没有).{0,10}(?:查看|读取|识别|处理|接收|理解|访问)?(?:图片|图像|视觉)",
+                cleaned,
             )
         )
 
@@ -3513,7 +3588,7 @@ class PrivateImageMixin:
         vision_text = _single_line(buffer.get("vision_text"), image_limit)
         vision_wait_timed_out = False
         if not vision_text and isinstance(vision_task, asyncio.Task):
-            timeout = max(0.0, float(getattr(self, "private_image_vision_wait_seconds", 30.0) or 0.0))
+            timeout = self._private_image_vision_wait_budget_seconds()
             try:
                 if timeout > 0:
                     logger.info("[PrivateCompanion] 私聊单图等待视觉转述完成: user=%s timeout=%.1fs", user_id, timeout)
@@ -3557,8 +3632,9 @@ class PrivateImageMixin:
         request_image_refs = self._private_image_sources_for_astrbot_request(raw_image_sources)
         try:
             umo = str(getattr(event, "unified_msg_origin", "") or "")
+            framework_context = self._private_image_framework_context()
             framework_event = event
-            if umo:
+            if umo and framework_context is not None:
                 try:
                     from astrbot.core.platform.message_session import MessageSession
                     from .proactive_message import SyntheticPrivateWakeEvent
@@ -3570,7 +3646,7 @@ class PrivateImageMixin:
                     except Exception:
                         sender_name = ""
                     framework_event = SyntheticPrivateWakeEvent(
-                        context=self.context,
+                        context=framework_context,
                         session=session,
                         message="[图片]",
                         sender_name=sender_name or "PrivateCompanion",
@@ -3585,6 +3661,11 @@ class PrivateImageMixin:
                 except Exception as exc:
                     framework_event = event
                     logger.info("[PrivateCompanion] 私聊单图合成私聊事件创建失败,回退原事件: user=%s error=%s", user_id, _single_line(exc, 160))
+            elif umo:
+                logger.warning(
+                    "[PrivateCompanion] 私聊单图主链未取得 AstrBot 原生 Context,已直接转入视觉摘要兜底: user=%s",
+                    user_id,
+                )
             setattr(framework_event, "private_companion_deferred_private_image_only_ready", True)
             setattr(framework_event, "private_companion_deferred_private_image_only", False)
             setattr(framework_event, "private_companion_skip_external_token_stats", True)
@@ -3597,11 +3678,15 @@ class PrivateImageMixin:
                 bool(getattr(self, "enable_private_image_gif_enhancement", True))
                 and self._private_image_sources_include_gif(raw_image_sources)
             )
+            resolved_image_mode = self._private_image_delivery_mode(
+                has_visual_provider=has_visual_provider,
+                main_provider_supports_image=main_provider_supports_image,
+                has_dynamic_gif=has_dynamic_gif_sources,
+            )
             direct_image_mode = bool(
                 request_image_refs
                 and buffered_image_mode == "direct"
-                and main_provider_supports_image
-                and not has_dynamic_gif_sources
+                and resolved_image_mode == "direct"
             )
             direct_provider_id = ""
             direct_provider_source = "current_main_provider"
@@ -3682,7 +3767,8 @@ class PrivateImageMixin:
                     conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
                     if conv_id:
                         conv = await self.context.conversation_manager.get_conversation(umo, conv_id)
-            cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+            config_context = framework_context or self.context
+            cfg = config_context.get_config(umo=umo) if umo else config_context.get_config()
             provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
             build_cfg = MainAgentBuildConfig(
                 tool_call_timeout=int(provider_settings.get("tool_call_timeout", 120) or 120),
@@ -3741,9 +3827,11 @@ class PrivateImageMixin:
             llm_resp = None
             try:
                 async def _runner_factory():
+                    if framework_context is None:
+                        return None
                     built = await build_main_agent(
                         event=framework_event,
-                        plugin_context=self.context,
+                        plugin_context=framework_context,
                         config=build_cfg,
                         req=req,
                     )
@@ -3817,6 +3905,16 @@ class PrivateImageMixin:
                 )
                 reply = ""
                 reply_source = "internal_error_fallback"
+            if reply and direct_image_mode and self._private_image_reply_denies_image_capability(reply):
+                logger.warning(
+                    "[PrivateCompanion] 私聊单图主链返回无法看图声明,已转视觉摘要兜底: user=%s provider=%s preview=%s",
+                    user_id,
+                    direct_provider_id,
+                    _single_line(reply, 180),
+                )
+                reply = ""
+                direct_image_mode = False
+                reply_source = "image_capability_denial_fallback"
             if not reply and captured_tool_sends:
                 captured_text_parts: list[str] = []
                 sanitizer = getattr(self, "_sanitize_captured_plain_text", None)

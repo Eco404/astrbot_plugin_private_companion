@@ -1,6 +1,11 @@
 window.PrivateCompanionAppearance = (() => {
+  const FONT_FAMILIES = new Set([
+    "original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng",
+  ]);
+
   function normalizeFontFamily(value) {
-    return String(value || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
+    const font = String(value || "original").trim().toLowerCase();
+    return FONT_FAMILIES.has(font) ? font : "original";
   }
 
   function applyFontFamily(value) {

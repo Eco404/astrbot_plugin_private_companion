@@ -299,6 +299,33 @@ class MemoryCompanionAdapterMixin:
                 continue
         return "", {}
 
+    def _memory_companion_bridge_bot_id(self, event: Any | None = None) -> str:
+        if event is not None:
+            event_self_id = getattr(self, "_event_self_id", None)
+            if callable(event_self_id):
+                try:
+                    bot_id = _single_line(event_self_id(event), 120)
+                except Exception:
+                    bot_id = ""
+                if bot_id:
+                    return bot_id
+        known_ids: set[str] = set()
+        known_getter = getattr(self, "_known_bot_self_ids", None)
+        if callable(known_getter):
+            try:
+                known_ids.update(
+                    _single_line(value, 120)
+                    for value in known_getter()
+                    if _single_line(value, 120)
+                )
+            except Exception:
+                pass
+        for attr in ("bot_self_id", "bot_user_id", "self_id"):
+            value = _single_line(getattr(self, attr, ""), 120)
+            if value:
+                known_ids.add(value)
+        return next(iter(known_ids)) if len(known_ids) == 1 else ""
+
     def _memory_companion_schedule_session_context(self, *, message_text: str = "") -> dict[str, Any]:
         user_id, user = self._memory_companion_schedule_owner_context()
         umo = _single_line(user.get("umo"), 200) if isinstance(user, dict) else ""
@@ -313,6 +340,7 @@ class MemoryCompanionAdapterMixin:
             "platform": platform,
             "user_id": user_id,
             "user_name": user_name,
+            "bot_id": self._memory_companion_bridge_bot_id(),
             "message_text": _single_line(message_text, 1200),
         }
 
@@ -366,15 +394,18 @@ class MemoryCompanionAdapterMixin:
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
             timeout = max(0.2, min(6.0, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
+            compose_kwargs = {
+                "query": query,
+                "session_context": self._memory_companion_schedule_session_context(message_text=query),
+                "top_k": 6 if kind == "daily_plan" else 5,
+                "max_chars": max(500, min(1800, int(max_chars or 1200))),
+                "companion_bot_mood": bot_mood,
+                "companion_bot_energy": bot_energy,
+            }
+            if self._memory_companion_coordination_status().get("schedule_fast_context") is True:
+                compose_kwargs["retrieval_profile"] = "schedule_fast"
             text = await asyncio.wait_for(
-                composer(
-                    query=query,
-                    session_context=self._memory_companion_schedule_session_context(message_text=query),
-                    top_k=6 if kind == "daily_plan" else 5,
-                    max_chars=max(500, min(1800, int(max_chars or 1200))),
-                    companion_bot_mood=bot_mood,
-                    companion_bot_energy=bot_energy,
-                ),
+                composer(**compose_kwargs),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -425,6 +456,16 @@ class MemoryCompanionAdapterMixin:
         clean_query = _single_line(query, 1200)
         if not clean_query:
             return ""
+        if kind == "daily_outfit_photo" and event is None and not user_id and not isinstance(user, dict):
+            owner_getter = getattr(self, "_memory_companion_schedule_owner_context", None)
+            if callable(owner_getter):
+                try:
+                    owner_id, owner = owner_getter()
+                    if owner_id and isinstance(owner, dict):
+                        user_id = _single_line(owner_id, 80)
+                        user = owner
+                except Exception:
+                    pass
         session_context: dict[str, Any]
         if event is not None:
             session_id = _single_line(getattr(event, "unified_msg_origin", ""), 180)
@@ -449,6 +490,7 @@ class MemoryCompanionAdapterMixin:
                 "platform": session_id.split(":", 1)[0] if ":" in session_id else "",
                 "user_id": user_id,
                 "user_name": user_name,
+                "bot_id": self._memory_companion_bridge_bot_id(event),
                 "message_text": clean_query,
                 "strict_session_only": bool(strict_session_only),
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
@@ -461,6 +503,7 @@ class MemoryCompanionAdapterMixin:
                 "platform": umo.split(":", 1)[0] if ":" in umo else "",
                 "user_id": user_id,
                 "user_name": _single_line(user.get("nickname") or user.get("display_name") or user_id, 80),
+                "bot_id": self._memory_companion_bridge_bot_id(),
                 "message_text": clean_query,
                 "strict_session_only": bool(strict_session_only),
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
@@ -469,6 +512,7 @@ class MemoryCompanionAdapterMixin:
             session_context = {
                 "session_id": f"private_companion:{kind}",
                 "scope": "unknown",
+                "bot_id": self._memory_companion_bridge_bot_id(),
                 "message_text": clean_query,
                 "strict_session_only": bool(strict_session_only),
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
@@ -476,15 +520,21 @@ class MemoryCompanionAdapterMixin:
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
             configured_timeout = max(0.2, min(6.0, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
+            compose_kwargs = {
+                "query": clean_query,
+                "session_context": session_context,
+                "top_k": max(1, min(10, int(top_k or 5))),
+                "max_chars": max(240, min(1800, int(max_chars or 900))),
+                "companion_bot_mood": bot_mood,
+                "companion_bot_energy": bot_energy,
+            }
+            if (
+                kind == "daily_outfit_photo"
+                and self._memory_companion_coordination_status().get("outfit_fast_context") is True
+            ):
+                compose_kwargs["retrieval_profile"] = "outfit_fast"
             text = await asyncio.wait_for(
-                composer(
-                    query=clean_query,
-                    session_context=session_context,
-                    top_k=max(1, min(10, int(top_k or 5))),
-                    max_chars=max(240, min(1800, int(max_chars or 900))),
-                    companion_bot_mood=bot_mood,
-                    companion_bot_energy=bot_energy,
-                ),
+                composer(**compose_kwargs),
                 timeout=max(0.2, min(6.0, min(configured_timeout, _memory_companion_safe_float(timeout_seconds, configured_timeout, 0.2)))),
             )
         except asyncio.TimeoutError:

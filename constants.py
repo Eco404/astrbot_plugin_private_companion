@@ -7,6 +7,9 @@ DATA_VERSION = 1
 PAGE_THEME_NAMES = frozenset(
     {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"}
 )
+PAGE_FONT_NAMES = frozenset(
+    {"original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng"}
+)
 
 MODEL_PROVIDER_KEYS = frozenset(
     {

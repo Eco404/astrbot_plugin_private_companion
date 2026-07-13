@@ -2168,15 +2168,51 @@ class ProactiveMessageMixin:
         return str(conv_id or "")
 
     def _proactive_synthetic_event(self, umo: str, *, prompt: str, name: str) -> AstrMessageEvent | None:
+        framework_context = self._proactive_framework_context()
+        if framework_context is None:
+            return None
         session = self._parse_message_session(umo)
         if not session:
             return None
         return SyntheticPrivateWakeEvent(
-            context=self.context,
+            context=framework_context,
             session=session,
             message=prompt,
             sender_name=name or "PrivateCompanion",
         )
+
+    def _proactive_framework_context(self) -> Context | None:
+        """Resolve only a native AstrBot Context from current or legacy wrappers."""
+        candidate = getattr(self, "context", None)
+        pending = [candidate]
+        visited: set[int] = set()
+        wrapper_attrs = (
+            "context_obj",
+            "plugin_context",
+            "wrapped_context",
+            "raw_context",
+            "_context",
+            "_context_obj",
+            "_plugin_context",
+            "_wrapped_context",
+            "_raw_context",
+            "__wrapped__",
+        )
+        while pending:
+            current = pending.pop(0)
+            if isinstance(current, Context):
+                return current
+            if current is None or id(current) in visited:
+                continue
+            visited.add(id(current))
+            for attr in wrapper_attrs:
+                try:
+                    nested = getattr(current, attr, None)
+                except Exception:
+                    continue
+                if nested is not None and id(nested) not in visited:
+                    pending.append(nested)
+        return None
 
     def _proactive_conversation_with_configured_persona(self, conversation: Any) -> Any:
         specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
@@ -2207,6 +2243,18 @@ class ProactiveMessageMixin:
     ) -> str:
         cache_key = str(umo or "")
         self._framework_captured_send_cache.pop(cache_key, None)
+        framework_context = self._proactive_framework_context()
+        if framework_context is None:
+            context_value = getattr(self, "context", None)
+            context_type = type(context_value).__name__ if context_value is not None else "None"
+            warning_key = f"{type(context_value).__module__}.{context_type}" if context_value is not None else context_type
+            if getattr(self, "_proactive_framework_context_warning_key", "") != warning_key:
+                self._proactive_framework_context_warning_key = warning_key
+                logger.warning(
+                    "[PrivateCompanion] 主动主链未取得 AstrBot 原生 Context,已直接转入人格化兜底: input_type=%s；请重载插件或重启 AstrBot",
+                    context_type,
+                )
+            return ""
         event = self._proactive_synthetic_event(umo, prompt=prompt, name=name)
         if event is None:
             return ""
@@ -2216,7 +2264,7 @@ class ProactiveMessageMixin:
             setattr(event, "private_companion_skip_passive_input_status", True)
         except Exception:
             pass
-        cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+        cfg = framework_context.get_config(umo=umo) if umo else framework_context.get_config()
         provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
         build_cfg = MainAgentBuildConfig(
             tool_call_timeout=int(provider_settings.get("tool_call_timeout", 120) or 120),
@@ -2242,7 +2290,7 @@ class ProactiveMessageMixin:
                         runner = await build_main_agent(
                             event=event,
                             # AstrBot 4.26.2+ validates this as the concrete Context type.
-                            plugin_context=self.context,
+                            plugin_context=framework_context,
                             config=build_cfg,
                             req=req,
                         )

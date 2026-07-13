@@ -16231,6 +16231,400 @@ tbody tr.is-selected {
   align-items: start;
 }
 
+.config-fold-panel {
+  position: relative;
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.96), rgba(245,248,253,0.76)),
+    var(--surface);
+  box-shadow: var(--shadow-ring);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+.config-fold-panel::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--blue), var(--plum));
+}
+
+.config-runtime-details::before {
+  background: linear-gradient(90deg, var(--gold), var(--red), var(--blue));
+}
+
+.config-runtime-details {
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.96), rgba(248,244,234,0.72)),
+    var(--surface);
+}
+
+.config-fold-panel[open] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line-soft));
+  box-shadow: 0 8px 24px rgba(15, 42, 74, 0.08), var(--shadow-ring);
+}
+
+.config-fold-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+  min-height: 104px;
+  padding: 16px 18px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.config-fold-panel[open] .config-fold-summary {
+  min-height: 84px;
+}
+
+.config-fold-panel[open] .config-fold-preview {
+  display: none;
+}
+
+.config-fold-summary::-webkit-details-marker {
+  display: none;
+}
+
+.config-fold-summary:hover {
+  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
+}
+
+.config-fold-summary:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  outline-offset: -3px;
+}
+
+.config-fold-heading {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.config-fold-kicker {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.config-runtime-details .config-fold-kicker {
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+.config-fold-heading h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.config-fold-heading p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.config-fold-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.config-fold-preview > span {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(255,255,255,0.72);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.config-common-settings-disclosure,
+.config-runtime-details-disclosure {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 76px;
+  min-height: 34px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line-soft));
+  border-radius: var(--radius);
+  padding: 7px 11px;
+  background: rgba(255,255,255,0.76);
+  color: var(--accent-strong);
+  font-size: 0;
+  font-weight: 800;
+  box-shadow: var(--shadow-ring);
+}
+
+.config-runtime-details-disclosure {
+  border-color: color-mix(in srgb, var(--gold) 28%, var(--line-soft));
+  color: var(--gold);
+}
+
+.config-common-settings-disclosure::before,
+.config-runtime-details-disclosure::before {
+  content: "展开";
+  font-size: 12px;
+}
+
+.config-common-settings-disclosure::after,
+.config-runtime-details-disclosure::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 0.18s var(--ease);
+}
+
+.config-fold-panel[open] .config-common-settings-disclosure::before,
+.config-fold-panel[open] .config-runtime-details-disclosure::before {
+  content: "收起";
+}
+
+.config-fold-panel[open] .config-common-settings-disclosure::after,
+.config-fold-panel[open] .config-runtime-details-disclosure::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.config-common-settings-body,
+.config-runtime-details-body {
+  border-top: 1px solid var(--line-soft);
+  padding: 16px 18px 18px;
+  animation: config-fold-reveal 0.2s var(--ease);
+}
+
+.config-common-settings-body {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  background: rgba(255,255,255,0.36);
+}
+
+.config-common-section-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.config-common-section-head::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--line-soft);
+}
+
+.config-runtime-details-body {
+  background: rgba(255,255,255,0.34);
+}
+
+.runtime-settings-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 0;
+}
+
+.runtime-settings-section {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 2px 18px 2px 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.runtime-settings-section + .runtime-settings-section {
+  border-left: 1px solid var(--line-soft);
+  padding-right: 0;
+  padding-left: 18px;
+}
+
+.runtime-settings-section-head {
+  display: grid;
+  gap: 4px;
+  min-height: 44px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.runtime-settings-section-head h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.runtime-settings-section-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.runtime-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.runtime-settings-grid > label {
+  min-width: 0;
+}
+
+.runtime-settings-form > .actions {
+  grid-column: 1 / -1;
+  margin-top: 0;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 14px;
+}
+
+#config-external-abilities,
+#config-prompt-injection-position {
+  border: 0;
+  border-radius: 0;
+  padding: 4px 2px;
+  background: transparent;
+  box-shadow: none;
+}
+
+#config-prompt-injection-position {
+  border-left: 1px solid var(--line-soft);
+  padding-left: 18px;
+}
+
+@keyframes config-fold-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 860px) {
+  .config-fold-summary {
+    align-items: flex-start;
+    min-height: 0;
+  }
+
+  .runtime-settings-form {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-settings-form > .actions {
+    grid-column: auto;
+  }
+
+  .runtime-settings-section,
+  .runtime-settings-section + .runtime-settings-section {
+    border-left: 0;
+    padding: 2px 0 16px;
+  }
+
+  .runtime-settings-section + .runtime-settings-section {
+    border-top: 1px solid var(--line-soft);
+    padding-top: 16px;
+  }
+
+  #config-external-abilities,
+  #config-prompt-injection-position {
+    border-left: 0;
+    padding: 4px 2px;
+  }
+}
+
+@media (max-width: 600px) {
+  .config-fold-summary {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 16px;
+  }
+
+  .config-common-settings-disclosure,
+  .config-runtime-details-disclosure {
+    align-self: center;
+    width: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    padding: 7px;
+  }
+
+  .config-common-settings-disclosure::before,
+  .config-runtime-details-disclosure::before {
+    display: none;
+  }
+
+  .config-fold-preview {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
+  }
+
+  .config-fold-preview > span {
+    min-width: 0;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .config-common-settings-body,
+  .config-runtime-details-body {
+    padding: 14px;
+  }
+
+  .config-fold-heading h2 {
+    font-size: 18px;
+  }
+
+  .runtime-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .config-common-settings-body,
+  .config-runtime-details-body {
+    animation: none;
+  }
+
+  .config-common-settings-disclosure::after,
+  .config-runtime-details-disclosure::after {
+    transition: none;
+  }
+}
+
 .config-card {
   grid-column: span 6;
   min-width: 0;
@@ -16282,6 +16676,25 @@ tbody tr.is-selected {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.storage-safety-toggle {
+  align-items: flex-start;
+}
+
+.storage-safety-toggle > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.storage-safety-toggle b {
+  color: var(--ink);
+}
+
+.storage-safety-toggle small {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .storage-collapsible {

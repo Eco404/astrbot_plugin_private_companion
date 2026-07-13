@@ -1,19 +1,42 @@
-:root[data-page-font="cheng"],
-:root[data-page-font="cheng"] body,
-:root[data-page-font="cheng"] button,
-:root[data-page-font="cheng"] input,
-:root[data-page-font="cheng"] select,
-:root[data-page-font="cheng"] textarea {
-  font-family: "CustomPanelFont", "Segoe UI", "Microsoft YaHei", sans-serif;
+:root[data-page-font="original"] {
+  --page-font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
 }
 
-:root[data-page-font="original"],
-:root[data-page-font="original"] body,
-:root[data-page-font="original"] button,
-:root[data-page-font="original"] input,
-:root[data-page-font="original"] select,
-:root[data-page-font="original"] textarea {
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+:root[data-page-font="yahei"] {
+  --page-font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+:root[data-page-font="dengxian"] {
+  --page-font-family: "DengXian", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+:root[data-page-font="source_han"] {
+  --page-font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+:root[data-page-font="simsun"] {
+  --page-font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif;
+}
+
+:root[data-page-font="kaiti"] {
+  --page-font-family: "KaiTi", "STKaiti", "Kaiti SC", "Microsoft YaHei", serif;
+}
+
+:root[data-page-font="fangsong"] {
+  --page-font-family: "FangSong", "STFangsong", "Fangsong SC", "Microsoft YaHei", serif;
+}
+
+:root[data-page-font="cheng"] {
+  --page-font-family: "CustomPanelFont", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+:root,
+body,
+button,
+input,
+select,
+textarea {
+  font-family: var(--page-font-family, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
 }
 
 .folio-tools {

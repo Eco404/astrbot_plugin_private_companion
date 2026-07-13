@@ -1297,6 +1297,7 @@ class GroupObservationMixin:
         if not isinstance(terms, list):
             return False
         now = _now_ts()
+        name_tokens = self._group_member_name_tokens(group)
         kept: list[Any] = []
         removed: set[str] = set()
         for item in terms:
@@ -1317,7 +1318,7 @@ class GroupObservationMixin:
                     if age_days >= 45 and count <= 5:
                         removed.add(term)
                         continue
-            if term and self._looks_like_group_member_name(group, term):
+            if term and self._looks_like_group_member_name(group, term, name_tokens=name_tokens):
                 removed.add(term)
                 continue
             kept.append(item)
@@ -2550,16 +2551,22 @@ class GroupObservationMixin:
         text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
         return text[:80]
 
-    def _looks_like_group_member_name(self, group: dict[str, Any], token: str) -> bool:
+    def _looks_like_group_member_name(
+        self,
+        group: dict[str, Any],
+        token: str,
+        *,
+        name_tokens: set[str] | None = None,
+    ) -> bool:
         token = _single_line(token, 40)
         if not token:
             return False
         normalized = re.sub(r"\s+", "", token)
-        name_tokens = self._group_member_name_tokens(group)
-        if token in name_tokens or normalized in name_tokens:
+        resolved_name_tokens = name_tokens if isinstance(name_tokens, set) else self._group_member_name_tokens(group)
+        if token in resolved_name_tokens or normalized in resolved_name_tokens:
             return True
         if len(normalized) >= 3:
-            for name in name_tokens:
+            for name in resolved_name_tokens:
                 compact_name = re.sub(r"\s+", "", name)
                 if compact_name and (normalized == compact_name or normalized in compact_name or compact_name in normalized):
                     return True

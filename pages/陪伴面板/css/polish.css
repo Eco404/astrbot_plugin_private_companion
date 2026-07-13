@@ -470,15 +470,16 @@ small {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 8px;
   color: var(--blue);
-  font-size: 13px;
+  font-size: 0;
   font-weight: 700;
 }
 
 .config-common-settings-disclosure::after {
-  content: ">";
-  font-size: 16px;
+  content: "";
+  font-size: 0;
   transition: transform .18s ease;
 }
 
@@ -488,11 +489,11 @@ small {
 
 .config-common-settings[open] .config-common-settings-disclosure::before {
   content: "收起";
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .config-common-settings[open] .config-common-settings-disclosure::after {
-  transform: rotate(90deg);
+  transform: rotate(225deg) translate(-1px, -1px);
 }
 
 .config-common-settings-body {
@@ -2087,20 +2088,23 @@ small {
 /* Configuration page consolidation */
 #panel-config .config-common-settings {
   padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, .96), rgba(245, 248, 253, .76)),
+    var(--surface);
+  box-shadow: var(--shadow-ring);
 }
 
 #panel-config .config-common-settings > summary {
-  min-height: 0;
-  padding: 0 0 14px;
+  min-height: 104px;
+  padding: 16px 18px;
   border-radius: 0;
-  border-bottom: 1px solid rgba(160, 182, 211, .42);
+  border-bottom: 0;
 }
 
 #panel-config .config-common-settings > summary:hover {
-  background: transparent;
+  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
 }
 
 #panel-config .config-common-settings > summary h2 {
@@ -2123,8 +2127,8 @@ small {
 
 #panel-config .config-common-settings-body {
   gap: 16px;
-  padding-top: 16px;
-  border-top: 0;
+  padding: 16px 18px 18px;
+  border-top: 1px solid var(--line-soft);
 }
 
 #panel-config .config-common-section-head {
@@ -2164,15 +2168,21 @@ small {
 
 #panel-config .config-runtime-details {
   padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, .96), rgba(248, 244, 234, .72)),
+    var(--surface);
+  box-shadow: var(--shadow-ring);
 }
 
 #panel-config .config-runtime-details > summary {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  min-height: 72px;
-  padding: 14px 16px;
+  gap: 20px;
+  min-height: 104px;
+  padding: 16px 18px;
   list-style: none;
   cursor: pointer;
   user-select: none;
@@ -2183,21 +2193,11 @@ small {
 }
 
 #panel-config .config-runtime-details > summary::after {
-  content: "展开";
-  flex: 0 0 auto;
-  align-self: center;
-  padding: 5px 12px;
-  border: 1px solid rgba(71, 103, 148, .22);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .72);
-  color: var(--blue);
-  font-size: 12px;
-  font-weight: 800;
-  white-space: nowrap;
+  content: none;
 }
 
 #panel-config .config-runtime-details[open] > summary::after {
-  content: "收起";
+  content: none;
 }
 
 #panel-config .config-runtime-details[open] > summary {
@@ -2206,30 +2206,45 @@ small {
 }
 
 #panel-config .config-runtime-details-body {
-  padding: 14px 16px 16px;
+  padding: 16px 18px 18px;
   border-top: 1px solid rgba(160, 182, 211, .26);
 }
 
 #panel-config .runtime-settings-form {
   display: grid;
-  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 0;
 }
 
 #panel-config .runtime-settings-section {
   display: grid;
+  align-content: start;
   gap: 12px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid rgba(160, 182, 211, .26);
+  min-width: 0;
+  padding: 2px 18px 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#panel-config .runtime-settings-section + .runtime-settings-section {
+  padding-right: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--line-soft);
 }
 
 #panel-config .runtime-settings-section:last-of-type {
-  padding-bottom: 0;
+  padding-bottom: 2px;
   border-bottom: 0;
 }
 
 #panel-config .runtime-settings-section-head {
   display: grid;
   gap: 4px;
+  min-height: 44px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
 #panel-config .runtime-settings-section-head h3,
@@ -2253,6 +2268,12 @@ small {
   gap: 12px 14px;
 }
 
+#panel-config .runtime-settings-form > .actions {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 14px;
+}
+
 #panel-config .runtime-settings-grid > .weather-location-option {
   grid-column: 1 / -1;
 }
@@ -2266,13 +2287,39 @@ small {
 
 @media (max-width: 760px) {
   #panel-config .config-common-settings > summary {
-    padding-bottom: 12px;
+    padding: 16px;
   }
 
   #panel-config .config-runtime-details > summary,
   #panel-config .config-runtime-details-body {
-    padding-right: 13px;
-    padding-left: 13px;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  #panel-config .config-common-settings > summary,
+  #panel-config .config-runtime-details > summary {
+    align-items: center;
+  }
+
+  #panel-config .runtime-settings-form {
+    grid-template-columns: 1fr;
+  }
+
+  #panel-config .runtime-settings-form > .actions {
+    grid-column: auto;
+  }
+
+  #panel-config .runtime-settings-section,
+  #panel-config .runtime-settings-section + .runtime-settings-section,
+  #panel-config .runtime-settings-section:last-of-type {
+    padding: 2px 0 16px;
+    border-left: 0;
+  }
+
+  #panel-config .runtime-settings-section + .runtime-settings-section,
+  #panel-config .runtime-settings-section:last-of-type {
+    padding-top: 16px;
+    border-top: 1px solid var(--line-soft);
   }
 
   #panel-config .runtime-settings-grid,

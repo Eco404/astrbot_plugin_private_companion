@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260712-panel-transition" />
-  <link rel="stylesheet" href="./css/header-tools.css?v=20260707-font-switch" />
+  <link rel="stylesheet" href="./app.css?v=20260714-config-fold-workspace-v4" />
+  <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
-  <link rel="stylesheet" href="./css/polish.css?v=20260713-warning-suppression-v2" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260714-config-fold-workspace-v4" />
   <script>
     (function () {
       try {
@@ -15,7 +15,8 @@
         var font = localStorage.getItem("pc_font") || "original";
         var allowedThemes = ["classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"];
         if (allowedThemes.indexOf(theme) === -1) theme = "classic";
-        if (font !== "cheng") font = "original";
+        var allowedFonts = ["original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng"];
+        if (allowedFonts.indexOf(font) === -1) font = "original";
         document.documentElement.dataset.theme = theme;
         document.documentElement.dataset.pageFont = font;
       } catch (e) {}
@@ -1014,11 +1015,18 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-config">
         <div class="config-grid">
-          <details class="config-common-settings" id="config-common-settings">
-            <summary>
-              <div>
+          <details class="config-fold-panel config-common-settings" id="config-common-settings">
+            <summary class="config-fold-summary">
+              <div class="config-fold-heading">
+                <span class="config-fold-kicker">配置工作台</span>
                 <h2>常用配置</h2>
                 <p>主动能力、动态注入、群聊范围、数据维护与页面外观。</p>
+                <span class="config-fold-preview" aria-label="包含的配置范围">
+                  <span>日常能力</span>
+                  <span>群聊范围</span>
+                  <span>数据维护</span>
+                  <span>页面外观</span>
+                </span>
               </div>
               <span class="config-common-settings-disclosure" aria-hidden="true">展开</span>
             </summary>
@@ -1189,6 +1197,13 @@ QQ空间 = 公开札记
                         <input id="storageSqlitePathInput" name="storage_sqlite_path" type="text" placeholder="留空时自动使用插件数据目录下 companions.db" />
                       </label>
                     </div>
+                    <label class="toggle-row storage-safety-toggle">
+                      <input id="storageSafetyCleanupToggle" name="enable_store_control_tag_sanitization" type="checkbox" />
+                      <span>
+                        <b>数据安全清理</b>
+                        <small>保存时清理模型泄漏的伪控制标签；原始群消息、成员原话和代码片段会保留。</small>
+                      </span>
+                    </label>
                     <div id="storageConfigSummary" class="storage-config-summary"></div>
                     <p class="storage-config-note">配置备份导入/导出不会携带这一项，避免换机器时误改本机存储路径。</p>
                     <div class="actions">
@@ -1209,8 +1224,14 @@ QQ空间 = 公开札记
                     <label class="appearance-field">
                       <span>页面字体</span>
                       <select id="appearanceFontSelect" data-page-font-select>
-                        <option value="original">原始字体</option>
-                        <option value="cheng">13.woff2</option>
+                        <option value="original">原始界面字体</option>
+                        <option value="yahei">微软雅黑</option>
+                        <option value="dengxian">等线</option>
+                        <option value="source_han">思源黑体 / 苹方</option>
+                        <option value="simsun">宋体</option>
+                        <option value="kaiti">楷体</option>
+                        <option value="fangsong">仿宋</option>
+                        <option value="cheng">13.woff2 艺术字体</option>
                       </select>
                     </label>
                     <div class="appearance-field appearance-theme-field">
@@ -1233,12 +1254,20 @@ QQ空间 = 公开札记
             </div>
           </details>
 
-          <details class="config-card wide config-runtime-details">
-            <summary>
-              <div>
+          <details class="config-fold-panel config-runtime-details">
+            <summary class="config-fold-summary">
+              <div class="config-fold-heading">
+                <span class="config-fold-kicker">运行节奏</span>
                 <h2>运行设置</h2>
                 <p>仅保留未归入功能开关的主动节奏与资源配额。</p>
+                <span class="config-fold-preview" aria-label="包含的设置范围">
+                  <span>主动上限</span>
+                  <span>触发间隔</span>
+                  <span>检查频率</span>
+                  <span>Token 配额</span>
+                </span>
               </div>
+              <span class="config-runtime-details-disclosure" aria-hidden="true">展开</span>
             </summary>
             <div class="config-runtime-details-body">
               <form id="runtimeSettingsForm" class="runtime-settings-form">
@@ -1424,9 +1453,9 @@ QQ空间 = 公开札记
   </div>
 
   <script src="./js/features/daily-outfit.js?v=20260711-qzone-preview-context"></script>
-  <script src="./js/ui/appearance.js?v=20260707-font-switch"></script>
+  <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260711-provider-debug"></script>
   <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
-  <script src="./app.js?v=20260713-warning-suppression-v2"></script>
+  <script src="./app.js?v=20260713-font-options"></script>
 </body>
 </html>

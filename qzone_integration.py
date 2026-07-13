@@ -1945,6 +1945,32 @@ class QzoneMixin(QzoneMediaMixin):
             return ""
         return "最近已发说说：\n" + "\n".join(lines) + "\n本次请换一个场景、情绪或观察角度，不要重复同一类表达。"
 
+    def _qzone_recent_self_publish_chat_context(self, *, limit: int = 3) -> str:
+        """Expose recent successful Bot posts to Qzone-related chat turns."""
+        state = self.data.get("qzone_integration") if isinstance(getattr(self, "data", None), dict) else {}
+        items = state.get("recent_life_publish_texts") if isinstance(state, dict) else []
+        if not isinstance(items, list):
+            return ""
+        records: list[str] = []
+        labels = ("最新一条", "上一条", "更早一条")
+        for item in reversed(items):
+            if len(records) >= max(1, min(3, int(limit or 3))):
+                break
+            text = _single_line(item.get("text") if isinstance(item, dict) else item, 180)
+            if not text:
+                continue
+            image_count = _safe_int(item.get("image_count"), 0, 0, 99) if isinstance(item, dict) else 0
+            image_note = f"；配图 {image_count} 张" if image_count else ""
+            label = labels[len(records)] if len(records) < len(labels) else f"较早第 {len(records) + 1} 条"
+            records.append(f"- {label}：{text}{image_note}")
+        if not records:
+            return ""
+        return (
+            "【Bot 自己最近成功发布的 QQ 空间记录】\n"
+            + "\n".join(records)
+            + "\n这些正文是 Bot 自己发出的公开动态，不是当前用户发的内容。"
+        )
+
     def _qzone_note_recent_publish(
         self,
         state: dict[str, Any],

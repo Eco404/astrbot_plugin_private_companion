@@ -71,6 +71,7 @@ from .constants import (
     DEFAULT_HUMANIZED_STATE,
     DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT,
     DEFAULT_REPLY_STYLE_PROMPT,
+    PAGE_FONT_NAMES,
     PAGE_THEME_NAMES,
     PLUGIN_NAME,
     DATA_VERSION,
@@ -438,7 +439,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.8",
+    "5.9.9",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -534,6 +535,9 @@ class PrivateCompanionPlugin(
         if self.storage_backend not in {"json", "sqlite"}:
             self.storage_backend = "json"
         self.storage_sqlite_path = self._cfg_str(c, "storage_sqlite_path", "", "")
+        self.enable_store_control_tag_sanitization = self._cfg_bool(
+            c, "enable_store_control_tag_sanitization", True
+        )
         self._rebuild_store_manager()
         config_migration_started = time.perf_counter()
         self._startup_config_migration_changes = migrate_flat_config_into_schema_groups(
@@ -722,7 +726,7 @@ class PrivateCompanionPlugin(
         self.deepseek_peak_match_keywords = self._cfg_str(c, "deepseek_peak_match_keywords", "deepseek,深度求索")
         self._deepseek_peak_last_log_key = ""
         _page_font = str(self._cfg_raw(c, "page_font_family", "original") or "original").strip().lower()
-        self.page_font_family = _page_font if _page_font in {"original", "cheng"} else "original"
+        self.page_font_family = _page_font if _page_font in PAGE_FONT_NAMES else "original"
         _page_theme = str(self._cfg_raw(c, "page_theme", "classic") or "classic").strip().lower()
         self.page_theme = _page_theme if _page_theme in PAGE_THEME_NAMES else "classic"
         self.fast_response_provider_id = self._cfg_str(c, "FAST_RESPONSE_PROVIDER_ID", "")
@@ -7357,15 +7361,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             buffered_image_mode = delayed_image_mode
         vision_task = buffered_image_context.get("vision_task") if isinstance(buffered_image_context, dict) else None
         if not buffered_image_vision and isinstance(vision_task, asyncio.Task):
-            vision_wait_timeout = max(
-                2.5,
-                min(
-                    12.0,
-                    _safe_float(getattr(self, "private_image_vision_wait_seconds", 30.0), 30.0, 0.0),
-                ),
-            )
+            vision_wait_timeout = self._private_image_vision_wait_budget_seconds()
             try:
-                buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=vision_wait_timeout), buffered_image_vision_limit)
+                if vision_wait_timeout > 0:
+                    buffered_image_vision = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=vision_wait_timeout), buffered_image_vision_limit)
             except asyncio.TimeoutError:
                 logger.info("[PrivateCompanion] 私聊图片视觉转述仍在进行,本轮先注入路径兜底: timeout=%.1fs", vision_wait_timeout)
             except Exception as exc:
@@ -9243,11 +9242,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         bool(getattr(self, "enable_private_image_gif_enhancement", True))
                         and self._private_image_sources_include_gif(usable_images)
                     )
-                    direct_image_mode = (
-                        not has_dynamic_gif_sources
-                        and self._event_main_provider_supports_image(event)
+                    image_mode = self._private_image_delivery_mode(
+                        has_visual_provider=has_visual_provider,
+                        main_provider_supports_image=self._event_main_provider_supports_image(event),
+                        has_dynamic_gif=has_dynamic_gif_sources,
                     )
-                    image_mode = "direct" if direct_image_mode else "caption" if has_visual_provider else "no_vision"
                     setattr(event, "private_companion_delayed_image_mode", image_mode)
                     if image_mode == "caption":
                         try:
@@ -9340,12 +9339,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                     umo = str(getattr(event, "unified_msg_origin", "") or "")
                     has_visual_provider = self._has_private_image_visual_provider(umo)
-                    direct_image_mode = (
-                        bool(persisted_images)
-                        and self._event_main_provider_supports_image(event)
-                        and not has_dynamic_gif_sources
+                    image_mode = self._private_image_delivery_mode(
+                        has_visual_provider=has_visual_provider,
+                        main_provider_supports_image=bool(persisted_images) and self._event_main_provider_supports_image(event),
+                        has_dynamic_gif=has_dynamic_gif_sources,
                     )
-                    image_mode = "direct" if direct_image_mode else "caption" if has_visual_provider else "no_vision"
                     buffers[key]["image_mode"] = image_mode
                     if persisted_images and image_mode == "caption":
                         buffers[key]["vision_task"] = asyncio.create_task(

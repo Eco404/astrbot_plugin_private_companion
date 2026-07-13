@@ -235,6 +235,10 @@ _ESCAPED_NONSTANDARD_SELF_CLOSING_TAG_PATTERN = re.compile(
     r"[A-Za-z][A-Za-z0-9_-]{0,31}(?:\s+[^&\r\n]{0,160})?/\s*&gt;",
     re.IGNORECASE,
 )
+_MARKDOWN_CODE_SPAN_PATTERN = re.compile(
+    r"(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\r\n]+`)",
+    re.MULTILINE,
+)
 
 
 def _strip_nonstandard_chat_control_tags(text: Any) -> str:
@@ -249,6 +253,17 @@ def _strip_nonstandard_chat_control_tags(text: Any) -> str:
     normalized = re.sub(r"\s+([）)】\]])", r"\1", normalized)
     normalized = re.sub(r"[ \t]{2,}", " ", normalized)
     return normalized
+
+
+def _strip_persisted_chat_control_tags(text: Any) -> str:
+    """Clean leaked controls while preserving literal tags shown as Markdown code."""
+    normalized = str(text or "")
+    if not normalized:
+        return ""
+    parts = _MARKDOWN_CODE_SPAN_PATTERN.split(normalized)
+    for index in range(0, len(parts), 2):
+        parts[index] = _strip_nonstandard_chat_control_tags(parts[index])
+    return "".join(parts)
 
 
 def _strip_outbound_control_blocks(

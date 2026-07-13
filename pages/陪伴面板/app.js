@@ -4048,7 +4048,7 @@ function applyOverviewData(overview) {
   state.providerConfigMode = inferProviderConfigMode(overview);
   state.providerTimeoutDraft = normalizeModelTimeoutOverrides(overview?.settings?.model_timeout_overrides);
   state.providerFallbackDraft = normalizeModelFallbackOverrides(overview?.settings?.model_fallback_overrides);
-  state.pageFontFamily = String(overview?.settings?.page_font_family || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original";
+  state.pageFontFamily = normalizePageFontFamily(overview?.settings?.page_font_family);
   state.pageTheme = normalizePageTheme(overview?.settings?.page_theme);
   applyPageFontFamily();
   applyPageTheme();
@@ -4059,7 +4059,13 @@ function applyPageFontFamily() {
 }
 
 function normalizePageFontFamily(value) {
-  return window.PrivateCompanionAppearance?.normalizeFontFamily(value) || (String(value || "original").trim().toLowerCase() === "cheng" ? "cheng" : "original");
+  if (window.PrivateCompanionAppearance?.normalizeFontFamily) {
+    return window.PrivateCompanionAppearance.normalizeFontFamily(value);
+  }
+  const font = String(value || "original").trim().toLowerCase();
+  return ["original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng"].includes(font)
+    ? font
+    : "original";
 }
 
 async function savePageFontFamily(value) {
@@ -15070,20 +15076,26 @@ function renderStorageConfig(options = {}) {
   const backendSelect = $("#storageBackendSelect");
   const sqliteWrap = $("#storageSqlitePathWrap");
   const sqliteInput = $("#storageSqlitePathInput");
+  const safetyToggle = $("#storageSafetyCleanupToggle");
   const summary = $("#storageConfigSummary");
   const selectedBackend = preserveDraft ? (backendSelect?.value || "") : "";
   const backend = String(selectedBackend || settings.storage_backend || plugin.storage_backend || "json").trim().toLowerCase() || "json";
   const sqlitePath = preserveDraft && sqliteInput
     ? String(sqliteInput.value || "").trim()
     : String(settings.storage_sqlite_path || plugin.storage_sqlite_path || "").trim();
+  const safetyEnabled = preserveDraft && safetyToggle
+    ? safetyToggle.checked
+    : toBool(settings.enable_store_control_tag_sanitization ?? plugin.enable_store_control_tag_sanitization ?? true);
   if (backendSelect) backendSelect.value = backend;
   if (sqliteInput) sqliteInput.value = sqlitePath;
+  if (safetyToggle) safetyToggle.checked = safetyEnabled;
   if (sqliteWrap) sqliteWrap.hidden = backend !== "sqlite";
   if (summary) {
     summary.innerHTML = `
       <span>当前后端：<b>${escapeHtml(backend)}</b></span>
       <span>当前路径：<b>${escapeHtml(plugin.storage_sqlite_path || sqlitePath || "companions.json / 默认 companions.db")}</b></span>
       <span>当前数据文件：<b>${escapeHtml(plugin.data_file || "-")}</b></span>
+      <span>数据安全清理：<b>${safetyEnabled ? "开启" : "关闭"}</b></span>
     `;
   }
 }
@@ -23722,11 +23734,13 @@ $("#storageConfigForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const backend = String($("#storageBackendSelect")?.value || "json").trim().toLowerCase() || "json";
   const sqlitePath = String($("#storageSqlitePathInput")?.value || "").trim();
+  const safetyEnabled = Boolean($("#storageSafetyCleanupToggle")?.checked);
   await runAction(
     () => postJson("/settings/update", {
       settings: {
         storage_backend: backend,
         storage_sqlite_path: sqlitePath,
+        enable_store_control_tag_sanitization: safetyEnabled,
       },
     }),
     "已保存存储方式",

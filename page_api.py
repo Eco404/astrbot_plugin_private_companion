@@ -23,7 +23,7 @@ from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from quart import request, send_file
 
-from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_THEME_NAMES, _REASON_TEXT
+from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_FONT_NAMES, PAGE_THEME_NAMES, _REASON_TEXT
 from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _normalize_timezone_name, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
@@ -238,6 +238,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         self.plugin,
                         "storage_sqlite_effective_path",
                         getattr(self.plugin, "storage_sqlite_path", ""),
+                    ),
+                    "enable_store_control_tag_sanitization": bool(
+                        getattr(self.plugin, "enable_store_control_tag_sanitization", True)
                     ),
                     "data_version": data.get("version"),
                 },
@@ -12427,7 +12430,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return
         if key == "page_font_family":
             text = str(value or "original").strip().lower()
-            self.plugin.page_font_family = text if text in {"original", "cheng"} else "original"
+            self.plugin.page_font_family = text if text in PAGE_FONT_NAMES else "original"
             return
         if key == "page_theme":
             text = str(value or "classic").strip().lower()
@@ -13480,7 +13483,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return str(value or "").strip()[:160]
         if key == "page_font_family":
             text = str(value or "original").strip().lower()
-            return text if text in {"original", "cheng"} else "original"
+            return text if text in PAGE_FONT_NAMES else "original"
         if key == "page_theme":
             text = str(value or "classic").strip().lower()
             return text if text in PAGE_THEME_NAMES else "classic"

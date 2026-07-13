@@ -49,6 +49,12 @@
           "storage_backend": "sqlite"
         }
       },
+      "enable_store_control_tag_sanitization": {
+        "description": "保存时清理非标准控制标签",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，在读取和保存陪伴数据时移除 <bubble/> 等模型误生成的非标准伪控制标签，避免它们再次进入上下文。原始群消息、成员原话和 Markdown 代码片段会保留；关闭后不清理其他持久化文本。消息正式发送时的出站安全过滤不受影响。"
+      },
       "daily_token_limit": {
         "description": "每日插件 Token 限额",
         "type": "int",
@@ -3606,6 +3612,12 @@
     "default": "original",
     "options": [
       "original",
+      "yahei",
+      "dengxian",
+      "source_han",
+      "simsun",
+      "kaiti",
+      "fangsong",
       "cheng"
     ],
     "invisible": true

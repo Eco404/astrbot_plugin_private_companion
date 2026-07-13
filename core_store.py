@@ -111,7 +111,7 @@ from .helpers import (
     _safe_int,
     _single_line,
     _strip_internal_message_blocks,
-    _strip_nonstandard_chat_control_tags,
+    _strip_persisted_chat_control_tags,
     _today_key,
 )
 from .config_migration import _ensure_config_parent_dir
@@ -491,30 +491,81 @@ class CoreStoreMixin:
         if detail:
             item["last_hit_detail" if hit else "last_miss_detail"] = _single_line(detail, 160)
 
-    def _sanitize_store_control_tags_inplace(self, value: Any) -> int:
+    @staticmethod
+    def _store_path_is_raw_user_text(path: tuple[Any, ...]) -> bool:
+        """Raw observations are evidence and must not be rewritten during persistence."""
+        if "recent_phrases" in path:
+            return True
+        return bool(
+            len(path) >= 5
+            and path[0] == "groups"
+            and path[2] == "recent_messages"
+            and path[-1] == "text"
+        )
+
+    def _sanitize_store_control_tags_inplace(self, value: Any, _path: tuple[Any, ...] = ()) -> int:
         """Remove leaked pseudo-control tags from persisted companion data."""
+        if not bool(getattr(self, "enable_store_control_tag_sanitization", True)):
+            return 0
         changed = 0
         if isinstance(value, dict):
             for key, item in list(value.items()):
+                item_path = (*_path, key)
                 if isinstance(item, str):
-                    cleaned = _strip_nonstandard_chat_control_tags(item)
+                    if self._store_path_is_raw_user_text(item_path):
+                        continue
+                    cleaned = _strip_persisted_chat_control_tags(item)
                     if cleaned != item:
                         value[key] = cleaned
                         changed += 1
                 elif isinstance(item, (dict, list)):
-                    changed += self._sanitize_store_control_tags_inplace(item)
+                    changed += self._sanitize_store_control_tags_inplace(item, item_path)
             return changed
         if isinstance(value, list):
             for idx, item in enumerate(list(value)):
+                item_path = (*_path, idx)
                 if isinstance(item, str):
-                    cleaned = _strip_nonstandard_chat_control_tags(item)
+                    if self._store_path_is_raw_user_text(item_path):
+                        continue
+                    cleaned = _strip_persisted_chat_control_tags(item)
                     if cleaned != item:
                         value[idx] = cleaned
                         changed += 1
                 elif isinstance(item, (dict, list)):
-                    changed += self._sanitize_store_control_tags_inplace(item)
+                    changed += self._sanitize_store_control_tags_inplace(item, item_path)
             return changed
         return 0
+
+    def _log_store_control_cleanup(self, stage: str, changed: int, *, cooldown_seconds: float = 600.0) -> bool:
+        if changed <= 0:
+            return False
+        now = time.monotonic()
+        states = getattr(self, "_store_control_cleanup_log_states", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._store_control_cleanup_log_states = states
+        key = _single_line(stage, 40) or "unknown"
+        state = states.setdefault(key, {"last_at": 0.0, "suppressed_events": 0, "suppressed_fields": 0})
+        last_at = _safe_float(state.get("last_at"), 0.0, 0.0)
+        if last_at and now - last_at < max(1.0, float(cooldown_seconds)):
+            state["suppressed_events"] = _safe_int(state.get("suppressed_events"), 0, 0) + 1
+            state["suppressed_fields"] = _safe_int(state.get("suppressed_fields"), 0, 0) + changed
+            return False
+        suppressed_events = _safe_int(state.get("suppressed_events"), 0, 0)
+        suppressed_fields = _safe_int(state.get("suppressed_fields"), 0, 0)
+        state.update({"last_at": now, "suppressed_events": 0, "suppressed_fields": 0})
+        suffix = (
+            f" suppressed_events={suppressed_events} suppressed_fields={suppressed_fields}"
+            if suppressed_events
+            else ""
+        )
+        logger.info(
+            "[PrivateCompanion] Store safety cleanup: stage=%s fields=%s%s",
+            key,
+            changed,
+            suffix,
+        )
+        return True
 
     @staticmethod
     def _proactive_candidate_repeat_limit_for_status(status: Any) -> int:
@@ -752,7 +803,7 @@ class CoreStoreMixin:
         changed = self._sanitize_store_control_tags_inplace(self.data)
         repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(self.data)
         if changed:
-            logger.warning("[PrivateCompanion] 保存数据前清理非标准控制标签: fields=%s", changed)
+            self._log_store_control_cleanup("immediate_save", changed)
         if repeat_changed:
             logger.warning("[PrivateCompanion] 保存数据前压缩主动候选重复计数: items=%s", repeat_changed)
         manager = getattr(self, "store_manager", None)
@@ -780,11 +831,9 @@ class CoreStoreMixin:
                 pass
         self._atomic_write_data_file_sync(self.data)
 
-    def _write_data_snapshot_sync(self, data: dict[str, Any]) -> None:
+    def _write_data_snapshot_sync(self, data: dict[str, Any]) -> int:
         changed = self._sanitize_store_control_tags_inplace(data)
         self._compact_store_history_inplace(data)
-        if changed:
-            logger.warning("[PrivateCompanion] 保存快照前清理非标准控制标签: fields=%s", changed)
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             manager.save_snapshot(data)
@@ -793,8 +842,9 @@ class CoreStoreMixin:
                     manager.export_current_to_json(data)
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] SQLite 快照镜像 JSON 写出失败: %s", _single_line(exc, 160))
-            return
+            return changed
         self._atomic_write_data_file_sync(data)
+        return changed
 
     def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:
         base = self.data_file
@@ -842,7 +892,12 @@ class CoreStoreMixin:
                     self._data_save_dirty = False
                     await asyncio.sleep(max(0.0, float(delay)))
                     snapshot = deepcopy(self.data)
-                    await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+                    snapshot_changed = await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+                    if snapshot_changed:
+                        live_changed = self._sanitize_store_control_tags_inplace(self.data)
+                        if live_changed:
+                            self._data_save_dirty = True
+                            self._log_store_control_cleanup("delayed_save_live_sync", live_changed)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
