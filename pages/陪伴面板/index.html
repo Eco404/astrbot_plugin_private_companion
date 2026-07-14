@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260714-config-fold-workspace-v4" />
+  <link rel="stylesheet" href="./app.css?v=20260714-browser-history-ui-v1" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
   <link rel="stylesheet" href="./css/polish.css?v=20260714-config-fold-workspace-v4" />
@@ -752,7 +752,7 @@ QQ空间 = 公开札记
           <h2>书柜</h2>
           <span class="muted">创作作品 · 私密日记 · 夹层阅读 — 管理可见性与内容</span>
         </div>
-        <div id="bookcaseHome" class="bookcase-home">
+        <div id="bookcaseHome" class="bookcase-home bookshelf-view" data-bookshelf-view="shelf">
           <div class="bookcase-hero">
             <article>
               <span>书架作品</span>
@@ -774,7 +774,62 @@ QQ空间 = 公开札记
               <b id="bookshelfJmCount">0</b>
               <small>夹层阅读记录</small>
             </article>
+            <article>
+              <span>备忘便签</span>
+              <b id="bookshelfMemoCount">0</b>
+              <small id="bookshelfMemoSummary">随手记下，到时提醒</small>
+            </article>
           </div>
+          <section class="memo-workspace" aria-labelledby="memoWorkspaceTitle">
+            <header class="memo-workspace-head">
+              <div>
+                <span>MEMO BOARD</span>
+                <h2 id="memoWorkspaceTitle">备忘便签</h2>
+                <p id="memoWorkspaceMeta">暂无进行中便签</p>
+              </div>
+              <button id="memoCreateBtn" type="button" class="memo-primary-action">新建便签</button>
+            </header>
+            <div class="memo-toolbar" role="group" aria-label="便签筛选">
+              <button type="button" data-memo-filter="active" class="is-active">进行中 <b id="memoActiveCount">0</b></button>
+              <button type="button" data-memo-filter="all">全部 <b id="memoAllCount">0</b></button>
+              <button type="button" data-memo-filter="completed">已完成 <b id="memoCompletedCount">0</b></button>
+              <span id="memoDueHint" class="memo-due-hint"></span>
+            </div>
+            <form id="memoEditorForm" class="memo-editor" hidden>
+              <div class="memo-editor-main">
+                <label>标题 <input id="memoTitle" name="title" maxlength="60" placeholder="例如：提交材料" /></label>
+                <label>内容 <textarea id="memoContent" name="content" maxlength="800" rows="4" placeholder="补充地点、清单或需要记住的细节"></textarea></label>
+              </div>
+              <div class="memo-editor-options">
+                <label>到期时间 <input id="memoDueAt" name="due_at" type="datetime-local" /></label>
+                <label>重复
+                  <select id="memoRepeat" name="repeat">
+                    <option value="none">不重复</option>
+                    <option value="daily">每天</option>
+                    <option value="weekly">每周</option>
+                    <option value="monthly">每月</option>
+                    <option value="yearly">每年</option>
+                  </select>
+                </label>
+                <fieldset class="memo-color-field">
+                  <legend>颜色</legend>
+                  <label><input type="radio" name="color" value="yellow" checked><span class="yellow" title="暖黄"></span></label>
+                  <label><input type="radio" name="color" value="blue"><span class="blue" title="浅蓝"></span></label>
+                  <label><input type="radio" name="color" value="green"><span class="green" title="浅绿"></span></label>
+                  <label><input type="radio" name="color" value="rose"><span class="rose" title="淡粉"></span></label>
+                  <label><input type="radio" name="color" value="gray"><span class="gray" title="雾灰"></span></label>
+                </fieldset>
+                <label class="memo-check"><input id="memoPinned" name="pinned" type="checkbox" /> 置顶</label>
+                <label class="memo-check"><input id="memoRemind" name="remind_enabled" type="checkbox" checked /> 到期提醒</label>
+              </div>
+              <div class="memo-editor-actions">
+                <span id="memoEditorHint">新便签</span>
+                <button id="memoCancelBtn" type="button">取消</button>
+                <button type="submit" class="memo-primary-action">保存便签</button>
+              </div>
+            </form>
+            <div id="memoNoteGrid" class="memo-note-grid"></div>
+          </section>
           <div class="bookcase-layout">
             <article class="bookcase-shell">
               <div class="bookcase-top">
@@ -804,7 +859,7 @@ QQ空间 = 公开札记
             </article>
           </div>
         </div>
-        <div id="bookDetailPanel" class="book-detail-panel" hidden></div>
+        <div id="bookDetailPanel" class="book-detail-panel bookshelf-view" data-bookshelf-view="detail" hidden></div>
       </section>
 
       <section class="panel" id="panel-tokens">
@@ -1456,6 +1511,6 @@ QQ空间 = 公开札记
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260711-provider-debug"></script>
   <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
-  <script src="./app.js?v=20260713-font-options"></script>
+  <script src="./app.js?v=20260714-browser-history-ui-v1"></script>
 </body>
 </html>

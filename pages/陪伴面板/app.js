@@ -24,6 +24,8 @@ const state = {
   selectedBookSpreadIndex: 0,
   selectedDiaryDate: "",
   selectedBrowsingIndex: 0,
+  memoFilter: "active",
+  memoEditorId: "",
   selectedUserId: "",
   selectedGroupId: "",
   featureDraft: {},
@@ -757,7 +759,8 @@ const featureMeta = {
   enable_expression_manual_review: ["表达样本审核", "新样本先进入私聊对象的待审核列表，通过后才会参与表达画像。"],
   enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
-  enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息在实际发送前按人格和上下文终审：发送、改写或丢弃。"],
+  enable_response_self_review: ["回复/主动复核总开关", "关闭后同时停止被动回复复核和主动消息模型终审；最低限度的本地安全检查仍保留，但不会调用模型改写。"],
+  enable_proactive_message_review: ["主动消息发送前终审", "仅在总开关开启时生效；按人格、上下文和真实来源判断原样发送、改写或取消。"],
   enable_smart_silence: ["智能沉默", "发送前判断用户是否想收住话题；可选择只看明确边界，或交给小模型结合上下文判断。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
@@ -847,6 +850,7 @@ const featureMeta = {
   enable_poke_action: ["主动戳一戳", "允许 Bot 在想轻轻刷存在感或逗一下用户时主动戳一戳。"],
   enable_voice_action: ["主动语音", "允许 Bot 在合适的主动场景里留一小句语音；需要当前会话有可用 TTS provider。"],
   enable_photo_reference_image: ["参考图一致性", "可选。自拍、人像、头像和角色表情包自动使用人设参考图或今日穿搭图保持外观；关闭后只按提示词生成。"],
+  enable_creative_cover_generation: ["创作封面", "可选。作品写出正文后调用当前文生图后端生成封面，并按作品类型、基调和内容自动匹配画风。"],
   enable_group_nsfw_private_fallback: ["群聊成图安全审核", "群聊成图先经视觉审核；安全图发群，其余结果仅私聊原请求者。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
@@ -1332,6 +1336,11 @@ const configLabels = {
   detail_enhancement_lead_minutes: "提前细化日程段（分钟）",
   enable_daily_diary: "每日 Bot 日记",
   daily_diary_time: "每日写日记时间",
+  daily_diary_form: "日记写作形式",
+  daily_diary_length: "日记篇幅",
+  daily_diary_creativity: "日记写实程度",
+  daily_diary_custom_direction: "日记创作方向",
+  daily_diary_generate_share_seed: "提取自然分享素材",
   max_diary_entries: "保留 Bot 日记数量",
   important_date_lookahead_days: "重要日期提前关注天数",
   daily_plan_prompt: "自定义每日日程提示词",
@@ -1527,6 +1536,7 @@ const configLabels = {
   enable_photo_reference_image: "参考图一致性",
   photo_persona_reference_image_path: "人设参考图路径",
   enable_daily_outfit_photo: "每日穿搭照片",
+  enable_creative_cover_generation: "为创作内容生成封面",
   daily_outfit_photo_prompt: "每日穿搭提示词",
   daily_outfit_rotation_days: "穿搭轮换冷却天数",
   enable_natural_language_photo_generation: "允许规则快判生图/改图",
@@ -1665,6 +1675,11 @@ const configDescriptions = {
   detail_enhancement_lead_minutes: "在日程段开始前多少分钟允许尝试细化；建议保持较短。",
   enable_daily_diary: "每天生成一条 Bot 自己的短日记，作为次日状态转移和主动分享素材。",
   daily_diary_time: "超过该时间后每天生成一次日记，格式为 HH:MM。",
+  daily_diary_form: "自动轮换多种日记形态，也可固定为一种；选择只影响表达结构。",
+  daily_diary_length: "设置短篇、标准或长篇。当天材料少时会主动缩短，不为凑字虚构细节。",
+  daily_diary_creativity: "控制事实边界内的表达自由度；所有模式都不会把计划或推演冒充真实经历。",
+  daily_diary_custom_direction: "指定日记更关注哪些真实内容或创作气质，留空则由人格与当天经历决定。",
+  daily_diary_generate_share_seed: "从正文已有细节提取可自然分享的素材；不会直接安排当天主动消息。",
   max_diary_entries: "日记用于状态延续和分享素材；超出数量后只保留最近记录。",
   important_date_lookahead_days: "新增重要日期时默认提前关注多少天；临近日期可进入日程和主动判断。",
   daily_plan_prompt: "高级设置。留空使用内置日程提示词；自定义内容必须继续要求模型输出包含 schedule 数组的 JSON。",
@@ -1958,6 +1973,7 @@ const configDescriptions = {
   enable_photo_reference_image: "可选。开启后，自拍、人像、头像和角色表情包会自动使用今日穿搭图或下方人设参考图来保持外观一致；关闭后不自动读取固定参考图，只按提示词生成。用户显式发送或引用图片要求改图时不受影响。",
   photo_persona_reference_image_path: "可选。仅在参考图一致性开启时使用。png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 不支持参考图。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
+  enable_creative_cover_generation: "默认关闭。开启后，已有正文但没有封面的创作项目会在空闲创作推进时调用当前文生图后端生成封面，并按悬疑、科幻奇幻、诗歌散文、古风、日常治愈等作品特征自动匹配画风。失败最多重试 3 次并带冷却；关闭后不再生成，但不会删除已有封面。",
   daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
   daily_outfit_rotation_days: "保留最近成功生成的穿搭档案，并优先避开相同主色、外层和轮廓。每次至少换掉最近一套的两个可见维度，手动重生也会轮换。",
   enable_natural_language_photo_generation: "只控制“规则快判”模式是否允许插件在主链前直接接管生图。默认建议用工具优先，让主链模型调用 pc_generate_photo；工具不稳定时再切到规则快判。",
@@ -2109,10 +2125,10 @@ const featureSettingGroups = {
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
-  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state", "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
+  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state", "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
   enable_daily_plan: ["daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "daily_plan_prompt"],
   enable_detail_enhancement: ["detail_enhancement_lead_minutes"],
-  enable_daily_diary: ["daily_diary_time", "max_diary_entries", "important_date_lookahead_days"],
+  enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
@@ -2176,7 +2192,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -2278,7 +2294,7 @@ const featureSettingSections = {
     {
       title: "日记与重要日期",
       note: "日记负责生活连续性；重要日期提前关注范围独立生效。",
-      keys: ["enable_daily_diary", "daily_diary_time", "max_diary_entries", "important_date_lookahead_days"],
+      keys: ["enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days"],
     },
     {
       title: "日常问候",
@@ -2683,9 +2699,9 @@ const featureSettingSections = {
       keys: ["enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds"],
     },
     {
-      title: "每日穿搭",
-      note: "日程生成后额外生成一张角色当天穿搭照；会按近期造型轮换主色、层次和版型，用作拓展页左上角图像。",
-      keys: ["enable_daily_outfit_photo", "daily_outfit_photo_prompt", "daily_outfit_rotation_days"],
+      title: "每日穿搭与创作封面",
+      note: "可分别开启每日穿搭照和创作作品封面；两者共用当前生图后端。",
+      keys: ["enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days"],
     },
     {
       title: "非指令生图/改图",
@@ -2798,6 +2814,11 @@ const featureSettingTypes = {
   enable_detail_enhancement: { type: "checkbox" },
   detail_enhancement_lead_minutes: { type: "number", min: 0, max: 180, step: 1 },
   enable_daily_diary: { type: "checkbox" },
+  daily_diary_form: { type: "select", options: [["auto", "自动轮换"], ["scene", "场景短记"], ["fragments", "碎片手记"], ["inner_voice", "心绪自述"], ["observation", "观察记录"]] },
+  daily_diary_length: { type: "select", options: [["short", "短篇"], ["standard", "标准"], ["long", "长篇"]] },
+  daily_diary_creativity: { type: "select", options: [["strict", "严格写实"], ["balanced", "自然平衡"], ["expressive", "个性表达"]] },
+  daily_diary_custom_direction: { type: "textarea" },
+  daily_diary_generate_share_seed: { type: "checkbox" },
   max_diary_entries: { type: "number", min: 1, max: 60, step: 1 },
   important_date_lookahead_days: { type: "number", min: 0, max: 60, step: 1 },
   daily_plan_prompt: { type: "textarea" },
@@ -5055,6 +5076,8 @@ const setupGuideAdvancedItems = {
         { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "仅在参考图一致性开启时使用；本地路径和图片 URL 都可以。", showWhen: (draft) => Boolean(draft.enable_photo_reference_image) },
         { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "feature", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
         { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => Boolean(draft.enable_group_nsfw_private_fallback) },
+        { key: "enable_daily_outfit_photo", type: "bool", kind: "feature", label: "每日穿搭照片", description: "日程生成后额外生成一张角色当天穿搭照。" },
+        { key: "enable_creative_cover_generation", type: "bool", kind: "feature", label: "为创作内容生成封面", description: "可选。作品已有正文后自动生成一次封面，并按内容自动匹配画风；失败最多重试 3 次。" },
         { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
         { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => String(draft.photo_generation_style || "") === "其他" },
         { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
@@ -12996,6 +13019,13 @@ function renderBookshelf() {
   $("#bookshelfSecretCount").textContent = bookshelf.secret_count ?? 0;
   $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
   $("#bookshelfJmCount").textContent = bookshelf.jm_album_count ?? 0;
+  const memoNotes = bookshelf.memo_notes || {};
+  $("#bookshelfMemoCount").textContent = memoNotes.active ?? 0;
+  $("#bookshelfMemoSummary").textContent = memoNotes.overdue
+    ? `${memoNotes.overdue} 张已逾期`
+    : memoNotes.due_soon
+      ? `${memoNotes.due_soon} 张临近到期`
+      : "随手记下，到时提醒";
   $("#bookshelfLockState").textContent = bookshelf.unlocked ? "已解锁" : "未解锁";
   const passwordHint = String(bookshelf.password_hint || "").trim();
   const passwordHintEl = $("#bookshelfPasswordHint");
@@ -13033,6 +13063,11 @@ function renderBookshelf() {
       value: `${settings.creative_chars_per_session || settings.creative_base_chars_per_hour || 0} 字`,
       tone: "metric",
     });
+    creativeChips.push({
+      label: "作品封面",
+      value: creative.cover_generation_enabled ? "自动生成" : "关闭",
+      tone: creative.cover_generation_enabled ? "ok" : "off",
+    });
   }
   if (privateReading.available) {
     creativeChips.push({
@@ -13047,6 +13082,7 @@ function renderBookshelf() {
     });
   }
   renderCreativeStatusBar("#creativeSettings", creativeChips);
+  renderMemoNotes(memoNotes);
   const publicBooks = bookshelf.public_books || [];
   $("#bookshelfPublicBooks").innerHTML = publicBooks.length
     ? renderBookCategoryShelves(publicBooks, { emptyText: "上层书架为空", reverseBooks: true })
@@ -13055,10 +13091,148 @@ function renderBookshelf() {
   $("#bookshelfSecretBooks").innerHTML = bookshelf.unlocked
     ? renderUnlockedDrawer(secretBooks)
     : renderLockedDrawer(bookshelf.secret_count || 0);
-  const home = $("#bookcaseHome");
-  if (home) home.hidden = state.bookshelfPage !== "shelf";
-  renderBookDetailPanel();
+  renderBookshelfPage();
   void hydrateBookshelfImages(document);
+}
+
+function memoRepeatLabel(value) {
+  return {
+    daily: "每天",
+    weekly: "每周",
+    monthly: "每月",
+    yearly: "每年",
+  }[String(value || "none")] || "";
+}
+
+function memoDueLabel(note) {
+  if (note.status === "completed") return "已完成";
+  return {
+    overdue: "已逾期",
+    due: "即将到期",
+    today: "24 小时内",
+    upcoming: note.due_text || "已安排",
+    none: "无到期时间",
+  }[note.due_state] || note.due_text || "无到期时间";
+}
+
+function renderMemoNotes(memoNotes = {}) {
+  const items = Array.isArray(memoNotes.items) ? memoNotes.items : [];
+  const filter = state.memoFilter || "active";
+  const visible = items.filter((item) => {
+    if (filter === "completed") return item.status === "completed";
+    if (filter === "active") return item.status !== "completed";
+    return true;
+  });
+  $("#memoActiveCount").textContent = memoNotes.active ?? items.filter((item) => item.status !== "completed").length;
+  $("#memoAllCount").textContent = memoNotes.total ?? items.length;
+  $("#memoCompletedCount").textContent = memoNotes.completed ?? items.filter((item) => item.status === "completed").length;
+  $("#memoDueHint").textContent = memoNotes.overdue
+    ? `${memoNotes.overdue} 张逾期便签等待处理`
+    : memoNotes.due_soon
+      ? `${memoNotes.due_soon} 张便签将在 24 小时内到期`
+      : "";
+  $("#memoWorkspaceMeta").textContent = memoNotes.active
+    ? `${memoNotes.active} 张进行中${memoNotes.completed ? ` · ${memoNotes.completed} 张已完成` : ""}`
+    : memoNotes.completed ? `${memoNotes.completed} 张已完成` : "暂无进行中便签";
+  document.querySelectorAll("[data-memo-filter]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.memoFilter === filter);
+  });
+  const root = $("#memoNoteGrid");
+  if (!root) return;
+  root.innerHTML = visible.length
+    ? visible.map((note) => {
+      const repeat = memoRepeatLabel(note.repeat);
+      const title = note.title || String(note.content || "未命名便签").slice(0, 24);
+      const dueClass = note.due_state === "overdue" ? "is-overdue" : "";
+      return `
+        <article class="memo-note ${escapeHtml(note.color || "yellow")} ${note.pinned ? "is-pinned" : ""} ${note.status === "completed" ? "is-completed" : ""} ${dueClass}">
+          <header>
+            <h3>${escapeHtml(title)}</h3>
+            <span>${escapeHtml(memoDueLabel(note))}</span>
+          </header>
+          <div class="memo-note-meta">
+            ${note.due_text ? `<span>${escapeHtml(note.due_text)}</span>` : ""}
+            ${repeat ? `<span>· ${escapeHtml(repeat)}</span>` : ""}
+            ${note.remind_enabled ? `<span>· 到期提醒</span>` : ""}
+          </div>
+          <p class="memo-note-content">${escapeHtml(note.content || "没有补充内容")}</p>
+          <footer class="memo-note-actions">
+            <button type="button" data-memo-action="${note.status === "completed" ? "reopen" : "complete"}" data-memo-id="${escapeHtml(note.id || "")}">${note.status === "completed" ? "恢复" : "完成"}</button>
+            <button type="button" data-memo-action="edit" data-memo-id="${escapeHtml(note.id || "")}">编辑</button>
+            <button type="button" data-memo-action="pin" data-memo-id="${escapeHtml(note.id || "")}">${note.pinned ? "取消置顶" : "置顶"}</button>
+            <button type="button" class="memo-delete" data-memo-action="delete" data-memo-id="${escapeHtml(note.id || "")}">删除</button>
+          </footer>
+        </article>
+      `;
+    }).join("")
+    : `<div class="memo-empty">${filter === "completed" ? "还没有已完成便签" : filter === "all" ? "书柜里还没有便签" : "当前没有待处理便签"}</div>`;
+}
+
+function currentMemoNotes() {
+  const shelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
+  return Array.isArray(shelf.memo_notes?.items) ? shelf.memo_notes.items : [];
+}
+
+function applyMemoPayload(payload) {
+  if (!payload || typeof payload !== "object") return;
+  if (state.overview?.bookshelf) state.overview.bookshelf.memo_notes = payload;
+  if (state.bookshelfUnlocked) state.bookshelfUnlocked.memo_notes = payload;
+}
+
+function openMemoEditor(note = null) {
+  const form = $("#memoEditorForm");
+  if (!form) return;
+  state.memoEditorId = note?.id || "";
+  form.hidden = false;
+  $("#memoTitle").value = note?.title || "";
+  $("#memoContent").value = note?.content || "";
+  $("#memoDueAt").value = note?.due_input || "";
+  $("#memoRepeat").value = note?.repeat || "none";
+  $("#memoPinned").checked = Boolean(note?.pinned);
+  $("#memoRemind").checked = note ? Boolean(note.remind_enabled) : false;
+  $("#memoRemind").disabled = !Boolean(note?.due_input);
+  const color = note?.color || "yellow";
+  const colorInput = form.querySelector(`input[name="color"][value="${CSS.escape(color)}"]`);
+  if (colorInput) colorInput.checked = true;
+  $("#memoEditorHint").textContent = note ? "编辑便签" : "新便签";
+  requestAnimationFrame(() => $("#memoTitle")?.focus());
+}
+
+function closeMemoEditor() {
+  state.memoEditorId = "";
+  const form = $("#memoEditorForm");
+  if (form) {
+    form.reset();
+    form.hidden = true;
+  }
+}
+
+async function updateMemoAction(action, note, button) {
+  if (!note?.id) return;
+  if (action === "delete" && !requireSecondClick(button, `memo:${note.id}`, "再次点击删除便签", "再次点击删除")) return;
+  if (action === "edit") {
+    openMemoEditor(note);
+    return;
+  }
+  const payload = action === "pin"
+    ? {
+      action: "save",
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      color: note.color,
+      pinned: !note.pinned,
+      due_at: Number(note.due_at || 0),
+      repeat: note.repeat,
+      remind_enabled: note.remind_enabled,
+    }
+    : { action, id: note.id };
+  await runAction(async () => {
+    const result = await postJson("/memo/update", payload);
+    applyMemoPayload(result.memo_notes);
+    renderBookshelf();
+    return result;
+  }, action === "delete" ? "便签已删除" : action === "complete" ? (note.repeat !== "none" ? "已完成，并移到下一次" : "便签已完成") : action === "reopen" ? "便签已恢复" : note.pinned ? "已取消置顶" : "便签已置顶", button, { reload: false });
 }
 
 function renderLockedDrawer(count) {
@@ -13225,8 +13399,8 @@ async function ensureCreativeProjectDetail(book, force = false) {
 }
 
 function renderBookCoverInner(book, kindLabel, title, progress = "") {
-  const coverSrc = book.kind === "jm_album" ? String(book.cover_src || "") : "";
-  const image = coverSrc ? bookshelfImageTag(coverSrc, `${title || "私密阅读"}封面`) : "";
+  const coverSrc = String(book.cover_src || "");
+  const image = coverSrc ? bookshelfImageTag(coverSrc, `${title || "作品"}封面`) : "";
   return `
     ${image}
     <span>${escapeHtml(kindLabel)}</span>
@@ -13554,32 +13728,169 @@ function allBookshelfBooks() {
   ];
 }
 
+const bookshelfPageOrder = { shelf: 0, detail: 1, reader: 2 };
+let activeBookshelfTransition = null;
+let bookshelfFallbackTimer = null;
+let bookshelfReturnFocusBookId = "";
+
+function renderBookshelfPage() {
+  const home = $("#bookcaseHome");
+  if (home) home.hidden = state.bookshelfPage !== "shelf";
+  renderBookDetailPanel();
+}
+
+function clearBookshelfFallbackMotion() {
+  if (bookshelfFallbackTimer !== null) {
+    window.clearTimeout(bookshelfFallbackTimer);
+    bookshelfFallbackTimer = null;
+  }
+  document.querySelectorAll("#panel-bookshelf .bookshelf-view.is-entering")
+    .forEach((view) => view.classList.remove("is-entering"));
+}
+
+function cancelBookshelfTransition() {
+  const transition = activeBookshelfTransition;
+  activeBookshelfTransition = null;
+  transition?.skipTransition?.();
+  clearBookshelfFallbackMotion();
+  delete document.documentElement.dataset.bookshelfTransition;
+  delete document.documentElement.dataset.bookshelfDirection;
+  const panel = $("#panel-bookshelf");
+  if (panel) delete panel.dataset.bookshelfDirection;
+}
+
+function bookshelfFocusTarget(page) {
+  if (page === "shelf") {
+    return [...document.querySelectorAll("#bookcaseHome [data-book-id]")]
+      .find((item) => item.dataset.bookId === bookshelfReturnFocusBookId) || $("#bookcaseHome");
+  }
+  const panel = $("#bookDetailPanel");
+  return page === "reader"
+    ? panel?.querySelector("[data-book-back]")
+    : panel?.querySelector("[data-book-close]");
+}
+
+function settleBookshelfTransition(page) {
+  window.requestAnimationFrame(() => {
+    const target = bookshelfFocusTarget(page);
+    if (!(target instanceof HTMLElement)) return;
+    const rect = target.getBoundingClientRect();
+    const outsideViewport = rect.bottom < 8 || rect.top > window.innerHeight - 8;
+    if (outsideViewport) {
+      target.scrollIntoView({ behavior: "auto", block: page === "shelf" ? "center" : "start" });
+    }
+    if (target.matches("button, [href], input, select, textarea, [tabindex]")) {
+      target.focus({ preventScroll: true });
+    }
+  });
+}
+
+function transitionBookshelfPage(nextPage, options = {}) {
+  if (!Object.prototype.hasOwnProperty.call(bookshelfPageOrder, nextPage)) return false;
+  const previousPage = state.bookshelfPage;
+  if (nextPage === previousPage) return false;
+
+  const direction = bookshelfPageOrder[nextPage] > bookshelfPageOrder[previousPage] ? "forward" : "backward";
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  const root = document.documentElement;
+  const bookshelfPanel = $("#panel-bookshelf");
+
+  if (activeTabTransition) {
+    const tabTransition = activeTabTransition;
+    activeTabTransition = null;
+    tabTransition.skipTransition?.();
+    delete root.dataset.tabDirection;
+  }
+  const previousTransition = activeBookshelfTransition;
+  activeBookshelfTransition = null;
+  previousTransition?.skipTransition?.();
+  clearBookshelfFallbackMotion();
+  root.dataset.bookshelfDirection = direction;
+  if (bookshelfPanel) bookshelfPanel.dataset.bookshelfDirection = direction;
+
+  let committed = false;
+  const commit = (fallbackMotion = false) => {
+    if (committed) return;
+    committed = true;
+    if (typeof options.mutate === "function") options.mutate();
+    state.bookshelfPage = nextPage;
+    renderBookshelfPage();
+    if (typeof options.afterCommit === "function") options.afterCommit();
+    if (!fallbackMotion) return;
+    const activeView = nextPage === "shelf" ? $("#bookcaseHome") : $("#bookDetailPanel");
+    if (!activeView) return;
+    void activeView.offsetWidth;
+    activeView.classList.add("is-entering");
+  };
+
+  const cleanup = () => {
+    delete root.dataset.bookshelfTransition;
+    delete root.dataset.bookshelfDirection;
+    if (bookshelfPanel) delete bookshelfPanel.dataset.bookshelfDirection;
+    clearBookshelfFallbackMotion();
+    settleBookshelfTransition(nextPage);
+  };
+
+  if (!reduceMotion && typeof document.startViewTransition === "function") {
+    root.dataset.bookshelfTransition = "active";
+    try {
+      const transition = document.startViewTransition(() => commit(false));
+      activeBookshelfTransition = transition;
+      const finishTransition = () => {
+        if (activeBookshelfTransition !== transition) return;
+        activeBookshelfTransition = null;
+        if (!committed) {
+          commit(true);
+          bookshelfFallbackTimer = window.setTimeout(cleanup, 230);
+          return;
+        }
+        cleanup();
+      };
+      transition.finished.then(finishTransition, finishTransition);
+      return true;
+    } catch (_error) {
+      delete root.dataset.bookshelfTransition;
+      activeBookshelfTransition = null;
+    }
+  }
+
+  commit(!reduceMotion);
+  if (reduceMotion) {
+    cleanup();
+  } else {
+    bookshelfFallbackTimer = window.setTimeout(cleanup, 230);
+  }
+  return true;
+}
+
 function selectBookshelfBook(bookId) {
   const book = allBookshelfBooks().find((item) => bookshelfBookId(item) === bookId);
   if (!book) return;
-  state.selectedBook = book;
-  state.bookshelfPage = "detail";
-  state.creativeEditing = false;
-  state.selectedBookSpreadIndex = 0;
-  if (book.kind === "diary") {
-    const entries = Array.isArray(book.entries) ? book.entries : [];
-    state.selectedDiaryDate = entries[entries.length - 1]?.date || "";
-  }
-  if (book.kind === "browsing") {
-    const entries = Array.isArray(book.entries) ? book.entries : [];
-    state.selectedBrowsingIndex = Math.max(0, entries.length - 1);
-  }
-  renderBookDetailPanel();
-  if (book.kind === "creative") {
-    void ensureCreativeProjectDetail(book);
-  }
-  const panel = $("#bookDetailPanel");
-  if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  bookshelfReturnFocusBookId = bookId;
+  transitionBookshelfPage("detail", {
+    mutate: () => {
+      state.selectedBook = book;
+      state.creativeEditing = false;
+      state.selectedBookSpreadIndex = 0;
+      if (book.kind === "diary") {
+        const entries = Array.isArray(book.entries) ? book.entries : [];
+        state.selectedDiaryDate = entries[entries.length - 1]?.date || "";
+      }
+      if (book.kind === "browsing") {
+        const entries = Array.isArray(book.entries) ? book.entries : [];
+        state.selectedBrowsingIndex = Math.max(0, entries.length - 1);
+      }
+    },
+    afterCommit: () => {
+      if (book.kind === "creative") void ensureCreativeProjectDetail(book);
+    },
+  });
 }
 
 function renderBookDetailPanel() {
   const panel = $("#bookDetailPanel");
   if (!panel) return;
+  panel.dataset.bookshelfView = state.bookshelfPage === "reader" ? "reader" : "detail";
   const book = state.selectedBook;
   if (!book || state.bookshelfPage === "shelf") {
     panel.hidden = true;
@@ -13943,11 +14254,17 @@ function renderBrowsingBookReader(book, kindLabel, entries) {
             <div class="browser-history-list">
               ${rows.slice().reverse().map((entry) => {
                 const originalIndex = rows.indexOf(entry);
+                const entrySource = entry.source_label || "记录";
+                const entryTitle = entry.title || entry.query || "未命名记录";
+                const entryTime = entry.generated_at || entry.date || "时间未知";
+                const isCurrent = originalIndex === safeIndex;
                 return `
-                  <button type="button" data-browsing-index="${escapeHtml(originalIndex)}" class="${originalIndex === safeIndex ? "is-active" : ""}">
-                    <span>${escapeHtml(entry.source_label || "记录")}</span>
-                    <b>${escapeHtml(entry.title || entry.query || "未命名记录")}</b>
-                    <small>${escapeHtml(entry.generated_at || entry.date || "")}</small>
+                  <button type="button" data-browsing-index="${escapeHtml(originalIndex)}" class="${isCurrent ? "is-active" : ""}" aria-current="${isCurrent ? "true" : "false"}" title="${escapeHtml(entryTitle)}">
+                    <span class="browser-history-meta">
+                      <span>${escapeHtml(entrySource)}</span>
+                      <small>${escapeHtml(entryTime)}</small>
+                    </span>
+                    <b>${escapeHtml(entryTitle)}</b>
                   </button>
                 `;
               }).join("")}
@@ -17329,7 +17646,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       "detail_enhancement_lead_minutes",
       "daily_plan_prompt",
     ]);
-    const diaryChildren = new Set(["daily_diary_time", "max_diary_entries"]);
+    const diaryChildren = new Set(["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"]);
     if (dailyPlanChildren.has(settingKey) && !boolSetting("enable_daily_plan")) return false;
     if (settingKey === "detail_enhancement_lead_minutes" && !boolSetting("enable_detail_enhancement")) return false;
     if (diaryChildren.has(settingKey) && !boolSetting("enable_daily_diary")) return false;
@@ -17765,10 +18082,10 @@ const featureDetailGuides = {
     disabled: "不再注入本轮意图策略；情绪模拟和关系距离感仍可基于自身开关使用轻量状态。",
   },
   enable_response_self_review: {
-    summary: "主动消息发送前统一做价值复核和轻量润色；被动回复保留防漏、防复读和智能沉默等发送前保护。",
+    summary: "统一控制被动回复复核和主动消息模型终审；关闭后不会再调用模型润色主动消息。",
     trigger: "主动消息生成后、发送前；普通被动回复只在严重风险、用户明确边界或 full 模式下进入额外处理。",
     enabled: "主动消息会在发送前判断原样发送、轻改写、延后或取消；用户明确不想继续话题时，可由智能沉默小模型决定是否直接不发。",
-    disabled: "不再调用模型润色主动消息；本地仍会尽量丢弃明显错误的主动消息。",
+    disabled: "不再调用模型润色主动消息；本地只允许原文通过或直接丢弃明显错误，不会拼接替代来源。",
   },
   enable_smart_silence: {
     summary: "用户说别聊了、别问了、换个话题或不用回复时，不再硬接一句“那就结束这个话题”，而是让小模型判断是否该安静退开。",
@@ -22439,6 +22756,7 @@ let activeTabTransition = null;
 function switchTab(tabName) {
   tabName = tabName === "modules" ? "config" : (tabName || "dashboard");
   if (tabName === state.activeTab) return;
+  cancelBookshelfTransition();
   const tabs = [...document.querySelectorAll(".annotations .tab[data-tab]")];
   const previousIndex = tabs.findIndex((item) => item.dataset.tab === state.activeTab);
   const nextIndex = tabs.findIndex((item) => item.dataset.tab === tabName);
@@ -22797,6 +23115,13 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const memoActionButton = element?.closest("[data-memo-action]");
+  if (memoActionButton) {
+    const noteId = memoActionButton.dataset.memoId || "";
+    const note = currentMemoNotes().find((item) => String(item.id || "") === noteId);
+    if (note) await updateMemoAction(memoActionButton.dataset.memoAction || "", note, memoActionButton);
+    return;
+  }
   const warningSuppression = element?.closest("[data-troubleshooting-warning-action]");
   if (warningSuppression) {
     await updateTroubleshootingWarningSuppression(warningSuppression);
@@ -22973,11 +23298,15 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (element?.closest("[data-book-read]")) {
-    state.bookshelfPage = "reader";
-    const savedPage = Math.max(1, Number(state.selectedBook?.reading_progress_page || 1));
-    state.selectedBookSpreadIndex = state.selectedBook?.kind === "jm_album" && savedPage > 1 ? Math.max(0, (savedPage - 1) - ((savedPage - 1) % 2)) : 0;
-    renderBookDetailPanel();
-    if (state.selectedBook?.kind === "jm_album") void saveSelectedBookshelfReadingState();
+    transitionBookshelfPage("reader", {
+      mutate: () => {
+        const savedPage = Math.max(1, Number(state.selectedBook?.reading_progress_page || 1));
+        state.selectedBookSpreadIndex = state.selectedBook?.kind === "jm_album" && savedPage > 1 ? Math.max(0, (savedPage - 1) - ((savedPage - 1) % 2)) : 0;
+      },
+      afterCommit: () => {
+        if (state.selectedBook?.kind === "jm_album") void saveSelectedBookshelfReadingState();
+      },
+    });
     return;
   }
   if (element?.closest("[data-book-prev]")) {
@@ -23030,16 +23359,18 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (element?.closest("[data-book-back]")) {
-    state.bookshelfPage = "detail";
-    state.creativeEditing = false;
-    renderBookDetailPanel();
+    transitionBookshelfPage("detail", {
+      mutate: () => { state.creativeEditing = false; },
+    });
     return;
   }
   if (element?.closest("[data-book-close]")) {
-    state.selectedBook = null;
-    state.bookshelfPage = "shelf";
-    state.creativeEditing = false;
-    renderBookshelf();
+    transitionBookshelfPage("shelf", {
+      mutate: () => {
+        state.selectedBook = null;
+        state.creativeEditing = false;
+      },
+    });
   }
 });
 
@@ -23436,6 +23767,50 @@ $("#bookshelfUnlockForm").addEventListener("submit", async (event) => {
       button.textContent = "打开抽屉";
     }
   }
+});
+$("#memoCreateBtn")?.addEventListener("click", () => openMemoEditor());
+$("#memoCancelBtn")?.addEventListener("click", closeMemoEditor);
+document.querySelectorAll("[data-memo-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.memoFilter = button.dataset.memoFilter || "active";
+    renderMemoNotes((state.bookshelfUnlocked || state.overview?.bookshelf || {}).memo_notes || {});
+  });
+});
+$("#memoDueAt")?.addEventListener("change", (event) => {
+  const hasDue = Boolean(event.target.value);
+  $("#memoRemind").disabled = !hasDue;
+  if (!hasDue) {
+    $("#memoRemind").checked = false;
+    $("#memoEditorHint").textContent = "普通便签";
+  } else {
+    $("#memoRemind").disabled = false;
+    $("#memoEditorHint").textContent = "已设置到期提醒";
+  }
+});
+$("#memoEditorForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector('button[type="submit"]');
+  const dueValue = $("#memoDueAt").value;
+  const dueAt = dueValue ? Math.floor(new Date(dueValue).getTime() / 1000) : 0;
+  const color = form.querySelector('input[name="color"]:checked')?.value || "yellow";
+  await runAction(async () => {
+    const result = await postJson("/memo/update", {
+      action: "save",
+      id: state.memoEditorId || "",
+      title: $("#memoTitle").value,
+      content: $("#memoContent").value,
+      due_at: Number.isFinite(dueAt) ? dueAt : 0,
+      repeat: $("#memoRepeat").value || "none",
+      color,
+      pinned: $("#memoPinned").checked,
+      remind_enabled: $("#memoRemind").checked,
+    });
+    applyMemoPayload(result.memo_notes);
+    closeMemoEditor();
+    renderBookshelf();
+    return result;
+  }, state.memoEditorId ? "便签已更新" : "便签已保存", submit, { reload: false });
 });
 $("#userFilter").addEventListener("input", renderUsers);
 $("#groupFilter").addEventListener("input", renderGroups);

@@ -3630,6 +3630,7 @@ Local classifier result:
         *,
         music_album_context: dict[str, Any] | None = None,
         creative_context: str = "",
+        review_event: Any | None = None,
     ) -> str:
         relay_claim_checker = getattr(self, "_unexecuted_relay_claim_reason", None)
         if callable(relay_claim_checker):
@@ -3758,6 +3759,9 @@ Local classifier result:
 - 如果问题是 unverified_fact_attribution，原回复正在断言“用户之前/先做过某事”，但当前短句没有提供这个归属；没有明确依据就改成中性主语或只谈那件事本身
 - 如果问题是 denies_existing_creative_work，必须依据本轮真实创作记录承认已有文本作品；不得把“未正式出版”偷换成“没写过”，也不要虚构出版、发行或实体书经历
 """.strip()
+        if review_event is not None:
+            setattr(review_event, "_private_companion_response_review_guard_active", True)
+            setattr(review_event, "_private_companion_response_review_fallback_text", response_text)
         started = time.perf_counter()
         try:
             rewritten = await self._llm_call(
@@ -3794,6 +3798,19 @@ Local classifier result:
                 _single_line(response_text, 120),
             )
             return self._response_review_drop_marker()
+        meta_leak_reason = self._response_review_meta_leak_reason(cleaned)
+        if meta_leak_reason:
+            logger.error(
+                "[PrivateCompanion] 被动回复复核模型返回内部判断，已回退复核前正文: reason=%s output=%s",
+                meta_leak_reason,
+                _single_line(cleaned, 180),
+            )
+            return self._fallback_temporal_or_continuity_confused_reply(
+                inbound_text,
+                response_text,
+                flags=effective_flags,
+                user=user,
+            ) or response_text
         if len(cleaned) > max(len(response_text) + 80, self.response_review_max_chars + 160):
             fallback = self._fallback_overlong_casual_reply(inbound_text, response_text)
             return fallback or response_text
@@ -3817,6 +3834,69 @@ Local classifier result:
             fallback = self._fallback_overlong_casual_reply(inbound_text, cleaned)
             return fallback or cleaned
         return cleaned
+
+    @staticmethod
+    def _response_review_meta_leak_reason(text: Any) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        compact = re.sub(r"\s+", " ", raw).strip()
+        lower = compact.lower()
+        if re.search(r"\bmaybe\s+\d+(?:\.\d+)?%\s+of\s+the\s+time\b", lower):
+            return "复核模型输出概率说明"
+        if re.search(r"\bat\s+the\s+(?:very\s+)?end\s+of\s+(?:a|the)\s+run\b", lower):
+            return "复核模型输出运行说明"
+        if re.search(
+            r"\b(?:decision|verdict|review result|review reason|reason)\s*[:：]",
+            lower,
+        ):
+            return "复核模型输出判定字段"
+        if re.search(
+            r"\b(?:response|output|message)\b.{0,80}\b(?:needs?\s+(?:to\s+be\s+)?rewritten|"
+            r"cannot\s+be\s+saniti[sz]ed|formatting\s+(?:issue|problem)|should\s+not\s+be\s+sent)\b",
+            lower,
+        ):
+            return "复核模型输出英文审核评语"
+        chinese_review_context = re.search(
+            r"(?:原(?:回复|文本|输出)|这条(?:回复|消息|输出)|回复内容|输出内容|后处理|清洗|复核|审核|"
+            r"格式化表达|重复标点|一字废话|最终回复|正常人无法容忍)",
+            compact,
+        )
+        chinese_verdict = re.search(
+            r"(?:无法|不能|不应|不宜|不适合|未通过|拒绝|需要|应当|建议).{0,24}"
+            r"(?:清洗|规整|发送|通过|重写|改写|修正)",
+            compact,
+        )
+        if chinese_review_context and chinese_verdict:
+            return "复核模型输出中文审核评语"
+        if re.search(r"(?:判定|审核|复核)(?:结果|结论|原因)?\s*[:：]", compact):
+            return "复核模型输出判定字段"
+        return ""
+
+    def _strip_response_review_meta_leak(self, text: Any) -> tuple[str, str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", ""
+        kept: list[str] = []
+        reasons: list[str] = []
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                if kept and kept[-1] != "":
+                    kept.append("")
+                continue
+            reason = self._response_review_meta_leak_reason(stripped)
+            if reason:
+                reasons.append(reason)
+                continue
+            kept.append(stripped)
+        if not reasons:
+            whole_reason = self._response_review_meta_leak_reason(raw)
+            if whole_reason:
+                return "", whole_reason
+            return raw, ""
+        cleaned = "\n".join(kept).strip()
+        return cleaned, "、".join(dict.fromkeys(reasons))
 
     def _response_review_severe_flags(self, flags: list[str]) -> list[str]:
         severe = {
@@ -3875,11 +3955,20 @@ Local classifier result:
         explicit_late_anchor = bool(
             re.search(r"(快|差不多|都|已经)?\s*(?:晚上)?(?:十一|11|23)\s*[点點]|23\s*[:：]\s*\d{1,2}", cleaned)
         )
+        implicit_late_anchor = bool(
+            re.search(
+                r"(?:时间|时候|天色).{0,4}(?:不早|(?:这么|很|太)晚)|"
+                r"(?:都|已经|这会儿|现在).{0,4}(?:不早|(?:这么|很|太)晚)|"
+                r"(?:不早|(?:这么|很|太)晚).{0,3}(?:了|啦|咯)",
+                cleaned,
+            )
+        )
         sleep_anchor = bool(re.search(r"(困不困|该睡|睡觉|睡了|晚安|熬夜|夜深|深夜)", cleaned))
-        if explicit_late_anchor and not (22 * 60 <= current_minutes or current_minutes <= 90):
+        late_night = 22 * 60 <= current_minutes or current_minutes <= 90
+        if (explicit_late_anchor or implicit_late_anchor) and not late_night:
             return True
         if sleep_anchor and re.search(r"(快|差不多|都|已经).{0,8}(?:十一|11|23)\s*[点點]", cleaned):
-            return not (22 * 60 <= current_minutes or current_minutes <= 90)
+            return not late_night
         return False
 
     def _has_open_proactive_awaiting_reply(self, user: dict[str, Any]) -> bool:
@@ -3947,6 +4036,13 @@ Local classifier result:
             cleaned,
         ).strip()
         cleaned = re.sub(
+            r"[，,。！？!?；;、\s]*(?:那[^，,。！？!?；;]{0,12})?"
+            r"(?:(?:时间|时候|天色).{0,4}(?:不早|(?:这么|很|太)晚)|(?:都|已经|这会儿|现在).{0,4}(?:不早|(?:这么|很|太)晚)|(?:不早|(?:这么|很|太)晚).{0,3}(?:了|啦|咯))"
+            r"[^。！？!?\n]{0,20}(?:歇息|休息|睡觉|睡|晚安)?[^。！？!?\n]{0,6}[？?。！!~～]*",
+            "",
+            cleaned,
+        ).strip()
+        cleaned = re.sub(
             r"[，,。！？!?；;、\s]*(?:看你|见你|以为你|还以为你|你).{0,8}(?:没回|不回|没理|不理|没搭理).{0,16}?(?:嘛|啦|了|而已|就)?[，,。！？!?~～]*",
             "",
             cleaned,
@@ -4006,12 +4102,12 @@ Local classifier result:
 
     async def _format_proactive_reply_context(self, event: AstrMessageEvent) -> str:
         try:
-            if not bool(getattr(event, "is_private_chat", lambda: False)()):
-                return ""
             user_id = str(event.get_sender_id())
+            event_umo = _single_line(getattr(event, "unified_msg_origin", ""), 180)
         except Exception:
             return ""
         consume_suspended = False
+        recent_delivery_context = ""
         async with self._data_lock:
             user = dict(self._get_user(user_id))
             raw_suspended = user.get("suspended_proactive")
@@ -4019,6 +4115,30 @@ Local classifier result:
                 consume_suspended = True
                 current = self._get_user(user_id)
                 current["suspended_proactive"] = {}
+                self._save_data_sync()
+
+            last_proactive_text = _single_line(user.get("last_proactive_message"), 500)
+            last_proactive_at = _safe_float(user.get("last_proactive_sent_at"), 0)
+            delivery_umo = _single_line(user.get("last_proactive_delivery_umo") or user.get("umo"), 180)
+            consumed_for = _safe_float(user.get("last_proactive_reply_context_consumed_for"), 0)
+            max_age = min(max(1, self.proactive_reply_context_hours) * 3600, 30 * 60)
+            same_delivery = last_proactive_at > 0 and abs(consumed_for - last_proactive_at) > 0.001
+            if (
+                last_proactive_text
+                and event_umo
+                and delivery_umo == event_umo
+                and same_delivery
+                and 0 <= _now_ts() - last_proactive_at <= max_age
+            ):
+                recent_delivery_context = (
+                    "【刚才你主动发出的消息】\n"
+                    f"你刚才在当前会话主动发了：{last_proactive_text}\n"
+                    "这是你自己已经说过并成功外发的内容。用户当前消息很可能在回应它；"
+                    "必须直接承认并顺着这条消息接话，不得声称不知道自己发了什么、没看到这条消息或把它当成别人发的。"
+                    "如果其中的标题、平台或链接确实有误，简短承认并依据上面的实际原文纠正，不要继续编造来源。"
+                )
+                current = self._get_user(user_id)
+                current["last_proactive_reply_context_consumed_for"] = last_proactive_at
                 self._save_data_sync()
 
         suspended = user.get("suspended_proactive")
@@ -4046,7 +4166,7 @@ Local classifier result:
                 + f"今天预设的生活线索：{self._format_story_plan_for_prompt()}"
             )
 
-        return ""
+        return recent_delivery_context
 
 
     async def _collect_recent_private_conversation_text(

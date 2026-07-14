@@ -23,6 +23,14 @@ from .helpers import _safe_float, _safe_int, _single_line, _strip_internal_messa
 class ForwardMessageMixin:
     """Forward-message parsing and prompt-context helpers."""
 
+    @staticmethod
+    def _reply_actor_binding_prompt_lines() -> list[str]:
+        return [
+            "引用内容属于原消息作者，用户当前文字属于本轮发言者；理解时请区分当前发言、引用作者和被提到的第三方。",
+            "人物与动作优先逐项对应：用户说“让甲做某事”通常只是提议由甲执行该动作；引用中信使、第三方或地点里的动作仍沿用原对象，除非上下文明确说明它们是同一个人。",
+            "旧记忆用于补充语气和连续性；若人物关系与本轮引用不一致，优先采用当前文字和直接引用。",
+        ]
+
     def _forward_descriptor_cache_keys(self, event: AstrMessageEvent) -> list[str]:
         keys: list[str] = []
         message_id = ""
@@ -1282,6 +1290,7 @@ class ForwardMessageMixin:
             "【引用链上下文】",
             "用户这轮回复/引用了一条消息；被引用消息本身还引用了更早的消息。下面按距离当前消息由近到远列出，请优先理解最深层原始消息和用户当前文字之间的关系。",
         ]
+        lines.extend(self._reply_actor_binding_prompt_lines())
         for row in chain:
             depth = _safe_int(row.get("depth"), 1, 1)
             message_id = _single_line(row.get("message_id"), 80)
@@ -1510,6 +1519,7 @@ class ForwardMessageMixin:
             "【本轮引用卡片/动态】",
             "这轮用户引用了一条卡片/动态，内容如下：",
         ]
+        lines.extend(self._reply_actor_binding_prompt_lines())
         if message_id:
             lines.append(f"引用消息ID：{message_id}")
         if texts:

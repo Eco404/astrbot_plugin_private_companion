@@ -1311,9 +1311,11 @@ class ProactiveEngineMixin:
             kind = "care"
         elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share", "personal_goal_progress"}:
             kind = "self_share"
-        elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
+        elif normalized_reason in {"important_date_share", "memo_note_reminder", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
             kind = "reminder"
-        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share", "environment_change"}:
+        elif normalized_reason == "environment_change":
+            kind = "observation"
+        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
             kind = "external_share"
         elif normalized_source in {"pending_followup", "followup"}:
             kind = "continuation"
@@ -1336,7 +1338,9 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "current_activity", 0.62
         elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
             anchor_type, anchor_score = "important_date", 0.78
-        elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share", "environment_change"}:
+        elif normalized_reason == "environment_change":
+            anchor_type, anchor_score = "environment", 0.82
+        elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
             anchor_type, anchor_score = "external_info", 0.66
         elif normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
             anchor_type, anchor_score = "time_ritual", 0.55
@@ -5048,7 +5052,7 @@ class ProactiveEngineMixin:
                         "action": "message",
                         "why": f"到了{meal_label}时段，惦记用户有没有按时吃东西",
                         "topic": f"{meal_label}吃了吗",
-                        "motive": self._normalize_internal_motive_text(f"想自然问问用户{meal_label}吃了没有"),
+                        "motive": self._normalize_internal_motive_text(f"想问对方{meal_label}吃了没有"),
                         "scene": f"{meal_label}时段",
                         "tone": "关心但不管教",
                         "impulse": "想确认用户有没有好好吃东西",
@@ -5122,7 +5126,7 @@ class ProactiveEngineMixin:
             "action": "message",
             "why": "之前只叫了用户一声，因此把话说完",
             "topic": _single_line(raw.get("complaint_topic"), 80) or "刚才那句后面",
-            "motive": _single_line(raw.get("complaint_motive"), 100) or f"刚刚只喊了{name}一声，现在想补一句完整的话",
+            "motive": _single_line(raw.get("complaint_motive"), 100) or f"刚才只喊了{name}一声，想补完话",
             "scene": "先前那句之后又过了一阵",
             "tone": _single_line(raw.get("complaint_tone"), 30) or "耐心等待",
             "impulse": "想把刚才没说完的话补上",
@@ -5193,7 +5197,7 @@ class ProactiveEngineMixin:
                 "reason": "morning_greeting",
                 "action": "message",
                 "why": "早上醒来后想打个招呼",
-                "topic": "早安",
+                "topic": "刚醒",
                 "scene": "一天刚醒来的时候",
                 "tone": "还没完全醒",
                 "impulse": "想第一时间说声早",
@@ -5202,21 +5206,21 @@ class ProactiveEngineMixin:
                 "window": "12:05-13:35",
                 "reason": "noon_greeting",
                 "action": "message",
-                "why": "午休或午饭时忽然想起这边",
-                "topic": "午后犯困",
+                "why": "午休或午饭时想起这边",
+                "topic": "午饭后那会儿",
                 "scene": "午后犯困的时候",
                 "tone": "懒洋洋",
-                "impulse": "想趁午后休息时短短说一句",
+                "impulse": "想趁午后休息时打个招呼",
             },
             {
                 "window": "20:10-21:20",
                 "reason": "evening_greeting",
                 "action": "message",
-                "why": "晚上节奏慢下来时，想短短说一句",
-                "topic": "晚间问候",
+                "why": "晚上节奏慢下来时",
+                "topic": "天暗下来那会儿",
                 "scene": "晚上安静下来时",
                 "tone": "安静",
-                "impulse": "想趁还没太晚短短说一句",
+                "impulse": "想趁还没太晚打个招呼",
             },
         ]
 
@@ -5382,11 +5386,11 @@ class ProactiveEngineMixin:
             (
                 "morning_greeting",
                 f"{self._minutes_to_hhmm(morning_start)}-{self._minutes_to_hhmm(morning_end)}",
-                "刚睡醒，想第一时间和用户说声早安",
-                "早上刚醒来",
+                "刚睡醒，想打个招呼",
+                "刚醒",
             ),
-            ("noon_greeting", "12:05-13:35", "中午有些犯困，想短短打声招呼", "午后犯困"),
-            ("evening_greeting", "20:10-21:20", "晚上闲下来时，想短短说一句", "晚间问候"),
+            ("noon_greeting", "12:05-13:35", "中午有些犯困，想打个招呼", "午饭后那会儿"),
+            ("evening_greeting", "20:10-21:20", "晚上闲下来时，想打个招呼", "天暗下来那会儿"),
         ]
         today = now_dt.date()
         candidates = []
@@ -5502,7 +5506,7 @@ class ProactiveEngineMixin:
                 "action": "message",
                 "why": "明天是一个值得为自己留一点空白的日子，先轻轻递一句，不提前揭开仪式",
                 "topic": "明天给自己留一点空白",
-                "motive": "明天想让你把步子放松一点，先替你留一小段只顾自己的时间",
+                "motive": "明天想让对方放松一点",
                 "_scheduled_ts": scheduled,
                 "_birthday_stage": "eve",
                 "context_key": "planned_birthday_event_context",
@@ -5527,7 +5531,7 @@ class ProactiveEngineMixin:
                 "action": action,
                 "why": "今天是用户明确允许记住的生日，想认真递上一份不造成压力的小惊喜",
                 "topic": "今天只属于你的生日小惊喜",
-                "motive": "今天是你的生日，想认真留一份只属于你的小惊喜；不用特地回复，只希望你今天能多偏爱自己一点",
+                "motive": "今天是对方生日，想留一份小惊喜",
                 "_scheduled_ts": scheduled,
                 "_birthday_stage": "birthday",
                 "context_key": "planned_birthday_event_context",
@@ -5545,7 +5549,7 @@ class ProactiveEngineMixin:
                 "action": "message",
                 "why": "昨天的生日仪式因时机错过，只在第二天午前低调补上一句",
                 "topic": "迟到一点的生日祝福",
-                "motive": "昨天没能把祝福好好递到你手上，想在还不算晚的时候轻轻补上一句",
+                "motive": "昨天错过了祝福，今天补上",
                 "_scheduled_ts": scheduled,
                 "_birthday_stage": "makeup",
                 "context_key": "planned_birthday_event_context",
@@ -5563,7 +5567,7 @@ class ProactiveEngineMixin:
             "action": "message",
             "why": "用户已经在生日祝福后有过回应，轻轻接住那点余温，不再重复庆祝",
             "topic": "昨天留下的一点开心",
-            "motive": "昨天那点开心好像还没散，想轻轻问一句有没有留下一个自己喜欢的瞬间",
+            "motive": "昨天的开心还没散",
             "_scheduled_ts": scheduled,
             "_birthday_stage": "afterglow",
             "context_key": "planned_birthday_event_context",
@@ -5625,7 +5629,7 @@ class ProactiveEngineMixin:
             "action": "message",
             "why": "相处了一阵后，想低调地知道一个将来可以认真记住的小日子",
             "topic": "你的生日是哪一天",
-            "motive": "相处了一阵，忽然有点好奇你的生日是哪一天；如果你不想说也完全没关系",
+            "motive": "好奇对方的生日",
             "_scheduled_ts": scheduled,
             "_birthday_curiosity": True,
         }
@@ -5958,7 +5962,7 @@ class ProactiveEngineMixin:
             "action": "screen_peek",
             "why": "上一条之后那边一直安静，想看一眼是不是还在忙。",
             "topic": "看看那边是不是还在忙",
-            "motive": "上一条之后那边一直安静着，想看一眼是不是还在忙",
+            "motive": "那边一直安静着",
             "scene": "上一条主动消息之后的安静空档",
             "tone": "好奇",
             "impulse": "想看一眼那边是不是还在忙",
@@ -6458,36 +6462,8 @@ class ProactiveEngineMixin:
         cleaned = _single_line(text, 60)
         if not cleaned:
             return ""
-        cleaned = re.sub(r"[“”\"'《》<>]", "", cleaned).strip("，,。！？；： ")
+        cleaned = re.sub(r"[""\"'《》<>]", "", cleaned).strip("，,。！？；： ")
         cleaned = re.sub(r"^(?:关于|有关|一种|一些|那个|这段|这一段)", "", cleaned).strip()
-        replacements = {
-            "劳动节的黄昏": "刚刚那点黄昏天色",
-            "夜色温柔": "窗外那点夜色",
-            "剧情共鸣": "刚刚那段剧情",
-            "剧情吐槽": "刚刚那段也太离谱了",
-            "偷看一眼": "你这会儿在干嘛",
-            "早晨试探": "刚醒那会儿",
-            "面包推荐": "刚咬到的那口面包",
-            "路上随手拍": "路上那一下光",
-            "念头分享": "刚冒出来的那句话",
-            "突然想到": "刚刚突然想到的事",
-        }
-        if cleaned in replacements:
-            return replacements[cleaned]
-        if any(token in cleaned for token in ("晚霞", "黄昏", "天色")):
-            return "刚刚那点天色"
-        if "夜色" in cleaned:
-            return "窗外那点夜色"
-        if "剧情" in cleaned:
-            return "刚刚那段剧情"
-        if any(token in cleaned for token in ("雨", "雨声")):
-            return "外面那阵雨声"
-        if "照片" in cleaned:
-            return "刚翻到的那张照片"
-        if "风" in cleaned and "吹" not in cleaned:
-            return "刚刚那阵风"
-        if len(cleaned) <= 10 and not re.search(r"(刚|这|那|窗外|外面|手里|眼前|楼下|路上|桌上|耳边)", cleaned):
-            return f"刚刚那点{cleaned}"
         return cleaned
 
     def _choose_proactive_topic(self, reason: str, user: dict[str, Any]) -> str:
@@ -6506,13 +6482,13 @@ class ProactiveEngineMixin:
             return _single_line(share.get("topic"), 48) or _single_line(share.get("text"), 48) or "群里那段片段"
         if reason == "bili_video_share":
             video = user.get("bilibili_video_context") if isinstance(user.get("bilibili_video_context"), dict) else {}
-            return _single_line(video.get("title"), 48) or "刚刷到的 B 站视频"
+            return _single_line(video.get("title"), 48) or "B站视频"
         if reason == "news_share":
             news = user.get("news_context") if isinstance(user.get("news_context"), dict) else {}
-            return _single_line(news.get("topic") or news.get("headline"), 48) or "刚看到的一条新闻"
+            return _single_line(news.get("topic") or news.get("headline"), 48) or "一条新闻"
         if reason == "web_exploration_share":
             exploration = user.get("web_exploration_context") if isinstance(user.get("web_exploration_context"), dict) else {}
-            return _single_line(exploration.get("topic") or exploration.get("query"), 48) or "刚查到的新东西"
+            return _single_line(exploration.get("topic") or exploration.get("query"), 48) or "新发现"
         if reason == "creative_share":
             creative = user.get("creative_share_context") if isinstance(user.get("creative_share_context"), dict) else {}
             return _single_line(creative.get("title"), 48) or "刚写到的小说片段"
@@ -7192,14 +7168,14 @@ class ProactiveEngineMixin:
             if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
                 return random.choice([
                     "按次要用户关系顺手打个招呼,语气轻一点,不显得黏人",
-                    "这个时间点刚好想起对方,只发一句普通问候",
+                    "这个时间点刚好想起对方",
                 ])
             if reason in {"activity_share", "diary_share", "background_schedule"}:
                 if topic:
-                    return self._normalize_internal_motive_text(f"有个和“{topic}”有关的小片段,觉得可以像朋友一样顺手分享一下")
-                return "有个不太打扰人的小片段,想像朋友一样顺手分享一下"
+                    return self._normalize_internal_motive_text(f"有个和“{topic}”有关的小片段")
+                return "有个小片段想分享"
             if reason == "group_share":
-                return "共同群里有个和对方可能有关的小片段,只做轻量转告,不扩大解读"
+                return "共同群里有个和对方可能有关的小片段"
         if impulse:
             return self._normalize_internal_motive_text(impulse)
         if scene or tone or event_hint or summary_hint:
@@ -7212,38 +7188,38 @@ class ProactiveEngineMixin:
             elif scene and topic:
                 lived_line = f"在{scene}的时候，想到“{topic}”{mood_fragment}"
             elif event_hint:
-                lived_line = f"刚刚{event_hint}的时候，想短短提一句{mood_fragment}"
+                lived_line = f"刚刚{event_hint}的时候{mood_fragment}"
             elif scene:
-                lived_line = f"刚刚在{scene}的时候，想短短提一句{mood_fragment}"
+                lived_line = f"刚刚在{scene}的时候{mood_fragment}"
             elif summary_hint:
-                lived_line = f"这一小段安静下来时，想短短提一句{mood_fragment}"
+                lived_line = f"这一小段安静下来时{mood_fragment}"
             if lived_line:
                 return self._normalize_internal_motive_text(lived_line)
 
         if reason == "birthday_eve_hint":
-            return "明天想让你把步子放松一点，先替你留一小段只顾自己的时间"
+            return "明天想让对方放松一点"
         if reason == "birthday_celebration":
-            return "今天是你的生日，想认真留一份只属于你的小惊喜；不用特地回复，只希望你今天能多偏爱自己一点"
+            return "今天是对方生日，想留一份小惊喜"
         if reason == "birthday_makeup":
-            return "昨天没能把祝福好好递到你手上，想在还不算晚的时候轻轻补上一句"
+            return "昨天错过了祝福，今天补上"
         if reason == "birthday_afterglow":
-            return "昨天那点开心好像还没散，想轻轻问一句有没有留下一个自己喜欢的瞬间"
+            return "昨天的开心还没散"
         if reason == "birthday_curiosity":
-            return "相处了一阵，忽然有点好奇你的生日是哪一天；如果你不想说也完全没关系"
+            return "好奇对方的生日"
 
         if reason == "insomnia_night":
             motives = [
-                "夜里一直没睡着，想短短留一句",
-                "睡不着，想看看用户是不是也还醒着",
-                "已经很晚了，但还是想留一句话",
+                "夜里一直没睡着",
+                "睡不着，想看看对方是不是也还醒着",
+                "已经很晚了，但还是想说一句",
             ]
             if action == "voice":
-                motives.append("夜里不想打太多字，想留一句语音")
+                motives.append("夜里不想打太多字，想发语音")
             return random.choice(motives)
         if reason == "state_share":
             motives = [
-                "这会儿说话可能慢一点，但还是想短短提一句",
-                "这会儿不太想说太多，但还是想问一句",
+                "这会儿说话可能慢一点",
+                "这会儿不太想说太多",
                 "这一会儿比较安静，想慢慢说一句",
             ]
             if energy < 45:
@@ -7278,27 +7254,27 @@ class ProactiveEngineMixin:
             return self._normalize_internal_motive_text("共同群里有个小片段还有点余味,想顺手给你递一下")
         if reason == "activity_share":
             motives = [
-                "刚刚碰到一个小片段，想短短提一句",
-                "刚刚看到一个小东西，想分享一下",
-                "刚刚有个小想法，想顺口提一下",
-                "脑子里冒出一句没头没尾的话，想说一下",
-                "刚刚那点小想法放着也没什么用，想短短提一句",
+                "刚刚碰到一个小片段",
+                "看到一个小东西",
+                "有个小想法",
+                "脑子里冒出一句没头没尾的话",
+                "一个小想法放着没用",
                 "手边的小东西有点好笑，想给你看",
             ]
             if topic:
-                motives.append(f"刚碰到“{topic}”时，想短短提一句")
+                motives.append(f"刚碰到“{topic}”时")
             if any(token in weather for token in ("雨", "小雨", "阵雨")):
-                motives.append("听见外面下雨，想短短提一句")
+                motives.append("外面在下雨")
             if any(token in weather for token in ("晴", "阳光", "晚霞")):
-                motives.append("看到外面的光线不错，想短短提一句")
+                motives.append("外面光线不错")
             return random.choice(motives)
         if reason == "diary_share":
             return random.choice([
-                "翻到今天记下来的小片段时，想短短提一句",
+                "翻到今天记下来的小片段",
                 "看到今天写下来的那句话，觉得可以给你看看",
-                "今天有个小片段还记着，想说一下",
+                "今天有个小片段还记着",
                 "有句话不算重要，但一直记着，想给你看看",
-                "今天有个小片段还记着，想短短提一句",
+                "今天有个小片段还记着",
             ])
         if reason == "important_date_share":
             return random.choice([
@@ -7308,32 +7284,32 @@ class ProactiveEngineMixin:
             ])
         if reason == "background_schedule":
             motives = [
-                "手上的事告一段落时，想短短提一句",
-                "忙到能休息一小会儿时，想短短说句话",
-                "眼前这一小段缓下来以后，想短短说一句",
+                "手上的事告一段落了",
+                "忙到能休息一小会儿了",
+                "眼前这一小段缓下来了",
             ]
             if topic:
-                motives.append(f"手上这点“{topic}”还没结束，想短短提一句")
+                motives.append(f"手上这点“{topic}”还没结束")
             return random.choice(motives)
         if reason == "morning_greeting":
             return random.choice([
-                "人还没太清醒,但先想轻轻说声早安",
-                "醒来还带着一点睡意,先想去打个招呼",
+                "还没太清醒，先打个招呼",
+                "刚醒，先打个招呼",
             ])
         if reason == "noon_greeting":
             return random.choice([
-                "中午这会儿人有点懒，想短短说一句",
-                "午间一下子松下来，想短短说句话",
+                "中午有点懒",
+                "午间松下来了",
             ])
         if reason == "evening_greeting":
             return random.choice([
-                "晚一点安静下来以后，想短短说一句",
-                "白天快结束时，想短短说句话",
+                "晚上安静下来了",
+                "白天快结束了",
             ])
         motives = [
-            "刚好能休息一小会儿，想短短说一句",
-            "眼前这点小事还记着，想短短说一句",
-            "刚松一口气的时候，想短短说句话",
+            "刚好休息一下",
+            "还记着眼前这点小事",
+            "刚松一口气",
         ]
         return self._normalize_internal_motive_text(random.choice(motives))
 
@@ -7342,44 +7318,19 @@ class ProactiveEngineMixin:
         if not cleaned:
             return ""
         replacements = {
-            "突然想起你": "刚好想到你",
-            "顺手冒了个头": "想跟你说一句",
-            "冒个头": "想跟你说一句",
-            "冒个泡": "想跟你说一句",
-            "刷一下存在感": "想跟你说一句",
+            "顺手冒了个头": "",
+            "冒个头": "",
+            "冒个泡": "",
+            "刷一下存在感": "",
             "没什么大道理,就是": "",
             "没什么大不了的,就是": "",
-            "顺手晃到你这边了": "想跟你说一句",
-            "顺手晃到你这边": "想跟你说一句",
+            "顺手晃到你这边了": "",
+            "顺手晃到你这边": "",
             "一直不理我": "那边还安静着",
             "不理我": "那边还安静着",
             "怎么一点动静都没有": "那边还没什么动静",
             "怎么还没动静": "那边还没什么动静",
             "一点动静都没有": "那边还没什么动静",
-            "想和用户说一句": "想短短说一句",
-            "想和用户说一声": "想短短提一声",
-            "想和用户说声": "想轻轻说声",
-            "想和用户说一下": "想短短说一下",
-            "想和用户说句话": "想短短说句话",
-            "想和用户打声招呼": "想打声招呼",
-            "想和用户分享": "想顺手分享",
-            "和用户说一句": "短短说一句",
-            "和用户说一声": "短短提一声",
-            "和用户说声": "轻轻说声",
-            "和用户说句话": "短短说句话",
-            "想给用户看": "想给你看",
-            "想给用户看看": "想给你看看",
-            "给用户看看": "给你看看",
-            "告诉用户": "顺口提一下",
-            "提醒用户一句": "提醒一句",
-            "用户是不是还在忙": "那边是不是还在忙",
-            "用户在不在": "那边有没有空",
-            "确认用户是不是还在忙": "看看那边是不是还在忙",
-            "确认用户还在": "看看那边还在不在",
-            "确认用户那边": "看看那边",
-            "确认用户": "看看那边",
-            "想到可以和用户说一句": "想到可以短短说一句",
-            "来找用户": "来这边",
             "主要用户": "这边",
             "次要用户": "对方",
             "用户": "你",
@@ -7392,9 +7343,7 @@ class ProactiveEngineMixin:
         cleaned = re.sub(r"这会儿又绕回[“\"]([^”\"]{1,40})[”\"]", r"想到“\1”", cleaned)
         cleaned = cleaned.replace("忍过一次", "先放了放")
         cleaned = cleaned.replace("还没散", "还记着")
-        cleaned = cleaned.replace("忽然想", "有点想")
         cleaned = re.sub(r"(?:来找你一下){2,}", "来找你一下", cleaned)
-        cleaned = cleaned.replace("碰你一下", "跟你说一句")
         cleaned = re.sub(r"\s+", " ", cleaned).strip(",。 ")
         return cleaned
 
@@ -7597,6 +7546,7 @@ class ProactiveEngineMixin:
             "jm_cosmos_recommendation_request": [(10 * 60, 23 * 60)],
             "creative_share": [(10 * 60, 23 * 60)],
             "personal_goal_progress": [(8 * 60, 22 * 60)],
+            "memo_note_reminder": [(7 * 60, 23 * 60)],
             "state_share": [(8 * 60, 22 * 60 + 30)],
             "quiet_care": [(9 * 60, 22 * 60 + 30)],
             "activity_share": [(10 * 60, 18 * 60 + 30)],

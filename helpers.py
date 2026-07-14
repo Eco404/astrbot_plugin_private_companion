@@ -11,6 +11,16 @@ from typing import Any
 
 _today_key_timezone = ""
 
+_GROUP_MESSAGE_URL_PATTERN = re.compile(
+    r"(?i)(?<![\w@])(?:https?://|www\.)[^\s<>\"“”‘’]+"
+)
+_GROUP_SHARE_MARKER_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"[\[【](?:分享|链接|网页|网页分享|卡片|小程序|QQ小程序|转发消息|合并转发|JSON消息|XML消息)[\]】]"
+    r"|\[CQ:(?:json|xml|share|miniapp)\b[^\]]*\]"
+    r")"
+)
+
 
 def _now_ts() -> float:
     return time.time()
@@ -73,6 +83,21 @@ def _safe_float(
 def _single_line(text: Any, limit: int = 80) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     return normalized[:limit]
+
+
+def _group_link_message_context(text: Any, limit: int = 260) -> tuple[str, bool]:
+    """Return non-link user text and whether the message contains a link/share payload."""
+    raw = str(text or "")[:4000].replace("\u200b", "").replace("\ufeff", "")
+    has_link_payload = bool(
+        _GROUP_MESSAGE_URL_PATTERN.search(raw) or _GROUP_SHARE_MARKER_PATTERN.search(raw)
+    )
+    if not has_link_payload:
+        return _single_line(raw, limit), False
+    remainder = _GROUP_MESSAGE_URL_PATTERN.sub(" ", raw)
+    remainder = _GROUP_SHARE_MARKER_PATTERN.sub(" ", remainder)
+    remainder = re.sub(r"(?i)(?:网页)?(?:链接|网址|link)\s*[:：]", " ", remainder)
+    remainder = re.sub(r"\s+", " ", remainder).strip(" \t\r\n,，。;；|｜-—")
+    return _single_line(remainder, limit), True
 
 
 _SECRET_FIELD_PATTERN = re.compile(

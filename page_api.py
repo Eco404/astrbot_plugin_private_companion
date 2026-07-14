@@ -29,6 +29,15 @@ from .helpers import _flat_get, _normalize_timezone_name, _safe_int, _set_into_c
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
+from .memo_notes import (
+    MEMO_NOTE_COLORS,
+    MEMO_NOTE_REPEATS,
+    advance_recurring_memo_due,
+    clean_memo_note_content,
+    memo_note_due_state,
+    memo_note_sort_key,
+    normalize_memo_note,
+)
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -130,6 +139,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
             ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
             ("/bookshelf/reading_state", self.update_bookshelf_reading_state, ["POST"], "Private Companion Page update bookshelf reading state"),
+            ("/memo/list", self.list_memo_notes, ["GET"], "Private Companion Page list memo notes"),
+            ("/memo/update", self.update_memo_note, ["POST"], "Private Companion Page update memo note"),
             ("/qzone/status", self.get_qzone_status, ["GET"], "Private Companion Page qzone status"),
             ("/qzone/health", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
             ("/qzone/summary", self.get_qzone_status, ["GET"], "Private Companion Page qzone status alias"),
@@ -155,6 +166,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/qzone/delete", self.delete_qzone_post, ["POST"], "Private Companion Page qzone delete"),
             ("/qzone/post/delete", self.delete_qzone_post, ["POST"], "Private Companion Page qzone delete alias"),
             ("/creative/project", self.get_creative_project, ["GET"], "Private Companion Page creative project detail"),
+            ("/creative/project/cover", self.get_creative_project_cover, ["GET"], "Private Companion Page creative project cover"),
             ("/creative/project/update", self.update_creative_project, ["POST"], "Private Companion Page update creative project"),
             ("/creative/project/chunk/update", self.update_creative_chunk, ["POST"], "Private Companion Page update creative chunk"),
             ("/creative/project/outline/update", self.update_creative_outline, ["POST"], "Private Companion Page update creative outline"),
@@ -4274,6 +4286,154 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 解锁书柜夹层失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    def _memo_notes_payload(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = time.time()
+        raw_notes = data.get("memo_notes") if isinstance(data.get("memo_notes"), list) else []
+        notes = [note for note in (normalize_memo_note(item, now=now) for item in raw_notes) if note]
+        notes.sort(key=lambda item: memo_note_sort_key(item, now=now))
+        rows: list[dict[str, Any]] = []
+        for note in notes[:200]:
+            due_at = self._float(note.get("due_at"))
+            due_text = ""
+            due_input = ""
+            if due_at > 0:
+                try:
+                    due_dt = self.plugin._environment_fromtimestamp(due_at)
+                    due_text = due_dt.strftime("%Y-%m-%d %H:%M")
+                    due_input = due_dt.strftime("%Y-%m-%dT%H:%M")
+                except Exception:
+                    due_text = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M")
+                    due_input = datetime.fromtimestamp(due_at).strftime("%Y-%m-%dT%H:%M")
+            rows.append({
+                **note,
+                "due_state": memo_note_due_state(note, now=now),
+                "due_text": due_text,
+                "due_input": due_input,
+                "created_text": self.plugin._format_timestamp_elapsed(note.get("created_at", 0)),
+                "updated_text": self.plugin._format_timestamp_elapsed(note.get("updated_at", 0)),
+            })
+        active = [item for item in rows if item.get("status") == "active"]
+        return {
+            "items": rows,
+            "total": len(rows),
+            "active": len(active),
+            "completed": sum(1 for item in rows if item.get("status") == "completed"),
+            "overdue": sum(1 for item in active if item.get("due_state") == "overdue"),
+            "due_soon": sum(1 for item in active if item.get("due_state") in {"due", "today"}),
+        }
+
+    async def list_memo_notes(self) -> dict[str, Any]:
+        try:
+            async with self.plugin._data_lock:
+                data = deepcopy(self.plugin.data)
+            return self._ok({"memo_notes": self._memo_notes_payload(data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取备忘便签失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_memo_note(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        action = self._single_line(payload.get("action"), 20).lower() or "save"
+        note_id = self._single_line(payload.get("id"), 64)
+        now = time.time()
+        try:
+            async with self.plugin._data_lock:
+                raw_notes = self.plugin.data.setdefault("memo_notes", [])
+                if not isinstance(raw_notes, list):
+                    raw_notes = []
+                    self.plugin.data["memo_notes"] = raw_notes
+                notes = [note for note in (normalize_memo_note(item, now=now) for item in raw_notes) if note]
+                existing = next((item for item in notes if item.get("id") == note_id), None) if note_id else None
+
+                if action == "delete":
+                    if not existing:
+                        return self._error("没有找到这张便签")
+                    notes = [item for item in notes if item.get("id") != note_id]
+                elif action in {"complete", "reopen"}:
+                    if not existing:
+                        return self._error("没有找到这张便签")
+                    if action == "reopen":
+                        existing["status"] = "active"
+                        existing["completed_at"] = 0.0
+                    elif existing.get("repeat") != "none" and self._float(existing.get("due_at")) > 0:
+                        next_due = advance_recurring_memo_due(
+                            self._float(existing.get("due_at")),
+                            str(existing.get("repeat") or "none"),
+                            now=now,
+                            fromtimestamp=self.plugin._environment_fromtimestamp,
+                            anchor_day=self._int(existing.get("repeat_anchor_day")),
+                            anchor_month=self._int(existing.get("repeat_anchor_month")),
+                        )
+                        existing["due_at"] = next_due
+                        existing["status"] = "active"
+                        existing["last_completed_at"] = now
+                        existing["completion_count"] = self._int(existing.get("completion_count")) + 1
+                        existing["last_reminder_offer_at"] = 0.0
+                        existing["last_reminder_attempt_at"] = 0.0
+                    else:
+                        existing["status"] = "completed"
+                        existing["completed_at"] = now
+                        existing["last_completed_at"] = now
+                        existing["completion_count"] = self._int(existing.get("completion_count")) + 1
+                    existing["updated_at"] = now
+                else:
+                    title = self._single_line(payload.get("title"), 60)
+                    content = clean_memo_note_content(payload.get("content"), 800)
+                    if not title and not content:
+                        return self._error("标题和内容至少填写一项")
+                    repeat = self._single_line(payload.get("repeat"), 20).lower() or "none"
+                    if repeat not in MEMO_NOTE_REPEATS:
+                        repeat = "none"
+                    color = self._single_line(payload.get("color"), 20).lower() or "yellow"
+                    if color not in MEMO_NOTE_COLORS:
+                        color = "yellow"
+                    due_at = max(0.0, self._float(payload.get("due_at")))
+                    if due_at > datetime(2100, 1, 1).timestamp():
+                        return self._error("到期时间超出支持范围")
+                    if repeat != "none" and due_at <= 0:
+                        return self._error("重复便签需要设置到期时间")
+                    if existing is None:
+                        existing = {
+                            "id": f"memo-{uuid.uuid4().hex[:16]}",
+                            "created_at": now,
+                            "status": "active",
+                            "completed_at": 0.0,
+                            "last_completed_at": 0.0,
+                            "completion_count": 0,
+                            "last_reminder_offer_at": 0.0,
+                            "last_reminder_attempt_at": 0.0,
+                        }
+                        notes.append(existing)
+                    prior_due_at = self._float(existing.get("due_at"))
+                    existing.update({
+                        "title": title,
+                        "content": content,
+                        "color": color,
+                        "pinned": bool(payload.get("pinned")),
+                        "due_at": due_at,
+                        "repeat": repeat,
+                        "remind_enabled": bool(payload.get("remind_enabled", True)) and due_at > 0,
+                        "updated_at": now,
+                    })
+                    if due_at > 0 and due_at != prior_due_at:
+                        due_dt = self.plugin._environment_fromtimestamp(due_at)
+                        existing["repeat_anchor_day"] = due_dt.day
+                        existing["repeat_anchor_month"] = due_dt.month
+                    if existing.get("status") == "completed" and bool(payload.get("reopen")):
+                        existing["status"] = "active"
+                        existing["completed_at"] = 0.0
+                    if due_at != self._float((next((item for item in raw_notes if isinstance(item, dict) and item.get("id") == existing.get("id")), {}) or {}).get("due_at")):
+                        existing["last_reminder_offer_at"] = 0.0
+                        existing["last_reminder_attempt_at"] = 0.0
+
+                self.plugin.data["memo_notes"] = notes[-200:]
+                self.plugin._save_data_sync()
+                result = self._memo_notes_payload(self.plugin.data)
+            return self._ok({"memo_notes": result})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新备忘便签失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     @staticmethod
@@ -10898,6 +11058,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_SELFIE_WORKFLOW_NAME",
             "photo_persona_reference_image_path",
             "enable_daily_outfit_photo",
+            "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
             "daily_outfit_rotation_days",
             "enable_natural_language_photo_generation",
@@ -13238,6 +13399,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_photo_reference_image",
             "photo_persona_reference_image_path",
             "enable_daily_outfit_photo",
+            "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
             "daily_outfit_rotation_days",
             "enable_natural_language_photo_generation",
@@ -15503,6 +15665,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "has_story_bible": bool(item.get("story_bible")) if isinstance(item.get("story_bible"), dict) else False,
                     "last_manual_edit_summary": self._single_line(item.get("last_manual_edit_summary"), 120),
                     "created": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
+                    "cover_src": self._creative_project_cover_url(item),
+                    "cover_status": self._single_line(item.get("cover_generation_status"), 24),
                 }
             )
         if browsing_entries:
@@ -15723,6 +15887,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "diary_count": 1 if diaries else 0,
             "jm_album_count": len(jm_items),
             "reading_now_count": sum(1 for item in jm_items if self._int(item.get("reading_progress_page")) > 0 and not self._float(item.get("reading_completed_at"))),
+            "memo_notes": self._memo_notes_payload(data),
             "password_hint": password_hint,
             "public_books": public_books,
             "secret_books": secret_books,
@@ -16589,6 +16754,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     # Creative Project Management Endpoints
     # ============================================================
 
+    def _creative_project_cover_path(self, project: dict[str, Any]) -> Path | None:
+        path_text = self._single_line(project.get("cover_path"), 500)
+        if not path_text:
+            return None
+        try:
+            path = Path(path_text).resolve()
+        except Exception:
+            return None
+        return path if path.exists() and path.is_file() else None
+
+    def _creative_project_cover_url(self, project: dict[str, Any]) -> str:
+        project_id = self._single_line(project.get("id"), 32)
+        path = self._creative_project_cover_path(project)
+        if not project_id or path is None:
+            return ""
+        try:
+            stat = path.stat()
+            version = f"{int(stat.st_mtime)}-{stat.st_size}"
+        except OSError:
+            version = self._single_line(project.get("cover_generated_at"), 40)
+        return f"{PAGE_API_PREFIX}/creative/project/cover?id={quote(project_id, safe='')}&v={quote(version, safe='')}"
+
     def _creative_project_payload(self, project: dict[str, Any]) -> dict[str, Any]:
         chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
         chunk_items = []
@@ -16634,7 +16821,31 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "created_at": self.plugin._format_timestamp_elapsed(project.get("created_at", 0)),
             "last_advanced": self.plugin._format_timestamp_elapsed(project.get("last_advanced_at", 0)),
             "next_advance": self.plugin._format_timestamp_elapsed(project.get("next_advance_at", 0)),
+            "cover_src": self._creative_project_cover_url(project),
+            "cover_status": self._single_line(project.get("cover_generation_status"), 24),
+            "cover_error": self._single_line(project.get("cover_generation_error"), 220),
+            "cover_backend": self._single_line(project.get("cover_generation_backend"), 80),
+            "cover_style": self._single_line(project.get("cover_generation_style"), 40),
+            "cover_attempts": self._int(project.get("cover_generation_attempts")),
+            "cover_generated_at": self.plugin._format_timestamp_elapsed(project.get("cover_generated_at", 0)),
         }
+
+    async def get_creative_project_cover(self):
+        project_id = self._single_line(request.args.get("id"), 32)
+        if not project_id:
+            return self._error("缺少 id")
+        async with self.plugin._data_lock:
+            projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+            project = next(
+                (item for item in projects if isinstance(item, dict) and self._single_line(item.get("id"), 32) == project_id),
+                None,
+            )
+            path = self._creative_project_cover_path(project) if isinstance(project, dict) else None
+        if path is None:
+            return self._error("作品封面不存在")
+        response = await send_file(str(path))
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        return response
 
     async def get_creative_project(self) -> dict[str, Any]:
         project_id = str(request.args.get("id", "")).strip()
@@ -16892,6 +17103,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return {
             "enabled": bool(getattr(self.plugin, "enable_creative_writing", False)),
             "hidden_mode": bool(getattr(self.plugin, "creative_hidden_mode", False)),
+            "cover_generation_enabled": bool(getattr(self.plugin, "enable_creative_cover_generation", False)),
             "project_count": len(items),
             "active_projects": len(active),
             "latest_title": self._single_line(latest.get("title"), 60) if isinstance(latest, dict) else "",
@@ -16926,6 +17138,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "created_at": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
                     "last_advanced": self.plugin._format_timestamp_elapsed(item.get("last_advanced_at", 0)),
                     "next_advance": self.plugin._format_timestamp_elapsed(item.get("next_advance_at", 0)),
+                    "cover_src": self._creative_project_cover_url(item),
+                    "cover_status": self._single_line(item.get("cover_generation_status"), 24),
+                    "cover_error": self._single_line(item.get("cover_generation_error"), 180),
                 }
                 for item in items[-6:]
             ],

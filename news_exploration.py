@@ -716,7 +716,7 @@ class NewsExplorationMixin:
         summary = _single_line(item.get("summary") or item.get("snippet") or item.get("video_context_text"), 240)
         source = _single_line(item.get("source"), 40)
         payload = {
-            "topic": title or _single_line((base_digest or {}).get("topic"), 40) or "刚看到的新闻",
+            "topic": title or _single_line((base_digest or {}).get("topic"), 40) or "新闻",
             "headline": title or _single_line((base_digest or {}).get("headline"), 100),
             "impression": summary or _single_line((base_digest or {}).get("impression"), 240),
             "selected_key": _single_line(item.get("key"), 32),
@@ -1343,7 +1343,7 @@ class NewsExplorationMixin:
                 continue
             delay_minutes = random.randint(12, 70)
             scheduled = now + delay_minutes * 60
-            title = _single_line(candidate.get("title"), 70) or "刚刷到的视频"
+            title = _single_line(candidate.get("title"), 70) or "视频"
             accepted = self._offer_proactive_candidate(
                 str(user_id),
                 user,
@@ -1354,7 +1354,7 @@ class NewsExplorationMixin:
                     "scheduled_ts": scheduled,
                     "topic": title,
                     "score": max(score, _safe_int(decision.get("score"), score, 0, 100)),
-                    "motive": f"刚刷到 B 站视频《{title}》,感觉和对方平时会在意的东西有点贴,只轻轻提一句",
+                    "motive": "这条视频和对方兴趣相关",
                     "context_key": "bilibili_video_context",
                     "context": {**candidate, "created_ts": now, "share_decision": decision, "preference_match": preference},
                 },
@@ -2666,7 +2666,7 @@ class NewsExplorationMixin:
         if not impression:
             impression = f"从 {source or '新闻源'} 看到一条新消息,还没来得及细看。"
         return {
-            "topic": title or "刚看到的新闻",
+            "topic": title or "新闻",
             "headline": title,
             "impression": impression,
             "selected_key": _single_line(item.get("key"), 32),
@@ -2828,7 +2828,7 @@ class NewsExplorationMixin:
             "should_share": True,
             "share_probability": 0.86,
             "self_link": "这像是能和用户一起碰碰运气的小福利，和日常吃喝、撒娇分享都很贴近。",
-            "motive": "刚看到一个挺实在的生活小活动，有点想醒来后轻轻提醒用户一句，像分享小便宜一样自然。",
+            "motive": "这条活动是实在的生活福利",
             "tone": "轻快,有点心动,不要像广告",
             "boundary": "不要保证一定抢到；不要催促用户；如果正在休息，就当作醒来后顺口提起。",
             "created_ts": _now_ts(),
@@ -3145,10 +3145,10 @@ class NewsExplorationMixin:
                         "reason": "news_share",
                         "action": "message",
                         "scheduled_ts": now + random.randint(10, 55) * 60,
-                        "topic": _single_line(user_digest.get("topic"), 48) or "刚看到的新闻",
+                        "topic": _single_line(user_digest.get("topic"), 48) or "新闻",
                         "score": max(4 if self_link_motive else 3, _safe_int(decision.get("score"), 0, 0, 100)),
                         "motive": self_link_motive
-                        or "刚看了几条新闻,其中一条和对方平时会在意的东西有点贴,只轻轻提一句",
+                        or "这条新闻和对方兴趣相关",
                         "context_key": "news_context",
                         "context": {
                             **user_digest,
@@ -4466,9 +4466,9 @@ class NewsExplorationMixin:
                         "reason": "web_exploration_share",
                         "action": "message",
                         "scheduled_ts": now + random.randint(12, 70) * 60,
-                        "topic": _single_line(digest.get("topic"), 48) or "刚查到的新东西",
+                        "topic": _single_line(digest.get("topic"), 48) or "新发现",
                         "score": max(4 if self_link_motive else 3, _safe_int(decision.get("score"), 0, 0, 100)),
-                        "motive": self_link_motive or "刚自己上网查了点新东西,有一点想按自己的语气轻轻提一句",
+                        "motive": self_link_motive or "这条内容和对方可能感兴趣的东西相关",
                         "context_key": "web_exploration_context",
                         "context": {
                             **digest,
@@ -4518,7 +4518,7 @@ class NewsExplorationMixin:
             "share_boundary": self_link_boundary,
             "queued_as_impulse": True,
         }
-        motive = self_link_motive or "刚自己上网查了点新东西,不是急着汇报,但后面如果有合适空档可以轻轻提一句"
+        motive = self_link_motive or "自然地向用户分享自己刚看的这条内容"
         shuffled = list(target_users)
         random.shuffle(shuffled)
         queued = 0
@@ -4537,7 +4537,7 @@ class NewsExplorationMixin:
                 reason="web_exploration_share",
                 action="message",
                 motive=motive,
-                topic=topic or "刚查到的新东西",
+                topic=topic or "新发现",
                 source="web_exploration",
                 window_start_at=start_at,
                 preferred_ts=start_at + random.randint(0, 45) * 60,

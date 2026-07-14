@@ -103,7 +103,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import _date_key, _group_link_message_context, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -794,10 +794,11 @@ class GroupWakeupMixin:
         return min(0.95, max(0.0, probability)), fatigue
 
     def _group_wakeup_question_signal(self, text: str) -> dict[str, Any]:
-        cleaned = _single_line(text, 260)
+        original = _single_line(text, 1000)
+        cleaned, _ = _group_link_message_context(original)
         if len(cleaned) < 4:
             return {}
-        if re.search(r"(https?://|www\.|```|\[图片\]|\[语音\]|\[视频\]|\[转发消息\])", cleaned, flags=re.I):
+        if re.search(r"(```|\[图片\]|\[语音\]|\[视频\]|\[转发消息\])", cleaned, flags=re.I):
             return {}
         if re.search(r"(哈哈|草|笑死|绷不住|乐|乐死|不是吧|不会吧).{0,8}[?？]?$", cleaned):
             return {}
@@ -829,6 +830,7 @@ class GroupWakeupMixin:
             (r"救命.{0,12}(怎么|咋办|怎么办|怎么弄|怎么解决|怎么处理|帮忙|帮我|报错|异常|卡住|跑不起来)", 80, "help_request"),
             (r"(为什么|为啥|咋回事|怎么回事|什么情况|啥情况|啥意思|什么意思)", 68, "explain_question"),
             (r"(这是什么|这个是什么|这个咋|这个怎么|这个为啥|这个能不能|这能不能)", 64, "identify_question"),
+            (r"(值不值得|值得(?:买|入手|用)?吗|靠谱吗|能买吗|能用吗|好用吗|怎么样|咋样|推荐吗|合适吗)", 68, "evaluation_question"),
         )
         for pattern, base_score, base_reason in strong_patterns:
             if re.search(pattern, cleaned):
@@ -1029,7 +1031,8 @@ class GroupWakeupMixin:
     ) -> dict[str, Any]:
         if not self.enable_group_wakeup_enhancement:
             return {}
-        cleaned = _single_line(text, 260)
+        original = _single_line(text, 1000)
+        cleaned, has_link_payload = _group_link_message_context(original)
         if not cleaned:
             return {}
         if str(scene.get("talking_to") or "") == "bot":
@@ -1048,8 +1051,10 @@ class GroupWakeupMixin:
                     "reason": "direct_wakeup_word",
                     "note": "群友提到了 Bot 名字或强唤醒词。",
                 }
-        question_signal = self._group_wakeup_question_signal(cleaned) if bool(getattr(self, "enable_group_wakeup_question", True)) else {}
-        cold_group_signal = self._group_wakeup_cold_group_signal(group, cleaned, now)
+        question_signal = self._group_wakeup_question_signal(original) if bool(getattr(self, "enable_group_wakeup_question", True)) else {}
+        if has_link_payload and not question_signal:
+            return {}
+        cold_group_signal = {} if has_link_payload else self._group_wakeup_cold_group_signal(group, cleaned, now)
         soft_signal_hit = bool(
             question_signal
             or cold_group_signal

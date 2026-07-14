@@ -425,7 +425,16 @@ class MemoryCompanionAdapterMixin:
             return ""
         if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:
             return ""
-        return text[: max(300, int(max_chars or 1200))]
+        relationship_sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
+        if callable(relationship_sanitizer):
+            try:
+                text = relationship_sanitizer(
+                    text,
+                    source=f"memory_companion.schedule.{kind}",
+                )
+            except Exception:
+                pass
+        return text[: max(300, int(max_chars or 1200))] if text else ""
 
     async def _memory_companion_compose_feature_context(
         self,
@@ -554,6 +563,27 @@ class MemoryCompanionAdapterMixin:
             return ""
         if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:
             return ""
+        generation_kinds = {
+            "current_state_reply",
+            "daily_outfit_photo",
+            "natural_photo",
+            "command_photo",
+        }
+        should_filter_relationships = (
+            kind in generation_kinds
+            or kind.startswith("proactive_")
+            or kind.startswith("qzone_")
+            or kind.startswith("creative_")
+        )
+        relationship_sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
+        if should_filter_relationships and callable(relationship_sanitizer):
+            try:
+                text = relationship_sanitizer(
+                    text,
+                    source=f"memory_companion.feature.{kind}",
+                )
+            except Exception:
+                pass
         return text[: max(240, min(1800, int(max_chars or 900)))]
 
     @staticmethod

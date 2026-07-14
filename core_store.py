@@ -376,6 +376,7 @@ class CoreStoreMixin:
             "jm_cosmos_integration": {},
             "bookshelf_items": [],
             "bookshelf_secret": {},
+            "memo_notes": [],
             "creative_projects": [],
             "creative_memory_pool": [],
             "proactive_candidate_pool": [],
@@ -436,6 +437,7 @@ class CoreStoreMixin:
         data.setdefault("jm_cosmos_integration", {})
         data.setdefault("bookshelf_items", [])
         data.setdefault("bookshelf_secret", {})
+        data.setdefault("memo_notes", [])
         data.setdefault("creative_projects", [])
         data.setdefault("creative_memory_pool", [])
         data.setdefault("proactive_candidate_pool", [])
@@ -495,6 +497,8 @@ class CoreStoreMixin:
     def _store_path_is_raw_user_text(path: tuple[Any, ...]) -> bool:
         """Raw observations are evidence and must not be rewritten during persistence."""
         if "recent_phrases" in path:
+            return True
+        if len(path) >= 3 and path[0] == "memo_notes" and path[-1] in {"title", "content"}:
             return True
         return bool(
             len(path) >= 5

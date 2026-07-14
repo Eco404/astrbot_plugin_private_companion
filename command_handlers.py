@@ -3419,8 +3419,29 @@ class CommandHandlersMixin:
         if not raw:
             return {}
         compact = re.sub(r"\s+", "", raw)
-        selfie_markers = ("自拍", "拍照", "拍张照", "拍一张照", "拍一张照片", "拍张照片", "来张自拍", "发张自拍", "发一张自拍")
-        selfie_hit = any(marker in compact for marker in selfie_markers)
+        selfie_markers = (
+            "自拍",
+            "拍照",
+            "拍张照",
+            "拍一张照",
+            "拍一张照片",
+            "拍张照片",
+            "来张自拍",
+            "发张自拍",
+            "发一张自拍",
+            "腿照",
+            "脚照",
+            "手照",
+            "全身照",
+            "半身照",
+            "近照",
+            "生活照",
+            "穿搭照",
+        )
+        character_photo_matcher = getattr(self, "_character_photo_request_matches", None)
+        selfie_hit = any(marker in compact for marker in selfie_markers) or bool(
+            callable(character_photo_matcher) and character_photo_matcher(raw)
+        )
         explicit_plugin_request = self._natural_language_photo_explicit_plugin_request(raw)
         draw_visual_targets = ("图片", "照片", "插画", "头像", "壁纸", "表情包", "自拍", "拍照", "画卷", "图")
         edit_visual_targets = draw_visual_targets + ("这张", "这个图", "引用图")

@@ -447,7 +447,7 @@ class ProactiveMessageMixin:
         if not title and not bvid and not comment and not review:
             return ""
         parts = [
-            "B站视频分享线索：刚刷到一个视频",
+            "B站视频分享线索",
             f"标题：{title}" if title else "",
             f"链接：https://www.bilibili.com/video/{bvid}" if bvid else "",
             f"UP：{up_name}" if up_name else "",
@@ -478,7 +478,7 @@ class ProactiveMessageMixin:
         if not topic and not headline and not link and not impression:
             return ""
         parts = [
-            "新闻阅读线索：刚扫过几条新闻,其中一条让自己有点想私下提一句。",
+            "新闻阅读线索",
             f"话题：{topic}" if topic else "",
             f"标题：{headline}" if headline else "",
             f"来源：{source}" if source else "",
@@ -487,7 +487,7 @@ class ProactiveMessageMixin:
             f"表达气质：{self_link_tone}" if self_link_tone else "",
             f"额外边界：{self_link_boundary}" if self_link_boundary else "",
             f"链接：{link}" if link else "",
-            "表达要求：不要像播报新闻,不要夸大或补充未知事实；可以只轻轻提起,也可以按人格吐槽、担心、好奇或转移成日常感受。",
+            "表达要求：不要像播报新闻,不要夸大或补充未知事实；按人格正常说话即可。",
         ]
         return "\n".join(part for part in parts if part)
 
@@ -502,6 +502,7 @@ class ProactiveMessageMixin:
         note = self._clean_external_share_source_field(exploration.get("note"), 260)
         source_title = self._clean_external_share_source_field(exploration.get("source_title"), 120)
         source_url = self._clean_external_share_source_field(exploration.get("source_url"), 420)
+        source_platform = self._external_share_platform_from_url(source_url)
         reason = self._clean_external_share_source_field(exploration.get("reason"), 140)
         self_link = exploration.get("self_link") if isinstance(exploration.get("self_link"), dict) else {}
         self_link_text = self._clean_external_share_source_field(self_link.get("self_link") if isinstance(self_link, dict) else "", 180)
@@ -510,7 +511,7 @@ class ProactiveMessageMixin:
         if not query and not topic and not note and not source_title and not source_url:
             return ""
         parts = [
-            "网页探索线索：Bot 刚刚按自己的兴趣主动搜索并了解了一点新东西,这是一条内部探索笔记。",
+            "网页探索线索",
             f"搜索词：{query}" if query else "",
             f"为什么想查：{reason}" if reason else "",
             f"探索主题：{topic}" if topic else "",
@@ -519,10 +520,74 @@ class ProactiveMessageMixin:
             f"表达气质：{self_link_tone}" if self_link_tone else "",
             f"额外边界：{self_link_boundary}" if self_link_boundary else "",
             f"参考来源：{source_title}" if source_title else "",
+            f"来源平台（以链接域名为准）：{source_platform}" if source_platform else "",
             f"链接：{source_url}" if source_url else "",
-            "表达要求：可以像随手分享发现、吐槽、好奇或继续想查；不要说成系统功能,不要编造来源外的信息。",
+            "表达要求：自然地向用户分享自己刚看的这条内容。标题、印象和链接只是事实参考，按当前人格正常说话，不要照抄字段。",
         ]
         return "\n".join(part for part in parts if part)
+
+    @staticmethod
+    def _external_share_platform_from_url(url: Any) -> str:
+        value = str(url or "").strip()
+        if not value:
+            return ""
+        try:
+            parsed = urlparse(value if "://" in value else f"//{value}")
+            hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
+        except Exception:
+            hostname = ""
+        if not hostname:
+            return ""
+        platform_domains = (
+            (("bilibili.com", "b23.tv"), "B站"),
+            (("douyin.com", "iesdouyin.com"), "抖音"),
+            (("xiaohongshu.com", "xhslink.com"), "小红书"),
+            (("weibo.com", "weibo.cn"), "微博"),
+            (("zhihu.com",), "知乎"),
+            (("youtube.com", "youtu.be"), "YouTube"),
+            (("reddit.com", "redd.it"), "Reddit"),
+            (("github.com",), "GitHub"),
+            (("toutiao.com",), "今日头条"),
+        )
+        for domains, label in platform_domains:
+            if any(hostname == domain or hostname.endswith(f".{domain}") for domain in domains):
+                return label
+        return ""
+
+    @staticmethod
+    def _external_share_claimed_platform(text: Any) -> str:
+        value = _single_line(text, 320)
+        patterns = (
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}(?:B站|哔哩哔哩)|(?:B站|哔哩哔哩)(?:视频|上|里|《)", "B站"),
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}抖音|抖音(?:视频|上|里|《)", "抖音"),
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}小红书|小红书(?:笔记|上|里|《)", "小红书"),
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}微博|微博(?:上|里|《)", "微博"),
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}知乎|知乎(?:上|里|《)", "知乎"),
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}YouTube|YouTube(?:上|里)", "YouTube"),
+            (r"(?:刚|在|从|刷到|看到|翻到).{0,8}Reddit|Reddit(?:上|里|《)", "Reddit"),
+        )
+        for pattern, label in patterns:
+            if re.search(pattern, value, flags=re.I):
+                return label
+        return ""
+
+    def _proactive_link_platform_mismatch_reason(self, text: Any) -> str:
+        cleaned = _single_line(text, 600)
+        claimed_platform = self._external_share_claimed_platform(cleaned)
+        if not cleaned or not claimed_platform:
+            return ""
+        links = re.findall(r"https?://[^\s，。！？!?；;）)】\]》>]+", cleaned, flags=re.I)
+        for link in links:
+            actual_platform = self._external_share_platform_from_url(link)
+            if actual_platform == claimed_platform:
+                continue
+            try:
+                hostname = str(urlparse(link).hostname or "").strip().lower()
+            except Exception:
+                hostname = ""
+            actual_label = actual_platform or hostname or "未知域名"
+            return f"正文声称来源为{claimed_platform}，但链接实际属于{actual_label}"
+        return ""
 
     def _user_asks_ai_daily_context(self, inbound_text: str) -> bool:
         text = str(inbound_text or "").strip()
@@ -997,7 +1062,7 @@ class ProactiveMessageMixin:
         current_chars = _safe_int(creative.get("current_chars"), 0, 0)
         target_chars = _safe_int(creative.get("target_chars"), 0, 0)
         parts = [
-            "创作分享线索：她最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直私下慢慢写；现在到了一个适合轻轻提起的小节点。",
+            "创作分享线索",
             f"作品类型：{work_type}" if work_type else "",
             f"标题：{title}" if title else "",
             f"设定：{premise}" if premise else "",
@@ -1481,6 +1546,7 @@ class ProactiveMessageMixin:
 
 【先判断，再开口】
 - 从线索中只选一个此刻最真实、最具体、最值得说的切口；无关线索直接忽略。
+- 开口动机是内部决策依据，不是你要说出口的话；不要照抄动机里的措辞，用你自己的方式开口。
 - 有明确的人、事、画面或感受时，就贴着它说；不要把多个来源拼成一段“近况播报”。
 - 日程、状态和记忆只能帮助确定语气与话题，不可单独证明某个动作已经完成；只有本轮真实动作结果可以支撑具体的已发生陈述。
 - 线索偏弱、对方尚未回复或时段不适合展开时，把话说得更轻：可以分享、留白或自然收住，但不追问、不催回应、不索取陪伴。
@@ -1530,8 +1596,21 @@ class ProactiveMessageMixin:
         action_context: str,
         motive: str,
     ) -> str:
+        relationship_sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
+
+        def sanitize_relationship_source(value: Any, source: str) -> str:
+            if callable(relationship_sanitizer):
+                try:
+                    return relationship_sanitizer(value, source=source)
+                except Exception:
+                    pass
+            return str(value or "").strip()
+
         state = self.data.get("daily_state", {})
-        action_prompt_context = self._format_action_prompt_context(action, action_context)
+        action_prompt_context = sanitize_relationship_source(
+            self._format_action_prompt_context(action, action_context),
+            "proactive.action_context",
+        )
         relationship_fact = self._format_proactive_relationship_fact(user)
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
@@ -1545,6 +1624,11 @@ class ProactiveMessageMixin:
         }
         if reason in source_focused_reasons:
             current_schedule = "（本轮不取生活片段，只围绕主动来源本身）"
+        elif reason in {"meal_care", "meal_care_followup"}:
+            current_schedule = (
+                "（饭点关心只使用当前时间、饭点和本轮动机；"
+                "不引用模拟日程中的具体动作、见闻、message_seed 或旧饮食记录）"
+            )
         elif reason == "group_share":
             last_sidecar_at = _safe_float(user.get("last_group_share_life_sidecar_at"), 0)
             if last_sidecar_at > 0 and _now_ts() - last_sidecar_at < 6 * 3600:
@@ -1555,6 +1639,7 @@ class ProactiveMessageMixin:
             action=action,
         )
         state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
+        state_hint = sanitize_relationship_source(state_hint, "proactive.current_state")
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
@@ -1568,7 +1653,15 @@ class ProactiveMessageMixin:
                 if open_loops:
                     loop_texts = []
                     for loop in open_loops[:2]:
-                        content_preview = _single_line(loop.get("content"), 80)
+                        content_preview = _single_line(
+                            sanitize_relationship_source(
+                                loop.get("content"),
+                                "proactive.open_loop",
+                            ),
+                            80,
+                        )
+                        if not content_preview:
+                            continue
                         age = loop.get("age_days")
                         age_str = f"（{age:.0f}天前）" if age is not None else ""
                         loop_texts.append(f"- {content_preview}{age_str}")
@@ -1581,8 +1674,18 @@ class ProactiveMessageMixin:
         except Exception:
             pass
         current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
-        compact_motive = _single_line(motive, 36) or "有一点想靠近对方"
-        topic_hint = _single_line(user.get("planned_proactive_topic"), 40)
+        current_schedule = sanitize_relationship_source(current_schedule, "proactive.current_schedule")
+        compact_motive = _single_line(
+            sanitize_relationship_source(motive, "proactive.planned_motive"),
+            36,
+        ) or "有一点想靠近对方"
+        topic_hint = _single_line(
+            sanitize_relationship_source(
+                user.get("planned_proactive_topic"),
+                "proactive.planned_topic",
+            ),
+            40,
+        )
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
         unanswered_hint = f"这是第 {unanswered_count} 次主动后还没等到回复。" if unanswered_count > 0 else ""
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
@@ -1592,6 +1695,14 @@ class ProactiveMessageMixin:
             recent_history_hint = await self._recent_private_conversation_for_proactive_review(user, limit=5)
         except Exception:
             recent_history_hint = ""
+        recent_history_hint = sanitize_relationship_source(
+            recent_history_hint,
+            "proactive.recent_private_history",
+        )
+        recent_topics_hint = sanitize_relationship_source(
+            recent_topics_hint,
+            "proactive.recent_topics",
+        )
         temporal_grounding_hint = (
             "【时间锚定】\n"
             f"- 当前真实时间：{current_time}。\n"
@@ -1669,19 +1780,33 @@ class ProactiveMessageMixin:
         if callable(balance_hint_getter):
             balance_hint = balance_hint_getter(user, reason=reason)
             if balance_hint:
-                prompt = f"{prompt.rstrip()}\n\n{balance_hint}"
+                balance_hint = sanitize_relationship_source(balance_hint, "proactive.balance_hint")
+                if balance_hint:
+                    prompt = f"{prompt.rstrip()}\n\n{balance_hint}"
         environment_hint_getter = getattr(self, "_format_environment_change_prompt", None)
         if callable(environment_hint_getter):
             environment_hint = environment_hint_getter(user, reason=reason)
             if environment_hint:
-                prompt = f"{prompt.rstrip()}\n\n{environment_hint}"
+                environment_hint = sanitize_relationship_source(environment_hint, "proactive.environment_hint")
+                if environment_hint:
+                    prompt = f"{prompt.rstrip()}\n\n{environment_hint}"
         personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
         if callable(personal_goal_hint_getter):
             personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
             if personal_goal_hint:
-                prompt = f"{prompt.rstrip()}\n\n{personal_goal_hint}"
+                personal_goal_hint = sanitize_relationship_source(personal_goal_hint, "proactive.personal_goal_hint")
+                if personal_goal_hint:
+                    prompt = f"{prompt.rstrip()}\n\n{personal_goal_hint}"
+        memo_hint_getter = getattr(self, "_format_memo_note_prompt", None)
+        if callable(memo_hint_getter):
+            memo_hint = memo_hint_getter(user, reason=reason)
+            if memo_hint:
+                memo_hint = sanitize_relationship_source(memo_hint, "proactive.memo_hint")
+                if memo_hint:
+                    prompt = f"{prompt.rstrip()}\n\n{memo_hint}"
         if open_loops_hint and "未完成话题候选" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
+        memory_context = ""
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(memory_getter):
             user_id = _single_line(user.get("user_id") or user.get("id"), 80)
@@ -1715,6 +1840,14 @@ class ProactiveMessageMixin:
                     f"{memory_context}\n"
                     "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
                 )
+        relationship_guard_getter = getattr(self, "_format_generation_relationship_authority_guard", None)
+        if callable(relationship_guard_getter) and "关系事实权限" not in prompt:
+            try:
+                relationship_guard = str(relationship_guard_getter() or "").strip()
+            except Exception:
+                relationship_guard = ""
+            if relationship_guard:
+                prompt = f"{prompt.rstrip()}\n\n{relationship_guard}"
         identity_guard = self._format_proactive_recipient_identity_guard(user, name)
         if identity_guard:
             prompt = f"{prompt.rstrip()}\n\n{identity_guard}"
@@ -1812,6 +1945,12 @@ class ProactiveMessageMixin:
             if personal_goal_hint:
                 lines.append(personal_goal_hint)
             lines.append("这是 Bot 自己的非创作型长期目标变化：只说一个真实进展、停滞或完成结果，不向用户索取监督，不把百分比写成系统汇报。")
+        elif reason == "memo_note_reminder":
+            memo_hint_getter = getattr(self, "_format_memo_note_prompt", None)
+            memo_hint = memo_hint_getter(user, reason=reason) if callable(memo_hint_getter) else ""
+            if memo_hint:
+                lines.append(memo_hint)
+            lines.append("这是用户自己设置的到期便签：直接提醒便签里的事项，一次说清，不解释为什么现在发送，也不要追问用户是否完成。")
         elif reason == "morning_greeting":
             lines.append("这是当天第一次普通早安：只自然打招呼或递出一个很轻的早晨片段，说完就停。用户还没有回应，禁止问早餐/早饭、吃了吗、吃什么，也不要追加起床查岗、健康确认或其他需要回答的问题；饮食关心会在用户回应后的独立时机处理。")
         elif reason == "meal_care":
@@ -1828,11 +1967,13 @@ class ProactiveMessageMixin:
             lines.append("今天是用户明确允许记住的生日，是一年一次的轻量仪式。先送出真诚、具体、低压力的祝福；不要提系统、记录、年龄、出生年份或精确日期，不承诺永远陪伴，也不要求回复或追问庆祝安排。若带图，正文只自然递出，不描述制作过程。")
         elif reason == "birthday_curiosity":
             lines.append("这是一次低频的资料好奇：只自然地问生日的月日，可顺带问公历还是农历；明确说不想回答也完全没关系。不要索要出生年份、年龄、证件信息，也不要假装已经准备了生日惊喜。")
+        elif reason == "web_exploration_share":
+            lines.append("自然地向用户分享自己刚看的这条内容。只把标题、探索印象和链接当作事实依据，像当前人格平时聊天一样表达。")
         elif kind in {"continuation", "reminder"}:
             lines.append("这是有来源的续接/提醒：可以顺着来源，但不要写成用户刚刚又发了新消息。")
         elif kind in {"self_share", "external_share", "observation"}:
             lines.append("这是分享/观察型主动：只取一个最小切口，不写成报告、推荐文或观察总结。")
-            true_external_info = reason in {"bili_video_share", "news_share", "web_exploration_share"} or anchor_type == "external_info"
+            true_external_info = reason in {"bili_video_share", "news_share", "web_exploration_share"}
             if true_external_info:
                 lines.append("外界分享必须贴住这次看到的标题、视频、新闻或资料本身；如果只是低压地放一句，也要围绕来源表达感受，不要改成无关的个人状态或泛泛压力询问。")
                 lines.append("最终正文必须让用户一眼知道你在分享什么：至少带标题、BV/链接、来源名或具体内容锚点之一；不要只写“看这个/这条好离谱/给你看个东西”。")
@@ -2572,6 +2713,23 @@ class ProactiveMessageMixin:
         cleaned = _single_line(text, 500)
         if not cleaned:
             return {"decision": "drop", "reason": "主动消息为空", "hard": True}
+        link_platform_mismatch = self._proactive_link_platform_mismatch_reason(cleaned)
+        if link_platform_mismatch:
+            return {
+                "decision": "drop",
+                "reason": link_platform_mismatch,
+                "hard": True,
+            }
+        if reason == "environment_change" and re.search(
+            r"https?://|(?:^|[^A-Za-z0-9])BV[0-9A-Za-z]{8,16}(?:$|[^A-Za-z0-9])|《[^》\n]{1,120}》",
+            cleaned,
+            flags=re.I,
+        ):
+            return {
+                "decision": "drop",
+                "reason": "环境变化主动消息混入了文章、视频或旧链接来源",
+                "hard": True,
+            }
         wrong_address = self._wrong_proactive_recipient_address(
             cleaned,
             user,
@@ -2617,6 +2775,14 @@ class ProactiveMessageMixin:
                     "text": rewritten_guard_text,
                 }
             return {"decision": "drop", "reason": _single_line(outbound_guard.get("reason"), 120) or "主动候选只剩内部残留", "hard": True}
+        fact_decision = self._unverified_proactive_fact_decision(
+            cleaned,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+        )
+        if fact_decision:
+            return fact_decision
         semantics: dict[str, Any] = {}
         semantic_getter = getattr(self, "_planned_proactive_semantics", None)
         if callable(semantic_getter):
@@ -2630,9 +2796,7 @@ class ProactiveMessageMixin:
         semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
         semantic_risk = _safe_float(semantics.get("risk"), 0.0)
         external_info_reasons = {"bili_video_share", "news_share", "web_exploration_share"}
-        external_share_active = reason in external_info_reasons or (
-            semantic_kind == "external_share" and semantic_anchor_type == "external_info"
-        )
+        external_share_active = reason in external_info_reasons
         default_hard_risk = 0.70 if strength == "lenient" else 0.45
         hard_risk_threshold = max(
             0.0,
@@ -2734,6 +2898,41 @@ class ProactiveMessageMixin:
                 "reason": "外界分享缺少可见来源",
                 "hard": True,
             }
+        source_link_match = re.search(r"https?://[^\s；，。！？!?]+", source_text, flags=re.I)
+        source_link = source_link_match.group(0).rstrip("）)】]》>。.") if source_link_match else ""
+        expected_platform = self._external_share_platform_from_url(source_link)
+        claimed_platform = self._external_share_claimed_platform(cleaned)
+        platform_mismatch = bool(
+            source_link
+            and claimed_platform
+            and (not expected_platform or claimed_platform != expected_platform)
+        )
+        if platform_mismatch:
+            expected_label = expected_platform or "该网页来源"
+            reference = self._external_share_fallback_reference(source_text)
+            if reference:
+                return {
+                    "decision": "rewrite",
+                    "reason": f"来源平台错配：链接属于{expected_label}，正文却写成{claimed_platform}",
+                    "reference_text": reference,
+                    "source_text": source_text,
+                    "hard": True,
+                }
+            return {
+                "decision": "drop",
+                "reason": f"来源平台错配：应为{expected_label}而不是{claimed_platform}",
+                "hard": True,
+            }
+        if source_link and source_link not in cleaned:
+            reference = self._external_share_fallback_reference(source_text)
+            if reference:
+                return {
+                    "decision": "rewrite",
+                    "reason": "外界分享正文遗漏真实来源链接",
+                    "reference_text": reference,
+                    "source_text": source_text,
+                    "hard": True,
+                }
         if self._external_share_text_mentions_source(cleaned, source_text):
             return None
         reference = self._external_share_fallback_reference(source_text)
@@ -2741,7 +2940,7 @@ class ProactiveMessageMixin:
             return {
                 "decision": "rewrite",
                 "reason": "外界分享正文偏离来源",
-                "text": reference,
+                "reference_text": reference,
                 "source_text": source_text,
                 "hard": True,
             }
@@ -2783,7 +2982,12 @@ class ProactiveMessageMixin:
                 ):
                     add(line, 220)
         if isinstance(user, dict):
-            for key in ("bilibili_video_context", "news_context", "web_exploration_context"):
+            context_keys = {
+                "bili_video_share": ("bilibili_video_context",),
+                "news_share": ("news_context",),
+                "web_exploration_share": ("web_exploration_context",),
+            }.get(str(reason or "").strip(), ())
+            for key in context_keys:
                 payload = user.get(key)
                 if not isinstance(payload, dict):
                     continue
@@ -2914,14 +3118,18 @@ class ProactiveMessageMixin:
         link_match = re.search(r"https?://[^\s；，。！？!?]+", source, flags=re.I)
         if link_match:
             link = _single_line(link_match.group(0).rstrip("）)】]》>。."), 220)
+        source_platform = self._external_share_platform_from_url(link)
         bvid_match = re.search(r"\bBV[0-9A-Za-z]{8,16}\b", source)
         if not link and bvid_match:
             link = f"https://www.bilibili.com/video/{bvid_match.group(0)}"
+        reference_match = re.search(r"(?:参考来源|source_title)[:：]\s*([^；。\n\r|｜]{2,90})", source, flags=re.I)
+        if reference_match:
+            title = _single_line(reference_match.group(1), 64)
         book_match = re.search(r"[《“\"『「]([^》”\"』」]{2,90})[》”\"』」]", source)
-        if book_match:
+        if not title and book_match:
             title = _single_line(book_match.group(1), 64)
         for pattern in (
-            r"(?:标题|摘要重点|话题|headline|topic)[:：]\s*([^；。\n\r|｜]{2,90})",
+            r"(?:标题|摘要重点|话题|参考来源|source_title|headline|topic)[:：]\s*([^；。\n\r|｜]{2,90})",
             r"^([^；。\n\r]{4,90})",
         ):
             if title:
@@ -2938,30 +3146,35 @@ class ProactiveMessageMixin:
                 break
         if not title:
             if link:
-                if "bilibili.com" in link:
-                    return _single_line(f"刚刷到这个 B站视频，有点想丢给你看一眼。 {link}", 220)
-                return _single_line(f"刚看到这条资料，有点想丢给你看一眼。 {link}", 220)
+                return _single_line(link, 260)
             return ""
         title = title.strip(" ，。！？；：、,.!?;:|｜")
         if not title:
             if link:
-                if "bilibili.com" in link:
-                    return _single_line(f"刚刷到这个 B站视频，有点想丢给你看一眼。 {link}", 220)
-                return _single_line(f"刚看到这条资料，有点想丢给你看一眼。 {link}", 220)
+                return _single_line(link, 260)
             return ""
         if self._looks_like_internal_provider_error_text(title):
             return ""
-        if "bilibili.com" in link or re.search(r"\bBV[0-9A-Za-z]{8,16}\b", source):
-            base = f"刚刷到 B站《{title}》，这个标题有点想丢给你看一眼。"
-        elif any(token in source for token in ("新闻阅读线索", "selected_source", "摘要重点", "新闻")):
-            base = f"刚看到《{title}》，有点想丢给你看一眼。"
-        elif any(token in source for token in ("网页探索线索", "搜索词", "参考来源", "source_url")):
-            base = f"刚查到《{title}》这条资料，有点想丢给你看一眼。"
+        impression_match = re.search(
+            r"(?:留下的印象|内部印象|短评|回味)[:：]\s*([^；\n\r]{4,70})",
+            source,
+            flags=re.I,
+        )
+        impression = _single_line(impression_match.group(1), 42).rstrip("。！？!?；;，,") if impression_match else ""
+        impression = re.sub(r"让人", "让我", impression)
+        if source_platform:
+            base = f"刚在{source_platform}刷到“{title}”"
         else:
-            base = f"刚看到《{title}》，有点想丢给你看一眼。"
+            base = f"刚看到“{title}”这条内容"
+        if impression and impression != title and len(base) + len(impression) <= 96:
+            base = f"{base}，{impression}"
+        else:
+            base = f"{base}，有点想给你看看"
         if link:
-            base = f"{base} {link}"
-        return _single_line(base, 220)
+            base = f"{base}。{link}"
+        else:
+            base = f"{base}。"
+        return _single_line(base, 300)
 
     def _strip_proactive_motive_leak_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -2987,6 +3200,13 @@ class ProactiveMessageMixin:
             r"[，,、\s]*(?:怕|担心)[^，。！？\n]{0,16}(?:太早|太晚|打扰|吵到|烦到)[^，。！？\n]*",
             r"[，,、\s]*(?:就)?先(?:收住|忍住|憋住)[^，。！？\n]*",
             r"[，,、\s]*(?:结果|后来)?[^，。！？\n]{0,12}(?:绕了一圈|转了一圈|想了半天)[^，。！？\n]*",
+            r"[，,、\s]*莫名觉得[^，。！？\n]*",
+            r"[，,、\s]*(?:顺手)(?:丢给你|放这儿|递给你|想起|分享一下|分享一下)[^，。！？\n]*",
+            r"[，,、\s]*(?:多看一眼|也会留意这个|也会看一眼)[^，。！？\n]*",
+            r"[，,、\s]*(?:只)?轻轻(?:提一句|提醒[^，。！？\n]*|说声|补上一句)[^，。！？\n]*",
+            r"[，,、\s]*想(?:短短|轻轻)(?:说一句|提一句|说句话|提一声|说一下|打声招呼)[^，。！？\n]*",
+            r"[，,、\s]*感觉和[^，。！？\n]{0,20}有点贴[^，。！？\n]*",
+            r"[，,、\s]*想跟你说一句[^，。！？\n]*",
         )
         kept: list[str] = []
         changed = False
@@ -3081,6 +3301,76 @@ class ProactiveMessageMixin:
         if seconds < 86400:
             return f"约{max(1, int(seconds // 3600))}小时"
         return f"约{max(1, int(seconds // 86400))}天"
+
+    @staticmethod
+    def _proactive_has_verified_recent_fact_source(
+        *,
+        reason: str,
+        action: str,
+        action_context: str = "",
+    ) -> bool:
+        source_reasons = {
+            "bili_video_share",
+            "news_share",
+            "web_exploration_share",
+            "creative_share",
+            "jm_cosmos_share",
+            "jm_cosmos_recommendation_request",
+        }
+        if str(reason or "").strip() in source_reasons:
+            return True
+        context = str(action_context or "")
+        if re.search(r"(?:真实图片文件|图片路径|真实动作结果|工具结果|来源链接|https?://)", context, re.I):
+            return True
+        return str(action or "message").strip() not in {"", "message", "photo_text"} and bool(_single_line(context, 240))
+
+    def _unverified_proactive_fact_decision(
+        self,
+        text: str,
+        *,
+        reason: str,
+        action: str,
+        action_context: str = "",
+    ) -> dict[str, Any] | None:
+        if self._proactive_has_verified_recent_fact_source(
+            reason=reason,
+            action=action,
+            action_context=action_context,
+        ):
+            return None
+        recent_self_action = re.compile(
+            r"(?:我\s*)?(?:刚刚|刚才|方才|刚|才)\s*"
+            r"(?:刷到|刷了|看到|看见|听到|听见|读到|发现|碰到|遇到|收到|"
+            r"买了|拍了|做了|画了|写了|吃了|喝了|回到|到家|出门|回来)"
+        )
+        stale_meal_attribution = re.compile(
+            r"你[^。！？!?；;…~～]{0,12}(?:昨天|昨晚)[^。！？!?；;…~～]{0,16}"
+            r"(?:吃的|点的|喝的|吃了|点了|喝了)"
+        )
+        unsafe_units: list[str] = []
+        safe_units: list[str] = []
+        for unit in self._split_proactive_sentence_units(text):
+            recent_claim = bool(recent_self_action.search(unit))
+            stale_claim = reason in {"meal_care", "meal_care_followup"} and bool(stale_meal_attribution.search(unit))
+            if recent_claim or stale_claim:
+                unsafe_units.append(unit)
+            else:
+                safe_units.append(unit)
+        if not unsafe_units:
+            return None
+        repaired = " ".join(safe_units).strip()
+        if repaired and len(re.sub(r"\s+", "", repaired)) >= 4:
+            return {
+                "decision": "rewrite",
+                "reason": "已移除无真实来源的近期动作或旧饮食归因",
+                "text": repaired,
+                "hard": True,
+            }
+        return {
+            "decision": "drop",
+            "reason": "主动正文依赖无真实来源的近期动作或旧饮食归因",
+            "hard": True,
+        }
 
     def _format_proactive_review_runtime_context(self, user: dict[str, Any], *, now: float | None = None) -> str:
         check_now = _now_ts() if now is None else now
@@ -3225,12 +3515,36 @@ class ProactiveMessageMixin:
         )
         local_decision = str(local.get("decision") or "send").strip().lower()
         local_hard_block = bool(local.get("hard")) or self._proactive_review_hard_block_reason(_single_line(local.get("reason"), 120))
+        review_enabled = bool(getattr(self, "enable_response_self_review", True)) and bool(
+            getattr(self, "enable_proactive_message_review", True)
+        )
+        if not review_enabled:
+            if local_decision in {"drop", "defer"}:
+                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            if local_decision == "rewrite":
+                return {
+                    "decision": "drop",
+                    "text": "",
+                    "reason": "主动终审已关闭，候选需要改写才能安全发送，已取消本轮发送",
+                    "hard": True,
+                }
+            return {
+                "decision": "send",
+                "text": "",
+                "reason": "主动终审已关闭，本地检查允许原文发送",
+            }
         if local_decision in {"drop", "defer"} and local_hard_block:
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         if local.get("decision") == "rewrite" and str(local.get("reference_text") or "").strip():
+            rewrite_scene = _single_line(
+                "自然地向用户分享自己刚看的这条内容；保留真实标题、来源和链接"
+                if reason in {"bili_video_share", "news_share", "web_exploration_share"}
+                else f"主动消息改写；reason={reason or 'check_in'}；action={action or 'message'}",
+                180,
+            )
             rewritten_reference = await self._rewrite_reference_reply_with_persona(
                 str(local.get("reference_text") or ""),
-                scene=_single_line(f"主动消息兜底改写；reason={reason or 'check_in'}；action={action or 'message'}", 180),
+                scene=rewrite_scene,
                 user=user,
                 fallback_text="",
                 task="proactive_reference_rewrite",
@@ -3246,6 +3560,23 @@ class ProactiveMessageMixin:
                     has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
                 )
                 rewritten_reference = self._normalize_proactive_sentence_flow(rewritten_reference)
+                post_rewrite_check = self._external_share_source_consistency_decision(
+                    user,
+                    rewritten_reference,
+                    reason=reason,
+                    topic=topic,
+                    motive=motive,
+                    action_context=review_context,
+                )
+                if post_rewrite_check:
+                    safe_reference = _single_line(local.get("reference_text"), 300)
+                    logger.info(
+                        "[PrivateCompanion] 主动外界分享人格润色后仍与来源不一致，已使用确定性来源文本: reason=%s before=%s after=%s",
+                        _single_line(post_rewrite_check.get("reason"), 120),
+                        _single_line(rewritten_reference, 140),
+                        _single_line(safe_reference, 140),
+                    )
+                    rewritten_reference = safe_reference
             if rewritten_reference:
                 local = dict(local)
                 local["text"] = rewritten_reference
@@ -3259,8 +3590,6 @@ class ProactiveMessageMixin:
         if local.get("decision") == "rewrite" and bool(local.get("hard")):
             return local
         if local_decision == "drop":
-            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-        if not bool(getattr(self, "enable_proactive_message_review", True)):
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         persona = await self._resolve_proactive_persona_prompt(user)
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
@@ -3277,6 +3606,16 @@ class ProactiveMessageMixin:
             _single_line(user.get("nickname"), 40),
         )
         runtime_context = self._format_proactive_review_runtime_context(user)
+        has_verified_fact_source = self._proactive_has_verified_recent_fact_source(
+            reason=reason,
+            action=action,
+            action_context=review_context,
+        )
+        fact_source_context = (
+            f"本轮存在可核验动作/来源：{review_context}"
+            if has_verified_fact_source
+            else "本轮没有可核验的近期动作或外部来源；不得声称自己刚刚看见、刷到、听到、收到或完成了某件事。"
+        )
         local_context = "；".join(
             part
             for part in (
@@ -3300,6 +3639,8 @@ Rules:
 - This is a content gate, not a scheduler. Never output defer, waiting, or a delay.
 - Read the recent conversation and runtime context first. The candidate must read like a natural message from the current persona, not a system-triggered interruption.
 - Do not invent facts or promise tools, searches, media, relays, or actions that were not actually performed.
+- Planned schedules, persona continuity, and message seeds are narrative inspiration, not evidence that an action happened.
+- Relative dates such as yesterday must be supported by the recent conversation or an explicitly dated reliable source.
 - Preserve real media context. Do not claim an image exists when none is attached.
 - A rewrite must be shorter or similarly sized and must not add new factual claims.
 - If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
@@ -3309,6 +3650,9 @@ Rules:
 
 [Runtime state]
 {runtime_context}
+
+[Verified fact boundary]
+{fact_source_context}
 
 [Local safety result]
 {local_context or "local gate passed"}
@@ -3360,7 +3704,14 @@ Output:
                 timeout=timeout_seconds,
             )
         except Exception as exc:
-            logger.warning("[PrivateCompanion] Proactive final content gate unavailable; using local result: %s", _single_line(exc, 120))
+            now = time.time()
+            last_log_at = float(getattr(self, "_proactive_review_fallback_log_at", 0.0) or 0.0)
+            if now - last_log_at >= 600:
+                self._proactive_review_fallback_log_at = now
+                logger.info(
+                    "[PrivateCompanion] 主动最终内容复核模型暂不可用，已安全回退本地复核（同类日志 10 分钟内不重复）: %s",
+                    self._format_send_exception(exc),
+                )
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
         payload = self._parse_json_object(raw)
         if not isinstance(payload, dict):
@@ -3395,6 +3746,9 @@ Output:
                 )
             if not reviewed_text:
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            meta_leak_checker = getattr(self, "_response_review_meta_leak_reason", None)
+            if callable(meta_leak_checker) and meta_leak_checker(reviewed_text):
+                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if self._framework_agent_meta_summary_leak(reviewed_text):
                 return {
                     "decision": "drop",
@@ -3405,6 +3759,39 @@ Output:
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
+                rewritten_source_issue = self._external_share_source_consistency_decision(
+                    user,
+                    reviewed_text,
+                    reason=reason,
+                    topic=topic,
+                    motive=motive,
+                    action_context=review_context,
+                )
+                if rewritten_source_issue:
+                    original_source_issue = self._external_share_source_consistency_decision(
+                        user,
+                        text,
+                        reason=reason,
+                        topic=topic,
+                        motive=motive,
+                        action_context=review_context,
+                    )
+                    if original_source_issue is None:
+                        reviewed_text = text
+                        note = "终审改写破坏了真实来源，已恢复复核前原文"
+                    else:
+                        source_text = str(rewritten_source_issue.get("source_text") or "").strip()
+                        safe_reference = self._external_share_fallback_reference(source_text)
+                        if not safe_reference:
+                            return {
+                                "decision": "drop",
+                                "text": "",
+                                "reason": "终审改写后的来源不一致且无法恢复真实来源",
+                                "hard": True,
+                            }
+                        reviewed_text = safe_reference
+                        note = "终审改写破坏了真实来源，已恢复确定性来源文本"
         normalized_payload = self._normalize_proactive_review_decision_policy(
             user,
             {
@@ -3423,6 +3810,11 @@ Output:
             decision = "rewrite"
             note = _single_line(note or local.get("reason") or "本地轻改写后放行", 120)
         final_text = reviewed_text if decision == "rewrite" and reviewed_text else text
+        link_platform_mismatch = self._proactive_link_platform_mismatch_reason(final_text)
+        if decision in {"send", "rewrite"} and link_platform_mismatch:
+            decision = "drop"
+            reviewed_text = ""
+            note = link_platform_mismatch
         if decision in {"send", "rewrite"} and self._framework_agent_meta_summary_leak(final_text):
             decision = "drop"
             reviewed_text = ""
@@ -3661,9 +4053,31 @@ Output:
         action_context: str = "",
         motive: str = "",
     ) -> str:
-        topic = _single_line(user.get("planned_proactive_topic"), 120)
-        planned_motive = _single_line(motive or user.get("planned_proactive_motive"), 220)
-        context = self._format_action_prompt_context(action, action_context)
+        relationship_sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
+
+        def sanitize_relationship_source(value: Any, source: str) -> str:
+            if callable(relationship_sanitizer):
+                try:
+                    return relationship_sanitizer(value, source=source)
+                except Exception:
+                    pass
+            return str(value or "").strip()
+
+        topic = _single_line(
+            sanitize_relationship_source(user.get("planned_proactive_topic"), "proactive_fallback.topic"),
+            120,
+        )
+        planned_motive = _single_line(
+            sanitize_relationship_source(
+                motive or user.get("planned_proactive_motive"),
+                "proactive_fallback.motive",
+            ),
+            220,
+        )
+        context = sanitize_relationship_source(
+            self._format_action_prompt_context(action, action_context),
+            "proactive_fallback.action_context",
+        )
         if (
             (context.startswith("message：") and "图片动作本轮未产出" not in context)
             or context in {"普通文字", "普通私聊文本"}
@@ -3693,8 +4107,16 @@ Output:
             personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
             if personal_goal_hint:
                 reference = f"{reference}\n{personal_goal_hint}" if reference else personal_goal_hint
+        memo_hint_getter = getattr(self, "_format_memo_note_prompt", None)
+        if reason == "memo_note_reminder" and callable(memo_hint_getter):
+            memo_hint = memo_hint_getter(user, reason=reason)
+            if memo_hint:
+                reference = f"{reference}\n{memo_hint}" if reference else memo_hint
         if not reference:
             reference = f"自然地向{name or '对方'}主动说一句与当前状态有关、低压力且无需立即回复的话。"
+        reference = sanitize_relationship_source(reference, "proactive_fallback.reference")
+        if not reference:
+            reference = f"自然地向{name or '对方'}主动说一句低压力且无需立即回复的话。"
         return await self._rewrite_reference_reply_with_persona(
             reference,
             scene=f"主动开口；原因={reason or 'check_in'}；动作={action or 'message'}",
@@ -3863,6 +4285,16 @@ Output:
         cleaned = str(text or "").strip()
         if not cleaned:
             return ""
+        relationship_sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
+
+        def sanitize_relationship_source(value: Any, source: str) -> str:
+            if callable(relationship_sanitizer):
+                try:
+                    return relationship_sanitizer(value, source=source)
+                except Exception:
+                    pass
+            return str(value or "").strip()
+
         flags = self._proactive_reply_air_flags(
             cleaned,
             reason=reason,
@@ -3895,6 +4327,25 @@ Output:
             motive=motive,
             action_context=action_context,
         )
+        intent_hint = sanitize_relationship_source(intent_hint, "proactive_review.intent")
+        review_motive = _single_line(
+            sanitize_relationship_source(
+                motive or user.get("planned_proactive_motive"),
+                "proactive_review.motive",
+            ),
+            160,
+        )
+        review_topic = _single_line(
+            sanitize_relationship_source(
+                user.get("planned_proactive_topic"),
+                "proactive_review.topic",
+            ),
+            120,
+        )
+        review_action_context = _single_line(
+            sanitize_relationship_source(action_context, "proactive_review.action_context"),
+            260,
+        )
         persona = await self._resolve_proactive_persona_prompt(user)
         proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
         recipient_identity = self._format_proactive_recipient_identity_guard(
@@ -3915,11 +4366,11 @@ Output:
 {reason or "check_in"}
 
 【动机/话题】
-{_single_line(motive or user.get("planned_proactive_motive"), 160)}
-{_single_line(user.get("planned_proactive_topic"), 120)}
+{review_motive}
+{review_topic}
 
 【动作上下文】
-{_single_line(action_context, 260) or "（无）"}
+{review_action_context or "（无）"}
 
 【内在约束】
 {intent_hint or "（无额外约束）"}
@@ -3959,6 +4410,13 @@ Output:
             action_context=action_context,
             has_real_image="真实图片文件：" in action_context or "图片路径：" in action_context,
         )
+        meta_leak_checker = getattr(self, "_response_review_meta_leak_reason", None)
+        if callable(meta_leak_checker) and meta_leak_checker(candidate):
+            logger.error(
+                "[PrivateCompanion] 回复/主动复核返回内部判断，已丢弃: output=%s",
+                _single_line(candidate, 180),
+            )
+            return ""
         logger.info(
             "[PrivateCompanion] 回复/主动复核完成: mode=%s flags=%s elapsed=%dms before=%s after=%s",
             mode,
@@ -5052,6 +5510,8 @@ Output:
                 if self._onebot_action_result_ok(result):
                     return True, ""
                 last_error = f"{attr} 返回失败: {_single_line(result, 180)}"
+                if self._is_onebot_event_checker_send_rejection(result):
+                    return False, self._onebot_event_checker_rejection_summary()
             except TypeError:
                 try:
                     result = func(action, params)
@@ -5060,10 +5520,16 @@ Output:
                     if self._onebot_action_result_ok(result):
                         return True, ""
                     last_error = f"{attr} 返回失败: {_single_line(result, 180)}"
+                    if self._is_onebot_event_checker_send_rejection(result):
+                        return False, self._onebot_event_checker_rejection_summary()
                 except Exception as exc:
+                    if self._is_onebot_event_checker_send_rejection(exc):
+                        return False, self._onebot_event_checker_rejection_summary()
                     last_error = self._format_send_exception(exc)
                     continue
             except Exception as exc:
+                if self._is_onebot_event_checker_send_rejection(exc):
+                    return False, self._onebot_event_checker_rejection_summary()
                 last_error = self._format_send_exception(exc)
                 continue
         func = getattr(client, action, None)
@@ -10034,6 +10500,25 @@ Output:
             return f"{exc.__class__.__name__}: {text}"
         return repr(exc)
 
+    @staticmethod
+    def _is_onebot_event_checker_send_rejection(error: Any) -> bool:
+        """Identify the NTQQ sendMsg rejection shared by every aiocqhttp send route."""
+        text = str(error or "").strip().lower()
+        compact = re.sub(r"\s+", "", text)
+        has_retcode = any(
+            token in compact
+            for token in ("retcode=1200", "retcode:1200", "'retcode':1200", '\"retcode\":1200')
+        )
+        return bool(
+            has_retcode
+            and "eventcheckerfailed" in compact
+            and ("sendmsg" in compact or "nodeikernelmsgservice" in compact)
+        )
+
+    @staticmethod
+    def _onebot_event_checker_rejection_summary() -> str:
+        return "QQ/NTQQ 拒绝发送（retcode=1200，EventChecker sendMsg）；目标可能暂时不可私聊、好友状态已变化，或 QQ 客户端正处于异常状态"
+
     def _describe_send_target(self, umo: str, session: MessageSession | None, platform: Any | None) -> str:
         if session is None:
             return f"umo={_single_line(umo, 140) or '-'} session=unparsed platform=-"
@@ -10714,6 +11199,13 @@ Output:
                 return
             except Exception as e:
                 precise_error = e
+                if self._is_onebot_event_checker_send_rejection(e):
+                    summary = self._onebot_event_checker_rejection_summary()
+                    logger.info(
+                        "[PrivateCompanion] 主动发送被 QQ/NTQQ 底层拒绝，停止对同一 sendMsg 链路的立即重复尝试: target=%s",
+                        self._describe_send_target(umo, session, platform),
+                    )
+                    raise RuntimeError(summary) from e
                 logger.warning(
                     "[PrivateCompanion] 精确平台发送失败,回退核心发送: target=%s error=%s",
                     self._describe_send_target(umo, session, platform),
@@ -10734,6 +11226,12 @@ Output:
             )
         except Exception as e:
             core_error = e
+            if self._is_onebot_event_checker_send_rejection(e):
+                logger.info(
+                    "[PrivateCompanion] 主动核心发送被 QQ/NTQQ 底层拒绝，停止同链立即重试: target=%s",
+                    self._describe_send_target(umo, session, platform),
+                )
+                raise RuntimeError(self._onebot_event_checker_rejection_summary()) from e
             target = self._describe_send_target(umo, session, platform)
             precise_text = self._format_send_exception(precise_error) or "未尝试或未失败"
             fallback_text = self._format_send_exception(e)
@@ -10746,6 +11244,8 @@ Output:
         direct_ok, direct_error = await self._send_chain_components_via_onebot_direct(umo, session, processed_chain)
         if direct_ok:
             return
+        if self._is_onebot_event_checker_send_rejection(direct_error):
+            raise RuntimeError(self._onebot_event_checker_rejection_summary())
         target = self._describe_send_target(umo, session, platform)
         precise_text = self._format_send_exception(precise_error) or "未尝试或未失败"
         if core_error is not None:
@@ -11453,15 +11953,13 @@ Output:
             ("顺手冒了个头", ""),
             ("没什么大不了的,就是", ""),
             ("没什么大道理,就是", ""),
-            ("免得你又忘了我", "怕你忙过头"),
+            ("免得你又忘了我", ""),
             ("最近忙不忙？", ""),
             ("最近忙不忙", ""),
             ("数据有意思吗？", ""),
             ("数据有意思吗", ""),
-            ("发现你好像在忙。", "看你还没从那边抬头。"),
-            ("发现你好像在忙", "看你还没从那边抬头"),
-            ("辛苦啦。", "别太累。"),
-            ("辛苦啦", "别太累"),
+            ("发现你好像在忙。", ""),
+            ("发现你好像在忙", ""),
             ("请注意休息", "记得歇会儿"),
         ]
         for old, new in _SOCIAL_REPLACEMENTS:

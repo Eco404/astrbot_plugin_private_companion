@@ -1087,20 +1087,20 @@ class ProactiveMixin:
                 "reason": normalized_reason,
                 "action": normalized_action,
                 "topic": _single_line(topic, 80) or "轻一点的近况",
-                "motive": "对方前面还没接话,作为朋友把主动放轻一点；只顺手留一句,不催、不追问、不要求立刻回复",
+                "motive": "对方还没接话，放轻；不催不追问",
             }
         if level == 2:
             return {
                 "reason": "quiet_care",
                 "action": "message",
                 "topic": "低压近况",
-                "motive": "对方已经有一阵没有回应,这次只保留一条很短的低压关心；不贴近、不连问、不要求回复",
+                "motive": "对方有一阵没回应了，低压；不连问",
             }
         return {
             "reason": "quiet_care",
             "action": "message",
             "topic": "留出空间",
-            "motive": "连续没有回应时,次要用户关系要主动退一步；如果还要发,只放一小句很轻的话,说完就把空间留给对方",
+            "motive": "连续没回应，退一步；留空间",
         }
 
     @staticmethod
@@ -2597,6 +2597,7 @@ class ProactiveMixin:
                     ("每日穿搭", self._ensure_daily_outfit_photo),
                     ("创作推进", self._maybe_advance_creative_projects),
                     ("个人目标", self._maybe_settle_personal_goals),
+                    ("备忘便签", self._maybe_process_memo_notes),
                     ("环境突变", self._maybe_refresh_environment_change),
                     ("余额感知", self._maybe_refresh_balance_awareness),
                     ("被动注入缓存", self._refresh_passive_injection_cache),
@@ -2630,6 +2631,7 @@ class ProactiveMixin:
                 ("每日穿搭", self._ensure_daily_outfit_photo),
                 ("创作推进", self._maybe_advance_creative_projects),
                 ("个人目标", self._maybe_settle_personal_goals),
+                ("备忘便签", self._maybe_process_memo_notes),
                 ("环境突变", self._maybe_refresh_environment_change),
                 ("余额感知", self._maybe_refresh_balance_awareness),
                 ("被动注入缓存", self._refresh_passive_injection_cache),
@@ -2671,6 +2673,11 @@ class ProactiveMixin:
             detail_due_in = self._next_detail_due_in_seconds(now)
             if detail_due_in is not None:
                 nearest_due_in = detail_due_in
+
+        memo_due_getter = getattr(self, "_next_memo_due_in_seconds", None)
+        memo_due_in = memo_due_getter(now) if callable(memo_due_getter) else None
+        if memo_due_in is not None and (nearest_due_in is None or memo_due_in < nearest_due_in):
+            nearest_due_in = memo_due_in
         elif self.enable_detail_enhancement:
             detail_due_in = self._next_detail_due_in_seconds(now)
             if detail_due_in is not None and detail_due_in < nearest_due_in:

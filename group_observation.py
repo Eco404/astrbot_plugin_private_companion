@@ -105,6 +105,7 @@ from .dreaming import (
 )
 from .helpers import (
     _date_key,
+    _group_link_message_context,
     _normalize_outbound_punctuation_flow,
     _now_ts,
     _safe_float,
@@ -1127,6 +1128,48 @@ class GroupObservationMixin:
         user["last_group_ignore_complaint_text"] = _single_line(text, 80)
         return True
 
+    @staticmethod
+    def _is_group_slang_transport_metadata_term(term: Any) -> bool:
+        normalized = unicodedata.normalize("NFKC", str(term or "")).strip().lower()
+        compact = re.sub(r"[\s\[\]【】()（）<>《》:：|]+", "", normalized)
+        if compact in {
+            "引用消息",
+            "被引用消息",
+            "回复消息",
+            "引用消息id",
+            "回复消息id",
+            "reply",
+            "quote",
+            "quoted",
+            "msg_id",
+            "message_id",
+            "message_seq",
+            "real_id",
+            "reply_id",
+            "reply_msg_id",
+            "reply_message_id",
+            "quote_id",
+            "quoted_id",
+            "quoted_message_id",
+            "share_source",
+            "share_medium",
+            "share_url",
+            "share_title",
+            "share_content",
+            "share_type",
+            "share_target",
+            "share_app",
+            "share_channel",
+        }:
+            return True
+        return bool(
+            re.fullmatch(
+                r"(?:msg|message|reply|quote|quoted)_(?:id|seq|msg_id|message_id|real_id)"
+                r"|share_(?:source|medium|url|title|content|type|target|app|channel)",
+                compact,
+            )
+        )
+
     def _learn_group_slang(self, group: dict[str, Any], text: str) -> None:
         if self._group_text_blocked_by_injection_guard(text):
             return
@@ -1136,9 +1179,13 @@ class GroupObservationMixin:
             group["slang_terms"] = terms
         self._cleanup_group_slang_terms(group)
         candidates: list[str] = []
-        for token in re.findall(r"[A-Za-z0-9_]{2,16}|[\u4e00-\u9fff]{2,8}", text):
-            token = _single_line(token, 16)
+        for raw_token in re.findall(r"[A-Za-z0-9_]{2,32}|[\u4e00-\u9fff]{2,8}", text):
+            if self._is_group_slang_transport_metadata_term(raw_token):
+                continue
+            token = _single_line(raw_token, 16)
             if not token:
+                continue
+            if self._is_group_slang_transport_metadata_term(token):
                 continue
             if token in {"哈哈", "什么", "这个", "那个", "就是", "感觉", "可以", "不是", "没有", "真的", "一下"}:
                 continue
@@ -1302,6 +1349,9 @@ class GroupObservationMixin:
         removed: set[str] = set()
         for item in terms:
             term = _single_line(item.get("term") if isinstance(item, dict) else item, 40)
+            if self._is_group_slang_transport_metadata_term(term):
+                removed.add(term)
+                continue
             meanings = group.get("slang_meanings")
             meaning_item = meanings.get(term) if isinstance(meanings, dict) else None
             if isinstance(meaning_item, dict) and meaning_item.get("source") in {"explicit_correction", "manual"}:
@@ -2278,8 +2328,7 @@ class GroupObservationMixin:
     def _parse_group_interjection_decision(self, raw: Any) -> tuple[bool, str, str]:
         payload = self._parse_json_object(raw)
         if not isinstance(payload, dict):
-            reply = self._clean_group_interjection_reply(raw)
-            return (bool(reply), reply, "legacy_text")
+            return (False, "", "invalid_json")
         raw_decision = str(
             payload.get("decision")
             or payload.get("action")
@@ -2308,11 +2357,17 @@ class GroupObservationMixin:
             or payload.get("content")
             or ""
         )
+        meta_leak_checker = getattr(self, "_response_review_meta_leak_reason", None)
+        if reply and callable(meta_leak_checker) and meta_leak_checker(reply):
+            return (False, "", "review_meta_leak")
         return (bool(should_reply and reply), reply if should_reply else "", _single_line(payload.get("reason"), 80))
 
     def _group_interjection_allowed(self, group: dict[str, Any], text: str) -> tuple[bool, str]:
         if not self.enable_group_interjection:
             return False, "群聊主动插话未开启"
+        _, has_link_payload = _group_link_message_context(text)
+        if has_link_payload:
+            return False, "链接或分享内容不触发主动插话"
         max_daily_getter = getattr(self, "_effective_group_interject_max_daily", None)
         max_daily = max_daily_getter() if callable(max_daily_getter) else self.group_interject_max_daily
         min_interval_getter = getattr(self, "_effective_group_interject_min_interval_minutes", None)
@@ -2654,6 +2709,11 @@ class GroupObservationMixin:
         return {"action": "follow", "text": cleaned, "image_path": ""}
 
     async def _maybe_group_interject(self, event: AstrMessageEvent, group: dict[str, Any], text: str) -> None:
+        if bool(getattr(event, "is_wake", False)) or bool(getattr(event, "is_at_or_wake_command", False)):
+            return
+        _, has_link_payload = _group_link_message_context(text)
+        if has_link_payload:
+            return
         try:
             sender_id = str(event.get_sender_id())
         except Exception:
@@ -2714,6 +2774,7 @@ class GroupObservationMixin:
 
 要求：
 - 如果这像群友之间的一对一、已经有人在自然接话、你这句没有新增价值,should_reply 必须为 false
+- 链接、分享卡片以及围绕链接猜测内容的消息,should_reply 必须为 false
 - 宁可不说,不要为了存在感插话
 - should_reply 为 true 时,text 才能填写要发到群里的正文；1 句,最多 35 个中文字符
 - should_reply 为 false 时,text 必须留空

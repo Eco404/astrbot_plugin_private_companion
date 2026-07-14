@@ -4,12 +4,15 @@ CreativeMixin — 从 main.py 重新拆分出的创作系统
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
+import shutil
 import uuid
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
@@ -1257,6 +1260,281 @@ class CreativeMixin:
         logger.info("[PrivateCompanion] 新增创作项目: %s / %s", project.get("work_type"), project.get("title"))
         return True
 
+    @staticmethod
+    def _creative_cover_file_exists(project: dict[str, Any]) -> bool:
+        path_text = _single_line(project.get("cover_path"), 500)
+        if not path_text:
+            return False
+        try:
+            path = Path(path_text)
+            return path.exists() and path.is_file()
+        except (OSError, ValueError):
+            return False
+
+    def _creative_cover_candidate_id(self) -> str:
+        if not bool(getattr(self, "enable_creative_cover_generation", False)):
+            return ""
+        now = _now_ts()
+        for project in reversed(self._creative_projects()):
+            if not isinstance(project, dict) or self._creative_cover_file_exists(project):
+                continue
+            chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+            if not any(isinstance(chunk, dict) and _single_line(chunk.get("text"), 80) for chunk in chunks):
+                continue
+            attempts = _safe_int(project.get("cover_generation_attempts"), 0, 0)
+            if attempts >= 3:
+                continue
+            if now < _safe_float(project.get("cover_generation_next_retry_at"), 0):
+                continue
+            if (
+                _single_line(project.get("cover_generation_status"), 24) == "generating"
+                and now - _safe_float(project.get("cover_generation_attempted_at"), 0) < 20 * 60
+            ):
+                continue
+            project_id = _single_line(project.get("id"), 32)
+            if project_id:
+                return project_id
+        return ""
+
+    @staticmethod
+    def _creative_cover_style_instruction(project: dict[str, Any]) -> tuple[str, str]:
+        source = re.sub(
+            r"\s+",
+            "",
+            " ".join(
+                str(project.get(key) or "")
+                for key in ("work_type", "tone", "premise", "source_text")
+            ).lower(),
+        )
+        style_rules = (
+            (
+                ("古风", "武侠", "仙侠", "历史", "志怪", "水墨"),
+                "东方水墨",
+                "contemporary Chinese ink illustration with restrained mineral pigments, expressive brush texture, elegant negative space",
+            ),
+            (
+                ("赛博", "cyberpunk", "霓虹", "朋克"),
+                "赛博视觉",
+                "refined cyberpunk editorial illustration, luminous neon accents, deep urban atmosphere, crisp graphic shapes",
+            ),
+            (
+                ("悬疑", "推理", "惊悚", "犯罪", "侦探", "谜"),
+                "悬疑黑色电影",
+                "restrained neo-noir editorial illustration, high-contrast lighting, controlled shadows, limited color palette, subtle visual clue",
+            ),
+            (
+                ("恐怖", "怪谈", "诡异", "克苏鲁", "gothic"),
+                "哥特暗黑",
+                "atmospheric gothic illustration, unsettling quiet, tactile shadows, muted colors, elegant rather than graphic horror",
+            ),
+            (
+                ("科幻", "未来", "宇宙", "星际", "机器人", "人工智能", "奇幻", "魔法", "幻想"),
+                "幻想概念插画",
+                "cinematic speculative-fiction concept illustration, immersive worldbuilding, dramatic scale, sophisticated atmospheric color",
+            ),
+            (
+                ("诗", "诗歌", "散文", "随笔", "札记", "日记", "意识流"),
+                "诗意水彩",
+                "poetic editorial watercolor and printmaking, tactile paper texture, symbolic imagery, soft layered color, generous negative space",
+            ),
+            (
+                ("童话", "儿童", "寓言", "轻小说", "校园", "青春"),
+                "清新叙事插画",
+                "polished narrative illustration with clean shapes, lively color rhythm, gentle detail, contemporary Japanese editorial sensibility",
+            ),
+            (
+                ("喜剧", "搞笑", "幽默", "轻松", "荒诞"),
+                "轻快平面插画",
+                "playful contemporary graphic illustration, bold readable shapes, witty visual metaphor, bright but balanced color palette",
+            ),
+            (
+                ("治愈", "日常", "生活", "温柔", "恋爱", "爱情", "亲情", "成长"),
+                "暖色文学插画",
+                "warm literary editorial illustration, natural light, intimate everyday detail, painterly gouache texture, emotionally restrained composition",
+            ),
+        )
+        for keywords, label, instruction in style_rules:
+            if any(keyword in source for keyword in keywords):
+                return label, instruction
+        return (
+            "文学编辑插画",
+            "sophisticated literary editorial illustration, painterly texture, symbolic central image, restrained color harmony, timeless book-cover composition",
+        )
+
+    def _creative_cover_prompt(self, project: dict[str, Any]) -> str:
+        chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+        recent_text = " ".join(
+            _single_line(chunk.get("text"), 220)
+            for chunk in chunks[-3:]
+            if isinstance(chunk, dict) and _single_line(chunk.get("text"), 220)
+        )
+        characters = self._get_project_characters(project)
+        character_hint = "; ".join(
+            " - ".join(
+                part
+                for part in (
+                    _single_line(character.get("name"), 30),
+                    _single_line(
+                        character.get("description") or character.get("personality") or character.get("role"),
+                        100,
+                    ),
+                )
+                if part
+            )
+            for character in characters[:4]
+            if isinstance(character, dict)
+        )
+        visual_source = _single_line(
+            " ".join(
+                part
+                for part in (
+                    _single_line(project.get("premise"), 280),
+                    _single_line(project.get("tone"), 80),
+                    _single_line(project.get("source_text"), 180),
+                    recent_text,
+                )
+                if part
+            ),
+            900,
+        )
+        _style_label, style_instruction = self._creative_cover_style_instruction(project)
+        return _single_line(
+            "Create a polished book cover illustration with a vertical 2:3 composition. "
+            f"Genre: {_single_line(project.get('work_type'), 50) or 'fiction'}. "
+            f"Story and visual motifs: {visual_source or 'an intimate original story with a clear central visual symbol'}. "
+            + (f"Characters: {character_hint}. " if character_hint else "")
+            + f"Art direction: {style_instruction}. "
+            + "Use one focused scene, strong silhouette, layered depth, deliberate lighting, and enough quiet space for a title overlay. "
+            "Artwork only: no readable text, no letters, no typography, no logo, no watermark, no mockup, no border.",
+            1800,
+        )
+
+    async def _store_creative_cover_image(self, project_id: str, image_path: str) -> str:
+        source_text = _single_line(image_path, 500)
+        if not source_text:
+            return ""
+        try:
+            source = Path(source_text).resolve()
+            if not source.exists() or not source.is_file():
+                return ""
+            root = Path(str(getattr(self, "data_dir", "") or ".")).resolve() / "creative_covers"
+            await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
+            suffix = source.suffix.lower() if source.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else ".png"
+            target = root / f"{_single_line(project_id, 32)}{suffix}"
+            if source != target.resolve():
+                await asyncio.to_thread(shutil.copy2, source, target)
+            return str(target)
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 创作封面保存失败: project=%s error=%s", project_id, _single_line(exc, 160))
+            return ""
+
+    async def _maybe_generate_creative_cover(self, project_id: str, *, force: bool = False) -> dict[str, Any] | None:
+        if not force and not bool(getattr(self, "enable_creative_cover_generation", False)):
+            return None
+        project_id = _single_line(project_id, 32)
+        if not project_id:
+            return None
+        locks = getattr(self, "_creative_cover_generation_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._creative_cover_generation_locks = locks
+        lock = locks.get(project_id)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            locks[project_id] = lock
+        async with lock:
+            async with self._data_lock:
+                project = next(
+                    (
+                        item
+                        for item in self._creative_projects()
+                        if isinstance(item, dict) and _single_line(item.get("id"), 32) == project_id
+                    ),
+                    None,
+                )
+                if not isinstance(project, dict):
+                    return None
+                if not force and self._creative_cover_file_exists(project):
+                    return dict(project)
+                now = _now_ts()
+                attempts = _safe_int(project.get("cover_generation_attempts"), 0, 0)
+                if not force and (
+                    attempts >= 3
+                    or now < _safe_float(project.get("cover_generation_next_retry_at"), 0)
+                ):
+                    return dict(project)
+                project_snapshot = deepcopy(project)
+
+            generator = getattr(self, "_generate_photo_image", None)
+            available = getattr(self, "_photo_text_available", None)
+            if (
+                not bool(getattr(self, "enable_photo_text_action", False))
+                or not callable(generator)
+                or (callable(available) and not available())
+            ):
+                async with self._data_lock:
+                    project = next(
+                        (item for item in self._creative_projects() if isinstance(item, dict) and _single_line(item.get("id"), 32) == project_id),
+                        None,
+                    )
+                    if isinstance(project, dict):
+                        project["cover_generation_status"] = "unavailable"
+                        project["cover_generation_error"] = "当前没有可用的生图后端"
+                        project["cover_generation_next_retry_at"] = _now_ts() + 3600
+                        self._save_data_sync()
+                        return dict(project)
+                return None
+
+            prompt_text = self._creative_cover_prompt(project_snapshot)
+            style_label, _style_instruction = self._creative_cover_style_instruction(project_snapshot)
+            attempt_number = attempts + 1
+            async with self._data_lock:
+                project = next(
+                    (item for item in self._creative_projects() if isinstance(item, dict) and _single_line(item.get("id"), 32) == project_id),
+                    None,
+                )
+                if not isinstance(project, dict):
+                    return None
+                project["cover_generation_status"] = "generating"
+                project["cover_generation_attempts"] = attempt_number
+                project["cover_generation_attempted_at"] = _now_ts()
+                project["cover_generation_error"] = ""
+                self._save_data_sync()
+
+            backend, generated_path, note = await generator(
+                workflow_kind="text2img",
+                prompt_text=prompt_text,
+                session_key=f"creative_cover_{project_id}",
+                image_size="",
+                allow_daily_outfit_reference=False,
+            )
+            stored_path = await self._store_creative_cover_image(project_id, generated_path) if generated_path else ""
+            now = _now_ts()
+            async with self._data_lock:
+                project = next(
+                    (item for item in self._creative_projects() if isinstance(item, dict) and _single_line(item.get("id"), 32) == project_id),
+                    None,
+                )
+                if not isinstance(project, dict):
+                    return None
+                project["cover_generation_backend"] = _single_line(backend, 80)
+                project["cover_generation_prompt"] = _single_line(prompt_text, 1800)
+                project["cover_generation_style"] = _single_line(style_label, 40)
+                if stored_path:
+                    project["cover_path"] = stored_path
+                    project["cover_generated_at"] = now
+                    project["cover_generation_status"] = "ready"
+                    project["cover_generation_error"] = ""
+                    project["cover_generation_next_retry_at"] = 0
+                    logger.info("[PrivateCompanion] 创作封面已生成: project=%s backend=%s path=%s", project_id, _single_line(backend, 80), _single_line(stored_path, 180))
+                else:
+                    project["cover_generation_status"] = "failed"
+                    project["cover_generation_error"] = _single_line(note, 220) or "生图失败"
+                    project["cover_generation_next_retry_at"] = now + min(24, max(3, attempt_number * 3)) * 3600
+                    logger.info("[PrivateCompanion] 创作封面未生成: project=%s attempt=%s error=%s", project_id, attempt_number, _single_line(note, 180))
+                self._save_data_sync()
+                return dict(project)
+
     async def _maybe_advance_creative_projects(self) -> None:
         if not self.enable_creative_writing:
             return
@@ -1325,6 +1603,9 @@ class CreativeMixin:
             if callable(recorder):
                 project_snapshot, chunk_snapshot, extract_snapshot = creative_record_payload
                 await recorder(project=project_snapshot, chunk=chunk_snapshot, extract=extract_snapshot)
+        cover_project_id = self._creative_cover_candidate_id()
+        if cover_project_id:
+            await self._maybe_generate_creative_cover(cover_project_id)
 
     def _latest_creative_share_candidate(self) -> dict[str, Any] | None:
         projects = self._creative_projects()

@@ -117,7 +117,11 @@ def recent_diary_context(plugin, count: int = 3) -> str:
             date_text = _single_line(diary.get("date"), 16)
             age_text = _diary_age_label(plugin, date_text)
             suffix = f"（{age_text},只作余味和避重）" if age_text else "（只作余味和避重）"
-            lines.append(f"- {date_text} {suffix}：{summary} {tag_text}".strip())
+            continuity = diary.get("continuity_thread") if isinstance(diary.get("continuity_thread"), dict) else {}
+            motif = _single_line(continuity.get("motif"), 60)
+            status = _single_line(continuity.get("status"), 16)
+            thread_text = f"；线索={motif}（{status or '出现'}）" if motif else ""
+            lines.append(f"- {date_text} {suffix}：{summary} {tag_text}{thread_text}".strip())
     return "\n".join(lines) if lines else "（暂无）"
 
 
@@ -660,58 +664,320 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
     return label, mood, energy_delta, duration_hours
 
 
+def _diary_entry_is_today(plugin, value: Any) -> bool:
+    today = _today_key()
+    if isinstance(value, (int, float)):
+        try:
+            stamp = float(value)
+            if stamp > 100_000_000_000:
+                stamp /= 1000.0
+            return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d") == today
+        except Exception:
+            return False
+    return str(value or "").strip().startswith(today)
+
+
+def _daily_diary_evidence_ledger(plugin) -> tuple[str, list[dict[str, str]]]:
+    data = plugin.data if isinstance(getattr(plugin, "data", None), dict) else {}
+    evidence: list[dict[str, str]] = []
+
+    def add(level: str, source: str, text: Any) -> None:
+        cleaned = _single_line(text, 180)
+        if not cleaned or any(item["text"] == cleaned for item in evidence):
+            return
+        evidence.append({"level": level, "source": source, "text": cleaned})
+
+    adjustments = data.get("schedule_adjustments") if isinstance(data.get("schedule_adjustments"), list) else []
+    for item in adjustments[-12:]:
+        if not isinstance(item, dict):
+            continue
+        stamp = item.get("created_at") or item.get("updated_at") or item.get("ts") or item.get("date")
+        if not stamp or not _diary_entry_is_today(plugin, stamp):
+            continue
+        text = item.get("summary") or item.get("reason") or item.get("adjustment") or item.get("text")
+        add("planned", "用户调整后的计划", text)
+
+    audits = data.get("proactive_audit_log") if isinstance(data.get("proactive_audit_log"), list) else []
+    for item in audits[-30:]:
+        if not isinstance(item, dict) or str(item.get("status") or "").lower() not in {"sent", "success", "completed"}:
+            continue
+        stamp = item.get("updated_at") or item.get("created_at") or item.get("ts") or item.get("sent_at")
+        if not stamp or not _diary_entry_is_today(plugin, stamp):
+            continue
+        text = item.get("final_text_preview") or item.get("text_preview") or item.get("topic") or item.get("note")
+        add("confirmed", "已执行主动", text)
+
+    for state_key, label in (("web_exploration", "主动搜索"), ("news_integration", "新闻阅读")):
+        source_state = data.get(state_key) if isinstance(data.get(state_key), dict) else {}
+        stamp = source_state.get("last_explore_at") or source_state.get("last_read_at") or source_state.get("updated_at")
+        digest = source_state.get("last_digest") if isinstance(source_state.get("last_digest"), dict) else {}
+        if stamp and _diary_entry_is_today(plugin, stamp):
+            add("confirmed", label, digest.get("topic") or digest.get("headline") or digest.get("note"))
+
+    for method_name, label in (
+        ("_self_timeline_from_creative", "实际创作记录"),
+        ("_self_timeline_from_private_reading", "实际阅读记录"),
+        ("_self_timeline_from_photo_generation", "实际生图记录"),
+        ("_self_timeline_from_qzone_publish", "实际空间发布"),
+    ):
+        collector = getattr(plugin, method_name, None)
+        if not callable(collector):
+            continue
+        try:
+            entries = collector(data)
+        except Exception:
+            continue
+        for entry in entries[-6:] if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or not _diary_entry_is_today(plugin, entry.get("ts") or entry.get("date")):
+                continue
+            summary = _single_line(entry.get("summary"), 100)
+            detail = _single_line(entry.get("detail"), 140)
+            if "tid:" in detail:
+                detail = detail.split("tid:", 1)[0].rstrip("；; ")
+            add("confirmed", label, "；".join(part for part in (summary, detail) if part))
+
+    goals = data.get("personal_goals") if isinstance(data.get("personal_goals"), list) else []
+    for goal in goals[-8:]:
+        if not isinstance(goal, dict):
+            continue
+        title = _single_line(goal.get("title") or goal.get("name"), 60)
+        logs = goal.get("recent_logs") if isinstance(goal.get("recent_logs"), list) else []
+        for log in logs[-3:]:
+            if not isinstance(log, dict) or not _diary_entry_is_today(plugin, log.get("ts")):
+                continue
+            evidence_text = _single_line(log.get("evidence"), 100)
+            progress = _safe_int(log.get("progress"), -1, -1, 100)
+            suffix = f"，进度 {progress}%" if progress >= 0 else ""
+            add("simulated", "个人目标运行记录", f"{title or '个人目标'}：{evidence_text}{suffix}")
+
+    enhanced = data.get("detail_enhanced_segments") if isinstance(data.get("detail_enhanced_segments"), dict) else {}
+    enhanced_day = str(data.get("detail_enhanced_day") or "")[:10]
+    for segment_key, snapshot in list(enhanced.items())[-8:]:
+        if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
+            continue
+        if enhanced_day != _today_key() and not str(segment_key).startswith(_today_key()):
+            continue
+        add("simulated", "运行细化", snapshot.get("summary"))
+        for item in (snapshot.get("today_events") if isinstance(snapshot.get("today_events"), list) else [])[:2]:
+            if isinstance(item, dict):
+                add("simulated", "运行细化", item.get("event"))
+
+    plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
+    if str(plan.get("date") or "")[:10] != _today_key():
+        plan = {}
+    now = plugin._environment_now() if hasattr(plugin, "_environment_now") else datetime.now()
+    now_minutes = now.hour * 60 + now.minute
+    for item in plan.get("items", []) if isinstance(plan.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        raw_end = str(item.get("end") or item.get("time") or "")
+        match = re.match(r"^(\d{1,2}):(\d{2})", raw_end)
+        if match and int(match.group(1)) * 60 + int(match.group(2)) <= now_minutes:
+            add("planned", "已过去的计划段", item.get("activity"))
+
+    if not evidence:
+        state = data.get("daily_state") if isinstance(data.get("daily_state"), dict) else {}
+        add("state", "当前状态", state.get("mood_bias") or state.get("summary") or "只留下了很少的具体记录")
+
+    level_labels = {
+        "confirmed": "已确认发生",
+        "simulated": "运行推演，不能直接声称真实发生",
+        "planned": "原计划，不能直接声称已经完成",
+        "state": "状态底色，不是事件",
+    }
+    lines = [f"- [{level_labels.get(item['level'], item['level'])}] {item['source']}：{item['text']}" for item in evidence[:16]]
+    return "\n".join(lines), evidence[:16]
+
+
+def _daily_diary_form_instruction(plugin, evidence: list[dict[str, str]]) -> tuple[str, str]:
+    configured = str(getattr(plugin, "daily_diary_form", "auto") or "auto").strip().lower()
+    forms = {
+        "scene": "场景短记：围绕一个确有依据的场景写清当时的动作和注意力变化。",
+        "fragments": "碎片手记：允许两到四个短段或断句，不强求完整起承转合，但彼此要有同一天的气息。",
+        "inner_voice": "心绪自述：从一个真实触发点写内心反应，不写空泛情绪总结。",
+        "observation": "观察记录：抓住一个具体对象、声音、文字或细节，少解释，多保留当时的目光。",
+    }
+    if configured not in forms:
+        choices = ["scene", "fragments", "inner_voice", "observation"]
+        confirmed = sum(1 for item in evidence if item.get("level") == "confirmed")
+        seed = sum(ord(char) for char in _today_key()) + confirmed
+        configured = choices[seed % len(choices)]
+    return configured, forms[configured]
+
+
+def _daily_diary_length_instruction(plugin) -> tuple[int, int]:
+    mode = str(getattr(plugin, "daily_diary_length", "standard") or "standard").strip().lower()
+    return {"short": (60, 130), "long": (180, 360)}.get(mode, (110, 240))
+
+
+def _daily_diary_creativity_instruction(plugin) -> str:
+    mode = str(getattr(plugin, "daily_diary_creativity", "balanced") or "balanced").strip().lower()
+    if mode == "strict":
+        return "严格写实：只写已确认发生的事实；材料不足就写短，不补场景。"
+    if mode == "expressive":
+        return "表达可以更有个人色彩和节奏，但只能放大感受与观察，不能虚构人物、事件或完成结果。"
+    return "写实为主：允许对已确认事实做轻微感官化表达，不得把计划或运行推演写成真实经历。"
+
+
+def _daily_diary_quality_issues(
+    plugin,
+    payload: Any,
+    evidence: list[dict[str, str]],
+    min_chars: int,
+    max_chars: int,
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["没有返回 JSON 对象"]
+    summary = _single_line(payload.get("summary"), 180)
+    body = _single_line(payload.get("body"), 800)
+    issues: list[str] = []
+    if not summary or not body:
+        issues.append("摘要或正文为空")
+        return issues
+    body_len = len(re.sub(r"\s+", "", body))
+    if body_len < max(28, min_chars // 2):
+        issues.append("正文过短且没有形成有效记录")
+    if body_len > max_chars + 120:
+        issues.append("正文明显超出所选篇幅")
+    internal_markers = ("系统", "模型", "提示词", "JSON", "运行推演", "状态数值", "主动消息", "日程字段", "evidence")
+    if any(marker in f"{summary} {body}" for marker in internal_markers):
+        issues.append("正文泄露后台术语")
+    if _diary_reads_like_status_broadcast(payload):
+        issues.append("正文像状态播报而不是私人日记")
+    unsupported = [item for item in evidence if item.get("level") in {"planned", "simulated"}]
+    completion_markers = ("完成了", "做完了", "已经做", "去了", "看完了", "写完了", "收拾好了", "结束了")
+    if unsupported and any(marker in body for marker in completion_markers):
+        compact_body = _compact_diary_text(body, 800)
+        for item in unsupported:
+            compact_evidence = _compact_diary_text(item.get("text"), 180)
+            trigrams = {compact_evidence[index : index + 3] for index in range(max(0, len(compact_evidence) - 2))}
+            if any(token in compact_body for token in trigrams):
+                issues.append("把未确认计划或推演写成了已完成经历")
+                break
+    compact_summary = _compact_diary_text(summary, 180)
+    compact_body = _compact_diary_text(body, 800)
+    summary_bigrams = {compact_summary[index : index + 2] for index in range(max(0, len(compact_summary) - 1))}
+    if len(compact_summary) >= 6 and not any(token in compact_body for token in summary_bigrams):
+        issues.append("摘要没有落在正文内容上")
+    duplicate_hit, _ = _recent_diary_duplicate_hit(plugin, payload)
+    if duplicate_hit:
+        issues.append("与近期日记过于相似")
+    return issues
+
+
+async def _rewrite_daily_diary_once(
+    plugin,
+    payload: Any,
+    issues: list[str],
+    evidence_text: str,
+    form_instruction: str,
+    min_chars: int,
+    max_chars: int,
+) -> dict[str, Any]:
+    current = payload if isinstance(payload, dict) else {}
+    prompt = f"""
+请修订下面这篇私人日记，只修一次。保留有事实依据的部分，删除虚构和模板化补景。
+
+问题：{'；'.join(issues)}
+写作方式：{form_instruction}
+篇幅：{min_chars}-{max_chars} 个中文字符左右；材料不足可以更短。
+
+今日经历账本：
+{evidence_text}
+
+原稿：
+摘要：{_single_line(current.get('summary'), 180)}
+正文：{_single_line(current.get('body'), 800)}
+
+只有“已确认发生”可作为真实经历。运行推演和原计划不能改写成已经完成。
+不要补桌面、窗光、茶水、便签等无来源场景。实在没有材料，就坦白今天具体记录很少。
+只输出 JSON：{{"summary":"15-55字题眼","body":"日记正文","tags":["1-4个正文标签"]}}
+""".strip()
+    try:
+        raw = await plugin._llm_call(
+            prompt,
+            max_tokens=520,
+            provider_id=plugin._task_provider(
+                getattr(plugin, "diary_provider_id", ""),
+                getattr(plugin, "mai_style_provider_id", ""),
+            ),
+        )
+        parsed = plugin._extract_json_payload(raw or "")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _extract_daily_diary_derivatives(plugin, payload: dict[str, Any]) -> dict[str, Any]:
+    body = _single_line(payload.get("body"), 700)
+    if not body:
+        return {}
+    share_enabled = bool(getattr(plugin, "daily_diary_generate_share_seed", True))
+    prompt = f"""
+请从这篇已经写好的私人日记中提取后台结构，不要改写日记正文，也不要新增事件。
+
+日记：
+{body}
+
+只输出 JSON：
+{{
+  "share_seed": "{('从正文真实出现的细节延伸出一句自然分享；不适合分享则留空' if share_enabled else '必须留空')}",
+  "dream_fragments": [{{"text": "正文里真实出现的物件/声音/动作/颜色/半句话", "weight": 0.6}}],
+  "continuity_thread": {{"motif": "值得跨日延续的具体线索，没有则留空", "status": "出现/变化/淡出", "next_hint": "以后只在自然有依据时承接"}},
+  "long_term_events": [{{"title": "正文里确实未完成且可能跨日的事项", "status": "当前状态", "next_hint": "下一步"}}]
+}}
+
+要求：dream_fragments 0–6 个，只提取正文确实存在的碎片，不足时留空；long_term_events 0–2 个。不要生成主动计划、今日事件或不存在的后续剧情。
+""".strip()
+    try:
+        raw = await plugin._llm_call(
+            prompt,
+            max_tokens=320,
+            provider_id=plugin._task_provider(getattr(plugin, "diary_provider_id", ""), getattr(plugin, "mai_style_provider_id", "")),
+        )
+        parsed = plugin._extract_json_payload(raw or "")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 async def generate_daily_diary(plugin) -> dict[str, Any]:
     today = _today_key()
     state = plugin.data.get("daily_state", {})
-    plan = plugin.data.get("daily_plan", {})
     persona = plugin._get_default_persona_prompt()
     schedule_persona = _single_line(getattr(plugin, "schedule_persona_prompt", ""), 1200)
     schedule_worldview = _single_line(getattr(plugin, "schedule_worldview_prompt", ""), 1200)
-    can_do = plugin._format_can_do_for_prompt()
     calendar_context = plugin._format_calendar_context_for_prompt()
-    yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
     recent_diary_avoid_context = _recent_diary_avoid_context(plugin)
+    evidence_text, evidence = _daily_diary_evidence_ledger(plugin)
+    diary_form, form_instruction = _daily_diary_form_instruction(plugin, evidence)
+    min_chars, max_chars = _daily_diary_length_instruction(plugin)
+    creativity_instruction = _daily_diary_creativity_instruction(plugin)
+    custom_direction = _single_line(getattr(plugin, "daily_diary_custom_direction", ""), 500)
     worldview_adaptation = ""
     formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
     if callable(formatter):
         worldview_adaptation = formatter()
     prompt = f"""
-你现在是 Private Companion 的日记生成器。请为拟人化 Bot 写一条今天的日记,同时预设今天的生活碎片和主动聊天计划。
+请以当前人格的第一人称，写一篇今天的私人日记。只写日记，不安排主动消息、梦境素材或后续剧情。
 
-【写日记的要求】
-· 这是写给自己看的私密日记，不是“今日状态”、天气、睡眠和计划的汇总。短、口语、有生活感，不要散文腔或日报腔。
-· body 必须依次拥有：一个具体场景（物件、地点或动作）→ 一个微小变化/发现/犹豫 → 一个自然收住的余韵。不要总结人生，也不要硬煽情。
-· 只挑一件最有感觉的小事写，宁可小：翻到旧便签、把凉掉的茶重新热上、窗帘拉开后停了一会儿、把桌边的东西归位。不要逐项播报天气、体力、梦境和待办。
-· 梦只能是背景或感官残留；除非梦里本身发生了具体故事，不能用“梦雾未散”撑起整篇日记。
-· summary/body/share_seed 会展示给用户。summary 是具体画面或题眼，不能是状态标签；body 以第一人称写 120–260 字；share_seed 仅从 body 里真实出现的一点自然延伸，不能另起一个泛问候。
-· 禁止写“能量 74/100”“状态确认”“适合推进/平稳推进”“主动计划”“可分享碎片”“生成/模型/插件”等内部话，也不要写“今天偏平稳”“没有什么特别重的话想说”一类模板句。
-· 可参考的事件：通勤或出门、路上看到的、梦、失眠、不舒服、饿了、整理东西、想到用户、重要的日期、没做完的小计划、想拍照/自拍、好奇用户在干嘛。只有人格里明确写了学生/工作/其他身份时,才使用对应的校园、职场或身份细节。
-· 0–3 个长线事件,代表之后几天还可能延续的小剧情,用来增加沉浸感。
-· proactive_events 是内部主动计划,可以结构化；但它不能污染 summary/body/share_seed 的口吻。
-· proactive_events 要同时带 motive（心里一闪而过的念头,不要长解释）,适合时也可以带 scene/tone/impulse。
-· 顺手产出 3–8 个梦境碎片关键词,它们是今天残留在脑子里的小东西：物件、动作、气味、颜色、情绪、半句话都可以。每个碎片给一个 0.6–3.5 的权重,越重代表越容易在梦里反复冒出来。
-· 最近 3 天日记里已经写过的具体物件、场景、动作和 share_seed 不要当成今天的新事件重复写。可以保留“梦境余韵/似曾相识”的连续感,但必须换成新的现实小事或只写成模糊余温。
-· 如果近期写过“梦里某物出现在学校/窗台/路上/桌边”这类桥段,今天不要再写同一物件又在同一场景出现,也不要复用“救命！我今天……”式相同分享句。
+写作方式：{form_instruction}
+篇幅：{min_chars}–{max_chars} 个中文字符左右。
+事实边界：{creativity_instruction}
+{f'用户指定方向：{custom_direction}' if custom_direction else ''}
+
+规则：
+1. “已确认发生”可以写成经历；“运行推演、原计划、状态底色”只能影响语气或成为未确认的念头，绝不能写成已经发生。
+2. 材料少就写短，允许今天没有戏剧性；禁止用桌面、窗光、凉茶、旧便签等通用小物件自行补场景。
+3. 不固定“场景→发现→余韵”的三段式，不总结人生，不把普通小事拔高成道理。
+4. 保持当前人格的词汇、观察角度和关系边界。不要写系统、模型、状态数值、日程字段或后台功能。
+5. 最近日记只用于承接或避重；没有新变化时让旧线索淡出，不强行续篇。
 
 只输出 JSON：
 {{
-  "summary": "把晾凉的茶重新热了一遍，才发现窗台上的光已经换了位置。",
-  "body": "早上本来只想把桌面腾出一点地方，翻到一张夹在书里的旧便签，就坐着看了好一会儿。后来去热那杯已经凉掉的茶，回来时窗台上的光已经挪开了。原来走神也会有一点点进度，今天先把这件事记下来。",
-  "share_seed": "刚把一杯放凉的茶重新热上，突然觉得今天可以慢一点。",
-  "tags": ["低能量", "失眠", "好梦", "生病", "恢复期", "回弹", "平稳"],
-  "today_events": [
-    {{"window": "10:00-11:00", "event": "整理桌面时翻到一张旧便签", "mood": "有点走神"}}
-  ],
- "proactive_events": [
-    {{"window": "17:20-18:30", "reason": "activity_share", "action": "message", "why": "傍晚适合分享一件具体小事", "topic": "旧便签和凉掉的茶", "motive": "整理时想起那张便签", "scene": "傍晚收桌面时", "tone": "轻一点", "impulse": "问问用户今天有没有遇到想记下来的小事"}}
-  ],
-  "dream_fragments": [
-    {{"text": "碗边沾着的水光", "weight": 2.2}},
-    {{"text": "楼下吹过来的晚风", "weight": 1.4}}
-  ],
-  "long_term_events": [
-    {{"title": "准备分享一张路上看到的照片", "status": "刚想到,还没拍", "next_hint": "如果傍晚天气好,可以用 photo_text 主动分享"}}
-  ]
+  "summary": "正文中最具体的一幕或题眼，15–55字",
+  "body": "私人日记正文",
+  "tags": ["正文确实体现的1–4个短标签"]
 }}
 
 【本次输入】
@@ -720,27 +986,19 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 【AstrBot 默认人格】
 {persona}
 
-【生活/日程人设补充】
+【生活身份补充】
 {schedule_persona or "（无）"}
 
 【生活/世界观补充】
 {schedule_worldview or "（无）"}
 
-{plugin._format_state_for_prompt(state if isinstance(state, dict) else {})}
-
 {worldview_adaptation}
-
-状态延续感：
-{plugin._format_state_continuity_for_prompt(state if isinstance(state, dict) else {})}
 
 日期语境：
 {calendar_context}
 
-今天可做事项：
-{can_do}
-
-今天日程摘要：
-{plugin._format_plan_for_diary(plan)}
+【今日经历账本】
+{evidence_text}
 
 最近日记：
 {plugin._recent_diary_context()}
@@ -748,48 +1006,70 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 近期需要避免复用的具体素材：
 {recent_diary_avoid_context}
 
-昨日完整对话摘要：
-{yesterday_conversation}
-
 近期重要日期：
 {plugin._format_important_dates_for_prompt()}
 """.strip()
-    raw_text = await plugin._llm_call(
-        prompt,
-        max_tokens=500,
-        provider_id=plugin._task_provider(
-            getattr(plugin, "diary_provider_id", ""),
-            getattr(plugin, "mai_style_provider_id", ""),
-        ),
-    )
+    try:
+        raw_text = await plugin._llm_call(
+            prompt,
+            max_tokens=620,
+            provider_id=plugin._task_provider(
+                getattr(plugin, "diary_provider_id", ""),
+                getattr(plugin, "mai_style_provider_id", ""),
+            ),
+        )
+    except Exception:
+        raw_text = ""
     payload = plugin._extract_json_payload(raw_text or "")
-    if not isinstance(payload, dict) or _diary_reads_like_status_broadcast(payload):
-        payload = plugin._fallback_diary_payload()
-    duplicate_hit, matched_date = _recent_diary_duplicate_hit(plugin, payload)
-    if duplicate_hit:
-        payload = _repair_duplicate_daily_diary(plugin, payload, matched_date)
+    used_fallback = False
+    quality_issues = _daily_diary_quality_issues(plugin, payload, evidence, min_chars, max_chars)
+    if quality_issues and isinstance(payload, dict):
+        payload = await _rewrite_daily_diary_once(
+            plugin, payload, quality_issues, evidence_text, form_instruction, min_chars, max_chars
+        )
+        quality_issues = _daily_diary_quality_issues(plugin, payload, evidence, min_chars, max_chars)
+    if quality_issues:
+        payload = plugin._fallback_diary_payload(evidence=evidence)
+        used_fallback = True
     polisher = getattr(plugin, "_polish_diary_payload", None)
     if callable(polisher):
         payload = polisher(payload)
     tags = payload.get("tags", [])
     if not isinstance(tags, list):
         tags = []
+    derivatives = {} if used_fallback else await _extract_daily_diary_derivatives(plugin, payload)
+    if not isinstance(derivatives, dict):
+        derivatives = {}
+    share_seed = _single_line(derivatives.get("share_seed"), 120) if getattr(plugin, "daily_diary_generate_share_seed", True) else ""
+    continuity_thread = derivatives.get("continuity_thread") if isinstance(derivatives.get("continuity_thread"), dict) else {}
+    derivative_payload = {
+        "dream_fragments": derivatives.get("dream_fragments", []),
+        "long_term_events": derivatives.get("long_term_events", []),
+        "today_events": [],
+        "proactive_events": [],
+    }
     return {
         "date": today,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "summary": _single_line(payload.get("summary"), 160),
         "body": _single_line(payload.get("body"), 500),
-        "share_seed": _single_line(payload.get("share_seed"), 120),
+        "share_seed": share_seed,
         "tags": [_single_line(tag, 20) for tag in tags[:6] if _single_line(tag, 20)],
-        "dream_fragments": plugin._extract_weighted_dream_fragments(payload),
-        "story_plan": plugin._normalize_story_plan(payload),
+        "diary_form": diary_form,
+        "evidence": evidence,
+        "continuity_thread": {
+            "motif": _single_line(continuity_thread.get("motif"), 80),
+            "status": _single_line(continuity_thread.get("status"), 20),
+            "next_hint": _single_line(continuity_thread.get("next_hint"), 100),
+        },
+        "dream_fragments": plugin._extract_weighted_dream_fragments(derivative_payload),
+        "story_plan": plugin._normalize_story_plan(derivative_payload),
         "raw": raw_text or "",
     }
 
 
-def fallback_diary_payload(plugin) -> dict[str, Any]:
+def fallback_diary_payload(plugin, evidence: list[dict[str, str]] | None = None) -> dict[str, Any]:
     state = plugin.data.get("daily_state", {})
-    mood = state.get("mood_bias", "平稳") if isinstance(state, dict) else "平稳"
     energy = state.get("energy", 70) if isinstance(state, dict) else 70
     tags = ["平稳"]
     if _safe_int(energy, 70) < 45:
@@ -808,50 +1088,27 @@ def fallback_diary_payload(plugin) -> dict[str, Any]:
             tags.append("回弹")
         if "tail" in phases or {"health_tail", "sleep_tail"} & kinds:
             tags.append("恢复期")
-    scenes = (
-        (
-            "把桌面最边上的东西一件件归回原位，最后发现空出来的那一小块地方比想象中亮。",
-            "今天把桌面最边上的东西一件件归回原位。本来只是想腾出一点地方，整理到最后却在空出来的那一小块位置停了会儿。没有发生什么大事，但手边终于不再乱糟糟的，连下一件小事也显得没那么难开始。",
-            "刚把桌边收出一小块空位，心里也跟着松了一点。",
-            "整理桌边的小东西",
-        ),
-        (
-            "把窗帘拉开以后没有立刻走开，在光落到地板前站了一会儿。",
-            "今天拉开窗帘以后没有立刻走开。光一点点落到地板上，我本来还在想别的事，后来却只盯着那条亮起来的边看了会儿。原来有些念头不必马上理清，先让房间亮一点，也算是给自己留了个重新开始的口子。",
-            "刚拉开窗帘，突然想把今天过得亮一点。",
-            "拉开窗帘看了一会儿光",
-        ),
-        (
-            "把今天第一件小事写在纸边，写完才发现字比平时慢一点。",
-            "今天把第一件要做的小事写在纸边，写完才发现字比平时慢一点。于是没有急着补第二条，只把笔放下，去倒了点水。回来时那行字还在原处，看着倒也没有催我。今天就先从这一件开始，剩下的以后再说。",
-            "今天只写了一件小事在纸边，感觉已经够用了。",
-            "在纸边写下第一件小事",
-        ),
-    )
-    index = sum(ord(char) for char in _today_key()) % len(scenes)
-    summary, body, share_seed, event = scenes[index]
+    usable = [item for item in (evidence or []) if isinstance(item, dict) and _single_line(item.get("text"), 180)]
+    confirmed = next((item for item in usable if item.get("level") == "confirmed"), None)
+    uncertain = next((item for item in usable if item.get("level") in {"planned", "simulated"}), None)
+    if confirmed:
+        fact = _single_line(confirmed.get("text"), 150)
+        summary = fact
+        body = f"今天能确定留下来的记录是：{fact}。除此之外没有足够具体的细节，就先记到这里。"
+    elif uncertain:
+        fact = _single_line(uncertain.get("text"), 150)
+        summary = "今天只留下一条尚未确认的线索"
+        body = f"今天原本记着：{fact}。后来是否照计划发生，我这里没有足够记录，所以不把它写成已经做过的事。"
+    else:
+        summary = "今天留下的具体记录不多"
+        body = "今天没有留下足够具体、可以确认的经历。与其补出一个看似自然的小场景，不如先如实记到这里。"
     return {
         "summary": summary,
         "body": body,
-        "share_seed": share_seed,
+        "share_seed": "",
         "tags": tags,
-        "today_events": [
-            {"window": "09:00-10:30", "event": event, "mood": str(mood)},
-            {"window": "17:30-19:00", "event": "把手边的小事慢慢收住", "mood": "安静"},
-        ],
-        "proactive_events": [
-            {
-                "window": "19:30-21:30",
-                "reason": "diary_share",
-                "action": "message",
-                "why": "晚上适合分享一件今天记下的小事",
-                "topic": event,
-                "motive": "那件小事到晚上还留在心里",
-                "scene": "晚间收尾时",
-                "tone": "安静",
-                "impulse": "问问用户今天有没有一件想记下的小事",
-            }
-        ],
-        "dream_fragments": plugin._fallback_dream_fragments_for_diary(state if isinstance(state, dict) else {}),
-        "long_term_events": plugin._generate_fallback_long_term_events(state if isinstance(state, dict) else {}),
+        "today_events": [],
+        "proactive_events": [],
+        "dream_fragments": [],
+        "long_term_events": [],
     }

@@ -1932,13 +1932,37 @@ class QzoneMixin(QzoneMediaMixin):
         )
         return random.choice(themes)
 
+    def _qzone_relationship_safe_source(self, value: Any, *, source: str) -> str:
+        sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
+        if callable(sanitizer):
+            try:
+                return sanitizer(value, source=source)
+            except Exception:
+                pass
+        return str(value or "").strip()
+
+    def _qzone_relationship_authority_guard(self) -> str:
+        formatter = getattr(self, "_format_generation_relationship_authority_guard", None)
+        if callable(formatter):
+            try:
+                return str(formatter() or "").strip()
+            except Exception:
+                pass
+        return ""
+
     def _qzone_recent_publish_context(self, state: dict[str, Any], *, limit: int = 5) -> str:
         items = state.get("recent_life_publish_texts") if isinstance(state, dict) else []
         if not isinstance(items, list):
             return ""
         lines: list[str] = []
         for item in items[-max(1, int(limit or 5)) :]:
-            text = _single_line(item.get("text") if isinstance(item, dict) else item, 120)
+            text = _single_line(
+                self._qzone_relationship_safe_source(
+                    item.get("text") if isinstance(item, dict) else item,
+                    source="qzone.recent_publish",
+                ),
+                120,
+            )
             if text:
                 lines.append(f"- {text}")
         if not lines:
@@ -1956,7 +1980,13 @@ class QzoneMixin(QzoneMediaMixin):
         for item in reversed(items):
             if len(records) >= max(1, min(3, int(limit or 3))):
                 break
-            text = _single_line(item.get("text") if isinstance(item, dict) else item, 180)
+            text = _single_line(
+                self._qzone_relationship_safe_source(
+                    item.get("text") if isinstance(item, dict) else item,
+                    source="qzone.recent_self_publish_chat",
+                ),
+                180,
+            )
             if not text:
                 continue
             image_count = _safe_int(item.get("image_count"), 0, 0, 99) if isinstance(item, dict) else 0
@@ -2204,6 +2234,21 @@ class QzoneMixin(QzoneMediaMixin):
 
     async def _sanitize_qzone_life_post_text(self, text: str, *, prompt: str = "") -> str:
         cleaned = _single_line(text, 180)
+        relationship_cleaned = _single_line(
+            self._qzone_relationship_safe_source(
+                cleaned,
+                source="qzone.generated_post",
+            ),
+            180,
+        )
+        if relationship_cleaned != cleaned:
+            logger.warning(
+                "[PrivateCompanion] QQ 空间说说草稿含未声明关系,已移除污染片段: %s",
+                _single_line(cleaned, 160),
+            )
+            cleaned = relationship_cleaned
+        if len(cleaned) < 12:
+            return ""
         if not self._qzone_text_leaks_internal_state(cleaned):
             return cleaned
         stripped = self._strip_qzone_internal_state_fragments(cleaned)
@@ -2228,7 +2273,13 @@ class QzoneMixin(QzoneMediaMixin):
                 provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
                 task="qzone_publish_sanitize",
             )
-            rewritten = _single_line(rewritten, 180)
+            rewritten = _single_line(
+                self._qzone_relationship_safe_source(
+                    rewritten,
+                    source="qzone.sanitizer_rewrite",
+                ),
+                180,
+            )
             if rewritten and not self._qzone_text_leaks_internal_state(rewritten):
                 logger.warning("[PrivateCompanion] QQ 空间说说草稿含内部状态,已重写: %s", _single_line(cleaned, 160))
                 return rewritten
@@ -2267,6 +2318,23 @@ class QzoneMixin(QzoneMediaMixin):
             purpose="publish_test",
             query="QQ空间生活说说 今日公开可写生活 当前日程 今日穿搭 最近吃饭 日记余味 自我时间线",
         )
+        public_state_hint = self._qzone_relationship_safe_source(
+            self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
+            source="qzone.publish_test.current_state",
+        )
+        current_schedule_hint = self._qzone_relationship_safe_source(
+            self._format_plan_item_for_prompt(current_item),
+            source="qzone.publish_test.current_schedule",
+        )
+        diary_context = self._qzone_relationship_safe_source(
+            diary_context,
+            source="qzone.publish_test.recent_diary",
+        )
+        memory_context = self._qzone_relationship_safe_source(
+            memory_context,
+            source="qzone.publish_test.memory",
+        )
+        relationship_authority_guard = self._qzone_relationship_authority_guard()
         prompt = f"""
 请以当前 Bot 人格写一条 QQ 空间说说。
 只输出说说正文,不要解释,不要加标题。
@@ -2286,10 +2354,10 @@ class QzoneMixin(QzoneMediaMixin):
 {temporal_context}
 
 【公开可写的状态余味】
-{self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})}
+{public_state_hint}
 
 【当前/附近日程】
-{self._format_plan_item_for_prompt(current_item) or "无明确日程"}
+{current_schedule_hint or "无明确日程"}
 
 【近日私密日记余味】
 {diary_context or "暂无"}
@@ -2300,6 +2368,8 @@ class QzoneMixin(QzoneMediaMixin):
 
 【最近说说去重】
 {recent_publish_context or "暂无最近记录。"}
+
+{relationship_authority_guard}
 
 {self._format_worldview_adaptation_prompt()}
 """.strip()
@@ -2385,6 +2455,19 @@ class QzoneMixin(QzoneMediaMixin):
         daily_state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         diary_context = self._recent_diary_context(count=2)
+        public_state_hint = self._qzone_relationship_safe_source(
+            self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
+            source="qzone.publish_image_test.current_state",
+        )
+        current_schedule_hint = self._qzone_relationship_safe_source(
+            self._format_plan_item_for_prompt(current_item),
+            source="qzone.publish_image_test.current_schedule",
+        )
+        diary_context = self._qzone_relationship_safe_source(
+            diary_context,
+            source="qzone.publish_image_test.recent_diary",
+        )
+        relationship_authority_guard = self._qzone_relationship_authority_guard()
         prompt = f"""
 请以当前 Bot 人格写一条 QQ 空间说说，用来测试配图生成。
 只输出说说正文,不要解释,不要加标题。
@@ -2402,16 +2485,18 @@ class QzoneMixin(QzoneMediaMixin):
 {self._qzone_temporal_context()}
 
 【公开可写的状态余味】
-{self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})}
+{public_state_hint}
 
 【当前/附近日程】
-{self._format_plan_item_for_prompt(current_item) or "无明确日程"}
+{current_schedule_hint or "无明确日程"}
 
 【近日私密日记余味】
 {diary_context or "暂无"}
 
 【最近说说去重】
 {self._qzone_recent_publish_context(state) or "暂无最近记录。"}
+
+{relationship_authority_guard}
 
 {self._format_worldview_adaptation_prompt()}
 """.strip()
@@ -2552,7 +2637,22 @@ class QzoneMixin(QzoneMediaMixin):
         draft_at = _safe_float(state.get(f"last_{prefix}_draft_at"), 0)
         if not draft_at or current - draft_at > max(1.0, float(max_age_hours)) * 3600:
             return ""
-        return _single_line(state.get(f"last_{prefix}_draft"), 300)
+        draft_key = f"last_{prefix}_draft"
+        draft = _single_line(state.get(draft_key), 300)
+        cleaned = _single_line(
+            self._qzone_relationship_safe_source(
+                draft,
+                source=f"qzone.reusable_draft.{prefix}",
+            ),
+            300,
+        )
+        if cleaned != draft:
+            state[draft_key] = cleaned
+            if len(cleaned) < 12:
+                state.pop(draft_key, None)
+                state.pop(f"last_{prefix}_draft_at", None)
+                return ""
+        return cleaned
 
     def _qzone_reusable_generated_image(self, state: dict[str, Any], reason: str, post_text: str, *, now: float | None = None) -> list[str]:
         if not isinstance(state, dict):
@@ -2662,13 +2762,29 @@ class QzoneMixin(QzoneMediaMixin):
             return []
 
         style_name, style_instruction = self._get_photo_style_instruction()
-        current_desc = self._format_plan_item_for_prompt(current_item) or "无明确日程"
-        state_desc = self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})
+        post_text = self._qzone_relationship_safe_source(post_text, source="qzone.image.post_text")
+        current_desc = self._qzone_relationship_safe_source(
+            self._format_plan_item_for_prompt(current_item),
+            source="qzone.image.current_schedule",
+        ) or "无明确日程"
+        state_desc = self._qzone_relationship_safe_source(
+            self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
+            source="qzone.image.current_state",
+        )
+        diary_context = self._qzone_relationship_safe_source(
+            diary_context,
+            source="qzone.image.recent_diary",
+        )
         content_options = ""
         try:
             content_options = self._format_content_choice_options_for_prompt()
         except Exception:
             content_options = "生活小物、窗边光影、路上风景、桌面一角、随手自拍、偶遇小动物。"
+        content_options = self._qzone_relationship_safe_source(
+            content_options,
+            source="qzone.image.content_options",
+        )
+        relationship_authority_guard = self._qzone_relationship_authority_guard()
         qzone_selfie_reference_path = ""
         qzone_selfie_reference_exists = False
         reference_getter = getattr(self, "_photo_persona_reference_image_for_kind_async", None)
@@ -2713,6 +2829,8 @@ class QzoneMixin(QzoneMediaMixin):
 {_single_line(diary_context, 500) or "暂无"}
 
 {self._format_worldview_adaptation_prompt()}
+
+{relationship_authority_guard}
 
 【可选画面方向】
 {content_options}
@@ -2944,6 +3062,23 @@ class QzoneMixin(QzoneMediaMixin):
             purpose="publish",
             query="QQ空间生活说说 今日公开可写生活 当前日程 今日穿搭 最近吃饭 日记余味 自我时间线",
         )
+        public_state_hint = self._qzone_relationship_safe_source(
+            self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
+            source="qzone.publish.current_state",
+        )
+        current_schedule_hint = self._qzone_relationship_safe_source(
+            self._format_plan_item_for_prompt(current_item),
+            source="qzone.publish.current_schedule",
+        )
+        diary_context = self._qzone_relationship_safe_source(
+            diary_context,
+            source="qzone.publish.recent_diary",
+        )
+        memory_context = self._qzone_relationship_safe_source(
+            memory_context,
+            source="qzone.publish.memory",
+        )
+        relationship_authority_guard = self._qzone_relationship_authority_guard()
         if reusable_text:
             text = reusable_text
             logger.info(
@@ -2970,10 +3105,10 @@ class QzoneMixin(QzoneMediaMixin):
 {temporal_context}
 
 【公开可写的状态余味】
-{self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})}
+{public_state_hint}
 
 【当前/附近日程】
-{self._format_plan_item_for_prompt(current_item) or "无明确日程"}
+{current_schedule_hint or "无明确日程"}
 
 【近日私密日记余味】
 {diary_context or "暂无"}
@@ -2984,6 +3119,8 @@ class QzoneMixin(QzoneMediaMixin):
 
 【最近说说去重】
 {recent_publish_context or "暂无最近记录。"}
+
+{relationship_authority_guard}
 
 {self._format_worldview_adaptation_prompt()}
 """.strip()
@@ -3106,7 +3243,22 @@ class QzoneMixin(QzoneMediaMixin):
             return
         daily_state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        reason = _single_line((rel_state or {}).get("last_hurt_reason") or (intent or {}).get("emotion_reason"), 80)
+        public_state_hint = self._qzone_relationship_safe_source(
+            self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
+            source="qzone.emotional_vent.current_state",
+        )
+        current_schedule_hint = self._qzone_relationship_safe_source(
+            self._format_plan_item_for_prompt(current_item),
+            source="qzone.emotional_vent.current_schedule",
+        )
+        reason = _single_line(
+            self._qzone_relationship_safe_source(
+                (rel_state or {}).get("last_hurt_reason") or (intent or {}).get("emotion_reason"),
+                source="qzone.emotional_vent.reason",
+            ),
+            80,
+        )
+        relationship_authority_guard = self._qzone_relationship_authority_guard()
         prompt = f"""
 请以当前 Bot 人格写一条 QQ 空间说说,表达一种模糊的低落、委屈或想透气的心情。
 只输出说说正文,不要解释,不要加标题。
@@ -3122,13 +3274,15 @@ class QzoneMixin(QzoneMediaMixin):
 {self._qzone_publish_style_prompt(mood="emotional_vent")}
 
 【公开可写的状态余味】
-{self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {})}
+{public_state_hint}
 
 【当前/附近日程】
-{self._format_plan_item_for_prompt(current_item) or "无明确日程"}
+{current_schedule_hint or "无明确日程"}
 
 【内部触发原因，只能作为情绪方向，禁止复述】
 {reason or "情绪有点低落"}
+
+{relationship_authority_guard}
 
 {self._format_worldview_adaptation_prompt()}
 """.strip()

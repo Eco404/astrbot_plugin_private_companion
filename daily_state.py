@@ -106,6 +106,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _normalize_outbound_punctuation_flow, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -1261,8 +1262,8 @@ class DailyStateMixin:
         await self._ensure_yesterday_conversation_summary()
         return await generate_daily_diary(self)
 
-    def _fallback_diary_payload(self) -> dict[str, Any]:
-        return fallback_diary_payload(self)
+    def _fallback_diary_payload(self, evidence: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        return fallback_diary_payload(self, evidence=evidence)
 
     def _polish_diary_text(self, text: Any, *, field: str = "body") -> str:
         cleaned = _single_line(text, 900 if field == "body" else 180)
@@ -1309,11 +1310,9 @@ class DailyStateMixin:
         polished["body"] = self._polish_diary_text(polished.get("body"), field="body")
         polished["share_seed"] = self._polish_diary_text(polished.get("share_seed"), field="share")
         if not polished["summary"]:
-            polished["summary"] = "把手边的一件小事慢慢收好，心里也腾出了一点位置。"
+            polished["summary"] = "今天留下的具体记录不多"
         if not polished["body"]:
-            polished["body"] = "今天整理手边的小东西时，顺手把一件总在碍事的东西放回了原处。动作停下来以后，桌面上空出一点位置，我也没有急着做下一件事。原来有些小小的收拾，并不是为了变得多有效率，只是想让自己坐下来时舒服一点。"
-        if not polished["share_seed"]:
-            polished["share_seed"] = "刚收好手边的一点东西，忽然觉得今天可以慢一点。"
+            polished["body"] = "今天没有留下足够具体、可以确认的经历，就先如实记到这里。"
         return polished
 
     def _generate_fallback_long_term_events(self, state: dict[str, Any]) -> list[dict[str, str]]:
@@ -1973,7 +1972,9 @@ class DailyStateMixin:
         error_hint = ""
         if clean_error:
             compact_error = clean_error.lower()
-            if "timeout" in compact_error or "sendmsg" in compact_error or "retcode=1200" in compact_error:
+            if "retcode=1200" in compact_error and "eventchecker" in compact_error:
+                error_hint = "QQ/NTQQ 拒绝发送（目标当前不可私聊或客户端临时异常）"
+            elif "timeout" in compact_error:
                 error_hint = "平台发送超时"
             elif "actionfailed" in compact_error or "failed" in compact_error:
                 error_hint = "平台发送失败"
@@ -2348,7 +2349,7 @@ class DailyStateMixin:
                     "action": "message",
                     "why": f"外面的天色有点好看，想短短提一句。{weather}",
                     "topic": "天色有点好看",
-                    "motive": "刚刚看到外面的天色不错，想短短提一句",
+                    "motive": "外面天色不错",
                     "mood": "松弛",
                 }
             )
@@ -5309,6 +5310,143 @@ class DailyStateMixin:
             )
         return "\n".join(lines)
 
+    def _active_memo_notes(self, *, include_completed: bool = False) -> list[dict[str, Any]]:
+        now = _now_ts()
+        raw_notes = self.data.get("memo_notes") if isinstance(self.data.get("memo_notes"), list) else []
+        notes = [note for note in (normalize_memo_note(item, now=now) for item in raw_notes) if note]
+        if not include_completed:
+            notes = [note for note in notes if note.get("status") == "active"]
+        notes.sort(key=lambda item: memo_note_sort_key(item, now=now))
+        return notes
+
+    def _format_memo_notes_for_prompt(self, *, days: int = 3, include_pinned: bool = True, limit: int = 6) -> str:
+        now = _now_ts()
+        horizon = now + max(0, int(days)) * 86400
+        rows: list[dict[str, Any]] = []
+        for note in self._active_memo_notes():
+            due_at = _safe_float(note.get("due_at"), 0)
+            if not (include_pinned and note.get("pinned")) and not (due_at > 0 and due_at <= horizon):
+                continue
+            rows.append(note)
+        if not rows:
+            return ""
+        lines = ["【备忘便签】"]
+        for note in rows[: max(1, int(limit or 1))]:
+            due_at = _safe_float(note.get("due_at"), 0)
+            due_text = self._environment_fromtimestamp(due_at).strftime("%m-%d %H:%M") if due_at > 0 else "未设时间"
+            repeat = {
+                "daily": "每天",
+                "weekly": "每周",
+                "monthly": "每月",
+                "yearly": "每年",
+            }.get(str(note.get("repeat") or "none"), "不重复")
+            text = _single_line(note.get("title") or note.get("content"), 80)
+            detail = _single_line(note.get("content"), 120)
+            if detail and detail != text:
+                text = f"{text}；{detail}"
+            lines.append(f"- {due_text}｜{repeat}｜{text}")
+        lines.append("这些是用户主动保存的待办/提醒，不是已经发生的经历；只在当前话题或时间相关时自然承接。")
+        return "\n".join(lines)
+
+    def _format_memo_note_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
+        if reason != "memo_note_reminder" or not isinstance(user, dict):
+            return ""
+        context = user.get("planned_memo_note_context")
+        if not isinstance(context, dict):
+            return ""
+        return (
+            "【到期备忘便签】\n"
+            f"- 标题：{_single_line(context.get('title'), 60) or '未命名便签'}\n"
+            f"- 内容：{_single_line(context.get('content'), 240) or '无补充内容'}\n"
+            f"- 到期：{_single_line(context.get('due_text'), 40) or '刚刚到期'}\n"
+            "这是用户自己设置并已到期的提醒。直接自然提醒事项本身，不解释便签系统、调度或后台字段，不责怪用户，也不要虚构已完成。"
+        )
+
+    def _next_memo_due_in_seconds(self, now: float | None = None) -> float | None:
+        check_now = _safe_float(now, _now_ts())
+        disabled_getter = getattr(self, "_proactive_generation_disabled", None)
+        if callable(disabled_getter) and disabled_getter():
+            return None
+        waits: list[float] = []
+        for note in self._active_memo_notes():
+            due_at = _safe_float(note.get("due_at"), 0)
+            if not note.get("remind_enabled") or due_at <= 0:
+                continue
+            if due_at > check_now:
+                waits.append(due_at - check_now)
+                continue
+            last_offer = _safe_float(note.get("last_reminder_offer_at"), 0)
+            last_attempt = _safe_float(note.get("last_reminder_attempt_at"), 0)
+            if last_offer > 0:
+                waits.append(max(0.0, last_offer + 24 * 3600 - check_now))
+            elif last_attempt > 0:
+                waits.append(max(0.0, last_attempt + 10 * 60 - check_now))
+            else:
+                waits.append(0.0)
+        return min(waits) if waits else None
+
+    async def _maybe_process_memo_notes(self, *, force: bool = False) -> None:
+        now = _now_ts()
+        async with self._data_lock:
+            raw_notes = self.data.get("memo_notes")
+            if not isinstance(raw_notes, list) or not raw_notes:
+                return
+            notes = [note for note in (normalize_memo_note(item, now=now) for item in raw_notes) if note]
+            changed = len(notes) != len(raw_notes)
+            for note in notes:
+                if note.get("status") != "active" or not note.get("remind_enabled"):
+                    continue
+                due_at = _safe_float(note.get("due_at"), 0)
+                if due_at <= 0 or due_at > now:
+                    continue
+                last_offer = _safe_float(note.get("last_reminder_offer_at"), 0)
+                if last_offer > 0 and now - last_offer < 24 * 3600 and not force:
+                    continue
+                last_attempt = _safe_float(note.get("last_reminder_attempt_at"), 0)
+                if last_offer <= 0 and last_attempt > 0 and now - last_attempt < 10 * 60 and not force:
+                    continue
+                title = _single_line(note.get("title") or note.get("content"), 60) or "一张便签"
+                content = _single_line(note.get("content"), 240)
+                due_text = self._environment_fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M")
+                context = {
+                    "memo_id": _single_line(note.get("id"), 64),
+                    "title": title,
+                    "content": content,
+                    "due_at": due_at,
+                    "due_text": due_text,
+                    "repeat": _single_line(note.get("repeat"), 20),
+                    "due_state": memo_note_due_state(note, now=now),
+                }
+                offered = 0
+                note["last_reminder_attempt_at"] = now
+                changed = True
+                for user_id, user in self._personal_goal_owner_users():
+                    scheduled = now + random.uniform(8, 35)
+                    candidate = {
+                        "source": "memo_note",
+                        "reason": "memo_note_reminder",
+                        "action": "message",
+                        "scheduled_ts": scheduled,
+                        "window_start_at": scheduled,
+                        "preferred_ts": scheduled,
+                        "best_until_at": scheduled + 2 * 3600,
+                        "expire_at": scheduled + 8 * 3600,
+                        "topic": title,
+                        "motive": f"用户保存的便签“{title}”已经到期，需要自然提醒一次",
+                        "score": 96,
+                        "context_key": "planned_memo_note_context",
+                        "context": deepcopy(context),
+                    }
+                    if self._offer_proactive_candidate(user_id, user, candidate):
+                        offered += 1
+                if offered > 0:
+                    note["last_reminder_offer_at"] = now
+                    note["updated_at"] = max(_safe_float(note.get("updated_at"), 0), now)
+                    changed = True
+            if changed:
+                self.data["memo_notes"] = notes[-200:]
+                self._save_data_sync()
+
     def _cleanup_expired_conditions(self):
         now = _now_ts()
         conditions = self.data.setdefault("state_conditions", [])
@@ -7970,6 +8108,9 @@ class DailyStateMixin:
             "如果用户提到相关日期、纪念、生日、约定或计划,请自然承接；不要无故强行展开。"
         )
 
+    def _format_memo_notes_injection(self) -> str:
+        return self._format_memo_notes_for_prompt(days=2, include_pinned=False, limit=4)
+
     def _format_lightweight_state_injection(self, state: dict[str, Any]) -> str:
         return self._format_state_for_prompt(state)
 
@@ -10159,10 +10300,252 @@ class DailyStateMixin:
         boundary = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(normalized)}(?![A-Za-z0-9_])", re.IGNORECASE)
         return any(boundary.search(str(source or "")) for source in persona_sources)
 
+    @staticmethod
+    def _daily_plan_relationship_alias_groups() -> tuple[tuple[str, ...], ...]:
+        """Stable relationship names that must come from an identity source."""
+        return (
+            ("妈妈", "母亲", "妈咪", "老妈", "娘亲", "阿妈"),
+            ("爸爸", "父亲", "爹地", "老爸", "爹", "阿爸"),
+            ("父母", "双亲"),
+            ("家人", "家里人", "亲人"),
+            ("祖母", "奶奶", "外婆", "姥姥"),
+            ("祖父", "爷爷", "外公", "姥爷"),
+            ("哥哥", "兄长", "大哥", "阿哥"),
+            ("姐姐", "姊姊", "姊姐", "阿姐"),
+            ("弟弟", "胞弟"),
+            ("妹妹", "胞妹"),
+            ("兄弟姐妹", "兄弟姊妹", "手足"),
+            ("叔叔", "伯伯", "舅舅", "姨父", "姑父"),
+            ("阿姨", "姑姑", "姨妈", "舅妈", "婶婶", "伯母"),
+            ("亲戚", "亲属"),
+            ("朋友", "好友", "闺蜜", "发小", "死党"),
+            ("同学", "同桌", "同班同学", "校友"),
+            ("学长", "学姐", "学弟", "学妹"),
+            ("老师", "教师", "班主任", "导师"),
+            ("师父", "师傅"),
+            ("室友", "舍友"),
+            ("同事", "同僚"),
+            ("上司", "领导", "老板"),
+            ("邻居", "邻家"),
+            ("前辈", "后辈"),
+            ("恋人", "爱人", "伴侣"),
+            ("男朋友", "男友"),
+            ("女朋友", "女友"),
+            ("丈夫", "老公"),
+            ("妻子", "老婆"),
+            ("未婚夫", "未婚妻"),
+            ("监护人", "养父", "养母", "继父", "继母"),
+        )
+
+    @staticmethod
+    def _daily_plan_identity_bound_relationship_groups() -> set[str]:
+        """Relationships too stable/private to infer from an old life fragment."""
+        return {
+            "妈妈",
+            "爸爸",
+            "父母",
+            "家人",
+            "祖母",
+            "祖父",
+            "哥哥",
+            "姐姐",
+            "弟弟",
+            "妹妹",
+            "兄弟姐妹",
+            "叔叔",
+            "阿姨",
+            "亲戚",
+            "恋人",
+            "男朋友",
+            "女朋友",
+            "丈夫",
+            "妻子",
+            "未婚夫",
+            "监护人",
+        }
+
+    @staticmethod
+    def _mask_non_relationship_phrases(text: Any) -> str:
+        source = str(text or "")
+        if not source:
+            return ""
+        for phrase in (
+            "母亲节",
+            "父亲节",
+            "教师节",
+            "父母官",
+            "老师傅",
+            "小姐姐",
+            "小哥哥",
+            "食堂阿姨",
+            "宿管阿姨",
+            "保洁阿姨",
+            "清洁阿姨",
+            "保安叔叔",
+            "司机叔叔",
+            "老婆饼",
+        ):
+            source = source.replace(phrase, "□" * len(phrase))
+        return source
+
+    def _daily_plan_relationship_authority_sources(self) -> tuple[str, ...]:
+        sources = [
+            str(getattr(self, "schedule_persona_prompt", "") or ""),
+            str(getattr(self, "schedule_worldview_prompt", "") or ""),
+            str(getattr(self, "_default_persona_prompt_cache", "") or ""),
+        ]
+        getter = getattr(self, "_get_default_persona_prompt", None)
+        if callable(getter):
+            try:
+                sources.append(str(getter() or ""))
+            except Exception:
+                pass
+        return tuple(dict.fromkeys(source for source in sources if source.strip()))
+
+    def _daily_plan_declared_relation_tokens(self) -> set[str]:
+        authority_text = self._mask_non_relationship_phrases(
+            "\n".join(self._daily_plan_relationship_authority_sources())
+        )
+        declared: set[str] = set()
+        groups = self._daily_plan_relationship_alias_groups()
+        for aliases in groups:
+            if any(alias in authority_text for alias in aliases):
+                declared.update(aliases)
+
+        # Institutional roles are an inherent part of an explicitly declared
+        # school/work identity, while family roles are never inferred this way.
+        if re.search(r"学生|校园|学校|上学|教室|班级|课程", authority_text):
+            for aliases in groups:
+                if aliases[0] in {"同学", "学长", "老师"}:
+                    declared.update(aliases)
+        if re.search(r"上班|职员|员工|公司|工位|办公室|职场", authority_text):
+            for aliases in groups:
+                if aliases[0] in {"同事", "上司"}:
+                    declared.update(aliases)
+        return declared
+
+    def _daily_plan_undeclared_relationship_tokens(self, text: Any) -> list[str]:
+        source = self._mask_non_relationship_phrases(text)
+        if not source:
+            return []
+        declared = self._daily_plan_declared_relation_tokens()
+        hits: list[str] = []
+        identity_bound_groups = self._daily_plan_identity_bound_relationship_groups()
+        all_aliases = sorted(
+            {
+                alias
+                for group in self._daily_plan_relationship_alias_groups()
+                if group[0] in identity_bound_groups
+                for alias in group
+            },
+            key=len,
+            reverse=True,
+        )
+        for alias in all_aliases:
+            if alias not in declared and alias in source:
+                hits.append(alias)
+        return hits
+
+    @staticmethod
+    def _relationship_clause_is_explicitly_user_owned(clause: str, relation_tokens: list[str]) -> bool:
+        if not clause or not relation_tokens:
+            return False
+        owner_marker = r"(?:主要用户|当前用户|这位用户|收件人|对方|用户|User|user)"
+        for token in relation_tokens:
+            escaped = re.escape(token)
+            if re.search(rf"{owner_marker}[^，,。；;！？!?]{{0,24}}{escaped}", clause):
+                return True
+            if re.search(rf"{escaped}[^，,。；;！？!?]{{0,16}}(?:是|属于|来自)?{owner_marker}(?:的|那边)", clause):
+                return True
+        return False
+
+    def _format_generation_relationship_authority_guard(self) -> str:
+        declared = self._daily_plan_declared_relation_tokens()
+        canonical = [
+            aliases[0]
+            for aliases in self._daily_plan_relationship_alias_groups()
+            if any(alias in declared for alias in aliases)
+        ]
+        declared_text = "、".join(canonical) if canonical else "无"
+        return (
+            "【关系事实权限】\n"
+            "- 只有日程专用角色设定、日程世界观和当前默认人格能够建立 Bot 的稳定关系；"
+            "旧日程、旧日记、旧动态、聊天摘要、MemoryCompanion、技能/创作记录和其他连续性材料不能单独证明一段新关系。\n"
+            f"- 当前身份来源已声明的关系称谓：{declared_text}。只有这些关系及其同义称呼可以作为 Bot 的关系事实。\n"
+            "- 连续性材料里的关系若不能和身份来源对上，就按未经核实的旧叙事略过；不要续写，也不要换个称呼继续沿用。\n"
+            "- 用户谈到的亲友只属于用户，除非身份来源另有明确设定，不得转移成 Bot 自己的亲友。"
+            "\n- 当前收件人与 Bot 的结构化关系由本轮收件人关系事实单独决定，不要用这份生活关系清单覆盖它。"
+        )
+
+    def _sanitize_generation_relationship_context(
+        self,
+        text: Any,
+        *,
+        source: str = "",
+        max_chars: int = 0,
+    ) -> str:
+        """Remove undeclared relationship clauses before they reach a generator."""
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        initial_hits = self._daily_plan_undeclared_relationship_tokens(raw)
+        if not initial_hits:
+            return raw[:max_chars] if max_chars > 0 else raw
+
+        cleaned_lines: list[str] = []
+        removed_any = False
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if cleaned_lines and cleaned_lines[-1]:
+                    cleaned_lines.append("")
+                continue
+            pieces = re.split(r"([，,。；;！？!?]+)", line)
+            kept: list[str] = []
+            for index in range(0, len(pieces), 2):
+                clause = pieces[index].strip()
+                separator = pieces[index + 1] if index + 1 < len(pieces) else ""
+                if not clause:
+                    continue
+                clause_hits = self._daily_plan_undeclared_relationship_tokens(clause)
+                if clause_hits and not self._relationship_clause_is_explicitly_user_owned(clause, clause_hits):
+                    removed_any = True
+                    continue
+                kept.append(clause)
+                if separator:
+                    kept.append(separator)
+            clean_line = "".join(kept).strip(" ，,。；;！？!?")
+            if clean_line and clean_line not in {"-", "*", "•"}:
+                cleaned_lines.append(clean_line)
+        if not removed_any:
+            return raw[:max_chars] if max_chars > 0 else raw
+        cleaned = "\n".join(cleaned_lines).strip()
+        if max_chars > 0:
+            cleaned = cleaned[:max_chars]
+        if cleaned == (raw[:max_chars] if max_chars > 0 else raw):
+            return cleaned
+
+        log_key = f"{source or '-'}|{'/'.join(initial_hits[:4])}"
+        now = _now_ts()
+        recent_logs = getattr(self, "_recent_relationship_context_sanitize_logs", None)
+        if not isinstance(recent_logs, dict):
+            recent_logs = {}
+            setattr(self, "_recent_relationship_context_sanitize_logs", recent_logs)
+        if now - _safe_float(recent_logs.get(log_key), 0) >= 1800:
+            logger.info(
+                "[PrivateCompanion] 生成前已剔除未声明关系上下文: source=%s relations=%s",
+                source or "-",
+                ",".join(initial_hits[:8]),
+            )
+            recent_logs[log_key] = now
+        return cleaned
+
     def _daily_plan_clause_has_unsafe_social_fact(self, text: str) -> bool:
         clause = _single_line(text, 160)
         if not clause:
             return False
+        if self._daily_plan_undeclared_relationship_tokens(clause):
+            return True
         if self._daily_plan_clause_has_named_message_interaction(clause):
             return True
         future_commitment = (
@@ -10215,7 +10598,7 @@ class DailyStateMixin:
             token in clause for token in concrete_relation
         ):
             return True
-        if re.search(r"(碰见|遇见|撞见|碰到)[过了]?[一-龥]{2,4}", clause) and not any(
+        if re.search(r"(碰见|遇见|撞见|遇到)[过了]?[一-龥]{2,4}", clause) and not any(
             token in clause for token in ("路人", "店员", "陌生人", "旁边的人", "小动物", "猫", "狗", "鸟")
         ):
             return True
@@ -10534,6 +10917,144 @@ class DailyStateMixin:
                 changed = True
         return changed
 
+    def _sanitize_relationship_text_tree_inplace(self, value: Any, *, field: str) -> bool:
+        changed = False
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                item_field = f"{field}.{key}" if field else str(key)
+                if str(key) in {
+                    "raw",
+                    "raw_text",
+                    "original_text",
+                    "prompt",
+                    "prompt_text",
+                    "response",
+                    "response_text",
+                }:
+                    continue
+                if isinstance(item, str):
+                    cleaned = self._sanitize_generation_relationship_context(item, source=item_field)
+                    if cleaned != item:
+                        value[key] = cleaned
+                        changed = True
+                elif isinstance(item, (dict, list)) and self._sanitize_relationship_text_tree_inplace(
+                    item,
+                    field=item_field,
+                ):
+                    changed = True
+            return changed
+        if isinstance(value, list):
+            rebuilt: list[Any] = []
+            for index, item in enumerate(value):
+                item_field = f"{field}.{index}" if field else str(index)
+                if isinstance(item, str):
+                    cleaned = self._sanitize_generation_relationship_context(item, source=item_field)
+                    if cleaned != item:
+                        changed = True
+                    if cleaned:
+                        rebuilt.append(cleaned)
+                else:
+                    if isinstance(item, (dict, list)) and self._sanitize_relationship_text_tree_inplace(
+                        item,
+                        field=item_field,
+                    ):
+                        changed = True
+                    rebuilt.append(item)
+            if rebuilt != value:
+                value[:] = rebuilt
+                changed = True
+        return changed
+
+    def _cleanup_generated_relationship_history_inplace(self) -> bool:
+        """Stop old Bot-authored relationship hallucinations from becoming new evidence."""
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return False
+        changed = False
+        counts: dict[str, int] = {}
+
+        for key in (
+            "daily_state",
+            "daily_plan_history",
+            "daily_story_plan_history",
+            "detail_enhanced_history",
+        ):
+            value = data.get(key)
+            if isinstance(value, (dict, list)) and self._sanitize_relationship_text_tree_inplace(value, field=key):
+                changed = True
+                counts[key] = counts.get(key, 0) + 1
+
+        for key in ("bot_diaries", "self_meal_log", "proactive_audit_log"):
+            records = data.get(key)
+            if isinstance(records, list) and self._sanitize_relationship_text_tree_inplace(records, field=key):
+                changed = True
+                counts[key] = counts.get(key, 0) + 1
+
+        projects = data.get("creative_projects")
+        if isinstance(projects, list):
+            for index, project in enumerate(projects):
+                if not isinstance(project, dict):
+                    continue
+                source_text = project.get("source_text")
+                if not isinstance(source_text, str):
+                    continue
+                cleaned = self._sanitize_generation_relationship_context(
+                    source_text,
+                    source=f"creative_projects.{index}.source_text",
+                )
+                if cleaned != source_text:
+                    project["source_text"] = cleaned
+                    changed = True
+                    counts["creative_projects.source_text"] = counts.get("creative_projects.source_text", 0) + 1
+
+        skill_state = data.get("skill_growth")
+        skills = skill_state.get("skills") if isinstance(skill_state, dict) else None
+        if isinstance(skills, dict):
+            for skill in skills.values():
+                if not isinstance(skill, dict):
+                    continue
+                logs = skill.get("recent_logs")
+                if not isinstance(logs, list):
+                    continue
+                if self._sanitize_relationship_text_tree_inplace(
+                    logs,
+                    field="skill_growth.recent_logs",
+                ):
+                    changed = True
+                    counts["skill_growth.recent_logs"] = counts.get("skill_growth.recent_logs", 0) + 1
+
+        qzone_state = data.get("qzone_integration")
+        if isinstance(qzone_state, dict):
+            recent_posts = qzone_state.get("recent_life_publish_texts")
+            if isinstance(recent_posts, list) and self._sanitize_relationship_text_tree_inplace(
+                recent_posts,
+                field="qzone_integration.recent_life_publish_texts",
+            ):
+                changed = True
+                counts["qzone_integration.recent_life_publish_texts"] = 1
+            for key, value in list(qzone_state.items()):
+                if not isinstance(value, str):
+                    continue
+                if not (
+                    key.endswith("_text")
+                    or key.endswith("_draft")
+                    or key.endswith("_caption")
+                    or key in {"last_publish_recorded_text"}
+                ):
+                    continue
+                cleaned = self._sanitize_generation_relationship_context(
+                    value,
+                    source=f"qzone_integration.{key}",
+                )
+                if cleaned != value:
+                    qzone_state[key] = cleaned
+                    changed = True
+                    counts["qzone_integration.text_fields"] = counts.get("qzone_integration.text_fields", 0) + 1
+
+        if changed:
+            logger.info("[PrivateCompanion] 已清理未声明关系的生成历史: %s", counts)
+        return changed
+
     def _sanitize_runtime_social_facts_inplace(self) -> bool:
         data = getattr(self, "data", None)
         if not isinstance(data, dict):
@@ -10561,6 +11082,8 @@ class DailyStateMixin:
             for user_id, user in users.items():
                 if self._sanitize_user_proactive_social_facts_inplace(user, field=f"users.{user_id}"):
                     changed = True
+        if self._cleanup_generated_relationship_history_inplace():
+            changed = True
         if changed:
             data["social_fact_sanitized_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M:%S")
         return changed
@@ -12485,7 +13008,9 @@ class DailyStateMixin:
                         image_path=image_path,
                     )
                 except Exception as exc:
-                    review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
+                    review_enabled = bool(getattr(self, "enable_response_self_review", True)) and bool(
+                        getattr(self, "enable_proactive_message_review", True)
+                    )
                     if review_enabled:
                         review_failure_signature = self._proactive_topic_signature(
                             " ".join(
@@ -13121,8 +13646,24 @@ class DailyStateMixin:
                     image_path,
                     extra_components=extra_components,
                     quote_message_id=proactive_quote_message_id,
-                    disable_segmenting=reason == "creative_share" or friend_proactive_for_send,
+                    disable_segmenting=(
+                        reason in {"creative_share", "bili_video_share", "news_share", "web_exploration_share"}
+                        or friend_proactive_for_send
+                    ),
                 )
+                async with self._data_lock:
+                    current_after_send = self._get_user(user_id)
+                    sent_at = _now_ts()
+                    delivered_text = self._visible_text_without_tts_reading(text, limit=500)
+                    current_after_send["last_proactive_message"] = _single_line(delivered_text, 500)
+                    current_after_send["last_proactive_sent_at"] = sent_at
+                    current_after_send["last_proactive_delivery_umo"] = _single_line(send_umo_for_send, 180)
+                    current_after_send["last_proactive_delivery_inbound_count"] = _safe_int(
+                        current_after_send.get("inbound_count"),
+                        0,
+                    )
+                    current_after_send["last_proactive_reply_context_consumed_for"] = 0
+                    self._save_data_sync()
                 if not is_troubleshooting_for_send and reason == "creative_share":
                     # Keep a per-user anchor before history archival so an immediate reply has context.
                     self._remember_recent_creative_share_snapshot(

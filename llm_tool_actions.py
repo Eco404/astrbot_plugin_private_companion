@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from typing import Any
 
@@ -22,6 +24,94 @@ from .qzone_selection import parse_qzone_post_selection
 
 class LlmToolActionsMixin:
     """Implementation bodies for LLM tools registered in main.py."""
+
+    @staticmethod
+    def _character_photo_request_matches(text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        if any(
+            marker in compact
+            for marker in (
+                "腿照",
+                "脚照",
+                "手照",
+                "全身照",
+                "半身照",
+                "近照",
+                "生活照",
+                "穿搭照",
+            )
+        ):
+            return True
+        return bool(
+            re.search(
+                r"(?:看看|看下|看一下|想看|要看|让我看看|给我看看|发来看看).{0,10}"
+                r"(?:腿|脚|手|脸|全身|半身|穿搭|衣服|样子)",
+                compact,
+                flags=re.I,
+            )
+        )
+
+    def _photo_generation_instruction_matches(self, text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        if self._character_photo_request_matches(compact):
+            return True
+        return any(
+            token in compact
+            for token in (
+                "生图",
+                "画图",
+                "绘图",
+                "生成图片",
+                "出图",
+                "画一张",
+                "画张",
+                "来张图",
+                "来一张图",
+                "自拍",
+                "拍照",
+                "照片",
+                "相片",
+                "头像",
+                "表情包",
+                "贴纸",
+                "壁纸",
+                "改图",
+                "修图",
+                "重绘",
+                "P图",
+                "p图",
+                "参考图",
+                "穿搭图",
+                "COS",
+                "cosplay",
+            )
+        )
+
+    def _media_delivery_truth_instruction(self) -> str:
+        if not (self.enabled and getattr(self, "enable_photo_text_action", False)):
+            return ""
+        return (
+            "【媒体真实性硬规则】只有本轮消息链实际包含图片，或媒体工具明确返回 `sent=true`，"
+            "才能说“已经发了/给你看了/图片在上面”。其他情况必须承认未发送；人格和角色扮演不能覆盖真实发送状态。"
+        )
+
+    def _photo_tool_call_timeout_seconds(self) -> float:
+        context = getattr(self, "context", None)
+        getter = getattr(context, "get_config", None)
+        if not callable(getter):
+            return 120.0
+        try:
+            cfg = getter()
+        except Exception:
+            return 120.0
+        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(provider_settings, dict):
+            return 120.0
+        return _safe_float(provider_settings.get("tool_call_timeout"), 120.0, 1.0, 3600.0)
 
     def _cross_user_memory_query_instruction(self) -> str:
         if not (self.enabled and getattr(self, "enable_cross_user_memory_bridge", False)):
@@ -77,8 +167,10 @@ class LlmToolActionsMixin:
 - 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。
 - 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。
 - 默认 `send=true`，工具会把生成图片发送到当前会话；如果只想拿路径再决定，可传 `send=false`。
-- 工具返回 `sent=true` 时，图片已经发出，后续只需要很短地承接，不要复述本地路径或再假装发送一次。
-- 如果工具返回失败，按失败原因说明，不要假装图片已生成。
+- 在实际调用本工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。
+- 只有工具返回 `sent=true` 时才表示图片已经发出；后续只需要很短地承接，不要复述本地路径或再假装发送一次。
+- 工具返回 `sent=false` 时，无论图片是否生成，都表示用户没有收到图片；必须按 `message/actual_error` 如实说明，绝对不能说已经发送。
+- 如果工具返回失败，按失败原因说明，不要假装图片已生成或已发送。
 """.strip()
 
     async def _pc_generate_photo_impl(
@@ -93,6 +185,7 @@ class LlmToolActionsMixin:
         scene_preset: str = "",
         **kwargs,
     ) -> str:
+        tool_started_at = time.monotonic()
         mode = _single_line(getattr(self, "natural_language_photo_generation_mode", "tool_first"), 40).lower()
         if mode == "off":
             return json.dumps({"status": "disabled", "message": "非指令生图/改图已关闭；显式指令仍可使用“陪伴 生图/自拍/改图”。"}, ensure_ascii=False)
@@ -129,9 +222,12 @@ class LlmToolActionsMixin:
         if intent_kind == "text2img" and any(token in compact_prompt for token in ("表情包", "贴纸", "sticker", "meme")):
             workflow_kind = "selfie"
             intent_kind = "sticker"
-        elif intent_kind == "text2img" and any(
-            token in compact_prompt
-            for token in ("自拍", "拍照", "头像", "人像", "角色本人", "本人出镜", "露脸", "穿搭", "镜前", "cos", "COS", "cosplay")
+        elif intent_kind == "text2img" and (
+            self._character_photo_request_matches(content)
+            or any(
+                token in compact_prompt
+                for token in ("自拍", "拍照", "头像", "人像", "角色本人", "本人出镜", "露脸", "穿搭", "镜前", "cos", "COS", "cosplay")
+            )
         ):
             workflow_kind = "selfie"
             intent_kind = "selfie"
@@ -286,13 +382,48 @@ class LlmToolActionsMixin:
 
         session_key = _single_line(getattr(event, "unified_msg_origin", ""), 120) or "tool_photo"
         generation_session_key = f"tool_photo_{session_key}"
-        backend_name, image_path, note = await self._generate_photo_image(
-            workflow_kind=workflow_kind,
-            prompt_text=prompt_text,
-            session_key=generation_session_key,
-            reference_image_path=reference_path,
-            image_size=_single_line(image_size or kwargs.get("size"), 40),
-        )
+        outer_timeout = self._photo_tool_call_timeout_seconds()
+        timeout_margin = max(2.0, min(8.0, outer_timeout * 0.1))
+        generation_timeout = outer_timeout - (time.monotonic() - tool_started_at) - timeout_margin
+        if generation_timeout <= 0:
+            generation_timeout = 0.01
+        try:
+            backend_name, image_path, note = await asyncio.wait_for(
+                self._generate_photo_image(
+                    workflow_kind=workflow_kind,
+                    prompt_text=prompt_text,
+                    session_key=generation_session_key,
+                    reference_image_path=reference_path,
+                    image_size=_single_line(image_size or kwargs.get("size"), 40),
+                ),
+                timeout=generation_timeout,
+            )
+        except asyncio.TimeoutError:
+            actual_error = (
+                f"生图未能在 AstrBot 工具调用时限 {outer_timeout:g} 秒内完成；"
+                "本次工具调用没有生成或发送图片。"
+            )
+            logger.warning(
+                "[PrivateCompanion] pc_generate_photo 在外层工具超时前主动结束: session=%s timeout=%.1fs budget=%.1fs",
+                session_key,
+                outer_timeout,
+                generation_timeout,
+            )
+            return json.dumps(
+                {
+                    "status": "timeout",
+                    "success": False,
+                    "generated": False,
+                    "send_requested": send_image,
+                    "sent": False,
+                    "message": actual_error,
+                    "actual_error": actual_error,
+                    "actionable_hint": "请如实告诉用户本次没有出图、没有发送；不要声称已经发出。可稍后重试，或让管理员提高 AstrBot tool_call_timeout/缩短生图后端超时。",
+                    "must_not_claim_sent": True,
+                    "retryable": True,
+                },
+                ensure_ascii=False,
+            )
         ok = bool(image_path and os.path.exists(image_path))
         annotator = getattr(self, "_annotate_recent_photo_generation", None)
         if callable(annotator):
@@ -321,11 +452,23 @@ class LlmToolActionsMixin:
         delivery: dict[str, Any] = {}
         if ok and send_image:
             message = _single_line(caption, 120) or ("" if intent_kind == "sticker" else "生成好了。")
-            delivery = await self._deliver_generated_image_to_event(
-                event,
-                image_path=image_path,
-                caption=message,
-            )
+            try:
+                delivery = await self._deliver_generated_image_to_event(
+                    event,
+                    image_path=image_path,
+                    caption=message,
+                )
+            except Exception as exc:
+                delivery = {
+                    "sent": False,
+                    "destination": "error",
+                    "message": f"图片发送失败：{_single_line(exc, 180) or '未知错误'}",
+                }
+                logger.warning(
+                    "[PrivateCompanion] pc_generate_photo 图片投递异常: session=%s err=%s",
+                    session_key,
+                    _single_line(exc, 180),
+                )
             sent = bool(delivery.get("sent"))
         if callable(annotator):
             annotator(
@@ -354,13 +497,16 @@ class LlmToolActionsMixin:
                     scene_preset=preset_text,
                     reference_image_path=reference_path,
                 )
+        overall_success = bool(ok and (not send_image or sent))
         result_payload = {
-            "status": "success" if ok else "error",
-            "success": ok,
+            "status": "success" if overall_success else ("delivery_failed" if ok else "error"),
+            "success": overall_success,
+            "generated": ok,
+            "send_requested": send_image,
             "message": (
                 _single_line(delivery.get("message"), 220)
                 if ok and send_image and delivery
-                else ("图片已生成并发送" if sent else ("图片已生成" if ok else (_single_line(note, 220) or "生图失败")))
+                else ("图片已生成但按请求未发送" if ok and not send_image else (_single_line(note, 220) or "生图失败"))
             ),
             "backend": _single_line(backend_name, 80),
             "path": _single_line(image_path, 260),
@@ -372,8 +518,20 @@ class LlmToolActionsMixin:
             "delivery": _single_line(delivery.get("destination"), 30),
             "safety_review": _single_line(delivery.get("review_label"), 30),
             "note": _single_line(note, 220),
+            "must_not_claim_sent": not sent,
         }
-        if not ok:
+        if ok and send_image and not sent:
+            delivery_error = _single_line(delivery.get("message"), 360) or "图片发送失败"
+            result_payload.update(
+                {
+                    "failure_stage": "delivery",
+                    "delivery_error": delivery_error,
+                    "actual_error": delivery_error,
+                    "actionable_hint": "图片文件已经生成，但用户没有收到图片。请明确说发送失败，绝对不能说已经发出。",
+                    "retryable": True,
+                }
+            )
+        elif not ok:
             note_text = _single_line(note, 360) or "生图失败"
             lowered_note = note_text.lower()
             hint = "请按 actual_error 里的真实原因回复用户，不要改写成未出现的超时、排队或权限问题。"
@@ -389,6 +547,7 @@ class LlmToolActionsMixin:
                     "actual_error": note_text,
                     "actionable_hint": hint,
                     "do_not_claim_timeout": "超时" not in note_text and "timeout" not in lowered_note,
+                    "must_not_claim_sent": True,
                 }
             )
         return json.dumps(result_payload, ensure_ascii=False)

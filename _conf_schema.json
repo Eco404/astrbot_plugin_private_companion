@@ -2777,6 +2777,12 @@
     "default": false,
     "invisible": true
   },
+  "enable_creative_cover_generation": {
+    "description": "Legacy flat config: 为创作内容生成封面",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "daily_outfit_photo_prompt": {
     "description": "Legacy flat config: 每日穿搭额外提示词",
     "type": "string",
@@ -5366,18 +5372,18 @@
         }
       },
       "enable_response_self_review": {
-        "description": "启用回复/主动复核",
+        "description": "启用回复/主动复核总开关",
         "type": "bool",
-        "hint": "Controls passive reply self-review only. Proactive final content review uses enable_proactive_message_review.",
+        "hint": "关闭后同时停止被动回复复核和主动消息终审；下方主动终审子开关只在本总开关开启时生效。最低限度的本地安全检查仍会保留，但不会调用模型改写。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
         }
       },
       "enable_proactive_message_review": {
-        "description": "Proactive final content gate",
+        "description": "主动消息发送前终审",
         "type": "bool",
-        "hint": "Every proactive message is reviewed immediately before delivery using recent chat, persona, motive, and runtime state. The final decision is send, rewrite, or drop only; this switch does not affect passive reply review.",
+        "hint": "仅在回复/主动复核总开关开启时生效。主动消息发送前结合最近聊天、人格、动机和运行态判断原样发送、改写或取消；关闭后不调用模型润色。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
@@ -7612,6 +7618,54 @@
           "enable_daily_diary": true
         }
       },
+      "daily_diary_form": {
+        "description": "日记写作形式",
+        "type": "string",
+        "hint": "自动模式会按日期和当天可用经历稳定选择一种形式，不会每次重载都变化。也可固定为场景短记、碎片手记、心绪自述或观察记录。",
+        "options": ["auto", "scene", "fragments", "inner_voice", "observation"],
+        "default": "auto",
+        "condition": {
+          "enable_daily_diary": true
+        }
+      },
+      "daily_diary_length": {
+        "description": "日记篇幅",
+        "type": "string",
+        "hint": "材料不足时允许比目标更短，避免为了凑字数虚构生活细节。",
+        "options": ["short", "standard", "long"],
+        "default": "standard",
+        "condition": {
+          "enable_daily_diary": true
+        }
+      },
+      "daily_diary_creativity": {
+        "description": "日记写实程度",
+        "type": "string",
+        "hint": "严格写实只采用已确认经历；自然平衡允许轻微感官表达；个性表达可增强节奏和内心色彩，但都不会虚构事件。",
+        "options": ["strict", "balanced", "expressive"],
+        "default": "balanced",
+        "condition": {
+          "enable_daily_diary": true
+        }
+      },
+      "daily_diary_custom_direction": {
+        "description": "日记创作方向",
+        "type": "text",
+        "hint": "可指定更关注哪些真实内容或采用怎样的创作气质。这里不能突破事实边界；留空由人格和当天经历决定。",
+        "default": "",
+        "condition": {
+          "enable_daily_diary": true
+        }
+      },
+      "daily_diary_generate_share_seed": {
+        "description": "从日记提取自然分享素材",
+        "type": "bool",
+        "hint": "只从正文已经出现的细节提取，不会让日记直接安排当晚主动消息。关闭后日记仅用于连续性和梦境素材。",
+        "default": true,
+        "condition": {
+          "enable_daily_diary": true
+        }
+      },
       "max_diary_entries": {
         "description": "保留 Bot 日记数量",
         "type": "int",
@@ -8059,6 +8113,15 @@
         "description": "每日穿搭照片",
         "type": "bool",
         "hint": "默认关闭。开启后，每天日程生成并保存后会额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，用作拓展页左上角 Logo。生成失败会自动间隔约3分钟重试，最多重试5次；当天成功或重试上限后不再重复请求。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "enable_creative_cover_generation": {
+        "description": "为创作内容生成封面",
+        "type": "bool",
+        "hint": "默认关闭。开启后，已有正文但没有封面的创作项目会在空闲创作推进时调用一次文生图能力生成封面，并根据悬疑、科幻奇幻、诗歌散文、古风、日常治愈等作品特征自动匹配画风。封面显示在书柜作品详情中；失败最多重试3次且带冷却。关闭后不再生成，但不会删除已有封面。",
         "default": false,
         "condition": {
           "enable_photo_text_action": true

@@ -763,6 +763,32 @@ def _build_schedule_reference_sections(
     return "\n\n".join(identity_parts), "\n\n".join(behavior_parts)
 
 
+def _sanitize_relationship_generation_source(plugin, value: Any, *, source: str) -> str:
+    sanitizer = getattr(plugin, "_sanitize_generation_relationship_context", None)
+    if callable(sanitizer):
+        try:
+            return sanitizer(value, source=source)
+        except Exception:
+            pass
+    return str(value or "").strip()
+
+
+def _relationship_authority_guard(plugin) -> str:
+    formatter = getattr(plugin, "_format_generation_relationship_authority_guard", None)
+    if callable(formatter):
+        try:
+            guard = str(formatter() or "").strip()
+            if guard:
+                return guard
+        except Exception:
+            pass
+    return (
+        "【关系事实权限】\n"
+        "只有当前人格与世界观可以建立 Bot 的稳定关系。记忆、历史日程、旧动态和其他连续性材料"
+        "只能延续人格已声明的关系，不能新增家人、亲友、同学、同事或伴侣。"
+    )
+
+
 def get_schedule_planning_prompt(plugin) -> str:
     identity_context, behavior_context = _build_schedule_reference_sections(plugin)
     return "\n\n".join(part for part in (identity_context, behavior_context) if part)
@@ -816,32 +842,80 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
     custom = plugin.daily_plan_prompt
     identity_context, planning_style_context = _build_schedule_reference_sections(plugin)
     schedule_prompt = "\n\n".join(part for part in (identity_context, planning_style_context) if part)
-    can_do_text = plugin._format_can_do_for_prompt()
-    humanized_state = plugin._format_state_for_prompt(
-        plugin.data.get("daily_state", {}),
-        include_dream=bool(custom),
+    can_do_text = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_can_do_for_prompt(),
+        source="daily_plan.can_do",
     )
-    recent_diaries = plugin._recent_diary_context()
-    yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
-    yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
+    humanized_state = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_state_for_prompt(
+            plugin.data.get("daily_state", {}),
+            include_dream=bool(custom),
+        ),
+        source="daily_plan.current_state",
+    )
+    recent_diaries = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._recent_diary_context(),
+        source="daily_plan.recent_diaries",
+    )
+    yesterday_conversation = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_yesterday_conversation_summary_for_prompt(),
+        source="daily_plan.yesterday_conversation",
+    )
+    yesterday_screen_diary = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_yesterday_screen_diary_context_for_prompt(),
+        source="daily_plan.yesterday_screen_diary",
+    )
     weather_info = plugin._weather_summary_text(plugin.data.get("daily_weather", {}))
     calendar_context = plugin._format_calendar_context_for_prompt()
-    schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
-    recent_plan_history = plugin._format_recent_daily_plan_history_for_prompt()
+    schedule_adjustments = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_schedule_adjustments_for_prompt(),
+        source="daily_plan.schedule_adjustments",
+    )
+    recent_plan_history = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_recent_daily_plan_history_for_prompt(),
+        source="daily_plan.recent_plan_history",
+    )
     personal_goal_context_getter = getattr(plugin, "_format_personal_goals_schedule_context", None)
-    skill_growth_context = "\n\n".join(
+    skill_growth_context = _sanitize_relationship_generation_source(plugin, "\n\n".join(
         part
         for part in (
             plugin._format_skill_growth_schedule_context(),
             personal_goal_context_getter() if callable(personal_goal_context_getter) else "",
         )
         if part
+    ), source="daily_plan.skill_growth")
+    user_habits = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_all_user_behavior_habits_for_schedule(),
+        source="daily_plan.user_habits",
     )
-    user_habits = plugin._format_all_user_behavior_habits_for_schedule()
-    memory_companion_context = str(memory_companion_context or "").strip()
+    memory_companion_context = _sanitize_relationship_generation_source(
+        plugin,
+        memory_companion_context,
+        source="daily_plan.memory_companion",
+    )
     memory_companion_context_block = memory_companion_context or "暂无可用 MemoryCompanion 连续性参考。"
+    memo_notes_getter = getattr(plugin, "_format_memo_notes_for_prompt", None)
+    memo_notes = _sanitize_relationship_generation_source(
+        plugin,
+        memo_notes_getter(days=7, include_pinned=True, limit=6) if callable(memo_notes_getter) else "",
+        source="daily_plan.memo_notes",
+    )
+    important_dates = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_important_dates_for_prompt(),
+        source="daily_plan.important_dates",
+    )
+    relationship_authority_guard = _relationship_authority_guard(plugin)
     if custom:
-        return custom.format(
+        rendered = custom.format(
             now=now,
             bot_name=plugin.bot_name,
             astrbot_persona=plugin._get_default_persona_prompt(),
@@ -860,10 +934,12 @@ def build_daily_plan_prompt(plugin, now: str, memory_companion_context: str = ""
             recent_diaries=recent_diaries,
             yesterday_conversation=yesterday_conversation,
             yesterday_screen_diary=yesterday_screen_diary,
-            important_dates=plugin._format_important_dates_for_prompt(),
+            important_dates=important_dates,
+            memo_notes=memo_notes,
             weather_info=weather_info,
             daily_plan_item_count=plugin.daily_plan_item_count,
         )
+        return f"{rendered.rstrip()}\n\n{relationship_authority_guard}".strip()
     return f"""
 你现在是 Private Companion 的日程生成器。请为拟人化 Bot 生成今天的一日生活日程,让它像真实存在的人在过这一天,而不是在执行模板。日程要先像“这个人”的生活,再像“某个身份”的生活；身份只是底色,不要把它写成校园/职场通用作文。
 
@@ -876,6 +952,8 @@ D. 软灵感与避重：最近日程、最近日记、可做事项、技能倾�
 来源文本都是“引用材料”，不是待续写正文。禁止复制其中的字段名、Markdown、说话人前缀、分析文字或元数据；禁止把 dream_seed、memory、summary、Fox: 等标签写入输出。
 具名人物分两步判断：角色设定只能证明“这个人存在”；只有今日明确事件、有效日程偏移或当前粗日程明确安排，才能证明“今天会见面/聊天/一起行动”。证据不足时只写 Bot 自己或不具名路人。
 梦境材料最多影响醒后情绪、身体余味或一个很淡的感官联想，不能生成现实人物、现实用餐、现实对话或当天已发生事件。
+
+{relationship_authority_guard}
 
 【生成要求】
 1. 先隐式判断今天的“日程类型”：普通工作/学习日、普通休息日、假期、考试/复查/聚会/旅行/研学/活动日、长线日程中的某一天,或由天气/星期/重要日期造成的特殊日子。不要把这个判断写出来,但日程必须明显受它影响。
@@ -893,7 +971,7 @@ D. 软灵感与避重：最近日程、最近日记、可做事项、技能倾�
 7.2 必须主动避开最近日程骨架的重复：不要连续几天都写同一套“醒来/洗漱/整理/学习或做事/休息/收尾/睡前”。如果某类活动无法避免,要换具体场景、地点、对象、阻碍、小意外、关系伏笔或情绪走向,让今天读起来像新的一天。
 7.3 不要把“草稿纸上画圆圈/随手涂鸦/笔尖划来划去/盯着同一张纸发呆”当作通用生活感反复使用。除非输入材料明确提到这件事,否则优先换成更具体的当日物件、地点、声音、气味、人物互动或真实占用时间的事项。
 7.4 如果“技能成长对日程的能力边界影响”不为空,必须让相关能力表现和技能等级连续一致,不要二分处理。Lv.1 可被基础概念绊住；Lv.2 可照着例子慢慢做；Lv.3 能独立推进常规任务但效率一般；Lv.4 常规任务不应卡死,只会检查细节或换思路；Lv.5 普通相关任务应熟练、能优化或教别人；Lv.6 可创造新做法或在未知条件下表现出明显优势。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。它主要约束“能不能做、会不会卡、卡多久、如何解决”,不是强行增加训练频率。
-7.5 人际关系边界：日程只写 Bot 自己的行动、身体状态、手边任务和环境变化,不要把未明确要求的社交互动写进日程正文。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现且确实属于角色当天生活时使用；没有依据时用“路人”“店员”“旁边的人”“群友”“别人”等弱关系,或只保留角色自己的行动。
+7.5 人际关系边界：日程只写 Bot 自己的行动、身体状态、手边任务和环境变化,不要把未明确要求的社交互动写进日程正文。稳定关系必须由 A 级身份来源明确声明；它若只在旧日程、旧日记、旧动态、记忆或聊天里出现，只算未经核实的旧叙事，不能单独作为依据。即使关系已声明，也仍需当天事实才能安排共同活动；否则用“路人”“店员”“旁边的人”“群友”“别人”等弱关系,或只保留角色自己的行动。
 7.6 次要用户禁区：禁止加入与次要用户的互动。这里的“次要用户”指插件里关系角色为 friend 的私聊对象,不是普通剧情里的路人朋友。不要在 activity、mood、message_seed 里写 Bot 和次要用户聊天、发消息、回消息、被提醒、互相吐槽、约饭、夜宵、见面、出门或一起做事；也不要把用户介入改写成 Bot 与次要用户之间的互动。如果需要表现手机或消息氛围,只能写成“手机震了一下,她没有点开”“看见通知又扣下屏幕”“把想说的话先存在输入框里”,对象只能是当前主要用户/用户或不指名对象。
 8. 状态和天气必须真的影响安排：低能量时密度更松,困倦时上午起步更慢,下雨会改变出门/衣物/交通/心情,天气舒服时更容易出门、开窗或注意到光线。
 9. 生活感来自“有选择的具体”,不是动作清单：动作要透露她的习惯、迟疑、偏好、人际关系、宠物/物件或当天状态。不要连续堆“揉头发、系鞋带、转笔、理刘海”这类谁都能做的通用动作；每段最好有一个独属于此刻的小原因、小物件或小偏差。
@@ -977,7 +1055,10 @@ Bot 自身连续记忆：
 {skill_growth_context or "暂无技能倾向。"}
 
 近期重要日期（非今天的日期只能形成轻量准备，不得写成已发生）：
-{plugin._format_important_dates_for_prompt()}
+{important_dates}
+
+近期备忘便签（只能作为待办或提醒，不能写成已完成经历）：
+{memo_notes or "（暂无）"}
 """.strip()
 
 
@@ -999,15 +1080,70 @@ def build_detail_enhancement_prompt(
         knowledge_max_chars=2400,
         knowledge_max_chunks=12,
     )
-    plan_outline = _format_detail_plan_outline(plan)
-    current_state = plugin._format_state_for_prompt(state, include_dream=False)
+    plan_outline = _sanitize_relationship_generation_source(
+        plugin,
+        _format_detail_plan_outline(plan),
+        source="detail.plan_outline",
+    )
+    current_state = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_state_for_prompt(state, include_dream=False),
+        source="detail.current_state",
+    )
     weather_info = plugin._weather_summary_text(plugin.data.get("daily_weather", {}))
     calendar_context = plugin._format_calendar_context_for_prompt()
-    schedule_adjustments = plugin._format_schedule_adjustments_for_prompt(segment=segment)
-    user_habits = plugin._format_all_user_behavior_habits_for_schedule()
-    memory_companion_context = str(memory_companion_context or "").strip()
+    schedule_adjustments = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_schedule_adjustments_for_prompt(segment=segment),
+        source="detail.schedule_adjustments",
+    )
+    user_habits = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_all_user_behavior_habits_for_schedule(),
+        source="detail.user_habits",
+    )
+    memory_companion_context = _sanitize_relationship_generation_source(
+        plugin,
+        memory_companion_context,
+        source="detail.memory_companion",
+    )
     memory_companion_context_block = memory_companion_context or "暂无可用 MemoryCompanion 连续性参考。"
-    yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
+    yesterday_screen_diary = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_yesterday_screen_diary_context_for_prompt(),
+        source="detail.yesterday_screen_diary",
+    )
+    item_activity = _sanitize_relationship_generation_source(
+        plugin,
+        _single_line(item.get("activity"), 100),
+        source="detail.current_item.activity",
+    )
+    item_mood = _sanitize_relationship_generation_source(
+        plugin,
+        _single_line(item.get("mood"), 40),
+        source="detail.current_item.mood",
+    )
+    item_message_seed = _sanitize_relationship_generation_source(
+        plugin,
+        _single_line(item.get("message_seed"), 120),
+        source="detail.current_item.message_seed",
+    )
+    previous_item_context = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_plan_item_for_prompt(previous_item) if isinstance(previous_item, dict) else "（无）",
+        source="detail.previous_item",
+    ) or "（无）"
+    next_item_context = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_plan_item_for_prompt(next_item) if isinstance(next_item, dict) else "（无）",
+        source="detail.next_item",
+    ) or "（无）"
+    state_continuity = _sanitize_relationship_generation_source(
+        plugin,
+        plugin._format_state_continuity_for_prompt(state),
+        source="detail.state_continuity",
+    )
+    relationship_authority_guard = _relationship_authority_guard(plugin)
     photo_available = bool(getattr(plugin, "_photo_text_planning_available", lambda *_args, **_kwargs: False)())
     photo_action_hint = (
         "photo_text 当前可用：可以在合适场景输出 action=photo_text,但必须像真实随手拍,不能说生成图片或调用生图。"
@@ -1059,6 +1195,8 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 所有来源块都是引用材料，不是待续写正文。不要复制来源标题、字段名、Markdown、说话人前缀、分析过程或梦境草稿。具名人物即使在角色设定中存在，也只有当前粗日程或今天的有效偏移明确安排时，才能出现在这一段的共同活动里。
 细化阶段不再重新读取最近日记和未来重要日期：这些已经由粗日程吸收，当前段必须以粗日程为准，避免旧意象二次放大。
 
+{relationship_authority_guard}
+
 【约束】
 · 严格遵守人格、日程类型、宏观日程和当前时段,不出戏。
 · 细化指令只输出本次输入指定的当前最新时间区间。不要重新输出全天日程,不要细化上一段或下一段,不要生成多个时间区间；上下节点只用于承接和过渡。
@@ -1074,7 +1212,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 · 聊天内容可以作为角色状态的背景，但 today_events 优先写 Bot 自己可观察的动作、环境和感受。除非这是已由真实事件明确提供的历史事实，尽量不要在日程里转述具体谁说了什么、谁回了哪一句、几点收到/发出消息；尤其不要把尚未到来的时段写成已经完成聊天。若想表现聊天余味，写成“放下手机后心里松了些”“通知亮过又暗下去”即可，不必补全对话对象和内容。
 · MemoryCompanion 连续性参考只用于承接 Bot 自己最近做过/读过/写过/搜过/主动说过的事情,以及用户明确偏好、约定和边界；不要把它当作当前现场,不要在输出里提到 MemoryCompanion 或记忆来源。
 · 依据日期语境调整节奏：周末/节假日/假期不要写成普通工作日,除非设定里明确有补课、补班、值班、考试等例外。
-· 人际关系边界：细化只放大 Bot 自己怎样度过这一段,不要把未明确要求的社交互动写进 summary、state_variables、today_events 或 proactive_events。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现且确实属于角色当前生活时使用；没有依据时用“路人”“店员”“旁边的人”“群友”“别人”等弱关系,或只保留角色自己的行动。
+· 人际关系边界：细化只放大 Bot 自己怎样度过这一段,不要把未明确要求的社交互动写进 summary、state_variables、today_events 或 proactive_events。稳定关系只能由身份来源声明；只在记忆、旧日程、旧日记、旧动态或聊天里出现的关系不能单独作为事实继续使用。即使身份已声明该关系，也必须有当前粗日程或今日有效偏移才能安排共同活动；否则用“路人”“店员”“旁边的人”“群友”“别人”等弱关系,或只保留角色自己的行动。
 · 次要用户禁区：禁止加入与次要用户的互动。这里的“次要用户”指插件里关系角色为 friend 的私聊对象,不是普通剧情里的路人朋友。不要在 summary、state_variables、today_events、proactive_events 里写 Bot 和次要用户聊天、发消息、回消息、被提醒、互相吐槽、约饭、夜宵、见面、出门或一起做事；也不要把用户介入改写成 Bot 与次要用户之间的互动。如果需要表现手机或消息氛围,只能写成“手机震了一下,她没有点开”“看见通知又扣下屏幕”“把想说的话先存在输入框里”,对象只能是当前主要用户/用户或不指名对象。
 · 社交事实边界：不要在 today_events、summary、proactive_events 里凭空写“遇见某个具体人/熟人”“次要用户发来消息/约夜宵/约饭”“给次要用户回消息”“次要用户提醒/找她聊天”“和别人约好下周/改天一起做某事”“替用户买好或带回某样东西”。可以写成看到某物想起用户、想问用户要不要、或把这件小事当作普通分享,但不能把未发生的承诺写成既定事实。
 · 输出必须是干净 JSON 字段值。禁止把 dream_seed、analysis、reasoning、角色名加冒号的台词（如“Fox:”）、Markdown 粗体标记或任何草稿/续写提示混入 summary、today_events、state_variables、presence_status、proactive_events。
@@ -1137,13 +1275,13 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 
 即将细化的当前事项：
 时间段：{start_text}-{end_text}
-当前事项：{_single_line(item.get('activity'), 100)}
-情绪：{_single_line(item.get('mood'), 40)}
-可分享种子：{_single_line(item.get('message_seed'), 120)}
+当前事项：{item_activity or "（无）"}
+情绪：{item_mood}
+可分享种子：{item_message_seed}
 
 上下节点衔接：
-上一段：{plugin._format_plan_item_for_prompt(previous_item) if isinstance(previous_item, dict) else '（无）'}
-下一段：{plugin._format_plan_item_for_prompt(next_item) if isinstance(next_item, dict) else '（无）'}
+上一段：{previous_item_context}
+下一段：{next_item_context}
 衔接要求：当前段要承接上一段的身体余味、情绪惯性或未收住的小动作,同时自然滑向下一段；不要像三个互不相干的短剧。可以让上一段只留下很淡的影响,但不要忽略时间推进。
 
 【B｜当前事实】
@@ -1157,7 +1295,7 @@ Bot 当前状态（已排除梦境正文）：
 {current_state}
 
 状态自然走向：
-{plugin._format_state_continuity_for_prompt(state)}
+{state_continuity}
 
 用户今天明确造成的局部偏移：
 {schedule_adjustments}
