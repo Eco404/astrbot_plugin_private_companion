@@ -9278,8 +9278,10 @@ class DailyStateMixin:
         current_time = self._environment_fromtimestamp(_now_ts()).strftime("%Y-%m-%d %H:%M:%S")
         return f"""【临时预约与动作查岗】
 当前本地时间：{current_time}。所有 time 都必须据此换算为未来的绝对时间。
-一、明确约定：用户明确要求稍后提醒/叫醒/回头说，或双方形成明确临时约定时，在回复末尾写：
+一、明确约定：用户明确要求稍后提醒/叫醒/回头说，或双方形成明确临时约定时，若本轮提供 AstrBot 官方 `future_task` 工具，优先调用该工具；只有没有官方工具可用时，才在回复末尾写：
 <timer>{{"time":"YYYY-MM-DD HH:MM:SS","topic":"约定内容"}}</timer>
+
+同一约定只能选择 `future_task` 或 `<timer>` 其中一种，绝对不能同时创建。用户明确说“便签/便笺/备忘/待办/帮我记一下/记下来”时，应使用 `pc_manage_memo`；带提醒时间的便签由便签自身提醒，不得再调用 `future_task` 或输出 `<timer>`。
 
 二、动作查岗：用户明确说自己暂时离开去做一个有自然结束点的具体动作（如洗澡、吃饭、拿快递、短时出门办事），即使没有主动要求提醒，也可以形成一个“忙完后想问一句”的主动念头。生成念头的同一轮必须估计合理耗时并直接预约下一次主动消息：
 <timer>{{"time":"YYYY-MM-DD HH:MM:SS","reason":"activity_followup","activity":"洗澡","estimated_minutes":30,"topic":"洗完澡后问问回来了没有","motive":"记得用户刚去洗澡，估计差不多结束后想自然问一句","followup_intensity":1,"style":"轻松自然"}}</timer>
@@ -9303,6 +9305,8 @@ class DailyStateMixin:
 
     def _llm_response_has_official_timer_tool(self, resp: Any) -> bool:
         names = getattr(resp, "tools_call_name", None)
+        if isinstance(names, str) and names.strip() == "future_task":
+            return True
         if isinstance(names, (list, tuple, set)) and any(str(name).strip() == "future_task" for name in names):
             return True
         raw_completion = getattr(resp, "raw_completion", None)
@@ -9342,6 +9346,92 @@ class DailyStateMixin:
 
     def _should_skip_timer_capture_for_official_task(self, resp: Any, text: str) -> bool:
         return self._llm_response_has_official_timer_tool(resp) or self._text_mentions_official_timer_created(text)
+
+    @staticmethod
+    def _record_future_task_result(
+        event: AstrMessageEvent,
+        tool: Any,
+        tool_args: Any,
+        tool_result: Any,
+    ) -> bool:
+        if _single_line(getattr(tool, "name", ""), 80) != "future_task":
+            return False
+        action = _single_line((tool_args or {}).get("action") if isinstance(tool_args, dict) else "", 20).lower()
+        success_prefixes = {
+            "create": "Scheduled future task ",
+            "edit": "Updated future task ",
+            "delete": "Deleted cron job ",
+        }
+        expected_prefix = success_prefixes.get(action)
+        if not expected_prefix and action != "list":
+            return False
+        try:
+            setattr(event, "private_companion_future_task_result_observed", True)
+            setattr(event, "private_companion_future_task_action", action)
+        except Exception:
+            return False
+        if action == "list":
+            return False
+        if tool_result is None or bool(getattr(tool_result, "isError", False)):
+            return False
+        content = getattr(tool_result, "content", None)
+        if not isinstance(content, list):
+            return False
+        result_text = "\n".join(
+            str(getattr(item, "text", "") or "")
+            for item in content
+            if getattr(item, "text", None) is not None
+        ).strip()
+        if not result_text.startswith(expected_prefix):
+            return False
+        try:
+            setattr(event, "private_companion_future_task_succeeded", True)
+        except Exception:
+            return False
+        return True
+
+    async def _schedule_llm_timer_after_response_dedup(
+        self,
+        event: AstrMessageEvent,
+        resp: Any,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        source_text: str,
+        visible_text: str,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
+    ) -> str:
+        if bool(getattr(event, "private_companion_memo_reminder_saved", False)):
+            logger.info(
+                "[PrivateCompanion] 跳过对话临时预约转写: 本轮已保存带提醒的便签 session=%s",
+                _single_line(trigger_umo, 120) or "unknown",
+            )
+            return "memo_reminder"
+        if bool(getattr(event, "private_companion_future_task_succeeded", False)):
+            logger.info(
+                "[PrivateCompanion] 跳过对话临时预约转写: 本轮 AstrBot future_task 已执行成功 session=%s",
+                _single_line(trigger_umo, 120) or "unknown",
+            )
+            return "official_task"
+        future_task_result_observed = bool(
+            getattr(event, "private_companion_future_task_result_observed", False)
+        )
+        if not future_task_result_observed and self._should_skip_timer_capture_for_official_task(resp, visible_text):
+            logger.info(
+                "[PrivateCompanion] 跳过对话临时预约转写: 本轮疑似已由 AstrBot 官方定时计划处理 session=%s",
+                _single_line(trigger_umo, 120) or "unknown",
+            )
+            return "official_task"
+        await self._schedule_llm_timer(
+            user_id,
+            payload,
+            source_text=source_text,
+            source_origin="llm_response",
+            trigger_message_id=trigger_message_id,
+            trigger_umo=trigger_umo,
+        )
+        return "scheduled"
 
     def _parse_timer_directive(self, raw: str) -> dict[str, Any] | None:
         content = str(raw or "").strip()

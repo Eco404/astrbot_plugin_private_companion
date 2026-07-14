@@ -30,10 +30,7 @@ from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
 from .memo_notes import (
-    MEMO_NOTE_COLORS,
-    MEMO_NOTE_REPEATS,
-    advance_recurring_memo_due,
-    clean_memo_note_content,
+    apply_memo_note_action,
     memo_note_due_state,
     memo_note_sort_key,
     normalize_memo_note,
@@ -4335,103 +4332,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     async def update_memo_note(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
-        action = self._single_line(payload.get("action"), 20).lower() or "save"
-        note_id = self._single_line(payload.get("id"), 64)
         now = time.time()
         try:
             async with self.plugin._data_lock:
-                raw_notes = self.plugin.data.setdefault("memo_notes", [])
-                if not isinstance(raw_notes, list):
-                    raw_notes = []
-                    self.plugin.data["memo_notes"] = raw_notes
-                notes = [note for note in (normalize_memo_note(item, now=now) for item in raw_notes) if note]
-                existing = next((item for item in notes if item.get("id") == note_id), None) if note_id else None
-
-                if action == "delete":
-                    if not existing:
-                        return self._error("没有找到这张便签")
-                    notes = [item for item in notes if item.get("id") != note_id]
-                elif action in {"complete", "reopen"}:
-                    if not existing:
-                        return self._error("没有找到这张便签")
-                    if action == "reopen":
-                        existing["status"] = "active"
-                        existing["completed_at"] = 0.0
-                    elif existing.get("repeat") != "none" and self._float(existing.get("due_at")) > 0:
-                        next_due = advance_recurring_memo_due(
-                            self._float(existing.get("due_at")),
-                            str(existing.get("repeat") or "none"),
-                            now=now,
-                            fromtimestamp=self.plugin._environment_fromtimestamp,
-                            anchor_day=self._int(existing.get("repeat_anchor_day")),
-                            anchor_month=self._int(existing.get("repeat_anchor_month")),
-                        )
-                        existing["due_at"] = next_due
-                        existing["status"] = "active"
-                        existing["last_completed_at"] = now
-                        existing["completion_count"] = self._int(existing.get("completion_count")) + 1
-                        existing["last_reminder_offer_at"] = 0.0
-                        existing["last_reminder_attempt_at"] = 0.0
-                    else:
-                        existing["status"] = "completed"
-                        existing["completed_at"] = now
-                        existing["last_completed_at"] = now
-                        existing["completion_count"] = self._int(existing.get("completion_count")) + 1
-                    existing["updated_at"] = now
-                else:
-                    title = self._single_line(payload.get("title"), 60)
-                    content = clean_memo_note_content(payload.get("content"), 800)
-                    if not title and not content:
-                        return self._error("标题和内容至少填写一项")
-                    repeat = self._single_line(payload.get("repeat"), 20).lower() or "none"
-                    if repeat not in MEMO_NOTE_REPEATS:
-                        repeat = "none"
-                    color = self._single_line(payload.get("color"), 20).lower() or "yellow"
-                    if color not in MEMO_NOTE_COLORS:
-                        color = "yellow"
-                    due_at = max(0.0, self._float(payload.get("due_at")))
-                    if due_at > datetime(2100, 1, 1).timestamp():
-                        return self._error("到期时间超出支持范围")
-                    if repeat != "none" and due_at <= 0:
-                        return self._error("重复便签需要设置到期时间")
-                    if existing is None:
-                        existing = {
-                            "id": f"memo-{uuid.uuid4().hex[:16]}",
-                            "created_at": now,
-                            "status": "active",
-                            "completed_at": 0.0,
-                            "last_completed_at": 0.0,
-                            "completion_count": 0,
-                            "last_reminder_offer_at": 0.0,
-                            "last_reminder_attempt_at": 0.0,
-                        }
-                        notes.append(existing)
-                    prior_due_at = self._float(existing.get("due_at"))
-                    existing.update({
-                        "title": title,
-                        "content": content,
-                        "color": color,
-                        "pinned": bool(payload.get("pinned")),
-                        "due_at": due_at,
-                        "repeat": repeat,
-                        "remind_enabled": bool(payload.get("remind_enabled", True)) and due_at > 0,
-                        "updated_at": now,
-                    })
-                    if due_at > 0 and due_at != prior_due_at:
-                        due_dt = self.plugin._environment_fromtimestamp(due_at)
-                        existing["repeat_anchor_day"] = due_dt.day
-                        existing["repeat_anchor_month"] = due_dt.month
-                    if existing.get("status") == "completed" and bool(payload.get("reopen")):
-                        existing["status"] = "active"
-                        existing["completed_at"] = 0.0
-                    if due_at != self._float((next((item for item in raw_notes if isinstance(item, dict) and item.get("id") == existing.get("id")), {}) or {}).get("due_at")):
-                        existing["last_reminder_offer_at"] = 0.0
-                        existing["last_reminder_attempt_at"] = 0.0
-
+                notes, _ = apply_memo_note_action(
+                    self.plugin.data.get("memo_notes"),
+                    payload,
+                    now=now,
+                    fromtimestamp=self.plugin._environment_fromtimestamp,
+                )
                 self.plugin.data["memo_notes"] = notes[-200:]
                 self.plugin._save_data_sync()
                 result = self._memo_notes_payload(self.plugin.data)
             return self._ok({"memo_notes": result})
+        except ValueError as exc:
+            return self._error(str(exc))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新备忘便签失败: {exc}", exc_info=True)
             return self._error(str(exc))

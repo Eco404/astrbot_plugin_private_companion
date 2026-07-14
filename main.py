@@ -1971,6 +1971,47 @@ class PrivateCompanionPlugin(
             )
 
     @filter.on_decorating_result()
+    async def strip_plaintext_tool_calls_before_send(self, event: AstrMessageEvent, *args, **kwargs):
+        """阻止兼容模型把工具调用 JSON 当普通聊天正文发送。"""
+        if self is None or not self.enabled:
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain:
+            return
+        changed = False
+        leaked_names: list[str] = []
+        cleaned_chain: list[Any] = []
+        for comp in chain:
+            if not isinstance(comp, Plain):
+                cleaned_chain.append(comp)
+                continue
+            original = str(getattr(comp, "text", "") or "")
+            cleaned, calls = self._strip_plaintext_tool_call_envelopes(original)
+            if not calls:
+                cleaned_chain.append(comp)
+                continue
+            changed = True
+            leaked_names.extend(str(item.get("name") or "") for item in calls)
+            if cleaned:
+                try:
+                    comp.text = cleaned
+                    cleaned_chain.append(comp)
+                except Exception:
+                    cleaned_chain.append(Plain(cleaned))
+        if not changed:
+            return
+        try:
+            result.chain = cleaned_chain
+        except Exception:
+            event.set_result(self._build_result_from_chain(cleaned_chain))
+        logger.warning(
+            "[PrivateCompanion] 发送前终检已移除明文工具调用: session=%s tools=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            ",".join(leaked_names),
+        )
+
+    @filter.on_decorating_result()
     async def cancel_reply_if_trigger_recalled_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """若触发/唤醒消息在回复发出前被撤回，则静默取消本次回复。"""
         if self is None or not self.enabled:
@@ -3191,6 +3232,26 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             outbound_chunk = [Plain(cleaned)] if cleaned else []
                     if not outbound_chunk:
                         continue
+                    sanitized_chunk: list[Any] = []
+                    leaked_tools: list[str] = []
+                    for component in outbound_chunk:
+                        if not isinstance(component, Plain):
+                            sanitized_chunk.append(component)
+                            continue
+                        cleaned_text, calls = self._strip_plaintext_tool_call_envelopes(
+                            str(getattr(component, "text", "") or "")
+                        )
+                        leaked_tools.extend(str(item.get("name") or "") for item in calls)
+                        if cleaned_text:
+                            sanitized_chunk.append(Plain(cleaned_text) if calls else component)
+                    if leaked_tools:
+                        logger.warning(
+                            "[PrivateCompanion] 分段组件发送前已移除明文工具调用: tools=%s",
+                            ",".join(leaked_tools),
+                        )
+                    outbound_chunk = sanitized_chunk
+                    if not outbound_chunk:
+                        continue
                     hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(outbound_chunk))
                     if hit:
                         logger.warning("[PrivateCompanion] 分段剩余组件命中违禁词，停止发送: word=%s", _single_line(hit, 40))
@@ -3243,6 +3304,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         started_at = _safe_float(started_at, 0.0, 0.0) or self._event_inbound_activity_ts(event)
         for segment in segments:
             segment = str(segment or "").strip()
+            if not segment:
+                continue
+            segment, leaked_calls = self._strip_plaintext_tool_call_envelopes(segment)
+            if leaked_calls:
+                logger.warning(
+                    "[PrivateCompanion] 分段文本发送前已移除明文工具调用: tools=%s",
+                    ",".join(str(item.get("name") or "") for item in leaked_calls),
+                )
             if not segment:
                 continue
             sent_index += 1
@@ -3498,6 +3567,63 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             caption=caption,
             scene_preset=scene_preset,
             **kwargs,
+        )
+
+    @filter.llm_tool(name="pc_manage_memo")
+    async def pc_manage_memo(
+        self,
+        event: AstrMessageEvent,
+        action: str = "list",
+        title: str = "",
+        content: str = "",
+        selector: str = "",
+        due_at: str = "",
+        repeat: str = "",
+        color: str = "",
+        remind_enabled: bool | None = None,
+        include_completed: bool = False,
+        status: str = "",
+        query: str = "",
+        clear_due: bool = False,
+        clear_content: bool = False,
+        confirmation_token: str = "",
+    ) -> str:
+        """在主要用户私聊中新增、查看、修改、完成、恢复、置顶或删除备忘便签。
+
+        Args:
+            action(string): list/get/create/update/complete/reopen/delete/cancel_delete/pin/unpin。
+            title(string): 新增时的标题，或修改后的标题。
+            content(string): 新增时的正文，或修改后的正文。
+            selector(string): 要操作的便签标题、列表编号或便签 id。
+            due_at(string): 可选提醒时间，可传绝对日期或“明早9点”“两小时后”等常见表达。
+            repeat(string): 可选，none/daily/weekly/monthly/yearly。
+            color(string): 可选，yellow/blue/green/rose/gray。
+            remind_enabled(boolean): 可选，是否在到期时提醒。
+            include_completed(boolean): list 时是否包含已完成便签。
+            status(string): 可选，active/completed/all；用于筛选列表或限定编号所在视图。
+            query(string): list 时可选，按标题或正文关键词筛选。
+            clear_due(boolean): update 时是否清除到期时间和重复设置。
+            clear_content(boolean): update 时是否清空正文。
+            confirmation_token(string): 删除确认时原样传回首次 delete 返回的令牌。
+        """
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return '{"status":"disabled","saved":false,"message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
+        return await self._pc_manage_memo_impl(
+            event,
+            action=action,
+            title=title,
+            content=content,
+            selector=selector,
+            due_at=due_at,
+            repeat=repeat,
+            color=color,
+            remind_enabled=remind_enabled,
+            include_completed=include_completed,
+            status=status,
+            query=query,
+            clear_due=clear_due,
+            clear_content=clear_content,
+            confirmation_token=confirmation_token,
         )
 
     @filter.llm_tool(name="pc_get_group_id_by_name")
@@ -4958,6 +5084,55 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     mode="conditional",
                     metadata={"注入位置": placement},
                 )
+        memo_instruction = self._memo_management_tool_instruction()
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        memo_marker = "<!-- private_companion_memo_management_v1 -->"
+        try:
+            memo_private = bool(getattr(event, "is_private_chat", lambda: False)())
+            memo_requester = self._permission_identity_id(event.get_sender_id())
+        except Exception:
+            memo_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+            memo_requester = ""
+        memo_owner = bool(memo_requester and self._is_private_companion_owner_user_id(memo_requester))
+        memo_request = bool(
+            memo_private
+            and memo_owner
+            and self._memo_management_instruction_matches(message_text)
+        )
+        if memo_request:
+            self._mark_memo_request_tool_boundary(event, req)
+            if self._remove_future_task_for_memo_request(req, message_text):
+                logger.debug(
+                    "[PrivateCompanion] 明确便签请求已从初始工具集移除 future_task: session=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                )
+        if (
+            memo_request
+            and memo_instruction
+            and memo_marker not in current_prompt
+            and memo_marker not in current_turn_prompt
+        ):
+            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                req,
+                memo_marker,
+                memo_instruction,
+                priority=88,
+                source="tools",
+            ) else "system_prompt"
+            if placement == "system_prompt":
+                current_prompt = f"{current_prompt}\n\n{memo_marker}\n{memo_instruction}".strip()
+                req.system_prompt = current_prompt
+            await self._record_request_prompt_fragment(
+                event,
+                title="备忘便签工具注入",
+                key="tools.memo_management",
+                text=memo_instruction,
+                source="tools",
+                mode="conditional",
+                metadata={"注入位置": placement},
+            )
+
         media_truth_instruction = self._media_delivery_truth_instruction()
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -5039,6 +5214,37 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     mode="conditional",
                     metadata={"注入位置": placement},
                 )
+
+    @filter.on_agent_begin()
+    async def enforce_memo_reminder_tool_boundary(self, event: AstrMessageEvent, run_context: Any, *args, **kwargs):
+        """AstrBot 会在请求钩子之后补内置工具，因此在 Agent 启动时做最终互斥。"""
+        if self is None or event is None:
+            return
+        if self._finalize_memo_request_tool_boundary(event):
+            logger.info(
+                "[PrivateCompanion] 明确便签请求已从最终工具集移除 future_task,避免重复提醒: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+
+    @filter.on_llm_tool_respond()
+    async def capture_future_task_result(
+        self,
+        event: AstrMessageEvent,
+        tool: Any,
+        tool_args: dict[str, Any] | None,
+        tool_result: Any,
+        *args,
+        **kwargs,
+    ):
+        """记录 AstrBot 官方定时工具的真实成功结果，供响应阶段可靠去重。"""
+        if self is None or event is None:
+            return
+        if self._record_future_task_result(event, tool, tool_args, tool_result):
+            logger.info(
+                "[PrivateCompanion] 已记录本轮 future_task 成功: action=%s session=%s",
+                _single_line((tool_args or {}).get("action"), 20) or "unknown",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
 
     def _is_lightweight_private_passive_inbound(self, text: str) -> bool:
         cleaned = _single_line(text, 80)
@@ -7331,7 +7537,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         state = await self._ensure_daily_state(skip_conversation_summary=True, passive_fast=True)
         inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
         lightweight_passive = self._is_lightweight_private_passive_inbound(inbound_text)
-        memo_query = bool(re.search(r"便签|备忘录?|待办", inbound_text, re.I))
+        memo_query = self._memo_management_instruction_matches(inbound_text)
         if memo_query:
             lightweight_passive = False
         bookshelf_signal_getter = getattr(self, "_bookshelf_secret_signal_info", None)
@@ -7981,12 +8187,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.on_llm_response()
     async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
-        """规范化 TTS 标签错拼，避免 <ttts> 等内容漏到发送链路。"""
+        """恢复降级为正文的生图调用，并规范化 TTS 标签。"""
         if self is None or not self.enabled:
             return
+        original_text = str(getattr(resp, "completion_text", "") or "")
+        recovered_text, _ = await self._recover_plaintext_photo_tool_call(event, resp, original_text)
+        if recovered_text != original_text:
+            resp.completion_text = recovered_text
+        original_text = recovered_text
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
-        original_text = str(getattr(resp, "completion_text", "") or "")
         normalized_text = _normalize_outbound_punctuation_flow(original_text)
         if normalized_text and normalized_text != original_text:
             resp.completion_text = normalized_text
@@ -8078,6 +8288,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 return
             original_text = str(resp.completion_text or "").strip()
             if not original_text:
+                if bool(getattr(event, "_private_companion_plaintext_photo_sent", False)):
+                    self._stop_passive_input_status_loop(event)
+                    release_now = True
+                    return
                 self._stop_passive_input_status_loop(event)
                 self._record_passive_no_reply(
                     event,
@@ -8133,21 +8347,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     working_text = cleaned_text
                     resp.completion_text = working_text
                 if payloads:
-                    if self._should_skip_timer_capture_for_official_task(resp, working_text):
-                        logger.info(
-                            "[PrivateCompanion] 跳过对话临时预约转写: 本轮疑似已由 AstrBot 官方定时计划处理 session=%s",
-                            _single_line(getattr(event, "unified_msg_origin", ""), 120),
-                        )
-                    else:
-                        timer_source_text = _single_line(current_user.get("last_user_message"), 260) or working_text
-                        await self._schedule_llm_timer(
-                            user_id,
-                            payloads[-1],
-                            source_text=timer_source_text,
-                            source_origin="llm_response",
-                            trigger_message_id=self._event_message_id(event),
-                            trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
-                        )
+                    timer_source_text = _single_line(current_user.get("last_user_message"), 260) or working_text
+                    await self._schedule_llm_timer_after_response_dedup(
+                        event,
+                        resp,
+                        user_id,
+                        payloads[-1],
+                        source_text=timer_source_text,
+                        visible_text=working_text,
+                        trigger_message_id=self._event_message_id(event),
+                        trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                    )
 
             inbound_text = _single_line(current_user.get("last_user_message"), 260)
             sanitized_elapsed_text = self._sanitize_unverified_repeat_elapsed_claim(

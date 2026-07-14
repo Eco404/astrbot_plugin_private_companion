@@ -7,6 +7,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 
 from astrbot.api import logger
@@ -18,7 +19,8 @@ try:
 except ImportError:
     from astrbot.api.message_components import At, Plain
 
-from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line
+from .helpers import _missing_optional_model_dependency, _now_ts, _redact_outbound_secrets, _safe_float, _safe_int, _single_line
+from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_memo_note
 from .qzone_selection import parse_qzone_post_selection
 
 
@@ -90,6 +92,23 @@ class LlmToolActionsMixin:
                 "cosplay",
             )
         )
+
+    def _plaintext_photo_recovery_intent_matches(self, text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        explicit_request = bool(
+            re.search(
+                r"(?:帮我|给我|替我|想要|想看|要看|拍|生成|画|绘制|做|来|发).{0,10}"
+                r"(?:照片|图片|自拍|头像|表情包|贴纸|壁纸|穿搭|腿|脚|手|脸|全身|半身)",
+                compact,
+                flags=re.I,
+            )
+        ) or any(token in compact for token in ("改图", "修图", "重绘", "P图", "p图"))
+        explanatory = any(token in compact for token in ("解释", "分析", "日志", "代码", "JSON", "json", "工具调用", "为什么"))
+        if explanatory and not explicit_request:
+            return False
+        return explicit_request or self._character_photo_request_matches(compact)
 
     def _media_delivery_truth_instruction(self) -> str:
         if not (self.enabled and getattr(self, "enable_photo_text_action", False)):
@@ -172,6 +191,821 @@ class LlmToolActionsMixin:
 - 工具返回 `sent=false` 时，无论图片是否生成，都表示用户没有收到图片；必须按 `message/actual_error` 如实说明，绝对不能说已经发送。
 - 如果工具返回失败，按失败原因说明，不要假装图片已生成或已发送。
 """.strip()
+
+    @staticmethod
+    def _plaintext_tool_call_from_object(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        function = value.get("function")
+        source = function if isinstance(function, dict) else value
+        name = _single_line(source.get("name") or value.get("tool_name"), 80)
+        known_names = {
+            "pc_qzone_view_feed",
+            "pc_qzone_publish_feed",
+            "pc_generate_photo",
+            "pc_manage_memo",
+            "pc_get_group_id_by_name",
+            "pc_get_user_id_by_name",
+            "pc_query_relation_person",
+            "pc_get_specified_group_members",
+            "pc_query_interaction",
+            "pc_relay_message",
+            "pc_send_to_group",
+            "pc_send_to_private_user",
+            "pc_send_to_groups",
+            "pc_send_to_private_users",
+            "pc_schedule_group_relay",
+            "future_task",
+            "send_message_to_user",
+        }
+        if name not in known_names:
+            return None
+        parameters = source.get("parameters")
+        if parameters is None:
+            parameters = source.get("arguments")
+        if parameters is None:
+            parameters = source.get("args")
+        if parameters is None:
+            parameters = value.get("parameters", value.get("arguments", value.get("args", {})))
+        if isinstance(parameters, str):
+            try:
+                parameters = json.loads(parameters)
+            except Exception:
+                return None
+        if not isinstance(parameters, dict):
+            return None
+        return {"name": name, "parameters": dict(parameters)}
+
+    def _strip_plaintext_tool_call_envelopes(self, text: Any) -> tuple[str, list[dict[str, Any]]]:
+        raw = str(text or "")
+        if not raw or "{" not in raw:
+            return raw, []
+        decoder = json.JSONDecoder()
+        calls: list[dict[str, Any]] = []
+        ranges: list[tuple[int, int]] = []
+        cursor = 0
+        while cursor < len(raw):
+            start = raw.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                value, consumed = decoder.raw_decode(raw[start:])
+            except Exception:
+                cursor = start + 1
+                continue
+            end = start + consumed
+            call = self._plaintext_tool_call_from_object(value)
+            if call is None:
+                cursor = start + 1
+                continue
+            calls.append(call)
+            ranges.append((start, end))
+            cursor = end
+        if not ranges:
+            return raw, []
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in ranges:
+            pieces.append(raw[cursor:start])
+            cursor = end
+        pieces.append(raw[cursor:])
+        cleaned = "".join(pieces)
+        cleaned = re.sub(r"</?(?:tool_call|function_call)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"(?im)^[ \t]*```(?:json)?[ \t]*$", "", cleaned)
+        cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, calls
+
+    async def _recover_plaintext_photo_tool_call(
+        self,
+        event: AstrMessageEvent,
+        resp: Any,
+        text: Any,
+    ) -> tuple[str, dict[str, Any] | None]:
+        raw = str(text or "")
+        if bool(getattr(event, "_private_companion_plaintext_tool_checked", False)):
+            previous = getattr(event, "_private_companion_plaintext_tool_recovery", None)
+            return raw, previous if isinstance(previous, dict) else None
+        cleaned, calls = self._strip_plaintext_tool_call_envelopes(raw)
+        if not calls:
+            return raw, None
+        setattr(event, "_private_companion_plaintext_tool_checked", True)
+        logger.warning(
+            "[PrivateCompanion] 检测到模型将工具调用写入普通正文，已阻止外发: session=%s tools=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            ",".join(call.get("name", "") for call in calls),
+        )
+        recovery: dict[str, Any] = {
+            "status": "sanitized_only",
+            "sent": False,
+            "tools": [call.get("name", "") for call in calls],
+        }
+        setattr(event, "_private_companion_plaintext_tool_recovery", recovery)
+        photo_calls = [call for call in calls if call.get("name") == "pc_generate_photo"]
+        if len(calls) != 1 or len(photo_calls) != 1:
+            return cleaned, recovery
+        try:
+            called_names = getattr(resp, "tools_call_name", None)
+            if isinstance(called_names, str) and called_names.strip() == "pc_generate_photo":
+                recovery["status"] = "already_called"
+                return cleaned, recovery
+            if isinstance(called_names, (list, tuple, set)) and "pc_generate_photo" in {str(item) for item in called_names}:
+                recovery["status"] = "already_called"
+                return cleaned, recovery
+            if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+                recovery["status"] = "blocked"
+                return cleaned, recovery
+        except Exception:
+            pass
+        inbound_text = str(getattr(event, "message_str", "") or "")
+        if not self._plaintext_photo_recovery_intent_matches(inbound_text):
+            recovery["status"] = "intent_mismatch"
+            return cleaned, recovery
+
+        raw_parameters = photo_calls[0].get("parameters")
+        parameters = dict(raw_parameters) if isinstance(raw_parameters, dict) else {}
+        allowed_keys = {
+            "prompt",
+            "kind",
+            "reference_image_path",
+            "image_size",
+            "caption",
+            "scene_preset",
+        }
+        parameters = {key: value for key, value in parameters.items() if key in allowed_keys}
+        parameters["send"] = True
+        try:
+            result_raw = await self._pc_generate_photo_impl(event, **parameters)
+            try:
+                result = json.loads(result_raw) if isinstance(result_raw, str) else dict(result_raw or {})
+            except Exception:
+                result = {"status": "error", "sent": False, "message": "生图工具返回无法解析"}
+        except Exception as exc:
+            logger.error(
+                "[PrivateCompanion] 明文生图工具调用恢复失败: session=%s error=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(exc, 160),
+                exc_info=True,
+            )
+            result = {"status": "error", "sent": False, "message": "图片生成调用失败"}
+        sent = bool(result.get("sent"))
+        recovery.update({"status": "recovered" if sent else "failed", "sent": sent, "result": result})
+        setattr(event, "_private_companion_plaintext_tool_recovery", recovery)
+        if sent:
+            setattr(event, "_private_companion_plaintext_photo_sent", True)
+            logger.info(
+                "[PrivateCompanion] 已恢复并执行明文生图工具调用: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return cleaned, recovery
+        failure = _single_line(result.get("message") or result.get("actual_error") or "图片没有生成成功", 180)
+        failure = _redact_outbound_secrets(failure, self)
+        failure_text = f"这次图片没能发出来：{failure}" if failure else "这次图片没能发出来。"
+        cleaned = "\n".join(part for part in (cleaned, failure_text) if str(part or "").strip()).strip()
+        return cleaned, recovery
+
+    @staticmethod
+    def _memo_management_instruction_matches(text: Any) -> bool:
+        value = str(text or "")
+        return bool(
+            re.search(
+                r"便签|便笺|备忘录?|待办|帮我记(?:一下|下来)?|记(?:一下|下来)|"
+                r"(?:确认|确定|取消)(?:删除|删掉|移除)|"
+                r"(?:完成|恢复|置顶|取消置顶|删除|删掉).{0,4}(?:第?\s*\d+|这张|那张)|"
+                r"第?\s*\d+(?:张|条|个)?.{0,8}(?:完成|恢复|置顶|删除|删掉|改到|改成)|"
+                r"(?:只看|查看|看看).{0,4}(?:已完成|进行中|全部)",
+                value,
+                flags=re.I,
+            )
+        )
+
+    def _remove_future_task_for_memo_request(self, req: Any, text: Any) -> bool:
+        """明确的便签操作只保留便签工具，避免同轮再创建官方定时任务。"""
+        if not self._memo_management_instruction_matches(text):
+            return False
+        tool_set = getattr(req, "func_tool", None)
+        if tool_set is None:
+            return False
+        has_future_task = False
+        get_tool = getattr(tool_set, "get_tool", None)
+        if callable(get_tool):
+            try:
+                has_future_task = get_tool("future_task") is not None
+            except Exception:
+                pass
+        tools = getattr(tool_set, "tools", None)
+        if not has_future_task and isinstance(tools, list):
+            has_future_task = any(
+                _single_line(getattr(tool, "name", ""), 120) == "future_task"
+                for tool in tools
+            )
+        if not has_future_task:
+            return False
+        remove_tool = getattr(tool_set, "remove_tool", None)
+        try:
+            if callable(remove_tool):
+                remove_tool("future_task")
+            elif isinstance(tools, list):
+                tool_set.tools = [
+                    tool
+                    for tool in tools
+                    if _single_line(getattr(tool, "name", ""), 120) != "future_task"
+                ]
+            else:
+                return False
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 便签请求移除 future_task 失败: %s", _single_line(exc, 160))
+            return False
+        return True
+
+    @staticmethod
+    def _mark_memo_request_tool_boundary(event: AstrMessageEvent, req: Any) -> None:
+        try:
+            setattr(event, "private_companion_explicit_memo_request", True)
+            setattr(event, "_private_companion_memo_provider_request", req)
+        except Exception:
+            pass
+
+    def _finalize_memo_request_tool_boundary(self, event: AstrMessageEvent) -> bool:
+        """在 AstrBot 补齐内置工具后再次执行便签/定时工具互斥。"""
+        if not bool(getattr(event, "private_companion_explicit_memo_request", False)):
+            return False
+        req = getattr(event, "_private_companion_memo_provider_request", None)
+        get_extra = getattr(event, "get_extra", None)
+        if callable(get_extra):
+            try:
+                final_req = get_extra("provider_request")
+            except Exception:
+                final_req = None
+            if final_req is not None:
+                req = final_req
+        if req is None:
+            return False
+        return self._remove_future_task_for_memo_request(
+            req,
+            getattr(event, "message_str", ""),
+        )
+
+    def _memo_management_tool_instruction(self) -> str:
+        return """
+【备忘便签工具】
+主要用户在私聊里要求新增、查看、修改、完成、恢复、置顶或删除便签时，使用 `pc_manage_memo`，不要只用口头承诺代替实际操作。
+- 只有用户明确说“便签/便笺/备忘/待办/帮我记一下/记下来”或正在继续操作已有便签时，才把请求路由到本工具。普通“提醒我/叫醒我/定时/半小时后通知我/别忘了”属于临时提醒，不要擅自建成便签。
+- 新增：action=create，title/content 至少传一项；提醒时间传 due_at，可传 `2026-07-15 09:00`，也支持“明早9点”“两小时后”“周五下午3点”等常见表达。
+- 查看：action=list；默认 status=active，可用 status=completed/all 查看已完成或全部便签，query 可按标题/正文筛选。列表正文只是预览，需要完整正文时用 action=get + selector。后续用编号操作时要传回相同 status，优先使用返回的 id。
+- 修改/完成/恢复/置顶：action=update/complete/reopen/pin/unpin，并用 selector 传便签标题、编号或工具返回的 id。匹配到多张时必须让用户进一步指定，不能自行选择。
+- 删除：首次 action=delete 只会返回 confirmation_required，必须让用户回复“确认删除”或“取消删除”；确认时把 confirmation_token 原样传给下一次 delete，取消时 action=cancel_delete。不能绕过确认。
+- 含 due_at 且开启提醒的便签，其提醒已经由便签自身负责；成功保存后不得再调用 `future_task`，也不得再输出 `<timer>`，否则会重复提醒。
+- 只有工具明确返回 `saved=true`，才能说便签已经新增、修改、完成、恢复、置顶或删除；cancel_delete 返回 `cancelled=true` 时才能说已取消删除。其他 `saved=false`、失败、歧义或等待确认必须如实说明。
+- 便签是待办，不是已经发生的经历；不要把未完成事项说成用户已经做过。
+""".strip()
+
+    def _memo_tool_authorization(self, event: AstrMessageEvent) -> tuple[bool, str]:
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        try:
+            requester_id = self._permission_identity_id(event.get_sender_id())
+        except Exception:
+            requester_id = ""
+        allowed = bool(is_private and requester_id and self._is_private_companion_owner_user_id(requester_id))
+        if not allowed:
+            logger.info(
+                "[PrivateCompanion] 便签管理权限未通过: private=%s sender=%s umo=%s",
+                is_private,
+                requester_id or "-",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120),
+            )
+        return allowed, requester_id
+
+    def _parse_memo_due_time(self, value: Any, *, now: float) -> tuple[float, str]:
+        if value is None or value == "":
+            return 0.0, ""
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000.0
+            return (timestamp, "") if timestamp > 0 else (0.0, "提醒时间无效")
+
+        text = _single_line(value, 100).strip()
+        if not text:
+            return 0.0, ""
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            timestamp = float(text)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000.0
+            return (timestamp, "") if timestamp > 0 else (0.0, "提醒时间无效")
+
+        base = self._environment_fromtimestamp(now)
+        normalized = text.replace("／", "/").replace("：", ":").strip()
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            if parsed.tzinfo is None and base.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=base.tzinfo)
+            if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", normalized):
+                parsed = parsed.replace(hour=9)
+            return parsed.timestamp(), ""
+        except ValueError:
+            pass
+        for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y/%m/%d", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+            if parsed.tzinfo is None and base.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=base.tzinfo)
+            if fmt in {"%Y/%m/%d", "%Y-%m-%d"}:
+                parsed = parsed.replace(hour=9)
+            return parsed.timestamp(), ""
+
+        def natural_number(raw: str) -> float:
+            if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+                return float(raw)
+            digits = {
+                "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+                "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+            }
+            if raw == "十":
+                return 10.0
+            if "十" in raw:
+                left, right = raw.split("十", 1)
+                return float((digits.get(left, 1) * 10) + digits.get(right, 0))
+            return float(digits.get(raw, 0))
+
+        relative_day_offset: int | None = None
+        duration_match = re.search(r"(\d+(?:\.\d+)?|[一二两三四五六七八九十]+)\s*(分钟|小时|天|周)后", normalized)
+        if duration_match:
+            amount = natural_number(duration_match.group(1))
+            unit = duration_match.group(2)
+            seconds = amount * {"分钟": 60, "小时": 3600, "天": 86400, "周": 7 * 86400}[unit]
+            has_clock = bool(re.search(r"点|时|:\d|早上|上午|中午|下午|傍晚|晚上|凌晨", normalized))
+            if unit in {"天", "周"} and has_clock and amount.is_integer():
+                relative_day_offset = int(amount) * (7 if unit == "周" else 1)
+            else:
+                return now + seconds, ""
+        if "半小时后" in normalized:
+            return now + 1800, ""
+
+        day_offset: int | None = relative_day_offset
+        if "大后天" in normalized:
+            day_offset = 3
+        elif "后天" in normalized:
+            day_offset = 2
+        elif any(token in normalized for token in ("明天", "明早", "明晚", "明日下午", "明日上午")):
+            day_offset = 1
+        elif any(token in normalized for token in ("今天", "今早", "今晚", "今夜", "今日")):
+            day_offset = 0
+
+        target_date = (base + timedelta(days=day_offset or 0)).date()
+        weekday_match = re.search(r"(下|本|这)?\s*(?:周|星期)([一二三四五六日天])", normalized)
+        if weekday_match:
+            target_weekday = "一二三四五六日".index("日" if weekday_match.group(2) == "天" else weekday_match.group(2))
+            prefix = weekday_match.group(1) or ""
+            if prefix == "下":
+                days = 7 - base.weekday() + target_weekday
+            else:
+                days = target_weekday - base.weekday()
+                if days < 0:
+                    days += 7
+            target_date = (base + timedelta(days=days)).date()
+            day_offset = days
+        else:
+            month_day_match = re.search(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})(?:日|号)?", normalized)
+            if month_day_match:
+                year = int(month_day_match.group(1) or base.year)
+                month = int(month_day_match.group(2))
+                day = int(month_day_match.group(3))
+                try:
+                    candidate = base.replace(year=year, month=month, day=day).date()
+                except ValueError:
+                    return 0.0, "提醒日期无效"
+                if not month_day_match.group(1) and candidate < base.date():
+                    try:
+                        candidate = base.replace(year=base.year + 1, month=month, day=day).date()
+                    except ValueError:
+                        return 0.0, "提醒日期无效"
+                target_date = candidate
+                day_offset = (candidate - base.date()).days
+
+        clock_number = r"(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})"
+        time_match = re.search(
+            rf"(?<!\d)({clock_number})\s*(?:点|时|:)(?:\s*({clock_number})\s*分?)?",
+            normalized,
+        )
+        has_half = bool(re.search(r"(?:点|时)\s*半", normalized))
+        quarter_match = re.search(r"(?:点|时)\s*([一三])刻", normalized)
+        if time_match:
+            hour = int(natural_number(time_match.group(1)))
+            if has_half:
+                minute = 30
+            elif quarter_match:
+                minute = 15 if quarter_match.group(1) == "一" else 45
+            else:
+                minute = int(natural_number(time_match.group(2) or "0"))
+            if hour > 23 or minute > 59:
+                return 0.0, "提醒时间无效"
+        elif day_offset is not None:
+            if "凌晨" in normalized:
+                hour, minute = 0, 0
+            elif "中午" in normalized:
+                hour, minute = 12, 0
+            elif "下午" in normalized:
+                hour, minute = 15, 0
+            elif "傍晚" in normalized:
+                hour, minute = 18, 0
+            elif any(token in normalized for token in ("晚上", "今晚", "今夜", "明晚")):
+                hour, minute = 20, 0
+            else:
+                hour, minute = 9, 0
+        else:
+            return 0.0, "无法识别提醒时间，请提供例如“明早9点”或“2026-07-15 09:00”"
+
+        evening = any(token in normalized for token in ("晚上", "今晚", "今夜", "明晚"))
+        if evening and hour in {0, 12}:
+            hour = 0
+            target_date += timedelta(days=1)
+        elif any(token in normalized for token in ("下午", "傍晚")) and hour < 12:
+            hour += 12
+        elif evening and hour < 12:
+            hour += 12
+        elif "中午" in normalized and hour < 11:
+            hour += 12
+        elif "凌晨" in normalized and hour == 12:
+            hour = 0
+        try:
+            parsed = base.replace(
+                year=target_date.year,
+                month=target_date.month,
+                day=target_date.day,
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
+            )
+        except ValueError:
+            return 0.0, "提醒时间无效"
+        if weekday_match and parsed.timestamp() <= now:
+            parsed += timedelta(days=7)
+        elif day_offset is None and parsed.timestamp() <= now:
+            parsed += timedelta(days=1)
+        return parsed.timestamp(), ""
+
+    def _memo_tool_note_view(
+        self,
+        note: dict[str, Any],
+        *,
+        number: int = 0,
+        content_limit: int = 240,
+    ) -> dict[str, Any]:
+        due_at = _safe_float(note.get("due_at"), 0.0)
+        due_text = ""
+        if due_at > 0:
+            try:
+                due_text = self._environment_fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                due_text = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M")
+        raw_content = str(note.get("content") or "")
+        result = {
+            "id": _single_line(note.get("id"), 64),
+            "title": _single_line(note.get("title"), 60),
+            "content": raw_content[:content_limit],
+            "content_truncated": len(raw_content) > content_limit,
+            "status": _single_line(note.get("status"), 20) or "active",
+            "due_at": due_at,
+            "due_text": due_text,
+            "repeat": _single_line(note.get("repeat"), 20) or "none",
+            "remind_enabled": bool(note.get("remind_enabled")),
+            "pinned": bool(note.get("pinned")),
+            "color": _single_line(note.get("color"), 20) or "yellow",
+        }
+        if number > 0:
+            result["number"] = number
+        return result
+
+    def _memo_tool_find_matches(
+        self,
+        notes: list[dict[str, Any]],
+        selector: Any,
+        *,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
+        eligible = [item for item in notes if not status or item.get("status") == status]
+        value = _single_line(selector, 100).strip(" \t\r\n‘’“”'\"《》【】[]")
+        if not value:
+            return []
+        exact_id = [item for item in eligible if str(item.get("id") or "") == value]
+        if exact_id:
+            return exact_id
+        number_match = re.fullmatch(r"第?\s*(\d+)\s*(?:张|条|个)?", value)
+        if number_match:
+            index = int(number_match.group(1)) - 1
+            return [eligible[index]] if 0 <= index < len(eligible) else []
+        folded = value.casefold()
+        exact_title = [item for item in eligible if _single_line(item.get("title"), 60).casefold() == folded]
+        if exact_title:
+            return exact_title
+        return [
+            item
+            for item in eligible
+            if folded in f"{item.get('title', '')}\n{item.get('content', '')}".casefold()
+        ]
+
+    async def _pc_manage_memo_impl(
+        self,
+        event: AstrMessageEvent,
+        *,
+        action: str = "list",
+        title: str = "",
+        content: str = "",
+        selector: str = "",
+        due_at: Any = "",
+        repeat: str = "",
+        color: str = "",
+        remind_enabled: bool | None = None,
+        include_completed: bool = False,
+        status: str = "",
+        query: str = "",
+        clear_due: bool = False,
+        clear_content: bool = False,
+        confirmation_token: str = "",
+    ) -> str:
+        allowed, requester_id = self._memo_tool_authorization(event)
+        if not allowed:
+            return json.dumps(
+                {"status": "forbidden", "saved": False, "message": "便签只允许配置的主要用户在私聊中管理。"},
+                ensure_ascii=False,
+            )
+        action_key = _single_line(action, 30).lower()
+        aliases = {
+            "": "list", "查看": "list", "列表": "list", "查询": "list", "list": "list",
+            "详情": "get", "查看详情": "get", "get": "get",
+            "新增": "create", "添加": "create", "创建": "create", "记录": "create", "create": "create", "add": "create",
+            "修改": "update", "编辑": "update", "update": "update", "edit": "update",
+            "完成": "complete", "办完": "complete", "complete": "complete", "done": "complete",
+            "恢复": "reopen", "重新打开": "reopen", "reopen": "reopen",
+            "删除": "delete", "delete": "delete", "remove": "delete",
+            "取消删除": "cancel_delete", "cancel_delete": "cancel_delete", "cancel": "cancel_delete",
+            "置顶": "pin", "pin": "pin", "取消置顶": "unpin", "unpin": "unpin",
+        }
+        action_key = aliases.get(action_key, action_key)
+        if action_key not in {"list", "get", "create", "update", "complete", "reopen", "delete", "cancel_delete", "pin", "unpin"}:
+            return json.dumps({"status": "invalid_action", "saved": False, "message": "不支持的便签操作"}, ensure_ascii=False)
+
+        now = time.time()
+        status_key = _single_line(status, 20).lower()
+        status_aliases = {
+            "": "all" if include_completed else "active",
+            "active": "active", "进行中": "active", "未完成": "active", "待办": "active",
+            "completed": "completed", "完成": "completed", "已完成": "completed", "历史": "completed",
+            "all": "all", "全部": "all",
+        }
+        status_key = status_aliases.get(status_key, status_key)
+        if status_key not in {"active", "completed", "all"}:
+            return json.dumps({"status": "invalid_status", "saved": False, "message": "便签状态只支持 active/completed/all"}, ensure_ascii=False)
+        if action_key == "list":
+            async with self._data_lock:
+                raw_notes = self.data.get("memo_notes")
+                source_notes = raw_notes if isinstance(raw_notes, list) else []
+                notes = [item for item in (normalize_memo_note(raw, now=now) for raw in source_notes) if item]
+            if status_key != "all":
+                notes = [item for item in notes if item.get("status") == status_key]
+            query_text = _single_line(query, 100).casefold()
+            if query_text:
+                notes = [
+                    item for item in notes
+                    if query_text in f"{item.get('title', '')}\n{item.get('content', '')}".casefold()
+                ]
+            notes.sort(key=lambda item: memo_note_sort_key(item, now=now))
+            items = [self._memo_tool_note_view(item, number=index) for index, item in enumerate(notes[:20], start=1)]
+            return json.dumps(
+                {
+                    "status": "success",
+                    "saved": False,
+                    "action": "list",
+                    "view": status_key,
+                    "query": query_text,
+                    "count": len(notes),
+                    "shown_count": len(items),
+                    "truncated": len(notes) > len(items),
+                    "items": items,
+                    "message": "当前没有便签" if not notes else f"找到 {len(notes)} 张便签",
+                },
+                ensure_ascii=False,
+            )
+
+        due_timestamp = 0.0
+        if action_key == "create" or due_at not in (None, ""):
+            due_timestamp, due_error = self._parse_memo_due_time(due_at, now=now)
+            if due_error:
+                return json.dumps({"status": "invalid_time", "saved": False, "message": due_error}, ensure_ascii=False)
+
+        pending_store = getattr(self, "_memo_delete_confirmations", None)
+        if not isinstance(pending_store, dict):
+            pending_store = {}
+            setattr(self, "_memo_delete_confirmations", pending_store)
+        for token, pending in list(pending_store.items()):
+            if not isinstance(pending, dict) or _safe_float(pending.get("expires_at"), 0.0) <= now:
+                pending_store.pop(token, None)
+
+        token = _single_line(confirmation_token, 100)
+        if action_key == "cancel_delete":
+            removable = [
+                key for key, pending in pending_store.items()
+                if isinstance(pending, dict)
+                and pending.get("requester_id") == requester_id
+                and (not token or key == token)
+            ]
+            for key in removable:
+                pending_store.pop(key, None)
+            return json.dumps(
+                {
+                    "status": "success" if removable else "nothing_pending",
+                    "saved": False,
+                    "cancelled": bool(removable),
+                    "action": "cancel_delete",
+                    "message": "已取消删除，便签没有变化。" if removable else "当前没有等待确认的便签删除。",
+                },
+                ensure_ascii=False,
+            )
+
+        confirmed_delete_id = ""
+        confirmed_pending: dict[str, Any] | None = None
+        if action_key == "delete" and token:
+            pending = pending_store.get(token)
+            if not isinstance(pending, dict) or pending.get("requester_id") != requester_id:
+                return json.dumps({"status": "confirmation_expired", "saved": False, "message": "删除确认已失效，请重新指定便签。"}, ensure_ascii=False)
+            confirmed_pending = pending
+            confirmed_delete_id = _single_line(pending.get("note_id"), 64)
+
+        try:
+            async with self._data_lock:
+                raw_notes = self.data.get("memo_notes")
+                source_notes = raw_notes if isinstance(raw_notes, list) else []
+                notes = [item for item in (normalize_memo_note(raw, now=now) for raw in source_notes) if item]
+                notes.sort(key=lambda item: memo_note_sort_key(item, now=now))
+                if action_key == "create":
+                    payload: dict[str, Any] = {
+                        "action": "save",
+                        "title": title,
+                        "content": content,
+                        "due_at": due_timestamp,
+                        "repeat": repeat or "none",
+                        "color": color or "yellow",
+                        "pinned": False,
+                        "remind_enabled": True if remind_enabled is None else remind_enabled,
+                    }
+                    updated_notes, affected = apply_memo_note_action(
+                        raw_notes,
+                        payload,
+                        now=now,
+                        fromtimestamp=self._environment_fromtimestamp,
+                    )
+                else:
+                    match_status = "" if status_key == "all" else status_key
+                    if not status:
+                        match_status = "completed" if action_key == "reopen" else "active" if action_key == "complete" else ""
+                    matches = self._memo_tool_find_matches(
+                        notes,
+                        confirmed_delete_id or selector,
+                        status=match_status,
+                    )
+                    if not matches:
+                        return json.dumps({"status": "not_found", "saved": False, "message": "没有找到匹配的便签"}, ensure_ascii=False)
+                    if len(matches) > 1:
+                        return json.dumps(
+                            {
+                                "status": "ambiguous",
+                                "saved": False,
+                                "message": "匹配到多张便签，请用编号、完整标题或 id 进一步指定。",
+                                "matches": [self._memo_tool_note_view(item) for item in matches[:8]],
+                            },
+                            ensure_ascii=False,
+                        )
+                    target = matches[0]
+                    if action_key == "get":
+                        return json.dumps(
+                            {
+                                "status": "success",
+                                "saved": False,
+                                "action": "get",
+                                "note": self._memo_tool_note_view(target, content_limit=800),
+                            },
+                            ensure_ascii=False,
+                        )
+                    if confirmed_pending is not None and _safe_float(target.get("updated_at"), 0.0) != _safe_float(confirmed_pending.get("updated_at"), 0.0):
+                        pending_store.pop(token, None)
+                        return json.dumps(
+                            {
+                                "status": "confirmation_stale",
+                                "saved": False,
+                                "message": "便签在确认前发生了变化，请重新发起删除并确认。",
+                                "note": self._memo_tool_note_view(target),
+                            },
+                            ensure_ascii=False,
+                        )
+                    if action_key == "delete" and not confirmed_delete_id:
+                        token = uuid.uuid4().hex
+                        pending_store[token] = {
+                            "requester_id": requester_id,
+                            "note_id": target.get("id"),
+                            "updated_at": _safe_float(target.get("updated_at"), 0.0),
+                            "expires_at": now + 180,
+                        }
+                        return json.dumps(
+                            {
+                                "status": "confirmation_required",
+                                "saved": False,
+                                "message": "这张便签尚未删除，请让用户回复“确认删除”或“取消删除”。",
+                                "note": self._memo_tool_note_view(target),
+                                "confirmation_token": token,
+                                "expires_in_seconds": 180,
+                            },
+                            ensure_ascii=False,
+                        )
+                    payload = {"action": action_key, "id": target.get("id")}
+                    partial = False
+                    if action_key == "update":
+                        payload["action"] = "save"
+                        partial = True
+                        if title:
+                            payload["title"] = title
+                        if content or clear_content:
+                            payload["content"] = "" if clear_content else content
+                        if due_at not in (None, "") or clear_due:
+                            payload["due_at"] = 0.0 if clear_due else due_timestamp
+                        if repeat:
+                            payload["repeat"] = repeat
+                        elif clear_due:
+                            payload["repeat"] = "none"
+                        if color:
+                            payload["color"] = color
+                        if remind_enabled is not None:
+                            payload["remind_enabled"] = remind_enabled
+                        if len(payload) <= 2:
+                            return json.dumps({"status": "need_changes", "saved": False, "message": "没有提供要修改的内容"}, ensure_ascii=False)
+                    updated_notes, affected = apply_memo_note_action(
+                        raw_notes,
+                        payload,
+                        now=now,
+                        fromtimestamp=self._environment_fromtimestamp,
+                        partial=partial,
+                    )
+
+                previous_notes = raw_notes
+                self.data["memo_notes"] = updated_notes
+                try:
+                    self._save_data_sync()
+                except Exception:
+                    self.data["memo_notes"] = previous_notes
+                    raise
+            if action_key == "delete" and token:
+                pending_store.pop(token, None)
+            if (
+                action_key in {"create", "update"}
+                and isinstance(affected, dict)
+                and _single_line(affected.get("status"), 20) == "active"
+                and _safe_float(affected.get("due_at"), 0.0) > 0
+                and bool(affected.get("remind_enabled", True))
+            ):
+                try:
+                    setattr(event, "private_companion_memo_reminder_saved", True)
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 便签提醒已保存但无法写入本轮去重标记: user=%s error=%s",
+                        requester_id,
+                        _single_line(exc, 160),
+                    )
+                else:
+                    logger.info(
+                        "[PrivateCompanion] 便签提醒已保存,本轮将抑制重复临时定时: user=%s note=%s action=%s",
+                        requester_id,
+                        _single_line(affected.get("id"), 64) or "-",
+                        action_key,
+                    )
+            return json.dumps(
+                {
+                    "status": "success",
+                    "saved": True,
+                    "action": action_key,
+                    "message": {
+                        "create": "便签已新增",
+                        "update": "便签已更新",
+                        "complete": "便签已完成",
+                        "reopen": "便签已恢复",
+                        "delete": "便签已删除",
+                        "pin": "便签已置顶",
+                        "unpin": "已取消便签置顶",
+                    }[action_key],
+                    "note": self._memo_tool_note_view(affected),
+                },
+                ensure_ascii=False,
+            )
+        except ValueError as exc:
+            return json.dumps({"status": "invalid", "saved": False, "message": str(exc)}, ensure_ascii=False)
+        except Exception as exc:
+            logger.error("[PrivateCompanion] 聊天便签操作失败: %s", _single_line(exc, 160), exc_info=True)
+            return json.dumps({"status": "error", "saved": False, "message": f"便签操作失败: {_single_line(exc, 120)}"}, ensure_ascii=False)
 
     async def _pc_generate_photo_impl(
         self,

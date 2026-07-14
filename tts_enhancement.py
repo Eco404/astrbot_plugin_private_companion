@@ -1305,6 +1305,19 @@ TTS 朗读文本：
         text = self._restore_protected_tts_blocks("".join(plain_parts), event).strip()
         if not text:
             return
+        tool_cleaner = getattr(self, "_strip_plaintext_tool_call_envelopes", None)
+        if callable(tool_cleaner):
+            cleaned_text, leaked_calls = tool_cleaner(text)
+            if leaked_calls:
+                logger.warning(
+                    "[PrivateCompanion] TTS 发送前已移除明文工具调用: session=%s tools=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    ",".join(str(item.get("name") or "") for item in leaked_calls),
+                )
+                text = cleaned_text
+                if not text:
+                    event.set_result(self._build_result_from_chain([]))
+                    return
         normalized = self._normalize_tts_tags(text)
         if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
             # A tag can also arrive from a tool or an extension that bypasses the LLM response hook.
@@ -1520,6 +1533,18 @@ TTS 朗读文本：
         if not text:
             return []
         original_text = text
+        tool_cleaner = getattr(self, "_strip_plaintext_tool_call_envelopes", None)
+        if callable(tool_cleaner):
+            cleaned_text, leaked_calls = tool_cleaner(text)
+            if leaked_calls:
+                logger.warning(
+                    "[PrivateCompanion] TTS 分块前已移除明文工具调用: session=%s tools=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    ",".join(str(item.get("name") or "") for item in leaked_calls),
+                )
+                text = cleaned_text
+                if not text:
+                    return []
         is_tts_visible_text = any(bool(getattr(comp, "_private_companion_tts_visible_text", False)) for comp in chunk)
         if is_tts_visible_text:
             cleaned_visible = self._sanitize_tts_visible_text(text)
