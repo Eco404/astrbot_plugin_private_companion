@@ -1484,6 +1484,24 @@ class QzoneMixin(QzoneMediaMixin):
         )
         return any(re.search(pattern, compact, flags=re.IGNORECASE) for pattern in patterns)
 
+    @staticmethod
+    def _qzone_clean_comment_reply_text(value: Any, commenter_name: Any = "") -> str:
+        reply = _single_line(value, 80).strip(" ，,。")
+        name = _single_line(commenter_name, 40).strip().lstrip("@")
+        if name:
+            reply = re.sub(rf"^(?:@?{re.escape(name)}[\s,，:：]+)+", "", reply).strip()
+        while reply:
+            codepoint = ord(reply[-1])
+            if (
+                0x1F000 <= codepoint <= 0x1FAFF
+                or 0x2600 <= codepoint <= 0x27BF
+                or codepoint in {0x200D, 0xFE0E, 0xFE0F}
+            ):
+                reply = reply[:-1].rstrip()
+                continue
+            break
+        return reply.strip(" ，,。")
+
     def _qzone_comment_author_context(self, comment: Any) -> str:
         uin = _single_line(getattr(comment, "uin", ""), 40)
         name = _single_line(getattr(comment, "name", ""), 40)
@@ -1605,6 +1623,8 @@ class QzoneMixin(QzoneMediaMixin):
 - 不要过度亲密，不要替评论者编造关系。
 - 评论者身份未确认时，只按普通空间访客处理；不能因为对方语气或昵称就认成主要用户。
 - 评论者身份已识别时，也只使用自然称呼和公开边界，不要复述关系网资料。
+- 评论区已有明确的回复层级，不要在开头机械复述评论者的显示名，也不要无故 @ 对方。
+- 不要用表情符号或颜文字补语气；一句自然的话配正常标点即可。
 - 如果需要回复，只把 reply 写成可公开发送的正文；不需要回复时 reply 为空。
 
 输出格式：
@@ -1641,16 +1661,18 @@ class QzoneMixin(QzoneMediaMixin):
         if decision == "reply":
             if len(reply) < 2 or self._qzone_comment_reply_leaks_private(reply):
                 return {"decision": "skip", "reply": "", "reason": "回复不安全"}
-            reply = reply.strip(" 「」\"'")
+            reply = self._qzone_clean_comment_reply_text(
+                reply.strip(" 「」\"'"),
+                getattr(comment, "name", ""),
+            )
+            if len(reply) < 2:
+                return {"decision": "skip", "reply": "", "reason": "回复过短"}
         return {"decision": decision, "reply": reply, "reason": reason}
 
     async def _qzone_reply_to_comment(self, event: AstrMessageEvent | None, post: Any, comment: Any, reply_text: str) -> str:
-        reply = _single_line(reply_text, 80).strip(" ，,。")
+        reply = self._qzone_clean_comment_reply_text(reply_text, getattr(comment, "name", ""))
         if not reply:
             raise RuntimeError("评论回复内容为空")
-        name = _single_line(getattr(comment, "name", ""), 24).strip("@")
-        if name and name not in reply and not reply.startswith("@"):
-            reply = f"{name}，{reply}"
         return await self._qzone_comment_post(event, post, content=_single_line(reply, 120))
 
     async def _maybe_process_qzone_comment_inbox(self) -> None:
@@ -2213,10 +2235,19 @@ class QzoneMixin(QzoneMediaMixin):
         voice_formatter = getattr(self, "_format_persona_voice_channel_prompt", None)
         if callable(voice_formatter):
             voice = voice_formatter("creative")
+        expression_voice = ""
+        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+        if callable(expression_formatter):
+            expression_voice = expression_formatter(
+                scope="qzone",
+                inbound_text="低落情绪" if mood == "emotional_vent" else "生活闲聊",
+            )
         custom = _single_line(getattr(self, "qzone_publish_style_prompt", ""), 500)
         parts = [base]
         if voice:
             parts.append(voice)
+        if expression_voice:
+            parts.append(expression_voice)
         if custom:
             parts.append(f"自定义风格：{custom}")
         return "\n".join(parts)

@@ -747,6 +747,13 @@ class GroupObservationMixin:
                 ",".join(_single_line(item, 24) for item in injection_guard.get("reasons", []) if _single_line(item, 24)),
                 _single_line(cleaned, 120),
             )
+        if not blocked_by_guard:
+            expression_feedback_updater = getattr(self, "_apply_expression_rule_feedback", None)
+            if callable(expression_feedback_updater):
+                expression_feedback_updater(group, cleaned, channel="group")
+        if not blocked_by_guard and self._expression_group_learning_source_enabled(group.get("group_id") or group_id):
+            self._update_group_expression_profile_from_message(group, cleaned)
+            self._refresh_expression_voice_profile()
         if self.enable_group_slang_learning and not blocked_by_guard:
             self._learn_group_nickname_correction(group, cleaned)
             self._learn_group_slang(group, cleaned)
@@ -1170,6 +1177,106 @@ class GroupObservationMixin:
             )
         )
 
+    @classmethod
+    def _is_group_slang_noise_term(cls, term: Any) -> bool:
+        normalized = unicodedata.normalize("NFKC", str(term or "")).strip()
+        if not normalized:
+            return True
+        lower = normalized.casefold()
+        compact = re.sub(r"[\s._:/\\-]+", "", lower)
+        if cls._is_group_slang_transport_metadata_term(normalized):
+            return True
+        if re.fullmatch(r"\d+", compact):
+            return True
+        if re.search(r"https?://|www\.|\.(?:com|cn|net|org|io|ai)(?:\b|/)", lower):
+            return True
+        if lower in {
+            "http", "https", "www", "com", "cn", "net", "org", "html", "url", "b23",
+            "api", "token", "pro", "plus", "app", "bot", "browser", "bilibili",
+            "gpt", "vlm", "qwen", "gemini", "codex", "opencode",
+        }:
+            return True
+        if compact in {
+            "什么", "这个", "那个", "就是", "感觉", "可以", "不是", "没有", "真的",
+            "一下", "一个", "怎么", "为什么", "能不能", "是不是", "已经", "现在",
+            "今天", "明天", "昨天", "然后", "但是", "还是", "因为", "所以", "可能",
+            "需要", "应该", "知道", "看看", "请问", "谢谢", "好的", "收到", "版本",
+            "支持", "应用", "升级", "记录", "出来", "找到", "浏览器",
+        }:
+            return True
+        return False
+
+    def _group_slang_term_is_promoted(self, group: dict[str, Any], item: Any) -> bool:
+        term = _single_line(item.get("term") if isinstance(item, dict) else item, 40)
+        if not term or self._is_group_slang_noise_term(term):
+            return False
+        meanings = group.get("slang_meanings") if isinstance(group.get("slang_meanings"), dict) else {}
+        meaning_item = meanings.get(term) if isinstance(meanings.get(term), dict) else {}
+        if _single_line(meaning_item.get("source"), 32) in {"explicit_correction", "manual"}:
+            return True
+        count = _safe_int(item.get("count"), 0, 0) if isinstance(item, dict) else 0
+        meaning = _single_line(meaning_item.get("meaning"), 120)
+        confidence = _safe_float(meaning_item.get("confidence"), 0, 0.0, 1.0)
+        if meaning and confidence >= 0.55 and not self._is_uncertain_group_slang_meaning(
+            meaning,
+            _single_line(meaning_item.get("usage"), 120),
+        ):
+            return True
+        return count >= 2
+
+    def _group_slang_candidates_from_text(self, text: Any) -> list[str]:
+        raw = str(text or "")
+        if not raw:
+            return []
+        cleaned = re.sub(r"https?://\S+|www\.\S+", " ", raw, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\[CQ:[^\]]+\]", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"```[\s\S]*?```|`[^`]*`", " ", cleaned)
+        candidates: list[str] = []
+
+        def add(value: Any) -> None:
+            if self._is_group_slang_transport_metadata_term(value):
+                return
+            token = _single_line(value, 16).strip("'\"“”‘’「」『』【】[]()（）<>《》：:，,。.!！?？")
+            if not token or self._is_group_slang_noise_term(token):
+                return
+            if self._is_group_slang_transport_metadata_term(token):
+                return
+            if len(token) <= 2 and token not in {"草", "绷", "典", "急", "乐", "急了", "笑死"}:
+                return
+            if token not in candidates:
+                candidates.append(token)
+
+        # Latin abbreviations and coined identifiers have stable boundaries;
+        # URL/code payloads were removed above before tokenization.
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{1,31}", cleaned):
+            add(token)
+
+        # A short standalone message can itself be a repeated group expression.
+        short_message = re.sub(r"\s+", "", cleaned).strip()
+        if (
+            2 <= len(short_message) <= 12
+            and re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9_]+", short_message)
+        ):
+            add(short_message)
+
+        # In longer sentences only accept explicitly quoted/named expressions;
+        # never split ordinary Chinese prose into arbitrary eight-character blocks.
+        for token in re.findall(r"[“\"「『【]([^”\"」』】\n]{2,16})[”\"」』】]", cleaned):
+            add(token)
+        for pattern in (
+            r"(?:群里|你们|大家)(?:说的|叫的|讲的)?[“\"「『【]?([\u4e00-\u9fffA-Za-z0-9_]{2,12})[”\"」』】]?(?:是什么意思|是啥|什么梗)",
+            r"([\u4e00-\u9fffA-Za-z0-9_]{2,12})(?:这个词|这个梗)?(?:是什么意思|是啥意思|什么梗)",
+            r"(?:我们|群里|大家)(?:都)?(?:叫|称|简称)([\u4e00-\u9fffA-Za-z0-9_]{2,12})",
+        ):
+            match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+            if match:
+                add(match.group(1))
+
+        for marker in ("草", "绷", "典", "急了", "笑死", "蚌埠住", "乐"):
+            if marker in cleaned:
+                add(marker)
+        return candidates[:8]
+
     def _learn_group_slang(self, group: dict[str, Any], text: str) -> None:
         if self._group_text_blocked_by_injection_guard(text):
             return
@@ -1178,28 +1285,11 @@ class GroupObservationMixin:
             terms = []
             group["slang_terms"] = terms
         self._cleanup_group_slang_terms(group)
-        candidates: list[str] = []
-        for raw_token in re.findall(r"[A-Za-z0-9_]{2,32}|[\u4e00-\u9fff]{2,8}", text):
-            if self._is_group_slang_transport_metadata_term(raw_token):
-                continue
-            token = _single_line(raw_token, 16)
-            if not token:
-                continue
-            if self._is_group_slang_transport_metadata_term(token):
-                continue
-            if token in {"哈哈", "什么", "这个", "那个", "就是", "感觉", "可以", "不是", "没有", "真的", "一下"}:
-                continue
-            if re.fullmatch(r"\d+", token):
-                continue
-            if len(token) <= 2 and token not in {"草", "绷", "典", "急", "乐"}:
-                continue
-            if self._looks_like_group_member_name(group, token):
-                continue
-            candidates.append(token)
-        if any(marker in text for marker in ("草", "绷", "典", "急了", "笑死", "蚌埠住", "乐")):
-            for marker in ("草", "绷", "典", "急了", "笑死", "蚌埠住", "乐"):
-                if marker in text:
-                    candidates.append(marker)
+        candidates = [
+            token
+            for token in self._group_slang_candidates_from_text(text)
+            if not self._looks_like_group_member_name(group, token)
+        ]
         if not candidates:
             return
         indexed = {}
@@ -1356,6 +1446,9 @@ class GroupObservationMixin:
             meaning_item = meanings.get(term) if isinstance(meanings, dict) else None
             if isinstance(meaning_item, dict) and meaning_item.get("source") in {"explicit_correction", "manual"}:
                 kept.append(item)
+                continue
+            if self._is_group_slang_noise_term(term):
+                removed.add(term)
                 continue
             if isinstance(item, dict):
                 count = _safe_int(item.get("count"), 0, 0)
@@ -1922,7 +2015,11 @@ class GroupObservationMixin:
             for item in slang[:12]:
                 if isinstance(item, dict):
                     term = _single_line(item.get("term"), 16)
-                    if term and not self._group_text_blocked_by_injection_guard(term):
+                    if (
+                        term
+                        and self._group_slang_term_is_promoted(group, item)
+                        and not self._group_text_blocked_by_injection_guard(term)
+                    ):
                         terms.append(term)
             if terms:
                 lines.append("群内常见词/梗：" + "、".join(terms))
@@ -2250,7 +2347,11 @@ class GroupObservationMixin:
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
         top_terms = []
         for item in slang[:12]:
-            if isinstance(item, dict) and item.get("term"):
+            if (
+                isinstance(item, dict)
+                and item.get("term")
+                and self._group_slang_term_is_promoted(group, item)
+            ):
                 top_terms.append(f"{item.get('term')}({item.get('count', 0)})")
         active_members = sorted(
             [(user_id, item) for user_id, item in members.items() if isinstance(item, dict)],
@@ -2564,7 +2665,7 @@ class GroupObservationMixin:
                 "updated_at": now,
             },
         )
-        del pending[5:]
+        del pending[24:]
         profile["last_pending_observation_at"] = now
 
     def _worldbook_pending_observation_signal(self, text: str) -> dict[str, Any] | None:
@@ -2711,6 +2812,8 @@ class GroupObservationMixin:
     async def _maybe_group_interject(self, event: AstrMessageEvent, group: dict[str, Any], text: str) -> None:
         if bool(getattr(event, "is_wake", False)) or bool(getattr(event, "is_at_or_wake_command", False)):
             return
+        if bool(getattr(event, "private_companion_group_quoted_link_payload", False)):
+            return
         _, has_link_payload = _group_link_message_context(text)
         if has_link_payload:
             return
@@ -2839,6 +2942,52 @@ class GroupObservationMixin:
                     item["bot_joined_ts"] = group["last_interject_at"]
                     break
 
+    async def _try_reserve_group_expression_rule_batch(
+        self,
+        group_id: str,
+        *,
+        batch_key: str,
+        candidate_count: int,
+        now: float,
+    ) -> bool:
+        day = _today_key()
+        limit = _safe_int(
+            getattr(self, "expression_group_learning_daily_batch_limit", 6),
+            6,
+            1,
+            50,
+        )
+        async with self._data_lock:
+            current = self._get_group(group_id)
+            if _single_line(current.get("last_expression_rule_attempt_day"), 20) == day:
+                return False
+            if _single_line(current.get("last_expression_rule_batch_key"), 40) == batch_key:
+                return False
+            runtime = self.data.setdefault("expression_learning_runtime", {})
+            if not isinstance(runtime, dict):
+                runtime = {}
+                self.data["expression_learning_runtime"] = runtime
+            by_day = runtime.setdefault("group_batches_by_day", {})
+            if not isinstance(by_day, dict):
+                by_day = {}
+                runtime["group_batches_by_day"] = by_day
+            used = _safe_int(by_day.get(day), 0, 0)
+            if used >= limit:
+                runtime["last_group_deferred_at"] = now
+                runtime["last_group_defer_reason"] = "daily_batch_limit"
+                return False
+            by_day[day] = used + 1
+            for old_day in sorted(by_day)[:-14]:
+                by_day.pop(old_day, None)
+            runtime["last_group_batch_at"] = now
+            runtime["last_group_batch_id"] = _single_line(group_id, 80)
+            current["last_expression_rule_attempt_day"] = day
+            current["last_expression_rule_attempt_at"] = now
+            current["last_expression_rule_batch_key"] = batch_key
+            current["last_expression_rule_candidate_count"] = max(0, int(candidate_count))
+            self._save_data_sync()
+        return True
+
     async def _maybe_refresh_group_episode(self, group_id: str, group: dict[str, Any]) -> None:
         if not self.enable_group_episode_memory:
             return
@@ -2853,19 +3002,111 @@ class GroupObservationMixin:
         if len(recent) < 12:
             return
         lines = []
+        expression_candidate_lines: list[str] = []
+        expression_cursor = _safe_float(group.get("last_expression_rule_source_ts"), 0.0)
+        expression_source_ts = expression_cursor
         for item in recent[-80:]:
             if not isinstance(item, dict):
                 continue
             name = _single_line(item.get("name"), 20) or "群友"
             text = _single_line(item.get("text"), 100)
             if text:
-                lines.append(f"{name}: {text}")
+                line = f"{name}: {text}"
+                lines.append(line)
+                message_ts = _safe_float(item.get("ts"), 0.0)
+                if expression_cursor <= 0 or (message_ts > 0 and message_ts > expression_cursor):
+                    expression_candidate_lines.append(line)
+                    expression_source_ts = max(expression_source_ts, message_ts)
         if len(lines) < 8:
             return
+        min_new_messages = _safe_int(
+            getattr(self, "expression_group_learning_min_new_messages", 20),
+            20,
+            5,
+            80,
+        )
+        wants_expression_rules = bool(
+            getattr(self, "enable_expression_learning", False)
+            and len(expression_candidate_lines) >= min_new_messages
+            and self._expression_group_learning_source_enabled(group_id)
+        )
+        expression_source_text = chr(10).join(expression_candidate_lines)
+        expression_batch_key = hashlib.sha1(expression_source_text.encode("utf-8")).hexdigest()[:20]
+        acquired = await self._try_acquire_group_background_task(
+            group_id,
+            "group_episode",
+            now,
+            refresh_key="last_episode_refresh_at",
+            refresh_seconds=self.group_episode_refresh_minutes * 60,
+        )
+        if not acquired:
+            return
+        learn_expression_rules = bool(
+            wants_expression_rules
+            and await self._try_reserve_group_expression_rule_batch(
+                group_id,
+                batch_key=expression_batch_key,
+                candidate_count=len(expression_candidate_lines),
+                now=now,
+            )
+        )
+        expression_rule_task = ""
+        expression_rule_schema = ""
+        if learn_expression_rules:
+            expression_rule_task = """
+同时从群成员消息中学习有辨识度的表达。只分析【群聊记录】末尾 {candidate_count} 条新增消息，更早的消息只用于片段记忆，不得重复计入证据。不要把“字数、标点、柔和收尾”本身当成学习成果。
+分别输出两类：style_expressions 是“具体情境 → 可直接借鉴的短表达/口癖/梗/占位模板”；grammar_expressions 是“具体情境 → 稳定句法结构”。每类最多 3 条，没有就返回空数组。
+如果一条 style 与一条 grammar 来自同一组支持片段、描述同一个情境，只是分别概括说法和句法，两者必须填写完全相同的 family_key（简短英文或拼音标识）；互不相关的规则使用不同 family_key，不要为了凑对而强行配对。
+style 可以保留“我嘞个____”“懂的都懂”“这么强！”这类短而可迁移的表达，也可以把专名替换为 [称谓]/[对象]/____；style 字段只写 2–32 字原话/脱敏模板。包含“偏好、语气、风格、口语化、短句、铺垫、表达方式、回应时”等分析词的一律无效，不能输出。
+grammar 必须写清句长、主语省略、拆句、反问或祈使等可验证结构，不要混入具体话题；只有“简短、自然、直接、口语化”而没有句法细节时一律不输出。
+无法从新增消息中找到具体可复用原话/模板时，style_expressions 必须返回空数组，不得用抽象描述凑数。
+优先要求 2 条不同消息支持；只有 1 次但明显独特的梗也可以作为待审核候选，并将 evidence_count 写 1。普通“嗯/好/可以”不要学。
+必须删除昵称、@、账号/群号、关系、事实、群内秘密和罕见专名；evidence_examples 只保留 1–3 条脱敏短片段，仅供审核，绝不注入回复。
+tags 写 2–8 个用于按当前消息召回的通用情境词。channels 可从 private/group/proactive 中选择，让使用范围配置决定具体在哪些会话使用；
+relationship_stages 默认写 any；emotion_gates 只能从 normal/positive/low/guarded/any 选；
+intent 只能从 acknowledgement/question/request/help/comfort/play/intimacy/boundary/emotion/casual/any 选。
+avoid 写清楚哪些严肃、排障、工具失败、低落或边界场景不能用；如果表达规律会覆盖事实、工具结果、安全边界或 AstrBot 人格，persona_conflict 必须为 true。
+""".strip().format(candidate_count=len(expression_candidate_lines))
+            expression_rule_schema = """,
+  "style_expressions": [
+    {
+      "situation": "会触发这种表达的通用情境",
+      "family_key": "same_scene_rule_1",
+      "style": "脱敏后可直接借鉴的短表达或占位模板",
+      "instruction": "如何自然改写和使用",
+      "tags": ["通用召回标签"],
+      "evidence_examples": ["脱敏支持片段"],
+      "channels": ["private", "group", "proactive"],
+      "relationship_stages": ["any"],
+      "emotion_gates": ["normal", "positive"],
+      "intent": "casual",
+      "avoid": "严肃排障、工具失败或群聊气氛紧张时不用",
+      "persona_conflict": false,
+      "evidence_count": 2
+    }
+  ],
+  "grammar_expressions": [
+    {
+      "situation": "会触发这种句法的通用情境",
+      "family_key": "same_scene_rule_1",
+      "style": "稳定句法结构与字数范围",
+      "instruction": "如何安全使用该句法",
+      "tags": ["通用召回标签"],
+      "evidence_examples": ["脱敏支持片段"],
+      "channels": ["private", "group", "proactive"],
+      "relationship_stages": ["any"],
+      "emotion_gates": ["any"],
+      "intent": "casual",
+      "avoid": "不适用情境",
+      "persona_conflict": false,
+      "evidence_count": 2
+    }
+  ]"""
         prompt = f"""
 请把下面这段群聊整理成群聊片段记忆。
 目标是让角色以后知道群里发生过什么、哪个梗出现过、哪些话题已经结束。
 不要编造,不要输出解释。
+{expression_rule_task}
 
 【群聊记录】
 {chr(10).join(lines[-80:])}
@@ -2876,22 +3117,13 @@ class GroupObservationMixin:
   "main_topics": ["主要话题"],
   "new_meme": "新出现或变热的梗/黑话,没有就空字符串",
   "active_people": ["活跃群友昵称"],
-  "avoid_repeat": ["短期内不要重复接的话题"]
+  "avoid_repeat": ["短期内不要重复接的话题"]{expression_rule_schema}
 }}
 """.strip()
-        acquired = await self._try_acquire_group_background_task(
-            group_id,
-            "group_episode",
-            now,
-            refresh_key="last_episode_refresh_at",
-            refresh_seconds=self.group_episode_refresh_minutes * 60,
-        )
-        if not acquired:
-            return
         try:
             raw = await self._llm_call(
                 prompt,
-                max_tokens=420,
+                max_tokens=760 if learn_expression_rules else 420,
                 provider_id=self._task_provider(self.group_episode_provider_id, self.mai_style_provider_id),
                 task="group_episode",
             )
@@ -2911,7 +3143,12 @@ class GroupObservationMixin:
             "active_people": self._normalize_string_list(payload.get("active_people"), limit=8, item_limit=30),
             "avoid_repeat": self._normalize_string_list(payload.get("avoid_repeat"), limit=6, item_limit=60),
         }
-        if not episode["summary"]:
+        expression_rules = self._normalize_expression_rule_candidates(
+            self._expression_rule_payload_candidates(payload),
+            source_kind="group",
+            source_text=expression_source_text,
+        ) if learn_expression_rules else []
+        if not episode["summary"] and not expression_rules:
             await self._mark_group_background_retry(group_id, "group_episode", now, "empty_summary")
             return
         async with self._data_lock:
@@ -2920,9 +3157,29 @@ class GroupObservationMixin:
             if not isinstance(episodes, list):
                 episodes = []
                 current["group_episodes"] = episodes
-            if not episodes or _single_line(episodes[-1].get("summary") if isinstance(episodes[-1], dict) else "", 140) != episode["summary"]:
+            if episode["summary"] and (
+                not episodes
+                or _single_line(episodes[-1].get("summary") if isinstance(episodes[-1], dict) else "", 140) != episode["summary"]
+            ):
                 episodes.append(episode)
             del episodes[:-self.max_group_episodes]
+            if expression_rules:
+                expression_profile = current.setdefault("expression_profile", {})
+                if not isinstance(expression_profile, dict):
+                    expression_profile = {}
+                    current["expression_profile"] = expression_profile
+                self._merge_learned_expression_rules(
+                    expression_profile,
+                    expression_rules,
+                    batch_key=expression_batch_key,
+                    now=now,
+                    pending=True,
+                )
+                expression_profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._refresh_expression_voice_profile()
+            if learn_expression_rules:
+                current["last_expression_rule_source_ts"] = expression_source_ts or now
+                current["last_expression_rule_completed_at"] = now
             current["last_episode_refresh_at"] = now
             current["group_episode_retry_after"] = 0
             current["group_episode_last_error"] = ""
@@ -2940,12 +3197,15 @@ class GroupObservationMixin:
         if now < _safe_float(group.get("group_slang_retry_after"), 0):
             return
         slang = group.get("slang_terms")
-        if not isinstance(slang, list) or len(slang) < 5:
+        if not isinstance(slang, list):
             return
         if self._cleanup_group_slang_terms(group):
             slang = group.get("slang_terms")
-            if not isinstance(slang, list) or len(slang) < 5:
+            if not isinstance(slang, list):
                 return
+        slang = [item for item in slang if self._group_slang_term_is_promoted(group, item)]
+        if len(slang) < 3:
+            return
         recent = self._filtered_group_recent_messages(group)
         terms = [
             _single_line(item.get("term"), 20)

@@ -27,6 +27,26 @@ const state = {
   memoFilter: "active",
   memoEditorId: "",
   selectedUserId: "",
+  learningSection: "expressions",
+  expressionWorkspaceView: "library",
+  selectedExpressionReviewRuleId: "",
+  expressionReviewSource: "all",
+  expressionReviewType: "all",
+  expressionReviewQuery: "",
+  expressionLibrary: null,
+  expressionLibraryError: "",
+  expressionLibraryLoading: false,
+  expressionLibraryRequestSeq: 0,
+  expressionLibraryFilter: "all",
+  expressionLibraryType: "all",
+  expressionLibraryQuery: "",
+  expressionLibraryArchiveOpen: false,
+  expressionLibraryVisibleCounts: {
+    pending: 8,
+    rules: 12,
+    observation: 16,
+  },
+  expressionScopeOpen: false,
   selectedGroupId: "",
   featureDraft: {},
   selectedFeatureKey: "",
@@ -94,6 +114,7 @@ const state = {
   },
   lazyScripts: {},
   userGroupListPromise: null,
+  userGroupListError: "",
   dailyOutfitHydrateTimer: null,
   dailyOutfitHydrateKey: "",
   pageFontFamily: "original",
@@ -115,7 +136,7 @@ const hiddenCompatibilityConfigKeys = new Set([
 ]);
 
 const featureSwitchNotes = {
-  enable_skill_growth_simulation: "自定义技能不在这里填写，请到观察页的“技能成长”卡片新增、隐藏、冻结成长或合并别名。",
+  enable_skill_growth_simulation: "自定义技能不在这里填写，请到学习页的“技能成长”区域新增、隐藏、冻结成长或合并别名。",
   enable_food_menu_recommendation: "候选菜单在本功能详情页管理；观察页不再展示这块内容。",
   enable_group_companion: "群聊名单和当前覆盖范围在“常用配置”的“群聊名单”中管理。",
 };
@@ -755,13 +776,13 @@ const featureMeta = {
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
   enable_companion_memory: ["长期画像", "沉淀用户偏好、边界、关系线索和可复用事实。"],
-  enable_expression_learning: ["表达节奏学习", "统计用户句长、标点、句尾和短句节奏，只影响回复口感。"],
-  enable_expression_manual_review: ["表达样本审核", "新样本先进入私聊对象的待审核列表，通过后才会参与表达画像。"],
+  enable_expression_learning: ["表达方式学习", "从选定私聊或群聊提取抽象表达特征，并按范围用于私聊被动、私聊主动和群聊回复。"],
+  enable_expression_manual_review: ["观察素材审核", "原始观察素材先进入待整理区；模型归纳的表达规则始终必须审核后使用。"],
   enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
-  enable_response_self_review: ["回复/主动复核总开关", "关闭后同时停止被动回复复核和主动消息模型终审；最低限度的本地安全检查仍保留，但不会调用模型改写。"],
-  enable_proactive_message_review: ["主动消息发送前终审", "仅在总开关开启时生效；按人格、上下文和真实来源判断原样发送、改写或取消。"],
-  enable_smart_silence: ["智能沉默", "发送前判断用户是否想收住话题；可选择只看明确边界，或交给小模型结合上下文判断。"],
+  enable_passive_response_review: ["被动回复复核", "复核用户消息触发的回复；用于私聊普通回复，也用于群聊答疑唤醒保护，不影响主动消息终审。"],
+  enable_proactive_message_review: ["主动私聊发送前终审", "仅作用于主动私聊，独立按人格、上下文和真实来源判断原样发送、改写或取消。"],
+  enable_smart_silence: ["智能沉默", "私聊和群聊发送前判断是否应该收住话题；可只看明确边界，也可交给小模型结合上下文判断。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
   enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身被刺到、缓和、恢复和短暂回避的余波。"],
@@ -781,7 +802,7 @@ const featureMeta = {
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
   enable_cycle_state: ["生理期模拟", "开启后即视为适用，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
-  enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到观察页的技能成长卡片管理。"],
+  enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到学习页的技能成长区域管理。"],
   enable_personal_goals: ["个人目标", "明确创建非创作型长期目标，并按真实完成的日程推进。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
   enable_smart_message_debounce: ["智能文本收口", "先本地快判明确完整文本；“知道吗/问你个事/你猜”等短引子会先等补话。"],
@@ -831,7 +852,7 @@ const featureMeta = {
   enable_worldbook_member_recognition: ["群聊关系网", "以 QQ 号确认稳定身份，关系备注和重要记忆都放在这里。"],
   enable_cross_user_memory_bridge: ["跨用户记忆", "主要用户可查询 Bot 与其他用户/群聊的近期互动摘要；只读，不发送消息。"],
   enable_atrelay_tools: ["跨群转述", "查询群成员、按关系网解析 @ 对象，并转述到群聊或私聊。"],
-  enable_livingmemory_integration: ["记忆插件协同", "检测到“我会牢牢记住你”或 LivingMemory 时引导模型按需召回长期记忆，并展开更多协同配置。"],
+  enable_livingmemory_integration: ["外部记忆插件协同", "统一接入已适配的外部长期记忆插件；当前支持“我会牢牢记住你”/MemoryCompanion 与 LivingMemory。"],
   enable_bilibili_integration: ["B站 AI Bot 联动", "读取 B站 AI Bot 观看日志，并在合适节点私聊分享。"],
   enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档看视频。"],
   enable_news_integration: ["新闻阅读", "低频读取 RSS/Atom 新闻源，形成近期见闻和主动分享素材。"],
@@ -867,6 +888,11 @@ const featureMeta = {
   enable_personality_iteration_experiment: ["角色贴合校准", "实验性功能第三项：基于艾森克 PEN、大五人格、依恋风格和自我决定理论，帮用户判断行为是否贴近角色，并提示该怎么调整。"],
 };
 
+const featurePublicKeyAliases = {
+  // Keep the legacy config key internally while presenting the capability neutrally.
+  enable_livingmemory_integration: "enable_external_memory_integration",
+};
+
 const featureGroups = [
   {
     title: "通用能力",
@@ -882,19 +908,21 @@ const featureGroups = [
       "enable_recall_enhancement",
       "enable_private_image_self_recognition",
       "enable_forward_message_adaptation",
+      "enable_passive_response_review",
+      "enable_smart_silence",
       "enable_proactive_quote_trigger_message",
       "enable_tts_enhancement",
     ],
   },
   {
     title: "私聊陪伴",
-    note: "关系、记忆、回复策略和自然表达。",
+    note: "关系、记忆、回复策略、主动终审和自然表达。",
     keys: [
       "enable_mai_style_integration",
       "enable_companion_memory",
       "enable_expression_learning",
       "enable_intent_emotion_analysis",
-      "enable_response_self_review",
+      "enable_proactive_message_review",
       "enable_passive_topic_suppression",
       "enable_relationship_state_machine",
       "enable_dialogue_episode_memory",
@@ -936,8 +964,8 @@ const featureGroups = [
     ],
   },
   {
-    title: "身份与记忆联动",
-    note: "记忆插件协同（“我会牢牢记住你” / LivingMemory）；群聊关系网、跨群转述和跨用户记忆已归入群聊功能。",
+    title: "外部记忆联动",
+    note: "统一管理已适配的外部长期记忆插件；“我会牢牢记住你”/MemoryCompanion 与 LivingMemory 是当前支持项，不代表只绑定其中一种。",
     keys: [
       "enable_livingmemory_integration",
     ],
@@ -1132,14 +1160,14 @@ function featureSearchText(key) {
   const settingText = (featureSettingGroups[key] || [])
     .map((settingKey) => `${settingKey} ${configLabel(settingKey)} ${configDescriptions[settingKey] || ""}`)
     .join(" ");
-  return `${key} ${featureLabel(key)} ${featureDescription(key)} ${childText} ${settingText}`.toLowerCase();
+  return `${key} ${featurePublicKey(key)} ${featureLabel(key)} ${featureDescription(key)} ${childText} ${settingText}`.toLowerCase();
 }
 
 const safeFeatureKeys = [
   "enable_mai_style_integration",
   "enable_companion_memory",
   "enable_expression_learning",
-  "enable_response_self_review",
+  "enable_passive_response_review",
   "enable_group_privacy_guard",
   "enable_relationship_state_machine",
   "enable_dialogue_episode_memory",
@@ -1208,7 +1236,9 @@ const configLabels = {
   enable_meal_care_proactive: "饭点主动关心",
   meal_care_max_daily: "每日饭点关心上限",
   meal_care_followup_minutes: "吃饭补问等待分钟",
-  response_review_mode: "回复/主动复核模式",
+  passive_review_mode: "被动回复复核模式",
+  passive_review_strength: "被动回复复核强度",
+  proactive_review_mode: "主动消息终审模式",
   smart_silence_judge_mode: "智能沉默判断模式",
   SMART_SILENCE_PROVIDER_ID: "智能沉默小模型",
   smart_silence_min_confidence: "智能沉默置信度",
@@ -1472,7 +1502,7 @@ const configLabels = {
   memory_refresh_interval_minutes: "长期画像整理间隔",
   max_companion_memory_items: "长期画像条目上限",
   expression_learning_mode: "表达学习模式",
-  max_learned_expression_items: "表达节奏样本上限",
+  max_learned_expression_items: "每来源学习资料上限",
   episode_memory_refresh_messages: "片段整理消息阈值",
   episode_memory_refresh_minutes: "片段整理时间阈值",
   max_dialogue_episodes: "私聊片段上限",
@@ -1492,6 +1522,7 @@ const configLabels = {
   enable_external_event_self_link: "外界信息自我关联",
   external_event_self_link_probability: "自我关联分享欲倍率",
   external_event_self_link_cooldown_hours: "自我关联冷却",
+  external_link_share_cooldown_hours: "主动外链统一冷却",
   news_max_items_per_source: "单源读取条数",
   news_sources: "新闻源",
   enable_ai_daily_watch: "AI 日报/早报追踪",
@@ -1909,10 +1940,10 @@ const configDescriptions = {
   group_slang_web_search_results: "黑话释义联网参考开启时，每个候选词最多保留多少条网页摘要给模型判断匹配程度。",
   memory_refresh_interval_minutes: "长期画像整理的最小间隔，越短越容易产生模型调用。",
   max_companion_memory_items: "每个私聊对象最多保留多少条长期画像条目。",
-  expression_learning_mode: "light 更克制；balanced 保持当前自然学习；aggressive 会参考更多通过审核的短句和句尾样本，建议搭配手动审核。",
-  enable_expression_manual_review: "开启后，新表达样本先进入用户详情的待审核列表，通过后才会参与表达注入。",
+  expression_learning_mode: "light 更克制；balanced 会按短确认、提问、请求、玩笑和情绪等场景应用重复证据；aggressive 会参考更多通过审核的短句和句尾样本，建议搭配手动审核。",
+  enable_expression_manual_review: "开启后，原始观察素材先进入“学习”页待整理区；模型生成的情境表达和语法习惯无论此项是否开启都必须审核。",
   enable_expression_style_review: "开启后，回复复核会额外处理表达学习过头、异常逗号/断句、照抄样本等问题。",
-  max_learned_expression_items: "每个私聊对象最多保留多少条短句、句尾和标点节奏样本；不作为长期记忆事实。",
+  max_learned_expression_items: "每个私聊或群聊来源最多保留多少条情境表达、语法习惯和观察素材；每轮最多召回 2 条已审核规则。",
   episode_memory_refresh_messages: "累计多少条私聊消息后尝试整理一次对话片段。",
   episode_memory_refresh_minutes: "距离上次整理多久后允许再次整理私聊片段。",
   max_dialogue_episodes: "每个私聊对象最多保留多少条对话片段；实际回复时只择要使用最近或相关片段。",
@@ -1937,6 +1968,7 @@ const configDescriptions = {
   enable_external_event_self_link: "开启后，Bot 会把新闻和搜索结果先与自己的模型、能力、兴趣、创作、日程或关系做关联判断，再决定是否产生主动分享欲。不是关键词硬触发。",
   external_event_self_link_probability: "自我关联判断通过后进入主动候选的概率倍率，按百分比填写。越高越容易因为与自己有关的新鲜事来找用户。",
   external_event_self_link_cooldown_hours: "同一用户两次因外界信息自我关联而主动找人的最小间隔。",
+  external_link_share_cooldown_hours: "B 站视频、新闻和主动搜索共用的外链分享间隔。默认 72 小时，避免不同来源轮流发链接；0 表示关闭统一限制。用户主动询问链接与官方定时消息不受影响。",
   news_max_items_per_source: "每个新闻源最多读取多少条候选。",
   news_sources: "新闻源地址。可填 RSS/Atom、B 站空间链接、bilibili:UID、bvid:BV... 或单条 B 站视频链接。AI 日报/早报建议使用定时来源，避免普通新闻阅读反复访问 UP 空间。",
   enable_ai_daily_watch: "开启后按来源配置的固定时间读取 AI 日报/早报；默认 12:00 黑鸦Heya早报，23:00 橘鸦Juya日报。",
@@ -2044,7 +2076,9 @@ const configDescriptions = {
   enable_atrelay_llm_rewrite: "开启后先用模型把要转述的话改成 Bot 自然会说的短句；关闭后直接发送解析出的正文，速度更快。",
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
-  response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；被动侧只处理严重复读、泄露内部提示等保护性问题；full 会额外让较长被动回复参与模型改写，延迟更高。",
+  passive_review_mode: "控制被动回复复核范围。severe_only 只处理严重复读、泄露内部提示等问题；full 会让更多普通回复参与模型改写。",
+  passive_review_strength: "宽松模式只改写不吞回复；标准和严格模式允许取消高置信重复回复。",
+  proactive_review_mode: "local_only 只做本地检查；severe_only 仅在发现风险时调用模型；full 对每条准备发送的主动消息执行终审。",
   smart_silence_judge_mode: "boundary_only 只在明确边界语义时调用模型，最保守；contextual 会把短句收尾、忙了/睡了、敷衍回应、群聊普通反应等也交给模型判断，更智能但更依赖模型质量。",
   SMART_SILENCE_PROVIDER_ID: "用于发送前沉默判定。留空时跟随回复/主动复核模型。",
   smart_silence_min_confidence: "小模型判定 silent 且达到该置信度才会真正吞掉回复。值越高越保守，按百分比填写。",
@@ -2113,7 +2147,9 @@ const featureSettingGroups = {
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
-  enable_response_self_review: ["response_review_mode", "enable_proactive_message_review", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "enable_smart_silence", "smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds", "response_review_max_chars"],
+  enable_passive_response_review: ["passive_review_mode", "passive_review_strength", "response_review_max_chars"],
+  enable_proactive_message_review: ["proactive_review_mode", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold"],
+  enable_smart_silence: ["smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
@@ -2130,7 +2166,7 @@ const featureSettingGroups = {
   enable_detail_enhancement: ["detail_enhancement_lead_minutes"],
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
-  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
   enable_health_state: ["humanized_state_intensity"],
   enable_hunger_state: ["humanized_state_intensity"],
@@ -2181,7 +2217,7 @@ const featureSettingGroups = {
   enable_livingmemory_integration: ["livingmemory_tool_name", "memory_companion_context_timeout_seconds", "enable_memory_companion_emotional_drift", "enable_memory_companion_cross_window_emotion", "enable_memory_companion_dream_fragment", "enable_memory_companion_open_loop_search", "enable_memory_companion_feature_context", "enable_memory_companion_private_recall", "memory_companion_context_top_k", "memory_companion_context_max_chars"],
   enable_bilibili_integration: ["enable_bilibili_boredom_watch", "bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_bilibili_boredom_watch: ["bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
-  enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_sources", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
+  enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_sources", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "external_link_share_cooldown_hours", "news_max_items_per_source"],
   enable_news_daily_hot_read: ["news_hot_sources", "news_hot_max_items", "enable_ai_daily_watch", "ai_daily_sources"],
   enable_ai_daily_watch: ["ai_daily_sources", "ai_daily_prefer_text_version"],
   enable_news_boredom_read: ["news_min_interval_hours", "news_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
@@ -2244,7 +2280,7 @@ const featureSettingSections = {
       keys: ["livingmemory_tool_name"],
     },
     {
-      title: "记忆插件桥接基础",
+      title: "MemoryCompanion 桥接基础",
       note: "仅在检测到“我会牢牢记住你”/MemoryCompanion 桥接时显示。控制读取外部记忆上下文时最多等待多久。",
       keys: ["memory_companion_context_timeout_seconds"],
     },
@@ -2582,7 +2618,7 @@ const featureSettingSections = {
     {
       title: "主动分享",
       note: "控制新闻是否在空档阅读、如何形成主动候选。",
-      keys: ["enable_news_boredom_read", "news_min_interval_hours", "news_share_probability", "news_max_items_per_source", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours"],
+      keys: ["enable_news_boredom_read", "news_min_interval_hours", "news_share_probability", "news_max_items_per_source", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "external_link_share_cooldown_hours"],
     },
   ],
   enable_web_exploration: [
@@ -2660,6 +2696,11 @@ const featureSettingSections = {
       title: "内容清理",
       note: "用于去掉句尾分隔符、空格或换行；括号和双引号内的内容会被保护。",
       keys: ["enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words"],
+    },
+    {
+      title: "内容替换",
+      note: "按顺序把指定原文替换成新内容，再执行长度判断和分段；网址与媒体标签会被保护。",
+      keys: ["enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements"],
     },
     {
       title: "发送间隔",
@@ -2844,7 +2885,9 @@ const featureSettingTypes = {
   rest_reply_awake_grace_minutes: { type: "number", min: 0, max: 240, step: 5 },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   expression_learning_mode: { type: "select", options: [["light", "轻量：只学节奏"], ["balanced", "标准：当前行为"], ["aggressive", "激进：参考审核样本"]] },
-  response_review_mode: { type: "select", options: [["severe_only", "主动统一复核"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  passive_review_mode: { type: "select", options: [["severe_only", "仅严重问题"], ["local_only", "仅本地识别"], ["full", "积极复核（延迟更高）"]] },
+  passive_review_strength: { type: "select", options: [["lenient", "宽松：不吞回复"], ["balanced", "标准：允许去重取消"], ["strict", "严格：强化拦截"]] },
+  proactive_review_mode: { type: "select", options: [["full", "完整终审"], ["severe_only", "仅风险候选"], ["local_only", "仅本地检查"]] },
   smart_silence_judge_mode: { type: "select", options: [["boundary_only", "明确边界才判断"], ["contextual", "上下文模型判断"]] },
   proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴：不省成本"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
@@ -3328,6 +3371,8 @@ const tokenTaskLabels = {
   detail: "日程细化",
   dream: "梦境内容",
   diary: "日记整理",
+  diary_rewrite: "日记修订",
+  diary_derivatives: "日记线索提取",
   memory_profile: "长期画像",
   dialogue_episode: "私聊片段",
   response_review: "回复/主动复核",
@@ -3353,6 +3398,7 @@ const tokenTaskLabels = {
   photo_prompt: "生图提示",
   screen_narration: "识屏转述",
   forward_message: "合并转发转述",
+  forward_message_image_vision: "转发图片识别",
   private_reading_vision: "夹层视觉",
   private_image_vision: "私聊图片识别",
   private_image_only_framework: "单图回复主链",
@@ -3362,7 +3408,14 @@ const tokenTaskLabels = {
   proactive_persona_judge: "主动人格判定",
   voice_framework: "框架语音",
   voice_repair: "语音格式修复",
+  tts_conversion: "TTS 快速转换",
+  tts_spoken_conversion: "TTS 口语转换",
+  tts_postprocess: "TTS 后处理",
+  tts_visible_translation: "TTS 可见译文",
   smart_message_debounce: "智能收口防抖",
+  smart_silence: "智能沉默判断",
+  group_air_reply_guard: "群聊插话把关",
+  group_nsfw_image_review: "群图安全审核",
   rest_wakeup_judge: "休息醒来判断",
   yesterday_summary: "昨日摘要",
   full_test_detail: "完整测试细化",
@@ -3372,7 +3425,13 @@ const tokenTaskLabels = {
   qzone_publish: "空间说说",
   qzone_publish_test: "空间发布测试",
   qzone_publish_sanitize: "空间文案清理",
+  qzone_publish_image_test_draft: "空间配图测试草稿",
+  qzone_emotional_vent: "空间情绪表达",
   companion_manual_diagnosis: "陪伴答疑",
+  proactive_send_review: "主动发送复核",
+  atrelay_rewrite: "代答转写",
+  bookshelf_password: "书柜密码生成",
+  bookshelf_password_reason: "书柜密码缘由",
   memory_summary: "记忆阶段总结",
   memory_decay_summary: "记忆衰减整理",
   memory_rerank: "记忆重排",
@@ -3381,7 +3440,7 @@ const tokenTaskLabels = {
   astrbot_private_reply: "非插件私聊主回复",
   astrbot_group_reply: "非插件群聊主回复",
   astrbot_reply: "非插件主回复",
-  other: "其他调用",
+  other: "未分类模型调用",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -3404,7 +3463,14 @@ function cleanInterjectionText(value) {
 function bookshelfImageTag(src, alt) {
   const imageSrc = String(src || "");
   if (!imageSrc) return "";
-  return `<img src="${TRANSPARENT_IMAGE}" data-bookshelf-image-src="${escapeHtml(imageSrc)}" alt="${escapeHtml(alt || "书柜图片")}" loading="lazy" />`;
+  const image = `<img src="${TRANSPARENT_IMAGE}" data-bookshelf-image-src="${escapeHtml(imageSrc)}" alt="${escapeHtml(alt || "书柜图片")}" loading="lazy" />`;
+  if (!String(alt || "").endsWith("封面")) return image;
+  return `
+    <button type="button" class="bookshelf-cover-zoom" data-bookshelf-cover-preview disabled aria-label="放大预览${escapeHtml(alt || "作品封面")}">
+      ${image}
+      <span class="bookshelf-cover-zoom-hint" aria-hidden="true">点击放大</span>
+    </button>
+  `;
 }
 
 function bookshelfImageDataPath(src) {
@@ -3416,15 +3482,26 @@ function bookshelfImageDataPath(src) {
     if (url.pathname.endsWith("/bookshelf/image")) {
       return `/bookshelf/image_data${url.search}`;
     }
+    if (url.pathname.endsWith("/creative/project/cover")) {
+      return `/creative/project/cover_data${url.search}`;
+    }
     const marker = "/bookshelf/image?";
     const markerIndex = raw.indexOf(marker);
     if (markerIndex >= 0) {
       return `/bookshelf/image_data?${raw.slice(markerIndex + marker.length)}`;
     }
+    const creativeMarker = "/creative/project/cover?";
+    const creativeMarkerIndex = raw.indexOf(creativeMarker);
+    if (creativeMarkerIndex >= 0) {
+      return `/creative/project/cover_data?${raw.slice(creativeMarkerIndex + creativeMarker.length)}`;
+    }
   } catch (error) {
     const marker = "/bookshelf/image?";
     const markerIndex = raw.indexOf(marker);
     if (markerIndex >= 0) return `/bookshelf/image_data?${raw.slice(markerIndex + marker.length)}`;
+    const creativeMarker = "/creative/project/cover?";
+    const creativeMarkerIndex = raw.indexOf(creativeMarker);
+    if (creativeMarkerIndex >= 0) return `/creative/project/cover_data?${raw.slice(creativeMarkerIndex + creativeMarker.length)}`;
   }
   return raw;
 }
@@ -3440,21 +3517,93 @@ async function hydrateBookshelfImages(root = document) {
     try {
       if (endpoint.startsWith("data:")) {
         img.src = endpoint;
-      } else if (endpoint.startsWith("/bookshelf/image_data")) {
+      } else if (endpoint.startsWith("/bookshelf/image_data") || endpoint.startsWith("/creative/project/cover_data")) {
         const result = await fetchJson(endpoint);
         if (result?.data_url) img.src = result.data_url;
       } else {
         img.src = source;
       }
       img.dataset.loaded = "1";
+      const previewButton = img.closest("[data-bookshelf-cover-preview]");
+      if (previewButton instanceof HTMLButtonElement) {
+        previewButton.disabled = false;
+        previewButton.classList.add("is-ready");
+        previewButton.classList.remove("is-error");
+      }
     } catch (error) {
       img.dataset.loaded = "0";
       img.alt = `${img.alt || "书柜图片"}（加载失败）`;
+      const previewButton = img.closest("[data-bookshelf-cover-preview]");
+      if (previewButton instanceof HTMLButtonElement) {
+        previewButton.disabled = true;
+        previewButton.classList.add("is-error");
+        previewButton.title = "封面加载失败，请刷新后重试";
+      }
     } finally {
       img.dataset.loading = "0";
     }
   }));
 }
+
+let bookshelfCoverPreviewReturnFocus = null;
+
+function openBookshelfCoverPreview(trigger) {
+  const overlay = $("#bookshelfCoverPreview");
+  const previewImage = $("#bookshelfCoverPreviewImage");
+  const previewTitle = $("#bookshelfCoverPreviewTitle");
+  const sourceImage = trigger?.querySelector("img[data-bookshelf-image-src]");
+  if (!overlay || !previewImage || !sourceImage || sourceImage.dataset.loaded !== "1") return;
+  bookshelfCoverPreviewReturnFocus = trigger instanceof HTMLElement ? trigger : null;
+  previewImage.src = sourceImage.currentSrc || sourceImage.src;
+  previewImage.alt = sourceImage.alt || "创作封面预览";
+  if (previewTitle) previewTitle.textContent = sourceImage.alt || "创作封面";
+  overlay.hidden = false;
+  overlay.setAttribute("aria-hidden", "false");
+  document.documentElement.dataset.bookshelfCoverPreview = "open";
+  window.requestAnimationFrame(() => $("#bookshelfCoverPreviewClose")?.focus());
+}
+
+function closeBookshelfCoverPreview() {
+  const overlay = $("#bookshelfCoverPreview");
+  const previewImage = $("#bookshelfCoverPreviewImage");
+  if (!overlay || overlay.hidden) return;
+  overlay.hidden = true;
+  overlay.setAttribute("aria-hidden", "true");
+  if (previewImage) {
+    previewImage.removeAttribute("src");
+    previewImage.alt = "";
+  }
+  delete document.documentElement.dataset.bookshelfCoverPreview;
+  bookshelfCoverPreviewReturnFocus?.focus?.({ preventScroll: true });
+  bookshelfCoverPreviewReturnFocus = null;
+}
+
+function bindBookshelfCoverPreviewDismissal() {
+  const overlay = $("#bookshelfCoverPreview");
+  const dialog = overlay?.querySelector(".bookshelf-cover-preview__dialog");
+  const closeButton = $("#bookshelfCoverPreviewClose");
+  if (!overlay || overlay.dataset.dismissBound === "1") return;
+  overlay.dataset.dismissBound = "1";
+  closeButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeBookshelfCoverPreview();
+  });
+  overlay.addEventListener("click", (event) => {
+    if (event.target !== overlay) return;
+    event.preventDefault();
+    closeBookshelfCoverPreview();
+  });
+  dialog?.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || overlay.hidden) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeBookshelfCoverPreview();
+  }, true);
+}
+
+bindBookshelfCoverPreviewDismissal();
 
 async function hydrateDailyOutfitLogo() {
   if (window.PrivateCompanionDailyOutfit?.hydrateDailyOutfitLogo) {
@@ -4145,6 +4294,7 @@ function renderAppearanceSettings() {
 function applyUserGroupLists(users, groups) {
   state.users = Array.isArray(users?.items) ? users.items : [];
   state.groups = Array.isArray(groups?.items) ? groups.items : [];
+  state.userGroupListError = "";
   if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
   if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
 }
@@ -4155,10 +4305,10 @@ function renderAfterUserGroupListsLoaded() {
   renderGroupBubbleChart();
   if (state.activeTab === "private") {
     renderUsers();
+  } else if (state.activeTab === "learning") {
+    renderLearning();
   } else if (state.activeTab === "group") {
     renderGroups();
-  } else if (state.activeTab === "worldbook") {
-    renderWorldbook();
   } else if (state.activeTab === "memory") {
     renderMemory();
   } else if (state.activeTab === "proactive") {
@@ -4174,6 +4324,8 @@ async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) 
     return { users: { items: state.users }, groups: { items: state.groups } };
   }
   if (!force && state.userGroupListPromise) return state.userGroupListPromise;
+  state.userGroupListError = "";
+  if (!silent && state.activeTab === "learning") renderLearningSummary();
   const promise = (async () => {
     try {
       const [users, groups] = await Promise.all([
@@ -4191,10 +4343,12 @@ async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) 
       return { users, groups };
     } catch (error) {
       if (requestSeq !== loadAllRequestSeq) return null;
+      state.userGroupListError = error.message || "名单读取失败";
       console.warn("[PrivateCompanionPage] 用户/群聊列表加载失败", error);
       if (!silent) {
         const overview = state.overview || {};
         $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载，名单加载失败`;
+        if (state.activeTab === "learning") renderLearningSummary();
       }
       if (showErrors) showToast(`名单加载失败：${error.message}`, "error");
       return null;
@@ -4213,6 +4367,9 @@ async function loadAll(options = {}) {
   const { waitForLists = false } = options;
   state.lazyLoaded.userGroupLists = false;
   state.userGroupListPromise = null;
+  state.userGroupListError = "";
+  state.expressionLibrary = null;
+  state.expressionLibraryError = "";
   $("#subtitle").textContent = "读取运行态中...";
   try {
     const overview = await fetchJson("/overview");
@@ -4257,10 +4414,10 @@ function renderAll() {
 function renderActiveTab(tabName = state.activeTab || "dashboard") {
   if (tabName === "private") {
     renderUsers();
+  } else if (tabName === "learning") {
+    renderLearning();
   } else if (tabName === "group") {
     renderGroups();
-  } else if (tabName === "worldbook") {
-    renderWorldbook();
   } else if (tabName === "memory") {
     renderMemory();
   } else if (tabName === "proactive") {
@@ -4381,7 +4538,7 @@ async function ensureTabData(tabName, force = false) {
   if (tabName === "dashboard") {
     return;
   }
-  if (["private", "group", "worldbook", "memory", "proactive", "experimental"].includes(tabName) && (!state.lazyLoaded.userGroupLists || force)) {
+  if (["private", "group", "learning", "memory", "proactive", "experimental"].includes(tabName) && (!state.lazyLoaded.userGroupLists || force)) {
     await loadUserGroupLists(loadAllRequestSeq, { showErrors: true, force });
   }
   if (tabName === "tokens") {
@@ -4581,7 +4738,7 @@ const setupGuideAdvancedBlocks = [
   {
     id: "private",
     title: "私聊增强",
-    body: "配置私聊里读图、合并转发、撤回、未回复跟进和夹层阅读。适合想让私聊更像长期陪伴，但要注意模型成本和隐私边界。",
+    body: "配置私聊里的主动终审、读图、合并转发、撤回、未回复跟进和夹层阅读。适合想让私聊更像长期陪伴，但要注意模型成本和隐私边界。",
   },
   {
     id: "group",
@@ -4591,7 +4748,7 @@ const setupGuideAdvancedBlocks = [
   {
     id: "proactive",
     title: "主动增强",
-    body: "配置主动消息之外的长线动作：主动带图、新闻、搜索、QQ 空间、B 站、创作和分段发送。适合核心主动链路稳定后逐项打开。",
+    body: "配置主动带图、新闻、搜索、QQ 空间、B 站、创作和分段发送等长线动作。适合核心主动链路稳定后逐项打开。",
   },
   {
     id: "experimental",
@@ -4630,18 +4787,19 @@ const setupGuideAdvancedItems = {
         { key: "memory_refresh_interval_minutes", type: "number", label: "画像整理间隔分钟", placeholder: "120", min: 5 },
         { key: "max_companion_memory_items", type: "number", label: "长期画像上限", placeholder: "80", min: 1 },
         { key: "enable_expression_learning", type: "bool", kind: "feature", label: "学习表达习惯", description: "从对话里提炼口癖、偏好措辞和风格线索。" },
-        { key: "enable_expression_manual_review", type: "bool", label: "表达学习人工审核", description: "担心学错梗或误学阴阳怪气时建议开启。" },
+        { key: "enable_expression_manual_review", type: "bool", label: "观察素材人工审核", description: "仅控制原始观察素材；模型归纳规则始终需要审核。" },
       ],
     },
     {
-      key: "enable_response_self_review",
-      title: "回复自检",
-      ask: "是否让部分回复发送前先做一次风险和质量复核？",
-      description: "它会拦一拦明显不合适、越界、压力过强或不该发的内容，尤其影响主动消息和敏感场景。",
-      caution: "会多一次模型调用，回复可能稍慢；模型配置不稳时可能误判得偏保守。",
+      key: "enable_passive_response_review",
+      title: "被动回复复核",
+      ask: "是否让普通回复发送前做风险和质量复核？",
+      description: "用于私聊普通回复，也覆盖群聊答疑唤醒的插话保护；不控制主动私聊终审。",
+      caution: "会多一次模型调用，回复可能稍慢；担心误吞回复时使用宽松强度。",
       kind: "feature",
       settings: [
-        { key: "response_review_mode", type: "select", label: "复核模式", options: [["balanced", "标准"], ["strict", "严格"], ["lenient", "宽松"]] },
+        { key: "passive_review_mode", type: "select", label: "复核模式", options: [["local_only", "仅本地"], ["severe_only", "仅严重问题"], ["full", "积极复核"]] },
+        { key: "passive_review_strength", type: "select", label: "复核强度", options: [["lenient", "宽松：不吞回复"], ["balanced", "标准"], ["strict", "严格"]] },
         { key: "response_review_max_chars", type: "number", label: "最长复核文本", placeholder: "1800", min: 200 },
       ],
     },
@@ -4662,7 +4820,7 @@ const setupGuideAdvancedItems = {
       key: "enable_smart_silence",
       title: "智能沉默",
       ask: "是否允许 Bot 判断“这句话其实不用回复”？",
-      description: "比如用户只是自言自语、表情、收尾语或明显不想继续时，它会减少硬接话。",
+      description: "私聊和群聊都会使用。用户只是自言自语、表情、收尾语或明显不想继续时，它会减少硬接话。",
       caution: "开太严格会显得不理人。首次建议标准阈值，发现漏回复再降低置信度。",
       kind: "feature",
       settings: [
@@ -4842,6 +5000,18 @@ const setupGuideAdvancedItems = {
         { key: "private_reading_default_keywords", type: "textarea", label: "默认搜索关键词", placeholder: "纯爱, 恋爱, 同人", description: "素材源支持搜索时使用；多个词可用逗号或换行分隔。" },
         { key: "private_reading_blocked_tags", type: "textarea", label: "过滤标签", placeholder: "連載中, 長篇, 青年漫", description: "匹配这些标签的素材会尽量跳过。" },
         { key: "enable_private_reading_preference_influence", type: "bool", label: "阅读偏好影响后续选择", description: "越用越偏向用户喜欢的内容。" },
+      ],
+    },
+    {
+      key: "enable_proactive_message_review",
+      title: "主动私聊终审",
+      ask: "是否让主动私聊在发送前独立做一次终审？",
+      description: "仅作用于主动私聊，结合人格、最近聊天、真实来源和动机判断原样发送、改写或取消；被动复核关闭时仍可单独开启。",
+      caution: "完整终审会增加一次模型调用；只需本地安全检查时可选择 local_only。",
+      kind: "feature",
+      settings: [
+        { key: "proactive_review_mode", type: "select", label: "终审模式", options: [["local_only", "仅本地"], ["severe_only", "仅风险候选"], ["full", "完整终审"]] },
+        { key: "proactive_review_strength", type: "select", label: "终审强度", options: [["lenient", "宽松"], ["balanced", "标准"], ["strict", "严格"]] },
       ],
     },
   ],
@@ -5042,6 +5212,8 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "segmented_proactive_max_segments", type: "number", label: "最多分段", placeholder: "3", min: 1 },
+        { key: "enable_segmented_proactive_content_replacement", type: "bool", label: "启用内容替换", description: "替换规则在分段前执行。" },
+        { key: "segmented_proactive_content_replacements", type: "textarea", label: "内容替换规则", placeholder: "主人 => 比折大人" },
         { key: "segmented_proactive_interval_min", type: "number", label: "最小间隔秒", placeholder: "1", min: 0 },
         { key: "segmented_proactive_interval_max", type: "number", label: "最大间隔秒", placeholder: "4", min: 0 },
       ],
@@ -5107,6 +5279,7 @@ const setupGuideAdvancedItems = {
         { key: "ai_daily_sources", type: "textarea", label: "AI 日报/早报来源", placeholder: "每行一个来源链接或标识", description: "开启 AI 日报/早报时建议填写。" },
         { key: "news_min_interval_hours", type: "number", label: "新闻最小间隔小时", placeholder: "8", min: 1 },
         { key: "news_share_probability", type: "number", label: "读后主动分享概率", placeholder: "15", min: 0, max: 100 },
+        { key: "external_link_share_cooldown_hours", type: "number", label: "主动外链统一冷却小时", placeholder: "72", min: 0, max: 168, description: "B站、新闻、主动搜索共用；0 表示关闭。" },
       ],
     },
     {
@@ -8012,7 +8185,7 @@ function renderHealthPanel() {
       level: overview.livingmemory?.conflict
         ? "warn"
         : features.enable_livingmemory_integration && (overview.livingmemory?.compatible_available || overview.livingmemory?.available || overview.livingmemory?.memory_companion_active) ? "ok" : "info",
-      title: "记忆插件协同",
+      title: "外部记忆插件协同",
       text: livingMemoryHealthText(overview.livingmemory),
     },
     {
@@ -8208,7 +8381,7 @@ function renderSetupProgress() {
 }
 
 function livingMemoryHealthText(livingmemory) {
-  if (!livingmemory) return "未读取到记忆插件协同状态";
+  if (!livingmemory) return "未读取到外部记忆插件协同状态";
   if (livingmemory.conflict_warning) return livingmemory.conflict_warning;
   const pluginName = livingmemory.selected_plugin_name || livingmemory.selected_plugin?.display_name || "";
   if (!livingmemory.compatible_available && !livingmemory.available && !livingmemory.memory_companion_active) return "未检测到可协同记忆插件";
@@ -8220,7 +8393,7 @@ function livingMemoryHealthText(livingmemory) {
 }
 
 function livingMemoryStatusText(livingmemory) {
-  if (!livingmemory) return "未读取到记忆插件协同状态";
+  if (!livingmemory) return "未读取到外部记忆插件协同状态";
   const lines = [livingMemoryHealthText(livingmemory)];
   const activePlugins = Array.isArray(livingmemory.active_plugins) ? livingmemory.active_plugins : [];
   if (activePlugins.length) {
@@ -9723,12 +9896,22 @@ function renderTokens() {
   })}`;
 
   renderTokenChart("#tokenProviderChart", source.providers || [], `暂无${source.shortLabel} Provider 消耗数据`, (item) => item.key || "default");
+  const taskChartRows = source.chartSecondaryRows || source.tasks || [];
   renderTokenChart(
     "#tokenTaskChart",
-    source.chartSecondaryRows || source.tasks || [],
+    taskChartRows,
     source.secondaryChartEmpty || `暂无${source.shortLabel}任务消耗数据`,
     source.secondaryChartLabeler || ((item) => tokenTaskLabel(item.key)),
   );
+  const taskChartHint = $("#tokenTaskChartHint");
+  if (taskChartHint) {
+    const hasUnclassifiedCalls = source.source === "companion"
+      && taskChartRows.some((item) => String(item?.key || "").trim() === "other");
+    taskChartHint.hidden = !hasUnclassifiedCalls;
+    taskChartHint.textContent = hasUnclassifiedCalls
+      ? "“未分类模型调用”只保留没有有效任务标识的旧版记录或异常链路；当前内置调用已逐项标注。历史 Token 无法反推用途，清空统计后会重新按新分类累计。"
+      : "";
+  }
   if (showHourlyTrend) {
     renderTokenHourlyChart(source.hours || []);
   } else {
@@ -10663,7 +10846,7 @@ function tokenTable(headers, rows, mapper, emptyText) {
 
 function tokenTaskLabel(key) {
   const normalized = String(key || "").trim();
-  if (!normalized) return "其他调用";
+  if (!normalized) return "未分类模型调用";
   if (tokenTaskLabels[normalized]) return tokenTaskLabels[normalized];
   if (normalized.startsWith("qzone_") && normalized.endsWith("_photo_prompt")) return "空间配图提示";
   if (normalized.startsWith("qzone_")) return "QQ 空间任务";
@@ -10697,6 +10880,387 @@ function formatRecentTime(ts, fallback) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+const expressionScopeDefinitions = [
+  {
+    id: "private-learning",
+    title: "从哪些私聊学习",
+    description: "保留每个私聊自己的场景适配，同时把允许来源的表达特征汇总为 Bot 的表达底色。",
+    modeKey: "expression_private_learning_source_mode",
+    idsKey: "expression_private_learning_source_ids",
+    sourceKey: "private_learning",
+    itemKind: "private",
+    defaultMode: "owner",
+    modes: [["owner", "仅主要用户"], ["selected", "指定私聊"], ["all", "全部私聊"]],
+  },
+  {
+    id: "group-learning",
+    title: "从哪些群聊学习",
+    description: "只保存句长、场景和表达特征等抽象元数据，不保存或复用群成员原话。",
+    modeKey: "expression_group_learning_source_mode",
+    idsKey: "expression_group_learning_source_ids",
+    sourceKey: "group_learning",
+    itemKind: "group",
+    defaultMode: "disabled",
+    modes: [["disabled", "不学习"], ["selected", "指定群聊"], ["all", "全部群聊"]],
+  },
+  {
+    id: "private-application",
+    title: "用于哪些私聊",
+    description: "控制全局表达底色的使用范围；指定私聊自己的本地规则仍只来自该私聊。",
+    modeKey: "expression_private_application_mode",
+    idsKey: "expression_private_application_user_ids",
+    sourceKey: "private_application",
+    itemKind: "private",
+    defaultMode: "all",
+    modes: [["all", "全部私聊"], ["selected", "指定私聊"]],
+  },
+  {
+    id: "group-application",
+    title: "用于哪些群聊",
+    description: "只调整 Bot 的说话节奏和口语感，不会把私聊原话、称呼、关系或事实带进群聊。",
+    modeKey: "expression_group_application_mode",
+    idsKey: "expression_group_application_ids",
+    sourceKey: "group_application",
+    itemKind: "group",
+    defaultMode: "all",
+    modes: [["disabled", "不使用"], ["all", "全部群聊"], ["selected", "指定群聊"]],
+  },
+];
+
+function expressionScopeItems(kind, selectedIds = []) {
+  const selected = new Set((selectedIds || []).map((item) => String(item || "").trim()).filter(Boolean));
+  const known = kind === "group"
+    ? state.groups.map((group) => ({
+      id: String(group.group_id || "").trim(),
+      label: groupDisplayName(group),
+      meta: groupIdText(group),
+    }))
+    : state.users.map((user) => ({
+      id: String(user.user_id || "").trim(),
+      label: user.display_name || user.nickname || user.user_id,
+      meta: user.relationship_role_label || "私聊对象",
+    }));
+  const knownIds = new Set(known.map((item) => item.id));
+  selected.forEach((id) => {
+    if (!knownIds.has(id)) known.push({ id, label: id, meta: "已配置，当前列表未载入" });
+  });
+  return known.filter((item) => item.id);
+}
+
+function renderExpressionScopeChecklist(definition, selectedIds) {
+  const selected = new Set((selectedIds || []).map((item) => String(item || "")));
+  const items = expressionScopeItems(definition.itemKind, selectedIds);
+  if (!items.length) {
+    return `<p class="expression-scope-empty">暂无可选${definition.itemKind === "group" ? "群聊" : "私聊对象"}，产生会话记录后会出现在这里。</p>`;
+  }
+  return `
+    <div class="expression-selected-toolbar">
+      <span>已选 <b data-expression-selected-count>${selected.size}</b> / ${items.length}</span>
+      <input type="search" data-expression-scope-search placeholder="筛选${definition.itemKind === "group" ? "群聊" : "私聊"}" aria-label="筛选${escapeHtml(definition.title)}对象" />
+    </div>
+    <div class="expression-scope-checklist" data-expression-id-list="${escapeHtml(definition.idsKey)}">
+      ${items.map((item) => `
+        <label class="expression-scope-check">
+          <input type="checkbox" value="${escapeHtml(item.id)}" ${selected.has(item.id) ? "checked" : ""} />
+          <span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.meta || item.id)}</small></span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderExpressionScopeManager() {
+  const root = $("#expressionScopeManager");
+  if (!root) return;
+  const scope = state.overview?.expression_scope || {};
+  const voice = scope.voice || {};
+  const groupBudget = scope.group_budget || {};
+  root.classList.toggle("is-disabled", scope.enabled === false);
+  root.innerHTML = `
+    <header class="expression-scope-head">
+      <h3>表达范围</h3>
+      <div class="expression-voice-status" aria-label="当前表达底色统计">
+        <strong>${escapeHtml(voice.sample_count || 0)}</strong><span>证据</span>
+        <small>私聊 ${escapeHtml(voice.private_source_count || 0)} · 群聊 ${escapeHtml(voice.group_source_count || 0)} · 今日归纳 ${escapeHtml(groupBudget.used_today || 0)}/${escapeHtml(groupBudget.daily_limit || 6)}</small>
+      </div>
+    </header>
+    <details class="dashboard-disclosure expression-scope-disclosure" ${state.expressionScopeOpen ? "open" : ""}>
+      <summary>
+        <span><b>范围设置</b><small>${scope.enabled === false ? "当前关闭" : "来源与应用位置"}</small></span>
+      </summary>
+      <div class="expression-budget-panel" aria-label="群聊语义归纳预算">
+        <div>
+          <b>群聊语义归纳预算</b>
+          <span>控制每天最多整理多少批群聊。</span>
+        </div>
+        <label>
+          <span>每天最多批次</span>
+          <input type="number" min="1" max="50" step="1" value="${escapeHtml(groupBudget.daily_limit || 6)}" data-expression-budget-key="expression_group_learning_daily_batch_limit" />
+        </label>
+        <label>
+          <span>每批最少新增</span>
+          <input type="number" min="5" max="80" step="5" value="${escapeHtml(groupBudget.min_new_messages || 20)}" data-expression-budget-key="expression_group_learning_min_new_messages" />
+        </label>
+      </div>
+      <div class="expression-scope-grid">
+        ${expressionScopeDefinitions.map((definition) => {
+        const current = scope[definition.sourceKey] || {};
+        const validModes = definition.modes.map(([value]) => value);
+        const fallback = definition.defaultMode;
+        const mode = validModes.includes(current.mode) ? current.mode : fallback;
+        const selectedIds = Array.isArray(current.ids) ? current.ids : [];
+        return `
+          <fieldset class="expression-scope-field" data-expression-scope-field="${escapeHtml(definition.id)}" data-selected-mode="${mode === "selected" ? "1" : "0"}">
+            <legend>${escapeHtml(definition.title)}</legend>
+            <p>${escapeHtml(definition.description)}</p>
+            <div class="expression-mode-control" role="radiogroup" aria-label="${escapeHtml(definition.title)}">
+              ${definition.modes.map(([value, label]) => `
+                <label>
+                  <input type="radio" name="${escapeHtml(definition.modeKey)}" value="${escapeHtml(value)}" ${mode === value ? "checked" : ""} />
+                  <span>${escapeHtml(label)}</span>
+                </label>
+              `).join("")}
+            </div>
+            <div class="expression-selected-list">
+              ${renderExpressionScopeChecklist(definition, selectedIds)}
+            </div>
+            <p class="expression-empty-warning" data-expression-empty-warning ${mode === "selected" && selectedIds.length === 0 ? "" : "hidden"} aria-live="polite">尚未勾选对象，当前指定范围不会生效。</p>
+          </fieldset>
+        `;
+        }).join("")}
+      </div>
+      <footer class="expression-scope-footer">
+        <button type="button" data-save-expression-scope>保存范围</button>
+      </footer>
+    </details>
+  `;
+  root.querySelector(".expression-scope-disclosure")?.addEventListener("toggle", (event) => {
+    state.expressionScopeOpen = Boolean(event.currentTarget.open);
+  });
+  root.querySelectorAll("[data-expression-scope-field] input[type='radio']").forEach((input) => {
+    input.addEventListener("change", () => {
+      const field = input.closest("[data-expression-scope-field]");
+      if (field) {
+        field.dataset.selectedMode = input.value === "selected" ? "1" : "0";
+        const warning = field.querySelector("[data-expression-empty-warning]");
+        const checkedCount = field.querySelectorAll(".expression-scope-check input[type='checkbox']:checked").length;
+        if (warning) warning.hidden = input.value !== "selected" || checkedCount > 0;
+      }
+    });
+  });
+  root.querySelectorAll("[data-expression-scope-search]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const query = String(input.value || "").trim().toLowerCase();
+      const field = input.closest("[data-expression-scope-field]");
+      field?.querySelectorAll(".expression-scope-check").forEach((item) => {
+        item.hidden = Boolean(query) && !String(item.textContent || "").toLowerCase().includes(query);
+      });
+    });
+  });
+  root.querySelectorAll(".expression-scope-check input[type='checkbox']").forEach((input) => {
+    input.addEventListener("change", () => {
+      const field = input.closest("[data-expression-scope-field]");
+      const count = field?.querySelector("[data-expression-selected-count]");
+      if (count && field) {
+        const checkedCount = field.querySelectorAll(".expression-scope-check input[type='checkbox']:checked").length;
+        count.textContent = String(checkedCount);
+        const selectedMode = field.querySelector("input[type='radio']:checked")?.value === "selected";
+        const warning = field.querySelector("[data-expression-empty-warning]");
+        if (warning) warning.hidden = !selectedMode || checkedCount > 0;
+      }
+    });
+  });
+  const saveButton = root.querySelector("[data-save-expression-scope]");
+  saveButton?.addEventListener("click", async () => {
+    const settings = {};
+    expressionScopeDefinitions.forEach((definition) => {
+      const modeInput = root.querySelector(`input[name="${definition.modeKey}"]:checked`);
+      const list = root.querySelector(`[data-expression-id-list="${definition.idsKey}"]`);
+      settings[definition.modeKey] = modeInput?.value || definition.modes[0][0];
+      settings[definition.idsKey] = Array.from(list?.querySelectorAll("input[type='checkbox']:checked") || [])
+        .map((input) => String(input.value || "").trim())
+        .filter(Boolean);
+    });
+    root.querySelectorAll("[data-expression-budget-key]").forEach((input) => {
+      settings[input.dataset.expressionBudgetKey] = Number(input.value || 0);
+    });
+    const emptySelected = expressionScopeDefinitions.find((definition) => (
+      settings[definition.modeKey] === "selected" && settings[definition.idsKey].length === 0
+    ));
+    if (emptySelected) {
+      showToast(`“${emptySelected.title}”选择了指定范围，但还没有勾选对象`, "error");
+      return;
+    }
+    const updated = await runAction(
+      () => postJson("/settings/update", { settings }),
+      "已保存表达方式学习范围",
+      saveButton,
+    );
+    if (updated) {
+      state.expressionLibrary = null;
+      void renderExpressionLibrary(true);
+    }
+  });
+}
+
+function renderLearningSummary() {
+  const root = $("#learningSummary");
+  if (!root) return;
+  const library = state.expressionLibrary || {};
+  const growth = state.overview?.skill_growth || {};
+  const skills = Array.isArray(growth.items) ? growth.items : [];
+  const ruleCount = Number(library.rule_group_count ?? library.rule_count ?? library.pattern_count ?? (Array.isArray(library.rule_groups) ? library.rule_groups.length : 0));
+  const pendingCount = Number(library.pending_rule_group_count ?? library.pending_rule_count ?? library.pending_count ?? (Array.isArray(library.pending_rule_groups) ? library.pending_rule_groups.length : 0));
+  const skillCount = Number(growth.skill_count || skills.length || 0);
+  const worldbook = state.overview?.worldbook || {};
+  const relationshipCount = Number(worldbook.member_count || 0);
+  const pendingObservationCount = Number(worldbook.pending_observation_total || 0);
+  root.innerHTML = `
+    <button id="learningTabSocial" type="button" role="tab" aria-controls="learningPanelSocial" data-learning-section="social" class="learning-summary-card" aria-label="关系网，共 ${escapeHtml(relationshipCount)} 个节点">
+      <b>${escapeHtml(relationshipCount)}</b>
+      <span>关系网</span>
+      <small id="worldbookNavSummary">${escapeHtml(pendingObservationCount)} 条待确认</small>
+    </button>
+    <button id="learningTabSkills" type="button" role="tab" aria-controls="learningPanelSkills" data-learning-section="skills" class="learning-summary-card" aria-label="技能，共 ${escapeHtml(skillCount)} 项">
+      <b>${escapeHtml(skillCount)}</b>
+      <span>技能</span>
+      <small id="skillGrowthSummary">成长与熟练度</small>
+    </button>
+    <div class="learning-summary-card learning-summary-expression-card" data-learning-expression-card role="presentation">
+      <button id="learningTabExpressions" type="button" role="tab" aria-controls="learningPanelExpressions" data-learning-section="expressions" data-expression-nav-view="library" class="learning-summary-expression-main" aria-label="表达，共 ${escapeHtml(ruleCount)} 个已启用规则组">
+        <b>${escapeHtml(ruleCount)}</b>
+        <span>表达</span>
+        <small id="expressionLibrarySummary">已启用规则组</small>
+      </button>
+      <button type="button" class="learning-summary-review-action ${pendingCount > 0 ? "has-attention" : ""}" data-learning-review-shortcut aria-controls="learningPanelExpressions" aria-pressed="false" aria-label="审核队列，共 ${escapeHtml(pendingCount)} 组待审核">
+        <b>${escapeHtml(pendingCount)}</b>
+        <span>审核</span>
+        <small>${pendingCount ? "待处理" : "已清空"}</small>
+      </button>
+    </div>
+  `;
+  root.querySelector("[data-learning-review-shortcut]")?.addEventListener("click", () => {
+    state.expressionWorkspaceView = "review";
+    switchLearningSection("expressions");
+  });
+  bindLearningNavigation();
+  syncLearningNavigationState();
+  const expressionSummary = $("#expressionLibrarySummary");
+  if (expressionSummary) expressionSummary.textContent = `${ruleCount} 个规则组`;
+  const skillSummary = $("#skillGrowthSummary");
+  if (skillSummary) {
+    skillSummary.textContent = growth.enabled === false
+      ? "未开启"
+      : (growth.frozen_count ? `${growth.frozen_count} 项冻结` : "成长与熟练度");
+  }
+  const reviewCount = $("#expressionReviewCount");
+  if (reviewCount) reviewCount.textContent = String(pendingCount);
+  const worldbookSummary = $("#worldbookNavSummary");
+  if (worldbookSummary) {
+    worldbookSummary.textContent = worldbook.pending_observation_total
+      ? `${worldbook.pending_observation_total} 条待确认`
+      : "身份与边界";
+  }
+}
+
+function switchLearningSection(section, options = {}) {
+  const next = ["skills", "expressions", "social"].includes(section) ? section : "expressions";
+  state.learningSection = next;
+  syncLearningNavigationState();
+  document.querySelectorAll("[data-learning-section-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.learningSectionPanel !== next;
+  });
+  if (next === "expressions") {
+    syncExpressionWorkspaceView();
+    void renderExpressionLibrary();
+  } else if (next === "social") {
+    renderWorldbook();
+  } else {
+    renderSkillGrowth();
+  }
+  if (options.focus) {
+    document.querySelector(`[data-learning-section="${next}"]`)?.focus();
+  }
+}
+
+function syncLearningNavigationState() {
+  document.querySelectorAll("[data-learning-section]").forEach((button) => {
+    const selected = button.dataset.learningSection === state.learningSection;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.tabIndex = selected ? 0 : -1;
+  });
+  const expressionSelected = state.learningSection === "expressions";
+  document.querySelector("[data-learning-expression-card]")?.classList.toggle("is-active", expressionSelected);
+  const reviewShortcut = document.querySelector("[data-learning-review-shortcut]");
+  const reviewSelected = expressionSelected && state.expressionWorkspaceView === "review";
+  reviewShortcut?.classList.toggle("is-active", reviewSelected);
+  reviewShortcut?.setAttribute("aria-pressed", reviewSelected ? "true" : "false");
+}
+
+function syncExpressionWorkspaceView() {
+  const next = state.expressionWorkspaceView === "review" ? "review" : "library";
+  document.querySelectorAll("[data-expression-view]").forEach((button) => {
+    const selected = button.dataset.expressionView === next;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.tabIndex = selected ? 0 : -1;
+  });
+  document.querySelectorAll("[data-expression-view-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.expressionViewPanel !== next;
+  });
+  if (next === "review") renderExpressionReviewWorkspace();
+}
+
+function switchExpressionWorkspaceView(view, options = {}) {
+  state.expressionWorkspaceView = view === "review" ? "review" : "library";
+  syncExpressionWorkspaceView();
+  syncLearningNavigationState();
+  if (options.focus) {
+    document.querySelector(`[data-expression-view="${state.expressionWorkspaceView}"]`)?.focus();
+  }
+}
+
+function bindLearningNavigation() {
+  document.querySelectorAll("[data-learning-section]").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => {
+      if (button.dataset.expressionNavView) state.expressionWorkspaceView = button.dataset.expressionNavView;
+      switchLearningSection(button.dataset.learningSection || "expressions");
+    });
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const buttons = [...document.querySelectorAll("[data-learning-section]")];
+      const current = buttons.indexOf(button);
+      const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+      const next = buttons[nextIndex];
+      if (next) switchLearningSection(next.dataset.learningSection || "expressions", { focus: true });
+    });
+  });
+  document.querySelectorAll("[data-expression-view]").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => switchExpressionWorkspaceView(button.dataset.expressionView || "library"));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "ArrowLeft" || event.key === "Home" ? "library" : "review";
+      switchExpressionWorkspaceView(next, { focus: true });
+    });
+  });
+}
+
+function renderLearning() {
+  renderLearningSummary();
+  bindLearningNavigation();
+  renderExpressionScopeManager();
+  void renderExpressionLibrary();
+  renderSkillGrowth();
+  switchLearningSection(state.learningSection);
 }
 
 function renderUsers() {
@@ -10765,7 +11329,6 @@ async function renderUserDetail(forceFetch = false) {
       <button data-user-action="reset_daily">重置今日额度</button>
       <button data-user-action="clear_schedule">清空主动计划</button>
       <button data-user-action="clear_emotion_state">重置情绪状态</button>
-      <button data-user-action="clear_learning" class="danger">清空学习记忆</button>
       <button data-user-action="delete" class="danger">删除私聊用户</button>
     </div>
     <form id="userEditForm" class="inline-form">
@@ -10773,7 +11336,7 @@ async function renderUserDetail(forceFetch = false) {
       <label>语气 <input name="style" value="${escapeHtml(detail.style || "")}" placeholder="温柔 / 活泼 / 工作" /></label>
       <label>关系角色
         <select name="relationship_role">
-          <option value="owner" ${detail.relationship_role === "owner" ? "selected" : ""}>主要用户</option>
+          <option value="owner" ${detail.relationship_role === "owner" ? "selected" : ""}>主要用户（含管理权限）</option>
           <option value="friend" ${detail.relationship_role !== "owner" ? "selected" : ""}>次要用户</option>
         </select>
       </label>
@@ -10789,16 +11352,47 @@ async function renderUserDetail(forceFetch = false) {
     </div>
     <div class="detail-grid">
       ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
+      ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
       ${userWorldbookBlock(detail.worldbook_member)}
-      ${detailBlock("行为习惯", detail.behavior_habits?.updated_at ? `更新于 ${detail.behavior_habits.updated_at}` : "", userHabitPairs(detail.behavior_habits))}
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
-      ${detailBlock("对话片段", "", (detail.dialogue_episodes || []).map((item, index) => [`#${index + 1}`, item.summary || item.title || JSON.stringify(item)]))}
-      ${renderExpressionProfileBlock(detail)}
       ${renderOpenLoopBlock(detail)}
+    </div>
+    <div class="private-dialogue-section">
+      ${renderPrivateDialogueEpisodes(detail)}
     </div>
   `;
   bindUserActions(detail);
+}
+
+function renderPrivateDialogueEpisodes(detail) {
+  const episodes = Array.isArray(detail?.dialogue_episodes) ? detail.dialogue_episodes : [];
+  const episodePairs = episodes.length
+    ? episodes.map((item, index) => [
+      item.title || `片段 ${index + 1}`,
+      item.summary || item.content || JSON.stringify(item),
+    ])
+    : [["-", "暂无已整理对话片段"]];
+  const note = episodes.length ? `当前保留 ${episodes.length} 个私聊片段` : "私聊积累到整理条件后会显示在这里";
+  return detailBlock("对话片段", note, episodePairs);
+}
+
+function renderPrivateBehaviorHabits(detail) {
+  const habits = detail?.behavior_habits || {};
+  const pairs = userHabitPairs(habits);
+  const updatedAt = habits.updated_at ? `更新于 ${habits.updated_at}` : (habits.enabled ? "等待形成稳定样本" : "习惯学习未开启");
+  return `
+    <section class="detail-block private-habit-block">
+      <header class="private-habit-head">
+        <div>
+          <h2>行为习惯</h2>
+          <span>${escapeHtml(updatedAt)}</span>
+        </div>
+        <button type="button" class="danger-outline" data-private-learning-clear>清空</button>
+      </header>
+      <dl>${pairs.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value || "-")}</dd>`).join("")}</dl>
+    </section>
+  `;
 }
 
 function userWorldbookBlock(item) {
@@ -10997,68 +11591,818 @@ function renderOpenLoopBlock(detail) {
   `;
 }
 
-function renderExpressionProfileBlock(detail) {
-  const profile = detail?.expression_profile && typeof detail.expression_profile === "object" ? detail.expression_profile : {};
-  const pending = Array.isArray(profile.pending_samples) ? profile.pending_samples : [];
-  const samples = Array.isArray(profile.samples) ? profile.samples : [];
-  const endings = Array.isArray(profile.endings) ? profile.endings.filter(Boolean) : [];
-  const phrases = Array.isArray(profile.recent_phrases) ? profile.recent_phrases.filter(Boolean) : [];
-  return `
-    <section class="detail-block expression-profile-block">
-      <div class="detail-block-head">
-        <h2>表达画像</h2>
-        <div class="open-loop-actions">
-          <span class="badge">${escapeHtml(profile.mode || "balanced")}</span>
-          ${profile.manual_review ? `<span class="badge ok">手动审核</span>` : ""}
-          ${pending.length ? `<button type="button" class="danger-outline" data-expression-action="clear_pending">清空待审</button>` : ""}
+function expressionLibrarySourceText(item) {
+  const kind = item?.source_kind_label || (item?.source_type === "group" ? "群聊" : "私聊");
+  const name = item?.source_name || item?.source_id || "未知来源";
+  const id = item?.source_id || "";
+  return `${kind} ${name} ${id}`.trim();
+}
+
+function normalizeExpressionRuleGroup(value, fallbackIndex = 0) {
+  const raw = value && typeof value === "object" ? value : {};
+  const components = (Array.isArray(raw.items) ? raw.items : (Array.isArray(raw.component_rules) ? raw.component_rules : [raw]))
+    .filter((item) => item && typeof item === "object");
+  const styleRule = raw.style_rule && typeof raw.style_rule === "object"
+    ? raw.style_rule
+    : components.find((item) => item.kind === "style") || null;
+  const grammarRule = raw.grammar_rule && typeof raw.grammar_rule === "object"
+    ? raw.grammar_rule
+    : components.find((item) => item.kind === "grammar") || null;
+  const familyId = String(raw.family_id || raw.id || components[0]?.family_id || components[0]?.id || `rule-group-${fallbackIndex}`);
+  const examples = [];
+  components.forEach((item) => {
+    (Array.isArray(item.evidence_examples) ? item.evidence_examples : []).forEach((example) => {
+      if (example && !examples.includes(example)) examples.push(example);
+    });
+  });
+  return {
+    ...(components[0] || {}),
+    ...raw,
+    id: familyId,
+    family_id: familyId,
+    kind: styleRule && grammarRule ? "combined" : (styleRule ? "style" : "grammar"),
+    kind_label: styleRule && grammarRule ? "组合规则" : (styleRule ? "情境表达" : "语法习惯"),
+    label: raw.label || styleRule?.label || grammarRule?.label || styleRule?.situation || grammarRule?.situation || "未命名规则组",
+    situation: raw.situation || styleRule?.situation || grammarRule?.situation || "",
+    items: components,
+    component_rules: components,
+    component_count: components.length,
+    component_kinds: [styleRule ? "style" : "", grammarRule ? "grammar" : ""].filter(Boolean),
+    style_rule: styleRule,
+    grammar_rule: grammarRule,
+    evidence_count: Math.max(0, ...components.map((item) => Number(item.evidence_count) || 0), Number(raw.evidence_count) || 0),
+    evidence_examples: Array.isArray(raw.evidence_examples) && raw.evidence_examples.length ? raw.evidence_examples : examples,
+  };
+}
+
+function expressionRuleGroups(library, pending = false) {
+  const groupKey = pending ? "pending_rule_groups" : "rule_groups";
+  const flatKey = pending ? "pending_rules" : "rules";
+  const provided = Array.isArray(library?.[groupKey]) ? library[groupKey] : [];
+  if (provided.length) return provided.map((item, index) => normalizeExpressionRuleGroup(item, index));
+  const flatRules = Array.isArray(library?.[flatKey]) ? library[flatKey] : [];
+  const buckets = new Map();
+  flatRules.forEach((rule, index) => {
+    const familyId = String(rule?.family_id || rule?.id || `rule-${index}`);
+    const sourceKey = `${rule?.source_type || "private"}:${rule?.source_id || "unknown"}:${familyId}`;
+    if (!buckets.has(sourceKey)) buckets.set(sourceKey, []);
+    buckets.get(sourceKey).push(rule);
+  });
+  return Array.from(buckets.values()).map((items, index) => normalizeExpressionRuleGroup({
+    ...(items[0] || {}),
+    family_id: items[0]?.family_id || items[0]?.id || `rule-group-${index}`,
+    items,
+  }, index));
+}
+
+function expressionLibraryItemMatches(item, filter, type, query) {
+  if (filter !== "all" && String(item?.source_type || "") !== filter) return false;
+  const components = Array.isArray(item?.items)
+    ? item.items
+    : (Array.isArray(item?.component_rules) ? item.component_rules : []);
+  const componentKinds = new Set([
+    String(item?.kind || ""),
+    ...(Array.isArray(item?.component_kinds) ? item.component_kinds.map(String) : []),
+    ...components.map((component) => String(component?.kind || "")),
+  ]);
+  if (type !== "all" && !componentKinds.has(type)) return false;
+  if (!query) return true;
+  const componentSearch = components.flatMap((component) => [
+    component?.label,
+    component?.situation,
+    component?.pattern,
+    component?.instruction,
+    component?.avoid,
+    ...(Array.isArray(component?.signals) ? component.signals : []),
+    ...(Array.isArray(component?.evidence_examples) ? component.evidence_examples : []),
+  ]);
+  const searchable = [
+    expressionLibrarySourceText(item),
+    item?.text,
+    item?.phrase,
+    item?.ending,
+    item?.label,
+    item?.scene,
+    item?.pattern,
+    item?.pattern_label,
+    item?.instruction,
+    item?.kind_label,
+    item?.avoid,
+    item?.intent,
+    ...(Array.isArray(item?.channels) ? item.channels : []),
+    ...(Array.isArray(item?.relationship_stages) ? item.relationship_stages : []),
+    ...(Array.isArray(item?.emotion_gates) ? item.emotion_gates : []),
+    ...(Array.isArray(item?.features) ? item.features : []),
+    ...(Array.isArray(item?.signals) ? item.signals : []),
+    ...(Array.isArray(item?.tags) ? item.tags : []),
+    ...(Array.isArray(item?.evidence_examples) ? item.evidence_examples : []),
+    ...componentSearch,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return searchable.includes(query);
+}
+
+const EXPRESSION_LIBRARY_PAGE_SIZES = {
+  pending: 8,
+  rules: 12,
+  observation: 16,
+};
+
+function resetExpressionLibraryVisibleCounts() {
+  state.expressionLibraryVisibleCounts = { ...EXPRESSION_LIBRARY_PAGE_SIZES };
+}
+
+function expressionLibraryVisibleCount(section) {
+  const fallback = EXPRESSION_LIBRARY_PAGE_SIZES[section] || 12;
+  return Math.max(fallback, Number(state.expressionLibraryVisibleCounts?.[section]) || fallback);
+}
+
+function expressionLibraryResultCounts(library) {
+  return {
+    rules: expressionRuleGroups(library, true).length + expressionRuleGroups(library, false).length,
+    observations: (Array.isArray(library?.pending_samples) ? library.pending_samples.length : 0)
+      + (Array.isArray(library?.samples) ? library.samples.length : 0),
+  };
+}
+
+async function renderExpressionLibrary(forceFetch = false) {
+  const root = $("#expressionLibrary");
+  const reviewRoot = $("#expressionReviewWorkspace");
+  if (!root) return;
+  if (!forceFetch && state.expressionLibrary) {
+    renderExpressionLibraryView();
+    return;
+  }
+  if (state.expressionLibraryLoading && !forceFetch) return;
+  const requestSeq = ++state.expressionLibraryRequestSeq;
+  state.expressionLibraryLoading = true;
+  state.expressionLibraryError = "";
+  root.innerHTML = `<div class="learning-detail-loading" role="status" aria-label="正在读取统一表达学习库"><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></div>`;
+  if (reviewRoot) reviewRoot.innerHTML = `<div class="learning-detail-loading" role="status" aria-label="正在读取表达审核队列"><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></div>`;
+  try {
+    const library = await fetchJson("/expression-library");
+    if (requestSeq !== state.expressionLibraryRequestSeq) return;
+    state.expressionLibrary = library;
+    renderExpressionLibraryView();
+  } catch (error) {
+    if (requestSeq !== state.expressionLibraryRequestSeq) return;
+    state.expressionLibraryError = error.message || "统一表达学习库读取失败";
+    root.innerHTML = `
+      <div class="learning-detail-empty is-error" role="alert">
+        <b>统一表达学习库读取失败</b>
+        <span>${escapeHtml(state.expressionLibraryError)}</span>
+        <button type="button" data-expression-library-retry>重试</button>
+      </div>
+    `;
+    root.querySelector("[data-expression-library-retry]")?.addEventListener("click", () => {
+      void renderExpressionLibrary(true);
+    });
+    if (reviewRoot) {
+      reviewRoot.innerHTML = `
+        <div class="learning-detail-empty is-error" role="alert">
+          <b>表达审核队列读取失败</b>
+          <span>${escapeHtml(state.expressionLibraryError)}</span>
+          <button type="button" data-expression-review-retry>重试</button>
+        </div>
+      `;
+      reviewRoot.querySelector("[data-expression-review-retry]")?.addEventListener("click", () => {
+        void renderExpressionLibrary(true);
+      });
+    }
+  } finally {
+    if (requestSeq === state.expressionLibraryRequestSeq) state.expressionLibraryLoading = false;
+  }
+}
+
+function renderExpressionLibraryView() {
+  const root = $("#expressionLibrary");
+  const library = state.expressionLibrary;
+  if (!root || !library) return;
+  renderLearningSummary();
+  const filter = ["all", "private", "group"].includes(state.expressionLibraryFilter)
+    ? state.expressionLibraryFilter
+    : "all";
+  const type = ["all", "style", "grammar"].includes(state.expressionLibraryType)
+    ? state.expressionLibraryType
+    : "all";
+  const query = String(state.expressionLibraryQuery || "").trim().toLowerCase();
+  const filterItems = (items) => (Array.isArray(items) ? items : []).filter((item) => expressionLibraryItemMatches(item, filter, type, query));
+  const allRuleGroups = expressionRuleGroups(library, false);
+  const allPendingRuleGroups = expressionRuleGroups(library, true);
+  const matchedLibrary = {
+    ...library,
+    samples: filterItems(library.samples),
+    pending_samples: filterItems(library.pending_samples),
+    pending_rules: filterItems(library.pending_rules),
+    rules: filterItems(library.rules),
+    pending_rule_groups: filterItems(allPendingRuleGroups),
+    rule_groups: filterItems(allRuleGroups),
+  };
+  const filteredLibrary = {
+    ...matchedLibrary,
+    samples: matchedLibrary.samples,
+    pending_samples: matchedLibrary.pending_samples,
+    pending_rules: [],
+    pending_rule_groups: [],
+    rules: matchedLibrary.rules,
+    rule_groups: matchedLibrary.rule_groups,
+  };
+  const totalCounts = expressionLibraryResultCounts({ ...library, pending_rules: [], pending_rule_groups: [] });
+  const resultCounts = expressionLibraryResultCounts(filteredLibrary);
+  const activeFilterCount = Number(filter !== "all") + Number(type !== "all") + Number(Boolean(query));
+  const resultText = `${resultCounts.rules} 组规则${resultCounts.observations ? ` · ${resultCounts.observations} 条观察` : ""}`;
+  root.innerHTML = `
+    <div class="expression-library-toolbar">
+      <div class="expression-library-filter-groups">
+        <div class="expression-library-filter-block">
+          <span>来源</span>
+          <div class="expression-library-segments" role="group" aria-label="筛选表达来源类型">
+            ${[["all", "全部"], ["private", "私聊"], ["group", "群聊"]].map(([value, label]) => `
+              <button type="button" class="${filter === value ? "is-active" : ""}" data-expression-library-filter="${value}" aria-pressed="${filter === value}">${label}</button>
+            `).join("")}
+          </div>
+        </div>
+        <div class="expression-library-filter-block">
+          <span>类型</span>
+          <div class="expression-library-segments expression-library-kind-segments" role="group" aria-label="筛选表达学习类型">
+            ${[["all", "全部"], ["style", "情境表达"], ["grammar", "语法习惯"]].map(([value, label]) => `
+              <button type="button" class="${type === value ? "is-active" : ""}" data-expression-library-type="${value}" aria-pressed="${type === value}">${label}</button>
+            `).join("")}
+          </div>
         </div>
       </div>
-      <p class="muted small">已入库 ${escapeHtml(profile.sample_count || samples.length || 0)} 条 · 待审核 ${escapeHtml(profile.pending_count || pending.length || 0)} 条 · ${profile.style_review ? "发送前审核开启" : "发送前审核关闭"}</p>
-      ${profile.prompt_preview ? `<pre class="compact-pre">${escapeHtml(profile.prompt_preview)}</pre>` : `<div class="empty small">暂无足够表达样本</div>`}
-      ${endings.length || phrases.length ? `
-        <div class="worldbook-chip-row">
-          ${endings.slice(0, 8).map((item) => `<span>句尾：${escapeHtml(item)}</span>`).join("")}
-          ${phrases.slice(0, 8).map((item) => `<span>短句：${escapeHtml(item)}</span>`).join("")}
+      <div class="expression-library-search-tools">
+        <div class="expression-library-search-wrap">
+          <input type="search" value="${escapeHtml(state.expressionLibraryQuery)}" data-expression-library-search placeholder="搜索情境、表达、标签或来源" aria-label="筛选统一表达学习库" />
+          ${query ? `<button type="button" data-expression-search-clear aria-label="清空搜索">清除</button>` : ""}
+        </div>
+        <div class="expression-library-result-row" aria-live="polite">
+          <span>${escapeHtml(resultText)}</span>
+          ${activeFilterCount ? `<button type="button" data-expression-filter-reset>清除 ${escapeHtml(activeFilterCount)} 项筛选</button>` : `<span>审核后使用</span>`}
+        </div>
+      </div>
+    </div>
+    ${renderExpressionLibraryBlock(filteredLibrary, {
+      hasAnyData: totalCounts.rules + totalCounts.observations > 0,
+      hasActiveFilters: activeFilterCount > 0,
+      pendingRuleCount: allPendingRuleGroups.length,
+      mode: "library",
+    })}
+  `;
+  root.querySelectorAll("[data-expression-library-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.expressionLibraryFilter = button.dataset.expressionLibraryFilter || "all";
+      resetExpressionLibraryVisibleCounts();
+      renderExpressionLibraryView();
+    });
+  });
+  root.querySelectorAll("[data-expression-library-type]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.expressionLibraryType = button.dataset.expressionLibraryType || "all";
+      resetExpressionLibraryVisibleCounts();
+      renderExpressionLibraryView();
+    });
+  });
+  root.querySelector("[data-expression-library-search]")?.addEventListener("input", (event) => {
+    const selectionStart = event.currentTarget.selectionStart;
+    state.expressionLibraryQuery = event.currentTarget.value || "";
+    resetExpressionLibraryVisibleCounts();
+    renderExpressionLibraryView();
+    const nextInput = root.querySelector("[data-expression-library-search]");
+    nextInput?.focus();
+    if (nextInput && selectionStart !== null) nextInput.setSelectionRange(selectionStart, selectionStart);
+  });
+  root.querySelector("[data-expression-search-clear]")?.addEventListener("click", () => {
+    state.expressionLibraryQuery = "";
+    resetExpressionLibraryVisibleCounts();
+    renderExpressionLibraryView();
+    root.querySelector("[data-expression-library-search]")?.focus();
+  });
+  root.querySelectorAll("[data-expression-filter-reset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.expressionLibraryFilter = "all";
+      state.expressionLibraryType = "all";
+      state.expressionLibraryQuery = "";
+      resetExpressionLibraryVisibleCounts();
+      renderExpressionLibraryView();
+    });
+  });
+  root.querySelectorAll("[data-expression-show-more]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const section = button.dataset.expressionShowMore || "";
+      const step = EXPRESSION_LIBRARY_PAGE_SIZES[section] || 12;
+      state.expressionLibraryVisibleCounts = {
+        ...state.expressionLibraryVisibleCounts,
+        [section]: expressionLibraryVisibleCount(section) + step,
+      };
+      renderExpressionLibraryView();
+    });
+  });
+  root.querySelector("[data-open-expression-review]")?.addEventListener("click", () => {
+    switchExpressionWorkspaceView("review", { focus: true });
+  });
+  bindExpressionLibraryActions(library, root);
+  renderExpressionReviewWorkspace();
+}
+
+function expressionReviewRuleKey(ruleGroup, index = 0) {
+  return String(ruleGroup?.family_id || ruleGroup?.id || `${ruleGroup?.source_type || "private"}:${ruleGroup?.source_id || "unknown"}:group:${index}`);
+}
+
+function expressionReviewQueueItem(ruleGroup, index, selected) {
+  const group = normalizeExpressionRuleGroup(ruleGroup, index);
+  const key = expressionReviewRuleKey(group, index);
+  const source = group?.source_name || group?.source_id || "未知来源";
+  const preview = group.style_rule?.pattern || group.grammar_rule?.pattern || "尚无可复用结构";
+  return `
+    <button type="button" class="expression-review-queue-item ${selected ? "is-selected" : ""}" data-expression-review-rule="${escapeHtml(key)}" aria-pressed="${selected ? "true" : "false"}">
+      <span class="expression-review-queue-top">
+        <span class="expression-review-queue-kinds">
+          ${group.style_rule ? `<span class="expression-kind-badge is-style">表达</span>` : ""}
+          ${group.grammar_rule ? `<span class="expression-kind-badge is-grammar">语法</span>` : ""}
+        </span>
+        <small>${escapeHtml(group?.evidence_count || 0)} 条证据</small>
+      </span>
+      <b>${escapeHtml(group?.label || group?.situation || "未命名规则组")}</b>
+      <span>${escapeHtml(preview)}</span>
+      <small>${escapeHtml(source)}</small>
+    </button>
+  `;
+}
+
+function renderExpressionReviewWorkspace() {
+  const root = $("#expressionReviewWorkspace");
+  const library = state.expressionLibrary;
+  if (!root) return;
+  const reviewCount = $("#expressionReviewCount");
+  const allRules = expressionRuleGroups(library, true);
+  if (reviewCount) reviewCount.textContent = String(allRules.length);
+  if (!library) {
+    if (!state.expressionLibraryLoading && state.expressionLibraryError) {
+      root.innerHTML = `
+        <div class="learning-detail-empty is-error" role="alert">
+          <b>表达审核队列读取失败</b>
+          <span>${escapeHtml(state.expressionLibraryError)}</span>
+          <button type="button" data-expression-review-retry>重试</button>
+        </div>
+      `;
+      root.querySelector("[data-expression-review-retry]")?.addEventListener("click", () => void renderExpressionLibrary(true));
+    }
+    return;
+  }
+  const source = ["all", "private", "group"].includes(state.expressionReviewSource) ? state.expressionReviewSource : "all";
+  const type = ["all", "style", "grammar"].includes(state.expressionReviewType) ? state.expressionReviewType : "all";
+  const query = String(state.expressionReviewQuery || "").trim().toLowerCase();
+  const rules = allRules.filter((rule) => expressionLibraryItemMatches(rule, source, type, query));
+  const keyedRules = rules.map((rule, index) => ({ rule, key: expressionReviewRuleKey(rule, index), index }));
+  if (!keyedRules.some((item) => item.key === state.selectedExpressionReviewRuleId)) {
+    state.selectedExpressionReviewRuleId = keyedRules[0]?.key || "";
+  }
+  const selectedItem = keyedRules.find((item) => item.key === state.selectedExpressionReviewRuleId) || keyedRules[0] || null;
+  const activeFilterCount = Number(source !== "all") + Number(type !== "all") + Number(Boolean(query));
+  root.innerHTML = `
+    <header class="expression-review-hero">
+      <div>
+        <span>REVIEW QUEUE</span>
+        <h3>表达审核</h3>
+        <p>按同一情境整组核对可复用表达、句法习惯和支持片段；一次通过或拒绝整组，避免重复审核。</p>
+      </div>
+      <div class="expression-review-hero-actions">
+        <span><b>${escapeHtml(allRules.length)}</b> 组待审核</span>
+        ${allRules.length ? `<button type="button" class="danger-outline" data-expression-action="clear_all_pending">清空队列</button>` : ""}
+      </div>
+    </header>
+    <div class="expression-review-toolbar">
+      <div class="expression-library-filter-block">
+        <span>来源</span>
+        <div class="expression-library-segments" role="group" aria-label="筛选待审核规则来源">
+          ${[["all", "全部"], ["private", "私聊"], ["group", "群聊"]].map(([value, label]) => `
+            <button type="button" class="${source === value ? "is-active" : ""}" data-expression-review-source="${value}" aria-pressed="${source === value}">${label}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div class="expression-library-filter-block">
+        <span>类型</span>
+        <div class="expression-library-segments" role="group" aria-label="筛选待审核规则类型">
+          ${[["all", "全部"], ["style", "情境表达"], ["grammar", "语法习惯"]].map(([value, label]) => `
+            <button type="button" class="${type === value ? "is-active" : ""}" data-expression-review-type="${value}" aria-pressed="${type === value}">${label}</button>
+          `).join("")}
+        </div>
+      </div>
+      <label class="expression-review-search">
+        <span>搜索</span>
+        <input type="search" value="${escapeHtml(state.expressionReviewQuery)}" data-expression-review-search placeholder="情境、表达或来源" />
+      </label>
+      ${activeFilterCount ? `<button type="button" class="expression-review-reset" data-expression-review-reset>清除筛选</button>` : ""}
+    </div>
+    ${allRules.length === 0 ? `
+      <div class="expression-review-empty" role="status">
+        <span aria-hidden="true">✓</span>
+        <b>审核队列已清空</b>
+        <p>新的情境表达与语法习惯会按同源情境合并后出现在这里。</p>
+        <button type="button" data-open-expression-library>查看已启用表达</button>
+      </div>
+    ` : (rules.length === 0 ? `
+      <div class="expression-review-empty" role="status">
+        <span aria-hidden="true">⌕</span>
+        <b>没有匹配的待审核规则</b>
+        <p>当前队列还有 ${escapeHtml(allRules.length)} 个规则组，可以清除筛选后继续审核。</p>
+        <button type="button" data-expression-review-reset>清除筛选</button>
+      </div>
+    ` : `
+      <div class="expression-review-layout">
+        <aside class="expression-review-queue" aria-label="待审核规则列表">
+          <div class="expression-review-queue-head"><b>待审核</b><span>${escapeHtml(rules.length)}/${escapeHtml(allRules.length)}</span></div>
+          <div class="expression-review-queue-list">
+            ${keyedRules.map((item) => expressionReviewQueueItem(item.rule, item.index, item.key === state.selectedExpressionReviewRuleId)).join("")}
+          </div>
+        </aside>
+        <section class="expression-review-detail" aria-live="polite">
+          <div class="expression-review-detail-head">
+            <div><span>当前规则组</span><b>${escapeHtml((selectedItem?.index || 0) + 1)} / ${escapeHtml(rules.length)}</b></div>
+            <small>一次处理整组，完成后自动进入下一组</small>
+          </div>
+          <div class="expression-review-detail-body">
+            ${selectedItem ? expressionRuleGroupItem(selectedItem.rule, true, true) : ""}
+          </div>
+        </section>
+      </div>
+    `)}
+  `;
+  root.querySelectorAll("[data-expression-review-source]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.expressionReviewSource = button.dataset.expressionReviewSource || "all";
+      state.selectedExpressionReviewRuleId = "";
+      renderExpressionReviewWorkspace();
+    });
+  });
+  root.querySelectorAll("[data-expression-review-type]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.expressionReviewType = button.dataset.expressionReviewType || "all";
+      state.selectedExpressionReviewRuleId = "";
+      renderExpressionReviewWorkspace();
+    });
+  });
+  root.querySelector("[data-expression-review-search]")?.addEventListener("input", (event) => {
+    const selectionStart = event.currentTarget.selectionStart;
+    state.expressionReviewQuery = event.currentTarget.value || "";
+    state.selectedExpressionReviewRuleId = "";
+    renderExpressionReviewWorkspace();
+    const input = root.querySelector("[data-expression-review-search]");
+    input?.focus();
+    if (input && selectionStart !== null) input.setSelectionRange(selectionStart, selectionStart);
+  });
+  root.querySelectorAll("[data-expression-review-reset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.expressionReviewSource = "all";
+      state.expressionReviewType = "all";
+      state.expressionReviewQuery = "";
+      state.selectedExpressionReviewRuleId = "";
+      renderExpressionReviewWorkspace();
+    });
+  });
+  root.querySelectorAll("[data-expression-review-rule]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedExpressionReviewRuleId = button.dataset.expressionReviewRule || "";
+      renderExpressionReviewWorkspace();
+    });
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const buttons = [...root.querySelectorAll("[data-expression-review-rule]")];
+      const current = buttons.indexOf(button);
+      const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
+      const next = buttons[nextIndex];
+      if (next) {
+        state.selectedExpressionReviewRuleId = next.dataset.expressionReviewRule || "";
+        renderExpressionReviewWorkspace();
+        [...root.querySelectorAll("[data-expression-review-rule]")]
+          .find((item) => item.dataset.expressionReviewRule === state.selectedExpressionReviewRuleId)
+          ?.focus();
+      }
+    });
+  });
+  root.querySelector("[data-open-expression-library]")?.addEventListener("click", () => switchExpressionWorkspaceView("library", { focus: true }));
+  bindExpressionLibraryActions(library, root);
+}
+
+function expressionLibraryMoreButton(section, visible, total, label) {
+  if (visible >= total) return "";
+  return `
+    <div class="expression-library-more">
+      <span>已显示 ${escapeHtml(visible)}/${escapeHtml(total)}</span>
+      <button type="button" data-expression-show-more="${escapeHtml(section)}">继续显示${escapeHtml(label)}</button>
+    </div>
+  `;
+}
+
+function renderExpressionLibraryBlock(profile, options = {}) {
+  const pending = Array.isArray(profile.pending_samples) ? profile.pending_samples : [];
+  const pendingRuleGroups = expressionRuleGroups(profile, true);
+  const samples = Array.isArray(profile.samples) ? profile.samples : [];
+  const ruleGroups = expressionRuleGroups(profile, false);
+  const visiblePendingRuleGroups = pendingRuleGroups.slice(0, expressionLibraryVisibleCount("pending"));
+  const visibleRuleGroups = ruleGroups.slice(0, expressionLibraryVisibleCount("rules"));
+  const observationLimit = expressionLibraryVisibleCount("observation");
+  const visiblePendingSamples = pending.slice(0, observationLimit);
+  const visibleSamples = samples.slice(0, Math.max(0, observationLimit - visiblePendingSamples.length));
+  const visibleObservationCount = visiblePendingSamples.length + visibleSamples.length;
+  const observationCount = samples.length;
+  const pendingRuleCount = Math.max(pendingRuleGroups.length, Number(options.pendingRuleCount || 0));
+  const totalItemCount = ruleGroups.length + pendingRuleGroups.length + samples.length + pending.length;
+  const usage = profile?.usage && typeof profile.usage === "object" ? profile.usage : {};
+  const lastInjection = usage?.last_injection && typeof usage.last_injection === "object" ? usage.last_injection : {};
+  const visibleSignals = Array.isArray(lastInjection.visible_signals) ? lastInjection.visible_signals : [];
+  return `
+    <section class="detail-block expression-profile-block">
+      ${lastInjection?.rule_id ? `
+        <details class="expression-last-injection">
+          <summary><b>最近使用：${escapeHtml(lastInjection.label || lastInjection.scene || "已学习场景")}</b><span>${escapeHtml(lastInjection.time || lastInjection.at || "刚刚")}</span></summary>
+          <small>证据 ${escapeHtml(lastInjection.evidence_count || 0)} 条 · 置信度 ${escapeHtml(Math.round(Number(lastInjection.confidence || 0) * 100))}%${lastInjection.instruction ? ` · ${escapeHtml(lastInjection.instruction)}` : ""}${visibleSignals.length ? ` · 回复中检测到 ${escapeHtml(visibleSignals.join(" / "))}` : ""}</small>
+        </details>
+      ` : ""}
+      ${profile.enabled === false ? `<div class="empty small">表达学习当前已关闭，已有资料仍可检视和清理。</div>` : ""}
+      ${totalItemCount === 0 ? `
+        <div class="expression-library-empty" role="status">
+          <b>${options.hasAnyData ? "没有匹配结果" : (pendingRuleCount ? "暂无已启用表达" : "暂无表达学习资料")}</b>
+          <span>${options.hasAnyData ? "可以放宽来源、类型或搜索条件。" : (pendingRuleCount ? "待审核规则不会混入表达库，请先完成审核。" : "产生足够的私聊或群聊片段后，归纳结果会先进入待审核区。")}</span>
+          ${options.hasActiveFilters ? `<button type="button" data-expression-filter-reset>清除筛选</button>` : ""}
+          ${pendingRuleCount && !options.hasActiveFilters ? `<button type="button" data-open-expression-review>前往审核队列</button>` : ""}
         </div>
       ` : ""}
-      ${pending.length ? `
-        <h3 class="subhead">待审核样本</h3>
-        <div class="open-loop-list">
-          ${pending.map((item, index) => expressionSampleItem(item, index, true)).join("")}
+      ${pendingRuleGroups.length ? `
+        <div id="expressionPendingSection" class="expression-section-head">
+          <div><h3>待审核规则组</h3><p>同源表达和语法会一起审核；支持片段通过前绝不会进入回复。</p></div>
+          <span>${escapeHtml(pendingRuleGroups.length)} 组</span>
         </div>
-      ` : `<div class="empty small">暂无待审核表达样本</div>`}
-      ${samples.length ? `
-        <details class="open-loop-archive">
-          <summary>已入库样本 ${escapeHtml(samples.length)}</summary>
-          <div class="open-loop-list archived">
-            ${samples.map((item, index) => expressionSampleItem(item, index, false)).join("")}
+        <div class="expression-rule-list">
+          ${visiblePendingRuleGroups.map((group, index) => expressionPendingRuleItem(group, index)).join("")}
+        </div>
+        ${expressionLibraryMoreButton("pending", visiblePendingRuleGroups.length, pendingRuleGroups.length, "待审核规则组")}
+      ` : ""}
+      ${ruleGroups.length ? `
+        <div id="expressionRuleGroupSection" class="expression-section-head">
+          <div><h3>已启用规则</h3><p>先看核心用法；适用范围、反馈、证据和管理操作默认收起。</p></div>
+          <div class="expression-section-actions">
+            <span>${escapeHtml(ruleGroups.length)} 组</span>
+            ${pendingRuleCount && options.mode === "library" ? `<button type="button" data-open-expression-review>审核 ${escapeHtml(pendingRuleCount)} 组</button>` : ""}
           </div>
+        </div>
+        <div class="expression-rule-list expression-rule-group-list">
+          ${visibleRuleGroups.map((group) => expressionRuleGroupItem(group, false)).join("")}
+        </div>
+        ${expressionLibraryMoreButton("rules", visibleRuleGroups.length, ruleGroups.length, "规则组")}
+      ` : ""}
+      ${pending.length || observationCount ? `
+        <details class="open-loop-archive expression-observation-archive" data-expression-sample-archive ${state.expressionLibraryArchiveOpen ? "open" : ""}>
+          <summary>原始观察（不参与回复） ${escapeHtml(observationCount)}${pending.length ? ` · 待收录 ${escapeHtml(pending.length)}` : ""}</summary>
+          <p class="muted small expression-observation-note"><b>这不是情境表达或语法习惯。</b>这里只保存来源、场景、句长和特征，供下一次模型归纳与人工排查；不会直接改变 Bot 的说法。</p>
+          ${visiblePendingSamples.length ? `<div class="expression-observation-list">${visiblePendingSamples.map((item, index) => expressionSampleItem(item, index, true)).join("")}</div>` : ""}
+          ${visibleSamples.length ? `<div class="expression-observation-list is-archived">${visibleSamples.map((item, index) => expressionSampleItem(item, index, false)).join("")}</div>` : ""}
+          ${expressionLibraryMoreButton("observation", visibleObservationCount, pending.length + samples.length, "观察素材")}
         </details>
       ` : ""}
     </section>
   `;
 }
 
+function expressionPendingRuleItem(ruleGroup, index = 0) {
+  return expressionRuleGroupItem(ruleGroup, true, index === 0);
+}
+
+function expressionRuleItem(rule, pending = false, evidenceOpen = false) {
+  return expressionRuleGroupItem(normalizeExpressionRuleGroup(rule), pending, evidenceOpen);
+}
+
+function expressionRuleComponent(rule, kind, groupSituation) {
+  if (!rule) return "";
+  const isGrammar = kind === "grammar";
+  const componentSituation = String(rule?.situation || "").trim();
+  return `
+    <section class="expression-rule-component is-${kind}" aria-label="${isGrammar ? "语法习惯" : "情境表达"}">
+      <div class="expression-rule-component-label">
+        <span class="expression-kind-badge is-${kind}">${isGrammar ? "语法习惯" : "情境表达"}</span>
+        <small>${isGrammar ? "控制句法，不复制内容" : "匹配情境后自然改写"}</small>
+      </div>
+      ${componentSituation && componentSituation !== String(groupSituation || "").trim() ? `<p class="expression-rule-component-scene">适用：${escapeHtml(componentSituation)}</p>` : ""}
+      <div class="expression-rule-template">
+        <span>${isGrammar ? "句法结构" : "可复用表达"}</span>
+        <strong>${escapeHtml(rule?.pattern || "-")}</strong>
+      </div>
+      <p class="expression-rule-instruction">${escapeHtml(rule?.instruction || "")}</p>
+    </section>
+  `;
+}
+
+function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = false) {
+  const group = normalizeExpressionRuleGroup(ruleGroup);
+  const needsReview = pending && group?.review_status === "needs_review";
+  const examples = Array.isArray(group?.evidence_examples) ? group.evidence_examples.filter(Boolean) : [];
+  const signals = Array.isArray(group?.signals) ? group.signals.filter(Boolean) : [];
+  const familyId = group?.family_id || group?.id || "";
+  const signalTags = signals.length ? `<div class="expression-rule-tags" aria-label="召回标签">${signals.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "";
+  const evidenceDetails = examples.length ? `
+    <details class="expression-rule-evidence" ${evidenceOpen ? "open" : ""}>
+      <summary>支持片段 ${escapeHtml(examples.length)} 条</summary>
+      <div>${examples.map((item) => `<blockquote>${escapeHtml(item)}</blockquote>`).join("")}</div>
+    </details>
+  ` : "";
+  const deleteAction = `<div class="expression-rule-actions"><button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">删除规则组</button></div>`;
+  return `
+    <article class="expression-rule-item expression-rule-group-item ${pending ? "is-pending" : "is-approved"} ${needsReview ? "needs-review" : ""}">
+      <div class="expression-rule-head">
+        <div class="expression-rule-title">
+          ${pending ? `<span class="expression-rule-group-kinds">
+            ${group.style_rule ? `<span class="expression-kind-badge is-style">表达</span>` : ""}
+            ${group.grammar_rule ? `<span class="expression-kind-badge is-grammar">语法</span>` : ""}
+          </span>` : ""}
+          <b class="open-loop-text">${escapeHtml(group?.label || group?.situation || "未命名表达规则组")}</b>
+        </div>
+        <span class="badge ${needsReview ? "warn" : ""}">${escapeHtml(group?.evidence_count || 0)} 条证据${pending ? ` · ${needsReview ? "反馈后复审" : "待审核"}` : ""}</span>
+      </div>
+      ${expressionSourceBadge(group, !pending)}
+      ${group?.review_reason ? `<p class="expression-rule-review-reason">${escapeHtml(group.review_reason)}</p>` : ""}
+      <div class="expression-rule-components">
+        ${expressionRuleComponent(group.style_rule, "style", group.situation)}
+        ${expressionRuleComponent(group.grammar_rule, "grammar", group.situation)}
+      </div>
+      ${pending ? `
+        ${signalTags}
+        ${expressionRuleContext(group)}
+        ${evidenceDetails}
+        <div class="expression-rule-actions">
+          <button type="button" data-expression-action="approve_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">${needsReview ? "重新通过整组" : "通过并启用整组"}</button>
+          <button type="button" class="danger-outline" data-expression-action="reject_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">拒绝整组</button>
+        </div>
+      ` : `
+        <details class="expression-rule-details">
+          <summary><span>范围、证据与管理</span><small>${escapeHtml(signals.length)} 个标签 · ${escapeHtml(examples.length)} 条片段</small></summary>
+          <div class="expression-rule-details-body">
+            ${signalTags}
+            ${expressionRuleContext(group)}
+            ${evidenceDetails}
+            ${deleteAction}
+          </div>
+        </details>
+      `}
+    </article>
+  `;
+}
+
+function expressionRuleContext(rule) {
+  const labels = {
+    private: "私聊",
+    group: "群聊",
+    proactive: "主动",
+    qzone: "空间",
+    tts: "语音",
+    any: "不限",
+    stranger: "陌生",
+    familiar: "熟悉",
+    close: "亲近",
+    normal: "普通",
+    positive: "轻松",
+    low: "安抚",
+    guarded: "边界",
+    acknowledgement: "确认",
+    question: "提问",
+    request: "请求",
+    help: "求助",
+    comfort: "安抚",
+    play: "玩笑",
+    tease: "逗趣",
+    intimacy: "亲近",
+    boundary: "边界",
+    emotion: "情绪",
+    casual: "闲聊",
+  };
+  const chips = [];
+  (Array.isArray(rule?.channels) ? rule.channels : []).forEach((item) => chips.push(labels[item] || item));
+  (Array.isArray(rule?.relationship_stages) ? rule.relationship_stages : []).forEach((item) => {
+    if (item !== "any") chips.push(labels[item] || item);
+  });
+  (Array.isArray(rule?.emotion_gates) ? rule.emotion_gates : []).forEach((item) => {
+    if (item !== "any") chips.push(labels[item] || item);
+  });
+  if (rule?.intent && rule.intent !== "any") chips.push(labels[rule.intent] || rule.intent);
+  if (Number(rule?.use_count) > 0) chips.push(`使用 ${Number(rule.use_count)} 次`);
+  const positive = Number(rule?.positive_feedback) || 0;
+  const negative = Number(rule?.negative_feedback) || 0;
+  return `
+    <div class="expression-rule-context">
+      ${chips.length ? `<div class="expression-rule-chips">${Array.from(new Set(chips)).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+      <div class="expression-rule-feedback" aria-label="规则反馈">
+        <span class="is-positive">正向 ${escapeHtml(positive)}</span>
+        <span class="${negative ? "is-negative" : ""}">负向 ${escapeHtml(negative)}</span>
+        ${rule?.last_used_time ? `<span>最近使用 ${escapeHtml(rule.last_used_time)}</span>` : ""}
+        ${rule?.persona_conflict ? `<strong>与人格/事实边界冲突，不会自动使用</strong>` : ""}
+      </div>
+      ${rule?.avoid ? `<details class="expression-rule-guard"><summary>适用边界</summary><p>${escapeHtml(rule.avoid)}</p></details>` : ""}
+    </div>
+  `;
+}
+
+function expressionSourceBadge(item, compact = false) {
+  const kind = item?.source_kind_label || (item?.source_type === "group" ? "群聊" : "私聊");
+  const name = item?.source_name || item?.source_id || "未知来源";
+  const id = item?.source_id || "";
+  if (compact) {
+    return `
+      <div class="expression-source-line is-compact" title="${escapeHtml(id || name)}">
+        <span>${escapeHtml(kind)}</span>
+        <b>${escapeHtml(name)}</b>
+        <small>${item?.source_active ? "当前来源" : "未参与学习"}</small>
+      </div>
+    `;
+  }
+  return `
+    <div class="expression-source-line">
+      <span class="badge ${item?.source_type === "group" ? "" : "ok"}">${escapeHtml(kind)}</span>
+      <b>${escapeHtml(name)}</b>
+      ${id ? `<span class="mono">${escapeHtml(id)}</span>` : ""}
+      <span class="badge ${item?.source_active ? "ok" : "off"}">${item?.source_active ? "当前来源" : "未参与学习"}</span>
+    </div>
+  `;
+}
+
 function expressionSampleItem(item, index, pending) {
   const text = item?.text || item?.phrase || item?.ending || "";
+  const featureText = Array.isArray(item?.features) ? item.features.filter(Boolean).join(" / ") : "";
+  const sceneText = item?.scene || "未分类场景";
+  const displayText = text || featureText || "尚无可归纳特征";
+  const sourceIndex = Number.isInteger(Number(item?.index)) ? Number(item.index) : index;
   const meta = [
     item?.time || "",
     item?.length ? `${item.length} 字` : "",
     item?.punctuation ? `标点 ${item.punctuation}` : "",
     item?.ending ? `句尾 ${item.ending}` : "",
+    Number(item?.evidence_count) > 0 ? `${item.evidence_count} 条证据` : "",
   ].filter(Boolean).join("｜");
+  const patternStatus = item?.source_type === "group"
+    ? `<span class="badge ${item?.observation_status === "supported" ? "ok" : ""}">${item?.observation_status === "supported" ? "重复证据" : "单次观察"}</span>`
+    : "";
   return `
-    <article class="open-loop-item ${pending ? "" : "archived"}">
-      <div class="open-loop-main">
-        <b class="open-loop-text">${escapeHtml(text || "空样本")}</b>
-        <span class="badge">${escapeHtml(meta || `#${index + 1}`)}</span>
+    <article class="expression-observation-item ${pending ? "is-pending" : "is-archived"}">
+      <div class="expression-observation-main">
+        <div class="expression-observation-title">
+          <span class="badge ${pending ? "warn" : "off"}">${pending ? "待收录观察" : "未归纳观察"}</span>
+          <b>${escapeHtml(sceneText)}</b>
+          ${patternStatus}
+        </div>
+        <p><span>观察特征</span>${escapeHtml(displayText)}</p>
+        <span class="expression-observation-meta">${escapeHtml(meta || `#${index + 1}`)}</span>
+        ${expressionSourceBadge(item)}
       </div>
-      <div class="open-loop-actions">
-        ${pending ? `<button type="button" data-expression-action="approve" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(index)}">通过</button>` : ""}
-        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(index)}">删除</button>
+      <div class="expression-observation-actions">
+        ${pending ? `<button type="button" data-expression-action="approve" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}">保留素材</button>` : ""}
+        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}">删除</button>
       </div>
     </article>
   `;
+}
+
+function bindExpressionLibraryActions(library, root) {
+  if (!root) return;
+  root.querySelector("[data-expression-sample-archive]")?.addEventListener("toggle", (event) => {
+    state.expressionLibraryArchiveOpen = Boolean(event.currentTarget.open);
+  });
+  root.querySelectorAll("[data-expression-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.expressionAction || "";
+      const sourceType = button.dataset.expressionSourceType || "";
+      const sourceId = button.dataset.expressionSourceId || "";
+      state.expressionLibraryArchiveOpen = Boolean(root.querySelector("[data-expression-sample-archive]")?.open);
+      if (action === "clear_all_pending" && !requireSecondClick(button, "expression-clear-all", "再次点击清空全部来源的待审核规则和待整理素材", "再次点击清空")) return;
+      if (action === "delete_sample" && !requireSecondClick(button, `expression-delete:${sourceType}:${sourceId}:${button.dataset.expressionSampleId || button.dataset.expressionSampleIndex || ""}`, "再次点击删除这条观察素材", "再次点击删除")) return;
+      if (action === "delete_rule" && !requireSecondClick(button, `expression-rule-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleId || ""}`, "再次点击删除这条表达规则", "再次点击删除")) return;
+      if (action === "delete_rule_group" && !requireSecondClick(button, `expression-rule-group-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleFamilyId || ""}`, "再次点击删除整个规则组", "再次点击删除整组")) return;
+      const updatedLibrary = await runAction(
+        () => postJson("/expression-library/update", {
+          source_type: sourceType,
+          source_id: sourceId,
+          expression_action: action,
+          sample_id: button.dataset.expressionSampleId || "",
+          rule_id: button.dataset.expressionRuleId || "",
+          rule_family_id: button.dataset.expressionRuleFamilyId || "",
+          sample_index: Number(button.dataset.expressionSampleIndex || -1),
+        }),
+        action === "approve" ? "已保留观察素材" : (
+          action === "approve_rule" ? "已通过表达规则" : (action === "approve_rule_group" ? "已通过并启用整个规则组" : "")
+        ),
+        button,
+        { reload: false },
+      );
+      if (!updatedLibrary) return;
+      state.expressionLibrary = updatedLibrary;
+      try {
+        const overview = await fetchJson("/overview");
+        applyOverviewData(overview);
+      } catch (error) {
+        console.warn("[PrivateCompanionPage] 表达画像操作后刷新总览失败", error);
+      }
+      renderExpressionScopeManager();
+      renderExpressionLibraryView();
+    });
+  });
 }
 
 function bindUserActions(detail) {
@@ -11067,6 +12411,24 @@ function bindUserActions(detail) {
       await renderUserDetail(true);
     }
   };
+  document.querySelector("[data-private-learning-clear]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (!requireSecondClick(button, `private-learning-clear:${detail.user_id}`, "再次点击清空该用户的行为习惯", "再次点击清空")) return;
+    const updated = await runAction(
+      () => postJson("/user/update", { user_id: detail.user_id, clear_behavior_habits: true }),
+      "已清空该用户的行为习惯",
+      button,
+      { reload: false },
+    );
+    if (!updated) return;
+    await refreshSelectedUserDetail();
+    try {
+      const overview = await fetchJson("/overview");
+      applyOverviewData(overview);
+    } catch (error) {
+      console.warn("[PrivateCompanionPage] 清空行为习惯后刷新总览失败", error);
+    }
+  });
   $("#userEditForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -11090,10 +12452,6 @@ function bindUserActions(detail) {
       if (action === "clear_emotion_state") {
         if (!requireSecondClick(button, `user-clear-emotion:${detail.user_id}`, "再次点击重置该用户的情绪状态", "再次点击重置")) return;
         body.clear_emotion_state = true;
-      }
-      if (action === "clear_learning") {
-        if (!requireSecondClick(button, `user-clear:${detail.user_id}`, "再次点击清空该用户的学习记忆", "再次点击清空")) return;
-        body.clear_learning = true;
       }
       if (action === "delete") {
         if (!requireSecondClick(button, `user-delete:${detail.user_id}`, "再次点击删除该私聊用户、目标名单和相关映射", "再次点击删除")) return;
@@ -11127,24 +12485,6 @@ function bindUserActions(detail) {
       await runAction(
         () => postJson("/user/update", { user_id: detail.user_id, clear_open_loops: true }),
         "",
-        button,
-      );
-      await refreshSelectedUserDetail();
-    });
-  });
-  document.querySelectorAll("[data-expression-action]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const action = button.dataset.expressionAction || "";
-      if (action === "clear_pending" && !requireSecondClick(button, `expression-clear:${detail.user_id}`, "再次点击清空待审核表达样本", "再次点击清空")) return;
-      if (action === "delete_sample" && !requireSecondClick(button, `expression-delete:${detail.user_id}:${button.dataset.expressionSampleId || button.dataset.expressionSampleIndex || ""}`, "再次点击删除这条表达样本", "再次点击删除")) return;
-      await runAction(
-        () => postJson("/user/update", {
-          user_id: detail.user_id,
-          expression_action: action,
-          sample_id: button.dataset.expressionSampleId || "",
-          sample_index: Number(button.dataset.expressionSampleIndex || -1),
-        }),
-        action === "approve" ? "已通过表达样本" : "",
         button,
       );
       await refreshSelectedUserDetail();
@@ -12228,7 +13568,6 @@ function renderMemory() {
   renderDreamFragments(life.dream_fragments || []);
   renderDl("#dailyState", normalizeDailyStateForDisplay(daily));
   renderDailyTimeline();
-  renderSkillGrowth();
   renderPersonalGoals();
   renderInteractionImpact();
   renderMemoryComposition();
@@ -12630,23 +13969,25 @@ function renderSkillGrowth() {
   const growth = state.overview?.skill_growth || {};
   const items = Array.isArray(growth.items) ? growth.items : [];
   const panel = $("#skillGrowthPanel");
+  const summary = $("#skillGrowthSummary");
   if (!panel) return;
   if (!growth.enabled) {
+    if (summary) summary.textContent = "未开启";
     panel.innerHTML = `<div class="empty small">技能成长未开启</div>`;
     return;
   }
   if (!items.length) {
+    if (summary) summary.textContent = "暂无记录";
     panel.innerHTML = `<div class="empty small">暂无技能记录</div>`;
     return;
   }
+  if (summary) summary.textContent = `${growth.skill_count || items.length} 项${growth.frozen_count ? ` · ${growth.frozen_count} 项冻结` : ""}`;
   panel.innerHTML = `
     <div class="skill-growth-head">
-      <span>${escapeHtml(growth.skill_count || items.length)} 项技能</span>
       ${growth.hidden_count ? `<span>隐藏 ${escapeHtml(growth.hidden_count)}</span>` : ""}
       ${growth.frozen_count ? `<span>冻结 ${escapeHtml(growth.frozen_count)}</span>` : ""}
       <span>成长倍率 ${escapeHtml(growth.rate || 1)}</span>
       <span>${growth.schedule_influence ? `影响日程 ${escapeHtml(formatPercent(growth.schedule_influence_strength))}` : "不影响日程"}</span>
-      <span>更新 ${escapeHtml(growth.updated || "-")}</span>
     </div>
     <div class="skill-category-list">
       ${renderSkillCategoryGroups(items)}
@@ -13988,12 +15329,14 @@ function renderBookDetailPanel() {
   }
   if (state.bookshelfPage === "reader" && book.kind === "creative") {
     panel.innerHTML = renderCreativeBookReader(book, kindLabel, displayTitle, displayIntro, displayContent);
+    void hydrateBookshelfImages(panel);
     return;
   }
   if (book.kind === "creative" && state.bookshelfPage === "detail") {
     panel.innerHTML = state.creativeEditing
       ? renderCreativeManager(book, kindLabel, displayTitle, displayIntro)
       : renderCreativeBookPreview(book, kindLabel, displayTitle, displayIntro, displayContent);
+    void hydrateBookshelfImages(panel);
     return;
   }
   panel.innerHTML = state.bookshelfPage === "reader"
@@ -14418,7 +15761,7 @@ function renderCreativeBookReader(book, kindLabel, displayTitle, displayIntro, d
         <button type="button" data-book-close>收回书柜</button>
       </div>
       <div class="reader-book-shell creative-shell ${escapeHtml(mode)}">
-        <aside class="reader-cover creative-cover ${escapeHtml(mode)}">
+        <aside class="reader-cover creative-cover ${escapeHtml(mode)} ${book.cover_src ? "has-cover-image" : ""}">
           ${renderBookCoverInner(book, kindLabel, displayTitle, book.progress || "")}
         </aside>
         <section class="reader-paper creative-paper ${escapeHtml(mode)}">
@@ -15330,10 +16673,15 @@ function renderMemoryComposition() {
 function renderSlangCloud() {
   const counts = new Map();
   state.groups.forEach((group) => {
-    (group.slang_terms || []).forEach((item, index) => {
+    (group.slang_terms || []).forEach((item) => {
       const term = slangTermText(item);
       if (!term) return;
-      counts.set(term, (counts.get(term) || 0) + Math.max(1, 16 - index));
+      const observedCount = typeof item === "object" && item
+        ? Math.max(0, Number(item.count || 0))
+        : 0;
+      const promoted = Boolean(typeof item === "object" && item && item.promoted === true);
+      if (observedCount < 2 && !promoted) return;
+      counts.set(term, (counts.get(term) || 0) + Math.max(1, observedCount));
     });
   });
   const entries = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 36);
@@ -15422,7 +16770,8 @@ function renderPrivateStrategyOverview(selector, info) {
   const enabled = Number(info.enabled_count ?? info.enabled_user_count ?? total);
   const adminIds = Array.isArray(info.admin_ids) ? info.admin_ids : [];
   const targetIds = Array.isArray(info.target_user_ids) ? info.target_user_ids : [];
-  const manageIds = [...new Set([...adminIds, ...targetIds])];
+  const relationshipOwnerIds = Array.isArray(info.relationship_owner_ids) ? info.relationship_owner_ids : [];
+  const manageIds = [...new Set([...adminIds, ...targetIds, ...relationshipOwnerIds])];
   const manageText = manageIds.length ? manageIds.join("、") : "未配置";
   const rows = [
     ["对象", total ? `${enabled}/${total} 启用` : `${enabled || 0} 个启用`],
@@ -16653,6 +18002,77 @@ function parseSegmentedWordList(value) {
     .filter((item) => item !== "");
 }
 
+function decodeSegmentedReplacementToken(value, replacement = false) {
+  const raw = String(value ?? "");
+  const trimmed = raw.trim();
+  const lower = trimmed.toLowerCase();
+  const aliases = new Map([
+    ["<space>", " "], ["{space}", " "], ["[space]", " "], ["空格", " "],
+    ["<newline>", "\n"], ["{newline}", "\n"], ["[newline]", "\n"], ["换行", "\n"],
+    ["<tab>", "\t"], ["{tab}", "\t"], ["[tab]", "\t"], ["tab", "\t"],
+    ["<empty>", ""], ["{empty}", ""], ["[empty]", ""], ["空内容", ""], ["删除", ""],
+  ]);
+  if (aliases.has(lower) && (replacement || !["<empty>", "{empty}", "[empty]", "空内容", "删除"].includes(lower))) {
+    return aliases.get(lower);
+  }
+  return trimmed.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
+function parseSegmentedReplacementRules(value) {
+  const rawRules = Array.isArray(value)
+    ? value
+    : String(value ?? "").split(/\r?\n/).filter((line) => line.trim());
+  const pairs = [];
+  rawRules.slice(0, 80).forEach((rawRule) => {
+    let oldValue = "";
+    let newValue = "";
+    if (rawRule && typeof rawRule === "object") {
+      oldValue = rawRule.from ?? rawRule.old ?? rawRule.source ?? "";
+      newValue = rawRule.to ?? rawRule.new ?? rawRule.replacement ?? "";
+    } else {
+      const rule = String(rawRule ?? "");
+      const separator = ["=>", "＝>", "→", "->"].find((item) => rule.includes(item));
+      if (!separator) return;
+      const separatorIndex = rule.indexOf(separator);
+      oldValue = rule.slice(0, separatorIndex);
+      newValue = rule.slice(separatorIndex + separator.length);
+    }
+    const oldText = decodeSegmentedReplacementToken(oldValue, false);
+    const newText = decodeSegmentedReplacementToken(newValue, true);
+    if (!oldText || oldText.length > 200 || newText.length > 500) return;
+    pairs.push([oldText, newText]);
+  });
+  return pairs;
+}
+
+function applySegmentedPreviewReplacements(value, rules) {
+  const pairs = parseSegmentedReplacementRules(rules);
+  const original = String(value || "");
+  if (!pairs.length || !original) return [original, 0];
+  const protectedPattern = /<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?<\/(?:image|img|video|record|audio|file)>|\/?>)|<tts\b[^>]*>.*?<\/tts>|<[^>\n]{1,240}\bpath="[^"]{1,500}"[^>\n]*>|<[^>\n]{1,240}\b(?:url|src)="[^"]{1,500}"[^>\n]*>|\b(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/gis;
+  let cursor = 0;
+  let output = "";
+  let replacementCount = 0;
+  const replacePlain = (source) => {
+    let next = String(source || "");
+    pairs.forEach(([oldText, newText]) => {
+      const count = Math.max(0, next.split(oldText).length - 1);
+      if (!count) return;
+      next = next.split(oldText).join(newText);
+      replacementCount += count;
+    });
+    return next;
+  };
+  let match = null;
+  while ((match = protectedPattern.exec(original)) !== null) {
+    output += replacePlain(original.slice(cursor, match.index));
+    output += match[0];
+    cursor = match.index + match[0].length;
+  }
+  output += replacePlain(original.slice(cursor));
+  return [output, replacementCount];
+}
+
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -16873,6 +18293,8 @@ function segmentedPreviewValues(root = document) {
     "segmented_proactive_content_cleanup_scope",
     "segmented_proactive_content_cleanup_rule",
     "segmented_proactive_content_cleanup_words",
+    "enable_segmented_proactive_content_replacement",
+    "segmented_proactive_content_replacements",
     "segmented_proactive_interval_method",
     "segmented_proactive_interval_min",
     "segmented_proactive_interval_max",
@@ -16886,21 +18308,37 @@ function segmentedPreviewValues(root = document) {
   values.enable_segmented_proactive_reply = toBool(values.enable_segmented_proactive_reply);
   values.segmented_proactive_send_as_forward = toBool(values.segmented_proactive_send_as_forward);
   values.enable_segmented_proactive_content_cleanup = toBool(values.enable_segmented_proactive_content_cleanup);
+  values.enable_segmented_proactive_content_replacement = toBool(values.enable_segmented_proactive_content_replacement);
   values.segmented_proactive_content_cleanup_scope = String(values.segmented_proactive_content_cleanup_scope || "all");
   values.segmented_proactive_split_words = String(values.segmented_proactive_split_words ?? "");
   values.segmented_proactive_content_cleanup_words = String(values.segmented_proactive_content_cleanup_words ?? "");
+  values.segmented_proactive_content_replacements = Array.isArray(values.segmented_proactive_content_replacements)
+    ? values.segmented_proactive_content_replacements
+    : String(values.segmented_proactive_content_replacements ?? "");
   return values;
 }
 
 function simulateSegmentedProactive(text, values) {
-  const normalized = String(text || "").trim();
+  let normalized = String(text || "").trim();
   if (!normalized) return { segments: [], status: "请输入一段主动消息示例。" };
   if (!values.enable_segmented_proactive_reply) {
     return { segments: [normalized], status: "主动分段未开启，真实发送会保持一整条。" };
   }
+  let replacementCount = 0;
+  if (values.enable_segmented_proactive_content_replacement) {
+    const [replaced, count] = applySegmentedPreviewReplacements(
+      normalized,
+      values.segmented_proactive_content_replacements,
+    );
+    if (count > 0 && replaced.trim()) {
+      normalized = replaced.trim();
+      replacementCount = count;
+    }
+  }
   const threshold = Math.max(20, Number(values.segmented_proactive_threshold || 500));
   if (normalized.length > threshold) {
-    return { segments: [normalized], status: `文本长度 ${normalized.length} 超过阈值 ${threshold}，真实发送不会分段。` };
+    const replacementText = replacementCount ? `已完成 ${replacementCount} 处内容替换；` : "";
+    return { segments: [normalized], status: `${replacementText}文本长度 ${normalized.length} 超过阈值 ${threshold}，真实发送不会分段。` };
   }
   const splitMode = String(values.segmented_proactive_split_mode || "regex");
   const scope = String(values.segmented_proactive_scope || "proactive_only");
@@ -17024,7 +18462,8 @@ function simulateSegmentedProactive(text, values) {
   const chatScopeText = chatScope === "private" ? "；仅私聊生效" : chatScope === "group" ? "；仅群聊生效" : "";
   const sendText = values.segmented_proactive_send_as_forward && segments.length > 1 ? "；真实发送会优先打包成合并消息" : "";
   const protectedText = protectedSplitHits ? `；${protectedSplitHits} 个分隔符位于括号/引号/网址内，已按保护规则跳过` : "";
-  return { segments, status: `预计发送 ${segments.length} 段；${scopeText}${chatScopeText}${sendText}${protectedText}。` };
+  const replacementText = replacementCount ? `；已完成 ${replacementCount} 处内容替换` : "";
+  return { segments, status: `预计发送 ${segments.length} 段；${scopeText}${chatScopeText}${sendText}${protectedText}${replacementText}。` };
 }
 
 function segmentedPreviewPanelHtml() {
@@ -17098,6 +18537,7 @@ function updateSegmentedConfigVisibility(root = document) {
     segmented_proactive_content_cleanup_scope: cleanupEnabled,
     segmented_proactive_content_cleanup_rule: cleanupEnabled && mode === "regex",
     segmented_proactive_content_cleanup_words: cleanupEnabled && mode === "words",
+    segmented_proactive_content_replacements: Boolean(values.enable_segmented_proactive_content_replacement),
     segmented_proactive_interval_min: intervalMethod === "random",
     segmented_proactive_interval_max: intervalMethod === "random",
     segmented_proactive_log_base: intervalMethod === "log",
@@ -17128,7 +18568,7 @@ function bindSegmentedPreview(root = document) {
       });
     });
   });
-  const controls = scope.querySelectorAll('[name^="segmented_proactive_"], [name="enable_segmented_proactive_reply"], [name="enable_segmented_proactive_content_cleanup"], [data-feature-param^="segmented_proactive_"], [data-feature-param="enable_segmented_proactive_content_cleanup"], [data-feature-detail-toggle="enable_segmented_proactive_reply"]');
+  const controls = scope.querySelectorAll('[name^="segmented_proactive_"], [name="enable_segmented_proactive_reply"], [name="enable_segmented_proactive_content_cleanup"], [name="enable_segmented_proactive_content_replacement"], [data-feature-param^="segmented_proactive_"], [data-feature-param="enable_segmented_proactive_content_cleanup"], [data-feature-param="enable_segmented_proactive_content_replacement"], [data-feature-detail-toggle="enable_segmented_proactive_reply"]');
   controls.forEach((control) => {
     if (control.dataset.segmentedConfigBound) return;
     control.dataset.segmentedConfigBound = "1";
@@ -17502,7 +18942,7 @@ function featureSwitchItem(key) {
       <div class="feature-switch-body">
         <button type="button" class="feature-switch-text" data-feature-open="${escapeHtml(key)}">
           <b>${escapeHtml(featureLabel(key))}</b>
-          <small>${escapeHtml(key)}</small>
+          <small>${escapeHtml(featurePublicKey(key))}</small>
         </button>
         <div class="feature-switch-meta">
           <span class="feature-state-text">${escapeHtml(stateText)}</span>
@@ -17749,12 +19189,9 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     }
     return true;
   }
-  if (featureKey === "enable_response_self_review") {
-    if (["smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds"].includes(settingKey)) {
-      return boolSetting("enable_smart_silence");
-    }
+  if (featureKey === "enable_passive_response_review") {
     if (settingKey === "response_review_max_chars") {
-      return String(valueSetting("response_review_mode", "severe_only")) === "full";
+      return String(valueSetting("passive_review_mode", "severe_only")) === "full";
     }
     return true;
   }
@@ -18003,7 +19440,7 @@ function featureDependencyLines(key) {
   if (key === "enable_proactive_only_mode") dependencies.push(["注意", "只跳过本插件的普通被动增强，不会阻止默认回复或其他插件"]);
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
-  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
+  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_proactive_message_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
     dependencies.push(["依赖", "私聊互动策略"]);
   }
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
@@ -18052,15 +19489,15 @@ const featureDetailGuides = {
     disabled: "不会新增长期画像，已有画像仍可在页面中查看和管理。",
   },
   enable_expression_learning: {
-    summary: "统计用户常用句长、标点、句尾味道和短句节奏，让回复更像同一段聊天里的自然接话。",
-    trigger: "每次私聊文本到达时本地更新统计，不调用模型。",
-    enabled: "Bot 只会参考节奏和语气轻重，不会把样本当成称呼规则、身份事实或长期偏好；激进模式可搭配手动审核。",
-    disabled: "不会继续更新表达节奏统计，回复更接近 AstrBot 默认人格的原始表达。",
+    summary: "从允许的私聊或群聊提取句长、场景和口语特征，让私聊被动、私聊主动与群聊回复共享稳定的 Bot 表达底色。",
+    trigger: "允许来源有新文本时本地更新统计，不调用模型；范围在私聊对象页快捷管理。",
+    enabled: "私聊保留各自的本地适配；跨会话只共享抽象特征，不共享原话、称呼、关系或事实。",
+    disabled: "不会继续更新表达方式统计，也不会向私聊主动、私聊被动或群聊回复注入表达底色。",
   },
   enable_expression_manual_review: {
     summary: "把新表达样本先放进待审核池，避免激进学习把噪音、群友口癖或复制内容直接写入画像。",
     trigger: "私聊文本到达并通过本地过滤后。",
-    enabled: "用户详情里会出现待审核表达样本，通过后才会用于表达注入。",
+    enabled: "“学习”页会出现待审核表达样本，通过后才会用于表达注入。",
     disabled: "通过本地过滤的样本会直接进入表达画像。",
   },
   enable_expression_style_review: {
@@ -18081,15 +19518,21 @@ const featureDetailGuides = {
     enabled: "高置信度结果会影响本轮策略；低置信度只记录在排障信息里，不硬注入提示词。",
     disabled: "不再注入本轮意图策略；情绪模拟和关系距离感仍可基于自身开关使用轻量状态。",
   },
-  enable_response_self_review: {
-    summary: "统一控制被动回复复核和主动消息模型终审；关闭后不会再调用模型润色主动消息。",
-    trigger: "主动消息生成后、发送前；普通被动回复只在严重风险、用户明确边界或 full 模式下进入额外处理。",
-    enabled: "主动消息会在发送前判断原样发送、轻改写、延后或取消；用户明确不想继续话题时，可由智能沉默小模型决定是否直接不发。",
-    disabled: "不再调用模型润色主动消息；本地只允许原文通过或直接丢弃明显错误，不会拼接替代来源。",
+  enable_passive_response_review: {
+    summary: "独立控制用户消息触发的回复复核，不影响主动私聊终审。",
+    trigger: "私聊普通回复生成后、发送前，以及群聊答疑唤醒准备插话时；按模式只处理严重问题或扩大到一般质量问题。",
+    enabled: "可按配置改写异常回复；宽松强度不会因模型复读判断直接吞掉回复。",
+    disabled: "普通被动回复不再进入复核模型，也不会由回复复核取消；智能沉默仍由自己的开关控制。",
+  },
+  enable_proactive_message_review: {
+    summary: "独立控制主动私聊发送前终审，可与被动回复复核分别开关。",
+    trigger: "主动私聊生成完成、准备发送前；不处理普通私聊回复或群聊消息。",
+    enabled: "按模式结合人格、最近聊天、动机、来源和运行态原样发送、轻改写或取消。",
+    disabled: "不调用主动终审模型；仍保留来源错配、链接平台不符和内部信息泄漏等本地安全检查。",
   },
   enable_smart_silence: {
-    summary: "用户说别聊了、别问了、换个话题或不用回复时，不再硬接一句“那就结束这个话题”，而是让小模型判断是否该安静退开。",
-    trigger: "仅在本地快判命中疑似话题边界后调用小模型；普通聊天不会额外消耗。",
+    summary: "私聊或群聊里用户说别聊了、别问了、换个话题或不用回复时，不再硬接一句“那就结束这个话题”，而是让小模型判断是否该安静退开。",
+    trigger: "私聊回复与群聊发送前，仅在本地快判命中疑似话题边界后调用小模型；普通聊天不会额外消耗。",
     enabled: "小模型判定 silent 且达到置信度阈值时，本轮待发送回复会被直接取消，不写入上次回复记忆。",
     disabled: "遇到这类边界表达时仍按普通主链回复处理。",
   },
@@ -18448,7 +19891,7 @@ const featureDetailGuides = {
     disabled: "Bot 不会跨用户读取互动记录，只能基于当前会话和已注入记忆回答。",
   },
   enable_livingmemory_integration: {
-    summary: "检测到“我会牢牢记住你”或 LivingMemory 时，引导模型按需使用记忆召回能力，并展开情绪漂移、梦境碎片、未完成话题取材等深度协同。",
+    summary: "统一接入已适配的外部长期记忆插件。当前支持“我会牢牢记住你”/MemoryCompanion 与 LivingMemory，并按各自能力提供召回或深度协同。",
     trigger: "私聊/群聊提示词构建、主动消息生成、状态问答、创作等链路需要长期记忆支持时。",
     enabled: "可减少重复存储，让长期记忆链路更完整。检测到“我会牢牢记住你”时还会自动拉取情绪漂移、写入梦境碎片、检索未完成话题和读取功能上下文。",
     disabled: "插件只使用自身记忆结构，不调用外部记忆插件。",
@@ -18771,7 +20214,8 @@ function featureDetailPage(key) {
         <article class="feature-detail-card">
           <h3>基础信息</h3>
           <dl>
-            <div><dt>配置键</dt><dd>${escapeHtml(key)}</dd></div>
+            <div><dt>${escapeHtml(featurePublicKey(key) === key ? "配置键" : "界面标识")}</dt><dd>${escapeHtml(featurePublicKey(key))}</dd></div>
+            ${featurePublicKey(key) === key ? "" : `<div><dt>兼容配置键</dt><dd>${escapeHtml(key)}（仅为兼容旧配置保留）</dd></div>`}
             <div><dt>所属模块</dt><dd>${escapeHtml(featureGroupForKey(key))}</dd></div>
             <div><dt>当前状态</dt><dd>${escapeHtml(enabled ? "开启" : "关闭")}</dd></div>
           </dl>
@@ -18860,9 +20304,6 @@ function bindFeatureDetailActions() {
           if (state.selectedFeatureKey === "enable_message_debounce" && input.dataset.featureParam === "enable_smart_message_debounce") {
             syncSettingBackedFeatureParam("enable_smart_message_debounce", { rerender: true });
           }
-          if (state.selectedFeatureKey === "enable_response_self_review" && input.dataset.featureParam === "enable_smart_silence") {
-            syncSettingBackedFeatureParam("enable_smart_silence", { rerender: true });
-          }
           if (state.selectedFeatureKey === "enable_livingmemory_integration" && input.dataset.featureParam === "enable_memory_companion_feature_context") {
             syncSettingBackedFeatureParam("enable_memory_companion_feature_context", { rerender: true });
           }
@@ -18926,10 +20367,10 @@ function bindFeatureDetailActions() {
           renderFeatureSwitches();
         });
       }
-      if (state.selectedFeatureKey === "enable_response_self_review" && input.dataset.featureParam === "response_review_mode") {
+      if (state.selectedFeatureKey === "enable_passive_response_review" && input.dataset.featureParam === "passive_review_mode") {
         input.addEventListener("change", () => {
           state.overview.settings = state.overview.settings || {};
-          state.overview.settings.response_review_mode = input.value || "severe_only";
+          state.overview.settings.passive_review_mode = input.value || "severe_only";
           renderFeatureSwitches();
         });
       }
@@ -19506,6 +20947,10 @@ function renderDl(selector, data) {
 
 function featureLabel(key) {
   return featureMeta[key]?.[0] || key.replace(/^enable_/, "");
+}
+
+function featurePublicKey(key) {
+  return featurePublicKeyAliases[key] || key;
 }
 
 function featureDescription(key) {
@@ -22753,9 +24198,30 @@ async function saveExperimentalSettings(key, form, successMessage) {
 
 let activeTabTransition = null;
 
+function revealActiveTab(tabButton, reduceMotion = false) {
+  const nav = tabButton?.closest(".annotations");
+  if (!nav) return;
+  const left = tabButton.offsetLeft;
+  const right = left + tabButton.offsetWidth;
+  const visibleLeft = nav.scrollLeft;
+  const visibleRight = visibleLeft + nav.clientWidth;
+  if (left >= visibleLeft && right <= visibleRight) return;
+  const target = Math.max(0, left - (nav.clientWidth - tabButton.offsetWidth) / 2);
+  if (typeof nav.scrollTo === "function") {
+    nav.scrollTo({ left: target, behavior: reduceMotion ? "auto" : "smooth" });
+  } else {
+    nav.scrollLeft = target;
+  }
+}
+
 function switchTab(tabName) {
-  tabName = tabName === "modules" ? "config" : (tabName || "dashboard");
-  if (tabName === state.activeTab) return;
+  const opensSocialLearning = tabName === "worldbook";
+  tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (tabName || "dashboard"));
+  if (opensSocialLearning) state.learningSection = "social";
+  if (tabName === state.activeTab) {
+    if (opensSocialLearning) switchLearningSection("social", { focus: true });
+    return;
+  }
   cancelBookshelfTransition();
   const tabs = [...document.querySelectorAll(".annotations .tab[data-tab]")];
   const previousIndex = tabs.findIndex((item) => item.dataset.tab === state.activeTab);
@@ -22767,6 +24233,7 @@ function switchTab(tabName) {
   const commit = (fallbackMotion = false) => {
     state.activeTab = tabName;
     tabs.forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
+    revealActiveTab(tabs.find((item) => item.dataset.tab === tabName), reduceMotion);
     document.querySelectorAll(".panel").forEach((item) => {
       item.classList.remove("is-entering", "is-leaving");
       item.classList.toggle("is-active", item.id === `panel-${tabName}`);
@@ -23115,6 +24582,15 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const coverPreviewTrigger = element?.closest("[data-bookshelf-cover-preview]");
+  if (coverPreviewTrigger) {
+    openBookshelfCoverPreview(coverPreviewTrigger);
+    return;
+  }
+  if (element?.closest("[data-bookshelf-cover-preview-close]") || element?.id === "bookshelfCoverPreview") {
+    closeBookshelfCoverPreview();
+    return;
+  }
   const memoActionButton = element?.closest("[data-memo-action]");
   if (memoActionButton) {
     const noteId = memoActionButton.dataset.memoId || "";
@@ -23371,6 +24847,13 @@ document.addEventListener("click", async (event) => {
         state.creativeEditing = false;
       },
     });
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("#bookshelfCoverPreview")?.hidden) {
+    event.preventDefault();
+    closeBookshelfCoverPreview();
   }
 });
 

@@ -844,6 +844,50 @@ class NewsExplorationMixin:
             "duplicate": noisy,
         }
 
+    def _external_link_share_cooldown_remaining(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> float:
+        """Return the shared cooldown remaining for plugin-initiated link shares.
+
+        Older versions recorded only per-source candidate timestamps.  Include
+        those fields so upgrading immediately stops Bilibili/news/web shares
+        from alternating around their separate short cooldowns.
+        """
+        if not isinstance(user, dict):
+            return 0.0
+        cooldown_hours = max(
+            0.0,
+            _safe_float(getattr(self, "external_link_share_cooldown_hours", 72), 72.0),
+        )
+        if cooldown_hours <= 0:
+            return 0.0
+        now = _now_ts() if now is None else now
+        last_share_at = max(
+            (
+                _safe_float(user.get(field), 0.0)
+                for field in (
+                    "last_external_link_share_at",
+                    "last_external_link_candidate_at",
+                    "last_bilibili_share_at",
+                    "last_news_share_at",
+                    "last_web_exploration_share_at",
+                    "last_external_event_self_link_at",
+                )
+            ),
+            default=0.0,
+        )
+        if last_share_at <= 0:
+            return 0.0
+        return max(0.0, last_share_at + cooldown_hours * 3600.0 - now)
+
+    @staticmethod
+    def _note_external_link_candidate(user: dict[str, Any], *, now: float) -> None:
+        if isinstance(user, dict):
+            user["last_external_link_candidate_at"] = now
+
     def _bilibili_plugin_dir(self) -> Path:
         candidates = self._bilibili_ai_bot_plugin_dirs()
         for path in candidates:
@@ -1306,6 +1350,8 @@ class NewsExplorationMixin:
                 continue
             if now - _safe_float(user.get("last_bilibili_share_at"), 0) < 10 * 3600:
                 continue
+            if self._external_link_share_cooldown_remaining(user, now=now) > 0:
+                continue
             timer_event = self._get_active_llm_timer(user)
             if (
                 _safe_float(user.get("next_proactive_at"), 0) > 0
@@ -1364,6 +1410,7 @@ class NewsExplorationMixin:
             self._record_bilibili_share_to_memory(str(user_id), candidate)
             user["last_bilibili_share_key"] = key
             user["last_bilibili_share_at"] = now
+            self._note_external_link_candidate(user, now=now)
             self._remember_external_event(candidate, source_type="bilibili", reason="bili_video_share")
             changed = True
         return changed
@@ -2795,13 +2842,28 @@ class NewsExplorationMixin:
             "机器人", "bot", "搜索", "新闻", "bilibili", "doubao", "deepseek", "glm", "gemini",
             "claude", "gpt", "qwen", "豆包", "火山", "openai",
         )
-        matched = [token for token in self_tokens if token in haystack]
+        matched = []
+        for token in self_tokens:
+            if token.isascii():
+                if re.search(rf"(?<![a-z0-9_]){re.escape(token)}(?![a-z0-9_])", haystack):
+                    matched.append(token)
+            elif token in haystack:
+                matched.append(token)
+        matched = [
+            token
+            for token in matched
+            if token.isascii()
+            or not any(token != other and not other.isascii() and token in other for other in matched)
+        ]
         relevance = min(10, 3 + len(matched) * 2)
         desire = min(10, 4 + len(matched))
         return {
             "relevance": relevance,
             "desire": desire,
-            "should_share": relevance >= 5 and desire >= 5,
+            # A lone generic word such as AI/model/search is not enough to
+            # manufacture proactive sharing intent when no judgement model is
+            # available.  Stronger multi-signal matches can still pass.
+            "should_share": relevance >= 7 and desire >= 7,
             "share_probability": min(0.85, 0.18 + relevance * 0.055 + desire * 0.035),
             "motive": _single_line(
                 f"刚读到的{('新闻' if source_type == 'news' else '搜索结果')}和自己的能力、兴趣或最近状态有一点关系,想按人格私下找用户说说",
@@ -3084,6 +3146,15 @@ class NewsExplorationMixin:
                 if now - _safe_float(user.get("last_news_share_at"), 0) < 8 * 3600:
                     _note_news_share(user_id, "skipped", "新闻分享 8 小时冷却中")
                     continue
+                shared_link_cooldown = self._external_link_share_cooldown_remaining(user, now=now)
+                if shared_link_cooldown > 0:
+                    _note_news_share(
+                        user_id,
+                        "skipped",
+                        "主动外链统一冷却中",
+                        cooldown_remaining_hours=round(shared_link_cooldown / 3600.0, 1),
+                    )
+                    continue
                 if isinstance(user_wish, dict) and user_wish:
                     if now - _safe_float(user.get("last_external_event_self_link_at"), 0) < self.external_event_self_link_cooldown_hours * 3600:
                         _note_news_share(user_id, "skipped", "外界信息自我关联冷却中")
@@ -3171,6 +3242,7 @@ class NewsExplorationMixin:
                     }
                     user["last_news_share_key"] = user_selected_key
                     user["last_news_share_at"] = now
+                    self._note_external_link_candidate(user, now=now)
                     if isinstance(user_wish, dict) and user_wish:
                         user["last_external_event_self_link_at"] = now
                     self._remember_external_event(user_digest, source_type="news", reason="news_share")
@@ -4416,13 +4488,14 @@ class NewsExplorationMixin:
         state["last_query"] = query_info
         state["last_digest"] = digest
         state["latest_results"] = results[:8]
-        self._queue_web_exploration_impulses(target_users, digest, wish, now=now)
         if digest.get("possible_share") and target_users:
             random.shuffle(target_users)
             for user_id, user in target_users[:3]:
                 if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 90) * 60:
                     continue
                 if now - _safe_float(user.get("last_web_exploration_share_at"), 0) < 10 * 3600:
+                    continue
+                if self._external_link_share_cooldown_remaining(user, now=now) > 0:
                     continue
                 if isinstance(wish, dict) and wish:
                     if now - _safe_float(user.get("last_external_event_self_link_at"), 0) < self.external_event_self_link_cooldown_hours * 3600:
@@ -4486,74 +4559,10 @@ class NewsExplorationMixin:
                         "share_decision": decision,
                     }
                     user["last_web_exploration_share_at"] = now
+                    self._note_external_link_candidate(user, now=now)
                     if isinstance(wish, dict) and wish:
                         user["last_external_event_self_link_at"] = now
                     self._remember_external_event(digest, source_type="web_exploration", reason="web_exploration_share")
                     break
         self._save_data_sync()
         logger.info("[PrivateCompanion] 已完成一次网页探索: %s", _single_line(digest.get("topic"), 80))
-
-    def _queue_web_exploration_impulses(
-        self,
-        target_users: list[tuple[str, dict[str, Any]]],
-        digest: dict[str, Any],
-        wish: dict[str, Any] | None,
-        *,
-        now: float,
-    ) -> None:
-        if not isinstance(digest, dict) or not digest.get("possible_share"):
-            return
-        if not target_users:
-            return
-        topic = _single_line(digest.get("topic") or digest.get("query"), 80)
-        note = _single_line(digest.get("note"), 180)
-        if not topic and not note:
-            return
-        self_link_motive = _single_line(wish.get("motive") if isinstance(wish, dict) else "", 180)
-        self_link_tone = _single_line(wish.get("tone") if isinstance(wish, dict) else "", 60)
-        self_link_boundary = _single_line(wish.get("boundary") if isinstance(wish, dict) else "", 140)
-        context = {
-            **digest,
-            "share_tone": self_link_tone,
-            "share_boundary": self_link_boundary,
-            "queued_as_impulse": True,
-        }
-        motive = self_link_motive or "自然地向用户分享自己刚看的这条内容"
-        shuffled = list(target_users)
-        random.shuffle(shuffled)
-        queued = 0
-        for user_id, user in shuffled:
-            if not isinstance(user, dict):
-                continue
-            if not self._user_enabled_for_proactive(str(user_id), user):
-                continue
-            if now - _safe_float(user.get("last_web_exploration_impulse_at"), 0) < 6 * 3600:
-                continue
-            if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 60) * 60:
-                continue
-            start_at = now + random.randint(25, 120) * 60
-            impulse = self._build_proactive_impulse(
-                user,
-                reason="web_exploration_share",
-                action="message",
-                motive=motive,
-                topic=topic or "新发现",
-                source="web_exploration",
-                window_start_at=start_at,
-                preferred_ts=start_at + random.randint(0, 45) * 60,
-                best_until_at=start_at + 4 * 3600,
-                expire_at=start_at + 10 * 3600,
-                context_key="web_exploration_context",
-                context=context,
-            )
-            impulse["salience"] = max(_safe_float(impulse.get("salience"), 0.0), 0.68)
-            impulse["warmth"] = max(_safe_float(impulse.get("warmth"), 0.0), 0.54)
-            impulse["urgency"] = min(_safe_float(impulse.get("urgency"), 0.0), 0.34)
-            self._queue_proactive_impulse(user, impulse)
-            user["last_web_exploration_impulse_at"] = now
-            queued += 1
-            if queued >= 3:
-                break
-        if queued:
-            logger.info("[PrivateCompanion] 主动搜索已转入后续主动念头: topic=%s users=%s", topic, queued)
-

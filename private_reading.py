@@ -976,6 +976,7 @@ class PrivateReadingMixin:
         raw = await self._llm_call(
             prompt,
             max_tokens=40,
+            task="bookshelf_password",
             provider_id=self._task_provider(
                 self.dream_diary_provider_id,
                 self.mai_style_provider_id,
@@ -1060,6 +1061,7 @@ class PrivateReadingMixin:
         raw = await self._llm_call(
             prompt,
             max_tokens=80,
+            task="bookshelf_password_reason",
             provider_id=self._task_provider(
                 self.dream_diary_provider_id,
                 self.mai_style_provider_id,

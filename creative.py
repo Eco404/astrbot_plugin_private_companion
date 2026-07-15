@@ -229,10 +229,83 @@ class CreativeMixin:
         for user in users.values():
             if not isinstance(user, dict):
                 continue
-            next_at = _safe_float(user.get("next_proactive_at"), 0)
-            source = str(user.get("planned_proactive_source") or "")
-            if next_at > now and (next_at - now <= 45 * 60 or source in {"timer", "simulation"}):
+            if bool(user.get("proactive_sending")):
                 return True
+            next_at = _safe_float(user.get("next_proactive_at"), 0)
+            if 0 < next_at - now <= 20 * 60:
+                return True
+        return False
+
+    @staticmethod
+    def _creative_fallback_signature(text: Any) -> str:
+        normalized = re.sub(r"\s+", "", str(text or "")).strip()
+        return normalized.translate(str.maketrans({"，": ",", "；": ";", "：": ":"}))
+
+    @classmethod
+    def _is_legacy_creative_fallback_chunk(cls, text: Any) -> bool:
+        signature = cls._creative_fallback_signature(text)
+        if not signature:
+            return False
+        return signature in {
+            cls._creative_fallback_signature(item)
+            for item in CREATIVE_FALLBACK_CHUNKS
+        }
+
+    def _cleanup_legacy_creative_fallback_chunks(self) -> bool:
+        projects = self.data.get("creative_projects") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(projects, list):
+            return False
+        removed_chunks = 0
+        cleaned_projects = 0
+        removed_memories = 0
+        for project in projects:
+            if not isinstance(project, dict):
+                continue
+            chunks = project.get("draft_chunks")
+            if not isinstance(chunks, list):
+                continue
+            kept_chunks = [
+                chunk
+                for chunk in chunks
+                if not (
+                    isinstance(chunk, dict)
+                    and self._is_legacy_creative_fallback_chunk(chunk.get("text"))
+                )
+            ]
+            removed_here = len(chunks) - len(kept_chunks)
+            if removed_here <= 0:
+                continue
+            project["draft_chunks"] = kept_chunks
+            project["current_chars"] = sum(
+                len(str(chunk.get("text") or "").strip())
+                for chunk in kept_chunks
+                if isinstance(chunk, dict)
+            )
+            project["legacy_fallback_chunks_removed"] = (
+                _safe_int(project.get("legacy_fallback_chunks_removed"), 0, 0) + removed_here
+            )
+            pool = project.get("creative_memory_pool")
+            if isinstance(pool, list):
+                kept_pool = [
+                    item
+                    for item in pool
+                    if not (
+                        isinstance(item, dict)
+                        and self._is_legacy_creative_fallback_chunk(item.get("content"))
+                    )
+                ]
+                removed_memories += len(pool) - len(kept_pool)
+                project["creative_memory_pool"] = kept_pool
+            removed_chunks += removed_here
+            cleaned_projects += 1
+        if removed_chunks:
+            logger.info(
+                "[PrivateCompanion] 已清理书柜旧版固定兜底片段: projects=%s chunks=%s memories=%s",
+                cleaned_projects,
+                removed_chunks,
+                removed_memories,
+            )
+            return True
         return False
 
     def _creative_persona_style_context(self) -> str:
@@ -384,7 +457,7 @@ class CreativeMixin:
         del pool[CREATIVE_MEMORY_MAX_ENTRIES:]
 
     def _check_chunk_similarity(self, new_text: str, recent_chunks: list[dict[str, Any]]) -> bool:
-        for item in recent_chunks[-5:]:
+        for item in recent_chunks[-12:]:
             if not isinstance(item, dict):
                 continue
             existing = _single_line(item.get("text"), 800)
@@ -1190,24 +1263,30 @@ class CreativeMixin:
                 cleaned = cleaned[: budget + 80].rstrip("，,、；;：:")
                 if cleaned and cleaned[-1] not in "。！？…":
                     cleaned += "。"
-            if not cleaned:
-                cleaned = random.choice(CREATIVE_FALLBACK_CHUNKS)
             return cleaned
 
-        cleaned = ""
         extra_notice = ""
         for attempt in range(CREATIVE_SIMILARITY_RETRIES + 1):
             cleaned = await _do_generate(extra_notice)
-            similarity_hit = self._check_chunk_similarity(cleaned, chunks[-5:])
+            similarity_hit = self._check_chunk_similarity(cleaned, chunks[-12:])
             review = await self._review_creative_chunk(project, story_bible, outline, cleaned, chunks[-5:])
             ps = _safe_int(review.get("persona_score"), 8, 0, 10) if isinstance(review, dict) else 8
             prs = _safe_int(review.get("progress_score"), 8, 0, 10) if isinstance(review, dict) else 8
             rs = _safe_int(review.get("repetition_score"), 8, 0, 10) if isinstance(review, dict) else 8
             passed = bool(review.get("passed", True)) if isinstance(review, dict) else True
             focus = _single_line(review.get("rewrite_focus"), 140) if isinstance(review, dict) else ""
-            if attempt >= CREATIVE_SIMILARITY_RETRIES or (not similarity_hit and passed and ps >= CREATIVE_REVIEW_MIN_SCORE and prs >= CREATIVE_REVIEW_MIN_SCORE and rs >= CREATIVE_REVIEW_MIN_SCORE):
-                break
+            if (
+                cleaned
+                and not similarity_hit
+                and passed
+                and ps >= CREATIVE_REVIEW_MIN_SCORE
+                and prs >= CREATIVE_REVIEW_MIN_SCORE
+                and rs >= CREATIVE_REVIEW_MIN_SCORE
+            ):
+                return cleaned
             notes: list[str] = []
+            if not cleaned:
+                notes.append("生成结果为空，必须重新写出实际正文。")
             if similarity_hit:
                 notes.append("避免与最近片段重复的意象、句式和情节走向。")
             if focus:
@@ -1219,7 +1298,22 @@ class CreativeMixin:
             if rs < CREATIVE_REVIEW_MIN_SCORE:
                 notes.append("减少重复，不要反复写相同心理和画面。")
             extra_notice = "注意重写：" + " ".join(notes)
-        return cleaned
+        return ""
+
+    def _defer_creative_project_advance(
+        self,
+        project: dict[str, Any],
+        *,
+        now: float,
+        reason: str,
+    ) -> int:
+        failures = _safe_int(project.get("advance_failure_count"), 0, 0) + 1
+        delay_minutes = min(360, 30 * (2 ** min(failures - 1, 4)))
+        project["advance_failure_count"] = failures
+        project["last_advance_failed_at"] = now
+        project["last_advance_error"] = _single_line(reason, 180) or "创作片段未通过质量检查"
+        project["next_advance_at"] = now + delay_minutes * 60
+        return delay_minutes
 
     async def _maybe_start_creative_project(self, *, idle_checked: bool = False) -> bool:
         if not self.enable_creative_writing:
@@ -1271,12 +1365,38 @@ class CreativeMixin:
         except (OSError, ValueError):
             return False
 
+    def _creative_cover_person_reference_configured(self) -> bool:
+        if not bool(getattr(self, "enable_photo_reference_image", False)):
+            return False
+        getter = getattr(self, "_photo_persona_reference_image_path", None)
+        if callable(getter):
+            try:
+                if _single_line(getter(), 500):
+                    return True
+            except Exception:
+                pass
+        return bool(_single_line(getattr(self, "photo_persona_reference_image_path", ""), 1000))
+
+    def _creative_cover_needs_identity_upgrade(self, project: dict[str, Any]) -> bool:
+        if not self._creative_cover_file_exists(project):
+            return False
+        if _safe_float(project.get("cover_generated_at"), 0) <= 0:
+            return False
+        if _single_line(project.get("cover_generation_person_policy"), 40) == "single_reference_character":
+            return False
+        return bool(
+            self._creative_cover_has_person_subject(project)
+            and self._creative_cover_person_reference_configured()
+        )
+
     def _creative_cover_candidate_id(self) -> str:
         if not bool(getattr(self, "enable_creative_cover_generation", False)):
             return ""
         now = _now_ts()
         for project in reversed(self._creative_projects()):
-            if not isinstance(project, dict) or self._creative_cover_file_exists(project):
+            if not isinstance(project, dict):
+                continue
+            if self._creative_cover_file_exists(project) and not self._creative_cover_needs_identity_upgrade(project):
                 continue
             chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
             if not any(isinstance(chunk, dict) and _single_line(chunk.get("text"), 80) for chunk in chunks):
@@ -1361,7 +1481,33 @@ class CreativeMixin:
             "sophisticated literary editorial illustration, painterly texture, symbolic central image, restrained color harmony, timeless book-cover composition",
         )
 
-    def _creative_cover_prompt(self, project: dict[str, Any]) -> str:
+    def _creative_cover_has_person_subject(self, project: dict[str, Any]) -> bool:
+        if self._get_project_characters(project):
+            return True
+        source = " ".join(
+            str(project.get(key) or "")
+            for key in ("premise", "source_text", "tone", "work_type")
+        )
+        chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+        source += " " + " ".join(
+            str(chunk.get("text") or "")
+            for chunk in chunks[-3:]
+            if isinstance(chunk, dict)
+        )
+        return bool(
+            re.search(
+                r"(少女|女孩|女生|女性|女人|男孩|男生|男性|男人|少年|青年|老人|孩子|人物|角色|主角|主人公|"
+                r"姑娘|先生|女士|母亲|父亲|妈妈|爸爸|姐姐|妹妹|哥哥|弟弟|她|他|人影|背影|侧脸|面孔|脸庞)",
+                source,
+            )
+        )
+
+    def _creative_cover_prompt(
+        self,
+        project: dict[str, Any],
+        *,
+        person_reference_available: bool = False,
+    ) -> str:
         chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
         recent_text = " ".join(
             _single_line(chunk.get("text"), 220)
@@ -1369,20 +1515,17 @@ class CreativeMixin:
             if isinstance(chunk, dict) and _single_line(chunk.get("text"), 220)
         )
         characters = self._get_project_characters(project)
-        character_hint = "; ".join(
-            " - ".join(
-                part
-                for part in (
-                    _single_line(character.get("name"), 30),
-                    _single_line(
-                        character.get("description") or character.get("personality") or character.get("role"),
-                        100,
-                    ),
-                )
-                if part
+        primary_character = characters[0] if characters and isinstance(characters[0], dict) else {}
+        character_hint = " - ".join(
+            part
+            for part in (
+                _single_line(primary_character.get("name"), 30),
+                _single_line(
+                    primary_character.get("description") or primary_character.get("personality") or primary_character.get("role"),
+                    100,
+                ),
             )
-            for character in characters[:4]
-            if isinstance(character, dict)
+            if part
         )
         visual_source = _single_line(
             " ".join(
@@ -1398,11 +1541,32 @@ class CreativeMixin:
             900,
         )
         _style_label, style_instruction = self._creative_cover_style_instruction(project)
+        has_person_subject = self._creative_cover_has_person_subject(project)
+        if has_person_subject and person_reference_available:
+            subject_instruction = (
+                "The supplied reference image defines the only visible character's identity and appearance. "
+                "Show exactly one person in the entire artwork and preserve that reference identity. "
+                "Do not show any second person, companion, man, woman, face, portrait, silhouette, shadow-person, "
+                "human reflection, figure inside a mirror/window/portal/screen, framed photo, statue, or background crowd. "
+                "Represent every other story character only through objects, architecture, light, weather, or abstract symbols. "
+            )
+        elif has_person_subject:
+            subject_instruction = (
+                "No character reference image is available, so do not depict any person or human-like character. "
+                "Use a symbolic object-and-environment composition for the protagonist instead: no people, faces, bodies, "
+                "silhouettes, portraits, human reflections, figures in mirrors/windows/portals/screens, framed photos, statues, or crowds. "
+            )
+        else:
+            subject_instruction = (
+                "Use a people-free symbolic composition: no people, faces, bodies, silhouettes, portraits, human reflections, "
+                "figures in mirrors/windows/portals/screens, framed photos, statues, or crowds. "
+            )
         return _single_line(
             "Create a polished book cover illustration with a vertical 2:3 composition. "
             f"Genre: {_single_line(project.get('work_type'), 50) or 'fiction'}. "
             f"Story and visual motifs: {visual_source or 'an intimate original story with a clear central visual symbol'}. "
-            + (f"Characters: {character_hint}. " if character_hint else "")
+            + (f"Primary character only: {character_hint}. " if character_hint and person_reference_available else "")
+            + subject_instruction
             + f"Art direction: {style_instruction}. "
             + "Use one focused scene, strong silhouette, layered depth, deliberate lighting, and enough quiet space for a title overlay. "
             "Artwork only: no readable text, no letters, no typography, no logo, no watermark, no mockup, no border.",
@@ -1454,7 +1618,8 @@ class CreativeMixin:
                 )
                 if not isinstance(project, dict):
                     return None
-                if not force and self._creative_cover_file_exists(project):
+                identity_upgrade = self._creative_cover_needs_identity_upgrade(project)
+                if not force and self._creative_cover_file_exists(project) and not identity_upgrade:
                     return dict(project)
                 now = _now_ts()
                 attempts = _safe_int(project.get("cover_generation_attempts"), 0, 0)
@@ -1485,7 +1650,39 @@ class CreativeMixin:
                         return dict(project)
                 return None
 
-            prompt_text = self._creative_cover_prompt(project_snapshot)
+            has_person_subject = self._creative_cover_has_person_subject(project_snapshot)
+            reference_image_path = ""
+            if has_person_subject:
+                reference_getter = getattr(self, "_photo_persona_reference_image_for_kind_async", None)
+                if callable(reference_getter):
+                    try:
+                        reference_image_path = _single_line(
+                            await reference_getter("portrait", allow_daily_outfit=False),
+                            500,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 创作封面读取人物参考图失败: project=%s error=%s",
+                            project_id,
+                            _single_line(exc, 160),
+                        )
+            if identity_upgrade and not reference_image_path:
+                async with self._data_lock:
+                    project = next(
+                        (item for item in self._creative_projects() if isinstance(item, dict) and _single_line(item.get("id"), 32) == project_id),
+                        None,
+                    )
+                    if isinstance(project, dict):
+                        project["cover_generation_status"] = "ready"
+                        project["cover_generation_error"] = "旧封面等待人物参考图可用后再升级"
+                        project["cover_generation_next_retry_at"] = _now_ts() + 3 * 3600
+                        self._save_data_sync()
+                        return dict(project)
+                return None
+            prompt_text = self._creative_cover_prompt(
+                project_snapshot,
+                person_reference_available=bool(reference_image_path),
+            )
             style_label, _style_instruction = self._creative_cover_style_instruction(project_snapshot)
             attempt_number = attempts + 1
             async with self._data_lock:
@@ -1502,9 +1699,10 @@ class CreativeMixin:
                 self._save_data_sync()
 
             backend, generated_path, note = await generator(
-                workflow_kind="text2img",
+                workflow_kind="portrait" if reference_image_path else "text2img",
                 prompt_text=prompt_text,
                 session_key=f"creative_cover_{project_id}",
+                reference_image_path=reference_image_path,
                 image_size="",
                 allow_daily_outfit_reference=False,
             )
@@ -1520,6 +1718,12 @@ class CreativeMixin:
                 project["cover_generation_backend"] = _single_line(backend, 80)
                 project["cover_generation_prompt"] = _single_line(prompt_text, 1800)
                 project["cover_generation_style"] = _single_line(style_label, 40)
+                project["cover_generation_reference_image"] = _single_line(reference_image_path, 500)
+                project["cover_generation_person_policy"] = (
+                    "single_reference_character"
+                    if reference_image_path
+                    else ("symbolic_no_people" if has_person_subject else "no_people")
+                )
                 if stored_path:
                     project["cover_path"] = stored_path
                     project["cover_generated_at"] = now
@@ -1559,7 +1763,39 @@ class CreativeMixin:
                 project["status"] = "finished"
                 changed = True
                 continue
-            chunk = await self._generate_creative_chunk(project, min(budget, max(70, remaining)))
+            try:
+                chunk = await self._generate_creative_chunk(project, min(budget, max(70, remaining)))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                delay_minutes = self._defer_creative_project_advance(
+                    project,
+                    now=now,
+                    reason=f"创作生成失败: {_single_line(exc, 140)}",
+                )
+                logger.warning(
+                    "[PrivateCompanion] 创作推进失败,已保留项目并退避: project=%s failures=%s delay=%sm error=%s",
+                    _single_line(project.get("id"), 32),
+                    _safe_int(project.get("advance_failure_count"), 1, 1),
+                    delay_minutes,
+                    _single_line(exc, 140),
+                )
+                changed = True
+                break
+            if not chunk:
+                delay_minutes = self._defer_creative_project_advance(
+                    project,
+                    now=now,
+                    reason="生成结果为空、重复或未通过质量复核",
+                )
+                logger.info(
+                    "[PrivateCompanion] 创作片段未通过质量门,本轮不写入书柜: project=%s failures=%s delay=%sm",
+                    _single_line(project.get("id"), 32),
+                    _safe_int(project.get("advance_failure_count"), 1, 1),
+                    delay_minutes,
+                )
+                changed = True
+                break
             chunks = project.setdefault("draft_chunks", [])
             if not isinstance(chunks, list):
                 chunks = []
@@ -1587,6 +1823,9 @@ class CreativeMixin:
             project["current_chars"] = _safe_int(project.get("current_chars"), 0, 0) + len(chunk)
             project["last_advanced_at"] = now
             project["next_advance_at"] = now + random.randint(95, 320) * 60
+            project["advance_failure_count"] = 0
+            project.pop("last_advance_failed_at", None)
+            project.pop("last_advance_error", None)
             if project["current_chars"] >= _safe_int(project.get("target_chars"), 2400, 300, 5200):
                 project["status"] = "finished"
             creative_record_payload = (dict(project), chunk, extract if isinstance(extract, dict) else None)

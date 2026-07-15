@@ -1902,7 +1902,7 @@ Provider 规则：{emotion_rule}
 """.strip()
         try:
             if provider is not None:
-                resp = await self._tts_provider_text_chat(provider, prompt, max_tokens=700)
+                resp = await self._tts_provider_text_chat(provider, prompt, max_tokens=700, task="tts_conversion")
                 converted = str(getattr(resp, "completion_text", resp) or "").strip()
             else:
                 converted = f"<tts>{source}</tts>"
@@ -2199,13 +2199,27 @@ Provider 规则：{emotion_rule}
         subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(volume), path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
     def _play_tts_audio_file_windows_silent(self, path: str, *, volume: int = 35) -> None:
+        source_path = path
         if Path(path).suffix.lower() == ".wav":
             path = self._prepare_windows_wav_for_playback(path)
-        if self._run_windows_media_player_script(path, use_wpf=True, volume=volume):
-            return
-        if self._run_windows_media_player_script(path, use_wpf=False, volume=volume):
-            return
-        raise RuntimeError("Windows 后台播放器均未能播放该音频")
+        try:
+            if self._run_windows_media_player_script(path, use_wpf=True, volume=volume):
+                return
+            if self._run_windows_media_player_script(path, use_wpf=False, volume=volume):
+                return
+            raise RuntimeError("Windows 后台播放器均未能播放该音频")
+        finally:
+            source = Path(source_path)
+            playback = Path(path)
+            expected = source.with_name(f"{source.stem}.playback.wav")
+            if playback != source and playback == expected:
+                try:
+                    playback.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 清理 TTS 播放修复文件失败: %s",
+                        _single_line(exc, 120),
+                    )
 
     def _prepare_windows_wav_for_playback(self, path: str) -> str:
         source = Path(path)
@@ -2259,10 +2273,13 @@ Provider 规则：{emotion_rule}
 
     def _run_windows_media_player_script(self, path: str, *, use_wpf: bool, volume: int = 35) -> bool:
         volume = max(0, min(100, int(volume)))
+        playback_env = os.environ.copy()
+        playback_env["PRIVATE_COMPANION_TTS_AUDIO_PATH"] = str(Path(path).expanduser().resolve())
+        playback_env["PRIVATE_COMPANION_TTS_VOLUME"] = str(volume)
         if use_wpf:
             script = (
-                "$p = [System.IO.Path]::GetFullPath($args[0]); "
-                "$vol = [Math]::Max(0, [Math]::Min(100, [int]$args[1])); "
+                "$p = [System.IO.Path]::GetFullPath($env:PRIVATE_COMPANION_TTS_AUDIO_PATH); "
+                "$vol = [Math]::Max(0, [Math]::Min(100, [int]$env:PRIVATE_COMPANION_TTS_VOLUME)); "
                 "Add-Type -AssemblyName PresentationCore; "
                 "$player = New-Object System.Windows.Media.MediaPlayer; "
                 "$player.Volume = $vol / 100.0; "
@@ -2274,11 +2291,11 @@ Provider 规则：{emotion_rule}
                 "Start-Sleep -Milliseconds ([Math]::Min([Math]::Max([int]$duration + 300, 800), 90000)); "
                 "$player.Close()"
             )
-            args = ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script, path, str(volume)]
+            args = ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script]
         else:
             script = (
-                "$p = [System.IO.Path]::GetFullPath($args[0]); "
-                "$vol = [Math]::Max(0, [Math]::Min(100, [int]$args[1])); "
+                "$p = [System.IO.Path]::GetFullPath($env:PRIVATE_COMPANION_TTS_AUDIO_PATH); "
+                "$vol = [Math]::Max(0, [Math]::Min(100, [int]$env:PRIVATE_COMPANION_TTS_VOLUME)); "
                 "$player = New-Object -ComObject WMPlayer.OCX; "
                 "$player.settings.volume = $vol; "
                 "$player.URL = $p; "
@@ -2287,7 +2304,7 @@ Provider 规则：{emotion_rule}
                 "while ($player.playState -notin 1,8 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }; "
                 "$player.close()"
             )
-            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, path, str(volume)]
+            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
         result = subprocess.run(
             args,
             capture_output=True,
@@ -2296,6 +2313,7 @@ Provider 规则：{emotion_rule}
             errors="ignore",
             timeout=95,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=playback_env,
         )
         if result.returncode == 0:
             return True
@@ -2662,7 +2680,7 @@ Provider 规则：{emotion_rule}
 """.strip()
         try:
             if provider is not None:
-                resp = await self._tts_provider_text_chat(provider, prompt, max_tokens=360)
+                resp = await self._tts_provider_text_chat(provider, prompt, max_tokens=360, task="tts_spoken_conversion")
                 converted = str(getattr(resp, "completion_text", resp) or "").strip()
                 return self._normalize_tts_spoken_text(converted, provider_kind=provider_kind) or text
         except Exception:

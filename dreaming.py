@@ -626,6 +626,7 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
     raw_text = await plugin._llm_call(
         prompt,
         max_tokens=1050,
+        task="dream",
         provider_id=plugin._task_provider(
             getattr(plugin, "dream_provider_id", ""),
             getattr(plugin, "diary_provider_id", ""),
@@ -897,6 +898,7 @@ async def _rewrite_daily_diary_once(
         raw = await plugin._llm_call(
             prompt,
             max_tokens=520,
+            task="diary_rewrite",
             provider_id=plugin._task_provider(
                 getattr(plugin, "diary_provider_id", ""),
                 getattr(plugin, "mai_style_provider_id", ""),
@@ -933,6 +935,7 @@ async def _extract_daily_diary_derivatives(plugin, payload: dict[str, Any]) -> d
         raw = await plugin._llm_call(
             prompt,
             max_tokens=320,
+            task="diary_derivatives",
             provider_id=plugin._task_provider(getattr(plugin, "diary_provider_id", ""), getattr(plugin, "mai_style_provider_id", "")),
         )
         parsed = plugin._extract_json_payload(raw or "")
@@ -1013,6 +1016,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
         raw_text = await plugin._llm_call(
             prompt,
             max_tokens=620,
+            task="diary",
             provider_id=plugin._task_provider(
                 getattr(plugin, "diary_provider_id", ""),
                 getattr(plugin, "mai_style_provider_id", ""),

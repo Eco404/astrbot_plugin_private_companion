@@ -444,6 +444,131 @@ class EventDispatchMixin:
     def _event_has_existing_reply_result(self, event: AstrMessageEvent) -> bool:
         return bool(self._event_existing_reply_result_preview(event))
 
+    def _outbound_text_duplicate_candidate(self, event: AstrMessageEvent) -> dict[str, str]:
+        """Build a stable key for a plain-text outbound result.
+
+        Media-bearing chains are deliberately excluded: identical captions can
+        legitimately accompany different images, records, or files.
+        """
+        getter = getattr(event, "get_result", None)
+        if not callable(getter):
+            return {}
+        try:
+            result = getter()
+        except Exception:
+            return {}
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain or self._chain_has_media_component(chain):
+            return {}
+        component_types: list[str] = []
+        route_parts: list[str] = []
+        for comp in chain:
+            try:
+                type_name = self._component_type_name(comp)
+            except Exception:
+                type_name = comp.__class__.__name__.strip().lower()
+            type_name = str(type_name or "").strip().lower()
+            if "." in type_name:
+                type_name = type_name.rsplit(".", 1)[-1]
+            component_types.append(type_name)
+            if type_name == "at":
+                target = _single_line(
+                    getattr(comp, "qq", "")
+                    or getattr(comp, "user_id", "")
+                    or getattr(comp, "target", ""),
+                    80,
+                )
+                if target:
+                    route_parts.append(f"at:{target}")
+            elif type_name == "reply":
+                target = _single_line(
+                    getattr(comp, "id", "")
+                    or getattr(comp, "message_id", "")
+                    or getattr(comp, "reply_id", ""),
+                    120,
+                )
+                if target:
+                    route_parts.append(f"reply:{target}")
+        if any(item not in {"plain", "at", "reply"} for item in component_types):
+            return {}
+        try:
+            text = str(result.get_plain_text() or "")
+        except Exception:
+            text = " ".join(
+                str(getattr(comp, "text", "") or "")
+                for comp, type_name in zip(chain, component_types)
+                if type_name == "plain"
+            )
+        text = re.sub(r"\s+", " ", _strip_internal_message_blocks(text)).strip()
+        if not text:
+            return {}
+        scope = _single_line(self._event_scope_key(event), 160) or "unknown"
+        route = "|".join(route_parts)
+        signature = hashlib.sha1(f"{scope}\n{route}\n{text}".encode("utf-8", errors="ignore")).hexdigest()
+        return {
+            "signature": signature,
+            "scope": scope,
+            "route": route,
+            "text": _single_line(text, 500),
+            "sender_id": _single_line(self._event_sender_id(event), 80),
+            "self_id": _single_line(self._event_self_id(event), 80),
+            "message_id": _single_line(self._event_message_id(event), 120),
+        }
+
+    @staticmethod
+    def _outbound_duplicate_sources_match(candidate: dict[str, str], previous: dict[str, Any]) -> bool:
+        sender_id = _single_line(candidate.get("sender_id"), 80)
+        self_id = _single_line(candidate.get("self_id"), 80)
+        previous_sender = _single_line(previous.get("sender_id"), 80)
+        message_id = _single_line(candidate.get("message_id"), 120)
+        previous_message_id = _single_line(previous.get("message_id"), 120)
+        from_self = bool(sender_id and self_id and sender_id == self_id)
+        same_sender = bool(sender_id and previous_sender and sender_id == previous_sender)
+        same_message = bool(message_id and previous_message_id and message_id == previous_message_id)
+        return from_self or same_sender or same_message
+
+    def _reserve_outbound_text_candidate(self, candidate: dict[str, str], *, now: float | None = None) -> str:
+        """Reserve an outbound text and return the duplicate state when blocked."""
+        signature = _single_line(candidate.get("signature"), 80)
+        if not signature:
+            return ""
+        now = _now_ts() if now is None else now
+        cache = getattr(self, "_recent_outbound_text_guard", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._recent_outbound_text_guard = cache
+        for key, value in list(cache.items()):
+            ts = _safe_float(value.get("ts"), 0) if isinstance(value, dict) else 0
+            if ts <= 0 or now - ts > 12.0:
+                cache.pop(key, None)
+        previous = cache.get(signature)
+        if isinstance(previous, dict) and self._outbound_duplicate_sources_match(candidate, previous):
+            age = max(0.0, now - _safe_float(previous.get("ts"), 0))
+            state = _single_line(previous.get("state"), 20) or "pending"
+            window = 5.0 if state == "sent" else 2.0
+            if age <= window:
+                return state
+        cache[signature] = {
+            **candidate,
+            "ts": now,
+            "state": "pending",
+        }
+        return ""
+
+    def _confirm_outbound_text_candidate(self, candidate: dict[str, str], *, now: float | None = None) -> None:
+        signature = _single_line(candidate.get("signature"), 80)
+        if not signature:
+            return
+        cache = getattr(self, "_recent_outbound_text_guard", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._recent_outbound_text_guard = cache
+        cache[signature] = {
+            **candidate,
+            "ts": _now_ts() if now is None else now,
+            "state": "sent",
+        }
+
     def _event_self_id(self, event: AstrMessageEvent) -> str:
         raw = self._event_raw_payload(event)
         self_id = _single_line(raw.get("self_id"), 80)
@@ -3695,6 +3820,103 @@ Bot 近期回复：
             return True
         return False
 
+    @staticmethod
+    def _decode_segmented_replacement_token(value: Any, *, replacement: bool = False) -> str:
+        raw = str(value if value is not None else "")
+        trimmed = raw.strip()
+        lowered = trimmed.lower()
+        aliases = {
+            "<space>": " ",
+            "{space}": " ",
+            "[space]": " ",
+            "空格": " ",
+            "<newline>": "\n",
+            "{newline}": "\n",
+            "[newline]": "\n",
+            "换行": "\n",
+            "<tab>": "\t",
+            "{tab}": "\t",
+            "[tab]": "\t",
+            "tab": "\t",
+            "<empty>": "",
+            "{empty}": "",
+            "[empty]": "",
+            "空内容": "",
+            "删除": "",
+        }
+        if lowered in aliases and (replacement or lowered not in {"<empty>", "{empty}", "[empty]", "空内容", "删除"}):
+            return aliases[lowered]
+        return trimmed.replace("\\n", "\n").replace("\\t", "\t")
+
+    def _segmented_content_replacement_pairs(self) -> list[tuple[str, str]]:
+        raw_rules = getattr(self, "segmented_proactive_content_replacements", [])
+        if isinstance(raw_rules, str):
+            rules: list[Any] = [line for line in raw_rules.splitlines() if line.strip()]
+        elif isinstance(raw_rules, list):
+            rules = list(raw_rules)
+        else:
+            rules = []
+        pairs: list[tuple[str, str]] = []
+        for raw_rule in rules[:80]:
+            old_value: Any = ""
+            new_value: Any = ""
+            if isinstance(raw_rule, dict):
+                old_value = raw_rule.get("from", raw_rule.get("old", raw_rule.get("source", "")))
+                new_value = raw_rule.get("to", raw_rule.get("new", raw_rule.get("replacement", "")))
+            else:
+                rule_text = str(raw_rule or "")
+                separator = next(
+                    (item for item in ("=>", "＝>", "→", "->") if item in rule_text),
+                    "",
+                )
+                if not separator:
+                    continue
+                old_value, new_value = rule_text.split(separator, 1)
+            old_text = self._decode_segmented_replacement_token(old_value)
+            new_text = self._decode_segmented_replacement_token(new_value, replacement=True)
+            if not old_text or len(old_text) > 200 or len(new_text) > 500:
+                continue
+            pairs.append((old_text, new_text))
+        return pairs
+
+    def _apply_segmented_content_replacements(self, text: Any) -> tuple[str, int]:
+        original = str(text or "")
+        if not original or not bool(
+            getattr(self, "enable_segmented_proactive_content_replacement", False)
+        ):
+            return original, 0
+        pairs = self._segmented_content_replacement_pairs()
+        if not pairs:
+            return original, 0
+        protected_pattern = re.compile(
+            r"(?is)"
+            r"<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?</(?:image|img|video|record|audio|file)>|/?>)"
+            r"|<tts\b[^>]*>.*?</tts>"
+            r"|<[^>\n]{1,240}\bpath=\"[^\"]{1,500}\"[^>\n]*>"
+            r"|<[^>\n]{1,240}\b(?:url|src)=\"[^\"]{1,500}\"[^>\n]*>"
+            r"|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
+        )
+        parts: list[str] = []
+        cursor = 0
+        replacements = 0
+        for match in protected_pattern.finditer(original):
+            plain = original[cursor:match.start()]
+            for old_text, new_text in pairs:
+                count = plain.count(old_text)
+                if count:
+                    plain = plain.replace(old_text, new_text)
+                    replacements += count
+            parts.extend((plain, match.group(0)))
+            cursor = match.end()
+        plain = original[cursor:]
+        for old_text, new_text in pairs:
+            count = plain.count(old_text)
+            if count:
+                plain = plain.replace(old_text, new_text)
+                replacements += count
+        parts.append(plain)
+        return "".join(parts), replacements
+
     def _split_proactive_text(
         self,
         text: str,
@@ -3723,6 +3945,13 @@ Bot 近期回复：
                 return [normalized]
         elif not self.enable_segmented_proactive_reply:
             return [normalized]
+        replaced_text, replacement_count = self._apply_segmented_content_replacements(normalized)
+        if replacement_count > 0:
+            candidate = replaced_text.strip()
+            if candidate:
+                normalized = candidate
+            else:
+                logger.warning("[PrivateCompanion] 主动分段内容替换会清空整条文本，已保留原文")
         if len(normalized) > self.segmented_proactive_threshold:
             return [normalized]
 

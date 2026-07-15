@@ -1051,10 +1051,10 @@ class GroupWakeupMixin:
                     "reason": "direct_wakeup_word",
                     "note": "群友提到了 Bot 名字或强唤醒词。",
                 }
-        question_signal = self._group_wakeup_question_signal(original) if bool(getattr(self, "enable_group_wakeup_question", True)) else {}
-        if has_link_payload and not question_signal:
+        if has_link_payload or bool(scene.get("quoted_link_payload")):
             return {}
-        cold_group_signal = {} if has_link_payload else self._group_wakeup_cold_group_signal(group, cleaned, now)
+        question_signal = self._group_wakeup_question_signal(original) if bool(getattr(self, "enable_group_wakeup_question", True)) else {}
+        cold_group_signal = self._group_wakeup_cold_group_signal(group, cleaned, now)
         soft_signal_hit = bool(
             question_signal
             or cold_group_signal

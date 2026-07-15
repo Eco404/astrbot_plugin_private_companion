@@ -110,7 +110,9 @@ from .dreaming import (
 from .helpers import (
     _date_key,
     _normalize_outbound_punctuation_flow,
+    _normalize_photo_subject_owner,
     _now_ts,
+    _photo_subject_owner_prompt_label,
     _redact_outbound_secrets,
     _safe_float,
     _safe_int,
@@ -1754,6 +1756,20 @@ class ProactiveMessageMixin:
         proactive_voice_marker = "<!-- private_companion_proactive_voice_v1 -->"
         if proactive_voice and proactive_voice_marker not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{proactive_voice_marker}\n{proactive_voice}"
+        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+        expression_voice = (
+            expression_formatter(
+                scope="proactive",
+                target_id=_single_line(user.get("user_id") or user.get("id"), 80),
+                context_owner=user,
+                stage_owner=user,
+            )
+            if callable(expression_formatter)
+            else ""
+        )
+        expression_voice_marker = "<!-- private_companion_expression_voice_v1 -->"
+        if expression_voice and expression_voice_marker not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{expression_voice_marker}\n{expression_voice}"
         delivery_hint = self._proactive_natural_delivery_hint()
         if delivery_hint and "自然交付提醒" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
@@ -2639,6 +2655,14 @@ class ProactiveMessageMixin:
         proactive_rewrite = str(task or "").startswith("proactive")
         if proactive_rewrite:
             reply_style = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
+            expression_voice = self._format_expression_voice_for_prompt(
+                scope="proactive",
+                target_id=_single_line(user.get("user_id") or user.get("id"), 80) if isinstance(user, dict) else "",
+                context_owner=user if isinstance(user, dict) else None,
+                stage_owner=user if isinstance(user, dict) else None,
+            )
+            if expression_voice:
+                reply_style = f"{reply_style}\n\n{expression_voice}".strip()
         else:
             reply_style = self._format_reply_style_prompt()
         if not history and isinstance(user, dict):
@@ -3234,6 +3258,10 @@ class ProactiveMessageMixin:
         strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
         return strength if strength in {"lenient", "balanced", "strict"} else "lenient"
 
+    def _effective_proactive_review_mode(self) -> str:
+        mode = str(getattr(self, "proactive_review_mode", "full") or "full").strip().lower()
+        return mode if mode in {"local_only", "severe_only", "full"} else "full"
+
     @staticmethod
     def _proactive_review_hard_block_reason(reason: str) -> bool:
         text = str(reason or "")
@@ -3515,23 +3543,22 @@ class ProactiveMessageMixin:
         )
         local_decision = str(local.get("decision") or "send").strip().lower()
         local_hard_block = bool(local.get("hard")) or self._proactive_review_hard_block_reason(_single_line(local.get("reason"), 120))
-        review_enabled = bool(getattr(self, "enable_response_self_review", True)) and bool(
-            getattr(self, "enable_proactive_message_review", True)
-        )
-        if not review_enabled:
+        review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
+        review_mode = self._effective_proactive_review_mode()
+        if not review_enabled or review_mode == "local_only":
             if local_decision in {"drop", "defer"}:
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if local_decision == "rewrite":
                 return {
                     "decision": "drop",
                     "text": "",
-                    "reason": "主动终审已关闭，候选需要改写才能安全发送，已取消本轮发送",
+                    "reason": "主动模型终审未启用，候选需要改写才能安全发送，已取消本轮发送",
                     "hard": True,
                 }
             return {
                 "decision": "send",
                 "text": "",
-                "reason": "主动终审已关闭，本地检查允许原文发送",
+                "reason": "主动模型终审未启用，本地检查允许原文发送",
             }
         if local_decision in {"drop", "defer"} and local_hard_block:
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
@@ -3591,6 +3618,12 @@ class ProactiveMessageMixin:
             return local
         if local_decision == "drop":
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+        if review_mode == "severe_only" and local_decision == "send" and not local_hard_block:
+            return {
+                "decision": "send",
+                "text": "",
+                "reason": "主动终审严重问题模式：本地检查通过",
+            }
         persona = await self._resolve_proactive_persona_prompt(user)
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
         intent_hint = self._format_proactive_generation_intent_hint(
@@ -3601,6 +3634,17 @@ class ProactiveMessageMixin:
             action_context=review_context,
         )
         proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
+        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+        expression_voice = (
+            expression_formatter(
+                scope="proactive",
+                target_id=_single_line(user.get("user_id") or user.get("id"), 80),
+                context_owner=user,
+                stage_owner=user,
+            )
+            if callable(expression_formatter)
+            else ""
+        )
         recipient_identity = self._format_proactive_recipient_identity_guard(
             user,
             _single_line(user.get("nickname"), 40),
@@ -3668,6 +3712,9 @@ reason={reason or "check_in"}; action={action or "message"}; topic={_single_line
 
 [Proactive voice]
 {proactive_voice or "(natural, low-pressure private chat)"}
+
+[Learned expression voice]
+{expression_voice or "(none)"}
 
 [Recipient identity boundary]
 {recipient_identity or "Use only the current recipient identity. Do not guess or copy an exclusive name from persona examples."}
@@ -4303,16 +4350,14 @@ Output:
         )
         if not flags:
             return cleaned
-        if not bool(getattr(self, "enable_response_self_review", True)):
+        if not bool(getattr(self, "enable_proactive_message_review", True)):
             logger.info(
-                "[PrivateCompanion] 主动消息疑似回复空气,自检关闭已丢弃: flags=%s text=%s",
+                "[PrivateCompanion] 主动消息疑似回复空气,主动终审关闭已丢弃: flags=%s text=%s",
                 ",".join(flags),
                 _single_line(cleaned, 120),
             )
             return ""
-        mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
-        if mode not in {"local_only", "severe_only", "full"}:
-            mode = "severe_only"
+        mode = self._effective_proactive_review_mode()
         if mode == "local_only":
             logger.info(
                 "[PrivateCompanion] 主动消息疑似回复空气,仅本地保护已丢弃: flags=%s text=%s",
@@ -4348,6 +4393,17 @@ Output:
         )
         persona = await self._resolve_proactive_persona_prompt(user)
         proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
+        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+        expression_voice = (
+            expression_formatter(
+                scope="proactive",
+                target_id=_single_line(user.get("user_id") or user.get("id"), 80),
+                context_owner=user,
+                stage_owner=user,
+            )
+            if callable(expression_formatter)
+            else ""
+        )
         recipient_identity = self._format_proactive_recipient_identity_guard(
             user,
             _single_line(user.get("nickname"), 40),
@@ -4380,6 +4436,9 @@ Output:
 
 【主动开口风格】
 {proactive_voice or "（无额外主动风格；保持原文已有的人格语气）"}
+
+【已形成的表达底色】
+{expression_voice or "（无额外表达底色）"}
 
 【当前收件人】
 {recipient_identity or "不要猜名字或套用其他对象的专属称呼。"}
@@ -6122,6 +6181,9 @@ Output:
 
         scene = await self._build_photo_scene_prompt(user, name, reason)
         workflow_kind = scene.get("kind", "text2img")
+        subject_owner = _normalize_photo_subject_owner(scene.get("subject_owner"))
+        if not subject_owner:
+            subject_owner = "bot" if bool(scene.get("use_persona_reference")) or workflow_kind == "selfie" else "scene"
         session_key = str(user.get("umo") or user.get("user_id") or name)
         reference_image_path = ""
         if bool(scene.get("use_persona_reference")):
@@ -6158,6 +6220,7 @@ Output:
             f"后端：{backend_name}\n"
             f"图片路径：{image_path}\n"
             f"画面：{scene['caption']}\n"
+            f"图片主体归属：{subject_owner}\n"
             f"人物参考图：{'已使用' if reference_image_path else '未使用'}\n"
             f"生图提示：{_single_line(scene['prompt'], 240)}"
         )
@@ -7873,11 +7936,22 @@ Output:
             )
         if not caption:
             caption = "今天看到一个很适合拍下来分享的小画面。"
+        if use_persona_reference:
+            subject_owner = "bot"
+        else:
+            character_text = f"{image_prompt} {caption}"
+            subject_owner = (
+                "third_party"
+                if re.search(r"\b(?:person|people|man|woman|boy|girl|character|human)\b", character_text, flags=re.I)
+                or any(token in character_text for token in ("人物", "男人", "女人", "男生", "女生", "男孩", "女孩", "路人"))
+                else "scene"
+            )
         return {
             "kind": kind,
             "prompt": image_prompt,
             "caption": caption,
             "use_persona_reference": use_persona_reference,
+            "subject_owner": subject_owner,
         }
 
     def _get_photo_style_instruction(self) -> tuple[str, str]:
@@ -10420,6 +10494,13 @@ Output:
             return ""
         return _single_line(match.group(1).splitlines()[0], 220)
 
+    def _extract_action_photo_subject_owner(self, action_context: str) -> str:
+        text = str(action_context or "")
+        match = re.search(r"(?:图片主体归属|画面主体归属)[:：]\s*([^\r\n]+)", text)
+        if not match:
+            return ""
+        return _normalize_photo_subject_owner(match.group(1))
+
     def _build_outbound_chain(
         self,
         text: str,
@@ -11287,6 +11368,13 @@ Output:
             extra_components=None,
             disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
         )
+        if len(segments) > 1:
+            logger.info(
+                "[PrivateCompanion] 主动媒体文本已分段: umo=%s segments=%s lengths=%s",
+                _single_line(umo, 140),
+                len(segments),
+                [len(segment) for segment in segments],
+            )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else ""
             if quote_message_id and self._quote_skip_reason_for_short_reply(outbound_text):
@@ -11381,6 +11469,13 @@ Output:
             extra_components=None,
             disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
         )
+        if len(segments) > 1:
+            logger.info(
+                "[PrivateCompanion] 主动文本已分段: umo=%s segments=%s lengths=%s",
+                _single_line(umo, 140),
+                len(segments),
+                [len(segment) for segment in segments],
+            )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else text
             if quote_message_id and self._quote_skip_reason_for_short_reply(outbound_text):
@@ -11448,6 +11543,7 @@ Output:
         image_path: str = "",
         extra_components: list[Any] | None = None,
         action_summary: str = "",
+        photo_subject_owner: str = "",
     ) -> str:
         original_is_receipt = self._is_proactive_delivery_receipt_text(text)
         message_text = self._visible_text_without_tts_reading(text, limit=1000)
@@ -11459,6 +11555,9 @@ Output:
                 photo_caption = _single_line(re.split(r"[:：]", str(action_summary), maxsplit=1)[-1], 220)
             if photo_caption and photo_caption not in {"发图", "图片", "photo_text"}:
                 attachment_notes.append(f"图片画面：{photo_caption}")
+            normalized_owner = _normalize_photo_subject_owner(photo_subject_owner)
+            if normalized_owner:
+                attachment_notes.append(f"图片主体：{_photo_subject_owner_prompt_label(normalized_owner)}")
         if extra_components:
             tts_notes: list[str] = []
             note_builder = getattr(self, "_tts_component_log_note", None)

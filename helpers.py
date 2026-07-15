@@ -20,6 +20,15 @@ _GROUP_SHARE_MARKER_PATTERN = re.compile(
     r"|\[CQ:(?:json|xml|share|miniapp)\b[^\]]*\]"
     r")"
 )
+_GROUP_SHARE_BOILERPLATE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"当前\s*QQ\s*版本不支持(?:此|该)?应用[，,、\s]*请升级"
+    r"|当前\s*QQ\s*版本不支持查看(?:此|该)?内容[，,、\s]*请升级"
+    r"|(?:你的|您(?:的)?|当前)?\s*QQ\s*版本过低[，,、\s]*"
+    r"(?:暂不支持查看(?:此|该)?内容|请(?:升级|更新)(?:后)?查看)"
+    r"|请使用最新版本(?:手机)?\s*QQ\s*查看"
+    r")"
+)
 
 
 def _now_ts() -> float:
@@ -85,16 +94,42 @@ def _single_line(text: Any, limit: int = 80) -> str:
     return normalized[:limit]
 
 
+def _normalize_photo_subject_owner(value: Any) -> str:
+    normalized = _single_line(value, 40).strip().lower().replace("-", "_")
+    if normalized in {"bot", "self", "persona", "character", "当前人格", "机器人", "角色本人"}:
+        return "bot"
+    if normalized in {"third_party", "thirdparty", "other_person", "第三方", "第三方人物", "其他人物"}:
+        return "third_party"
+    if normalized in {"scene", "object", "animal", "environment", "画面", "物体", "动物", "环境"}:
+        return "scene"
+    if normalized in {"unknown", "unclear", "ambiguous", "未知", "不明", "无法判断"}:
+        return "unknown"
+    return ""
+
+
+def _photo_subject_owner_prompt_label(value: Any) -> str:
+    owner = _normalize_photo_subject_owner(value) or "unknown"
+    return {
+        "bot": "Bot/当前人格（图片描述中的“我/她/角色本人”）",
+        "third_party": "画面中的第三方人物（不是 Bot，也不是用户）",
+        "scene": "画面中的物体、动物或环境主体（不是用户）",
+        "unknown": "画面中的实际主体（归属不明，但不能据此归到用户）",
+    }[owner]
+
+
 def _group_link_message_context(text: Any, limit: int = 260) -> tuple[str, bool]:
     """Return non-link user text and whether the message contains a link/share payload."""
     raw = str(text or "")[:4000].replace("\u200b", "").replace("\ufeff", "")
     has_link_payload = bool(
-        _GROUP_MESSAGE_URL_PATTERN.search(raw) or _GROUP_SHARE_MARKER_PATTERN.search(raw)
+        _GROUP_MESSAGE_URL_PATTERN.search(raw)
+        or _GROUP_SHARE_MARKER_PATTERN.search(raw)
+        or _GROUP_SHARE_BOILERPLATE_PATTERN.search(raw)
     )
     if not has_link_payload:
         return _single_line(raw, limit), False
     remainder = _GROUP_MESSAGE_URL_PATTERN.sub(" ", raw)
     remainder = _GROUP_SHARE_MARKER_PATTERN.sub(" ", remainder)
+    remainder = _GROUP_SHARE_BOILERPLATE_PATTERN.sub(" ", remainder)
     remainder = re.sub(r"(?i)(?:网页)?(?:链接|网址|link)\s*[:：]", " ", remainder)
     remainder = re.sub(r"\s+", " ", remainder).strip(" \t\r\n,，。;；|｜-—")
     return _single_line(remainder, limit), True

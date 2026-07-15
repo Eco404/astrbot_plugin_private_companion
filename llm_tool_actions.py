@@ -192,6 +192,86 @@ class LlmToolActionsMixin:
 - 如果工具返回失败，按失败原因说明，不要假装图片已生成或已发送。
 """.strip()
 
+    def _creative_work_tool_instruction(self) -> str:
+        if not (self.enabled and getattr(self, "enable_creative_writing", False)):
+            return ""
+        return """
+【自己的创作读取工具】
+当用户询问你自己的某篇创作写了什么、某一部分/片段的内容、你如何看待这篇创作、为什么这样写，或要求你结合原文讲讲时，必须先调用 `pc_view_creative_work` 读取真实创作，再依据工具结果回答。
+- 按标题读取：action=get，selector 传用户提到的作品标题；只有用户明确指定“第 N 部分/第 N 段”时才传 part=N。
+- 不确定有哪些作品或用户泛问“最近写了什么”：先 action=list；拿到准确标题后，如需正文再 action=get。
+- 讨论整篇作品时 part=0，工具会按顺序返回预算内的正文；结果若 truncated=true，可继续用 next_part 读取。
+- 工具返回 success 前，不要说“我看过了/我刚检查了”；也不要先发送“我先去看看”等准备动作。直接调用工具，取得结果后一次性自然回答。
+- 不得把被动提示中的短片段、长期记忆或聊天印象冒充完整原文；找不到作品或部分时如实说明，并可根据 candidates 请用户进一步说明。
+- 这是只读工具，不能修改、续写或删除创作。
+""".strip()
+
+    def _creative_work_query_instruction_matches(self, text: Any) -> bool:
+        normalized = _single_line(text, 260)
+        if not normalized:
+            return False
+        work_terms = (
+            "创作", "作品", "写作", "札记", "随笔", "散文", "小说", "故事",
+            "诗", "歌词", "剧本", "手稿", "草稿", "正文", "片段", "章节",
+        )
+        query_terms = (
+            "讲讲", "说说", "看看", "看一下", "读", "回顾", "总结", "内容",
+            "写了什么", "写的什么", "怎么看", "看待", "觉得", "想法", "为什么",
+            "第", "部分", "哪一段", "这一段", "那一段", "原文", "全文",
+        )
+        return any(token in normalized for token in work_terms) and any(
+            token in normalized for token in query_terms
+        )
+
+    @staticmethod
+    def _record_creative_work_tool_result(
+        event: AstrMessageEvent,
+        tool: Any,
+        tool_args: Any,
+        tool_result: Any,
+    ) -> bool:
+        if _single_line(getattr(tool, "name", ""), 80) != "pc_view_creative_work":
+            return False
+        try:
+            setattr(event, "private_companion_creative_work_tool_attempted", True)
+            action = _single_line(
+                (tool_args or {}).get("action") if isinstance(tool_args, dict) else "",
+                20,
+            ).lower() or "get"
+            payload: dict[str, Any] = {}
+            if isinstance(tool_result, dict):
+                payload = dict(tool_result)
+            elif isinstance(tool_result, str):
+                try:
+                    parsed = json.loads(tool_result)
+                    payload = parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    payload = {}
+            success = bool(
+                action == "get"
+                and _single_line(payload.get("status"), 24).lower() == "success"
+            )
+            setattr(event, "private_companion_creative_work_read_success", success)
+            setattr(event, "private_companion_creative_work_tool_status", _single_line(payload.get("status"), 24))
+        except Exception:
+            pass
+        return True
+
+    @staticmethod
+    def _guard_unread_creative_work_response(event: AstrMessageEvent, text: Any) -> str:
+        raw = str(text or "")
+        if not raw.strip() or not bool(
+            getattr(event, "private_companion_creative_work_tool_required", False)
+        ):
+            return raw
+        if bool(getattr(event, "private_companion_creative_work_tool_attempted", False)):
+            return raw
+        logger.warning(
+            "[PrivateCompanion] 指定创作问答未实际调用读取工具，已阻止凭片段作答: session=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+        )
+        return "我这次还没能实际读取到对应的创作原文，先不凭印象乱讲。你可以再告诉我准确标题或第几部分，我读到后再认真和你说。"
+
     @staticmethod
     def _plaintext_tool_call_from_object(value: Any) -> dict[str, Any] | None:
         if not isinstance(value, dict):
@@ -204,6 +284,7 @@ class LlmToolActionsMixin:
             "pc_qzone_publish_feed",
             "pc_generate_photo",
             "pc_manage_memo",
+            "pc_view_creative_work",
             "pc_get_group_id_by_name",
             "pc_get_user_id_by_name",
             "pc_query_relation_person",
@@ -235,6 +316,211 @@ class LlmToolActionsMixin:
         if not isinstance(parameters, dict):
             return None
         return {"name": name, "parameters": dict(parameters)}
+
+    @staticmethod
+    def _creative_work_project_candidates(
+        projects: list[dict[str, Any]],
+        selector: Any,
+    ) -> list[dict[str, Any]]:
+        eligible = [
+            item
+            for item in projects
+            if isinstance(item, dict)
+            and str(item.get("status") or "") in {"drafting", "finished"}
+            and isinstance(item.get("draft_chunks"), list)
+            and any(
+                isinstance(chunk, dict) and str(chunk.get("text") or "").strip()
+                for chunk in item.get("draft_chunks", [])
+            )
+        ]
+        value = _single_line(selector, 120)
+        if not value:
+            return eligible
+        folded = value.casefold()
+        exact = [
+            item
+            for item in eligible
+            if folded
+            in {
+                _single_line(item.get("id"), 40).casefold(),
+                _single_line(item.get("title"), 80).casefold(),
+            }
+        ]
+        if exact:
+            return exact
+        contains = [
+            item
+            for item in eligible
+            if folded in _single_line(item.get("title"), 80).casefold()
+            or _single_line(item.get("title"), 80).casefold() in folded
+        ]
+        if contains:
+            return contains
+        number_match = re.fullmatch(r"(?:第\s*)?(\d+)(?:\s*(?:个|篇|项))?", value)
+        if number_match:
+            index = _safe_int(number_match.group(1), 0) - 1
+            if 0 <= index < len(eligible):
+                return [eligible[index]]
+        return []
+
+    @staticmethod
+    def _creative_work_project_summary(project: dict[str, Any], index: int = 0) -> dict[str, Any]:
+        chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+        valid_chunks = [
+            chunk
+            for chunk in chunks
+            if isinstance(chunk, dict) and str(chunk.get("text") or "").strip()
+        ]
+        return {
+            "index": index,
+            "id": _single_line(project.get("id"), 40),
+            "title": _single_line(project.get("title"), 80) or "未定标题",
+            "work_type": _single_line(project.get("work_type"), 40) or "文本作品",
+            "status": _single_line(project.get("status"), 24),
+            "part_count": len(valid_chunks),
+            "current_chars": _safe_int(project.get("current_chars"), 0, 0),
+        }
+
+    async def _pc_view_creative_work_impl(
+        self,
+        event: AstrMessageEvent,
+        *,
+        action: str = "get",
+        selector: str = "",
+        part: int = 0,
+        max_chars: int = 6000,
+    ) -> str:
+        if not getattr(self, "enable_creative_writing", False):
+            return json.dumps(
+                {"status": "disabled", "message": "创作功能未启用。"},
+                ensure_ascii=False,
+            )
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        if not is_private:
+            return json.dumps(
+                {"status": "forbidden", "message": "创作正文只允许在私聊中读取。"},
+                ensure_ascii=False,
+            )
+
+        normalized_action = _single_line(action, 20).lower() or "get"
+        if normalized_action not in {"list", "get"}:
+            return json.dumps(
+                {"status": "invalid_action", "message": "action 仅支持 list/get。"},
+                ensure_ascii=False,
+            )
+        async with self._data_lock:
+            raw_projects = self.data.get("creative_projects")
+            projects = list(raw_projects) if isinstance(raw_projects, list) else []
+            eligible = self._creative_work_project_candidates(projects, "")
+            if normalized_action == "list":
+                summaries = [
+                    self._creative_work_project_summary(project, index)
+                    for index, project in enumerate(eligible, start=1)
+                ]
+                return json.dumps(
+                    {
+                        "status": "success",
+                        "action": "list",
+                        "count": len(summaries),
+                        "projects": summaries[-20:],
+                    },
+                    ensure_ascii=False,
+                )
+
+            matches = self._creative_work_project_candidates(projects, selector)
+            if not _single_line(selector, 120):
+                matches = eligible[-1:] if eligible else []
+            if not matches:
+                candidates = [
+                    self._creative_work_project_summary(project, index)
+                    for index, project in enumerate(eligible[-10:], start=max(1, len(eligible) - 9))
+                ]
+                return json.dumps(
+                    {
+                        "status": "not_found",
+                        "message": "没有找到对应的创作。",
+                        "selector": _single_line(selector, 120),
+                        "candidates": candidates,
+                    },
+                    ensure_ascii=False,
+                )
+            if len(matches) > 1:
+                return json.dumps(
+                    {
+                        "status": "ambiguous",
+                        "message": "匹配到多篇创作，请使用准确标题或 id 再读取。",
+                        "candidates": [
+                            self._creative_work_project_summary(project, index)
+                            for index, project in enumerate(matches[:10], start=1)
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+
+            project = matches[0]
+            chunks = [
+                chunk
+                for chunk in project.get("draft_chunks", [])
+                if isinstance(chunk, dict) and str(chunk.get("text") or "").strip()
+            ]
+            requested_part = _safe_int(part, 0, 0)
+            if part and not (1 <= requested_part <= len(chunks)):
+                return json.dumps(
+                    {
+                        "status": "part_not_found",
+                        "message": f"这篇创作目前只有 {len(chunks)} 个正文部分。",
+                        "title": _single_line(project.get("title"), 80) or "未定标题",
+                        "part_count": len(chunks),
+                    },
+                    ensure_ascii=False,
+                )
+
+            budget = _safe_int(max_chars, 6000, 600, 12000)
+            selected_parts: list[dict[str, Any]] = []
+            used_chars = 0
+            start_index = requested_part - 1 if requested_part > 0 else 0
+            for index in range(start_index, len(chunks)):
+                if requested_part > 0 and index != start_index:
+                    break
+                text_value = str(chunks[index].get("text") or "").strip()
+                remaining = budget - used_chars
+                if remaining <= 0:
+                    break
+                shown_text = text_value[:remaining]
+                selected_parts.append(
+                    {
+                        "part": index + 1,
+                        "text": shown_text,
+                        "chars": len(text_value),
+                        "truncated": len(shown_text) < len(text_value),
+                    }
+                )
+                used_chars += len(shown_text)
+                if len(shown_text) < len(text_value):
+                    break
+            last_part = selected_parts[-1]["part"] if selected_parts else 0
+            truncated = bool(
+                selected_parts
+                and (
+                    selected_parts[-1].get("truncated")
+                    or (requested_part == 0 and last_part < len(chunks))
+                )
+            )
+            payload = {
+                "status": "success",
+                "action": "get",
+                "project": self._creative_work_project_summary(project),
+                "premise": _single_line(project.get("premise"), 500),
+                "tone": _single_line(project.get("tone"), 120),
+                "parts": selected_parts,
+                "truncated": truncated,
+                "next_part": last_part + 1 if truncated and last_part < len(chunks) else 0,
+                "instruction": "只能依据返回的真实正文讨论，不要补写未读取内容。",
+            }
+            return json.dumps(payload, ensure_ascii=False)
 
     def _strip_plaintext_tool_call_envelopes(self, text: Any) -> tuple[str, list[dict[str, Any]]]:
         raw = str(text or "")

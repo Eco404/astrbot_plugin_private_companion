@@ -18,7 +18,7 @@ except ImportError:
     from astrbot.api.message_components import Plain
 from astrbot.api.provider import ProviderRequest
 
-from .helpers import _safe_float, _safe_int, _single_line, _strip_internal_message_blocks
+from .helpers import _group_link_message_context, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks
 
 class ForwardMessageMixin:
     """Forward-message parsing and prompt-context helpers."""
@@ -554,6 +554,36 @@ class ForwardMessageMixin:
         for item in self._event_components(event):
             type_name = self._component_type_name(item)
             if type_name == "reply" or "reply" in type_name:
+                return True
+        return False
+
+    async def _event_reply_contains_link_payload(self, event: AstrMessageEvent) -> bool:
+        """Whether a reply/quote chain contains a non-image external link/share."""
+        if not self._event_has_reply_component(event):
+            return False
+        try:
+            chain = await self._reply_message_chain_for_event(event, max_depth=3)
+        except Exception:
+            chain = []
+        for row in chain:
+            if not isinstance(row, dict):
+                continue
+            raw_message = row.get("raw_message")
+            info = self._extract_reply_rich_card_info(raw_message)
+            images = {
+                _single_line(item, 600)
+                for item in (info.get("images") if isinstance(info, dict) else []) or []
+                if _single_line(item, 600)
+            }
+            links = [
+                _single_line(item, 600)
+                for item in (info.get("links") if isinstance(info, dict) else []) or []
+                if _single_line(item, 600) and _single_line(item, 600) not in images
+            ]
+            if links:
+                return True
+            preview = _single_line(row.get("text"), 1000)
+            if preview and _group_link_message_context(preview, limit=1000)[1]:
                 return True
         return False
 

@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260714-browser-history-ui-v1" />
+  <link rel="stylesheet" href="./app.css?v=20260715-learning-nav-expression-clean-v2" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
-  <link rel="stylesheet" href="./css/polish.css?v=20260714-config-fold-workspace-v4" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260715-learning-nav-merged-v1" />
   <script>
     (function () {
       try {
@@ -111,7 +111,7 @@
         <button class="tab" data-tab="roleplay"><i>02</i><span>世界知识</span></button>
         <button class="tab" data-tab="private"><i>03</i><span>私聊</span></button>
         <button class="tab" data-tab="group"><i>04</i><span>群聊</span></button>
-        <button class="tab" data-tab="worldbook"><i>05</i><span>关系网</span></button>
+        <button class="tab" data-tab="learning"><i>05</i><span>学习</span></button>
         <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
         <button class="tab" data-tab="proactive"><i>07</i><span>主动</span></button>
         <button class="tab" data-tab="bookshelf"><i>08</i><span>书柜</span></button>
@@ -462,7 +462,10 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-private">
         <div class="section-head">
-          <h2>私聊对象</h2>
+          <div>
+            <h2>私聊对象</h2>
+            <p class="section-desc">管理关系角色、主动额度、行为习惯、陪伴状态和已整理的对话片段。</p>
+          </div>
           <input id="userFilter" type="search" placeholder="筛选用户 ID / 昵称" />
         </div>
         <form id="addUserForm" class="inline-form manage-form">
@@ -492,6 +495,127 @@ QQ空间 = 公开札记
         <article class="detail" id="userDetail"></article>
       </section>
 
+      <section class="panel learning-page" id="panel-learning">
+        <header class="learning-page-head">
+          <div>
+            <span class="learning-page-kicker">LEARNING · REVIEW · RELATION</span>
+            <h2>学习工作台</h2>
+            <p class="section-desc">集中管理技能成长、表达规则与社交关系；表达规则通过审核后才会参与回复。</p>
+          </div>
+          <span class="learning-page-status">审核后使用</span>
+        </header>
+        <nav id="learningSummary" class="learning-summary-board" role="tablist" aria-label="学习工作台导航"></nav>
+
+        <section id="learningPanelSkills" class="learning-section" role="tabpanel" aria-labelledby="learningTabSkills" data-learning-section-panel="skills" hidden>
+          <header class="learning-section-head">
+            <div><span>能力成长</span><h3>技能学习</h3></div>
+            <p>检视 Bot 已经掌握的能力、熟练度和成长状态。</p>
+          </header>
+          <article id="skillGrowthModule" class="learning-workspace-surface learning-growth-section" aria-label="技能成长管理">
+            <details class="skill-manage-drawer">
+              <summary>新增或管理技能</summary>
+              <form id="skillAddForm" class="inline-form manage-form skill-add-form">
+                <label>技能 <input name="name" maxlength="32" required /></label>
+                <label>分类 <input name="category" maxlength="20" placeholder="能力" /></label>
+                <label>等级
+                  <select name="level">
+                    <option value="1">还不太熟</option>
+                    <option value="2">能慢慢试</option>
+                    <option value="3">能自己做</option>
+                    <option value="4">已经顺手</option>
+                    <option value="5">很拿手</option>
+                    <option value="6">有自己的办法</option>
+                  </select>
+                </label>
+                <label>关键词 <input name="keywords" maxlength="160" placeholder="逗号分隔" /></label>
+                <label>别名 <input name="aliases" maxlength="160" placeholder="同义叫法，逗号分隔" /></label>
+                <button type="submit">新增技能</button>
+              </form>
+            </details>
+            <div id="skillGrowthPanel" class="skill-growth-panel"></div>
+          </article>
+        </section>
+
+        <section id="learningPanelExpressions" class="learning-section" role="tabpanel" aria-labelledby="learningTabExpressions" data-learning-section-panel="expressions">
+          <header class="learning-section-head expression-learning-head">
+            <div><span>说法与句法</span><h3>表达学习</h3></div>
+            <div class="expression-view-tabs" role="tablist" aria-label="表达学习页面">
+              <button id="expressionViewLibraryTab" type="button" role="tab" aria-selected="true" data-expression-view="library">表达库</button>
+              <button id="expressionViewReviewTab" type="button" role="tab" aria-selected="false" tabindex="-1" data-expression-view="review">审核队列 <span id="expressionReviewCount">0</span></button>
+            </div>
+          </header>
+          <section class="expression-view-panel" role="tabpanel" aria-labelledby="expressionViewLibraryTab" data-expression-view-panel="library">
+            <section id="expressionScopeManager" class="expression-scope-manager" aria-label="表达方式学习范围"></section>
+            <article id="expressionLibraryModule" class="learning-workspace-surface learning-expression-library-section" aria-label="统一表达学习库">
+              <article id="expressionLibrary" class="expression-library-shell"></article>
+            </article>
+          </section>
+          <section class="expression-view-panel" role="tabpanel" aria-labelledby="expressionViewReviewTab" data-expression-view-panel="review" hidden>
+            <article id="expressionReviewWorkspace" class="expression-review-workspace" aria-label="表达规则审核工作区"></article>
+          </section>
+        </section>
+
+        <section id="learningPanelSocial" class="learning-section relationship-workspace" role="tabpanel" aria-labelledby="learningTabSocial" data-learning-section-panel="social" hidden>
+          <div class="section-head relationship-head learning-section-head">
+            <div>
+              <span class="relationship-kicker">IDENTITY · CONTEXT · BOUNDARY</span>
+              <h3>社交关系网</h3>
+              <p class="section-desc">用明确身份、别名与边界资料辅助群聊判断；待确认观察不会自动写入长期记忆。</p>
+            </div>
+            <div class="actions compact">
+              <button id="worldbookImportBtn" type="button">同步资料</button>
+              <button id="worldbookClearPendingBtn" type="button" class="danger-outline">清理待确认观察</button>
+            </div>
+          </div>
+
+          <div id="worldbookSummary" class="worldbook-summary relationship-summary"></div>
+
+          <div class="relationship-commandbar">
+            <label class="relationship-search">
+              <span>查找成员</span>
+              <input id="worldbookMemberFilter" type="search" placeholder="QQ、B站身份、名称、别名或群名片" />
+            </label>
+            <span id="worldbookSourceFiles" class="relationship-source muted"></span>
+          </div>
+
+          <div class="relationship-workspace-grid">
+            <article class="relationship-roster">
+              <div class="relationship-section-head">
+                <div><span>成员目录</span><h3>关系节点</h3></div>
+                <span id="worldbookMemberCount" class="relationship-count muted"></span>
+              </div>
+              <details class="relationship-create">
+                <summary>新增关系节点</summary>
+                <form id="worldbookAddMemberForm" class="inline-form manage-form">
+                  <label>身份键 <input name="user_id" placeholder="QQ 号或 bili:UID" required /></label>
+                  <label>名称 <input name="name" placeholder="成员显示名" /></label>
+                  <label>优先级 <input name="priority" type="number" value="120" /></label>
+                  <button type="submit">新增节点</button>
+                </form>
+              </details>
+              <div id="worldbookMembers" class="worldbook-members relationship-member-list"></div>
+            </article>
+
+            <aside class="relationship-sidebar">
+              <article class="relationship-context-card">
+                <div class="relationship-section-head compact"><div><span>群上下文</span><h3>群资料</h3></div></div>
+                <form id="worldbookAddGroupForm" class="stack-form compact-manage-form">
+                  <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+                  <label>名称 <input name="name" placeholder="群资料名称" /></label>
+                  <button type="submit">新增群资料</button>
+                </form>
+                <div id="worldbookGroups" class="worldbook-groups"></div>
+              </article>
+
+              <article class="relationship-import-card">
+                <div class="relationship-section-head compact"><div><span>数据健康</span><h3>同步状态</h3></div></div>
+                <dl id="worldbookImportState" class="relationship-import-state"></dl>
+              </article>
+            </aside>
+          </div>
+        </section>
+      </section>
+
       <section class="panel" id="panel-group">
         <div class="group-page-head">
           <div>
@@ -519,78 +643,6 @@ QQ空间 = 公开札记
         </div>
       </section>
 
-      <section class="panel relationship-workspace" id="panel-worldbook">
-        <div class="section-head relationship-head">
-          <div>
-            <span class="relationship-kicker">IDENTITY · CONTEXT · BOUNDARY</span>
-            <h2>群聊关系网</h2>
-            <p class="section-desc">用明确身份、别名与边界资料辅助群聊判断；待确认观察不会自动写入长期记忆。</p>
-          </div>
-          <div class="actions compact">
-            <button id="worldbookImportBtn" type="button">同步资料</button>
-            <button id="worldbookClearPendingBtn" type="button" class="danger-outline">清理待确认观察</button>
-          </div>
-        </div>
-
-        <div id="worldbookSummary" class="worldbook-summary relationship-summary"></div>
-
-        <div class="relationship-commandbar">
-          <label class="relationship-search">
-            <span>查找成员</span>
-            <input id="worldbookMemberFilter" type="search" placeholder="QQ、B站身份、名称、别名或群名片" />
-          </label>
-          <span id="worldbookSourceFiles" class="relationship-source muted"></span>
-        </div>
-
-        <div class="relationship-workspace-grid">
-          <article class="relationship-roster">
-            <div class="relationship-section-head">
-              <div>
-                <span>成员目录</span>
-                <h3>关系节点</h3>
-              </div>
-              <span id="worldbookMemberCount" class="relationship-count muted"></span>
-            </div>
-            <details class="relationship-create">
-              <summary>新增关系节点</summary>
-              <form id="worldbookAddMemberForm" class="inline-form manage-form">
-                <label>身份键 <input name="user_id" placeholder="QQ 号或 bili:UID" required /></label>
-                <label>名称 <input name="name" placeholder="成员显示名" /></label>
-                <label>优先级 <input name="priority" type="number" value="120" /></label>
-                <button type="submit">新增节点</button>
-              </form>
-            </details>
-            <div id="worldbookMembers" class="worldbook-members relationship-member-list"></div>
-          </article>
-
-          <aside class="relationship-sidebar">
-            <article class="relationship-context-card">
-              <div class="relationship-section-head compact">
-                <div>
-                  <span>群上下文</span>
-                  <h3>群资料</h3>
-                </div>
-              </div>
-              <form id="worldbookAddGroupForm" class="stack-form compact-manage-form">
-                <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
-                <label>名称 <input name="name" placeholder="群资料名称" /></label>
-                <button type="submit">新增群资料</button>
-              </form>
-              <div id="worldbookGroups" class="worldbook-groups"></div>
-            </article>
-
-            <article class="relationship-import-card">
-              <div class="relationship-section-head compact">
-                <div>
-                  <span>数据健康</span>
-                  <h3>同步状态</h3>
-                </div>
-              </div>
-              <dl id="worldbookImportState" class="relationship-import-state"></dl>
-            </article>
-          </aside>
-        </div>
-      </section>
       <section class="panel" id="panel-memory">
         <div class="section-head">
           <h2>生活观察</h2>
@@ -653,35 +705,6 @@ QQ空间 = 公开札记
           <article class="wide skill-growth-shell">
             <details class="skill-growth-drawer">
               <summary>
-                <span>技能成长</span>
-                <small>默认收起，展开后查看等级、训练记录和管理项</small>
-              </summary>
-              <details class="skill-manage-drawer">
-                <summary>管理技能</summary>
-                <form id="skillAddForm" class="inline-form manage-form skill-add-form">
-                  <label>技能 <input name="name" maxlength="32" required /></label>
-                  <label>分类 <input name="category" maxlength="20" placeholder="能力" /></label>
-                  <label>等级
-                    <select name="level">
-                      <option value="1">还不太熟</option>
-                      <option value="2">能慢慢试</option>
-                      <option value="3">能自己做</option>
-                      <option value="4">已经顺手</option>
-                      <option value="5">很拿手</option>
-                      <option value="6">有自己的办法</option>
-                    </select>
-                  </label>
-                  <label>关键词 <input name="keywords" maxlength="160" placeholder="逗号分隔" /></label>
-                  <label>别名 <input name="aliases" maxlength="160" placeholder="同义叫法，逗号分隔" /></label>
-                  <button type="submit">新增技能</button>
-                </form>
-              </details>
-              <div id="skillGrowthPanel" class="skill-growth-panel"></div>
-            </details>
-          </article>
-          <article class="wide skill-growth-shell">
-            <details class="skill-growth-drawer">
-              <summary>
                 <span>个人目标</span>
                 <small>明确记录阅读、学习、健康和生活目标</small>
               </summary>
@@ -714,7 +737,7 @@ QQ空间 = 公开札记
             <div id="slangCloud" class="word-cloud"></div>
           </article>
           <article class="wide memory-raw">
-            <h2>记忆插件协同</h2>
+            <h2>外部记忆插件协同</h2>
             <pre id="livingMemoryBox">加载中...</pre>
           </article>
         </div>
@@ -897,6 +920,7 @@ QQ空间 = 公开札记
           </article>
           <article>
             <h2 id="tokenTaskChartTitle">任务消耗排行</h2>
+            <p id="tokenTaskChartHint" class="token-source-note" hidden></p>
             <div id="tokenTaskChart" class="chart-box"></div>
           </article>
           <article class="wide" id="tokenHourlyPanel">
@@ -1499,6 +1523,22 @@ QQ空间 = 公开札记
 
   <div id="setupGuideOverlayRoot"></div>
 
+  <div id="bookshelfCoverPreview" class="bookshelf-cover-preview" hidden aria-hidden="true">
+    <section class="bookshelf-cover-preview__dialog" role="dialog" aria-modal="true" aria-labelledby="bookshelfCoverPreviewTitle">
+      <header>
+        <div>
+          <span>创作封面</span>
+          <h2 id="bookshelfCoverPreviewTitle">封面预览</h2>
+        </div>
+        <button id="bookshelfCoverPreviewClose" type="button" data-bookshelf-cover-preview-close aria-label="关闭封面预览">×</button>
+      </header>
+      <div class="bookshelf-cover-preview__frame">
+        <img id="bookshelfCoverPreviewImage" alt="" />
+      </div>
+      <p>按 Esc 或点击遮罩关闭</p>
+    </section>
+  </div>
+
   <div id="dailyOutfitPreview" class="daily-outfit-preview" aria-hidden="true">
     <div class="daily-outfit-preview__dialog" role="dialog" aria-modal="true" aria-label="今日穿搭预览">
       <button id="dailyOutfitPreviewClose" type="button" class="daily-outfit-preview__close" data-preview-dismiss="1" aria-label="关闭预览">×</button>
@@ -1511,6 +1551,6 @@ QQ空间 = 公开札记
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260711-provider-debug"></script>
   <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
-  <script src="./app.js?v=20260714-browser-history-ui-v1"></script>
+  <script src="./app.js?v=20260715-learning-nav-expression-clean-token-task-v6"></script>
 </body>
 </html>

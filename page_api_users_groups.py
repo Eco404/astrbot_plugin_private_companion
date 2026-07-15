@@ -76,6 +76,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             action_message = ""
             async with self.plugin._data_lock:
                 user = self.plugin._get_user(user_id)
+                expression_voice_needs_refresh = False
                 if "enabled" in payload:
                     enabled = bool(payload.get("enabled"))
                     user["enabled"] = enabled
@@ -90,9 +91,11 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if "style" in payload:
                     user["style"] = self._single_line(payload.get("style"), 24)
                 if "relationship_role" in payload:
+                    previous_role = self.plugin._private_user_role(user, user_id)
                     role = self.plugin._normalize_private_user_role(payload.get("relationship_role"))
                     if role:
                         user["relationship_role"] = role
+                        expression_voice_needs_refresh = role != previous_role
                 if "proactive_daily_limit" in payload:
                     user["proactive_daily_limit"] = _safe_int(payload.get("proactive_daily_limit"), -1, -1, 30)
                 for key in (
@@ -132,6 +135,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if payload.get("clear_emotion_state"):
                     user["intent_profile"] = {}
                     user["relationship_state"] = {}
+                if payload.get("clear_behavior_habits"):
+                    user["behavior_habits"] = {}
                 if payload.get("clear_learning"):
                     for key, empty in (
                         ("companion_memory", {}),
@@ -147,6 +152,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     user["episode_message_count"] = 0
                     user["last_episode_refresh_at"] = 0
                     user["last_memory_refresh_at"] = 0
+                    expression_voice_needs_refresh = True
                 if payload.get("clear_open_loops"):
                     action_message = self.plugin._remove_open_loop_entry(user, "全部")
                 remove_open_loop_text = self._single_line(payload.get("remove_open_loop_text"), 120)
@@ -155,6 +161,12 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 expression_action = self._single_line(payload.get("expression_action"), 40)
                 if expression_action:
                     action_message = self._apply_expression_profile_action(user, payload)
+                    if expression_action in {"approve", "delete_sample"}:
+                        expression_voice_needs_refresh = True
+                if expression_voice_needs_refresh:
+                    voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(voice_refresher):
+                        voice_refresher()
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(user)
             result = self._user_summary(user_id, snapshot)
@@ -182,14 +194,39 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     users = {}
                     self.plugin.data["users"] = users
                 canonical_user_id = self.plugin._canonical_private_user_id(user_id)
-                removed_ids = {user_id}
-                removed_user = users.pop(user_id, None)
+                stored_user_id = canonical_user_id if canonical_user_id in users else user_id
+                removed_ids = {user_id, canonical_user_id, stored_user_id}
+                removed_user = users.pop(stored_user_id, None)
                 if isinstance(removed_user, dict):
                     for alias_id in removed_user.get("alias_user_ids") if isinstance(removed_user.get("alias_user_ids"), list) else []:
                         alias_text = str(alias_id or "").strip()
                         if alias_text:
                             removed_ids.add(alias_text)
                 removed_ids = {item for item in removed_ids if item}
+
+                def keep_expression_scope_ids(raw_values: Any) -> list[str]:
+                    kept: list[str] = []
+                    for item in self._normalize_id_list(raw_values or []):
+                        canonical_item_getter = getattr(self.plugin, "_expression_private_scope_id", None)
+                        canonical_item = canonical_item_getter(item) if callable(canonical_item_getter) else item
+                        if item in removed_ids or canonical_item in removed_ids:
+                            continue
+                        if item not in kept:
+                            kept.append(item)
+                    return kept
+
+                old_expression_learning_ids = self._normalize_id_list(
+                    getattr(self.plugin, "expression_private_learning_source_ids", []) or []
+                )
+                old_expression_application_ids = self._normalize_id_list(
+                    getattr(self.plugin, "expression_private_application_user_ids", []) or []
+                )
+                expression_learning_ids = keep_expression_scope_ids(old_expression_learning_ids)
+                expression_application_ids = keep_expression_scope_ids(old_expression_application_ids)
+                removed_expression_scope = (
+                    expression_learning_ids != old_expression_learning_ids
+                    or expression_application_ids != old_expression_application_ids
+                )
 
                 old_target_user_ids = self._normalize_id_list(getattr(self.plugin, "target_user_ids", []) or [])
                 target_user_ids = [item for item in old_target_user_ids if item not in removed_ids]
@@ -220,10 +257,17 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "target_user_ids": target_user_ids,
                     "private_user_aliases": alias_text,
                     "private_user_delivery_aliases": delivery_alias_text,
+                    "expression_private_learning_source_ids": expression_learning_ids,
+                    "expression_private_application_user_ids": expression_application_ids,
                 }
                 self._apply_config_value("target_user_ids", target_user_ids, overrides)
                 self._apply_config_value("private_user_aliases", alias_text, overrides)
                 self._apply_config_value("private_user_delivery_aliases", delivery_alias_text, overrides)
+                self._apply_config_value("expression_private_learning_source_ids", expression_learning_ids, overrides)
+                self._apply_config_value("expression_private_application_user_ids", expression_application_ids, overrides)
+                voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                if callable(voice_refresher):
+                    voice_refresher()
                 self.plugin._save_data_sync()
 
             config_saved = await self._save_config_if_possible()
@@ -236,6 +280,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 message_parts.append("已清理身份归并映射")
             if removed_delivery_aliases:
                 message_parts.append("已清理主动发送映射")
+            if removed_expression_scope:
+                message_parts.append("已清理表达学习范围")
             message = "，".join(message_parts) if message_parts else "没有找到可删除的私聊用户记录"
             return self._ok(
                 {
@@ -246,6 +292,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "removed_target": removed_target,
                     "removed_private_aliases": removed_private_aliases,
                     "removed_delivery_aliases": removed_delivery_aliases,
+                    "removed_expression_scope": removed_expression_scope,
                     "config_saved": config_saved,
                     "message": message,
                 }
@@ -615,6 +662,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             "last_slang_summary_at": 0,
                         }
                     )
+                    voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(voice_refresher):
+                        voice_refresher()
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(group)
             return self._ok(self._group_summary(group_id, snapshot))
@@ -635,6 +685,19 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     self.plugin.data["groups"] = groups
                 removed_group = groups.pop(group_id, None) is not None
 
+                old_expression_learning_ids = self._normalize_id_list(
+                    getattr(self.plugin, "expression_group_learning_source_ids", []) or []
+                )
+                old_expression_application_ids = self._normalize_id_list(
+                    getattr(self.plugin, "expression_group_application_ids", []) or []
+                )
+                expression_learning_ids = [item for item in old_expression_learning_ids if item != group_id]
+                expression_application_ids = [item for item in old_expression_application_ids if item != group_id]
+                removed_expression_scope = (
+                    expression_learning_ids != old_expression_learning_ids
+                    or expression_application_ids != old_expression_application_ids
+                )
+
                 whitelist = [
                     str(item).strip()
                     for item in (getattr(self.plugin, "group_whitelist_ids", []) or [])
@@ -649,6 +712,15 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 removed_blacklist = len(blacklist) != len(getattr(self.plugin, "group_blacklist_ids", []) or [])
                 self._apply_config_value("group_whitelist_ids", whitelist, {"group_whitelist_ids": whitelist, "group_blacklist_ids": blacklist})
                 self._apply_config_value("group_blacklist_ids", blacklist, {"group_whitelist_ids": whitelist, "group_blacklist_ids": blacklist})
+                expression_overrides = {
+                    "expression_group_learning_source_ids": expression_learning_ids,
+                    "expression_group_application_ids": expression_application_ids,
+                }
+                self._apply_config_value("expression_group_learning_source_ids", expression_learning_ids, expression_overrides)
+                self._apply_config_value("expression_group_application_ids", expression_application_ids, expression_overrides)
+                voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                if callable(voice_refresher):
+                    voice_refresher()
                 self.plugin._save_data_sync()
 
             config_saved = await self._save_config_if_possible()
@@ -657,6 +729,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 message_parts.append("已删除群聊观测")
             if removed_whitelist or removed_blacklist:
                 message_parts.append("已移出群聊名单")
+            if removed_expression_scope:
+                message_parts.append("已清理表达学习范围")
             message = "，".join(message_parts) if message_parts else "没有找到可删除的群聊记录"
             return self._ok(
                 {
@@ -664,6 +738,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "removed_group": removed_group,
                     "removed_whitelist": removed_whitelist,
                     "removed_blacklist": removed_blacklist,
+                    "removed_expression_scope": removed_expression_scope,
                     "config_saved": config_saved,
                     "message": message,
                 }

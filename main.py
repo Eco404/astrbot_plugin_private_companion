@@ -105,6 +105,7 @@ from .dreaming import (
 from .helpers import (
     _date_key,
     _flat_get,
+    _group_link_message_context,
     _missing_optional_model_dependency,
     _normalize_outbound_punctuation_flow,
     _now_ts,
@@ -240,6 +241,197 @@ class PrivateCompanionExtensionAPI:
 
     def list_proactive_abilities(self) -> list[dict[str, Any]]:
         return self._plugin.external_proactive_abilities()
+
+    def resolve_historical_chat_identities(self, speakers: list[str]) -> dict[str, Any]:
+        plugin = self._plugin
+        labels = [_single_line(item, 80) for item in speakers if _single_line(item, 80)]
+        matches: dict[str, list[dict[str, Any]]] = {}
+        resolver = getattr(plugin, "_resolve_worldbook_member_by_name", None)
+        for label in labels:
+            candidates = resolver(label) if callable(resolver) else []
+            matches[label] = [
+                {
+                    "user_id": _single_line(item.get("user_id"), 80),
+                    "name": _single_line(item.get("name"), 80),
+                    "aliases": [
+                        _single_line(alias, 40)
+                        for alias in (item.get("aliases") or [])
+                        if _single_line(alias, 40)
+                    ][:12],
+                    "observed_names": [
+                        _single_line(alias, 40)
+                        for alias in (item.get("observed_names") or [])
+                        if _single_line(alias, 40)
+                    ][:12],
+                    "identity_note": _single_line(item.get("identity_note"), 240),
+                }
+                for item in (candidates or [])
+                if isinstance(item, dict)
+            ][:8]
+        users = plugin.data.get("users") if isinstance(plugin.data.get("users"), dict) else {}
+        configured_targets = getattr(plugin, "_configured_target_ids", None)
+        target_ids = set(str(item) for item in (configured_targets() if callable(configured_targets) else []) or [])
+        target_users: list[dict[str, Any]] = []
+        for user_id, raw in users.items():
+            if not isinstance(raw, dict):
+                continue
+            if target_ids and str(user_id) not in target_ids:
+                continue
+            target_users.append(
+                {
+                    "user_id": _single_line(user_id, 80),
+                    "name": _single_line(raw.get("nickname") or raw.get("display_name") or user_id, 80),
+                }
+            )
+        bot_name = _single_line(getattr(plugin, "bot_name", ""), 80)
+        bot_aliases = [bot_name] if bot_name else []
+        return {
+            "available": True,
+            "matches": matches,
+            "bot": {
+                "name": bot_name,
+                "aliases": bot_aliases,
+                "self_ids": sorted(getattr(plugin, "_known_bot_self_ids", lambda: set())()),
+            },
+            "target_users": target_users[:30],
+        }
+
+    async def stage_historical_relationship_observations(
+        self,
+        *,
+        user_id: str,
+        user_name: str,
+        batch_id: str,
+        observations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        plugin = self._plugin
+        normalized_user_id = _single_line(user_id, 80)
+        normalized_batch_id = _single_line(batch_id, 120)
+        if not normalized_user_id or not normalized_batch_id:
+            return {"staged": 0, "reason": "missing_identity_or_batch"}
+        staged = 0
+        async with plugin._data_lock:
+            profiles = plugin.data.setdefault("worldbook_member_profiles", {})
+            if not isinstance(profiles, dict):
+                profiles = {}
+                plugin.data["worldbook_member_profiles"] = profiles
+            profile = profiles.get(normalized_user_id)
+            if not isinstance(profile, dict):
+                profile = {
+                    "user_id": normalized_user_id,
+                    "identity_type": "qq" if normalized_user_id.isdigit() else "external",
+                    "name": _single_line(user_name, 80) or normalized_user_id,
+                    "aliases": [],
+                    "observed_names": [],
+                    "content": "",
+                    "identity_note": "",
+                    "boundary_note": "",
+                    "important_memories": [],
+                    "pending_observations": [],
+                    "enabled": True,
+                    "priority": 120,
+                    "source_entries": ["MemoryCompanion 历史对话导入"],
+                }
+                profiles[normalized_user_id] = profile
+            pending = profile.setdefault("pending_observations", [])
+            if not isinstance(pending, list):
+                pending = []
+                profile["pending_observations"] = pending
+            existing_keys = {
+                (
+                    _single_line(item.get("import_batch_id"), 120),
+                    _single_line(item.get("content"), 500),
+                )
+                for item in pending
+                if isinstance(item, dict)
+            }
+            # 调用方按置信度排好优先级；只接收前 24 条，避免后部低优先候选
+            # 因 insert(0) 反而挤掉前部高优先候选。
+            for raw in observations[:24]:
+                if not isinstance(raw, dict):
+                    continue
+                content = _single_line(raw.get("content"), 500)
+                if not content or (normalized_batch_id, content) in existing_keys:
+                    continue
+                try:
+                    confidence = max(0.0, min(1.0, float(raw.get("confidence") or 0.6)))
+                except Exception:
+                    confidence = 0.6
+                pending.insert(
+                    0,
+                    {
+                        "id": hashlib.sha1(
+                            f"{normalized_batch_id}|{content}".encode("utf-8", errors="ignore")
+                        ).hexdigest()[:12],
+                        "title": _single_line(raw.get("title"), 80) or "历史对话关系观察",
+                        "content": content,
+                        "evidence": _single_line("；".join(raw.get("source_message_ids") or raw.get("segment_ids") or []), 500),
+                        "source_event_ids": [
+                            _single_line(item, 120)
+                            for item in (raw.get("source_message_ids") or [])
+                            if _single_line(item, 120)
+                        ][:16],
+                        "source": "memory_companion_historical_chat",
+                        "import_batch_id": normalized_batch_id,
+                        "observed_at": _single_line(raw.get("observed_at"), 80),
+                        "weight": max(35, min(95, int(round(confidence * 100)))),
+                        "confidence": confidence,
+                        "count": 1,
+                        "created_at": time.time(),
+                        "updated_at": time.time(),
+                    },
+                )
+                existing_keys.add((normalized_batch_id, content))
+                staged += 1
+            # 历史批次最多保留 24 条，但不能为了导入历史而删除原有的普通待确认观察。
+            # 新历史观察放在前面便于审核；超过上限时只裁掉历史来源自身。
+            ordinary_pending: list[dict[str, Any]] = []
+            historical_pending: list[dict[str, Any]] = []
+            historical_count = 0
+            for item in pending:
+                if not isinstance(item, dict):
+                    continue
+                if _single_line(item.get("source"), 80) == "memory_companion_historical_chat":
+                    historical_count += 1
+                    if historical_count > 24:
+                        continue
+                    historical_pending.append(item)
+                    continue
+                ordinary_pending.append(item)
+            # 普通实时观察先展示；历史观察随后逐条审核，不会把既有候选挤出页面。
+            profile["pending_observations"] = ordinary_pending + historical_pending
+            if staged:
+                profile["last_pending_observation_at"] = time.time()
+                plugin._save_data_sync()
+        return {"staged": staged, "batch_id": normalized_batch_id}
+
+    async def rollback_historical_relationship_observations(self, batch_id: str) -> dict[str, Any]:
+        plugin = self._plugin
+        normalized_batch_id = _single_line(batch_id, 120)
+        removed = 0
+        if not normalized_batch_id:
+            return {"removed": 0}
+        async with plugin._data_lock:
+            profiles = plugin.data.get("worldbook_member_profiles")
+            if not isinstance(profiles, dict):
+                return {"removed": 0}
+            for profile in profiles.values():
+                if not isinstance(profile, dict):
+                    continue
+                pending = profile.get("pending_observations")
+                if not isinstance(pending, list):
+                    continue
+                kept = [
+                    item
+                    for item in pending
+                    if not isinstance(item, dict)
+                    or _single_line(item.get("import_batch_id"), 120) != normalized_batch_id
+                ]
+                removed += len(pending) - len(kept)
+                profile["pending_observations"] = kept
+            if removed:
+                plugin._save_data_sync()
+        return {"removed": removed, "batch_id": normalized_batch_id}
 
 _LUNAR_MONTH_NAMES = [
     "正月",
@@ -439,7 +631,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.9.10",
+    "5.10.0",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -630,6 +822,7 @@ class PrivateCompanionPlugin(
             self.recall_forbidden_scope = "bot_and_group"
         self._recalled_message_ids: dict[str, dict[str, Any]] = {}
         self._recall_message_cache: dict[str, dict[str, Any]] = {}
+        self._recent_outbound_text_guard: dict[str, dict[str, Any]] = {}
         self.enable_message_debounce = self._cfg_bool(
             c,
             "enable_message_debounce",
@@ -877,6 +1070,22 @@ class PrivateCompanionPlugin(
             if isinstance(cleanup_words, list)
             else ["\n"]
         )
+        self.enable_segmented_proactive_content_replacement = self._cfg_bool(
+            c,
+            "enable_segmented_proactive_content_replacement",
+            False,
+        )
+        replacement_rules = self._cfg_raw(c, "segmented_proactive_content_replacements", [])
+        if isinstance(replacement_rules, list):
+            self.segmented_proactive_content_replacements = replacement_rules[:80]
+        elif isinstance(replacement_rules, str):
+            self.segmented_proactive_content_replacements = [
+                line.strip()
+                for line in replacement_rules.splitlines()
+                if line.strip()
+            ][:80]
+        else:
+            self.segmented_proactive_content_replacements = []
         self.segmented_proactive_interval_method = self._cfg_str(c, "segmented_proactive_interval_method", "log", "log")
         if self.segmented_proactive_interval_method not in {"random", "log"}:
             self.segmented_proactive_interval_method = "log"
@@ -1029,18 +1238,76 @@ class PrivateCompanionPlugin(
         self.expression_learning_mode = self._cfg_str(c, "expression_learning_mode", "balanced", "balanced").lower()
         if self.expression_learning_mode not in {"light", "balanced", "aggressive"}:
             self.expression_learning_mode = "balanced"
+        self.expression_private_learning_source_mode = self._cfg_str(
+            c, "expression_private_learning_source_mode", "owner", "owner"
+        ).lower()
+        if self.expression_private_learning_source_mode not in {"owner", "selected", "all"}:
+            self.expression_private_learning_source_mode = "owner"
+        self.expression_private_learning_source_ids = self._cfg_raw(c, "expression_private_learning_source_ids", [])
+        self.expression_group_learning_source_mode = self._cfg_str(
+            c, "expression_group_learning_source_mode", "disabled", "disabled"
+        ).lower()
+        if self.expression_group_learning_source_mode not in {"disabled", "selected", "all"}:
+            self.expression_group_learning_source_mode = "disabled"
+        self.expression_group_learning_source_ids = self._cfg_raw(c, "expression_group_learning_source_ids", [])
+        self.expression_group_learning_daily_batch_limit = self._cfg_int(
+            c,
+            "expression_group_learning_daily_batch_limit",
+            6,
+            1,
+            50,
+        )
+        self.expression_group_learning_min_new_messages = self._cfg_int(
+            c,
+            "expression_group_learning_min_new_messages",
+            20,
+            5,
+            80,
+        )
+        self.expression_private_application_mode = self._cfg_str(
+            c, "expression_private_application_mode", "all", "all"
+        ).lower()
+        if self.expression_private_application_mode not in {"all", "selected"}:
+            self.expression_private_application_mode = "all"
+        self.expression_private_application_user_ids = self._cfg_raw(c, "expression_private_application_user_ids", [])
+        self.expression_group_application_mode = self._cfg_str(
+            c, "expression_group_application_mode", "all", "all"
+        ).lower()
+        if self.expression_group_application_mode not in {"disabled", "all", "selected"}:
+            self.expression_group_application_mode = "all"
+        self.expression_group_application_ids = self._cfg_raw(c, "expression_group_application_ids", [])
         self.enable_expression_manual_review = self._cfg_bool(c, "enable_expression_manual_review", False)
         self.enable_expression_style_review = self._cfg_bool(c, "enable_expression_style_review", True)
         self.enable_intent_emotion_analysis = self._cfg_bool(c, "enable_intent_emotion_analysis", True)
-        self.enable_response_self_review = self._cfg_bool(c, "enable_response_self_review", True)
-        self.enable_proactive_message_review = self.enable_response_self_review and self._cfg_bool(
+        legacy_response_review_enabled = self._cfg_bool(c, "enable_response_self_review", True)
+        self.enable_passive_response_review = self._cfg_bool(
+            c,
+            "enable_passive_response_review",
+            legacy_response_review_enabled,
+        )
+        # Runtime alias for older integrations. It no longer gates proactive review.
+        self.enable_response_self_review = self.enable_passive_response_review
+        self.enable_proactive_message_review = self._cfg_bool(
             c,
             "enable_proactive_message_review",
-            True,
+            legacy_response_review_enabled,
         )
-        self.response_review_mode = self._cfg_str(c, "response_review_mode", "severe_only", "severe_only").lower()
-        if self.response_review_mode not in {"local_only", "severe_only", "full"}:
-            self.response_review_mode = "severe_only"
+        legacy_response_review_mode = self._cfg_str(c, "response_review_mode", "severe_only", "severe_only").lower()
+        self.passive_review_mode = self._cfg_str(
+            c,
+            "passive_review_mode",
+            legacy_response_review_mode,
+            legacy_response_review_mode,
+        ).lower()
+        if self.passive_review_mode not in {"local_only", "severe_only", "full"}:
+            self.passive_review_mode = "severe_only"
+        self.response_review_mode = self.passive_review_mode
+        self.passive_review_strength = self._cfg_str(c, "passive_review_strength", "lenient", "lenient").lower()
+        if self.passive_review_strength not in {"lenient", "balanced", "strict"}:
+            self.passive_review_strength = "lenient"
+        self.proactive_review_mode = self._cfg_str(c, "proactive_review_mode", "full", "full").lower()
+        if self.proactive_review_mode not in {"local_only", "severe_only", "full"}:
+            self.proactive_review_mode = "full"
         self.enable_smart_silence = self._cfg_bool(c, "enable_smart_silence", True)
         self.smart_silence_judge_mode = self._cfg_str(c, "smart_silence_judge_mode", "boundary_only", "boundary_only").strip().lower()
         if self.smart_silence_judge_mode not in {"boundary_only", "contextual"}:
@@ -1086,6 +1353,7 @@ class PrivateCompanionPlugin(
         self.enable_food_menu_recommendation = self._cfg_bool(c, "enable_food_menu_recommendation", True)
         self.enable_meal_care_proactive = self._cfg_bool(c, "enable_meal_care_proactive", True)
         self.meal_care_max_daily = self._cfg_int(c, "meal_care_max_daily", 1, 0, 3)
+        self.meal_care_min_interval_hours = self._cfg_int(c, "meal_care_min_interval_hours", 48, 0, 168)
         self.meal_care_followup_minutes = self._cfg_int(c, "meal_care_followup_minutes", 45, 15, 180)
         self.user_habit_min_count = self._cfg_int(c, "user_habit_min_count", 3, 2, 20)
         self.user_habit_max_items = self._cfg_int(c, "user_habit_max_items", 24, 8, 80)
@@ -1101,7 +1369,7 @@ class PrivateCompanionPlugin(
         self.personal_goal_stall_days = self._cfg_int(c, "personal_goal_stall_days", 3, 1, 30)
         self.memory_refresh_interval_minutes = self._cfg_int(c, "memory_refresh_interval_minutes", 360, 30, 4320)
         self.max_companion_memory_items = self._cfg_int(c, "max_companion_memory_items", 36, 8, 120)
-        self.max_learned_expression_items = self._cfg_int(c, "max_learned_expression_items", 18, 4, 60)
+        self.max_learned_expression_items = self._cfg_int(c, "max_learned_expression_items", 60, 12, 240)
         self.mai_style_provider_id = self._cfg_str(c, "MAI_STYLE_PROVIDER_ID", "")
         self.companion_memory_provider_id = self._cfg_str(c, "COMPANION_MEMORY_PROVIDER_ID", "")
         self.dialogue_episode_provider_id = self._cfg_str(c, "DIALOGUE_EPISODE_PROVIDER_ID", "")
@@ -1256,6 +1524,7 @@ class PrivateCompanionPlugin(
         self.enable_external_event_self_link = self._cfg_bool(c, "enable_external_event_self_link", True)
         self.external_event_self_link_probability = self._cfg_unit_interval(c, "external_event_self_link_probability", 0.62, 0.0)
         self.external_event_self_link_cooldown_hours = self._cfg_int(c, "external_event_self_link_cooldown_hours", 12, 1, 168)
+        self.external_link_share_cooldown_hours = self._cfg_int(c, "external_link_share_cooldown_hours", 72, 0, 168)
         self.news_max_items_per_source = self._cfg_int(c, "news_max_items_per_source", 5, 1, 20)
         self.news_hot_sources = self._cfg_str(c, "news_hot_sources", self._cfg_str(c, "hot_trend_sources", "weibo,hackernews"))
         self.news_hot_max_items = self._cfg_int(c, "news_hot_max_items", self._cfg_int(c, "hot_trend_max_items", 12, 3, 30), 3, 30)
@@ -1725,6 +1994,7 @@ class PrivateCompanionPlugin(
 
         run_step("legacy_prompt_trace_cleanup", self._cleanup_legacy_proactive_prompt_traces)
         run_step("framework_meta_leak_cleanup", self._cleanup_framework_meta_leak_records)
+        run_step("creative_fallback_cleanup", self._cleanup_legacy_creative_fallback_chunks)
         run_step("runtime_social_fact_sanitize", self._sanitize_runtime_social_facts_inplace)
         run_step("false_sleep_interaction_cleanup", self._cleanup_false_sleep_interaction_updates)
         run_step("private_user_alias_merge", self._merge_private_user_alias_records)
@@ -1921,6 +2191,44 @@ class PrivateCompanionPlugin(
             return
         if bool(getattr(event, "is_private_chat", lambda: False)()):
             self._stop_passive_input_status_loop(event)
+
+    @filter.on_decorating_result(priority=-10000)
+    async def suppress_recent_duplicate_outbound_text(self, event: AstrMessageEvent, *args, **kwargs):
+        """Last-mile idempotency guard for adapter echoes and concurrent reply chains."""
+        if self is None or not self.enabled:
+            return
+        candidate = self._outbound_text_duplicate_candidate(event)
+        if not candidate:
+            return
+        duplicate_state = self._reserve_outbound_text_candidate(candidate)
+        if not duplicate_state:
+            setattr(event, "_private_companion_outbound_text_candidate", candidate)
+            return
+        logger.warning(
+            "[PrivateCompanion] 发送前拦截短时间重复正文: scope=%s sender=%s previous=%s text=%s",
+            candidate.get("scope") or "unknown",
+            candidate.get("sender_id") or "-",
+            duplicate_state,
+            _single_line(candidate.get("text"), 120),
+        )
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+
+    @filter.after_message_sent(priority=10000)
+    async def remember_confirmed_outbound_text(self, event: AstrMessageEvent, *args, **kwargs):
+        """Confirm only candidates for which the platform send operation ran."""
+        if self is None or not self.enabled:
+            return
+        if not bool(getattr(event, "_has_send_oper", False)):
+            return
+        candidate = getattr(event, "_private_companion_outbound_text_candidate", None)
+        if isinstance(candidate, dict):
+            self._confirm_outbound_text_candidate(candidate)
 
     @filter.on_decorating_result()
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
@@ -2323,9 +2631,9 @@ class PrivateCompanionPlugin(
             return
         if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
             return
-        if not bool(getattr(self, "enable_response_self_review", True)):
+        if not self._passive_response_review_enabled():
             return
-        if str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower() == "local_only":
+        if self._effective_passive_review_mode() == "local_only":
             return
         if bool(getattr(event, "_private_companion_group_question_review_done", False)):
             return
@@ -2387,7 +2695,7 @@ class PrivateCompanionPlugin(
         if self is None or not self.enabled:
             return
         if (
-            bool(getattr(self, "enable_response_self_review", True))
+            self._passive_response_review_enabled()
             and bool(getattr(event, "_private_companion_response_review_drop", False))
         ):
             logger.info("[PrivateCompanion] 回复复核去重发送前兜底拦截")
@@ -3626,6 +3934,33 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             confirmation_token=confirmation_token,
         )
 
+    @filter.llm_tool(name="pc_view_creative_work")
+    async def pc_view_creative_work(
+        self,
+        event: AstrMessageEvent,
+        action: str = "get",
+        selector: str = "",
+        part: int = 0,
+        max_chars: int = 6000,
+    ) -> str:
+        """只读查看 Bot 自己书柜中的真实创作项目与正文。
+
+        Args:
+            action(string): list/get。list 列出作品；get 读取指定作品正文。
+            selector(string): 作品准确标题、项目 id 或列表编号；留空时 get 默认读取最近一篇。
+            part(number): 可选，明确读取第几部分，按 1 开始；0 表示从第一部分起按预算读取。
+            max_chars(number): 可选，本次最多返回正文字符数，默认 6000。
+        """
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
+        return await self._pc_view_creative_work_impl(
+            event,
+            action=action,
+            selector=selector,
+            part=part,
+            max_chars=max_chars,
+        )
+
     @filter.llm_tool(name="pc_get_group_id_by_name")
     async def pc_get_group_id_by_name(self, event: AstrMessageEvent, **kwargs) -> str:
         """按群名关键词查询机器人已加入的群号。
@@ -4820,15 +5155,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
             )
 
-    def _expression_profile_prompt_metadata(self, user: dict[str, Any]) -> dict[str, Any]:
+    def _expression_profile_prompt_metadata(
+        self,
+        user: dict[str, Any],
+        rule_details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         profile = user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {}
         samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
         pending = profile.get("pending_samples") if isinstance(profile.get("pending_samples"), list) else []
+        scene_profiles = profile.get("scene_profiles") if isinstance(profile.get("scene_profiles"), dict) else {}
+        stable_scene_count = sum(
+            1
+            for item in scene_profiles.values()
+            if isinstance(item, dict) and _safe_int(item.get("count"), 0, 0) >= 2
+        )
         return {
             "来源": "表达学习样本",
             "置信度": min(1.0, round(len(samples) / 8, 2)) if samples else 0,
-            "命中数": len(samples),
+            "样本数": len(samples),
             "待审核": len(pending),
+            "已学场景": stable_scene_count,
+            "本轮命中": _single_line((rule_details or {}).get("label"), 32) or "无稳定规则",
+            "规则证据": _safe_int((rule_details or {}).get("evidence_count"), 0, 0),
             "启用": bool(getattr(self, "enable_expression_learning", False)),
             "模式": _single_line(getattr(self, "expression_learning_mode", "balanced"), 20),
         }
@@ -4914,19 +5262,40 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             add_spec("livingmemory.guidance", "livingmemory", 90, lambda: self._format_livingmemory_guidance(scope="private" if is_private_chat else "group"))
         add_spec("detail.injection", "daily_detail", 40, self._format_detail_injection)
 
-        expression_text = ""
-        if bool(getattr(self, "enable_expression_learning", False)):
-            expression_text = self._format_expression_profile_for_prompt(current_user)
-            if expression_text.startswith("暂无足够样本"):
-                expression_text = ""
-        if expression_text:
-            add_spec(
-                "expression.rhythm",
-                "expression",
-                72,
-                lambda: "【表达节奏参考】\n" + expression_text + "\n只学习回复松紧、短句节奏和标点倾向；不要照抄样本，也不要把样本里的事实当作当前事实。",
-                metadata=self._expression_profile_prompt_metadata(current_user),
+        current_user_id = ""
+        if is_private_chat:
+            try:
+                current_user_id = self._expression_private_scope_id(
+                    current_user.get("user_id") or event.get_sender_id()
+                )
+            except Exception:
+                current_user_id = self._expression_private_scope_id(current_user.get("user_id"))
+            expression_voice_selection = self._expression_voice_selection(
+                scope="private",
+                target_id=current_user_id,
+                inbound_text=inbound_text,
+                context_owner=current_user,
             )
+            expression_voice = str(expression_voice_selection.get("prompt") or "")
+            semantic_expression_rules = expression_voice_selection.get("rules")
+            if isinstance(semantic_expression_rules, list) and semantic_expression_rules:
+                try:
+                    setattr(event, "private_companion_semantic_expression_rules", semantic_expression_rules)
+                    setattr(
+                        event,
+                        "private_companion_semantic_expression_context",
+                        dict(expression_voice_selection.get("context") or {}),
+                    )
+                except Exception:
+                    pass
+            if expression_voice:
+                add_spec(
+                    "expression.voice",
+                    "expression",
+                    68,
+                    lambda: expression_voice,
+                    metadata={"范围": "全局抽象表达底色", "目标": current_user_id},
+                )
 
         async def timer_context() -> str:
             if not (self.enable_llm_timer_scheduling and is_private_chat):
@@ -5133,6 +5502,45 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 metadata={"注入位置": placement},
             )
 
+        creative_work_instruction = self._creative_work_tool_instruction()
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        creative_work_marker = "<!-- private_companion_creative_work_tool_v1 -->"
+        try:
+            creative_work_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            creative_work_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        if (
+            creative_work_private
+            and creative_work_instruction
+            and self._creative_work_query_instruction_matches(message_text)
+            and creative_work_marker not in current_prompt
+            and creative_work_marker not in current_turn_prompt
+        ):
+            try:
+                setattr(event, "private_companion_creative_work_tool_required", True)
+            except Exception:
+                pass
+            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                req,
+                creative_work_marker,
+                creative_work_instruction,
+                priority=89,
+                source="tools",
+            ) else "system_prompt"
+            if placement == "system_prompt":
+                current_prompt = f"{current_prompt}\n\n{creative_work_marker}\n{creative_work_instruction}".strip()
+                req.system_prompt = current_prompt
+            await self._record_request_prompt_fragment(
+                event,
+                title="创作正文读取工具注入",
+                key="tools.creative_work",
+                text=creative_work_instruction,
+                source="tools",
+                mode="conditional",
+                metadata={"注入位置": placement},
+            )
+
         media_truth_instruction = self._media_delivery_truth_instruction()
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -5236,13 +5644,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         *args,
         **kwargs,
     ):
-        """记录 AstrBot 官方定时工具的真实成功结果，供响应阶段可靠去重。"""
+        """记录官方定时与创作读取工具的真实结果，供响应阶段可靠校验。"""
         if self is None or event is None:
             return
         if self._record_future_task_result(event, tool, tool_args, tool_result):
             logger.info(
                 "[PrivateCompanion] 已记录本轮 future_task 成功: action=%s session=%s",
                 _single_line((tool_args or {}).get("action"), 20) or "unknown",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+        if self._record_creative_work_tool_result(event, tool, tool_args, tool_result):
+            logger.info(
+                "[PrivateCompanion] 已记录本轮创作读取工具结果: action=%s status=%s session=%s",
+                _single_line((tool_args or {}).get("action") if isinstance(tool_args, dict) else "", 20) or "get",
+                _single_line(getattr(event, "private_companion_creative_work_tool_status", ""), 24) or "unknown",
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             )
 
@@ -7354,6 +7769,56 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 except Exception:
                     sender_id = ""
                 group = self._get_group(group_id)
+            if group_id and isinstance(group, dict):
+                expression_marker = "<!-- private_companion_expression_voice_group_v1 -->"
+                current_prompt = req.system_prompt or ""
+                current_turn_prompt = str(getattr(req, "prompt", "") or "")
+                if expression_marker not in current_prompt and expression_marker not in current_turn_prompt:
+                    group_expression_selection = self._expression_voice_selection(
+                        scope="group",
+                        target_id=group_id,
+                        inbound_text=_single_line(
+                            getattr(event, "private_companion_group_text", "")
+                            or getattr(event, "message_str", "")
+                            or getattr(req, "prompt", ""),
+                            300,
+                        ),
+                        context_owner=group,
+                    )
+                    expression_voice = str(group_expression_selection.get("prompt") or "")
+                    semantic_expression_rules = group_expression_selection.get("rules")
+                    if isinstance(semantic_expression_rules, list) and semantic_expression_rules:
+                        try:
+                            setattr(event, "private_companion_semantic_expression_rules", semantic_expression_rules)
+                            setattr(
+                                event,
+                                "private_companion_semantic_expression_context",
+                                dict(group_expression_selection.get("context") or {}),
+                            )
+                            setattr(event, "private_companion_semantic_expression_group_id", group_id)
+                        except Exception:
+                            pass
+                    if expression_voice:
+                        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                            req,
+                            expression_marker,
+                            expression_voice,
+                            priority=58,
+                            source="expression",
+                        ) else "system_prompt"
+                        if placement == "system_prompt":
+                            req.system_prompt = (
+                                f"{current_prompt}\n\n{expression_marker}\n{expression_voice}"
+                            ).strip()
+                        await self._record_request_prompt_fragment(
+                            event,
+                            title="群聊表达底色注入",
+                            key="expression.voice",
+                            text=expression_voice,
+                            source="expression",
+                            mode="group",
+                            metadata={"注入位置": placement, "范围": "全局抽象表达底色"},
+                        )
             if self.enable_group_context_injection and self._feature_enabled_or_temp_unlocked("enable_group_companion"):
                 if group_id and self._group_enabled_for_event(group_id):
                     if not isinstance(group, dict):
@@ -8194,7 +8659,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         recovered_text, _ = await self._recover_plaintext_photo_tool_call(event, resp, original_text)
         if recovered_text != original_text:
             resp.completion_text = recovered_text
-        original_text = recovered_text
+        called_names = getattr(resp, "tools_call_name", None)
+        creative_tool_called = bool(
+            (isinstance(called_names, str) and called_names.strip() == "pc_view_creative_work")
+            or (
+                isinstance(called_names, (list, tuple, set))
+                and "pc_view_creative_work" in {str(item) for item in called_names}
+            )
+        )
+        if creative_tool_called:
+            try:
+                setattr(event, "private_companion_creative_work_tool_attempted", True)
+            except Exception:
+                pass
+        guarded_text = self._guard_unread_creative_work_response(event, recovered_text)
+        if guarded_text != recovered_text:
+            resp.completion_text = guarded_text
+        original_text = guarded_text
         if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
             return
         normalized_text = _normalize_outbound_punctuation_flow(original_text)
@@ -8270,6 +8751,43 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             sender_id=sender_id,
             message_type="private" if is_private_chat else "group",
         )
+
+    @filter.on_llm_response()
+    async def record_group_expression_rule_usage(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
+        """记录群聊中实际进入主回复链的已审核语义表达规则。"""
+        if self is None or not self.enabled or bool(getattr(event, "is_private_chat", lambda: False)()):
+            return
+        semantic_rules = getattr(event, "private_companion_semantic_expression_rules", None)
+        if not isinstance(semantic_rules, list) or not semantic_rules:
+            return
+        if bool(getattr(event, "private_companion_group_semantic_usage_recorded", False)):
+            return
+        completion = _single_line(getattr(resp, "completion_text", ""), 500)
+        if not completion:
+            return
+        group_id = _single_line(
+            getattr(event, "private_companion_semantic_expression_group_id", "")
+            or self._extract_group_id_from_event(event),
+            80,
+        )
+        if not group_id:
+            return
+        context = getattr(event, "private_companion_semantic_expression_context", None)
+        async with self._data_lock:
+            group = self._get_group(group_id)
+            usage = self._record_expression_rule_injection(
+                group,
+                {},
+                completion,
+                semantic_rules=semantic_rules,
+                context=context if isinstance(context, dict) else {"channel": "group"},
+            )
+            if usage:
+                try:
+                    setattr(event, "private_companion_group_semantic_usage_recorded", True)
+                except Exception:
+                    pass
+                self._save_data_sync()
 
     @filter.on_llm_response()
     async def capture_llm_timer_directive(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
@@ -8423,7 +8941,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 creative_context=str(getattr(event, "private_companion_creative_reply_context", "") or ""),
                 review_event=event,
             )
-            if bool(getattr(self, "enable_response_self_review", True)) and self._is_response_review_drop_marker(reviewed_text):
+            if self._passive_response_review_enabled() and self._is_response_review_drop_marker(reviewed_text):
                 setattr(event, "_private_companion_response_review_drop", True)
                 resp.completion_text = ""
                 async with self._data_lock:
@@ -8466,7 +8984,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
             async with self._data_lock:
                 live_user_for_duplicate = self._get_user(user_id)
-            if bool(getattr(self, "enable_response_self_review", True)):
+            if self._passive_response_review_enabled() and self._effective_passive_review_strength() != "lenient":
                 should_drop_duplicate, duplicate_reason = self._should_drop_duplicate_reply_text(live_user_for_duplicate, inbound_text, working_text)
             else:
                 should_drop_duplicate, duplicate_reason = False, ""
@@ -8505,6 +9023,40 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 visible_reply_text = _single_line(_strip_internal_message_blocks(working_text), 500)
                 current["last_companion_message"] = visible_reply_text
                 current["last_companion_message_at"] = _now_ts()
+                expression_rule_details = getattr(
+                    event,
+                    "private_companion_expression_rule_details",
+                    None,
+                )
+                semantic_expression_rules = getattr(
+                    event,
+                    "private_companion_semantic_expression_rules",
+                    None,
+                )
+                semantic_expression_context = getattr(
+                    event,
+                    "private_companion_semantic_expression_context",
+                    None,
+                )
+                if isinstance(expression_rule_details, dict) or (
+                    isinstance(semantic_expression_rules, list) and semantic_expression_rules
+                ):
+                    expression_usage = self._record_expression_rule_injection(
+                        current,
+                        expression_rule_details if isinstance(expression_rule_details, dict) else {},
+                        visible_reply_text,
+                        semantic_rules=semantic_expression_rules if isinstance(semantic_expression_rules, list) else [],
+                        context=semantic_expression_context if isinstance(semantic_expression_context, dict) else {},
+                    )
+                    if expression_usage:
+                        logger.info(
+                            "[PrivateCompanion] 表达规则完成本轮注入: user=%s scene=%s evidence=%s visible=%s",
+                            user_id,
+                            _single_line(expression_usage.get("label"), 32) or "-",
+                            _safe_int(expression_usage.get("evidence_count"), 0, 0),
+                            ",".join(expression_usage.get("visible_signals") or [])
+                            or ("semantic" if _safe_int(expression_usage.get("semantic_rule_count"), 0, 0) else "none"),
+                        )
                 self._remember_passive_reply_topic(current, working_text, inbound_text)
                 self._save_data_sync()
             if working_text != original_text:
@@ -9859,8 +10411,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         rest_silence_early_block = bool(is_target_user)
                         rest_silence_early_text = safe_text or text
                 self._apply_private_image_vision_negative_feedback(user, safe_text or text)
+                expression_feedback = self._apply_expression_rule_feedback(
+                    user,
+                    safe_text or text,
+                    channel="private",
+                )
+                if expression_feedback:
+                    logger.info(
+                        "[PrivateCompanion] 表达规则收到用户反馈: user=%s signal=%s updated=%s demoted=%s",
+                        user_id,
+                        _single_line(expression_feedback.get("signal"), 16),
+                        _safe_int(expression_feedback.get("updated_rules"), 0, 0),
+                        _safe_int(expression_feedback.get("demoted_rules"), 0, 0),
+                    )
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
-                self._update_expression_profile_from_message(user, safe_text or text)
+                if self._expression_private_learning_source_enabled(user, user_id):
+                    self._update_expression_profile_from_message(user, safe_text or text)
+                    self._refresh_expression_voice_profile()
                 self._update_companion_memory_from_message(user, safe_text or text)
                 self._update_open_loops_from_message(user, safe_text or text)
                 self._update_action_preferences_from_message(user, safe_text or text)
@@ -9988,6 +10555,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         self._qzone_note_event_bot(event)
         if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
             return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id or not self._group_enabled_for_event(group_id):
+            return
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        self_id = self._event_self_id(event)
+        if sender_id and self_id and sender_id == self_id:
+            logger.info(
+                "[PrivateCompanion] 已终止 Bot 自己的群聊回流事件: group=%s self=%s text=%s",
+                group_id,
+                self_id,
+                _single_line(getattr(event, "message_str", ""), 80),
+            )
+            event.stop_event()
+            return
         received_ts = _now_ts()
         text = _single_line(event.message_str, 260)
         if not text:
@@ -10000,13 +10584,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self._proactive_only_blocks_passive_event(event, "group_event_pipeline"):
             logger.debug("[PrivateCompanion] 主动消息专用模式已跳过群聊被动观察")
             return
-        group_id = self._extract_group_id_from_event(event)
-        if not group_id or not self._group_enabled_for_event(group_id):
-            return
-        try:
-            sender_id = str(event.get_sender_id())
-        except Exception:
-            sender_id = ""
         sender_name = self._sender_display_name(event)
         if existing_reply_preview:
             async with self._data_lock:
@@ -10058,6 +10635,25 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and _single_line(signals.get("self_id"), 80)
             and _single_line(signals.get("reply_to_id"), 80) == _single_line(signals.get("self_id"), 80)
         )
+        quoted_link_payload = False
+        if not at_bot and not reply_to_bot:
+            try:
+                quoted_link_payload = await self._event_reply_contains_link_payload(event)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 群聊引用链接守卫读取失败: %s", _single_line(exc, 120))
+            if quoted_link_payload:
+                setattr(event, "private_companion_group_quoted_link_payload", True)
+        current_link_payload = _group_link_message_context(text, limit=260)[1]
+        if (current_link_payload or quoted_link_payload) and not at_bot and not reply_to_bot:
+            # Some adapters mark any reply/share card as a wake event before
+            # plugins inspect its real target.  Clear that provisional state;
+            # an actual Bot-name/custom-word/continuation match below can set
+            # it again deliberately.
+            try:
+                setattr(event, "is_at_or_wake_command", False)
+                setattr(event, "is_wake", False)
+            except Exception:
+                pass
         if (at_bot or reply_to_bot) and await self._maybe_handle_natural_language_photo_request(event, sender_id, text, directed=True):
             return
         registration_payload = None
@@ -10106,6 +10702,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if resting_mention_notice:
                 self._save_data_sync()
             scene = self._infer_group_scene(event, group, sender_id=sender_id, sender_name=sender_name, text=text)
+            if quoted_link_payload:
+                scene["quoted_link_payload"] = True
             if resting_mention_notice:
                 continuation = True
                 scene.update(
@@ -10154,6 +10752,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         async with self._data_lock:
             group = self._get_group(group_id)
             scene = self._infer_group_scene(event, group, sender_id=sender_id, sender_name=sender_name, text=text)
+            if quoted_link_payload:
+                scene["quoted_link_payload"] = True
             if resting_mention_notice:
                 setattr(event, "is_at_or_wake_command", True)
                 setattr(event, "is_wake", True)

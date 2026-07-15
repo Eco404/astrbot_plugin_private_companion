@@ -4860,6 +4860,20 @@ class ProactiveEngineMixin:
     def _food_prompt_cooldown_remaining(user: dict[str, Any], *, now: float) -> float:
         return max(0.0, _safe_float(user.get("last_food_prompt_at"), 0) + 7 * 3600 - now)
 
+    def _meal_care_interval_remaining(self, user: dict[str, Any], *, now: float) -> float:
+        interval_hours = _safe_int(
+            getattr(self, "meal_care_min_interval_hours", 48),
+            48,
+            0,
+            168,
+        )
+        if interval_hours <= 0:
+            return 0.0
+        return max(
+            0.0,
+            _safe_float(user.get("last_food_prompt_at"), 0) + interval_hours * 3600 - now,
+        )
+
     def _pick_state_need_event(
         self,
         user: dict[str, Any],
@@ -4956,6 +4970,27 @@ class ProactiveEngineMixin:
         morning_reply_at = _safe_float(user.get("morning_greeting_reply_at"), 0)
         return morning_sent_at <= 0 or morning_reply_at < morning_sent_at
 
+    def _meal_care_followup_blocked_by_newer_food_prompt(
+        self,
+        user: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        now: float,
+    ) -> bool:
+        """Keep a meal follow-up from bypassing a newer food-topic cooldown.
+
+        The initial meal-care message itself sets ``last_food_prompt_at`` to
+        the same timestamp as ``asked_at`` and must not cancel its own optional
+        follow-up. Any later food prompt, however, supersedes the old question.
+        """
+        asked_at = _safe_float(context.get("asked_at"), 0)
+        last_food_prompt_at = _safe_float(user.get("last_food_prompt_at"), 0)
+        return bool(
+            asked_at > 0
+            and last_food_prompt_at > asked_at + 1
+            and self._food_prompt_cooldown_remaining(user, now=now) > 0
+        )
+
     def _meal_care_followup_event(self, user: dict[str, Any], *, now: float) -> dict[str, Any] | None:
         context = user.get("meal_check_context")
         if not isinstance(context, dict) or not context.get("active"):
@@ -4964,6 +4999,17 @@ class ProactiveEngineMixin:
             user["meal_check_context"] = {}
             return None
         if _safe_int(context.get("followup_count"), 0, 0, 1) >= 1:
+            return None
+        if self._meal_care_followup_blocked_by_newer_food_prompt(user, context, now=now):
+            context.update(
+                {
+                    "active": False,
+                    "stage": "closed_newer_food_prompt",
+                    "closed_at": now,
+                    "followup_due_at": 0,
+                }
+            )
+            user["meal_check_context"] = context
             return None
         due_at = _safe_float(context.get("followup_due_at"), 0)
         expires_at = _safe_float(context.get("expires_at"), 0)
@@ -5008,6 +5054,8 @@ class ProactiveEngineMixin:
         followup = self._meal_care_followup_event(user, now=check_now)
         if isinstance(followup, dict):
             return followup
+        if self._meal_care_interval_remaining(user, now=check_now) > 0:
+            return None
         if self._food_prompt_cooldown_remaining(user, now=check_now) > 0:
             return None
         asked = user.get("meal_care_asked") if isinstance(user.get("meal_care_asked"), list) else []
@@ -5084,7 +5132,25 @@ class ProactiveEngineMixin:
             return None
         if raw.get("_meal_care_followup"):
             context = self._meal_care_active_context(user, now=now)
-            if not context or _safe_int(context.get("followup_count"), 0, 0, 1) >= 1:
+            blocked_by_newer_food_prompt = bool(
+                context
+                and self._meal_care_followup_blocked_by_newer_food_prompt(user, context, now=now)
+            )
+            if (
+                not context
+                or _safe_int(context.get("followup_count"), 0, 0, 1) >= 1
+                or blocked_by_newer_food_prompt
+            ):
+                if blocked_by_newer_food_prompt:
+                    context.update(
+                        {
+                            "active": False,
+                            "stage": "closed_newer_food_prompt",
+                            "closed_at": now,
+                            "followup_due_at": 0,
+                        }
+                    )
+                    user["meal_check_context"] = context
                 user["pending_followup_event"] = {}
                 return None
         raw = dict(raw)
@@ -7674,6 +7740,7 @@ class ProactiveEngineMixin:
     async def _render_message(self, user: dict[str, Any]) -> tuple[str, str, str, list[Any], str, str]:
         name = str(user.get("nickname") or self.default_nickname)
         user["planned_opener_mode"] = ""
+        user.pop("_proactive_photo_subject_owner", None)
         planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
         planned_action = str(user.get("planned_proactive_action") or "message")
         planned_motive = _single_line(user.get("planned_proactive_motive"), 140)
@@ -7752,6 +7819,9 @@ class ProactiveEngineMixin:
                 return reason, "", "", [], action_summary, effective_action
         image_path = self._extract_action_image_path(raw_action_context)
         photo_caption = self._extract_action_photo_caption(raw_action_context)
+        photo_subject_owner = self._extract_action_photo_subject_owner(raw_action_context)
+        if image_path:
+            user["_proactive_photo_subject_owner"] = photo_subject_owner or "unknown"
         if image_path and photo_caption:
             action_summary = f"发图：{photo_caption}"
         action_context = await self._narrate_action_context(effective_action, raw_action_context)

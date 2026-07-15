@@ -97,6 +97,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         register = self.plugin.context.register_web_api
         routes = [
             ("/overview", self.get_overview, ["GET"], "Private Companion Page overview"),
+            ("/expression-library", self.get_expression_library, ["GET"], "Private Companion Page expression library"),
+            ("/expression-library/update", self.update_expression_library, ["POST"], "Private Companion Page update expression library"),
             ("/users", self.list_users, ["GET"], "Private Companion Page users"),
             ("/user", self.get_user, ["GET"], "Private Companion Page user detail"),
             ("/user/update", self.update_user, ["POST"], "Private Companion Page update user"),
@@ -164,6 +166,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/qzone/post/delete", self.delete_qzone_post, ["POST"], "Private Companion Page qzone delete alias"),
             ("/creative/project", self.get_creative_project, ["GET"], "Private Companion Page creative project detail"),
             ("/creative/project/cover", self.get_creative_project_cover, ["GET"], "Private Companion Page creative project cover"),
+            ("/creative/project/cover_data", self.get_creative_project_cover_data, ["GET"], "Private Companion Page creative project cover data"),
             ("/creative/project/update", self.update_creative_project, ["POST"], "Private Companion Page update creative project"),
             ("/creative/project/chunk/update", self.update_creative_chunk, ["POST"], "Private Companion Page update creative chunk"),
             ("/creative/project/outline/update", self.update_creative_outline, ["POST"], "Private Companion Page update creative outline"),
@@ -221,6 +224,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 story = self.plugin.data.get("daily_story_plan")
                 if callable(story_sanitizer) and isinstance(story, dict) and story_sanitizer(story):
                     schedule_content_changed = True
+                expression_profile_getter = getattr(self.plugin, "_expression_voice_profile", None)
+                if callable(expression_profile_getter):
+                    expression_profile_getter()
                 if schedule_content_changed:
                     self.plugin._save_data_sync()
                 data = self._overview_data_snapshot_locked(self.plugin.data)
@@ -259,6 +265,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "require_opt_in": bool(getattr(self.plugin, "require_private_opt_in", True)),
                     "admin_ids": list(self.plugin._configured_admin_ids()) if hasattr(self.plugin, "_configured_admin_ids") else [],
                     "target_user_ids": list(self.plugin._configured_target_ids()) if hasattr(self.plugin, "_configured_target_ids") else [],
+                    "relationship_owner_ids": list(self.plugin._relationship_owner_user_ids()) if hasattr(self.plugin, "_relationship_owner_user_ids") else [],
                     "max_daily_messages": getattr(self.plugin, "max_daily_messages", 0),
                     "idle_minutes": getattr(self.plugin, "idle_minutes", 0),
                     "min_interval_minutes": getattr(self.plugin, "min_interval_minutes", 0),
@@ -277,6 +284,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "features": self._feature_flags(),
                 "proactive_intensity": self._proactive_intensity_summary(),
                 "proactive_only": self._proactive_only_mode_snapshot(),
+                "expression_scope": self._expression_learning_scope_summary(data),
                 "providers": self._provider_settings(),
                 "settings": self._runtime_settings(),
                 "deepseek_peak_routing": self._deepseek_peak_routing_summary(),
@@ -508,6 +516,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_runtime",
             "message_debounce",
             "smart_message_debounce",
+            "expression_voice_profile",
         ):
             value = raw_data.get(key)
             if isinstance(value, dict):
@@ -998,6 +1007,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     await flush_save()
             for key, value in changed.items():
                 self._apply_config_value(key, value, apply_overrides)
+            expression_scope_keys = {
+                "expression_private_learning_source_mode",
+                "expression_private_learning_source_ids",
+                "expression_group_learning_source_mode",
+                "expression_group_learning_source_ids",
+                "expression_private_application_mode",
+                "expression_private_application_user_ids",
+                "expression_group_application_mode",
+                "expression_group_application_ids",
+            }
+            if expression_scope_keys & set(changed):
+                async with self.plugin._data_lock:
+                    expression_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(expression_refresher):
+                        expression_refresher()
+                    self.plugin._save_data_sync()
             if storage_changed:
                 rebuild = getattr(self.plugin, "_rebuild_store_manager", None)
                 if callable(rebuild):
@@ -3607,12 +3632,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _token_task_label(task: Any) -> str:
         normalized = str(task or "").strip()
         if not normalized:
-            return "模型调用"
+            return "未分类模型调用"
         labels = {
             "daily_plan": "日程生成",
             "detail": "日程细化",
             "dream": "梦境内容",
             "diary": "日记整理",
+            "diary_rewrite": "日记修订",
+            "diary_derivatives": "日记线索提取",
             "memory_profile": "长期画像",
             "dialogue_episode": "私聊片段",
             "response_review": "回复/主动复核",
@@ -3636,6 +3663,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_prompt": "生图提示",
             "screen_narration": "识屏转述",
             "forward_message": "合并转发转述",
+            "forward_message_image_vision": "转发图片识别",
             "private_reading_vision": "夹层视觉",
             "private_image_vision": "私聊图片识别",
             "private_image_only_framework": "单图回复主链",
@@ -3645,7 +3673,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_persona_judge": "主动人格判定",
             "voice_framework": "框架语音",
             "voice_repair": "语音格式修复",
+            "tts_conversion": "TTS 快速转换",
+            "tts_spoken_conversion": "TTS 口语转换",
+            "tts_postprocess": "TTS 后处理",
+            "tts_visible_translation": "TTS 可见译文",
             "smart_message_debounce": "智能收口防抖",
+            "smart_silence": "智能沉默判断",
+            "group_air_reply_guard": "群聊插话把关",
+            "group_nsfw_image_review": "群图安全审核",
             "rest_wakeup_judge": "休息醒来判断",
             "yesterday_summary": "昨日摘要",
             "full_test_detail": "完整测试细化",
@@ -3655,11 +3690,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "qzone_publish": "空间说说",
             "qzone_publish_test": "空间发布测试",
             "qzone_publish_sanitize": "空间文案清理",
+            "qzone_publish_image_test_draft": "空间配图测试草稿",
+            "qzone_emotional_vent": "空间情绪表达",
             "companion_manual_diagnosis": "陪伴答疑",
+            "proactive_send_review": "主动发送复核",
+            "atrelay_rewrite": "代答转写",
+            "bookshelf_password": "书柜密码生成",
+            "bookshelf_password_reason": "书柜密码缘由",
             "astrbot_private_reply": "非插件私聊主回复",
             "astrbot_group_reply": "非插件群聊主回复",
             "astrbot_reply": "非插件主回复",
-            "other": "其他调用",
+            "other": "未分类模型调用",
         }
         if normalized in labels:
             return labels[normalized]
@@ -5130,7 +5171,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                             accepted = item
                             continue
                         kept.append(item)
-                    profile["pending_observations"] = kept[:8]
+                    profile["pending_observations"] = kept[:24]
                     if accepted and payload.get("accept_pending_observation_id"):
                         memories = self._normalize_important_memories(profile.get("important_memories"))
                         memories.insert(
@@ -5140,7 +5181,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                                 "content": str(accepted.get("content") or accepted.get("evidence") or "").strip()[:500],
                                 "weight": self._clamp_int(accepted.get("weight"), 35, 0, 100),
                                 "privacy": "internal",
-                                "source": "group_observation",
+                                "source": self._single_line(accepted.get("source"), 40) or "group_observation",
                                 "enabled": True,
                                 "updated_at": time.time(),
                             },
@@ -6328,7 +6369,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         features: dict[str, bool] = {
             "enable_llm_proactive_message": proactive_private,
             "enable_llm_proactive_persona_judge": proactive_private,
-            "enable_response_self_review": proactive_private,
+            "enable_passive_response_review": proactive_private,
+            "enable_proactive_message_review": proactive_private,
             "enable_group_companion": proactive_group,
             "enable_group_context_injection": proactive_group,
             "enable_group_injection_guard": proactive_group,
@@ -8852,23 +8894,169 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "items": normalized,
         }
 
-    def _expression_profile_summary(self, user: dict[str, Any]) -> dict[str, Any]:
+    def _expression_learning_scope_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        scope_ids = getattr(self.plugin, "_expression_scope_ids", None)
+
+        def ids(key: str, *, group: bool = False) -> list[str]:
+            if callable(scope_ids):
+                try:
+                    return sorted(scope_ids(key, group=group))
+                except Exception:
+                    pass
+            raw = getattr(self.plugin, key, [])
+            return sorted(self._normalize_id_list(raw))
+
+        voice = data.get("expression_voice_profile") if isinstance(data.get("expression_voice_profile"), dict) else {}
+        actions = voice.get("actions") if isinstance(voice.get("actions"), list) else []
+        runtime = data.get("expression_learning_runtime") if isinstance(data.get("expression_learning_runtime"), dict) else {}
+        by_day = runtime.get("group_batches_by_day") if isinstance(runtime.get("group_batches_by_day"), dict) else {}
+        group_daily_limit = self._int(getattr(self.plugin, "expression_group_learning_daily_batch_limit", 6)) or 6
+        group_used_today = self._int(by_day.get(_today_key()))
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_expression_learning", False)),
+            "private_learning": {
+                "mode": self._single_line(getattr(self.plugin, "expression_private_learning_source_mode", "owner"), 20),
+                "ids": ids("expression_private_learning_source_ids"),
+            },
+            "group_learning": {
+                "mode": self._single_line(getattr(self.plugin, "expression_group_learning_source_mode", "disabled"), 20),
+                "ids": ids("expression_group_learning_source_ids", group=True),
+            },
+            "private_application": {
+                "mode": self._single_line(getattr(self.plugin, "expression_private_application_mode", "all"), 20),
+                "ids": ids("expression_private_application_user_ids"),
+            },
+            "group_application": {
+                "mode": self._single_line(getattr(self.plugin, "expression_group_application_mode", "all"), 20),
+                "ids": ids("expression_group_application_ids", group=True),
+            },
+            "group_budget": {
+                "daily_limit": group_daily_limit,
+                "used_today": group_used_today,
+                "remaining_today": max(0, group_daily_limit - group_used_today),
+                "min_new_messages": self._int(
+                    getattr(self.plugin, "expression_group_learning_min_new_messages", 20)
+                ) or 20,
+                "last_batch_at": self._single_line(runtime.get("last_group_batch_at"), 30),
+                "last_defer_reason": self._single_line(runtime.get("last_group_defer_reason"), 40),
+            },
+            "voice": {
+                "sample_count": self._int(voice.get("sample_count")),
+                "private_source_count": self._int(voice.get("private_source_count")),
+                "group_source_count": self._int(voice.get("group_source_count")),
+                "actions": [self._single_line(item, 120) for item in actions[:4] if self._single_line(item, 120)],
+                "updated_at": self._single_line(voice.get("updated_at"), 30),
+            },
+        }
+
+    def _expression_rule_group_rows(self, rules: Any) -> list[dict[str, Any]]:
+        rows = [dict(item) for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
+        if not rows:
+            return []
+        grouper = getattr(self.plugin, "_expression_rule_groups", None)
+        bundler = getattr(self.plugin, "_expression_rule_runtime_bundle", None)
+        raw_groups = grouper(rows) if callable(grouper) else [[item] for item in rows]
+        result: list[dict[str, Any]] = []
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, list) or not raw_group:
+                continue
+            bundle = bundler(raw_group) if callable(bundler) else dict(raw_group[0])
+            if not isinstance(bundle, dict) or not bundle:
+                continue
+            items = [dict(item) for item in raw_group if isinstance(item, dict)]
+            style_rule = next((item for item in items if item.get("kind") == "style"), None)
+            grammar_rule = next((item for item in items if item.get("kind") == "grammar"), None)
+            review_statuses = {self._single_line(item.get("review_status"), 24).lower() for item in items}
+            review_status = "needs_review" if "needs_review" in review_statuses else (
+                "pending" if "pending" in review_statuses else "approved"
+            )
+            group_row = {
+                **bundle,
+                "id": self._single_line(bundle.get("family_id") or bundle.get("id"), 100),
+                "family_id": self._single_line(bundle.get("family_id"), 100),
+                "label": self._single_line(
+                    (style_rule or {}).get("label") or (grammar_rule or {}).get("label") or bundle.get("label"),
+                    100,
+                ),
+                "situation": self._single_line(
+                    (style_rule or {}).get("situation") or (grammar_rule or {}).get("situation") or bundle.get("situation"),
+                    100,
+                ),
+                "kind": "combined" if style_rule and grammar_rule else self._single_line(bundle.get("kind"), 24),
+                "kind_label": "组合规则" if style_rule and grammar_rule else (
+                    "情境表达" if style_rule else "语法习惯"
+                ),
+                "component_count": len(items),
+                "component_kinds": [kind for kind in ("style", "grammar") if any(item.get("kind") == kind for item in items)],
+                "items": items,
+                "component_rules": items,
+                "style_rule": dict(style_rule) if style_rule else None,
+                "grammar_rule": dict(grammar_rule) if grammar_rule else None,
+                "review_status": review_status,
+                "review_reason": self._single_line(
+                    next((item.get("review_reason") for item in items if item.get("review_reason")), ""),
+                    180,
+                ),
+                "evidence_count": max(self._int(item.get("evidence_count")) for item in items),
+            }
+            result.append(group_row)
+        result.sort(key=lambda item: (-self._int(item.get("evidence_count")), self._single_line(item.get("situation"), 100)))
+        return result
+
+    def _expression_profile_summary(self, user: dict[str, Any], *, source_type: str = "private") -> dict[str, Any]:
         profile = user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {}
+        scene_label = getattr(self.plugin, "_expression_scene_label", None)
+        feature_labels = {
+            "short": "短句",
+            "casual_opener": "随口开头",
+            "playful": "轻松感",
+            "laugh_marker": "笑声口语",
+            "reduplication": "自然叠词",
+            "soft_wave": "波浪收束",
+            "soft_ending": "柔和收尾",
+            "pause": "留白停顿",
+            "question": "问句推进",
+        }
 
         def sample_row(item: Any, index: int) -> dict[str, Any]:
             raw = item if isinstance(item, dict) else {}
             text = self._single_line(raw.get("text") or raw.get("phrase") or raw.get("ending"), 120)
             punctuation = raw.get("punctuation") if isinstance(raw.get("punctuation"), dict) else {}
             marks = "".join(f"{key}{value}" for key, value in punctuation.items() if self._int(value) > 0)
+            scene = self._single_line(
+                scene_label(raw.get("scene")) if callable(scene_label) else raw.get("scene"),
+                32,
+            )
+            feature_values = [
+                self._single_line(feature_labels.get(str(feature), str(feature)), 24)
+                for feature in raw.get("features", [])
+                if self._single_line(feature, 24)
+            ] if isinstance(raw.get("features"), list) else []
+            distinctive_features = [item for item in feature_values if item not in {"短句", "问句推进"}]
+            pattern_label = scene
+            if source_type == "group":
+                if distinctive_features:
+                    pattern_label = f"{scene or '日常交流'}中的{'与'.join(distinctive_features[:2])}"
+                elif scene:
+                    pattern_label = f"{scene}表达模式"
+            observation_status = "supported" if self._int(raw.get("evidence_count")) >= 2 else "single"
             return {
                 "id": self._single_line(raw.get("id"), 40) or str(index),
                 "index": index,
                 "text": text,
                 "phrase": self._single_line(raw.get("phrase"), 80),
                 "ending": self._single_line(raw.get("ending"), 20),
+                "scene": scene,
+                "features": feature_values,
                 "length": self._int(raw.get("length")),
+                "length_bucket": self._single_line(raw.get("length_bucket"), 20),
                 "punctuation": marks,
+                "evidence_count": max(1, self._int(raw.get("evidence_count"))),
+                "pattern_status": observation_status,
+                "observation_status": observation_status,
+                "pattern_label": pattern_label,
                 "created_at": self._single_line(raw.get("created_at"), 30),
+                "ts": self._float(raw.get("ts")),
                 "time": self.plugin._format_timestamp_elapsed(raw.get("ts", 0)),
             }
 
@@ -8879,6 +9067,150 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             prompt_preview = formatter(user) if callable(formatter) else ""
         except Exception:
             prompt_preview = ""
+        rules: list[dict[str, Any]] = []
+        def semantic_rule_row(raw_rule: dict[str, Any], *, pending_review: bool) -> dict[str, Any] | None:
+            if not isinstance(raw_rule, dict):
+                return None
+            validator = getattr(self.plugin, "_expression_rule_definition_is_valid", None)
+            if callable(validator) and not validator(raw_rule):
+                return None
+            evidence_count = self._int(raw_rule.get("evidence_count"))
+            if evidence_count < 1:
+                return None
+            situation = self._single_line(raw_rule.get("situation"), 100)
+            instruction = self._single_line(raw_rule.get("instruction"), 300)
+            pattern = self._single_line(raw_rule.get("pattern"), 180)
+            kind = self._single_line(raw_rule.get("kind"), 24).lower()
+            if kind not in {"style", "grammar"} or not situation or not pattern or not instruction:
+                return None
+            review_status = self._single_line(raw_rule.get("review_status"), 24).lower()
+            if not review_status:
+                review_status = "pending" if pending_review else "approved"
+            return {
+                "id": self._single_line(raw_rule.get("id"), 100),
+                "family_id": self._single_line(raw_rule.get("family_id"), 100),
+                "family_key": self._single_line(raw_rule.get("family_key"), 80),
+                "scene": self._single_line(raw_rule.get("kind"), 24),
+                "label": situation or "语义表达规则",
+                "situation": situation,
+                "pattern": pattern,
+                "instruction": instruction,
+                "evidence_count": evidence_count,
+                "confidence": min(0.98, round(0.52 + min(8, evidence_count) * 0.055, 2)),
+                "signals": [
+                    self._single_line(item, 24)
+                    for item in (raw_rule.get("keywords") or raw_rule.get("tags") or [])
+                    if self._single_line(item, 24)
+                ] if isinstance(raw_rule.get("keywords") or raw_rule.get("tags"), list) else [],
+                "rule_type": "semantic",
+                "kind": kind,
+                "kind_label": "情境表达" if kind == "style" else "语法习惯",
+                "evidence_examples": [
+                    self._single_line(item, 80)
+                    for item in raw_rule.get("evidence_examples", [])
+                    if self._single_line(item, 80)
+                ][:3] if isinstance(raw_rule.get("evidence_examples"), list) else [],
+                "pattern_status": review_status if pending_review else "active",
+                "review_status": review_status,
+                "review_reason": self._single_line(raw_rule.get("review_reason"), 180),
+                "channels": [
+                    self._single_line(item, 24).lower()
+                    for item in raw_rule.get("channels", [])
+                    if self._single_line(item, 24)
+                ] if isinstance(raw_rule.get("channels"), list) else [],
+                "relationship_stages": [
+                    self._single_line(item, 24).lower()
+                    for item in raw_rule.get("relationship_stages", [])
+                    if self._single_line(item, 24)
+                ] if isinstance(raw_rule.get("relationship_stages"), list) else [],
+                "emotion_gates": [
+                    self._single_line(item, 24).lower()
+                    for item in raw_rule.get("emotion_gates", [])
+                    if self._single_line(item, 24)
+                ] if isinstance(raw_rule.get("emotion_gates"), list) else [],
+                "intent": self._single_line(raw_rule.get("intent"), 32).lower() or "any",
+                "avoid": self._single_line(raw_rule.get("avoid"), 220),
+                "persona_conflict": raw_rule.get("persona_conflict") is True
+                or self._single_line(raw_rule.get("persona_conflict"), 12).lower() in {"1", "true", "yes", "on", "是", "冲突"},
+                "positive_feedback": self._int(raw_rule.get("positive_feedback")),
+                "negative_feedback": self._int(raw_rule.get("negative_feedback")),
+                "use_count": self._int(raw_rule.get("use_count")),
+                "last_used_time": self.plugin._format_timestamp_elapsed(raw_rule.get("last_used_ts", 0))
+                if self._float(raw_rule.get("last_used_ts")) > 0 else "",
+            }
+
+        learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+        for raw_rule in learned_rules:
+            row = semantic_rule_row(raw_rule, pending_review=False)
+            if row:
+                rules.append(row)
+        pending_rules = profile.get("pending_rules") if isinstance(profile.get("pending_rules"), list) else []
+        pending_rule_rows = [
+            row
+            for raw_rule in pending_rules
+            if (row := semantic_rule_row(raw_rule, pending_review=True)) is not None
+        ]
+        rules.sort(key=lambda item: (-self._int(item.get("evidence_count")), self._single_line(item.get("scene"), 32)))
+        rule_groups = self._expression_rule_group_rows(rules)
+        pending_rule_groups = self._expression_rule_group_rows(pending_rule_rows)
+        raw_usage = profile.get("usage") if isinstance(profile.get("usage"), dict) else {}
+        raw_last_injection = raw_usage.get("last_injection") if isinstance(raw_usage.get("last_injection"), dict) else {}
+        usage = {
+            "injected_count": self._int(raw_usage.get("injected_count")),
+            "visible_match_count": self._int(raw_usage.get("visible_match_count")),
+            "semantic_injected_count": self._int(raw_usage.get("semantic_injected_count")),
+            "feedback_positive": self._int(raw_usage.get("feedback_positive")),
+            "feedback_negative": self._int(raw_usage.get("feedback_negative")),
+            "last_injection": {
+                "time": self.plugin._format_timestamp_elapsed(raw_last_injection.get("ts", 0)) if raw_last_injection else "",
+                "at": self._single_line(raw_last_injection.get("at"), 30),
+                "rule_id": self._single_line(raw_last_injection.get("rule_id"), 100),
+                "scene": self._single_line(raw_last_injection.get("scene"), 32),
+                "label": self._single_line(raw_last_injection.get("label"), 32),
+                "instruction": self._single_line(raw_last_injection.get("instruction"), 300),
+                "evidence_count": self._int(raw_last_injection.get("evidence_count")),
+                "confidence": max(0.0, min(1.0, self._float(raw_last_injection.get("confidence")))),
+                "expected_signals": [
+                    self._single_line(feature_labels.get(str(signal), str(signal)), 24)
+                    for signal in raw_last_injection.get("expected_signals", [])
+                    if self._single_line(signal, 24)
+                ] if isinstance(raw_last_injection.get("expected_signals"), list) else [],
+                "visible_signals": [
+                    self._single_line(feature_labels.get(str(signal), str(signal)), 24)
+                    for signal in raw_last_injection.get("visible_signals", [])
+                    if self._single_line(signal, 24)
+                ] if isinstance(raw_last_injection.get("visible_signals"), list) else [],
+                "rule_type": self._single_line(raw_last_injection.get("rule_type"), 24),
+                "semantic_rule_count": self._int(raw_last_injection.get("semantic_rule_count")),
+                "channel": self._single_line(raw_last_injection.get("channel"), 24),
+                "relationship_stage": self._single_line(raw_last_injection.get("relationship_stage"), 24),
+                "emotion_gate": self._single_line(raw_last_injection.get("emotion_gate"), 24),
+                "intent": self._single_line(raw_last_injection.get("intent"), 32),
+            } if raw_last_injection else {},
+        }
+        raw_scene_profiles = profile.get("scene_profiles") if isinstance(profile.get("scene_profiles"), dict) else {}
+        scene_profiles = []
+        for scene, item in raw_scene_profiles.items():
+            if not isinstance(item, dict):
+                continue
+            count = self._int(item.get("count"))
+            if count <= 0:
+                continue
+            label = scene_label(scene) if callable(scene_label) else self._single_line(scene, 32)
+            scene_profiles.append(
+                {
+                    "scene": self._single_line(scene, 32),
+                    "label": self._single_line(label, 32),
+                    "count": count,
+                    "short_ratio": float(item.get("short_ratio") or 0),
+                    "feature_counts": item.get("feature_counts") if isinstance(item.get("feature_counts"), dict) else {},
+                }
+            )
+        scene_profiles.sort(key=lambda item: (-self._int(item.get("count")), self._single_line(item.get("scene"), 32)))
+        sample_limit = max(
+            4,
+            min(60, self._int(getattr(self.plugin, "max_learned_expression_items", 60)) or 60),
+        )
         return {
             "enabled": bool(getattr(self.plugin, "enable_expression_learning", False)),
             "mode": self._single_line(getattr(self.plugin, "expression_learning_mode", "balanced"), 20),
@@ -8886,14 +9218,306 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "style_review": bool(getattr(self.plugin, "enable_expression_style_review", True)),
             "updated_at": self._single_line(profile.get("updated_at"), 30),
             "sample_count": len(samples),
+            "observation_count": len(samples),
+            "observation_evidence_count": sum(max(1, self._int(item.get("evidence_count"))) for item in samples if isinstance(item, dict)),
+            "pattern_count": len(rules),
+            "rule_count": len(rules),
+            "rule_evidence_count": sum(self._int(item.get("evidence_count")) for item in rule_groups),
+            "style_rule_count": sum(1 for item in rules if item.get("kind") == "style"),
+            "grammar_rule_count": sum(1 for item in rules if item.get("kind") == "grammar"),
+            "rule_group_count": len(rule_groups),
             "pending_count": len(pending),
+            "pending_rule_count": len(pending_rule_rows),
+            "pending_rule_group_count": len(pending_rule_groups),
+            "pending_style_count": sum(1 for item in pending_rule_rows if item.get("kind") == "style"),
+            "pending_grammar_count": sum(1 for item in pending_rule_rows if item.get("kind") == "grammar"),
             "short_count": self._int(profile.get("short_count")),
             "endings": [self._single_line(item, 20) for item in (profile.get("endings") if isinstance(profile.get("endings"), list) else [])[:8]],
             "recent_phrases": [self._single_line(item, 80) for item in (profile.get("recent_phrases") if isinstance(profile.get("recent_phrases"), list) else [])[:8]],
-            "samples": [sample_row(item, idx) for idx, item in enumerate(samples[:12])],
+            "scene_profiles": scene_profiles[:6],
+            "rules": rules[: max(6, min(60, sample_limit * 2))],
+            "pending_rules": pending_rule_rows[: max(6, min(60, sample_limit * 2))],
+            "rule_groups": rule_groups[: max(6, min(60, sample_limit * 2))],
+            "pending_rule_groups": pending_rule_groups[: max(6, min(60, sample_limit * 2))],
+            "usage": usage,
+            "samples": [sample_row(item, idx) for idx, item in enumerate(samples[:sample_limit])],
             "pending_samples": [sample_row(item, idx) for idx, item in enumerate(pending[:24])],
             "prompt_preview": self._multi_line(prompt_preview, 500),
         }
+
+    def _expression_library_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        samples: list[dict[str, Any]] = []
+        pending_samples: list[dict[str, Any]] = []
+        pending_rules: list[dict[str, Any]] = []
+        rules: list[dict[str, Any]] = []
+        pending_rule_groups: list[dict[str, Any]] = []
+        rule_groups: list[dict[str, Any]] = []
+        sources: list[dict[str, Any]] = []
+        scene_totals: dict[str, dict[str, Any]] = {}
+        sample_count = 0
+        observation_evidence_count = 0
+        rule_evidence_count = 0
+        pending_count = 0
+        injected_count = 0
+        positive_feedback_count = 0
+        negative_feedback_count = 0
+        style_rule_count = 0
+        grammar_rule_count = 0
+        pending_style_count = 0
+        pending_grammar_count = 0
+
+        def collect(source_type: str, source_id: str, item: dict[str, Any]) -> None:
+            nonlocal sample_count, observation_evidence_count, rule_evidence_count, pending_count
+            nonlocal injected_count, positive_feedback_count, negative_feedback_count
+            nonlocal style_rule_count, grammar_rule_count, pending_style_count, pending_grammar_count
+            summary = self._expression_profile_summary(item, source_type=source_type)
+            if source_type == "group":
+                source_name = self._single_line(
+                    item.get("name") or item.get("group_name") or item.get("display_name"),
+                    80,
+                ) or "未命名群聊"
+                active = bool(self.plugin._expression_group_learning_source_enabled(source_id))
+                source_kind_label = "群聊"
+            else:
+                source_name = self._single_line(
+                    item.get("display_name") or item.get("nickname") or item.get("name"),
+                    80,
+                ) or source_id
+                active = bool(self.plugin._expression_private_learning_source_enabled(item, source_id))
+                source_kind_label = "私聊"
+            source = {
+                "source_type": source_type,
+                "source_kind_label": source_kind_label,
+                "source_id": source_id,
+                "source_name": source_name,
+                "source_active": active,
+            }
+            source_sample_count = self._int(summary.get("sample_count"))
+            source_pending_sample_count = self._int(summary.get("pending_count"))
+            source_pending_rule_count = self._int(summary.get("pending_rule_count"))
+            source_pending_count = source_pending_sample_count + source_pending_rule_count
+            source_rules = summary.get("rules") if isinstance(summary.get("rules"), list) else []
+            source_pending_rules = summary.get("pending_rules") if isinstance(summary.get("pending_rules"), list) else []
+            source_rule_groups = summary.get("rule_groups") if isinstance(summary.get("rule_groups"), list) else []
+            source_pending_rule_groups = summary.get("pending_rule_groups") if isinstance(summary.get("pending_rule_groups"), list) else []
+            if source_sample_count <= 0 and source_pending_count <= 0 and not source_rules and not source_pending_rules:
+                return
+            sources.append(
+                {
+                    **source,
+                    "sample_count": source_sample_count,
+                    "observation_count": source_sample_count,
+                    "pending_count": source_pending_count,
+                    "pending_rule_count": source_pending_rule_count,
+                    "rule_count": len(source_rules),
+                    "rule_group_count": len(source_rule_groups),
+                    "pending_rule_group_count": len(source_pending_rule_groups),
+                    "style_rule_count": self._int(summary.get("style_rule_count")),
+                    "grammar_rule_count": self._int(summary.get("grammar_rule_count")),
+                }
+            )
+            sample_count += source_sample_count
+            observation_evidence_count += self._int(summary.get("observation_evidence_count"))
+            rule_evidence_count += self._int(summary.get("rule_evidence_count"))
+            pending_count += source_pending_count
+            style_rule_count += self._int(summary.get("style_rule_count"))
+            grammar_rule_count += self._int(summary.get("grammar_rule_count"))
+            pending_style_count += self._int(summary.get("pending_style_count"))
+            pending_grammar_count += self._int(summary.get("pending_grammar_count"))
+            injected_count += self._int((summary.get("usage") or {}).get("injected_count"))
+            for row in summary.get("samples") or []:
+                if isinstance(row, dict):
+                    samples.append({**row, **source})
+            for row in summary.get("pending_samples") or []:
+                if isinstance(row, dict):
+                    pending_samples.append({**row, **source})
+            for row in source_pending_rules:
+                if isinstance(row, dict):
+                    pending_rules.append({**row, **source})
+            for row in source_pending_rule_groups:
+                if isinstance(row, dict):
+                    pending_rule_groups.append({**row, **source})
+            for row in source_rules:
+                if isinstance(row, dict):
+                    rules.append({**row, **source})
+                    if row.get("rule_type") == "semantic":
+                        positive_feedback_count += self._int(row.get("positive_feedback"))
+                        negative_feedback_count += self._int(row.get("negative_feedback"))
+            for row in source_rule_groups:
+                if isinstance(row, dict):
+                    rule_groups.append({**row, **source})
+            for scene in summary.get("scene_profiles") or []:
+                if not isinstance(scene, dict):
+                    continue
+                key = self._single_line(scene.get("scene") or scene.get("label"), 32)
+                if not key:
+                    continue
+                bucket = scene_totals.setdefault(
+                    key,
+                    {
+                        "scene": key,
+                        "label": self._single_line(scene.get("label") or key, 32),
+                        "count": 0,
+                    },
+                )
+                bucket["count"] += self._int(scene.get("count"))
+
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        for user_id, user in users.items():
+            if isinstance(user, dict):
+                collect("private", self._single_line(user_id, 80), user)
+        groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+        for group_id, group in groups.items():
+            if isinstance(group, dict):
+                collect("group", self._single_line(group_id, 80), group)
+
+        samples.sort(key=lambda row: (-self._float(row.get("ts")), row.get("source_type") or "", row.get("source_id") or ""))
+        pending_samples.sort(key=lambda row: (-self._float(row.get("ts")), row.get("source_type") or "", row.get("source_id") or ""))
+        pending_rules.sort(key=lambda row: (-self._int(row.get("evidence_count")), row.get("source_type") or "", row.get("source_id") or ""))
+        rules.sort(key=lambda row: (-self._int(row.get("evidence_count")), row.get("source_type") or "", row.get("source_id") or ""))
+        pending_rule_groups.sort(key=lambda row: (-self._int(row.get("evidence_count")), row.get("source_type") or "", row.get("source_id") or ""))
+        rule_groups.sort(key=lambda row: (-self._int(row.get("evidence_count")), row.get("source_type") or "", row.get("source_id") or ""))
+        sources.sort(key=lambda row: (not bool(row.get("source_active")), row.get("source_type") or "", row.get("source_name") or ""))
+        scene_profiles = sorted(
+            scene_totals.values(),
+            key=lambda row: (-self._int(row.get("count")), row.get("label") or ""),
+        )
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_expression_learning", False)),
+            "mode": self._single_line(getattr(self.plugin, "expression_learning_mode", "balanced"), 20),
+            "manual_review": bool(getattr(self.plugin, "enable_expression_manual_review", False)),
+            "style_review": bool(getattr(self.plugin, "enable_expression_style_review", True)),
+            "sample_count": sample_count,
+            "observation_count": sample_count,
+            "observation_evidence_count": observation_evidence_count,
+            "pattern_count": len(rules),
+            "rule_count": len(rules),
+            "rule_group_count": len(rule_groups),
+            "style_rule_count": style_rule_count,
+            "grammar_rule_count": grammar_rule_count,
+            "rule_evidence_count": rule_evidence_count,
+            "evidence_count": rule_evidence_count,
+            "pending_count": pending_count,
+            "source_count": len(sources),
+            "private_source_count": sum(1 for source in sources if source.get("source_type") == "private"),
+            "group_source_count": sum(1 for source in sources if source.get("source_type") == "group"),
+            "active_source_count": sum(1 for source in sources if source.get("source_active")),
+            "samples": samples,
+            "pending_samples": pending_samples,
+            "pending_rules": pending_rules,
+            "pending_rule_count": len(pending_rules),
+            "pending_rule_groups": pending_rule_groups,
+            "pending_rule_group_count": len(pending_rule_groups),
+            "pending_style_count": pending_style_count,
+            "pending_grammar_count": pending_grammar_count,
+            "rules": rules,
+            "rule_groups": rule_groups,
+            "scene_profiles": scene_profiles[:8],
+            "sources": sources,
+            "usage": {
+                "injected_count": injected_count,
+                "feedback_positive": positive_feedback_count,
+                "feedback_negative": negative_feedback_count,
+            },
+        }
+
+    async def get_expression_library(self) -> dict[str, Any]:
+        try:
+            async with self.plugin._data_lock:
+                changed = False
+                normalizer = getattr(self.plugin, "_normalize_group_expression_profile", None)
+                pruner = getattr(self.plugin, "_prune_invalid_expression_rules", None)
+                family_backfiller = getattr(self.plugin, "_backfill_expression_rule_families", None)
+                for collection_key in ("users", "groups"):
+                    collection = self.plugin.data.get(collection_key)
+                    if not isinstance(collection, dict):
+                        continue
+                    for item in collection.values():
+                        profile = item.get("expression_profile") if isinstance(item, dict) else None
+                        if not isinstance(profile, dict):
+                            continue
+                        if collection_key == "groups" and callable(normalizer) and normalizer(profile):
+                            changed = True
+                        if callable(pruner) and pruner(profile):
+                            changed = True
+                        if callable(family_backfiller) and family_backfiller(profile):
+                            changed = True
+                if changed:
+                    self.plugin._save_data_sync()
+                snapshot = deepcopy(self.plugin.data)
+            return self._ok(self._expression_library_summary(snapshot))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取统一表达学习库失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_expression_library(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        source_type = self._single_line(payload.get("source_type"), 16)
+        source_id = self._single_line(payload.get("source_id"), 80)
+        action = self._single_line(payload.get("expression_action"), 40)
+        if action == "clear_all_pending":
+            try:
+                async with self.plugin._data_lock:
+                    cleared = 0
+                    for collection_key in ("users", "groups"):
+                        collection = self.plugin.data.get(collection_key)
+                        if not isinstance(collection, dict):
+                            continue
+                        for item in collection.values():
+                            if not isinstance(item, dict):
+                                continue
+                            profile = item.get("expression_profile")
+                            pending = profile.get("pending_samples") if isinstance(profile, dict) else None
+                            pending_rules = profile.get("pending_rules") if isinstance(profile, dict) else None
+                            item_count = (len(pending) if isinstance(pending, list) else 0) + (
+                                len(pending_rules) if isinstance(pending_rules, list) else 0
+                            )
+                            if item_count:
+                                cleared += item_count
+                                self._apply_expression_profile_action(item, {"expression_action": "clear_pending"})
+                    self.plugin._save_data_sync()
+                    snapshot = deepcopy(self.plugin.data)
+                result = self._expression_library_summary(snapshot)
+                result["message"] = f"已清空 {cleared} 条待审核表达资料"
+                return self._ok(result)
+            except Exception as exc:
+                logger.error(f"[PrivateCompanionPage] 清空统一表达待审样本失败: {exc}", exc_info=True)
+                return self._error(str(exc))
+        if source_type not in {"private", "group"} or not source_id:
+            return self._error("缺少有效的表达样本来源")
+        if action not in {
+            "approve", "reject", "approve_rule", "reject_rule", "delete_sample", "delete_rule",
+            "approve_rule_group", "reject_rule_group", "delete_rule_group",
+        }:
+            return self._error("不支持的表达样本操作")
+        try:
+            async with self.plugin._data_lock:
+                collection_key = "groups" if source_type == "group" else "users"
+                collection = self.plugin.data.get(collection_key)
+                item = collection.get(source_id) if isinstance(collection, dict) else None
+                if not isinstance(item, dict):
+                    return self._error("表达样本来源不存在")
+                if source_type == "group":
+                    normalizer = getattr(self.plugin, "_normalize_group_expression_profile", None)
+                    profile = item.get("expression_profile")
+                    if callable(normalizer) and isinstance(profile, dict):
+                        normalizer(profile)
+                payload["source_type"] = source_type
+                action_message = self._apply_expression_profile_action(item, payload)
+                if action in {
+                    "approve", "approve_rule", "approve_rule_group", "delete_sample", "delete_rule", "delete_rule_group",
+                }:
+                    voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(voice_refresher):
+                        voice_refresher()
+                self.plugin._save_data_sync()
+                snapshot = deepcopy(self.plugin.data)
+            result = self._expression_library_summary(snapshot)
+            result["message"] = action_message
+            return self._ok(result)
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新统一表达学习库失败: {exc}", exc_info=True)
+            return self._error(str(exc))
 
     def _apply_expression_profile_action(self, user: dict[str, Any], payload: dict[str, Any]) -> str:
         profile = user.setdefault("expression_profile", {})
@@ -8901,9 +9525,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             profile = {}
             user["expression_profile"] = profile
         action = self._single_line(payload.get("expression_action"), 40)
+        family_backfiller = getattr(self.plugin, "_backfill_expression_rule_families", None)
+        if callable(family_backfiller):
+            family_backfiller(profile)
         pending = profile.get("pending_samples") if isinstance(profile.get("pending_samples"), list) else []
+        pending_rules = profile.get("pending_rules") if isinstance(profile.get("pending_rules"), list) else []
         samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
         sample_id = self._single_line(payload.get("sample_id"), 40)
+        rule_id = self._single_line(payload.get("rule_id"), 100)
+        rule_family_id = self._single_line(payload.get("rule_family_id"), 100)
         sample_index = self._int(payload.get("sample_index"))
 
         def find_index(items: list[Any]) -> int:
@@ -8915,11 +9545,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return sample_index
             return -1
 
+        def find_rule_index(items: list[Any]) -> int:
+            if not rule_id:
+                return -1
+            for idx, item in enumerate(items):
+                if isinstance(item, dict) and self._single_line(item.get("id"), 100) == rule_id:
+                    return idx
+            return -1
+
         if action == "clear_pending":
             profile["pending_samples"] = []
+            profile["pending_rules"] = []
             profile["pending_count"] = 0
             profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            return "已清空待审核表达样本"
+            return "已清空待审核表达资料"
         if action in {"approve", "reject"}:
             idx = find_index(pending)
             if idx < 0:
@@ -8935,14 +9574,104 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 approved.pop("review_status", None)
                 approved["approved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 samples.insert(0, approved)
-                limit = max(4, int(getattr(self.plugin, "max_learned_expression_items", 18) or 18))
+                limit = max(12, int(getattr(self.plugin, "max_learned_expression_items", 60) or 60))
                 profile["samples"] = samples[:limit]
                 refresher = getattr(self.plugin, "_refresh_expression_profile_legacy_summary", None)
                 if callable(refresher):
                     refresher(profile)
                 profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                if callable(voice_refresher):
+                    voice_refresher()
                 return "已通过表达样本"
             return "待审核样本格式异常"
+        if action in {"approve_rule", "reject_rule"}:
+            idx = find_rule_index(pending_rules)
+            if idx < 0:
+                return "没有找到待审核规则"
+            item = pending_rules.pop(idx)
+            profile["pending_rules"] = pending_rules
+            if action == "reject_rule":
+                profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                return "已拒绝归纳规则"
+            if not isinstance(item, dict):
+                return "待审核规则格式异常"
+            validator = getattr(self.plugin, "_expression_rule_definition_is_valid", None)
+            if callable(validator) and not validator(item):
+                profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                return "该规则不是可复用表达或具体语法，已从待审核区移除"
+            approved = dict(item)
+            approved["review_status"] = "approved"
+            if self._single_line(item.get("review_status"), 24).lower() == "needs_review":
+                approved["negative_feedback_before_review"] = self._int(item.get("negative_feedback"))
+                approved["negative_feedback"] = 0
+                approved["review_cycles"] = self._int(item.get("review_cycles")) + 1
+                approved.pop("review_reason", None)
+            approved["approved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            merger = getattr(self.plugin, "_merge_learned_expression_rules", None)
+            if callable(merger):
+                merger(
+                    profile,
+                    [approved],
+                    batch_key=f"approve:{self._single_line(item.get('last_batch_key'), 40) or rule_id}",
+                    now=time.time(),
+                )
+            else:
+                learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+                learned_rules.insert(0, approved)
+                profile["learned_rules"] = learned_rules[: max(12, int(getattr(self.plugin, "max_learned_expression_items", 60) or 60))]
+            profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            return "已通过表达规则，后续匹配情境时可以使用"
+        if action in {"approve_rule_group", "reject_rule_group"}:
+            if not rule_family_id:
+                return "缺少规则组标识"
+            matched = [
+                item
+                for item in pending_rules
+                if isinstance(item, dict) and self._single_line(item.get("family_id"), 100) == rule_family_id
+            ]
+            if not matched:
+                return "没有找到待审核规则组"
+            profile["pending_rules"] = [
+                item
+                for item in pending_rules
+                if not isinstance(item, dict) or self._single_line(item.get("family_id"), 100) != rule_family_id
+            ]
+            if action == "reject_rule_group":
+                profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                return f"已拒绝规则组中的 {len(matched)} 条归纳规则"
+            validator = getattr(self.plugin, "_expression_rule_definition_is_valid", None)
+            approved_items: list[dict[str, Any]] = []
+            approved_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+            for item in matched:
+                if callable(validator) and not validator(item):
+                    continue
+                approved = dict(item)
+                approved["review_status"] = "approved"
+                if self._single_line(item.get("review_status"), 24).lower() == "needs_review":
+                    approved["negative_feedback_before_review"] = self._int(item.get("negative_feedback"))
+                    approved["negative_feedback"] = 0
+                    approved["review_cycles"] = self._int(item.get("review_cycles")) + 1
+                    approved.pop("review_reason", None)
+                approved["approved_at"] = approved_at
+                approved_items.append(approved)
+            if not approved_items:
+                profile["updated_at"] = approved_at
+                return "规则组中没有可复用规则，已从待审核区移除"
+            merger = getattr(self.plugin, "_merge_learned_expression_rules", None)
+            if callable(merger):
+                merger(
+                    profile,
+                    approved_items,
+                    batch_key=f"approve-family:{rule_family_id}",
+                    now=time.time(),
+                )
+            else:
+                learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+                learned_rules[0:0] = approved_items
+                profile["learned_rules"] = learned_rules[: max(12, int(getattr(self.plugin, "max_learned_expression_items", 60) or 60))]
+            profile["updated_at"] = approved_at
+            return f"已通过规则组，共启用 {len(approved_items)} 条互补规则"
         if action == "delete_sample":
             idx = find_index(samples)
             if idx < 0:
@@ -8953,7 +9682,37 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if callable(refresher):
                 refresher(profile)
             profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+            if callable(voice_refresher):
+                voice_refresher()
             return "已删除表达样本"
+        if action == "delete_rule":
+            learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+            kept = [
+                item
+                for item in learned_rules
+                if not isinstance(item, dict) or self._single_line(item.get("id"), 100) != rule_id
+            ]
+            if len(kept) == len(learned_rules):
+                return "没有找到归纳规则"
+            profile["learned_rules"] = kept
+            profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            return "已删除归纳规则"
+        if action == "delete_rule_group":
+            if not rule_family_id:
+                return "缺少规则组标识"
+            learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+            kept = [
+                item
+                for item in learned_rules
+                if not isinstance(item, dict) or self._single_line(item.get("family_id"), 100) != rule_family_id
+            ]
+            removed = len(learned_rules) - len(kept)
+            if removed <= 0:
+                return "没有找到归纳规则组"
+            profile["learned_rules"] = kept
+            profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            return f"已删除规则组中的 {removed} 条规则"
         return "未知表达样本操作"
 
     @classmethod
@@ -9164,6 +9923,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         slang_terms = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []
         slang_meanings = group.get("slang_meanings") if isinstance(group.get("slang_meanings"), dict) else {}
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        group_for_filter = group
         group_id_text = str(group_id)
         group_name = self._single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
         if group_name == group_id_text:
@@ -9188,6 +9948,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     slang_terms = group_for_filter.get("slang_terms") if isinstance(group_for_filter.get("slang_terms"), list) else []
             except Exception:
                 pass
+        promoter = getattr(self.plugin, "_group_slang_term_is_promoted", None)
+        if callable(promoter):
+            visible_terms: list[Any] = []
+            for item in slang_terms:
+                try:
+                    if not promoter(group_for_filter, item):
+                        continue
+                except Exception:
+                    continue
+                if isinstance(item, dict):
+                    visible_terms.append({**item, "promoted": True})
+                else:
+                    visible_terms.append(item)
+            slang_terms = visible_terms
         identity_count = sum(1 for item in members.values() if isinstance(item, dict) and item.get("identity_known"))
         wakeup_logs = group.get("group_wakeup_logs") if isinstance(group.get("group_wakeup_logs"), list) else []
         last_wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
@@ -9548,7 +10322,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_companion_memory",
             "enable_expression_learning",
             "enable_intent_emotion_analysis",
-            "enable_response_self_review",
+            "enable_passive_response_review",
             "enable_proactive_message_review",
             "enable_smart_silence",
             "enable_llm_proactive_message",
@@ -9563,6 +10337,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_open_loop_tracking",
             "enable_user_habit_learning",
             "enable_food_menu_recommendation",
+            "enable_personal_goals",
             "enable_humanized_states",
             "enable_health_state",
             "enable_hunger_state",
@@ -9650,6 +10425,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_screen_glance_action",
+            "enable_poke_action",
+            "enable_voice_action",
             "enable_yesterday_screen_diary_context",
             "enable_tts_enhancement",
             "enable_creative_writing",
@@ -10867,7 +11645,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "worldview_adaptation_prompt",
             "quiet_hours",
             "passive_injection_position",
-            "response_review_mode",
+            "passive_review_mode",
+            "passive_review_strength",
+            "proactive_review_mode",
             "smart_silence_judge_mode",
             "smart_silence_min_confidence",
             "smart_silence_model_timeout_seconds",
@@ -11032,6 +11812,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "segmented_proactive_content_cleanup_scope",
             "segmented_proactive_content_cleanup_rule",
             "segmented_proactive_content_cleanup_words",
+            "enable_segmented_proactive_content_replacement",
+            "segmented_proactive_content_replacements",
             "segmented_proactive_interval_method",
             "segmented_proactive_interval_min",
             "segmented_proactive_interval_max",
@@ -11103,6 +11885,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "expression_learning_mode",
             "enable_expression_manual_review",
             "enable_expression_style_review",
+            "expression_private_learning_source_mode",
+            "expression_private_learning_source_ids",
+            "expression_group_learning_source_mode",
+            "expression_group_learning_source_ids",
+            "expression_group_learning_daily_batch_limit",
+            "expression_group_learning_min_new_messages",
+            "expression_private_application_mode",
+            "expression_private_application_user_ids",
+            "expression_group_application_mode",
+            "expression_group_application_ids",
             "max_dialogue_episodes",
             "user_habit_min_count",
             "user_habit_max_items",
@@ -11134,6 +11926,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "news_share_probability",
             "external_event_self_link_probability",
             "external_event_self_link_cooldown_hours",
+            "external_link_share_cooldown_hours",
             "news_max_items_per_source",
             "news_sources",
             "news_hot_sources",
@@ -12369,7 +13162,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "enable_group_interjection": False,
                     "enable_companion_memory": True,
                     "enable_expression_learning": True,
-                    "enable_response_self_review": True,
+                    "enable_passive_response_review": True,
+                    "enable_proactive_message_review": True,
                     "enable_livingmemory_integration": True,
                 },
             },
@@ -12394,7 +13188,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "enable_expression_learning": True,
                     "enable_dialogue_episode_memory": True,
                     "enable_open_loop_tracking": True,
-                    "enable_response_self_review": True,
+                    "enable_passive_response_review": True,
+                    "enable_proactive_message_review": True,
                 },
             },
             "active": {
@@ -12415,7 +13210,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "enable_companion_memory": True,
                     "enable_expression_learning": True,
                     "enable_intent_emotion_analysis": True,
-                    "enable_response_self_review": True,
+                    "enable_passive_response_review": True,
+                    "enable_proactive_message_review": True,
                     "enable_dialogue_episode_memory": True,
                     "enable_open_loop_tracking": True,
                     "enable_group_interjection": True,
@@ -12707,6 +13503,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 # still exposes a stale grouped/default value during the same request.
                 normalized_mode = self._normalize_setting_value("tts_generation_mode", value)
                 self.plugin.tts_generation_mode = normalized_mode
+            return
+        if key == "enable_passive_response_review":
+            normalized = self._normalize_bool_value(value)
+            self.plugin.enable_passive_response_review = normalized
+            self.plugin.enable_response_self_review = normalized
+            return
+        if key == "passive_review_mode":
+            normalized = self._normalize_setting_value(key, value)
+            self.plugin.passive_review_mode = normalized
+            self.plugin.response_review_mode = normalized
             return
         if key in self._allowed_feature_keys():
             setattr(self.plugin, key, self._normalize_bool_value(value))
@@ -13010,6 +13816,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_expression_learning",
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
+            "enable_passive_response_review",
             "enable_proactive_message_review",
             "enable_smart_silence",
             "enable_llm_proactive_message",
@@ -13024,6 +13831,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_open_loop_tracking",
             "enable_user_habit_learning",
             "enable_food_menu_recommendation",
+            "enable_personal_goals",
             "enable_humanized_states",
             "enable_health_state",
             "enable_hunger_state",
@@ -13106,6 +13914,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_screen_glance_action",
+            "enable_poke_action",
+            "enable_voice_action",
             "enable_yesterday_screen_diary_context",
             "enable_tts_enhancement",
             "enable_creative_writing",
@@ -13156,6 +13967,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _allowed_setting_keys(self) -> set[str]:
         keys = {
+            "expression_private_learning_source_mode",
+            "expression_private_learning_source_ids",
+            "expression_group_learning_source_mode",
+            "expression_group_learning_source_ids",
+            "expression_group_learning_daily_batch_limit",
+            "expression_group_learning_min_new_messages",
+            "expression_private_application_mode",
+            "expression_private_application_user_ids",
+            "expression_group_application_mode",
+            "expression_group_application_ids",
             "bot_name",
             "page_font_family",
             "page_theme",
@@ -13193,6 +14014,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "persona_inner_voice_prompt",
             "persona_proactive_voice_prompt",
             "response_review_mode",
+            "passive_review_mode",
+            "passive_review_strength",
+            "proactive_review_mode",
             "smart_silence_judge_mode",
             "smart_silence_min_confidence",
             "smart_silence_model_timeout_seconds",
@@ -13201,6 +14025,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_review_low_score_threshold",
             "proactive_review_pressure_threshold",
             "response_review_max_chars",
+            "enable_personal_goal_auto_progress",
+            "personal_goal_share_cooldown_hours",
+            "personal_goal_stall_days",
             "enable_llm_emotion_judgement",
             "emotion_judgement_mode",
             "schedule_persona_prompt",
@@ -13372,6 +14199,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "segmented_proactive_content_cleanup_scope",
             "segmented_proactive_content_cleanup_rule",
             "segmented_proactive_content_cleanup_words",
+            "enable_segmented_proactive_content_replacement",
+            "segmented_proactive_content_replacements",
             "segmented_proactive_interval_method",
             "segmented_proactive_interval_min",
             "segmented_proactive_interval_max",
@@ -13475,6 +14304,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "news_share_probability",
             "external_event_self_link_probability",
             "external_event_self_link_cooldown_hours",
+            "external_link_share_cooldown_hours",
             "news_max_items_per_source",
             "news_sources",
             "news_hot_sources",
@@ -13552,6 +14382,38 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
         if key in self._schema_bool_keys():
             return self._normalize_bool_value(value)
+        expression_modes = {
+            "expression_private_learning_source_mode": ({"owner", "selected", "all"}, "owner"),
+            "expression_group_learning_source_mode": ({"disabled", "selected", "all"}, "disabled"),
+            "expression_private_application_mode": ({"all", "selected"}, "all"),
+            "expression_group_application_mode": ({"disabled", "all", "selected"}, "all"),
+        }
+        if key in expression_modes:
+            allowed, default = expression_modes[key]
+            mode = str(value or default).strip().lower()
+            return mode if mode in allowed else default
+        expression_id_keys = {
+            "expression_private_learning_source_ids",
+            "expression_group_learning_source_ids",
+            "expression_private_application_user_ids",
+            "expression_group_application_ids",
+        }
+        if key in expression_id_keys:
+            ids = self._normalize_id_list(value)
+            if key in {
+                "expression_private_learning_source_ids",
+                "expression_private_application_user_ids",
+            }:
+                canonicalizer = getattr(self.plugin, "_canonical_private_user_id", None)
+                if callable(canonicalizer):
+                    normalized_ids: list[str] = []
+                    for item in ids:
+                        try:
+                            normalized_ids.append(self._single_line(canonicalizer(item), 80) or item)
+                        except Exception:
+                            normalized_ids.append(item)
+                    ids = normalized_ids
+            return list(dict.fromkeys(item for item in ids if item))[:500]
         if key in {"environment_perception_timezone", "deepseek_peak_timezone"}:
             return _normalize_timezone_name(value)
         if key == "target_user_ids":
@@ -13888,6 +14750,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 words = [_decode_segmented_word(part) for part in parts]
             words = [word for word in words if word != ""]
             return words[:80]
+        if key == "segmented_proactive_content_replacements":
+            if isinstance(value, list):
+                rules = [item for item in value if isinstance(item, dict) or str(item or "").strip()]
+            else:
+                rules = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+            return rules[:80]
         if key in {"segmented_proactive_regex", "segmented_proactive_content_cleanup_rule"}:
             return str(value or "").strip()[:800]
         if key == "atrelay_default_relay_style":
@@ -13983,7 +14851,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "proactive_intensity_preset":
             normalizer = getattr(self.plugin, "_normalize_proactive_intensity_preset", None)
             return normalizer(value) if callable(normalizer) else str(value or "off").strip().lower()
-        if key == "proactive_review_strength":
+        if key in {"proactive_review_strength", "passive_review_strength"}:
             text = str(value or "lenient").strip().lower()
             aliases = {
                 "宽松": "lenient",
@@ -13992,6 +14860,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             }
             text = aliases.get(text, text)
             return text if text in {"lenient", "balanced", "strict"} else "lenient"
+        if key in {"passive_review_mode", "proactive_review_mode", "response_review_mode"}:
+            default = "full" if key == "proactive_review_mode" else "severe_only"
+            text = str(value or default).strip().lower()
+            return text if text in {"local_only", "severe_only", "full"} else default
         if key == "quote_skip_short_reply_chars":
             try:
                 return max(0, min(120, int(value)))
@@ -14058,6 +14930,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(5, min(1440, int(value)))
             except (TypeError, ValueError):
                 return 180
+        if key == "external_link_share_cooldown_hours":
+            try:
+                return max(0, min(168, int(value)))
+            except (TypeError, ValueError):
+                return 72
         if key == "web_exploration_min_interval_hours":
             try:
                 return max(1, min(168, int(value)))
@@ -14127,6 +15004,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "news_hot_max_items",
             "ai_daily_check_interval_minutes",
             "external_event_self_link_cooldown_hours",
+            "external_link_share_cooldown_hours",
             "qzone_life_publish_min_interval_hours",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
@@ -14348,6 +15226,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_segmented_proactive_reply",
             "segmented_proactive_send_as_forward",
             "enable_segmented_proactive_content_cleanup",
+            "enable_segmented_proactive_content_replacement",
             "enable_humanized_states",
             "inject_passive_states",
             "enable_health_state",
@@ -16761,6 +17640,35 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         response = await send_file(str(path))
         response.headers["Cache-Control"] = "private, max-age=3600"
         return response
+
+    async def get_creative_project_cover_data(self) -> dict[str, Any]:
+        project_id = self._single_line(request.args.get("id"), 32)
+        if not project_id:
+            return self._error("缺少 id")
+        async with self.plugin._data_lock:
+            projects = self.plugin.data.get("creative_projects") if isinstance(self.plugin.data.get("creative_projects"), list) else []
+            project = next(
+                (item for item in projects if isinstance(item, dict) and self._single_line(item.get("id"), 32) == project_id),
+                None,
+            )
+            path = self._creative_project_cover_path(project) if isinstance(project, dict) else None
+        if path is None:
+            return self._error("作品封面不存在")
+        try:
+            mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+            data = await self._read_file_base64(path)
+            stat = path.stat()
+            return self._ok(
+                {
+                    "mime": mime,
+                    "data_url": f"data:{mime};base64,{data}",
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                }
+            )
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 读取创作封面数据失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
 
     async def get_creative_project(self) -> dict[str, Any]:
         project_id = str(request.args.get("id", "")).strip()

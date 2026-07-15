@@ -103,7 +103,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import _date_key, _normalize_photo_subject_owner, _now_ts, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -827,6 +827,533 @@ class UserMemoryMixin:
                 hints.append("气氛略近：可以自然一点,别过度黏。")
         return " ".join(hints).strip()
 
+    def _expression_scope_mode(self, key: str, allowed: set[str], default: str) -> str:
+        value = str(getattr(self, key, default) or default).strip().lower()
+        return value if value in allowed else default
+
+    def _expression_scope_ids(self, key: str, *, group: bool = False) -> set[str]:
+        raw = getattr(self, key, [])
+        parser = getattr(self, "_parse_group_id_list" if group else "_parse_text_list_config", None)
+        try:
+            values = parser(raw) if callable(parser) else (raw if isinstance(raw, list) else [])
+        except Exception:
+            values = raw if isinstance(raw, list) else []
+        normalized: set[str] = set()
+        for item in values:
+            value = _single_line(item, 80)
+            if not value:
+                continue
+            if not group:
+                value = self._expression_private_scope_id(value)
+            if value:
+                normalized.add(value)
+        return normalized
+
+    def _expression_private_scope_id(self, user_id: Any) -> str:
+        """Normalize configured private IDs so aliases follow the same identity boundary."""
+        value = _single_line(user_id, 80)
+        normalizer = getattr(self, "_canonical_private_user_id", None)
+        if value and callable(normalizer):
+            try:
+                value = _single_line(normalizer(value), 80) or value
+            except Exception:
+                pass
+        return value
+
+    def _expression_private_learning_source_enabled(self, user: dict[str, Any], user_id: Any = "") -> bool:
+        mode = self._expression_scope_mode(
+            "expression_private_learning_source_mode",
+            {"owner", "selected", "all"},
+            "owner",
+        )
+        user_id = self._expression_private_scope_id(user_id or user.get("user_id"))
+        if mode == "all":
+            return True
+        if mode == "selected":
+            return bool(user_id and user_id in self._expression_scope_ids("expression_private_learning_source_ids"))
+        role_getter = getattr(self, "_private_user_role", None)
+        try:
+            role = role_getter(user, user_id) if callable(role_getter) else str(user.get("relationship_role") or "")
+        except Exception:
+            role = str(user.get("relationship_role") or "")
+        return str(role or "").strip().lower() == "owner"
+
+    def _expression_group_learning_source_enabled(self, group_id: Any) -> bool:
+        mode = self._expression_scope_mode(
+            "expression_group_learning_source_mode",
+            {"disabled", "selected", "all"},
+            "disabled",
+        )
+        group_id = _single_line(group_id, 80)
+        if mode == "all":
+            return bool(group_id)
+        if mode == "selected":
+            return bool(group_id and group_id in self._expression_scope_ids("expression_group_learning_source_ids", group=True))
+        return False
+
+    def _expression_private_application_enabled(self, user_id: Any) -> bool:
+        mode = self._expression_scope_mode(
+            "expression_private_application_mode",
+            {"all", "selected"},
+            "all",
+        )
+        user_id = self._expression_private_scope_id(user_id)
+        return mode == "all" or bool(user_id and user_id in self._expression_scope_ids("expression_private_application_user_ids"))
+
+    def _expression_group_application_enabled(self, group_id: Any) -> bool:
+        mode = self._expression_scope_mode(
+            "expression_group_application_mode",
+            {"disabled", "all", "selected"},
+            "all",
+        )
+        group_id = _single_line(group_id, 80)
+        if mode == "all":
+            return bool(group_id)
+        if mode == "selected":
+            return bool(group_id and group_id in self._expression_scope_ids("expression_group_application_ids", group=True))
+        return False
+
+    def _expression_scope_signature(self) -> str:
+        parts = [
+            self._expression_scope_mode("expression_private_learning_source_mode", {"owner", "selected", "all"}, "owner"),
+            ",".join(sorted(self._expression_scope_ids("expression_private_learning_source_ids"))),
+            self._expression_scope_mode("expression_group_learning_source_mode", {"disabled", "selected", "all"}, "disabled"),
+            ",".join(sorted(self._expression_scope_ids("expression_group_learning_source_ids", group=True))),
+            self._expression_scope_mode("expression_private_application_mode", {"all", "selected"}, "all"),
+            ",".join(sorted(self._expression_scope_ids("expression_private_application_user_ids"))),
+            self._expression_scope_mode("expression_group_application_mode", {"disabled", "all", "selected"}, "all"),
+            ",".join(sorted(self._expression_scope_ids("expression_group_application_ids", group=True))),
+        ]
+        return "|".join(parts)
+
+    @staticmethod
+    def _expression_voice_actions(
+        sample_count: int,
+        short_ratio: float,
+        feature_counts: dict[str, Any],
+        *,
+        limit: int = 3,
+    ) -> list[str]:
+        if sample_count < 2:
+            return []
+        actions: list[str] = []
+        if short_ratio >= 0.55:
+            actions.append("优先用一两句完整短句，保持即时聊天感")
+        elif short_ratio <= 0.2:
+            actions.append("可以说完整一点，但不要写成说明书")
+        if _safe_int(feature_counts.get("casual_opener"), 0, 0) >= 2:
+            actions.append("开头可以自然地随口起一句，避开客服式开场")
+        if _safe_int(feature_counts.get("laugh_marker"), 0, 0) >= 2:
+            actions.append("轻松时可放一个笑声式口语标记，不要连续堆叠")
+        elif _safe_int(feature_counts.get("soft_wave"), 0, 0) >= 2:
+            actions.append("轻松时可用一个轻微波浪号收束，不要每句都加")
+        elif _safe_int(feature_counts.get("playful"), 0, 0) >= 2:
+            actions.append("保留一点轻松口语感，但不要硬塞口癖")
+        if _safe_int(feature_counts.get("soft_ending"), 0, 0) >= 2:
+            actions.append("收尾可以放轻一点，不必强行加语气词")
+        if _safe_int(feature_counts.get("reduplication"), 0, 0) >= 2:
+            actions.append("亲近轻松的话题里可偶尔用一个自然叠词，不要生造")
+        if _safe_int(feature_counts.get("pause"), 0, 0) >= 2:
+            actions.append("允许留一点停顿感，最多一个省略号")
+        return actions[: max(1, limit)]
+
+    def _refresh_expression_voice_profile(self) -> dict[str, Any]:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        now = _now_ts()
+        cutoff = now - 30 * 86400
+        refresh_day = datetime.now().strftime("%Y-%m-%d")
+        total_samples = 0
+        total_short = 0
+        private_sources = 0
+        group_sources = 0
+        feature_counts: dict[str, int] = {}
+        scene_profiles: dict[str, dict[str, Any]] = {}
+        semantic_rules: dict[str, dict[str, Any]] = {}
+
+        def collect(profile: Any, *, source_kind: str, source_id: str) -> None:
+            nonlocal total_samples, total_short, private_sources, group_sources
+            if not isinstance(profile, dict):
+                return
+            self._backfill_expression_rule_families(profile)
+            if source_kind == "group":
+                samples = [
+                    item
+                    for item in self._group_expression_pattern_samples(profile, now=now)
+                    if _safe_int(item.get("evidence_count"), 1, 1) >= 2
+                ]
+            else:
+                raw_samples = profile.get("samples")
+                samples = [
+                    item
+                    for item in (raw_samples if isinstance(raw_samples, list) else [])
+                    if isinstance(item, dict) and _safe_float(item.get("ts"), now) >= cutoff
+                ]
+            learned_rules = [
+                item
+                for item in (profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else [])
+                if (
+                    isinstance(item, dict)
+                    and _safe_int(item.get("evidence_count"), 0, 0) >= 1
+                    and self._expression_rule_definition_is_valid(item)
+                )
+            ]
+            if not samples and not learned_rules:
+                return
+            if source_kind == "private":
+                private_sources += 1
+            else:
+                group_sources += 1
+            for item in samples:
+                evidence = _safe_int(item.get("evidence_count"), 1, 1)
+                weight = min(evidence, 6) if source_kind == "group" else 1
+                total_samples += weight
+                length = _safe_int(item.get("length"), 0, 0)
+                if 0 < length <= 18:
+                    total_short += weight
+                scene = _single_line(item.get("scene"), 32)
+                if scene not in {"acknowledgement", "question", "request", "tease", "emotion", "casual"}:
+                    scene = self._expression_scene_from_text(item.get("text") or item.get("phrase"))
+                bucket = scene_profiles.setdefault(scene, {"count": 0, "short_count": 0, "feature_counts": {}})
+                bucket["count"] += weight
+                if 0 < length <= 18:
+                    bucket["short_count"] += weight
+                raw_features = item.get("features")
+                features = raw_features if isinstance(raw_features, list) else self._expression_style_features_from_text(item.get("text") or item.get("phrase"))
+                for feature in features:
+                    key = _single_line(feature, 32)
+                    if not key:
+                        continue
+                    feature_counts[key] = _safe_int(feature_counts.get(key), 0, 0) + weight
+                    bucket_features = bucket["feature_counts"]
+                    bucket_features[key] = _safe_int(bucket_features.get(key), 0, 0) + weight
+            for item in learned_rules:
+                # 只汇总已经审核通过的规则。pattern 是脱敏后的可复用表达模板，
+                # 与 evidence_examples 不同，可以进入召回；支持片段永远只留在审核页。
+                kind = _single_line(item.get("kind"), 16).lower()
+                situation = _single_line(item.get("situation"), 80)
+                pattern = _single_line(item.get("pattern") or item.get("style"), 100)
+                instruction = _single_line(item.get("instruction"), 140)
+                if kind not in {"style", "grammar"} or not situation or not pattern or not instruction:
+                    continue
+                if not self._safe_expression_phrase(pattern, 100):
+                    continue
+                family_id = _single_line(item.get("family_id"), 64)
+                signature_text = "|".join(
+                    (
+                        family_id,
+                        kind,
+                        re.sub(r"[\s，。！？!?、；;：:]", "", situation).lower(),
+                        re.sub(r"[\s，。！？!?、；;：:]", "", pattern).lower(),
+                    )
+                )
+                signature = hashlib.sha1(signature_text.encode("utf-8")).hexdigest()[:16]
+                evidence = min(6, _safe_int(item.get("evidence_count"), 0, 0))
+                bucket = semantic_rules.setdefault(
+                    signature,
+                    {
+                        "id": signature,
+                        "family_id": family_id,
+                        "kind": kind,
+                        "situation": situation,
+                        "pattern": pattern,
+                        "instruction": instruction,
+                        "keywords": [],
+                        "evidence_count": 0,
+                        "source_kinds": [],
+                        "source_refs": [],
+                        "channels": [],
+                        "relationship_stages": [],
+                        "emotion_gates": [],
+                        "intent": "",
+                        "avoid": "",
+                        "persona_conflict": False,
+                        "positive_feedback": 0,
+                        "negative_feedback": 0,
+                        "use_count": 0,
+                        "last_seen_ts": 0.0,
+                    },
+                )
+                bucket["evidence_count"] = min(99, _safe_int(bucket.get("evidence_count"), 0, 0) + evidence)
+                bucket["last_seen_ts"] = max(
+                    _safe_float(bucket.get("last_seen_ts"), 0.0),
+                    _safe_float(item.get("last_seen_ts"), now),
+                )
+                if source_kind not in bucket["source_kinds"]:
+                    bucket["source_kinds"].append(source_kind)
+                source_ref = {
+                    "source_kind": source_kind,
+                    "source_id": _single_line(source_id, 80),
+                    "rule_id": _single_line(item.get("id"), 40),
+                }
+                if source_ref["source_id"] and source_ref["rule_id"] and source_ref not in bucket["source_refs"]:
+                    bucket["source_refs"].append(source_ref)
+                for field in ("channels", "relationship_stages", "emotion_gates"):
+                    values = item.get(field) if isinstance(item.get(field), list) else []
+                    for value in values:
+                        normalized = _single_line(value, 24).lower()
+                        if normalized and normalized not in bucket[field]:
+                            bucket[field].append(normalized)
+                incoming_intent = _single_line(item.get("intent"), 32).lower()
+                if incoming_intent:
+                    if bucket["intent"] and bucket["intent"] != incoming_intent:
+                        bucket["intent"] = "any"
+                    else:
+                        bucket["intent"] = incoming_intent
+                incoming_avoid = _single_line(item.get("avoid"), 160)
+                if incoming_avoid and len(incoming_avoid) > len(bucket["avoid"]):
+                    bucket["avoid"] = incoming_avoid
+                bucket["persona_conflict"] = bool(bucket["persona_conflict"] or item.get("persona_conflict"))
+                bucket["positive_feedback"] = min(
+                    999,
+                    _safe_int(bucket.get("positive_feedback"), 0, 0)
+                    + _safe_int(item.get("positive_feedback"), 0, 0),
+                )
+                bucket["negative_feedback"] = min(
+                    999,
+                    _safe_int(bucket.get("negative_feedback"), 0, 0)
+                    + _safe_int(item.get("negative_feedback"), 0, 0),
+                )
+                bucket["use_count"] = min(
+                    99999,
+                    _safe_int(bucket.get("use_count"), 0, 0)
+                    + _safe_int(item.get("use_count"), 0, 0),
+                )
+                for keyword in item.get("keywords", []) if isinstance(item.get("keywords"), list) else []:
+                    value = _single_line(keyword, 24)
+                    if value and value not in bucket["keywords"]:
+                        bucket["keywords"].append(value)
+                bucket["keywords"] = bucket["keywords"][:8]
+
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        for user_id, user in users.items():
+            if isinstance(user, dict) and self._expression_private_learning_source_enabled(user, user_id):
+                collect(user.get("expression_profile"), source_kind="private", source_id=str(user_id))
+        groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+        for group_id, group in groups.items():
+            if isinstance(group, dict) and self._expression_group_learning_source_enabled(group_id):
+                collect(group.get("expression_profile"), source_kind="group", source_id=str(group_id))
+
+        profile = {
+            "sample_count": total_samples,
+            "private_source_count": private_sources,
+            "group_source_count": group_sources,
+            "short_ratio": round(total_short / max(1, total_samples), 2),
+            "feature_counts": feature_counts,
+            "scene_profiles": {
+                scene: {
+                    "count": _safe_int(bucket.get("count"), 0, 0),
+                    "short_ratio": round(_safe_int(bucket.get("short_count"), 0, 0) / max(1, _safe_int(bucket.get("count"), 0, 0)), 2),
+                    "feature_counts": dict(bucket.get("feature_counts") or {}),
+                }
+                for scene, bucket in scene_profiles.items()
+                if _safe_int(bucket.get("count"), 0, 0) > 0
+            },
+            "learned_rules": sorted(
+                semantic_rules.values(),
+                key=lambda item: (
+                    -_safe_int(item.get("evidence_count"), 0, 0),
+                    -_safe_float(item.get("last_seen_ts"), 0.0),
+                ),
+            )[: self.max_learned_expression_items],
+            "scope_signature": self._expression_scope_signature(),
+            "refresh_day": refresh_day,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        profile["actions"] = self._expression_voice_actions(
+            total_samples,
+            _safe_float(profile.get("short_ratio"), 0.0),
+            feature_counts,
+            limit=4,
+        )
+        data["expression_voice_profile"] = profile
+        return profile
+
+    def _expression_voice_profile(self) -> dict[str, Any]:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        profile = data.get("expression_voice_profile")
+        refresh_day = datetime.now().strftime("%Y-%m-%d")
+        if (
+            not isinstance(profile, dict)
+            or profile.get("scope_signature") != self._expression_scope_signature()
+            or profile.get("refresh_day") != refresh_day
+        ):
+            profile = self._refresh_expression_voice_profile()
+        return profile if isinstance(profile, dict) else {}
+
+    def _expression_companion_context(
+        self,
+        *,
+        scope: str,
+        target_id: str = "",
+        inbound_text: str = "",
+        context_owner: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        channel = _single_line(scope, 24).lower() or "private"
+        owner = context_owner if isinstance(context_owner, dict) else None
+        if owner is None and channel in {"private", "proactive", "tts"}:
+            users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+            candidate = users.get(str(target_id)) if isinstance(users, dict) else None
+            owner = candidate if isinstance(candidate, dict) else None
+
+        relationship_stage = "any"
+        if isinstance(owner, dict) and channel in {"private", "proactive", "tts"}:
+            level = _single_line(self._relationship_profile(owner).get("level"), 24).lower()
+            relationship_stage = {
+                "陌生": "stranger",
+                "stranger": "stranger",
+                "熟悉": "familiar",
+                "familiar": "familiar",
+                "亲近": "close",
+                "close": "close",
+            }.get(level, "any")
+
+        intent_profile: dict[str, Any] = {}
+        if inbound_text:
+            try:
+                intent_profile = self._analyze_inbound_intent(inbound_text)
+            except Exception:
+                intent_profile = {}
+        elif isinstance(owner, dict) and isinstance(owner.get("intent_profile"), dict):
+            intent_profile = owner.get("intent_profile") or {}
+        intent = _single_line(intent_profile.get("intent"), 32).lower()
+        if channel == "proactive" and not inbound_text:
+            intent = "proactive"
+        elif channel == "qzone":
+            intent = "emotion" if re.search(r"(低落|委屈|难受|emo|情绪)", inbound_text, re.IGNORECASE) else "casual"
+        elif intent in {"", "chat", "empty"}:
+            intent = self._expression_scene_from_text(inbound_text) if inbound_text else "casual"
+
+        emotion_gate = "normal"
+        state = owner.get("relationship_state") if isinstance(owner, dict) else {}
+        state_mode = _single_line(state.get("mode"), 24).lower() if isinstance(state, dict) else ""
+        intent_emotion = _single_line(intent_profile.get("emotion"), 24).lower()
+        if state_mode in {"refusing", "hurt", "backoff", "careful"} or intent == "boundary" or intent_emotion == "resistant":
+            emotion_gate = "guarded"
+        elif intent in {"comfort", "emotion"} or intent_emotion == "low":
+            emotion_gate = "low"
+        elif intent in {"play", "intimacy"} or intent_emotion in {"light", "close", "positive"}:
+            emotion_gate = "positive"
+
+        return {
+            "channel": channel,
+            "relationship_stage": relationship_stage,
+            "emotion_gate": emotion_gate,
+            "intent": intent or "casual",
+        }
+
+    @staticmethod
+    def _format_expression_rule_bundle_line(rule: Any) -> str:
+        if not isinstance(rule, dict):
+            return ""
+        style_rule = rule.get("style_rule") if isinstance(rule.get("style_rule"), dict) else None
+        grammar_rule = rule.get("grammar_rule") if isinstance(rule.get("grammar_rule"), dict) else None
+        if style_rule is None and _single_line(rule.get("kind"), 16).lower() == "style":
+            style_rule = rule
+        if grammar_rule is None and _single_line(rule.get("kind"), 16).lower() == "grammar":
+            grammar_rule = rule
+        situation = _single_line(
+            (style_rule or {}).get("situation") or (grammar_rule or {}).get("situation") or rule.get("situation"),
+            80,
+        )
+        if not situation:
+            return ""
+        parts: list[str] = []
+        if style_rule:
+            pattern = _single_line(style_rule.get("pattern") or style_rule.get("style"), 100)
+            instruction = _single_line(style_rule.get("instruction"), 140)
+            if pattern and instruction:
+                parts.append(f"可复用表达“{pattern}”（{instruction}）")
+        if grammar_rule:
+            pattern = _single_line(grammar_rule.get("pattern") or grammar_rule.get("style"), 100)
+            instruction = _single_line(grammar_rule.get("instruction"), 140)
+            if pattern and instruction:
+                parts.append(f"句法习惯“{pattern}”（{instruction}）")
+        if not parts:
+            return ""
+        avoid = _single_line(rule.get("avoid"), 200)
+        if avoid:
+            parts.append(f"边界：{avoid}")
+        kind_label = "组合规则" if style_rule and grammar_rule else ("情境表达" if style_rule else "语法习惯")
+        return f"- {kind_label}｜当“{situation}”时：" + "；".join(parts)
+
+    def _expression_voice_selection(
+        self,
+        *,
+        scope: str,
+        target_id: str = "",
+        inbound_text: str = "",
+        context_owner: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not bool(getattr(self, "enable_expression_learning", True)):
+            return {"prompt": "", "rules": [], "context": {}}
+        if scope in {"private", "proactive"} and not self._expression_private_application_enabled(target_id):
+            return {"prompt": "", "rules": [], "context": {}}
+        if scope == "group" and not self._expression_group_application_enabled(target_id):
+            return {"prompt": "", "rules": [], "context": {}}
+        profile = self._expression_voice_profile()
+        context = self._expression_companion_context(
+            scope=scope,
+            target_id=target_id,
+            inbound_text=inbound_text,
+            context_owner=context_owner,
+        )
+        learned_rules = self._select_learned_expression_rules(
+            profile.get("learned_rules"),
+            hint=inbound_text,
+            limit=2,
+            context=context,
+        )
+        if not learned_rules:
+            return {"prompt": "", "rules": [], "context": context}
+        guidance: list[str] = []
+        for rule in learned_rules:
+            line = self._format_expression_rule_bundle_line(rule)
+            if line:
+                guidance.append(line)
+        if not guidance:
+            return {"prompt": "", "rules": [], "context": context}
+        scope_label = {"private": "私聊回复", "proactive": "私聊主动消息", "group": "群聊回复"}.get(scope, "当前回复")
+        evidence_count = sum(_safe_int(item.get("evidence_count"), 0, 0) for item in learned_rules)
+        prompt = (
+            "【已审核的表达学习规则】\n"
+            f"这些规则只来自已允许的私聊/群聊来源，共 {evidence_count} 条支持证据。当前用于{scope_label}：\n"
+            + "\n".join(guidance[:4])
+            + "\n执行优先级：工具与事实结果 > 安全及能力边界 > AstrBot 人格 > 当前关系与情绪 > 已审核表达规则 > 装饰性口癖/标点。"
+            + "任何冲突都舍弃较低优先级；工具失败时绝不能声称已发送、已完成或已成功。"
+            + "情境表达可以改写或替换占位符，语法习惯只控制句法；不要机械复读。"
+            + "不得带出来源身份、称呼、账号、关系、事实、秘密或支持片段。"
+        )
+        return {"prompt": prompt, "rules": [dict(item) for item in learned_rules], "context": context}
+
+    def _format_expression_voice_for_prompt(
+        self,
+        *,
+        scope: str,
+        target_id: str = "",
+        inbound_text: str = "",
+        context_owner: dict[str, Any] | None = None,
+        stage_owner: dict[str, Any] | None = None,
+    ) -> str:
+        selection = self._expression_voice_selection(
+            scope=scope,
+            target_id=target_id,
+            inbound_text=inbound_text,
+            context_owner=context_owner,
+        )
+        if isinstance(stage_owner, dict) and selection.get("rules"):
+            profile = stage_owner.setdefault("expression_profile", {})
+            if isinstance(profile, dict):
+                profile["staged_semantic_selection"] = {
+                    "ts": _now_ts(),
+                    "rules": [dict(item) for item in selection.get("rules", []) if isinstance(item, dict)][:2],
+                    "context": dict(selection.get("context") or {}),
+                }
+        return str(selection.get("prompt") or "")
+
     def _update_expression_profile_from_message(self, user: dict[str, Any], text: str) -> None:
         if not self.enable_expression_learning:
             return
@@ -883,6 +1410,1040 @@ class UserMemoryMixin:
         profile["samples"] = samples[: self.max_learned_expression_items]
         self._refresh_expression_profile_legacy_summary(profile)
 
+    def _update_group_expression_profile_from_message(self, group: dict[str, Any], text: str) -> None:
+        if not self.enable_expression_learning:
+            return
+        cleaned = _single_line(_strip_internal_message_blocks(text), self._expression_sample_max_chars())
+        if not cleaned or self._should_skip_expression_sample(cleaned):
+            return
+        profile = group.setdefault("expression_profile", {})
+        if not isinstance(profile, dict):
+            profile = {}
+            group["expression_profile"] = profile
+        now = _now_ts()
+        samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
+        sample = self._expression_sample_from_text(cleaned, now)
+        # Group sources retain only aggregate-safe metadata, never a group member's original phrasing.
+        for key in ("text", "phrase", "ending"):
+            sample.pop(key, None)
+        sample["evidence_count"] = 1
+        samples.insert(0, sample)
+        profile["samples"] = samples
+        profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self._normalize_group_expression_profile(profile, now=now)
+
+    @staticmethod
+    def _expression_length_bucket(length: Any) -> str:
+        value = _safe_int(length, 0, 0)
+        if value <= 6:
+            return "2-6"
+        if value <= 12:
+            return "7-12"
+        if value <= 20:
+            return "13-20"
+        if value <= 36:
+            return "21-36"
+        return "37+"
+
+    def _group_expression_pattern_signature(self, item: dict[str, Any]) -> str:
+        scene = _single_line(item.get("scene"), 32)
+        if scene not in {"acknowledgement", "question", "request", "tease", "emotion", "casual"}:
+            scene = "casual"
+        raw_features = item.get("features")
+        features = sorted({
+            _single_line(feature, 32)
+            for feature in raw_features
+            if _single_line(feature, 32)
+        }) if isinstance(raw_features, list) else []
+        distinctive = [feature for feature in features if feature not in {"short", "question"}]
+        if scene == "casual" and not distinctive:
+            return ""
+        marks = item.get("punctuation") if isinstance(item.get("punctuation"), dict) else {}
+        mark_keys = sorted(str(mark) for mark, count in marks.items() if _safe_int(count, 0, 0) > 0)
+        length_bucket = self._expression_length_bucket(item.get("length"))
+        return "|".join((scene, length_bucket, ",".join(features), ",".join(mark_keys)))
+
+    def _group_expression_pattern_samples(self, profile: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:
+        if not isinstance(profile, dict):
+            return []
+        now = now or _now_ts()
+        cutoff = now - 30 * 86400
+        raw_samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
+        buckets: dict[str, dict[str, Any]] = {}
+        for raw in raw_samples:
+            if not isinstance(raw, dict) or _safe_float(raw.get("ts"), now) < cutoff:
+                continue
+            signature = self._group_expression_pattern_signature(raw)
+            if not signature:
+                continue
+            evidence = _safe_int(raw.get("evidence_count"), 1, 1, 9999)
+            length = _safe_int(raw.get("length"), 0, 0)
+            length_total = _safe_int(raw.get("length_total"), length * evidence, 0)
+            ts = _safe_float(raw.get("ts"), now)
+            first_seen_ts = _safe_float(raw.get("first_seen_ts"), ts)
+            features = [
+                _single_line(feature, 32)
+                for feature in raw.get("features", [])
+                if _single_line(feature, 32)
+            ] if isinstance(raw.get("features"), list) else []
+            marks = raw.get("punctuation") if isinstance(raw.get("punctuation"), dict) else {}
+            bucket = buckets.setdefault(
+                signature,
+                {
+                    "id": hashlib.sha1(signature.encode("utf-8")).hexdigest()[:12],
+                    "ts": ts,
+                    "first_seen_ts": first_seen_ts,
+                    "scene": _single_line(raw.get("scene"), 32) or "casual",
+                    "features": list(dict.fromkeys(features)),
+                    "length_bucket": self._expression_length_bucket(length),
+                    "length_total": 0,
+                    "evidence_count": 0,
+                    "punctuation": {},
+                },
+            )
+            bucket["ts"] = max(_safe_float(bucket.get("ts"), 0.0), ts)
+            bucket["first_seen_ts"] = min(_safe_float(bucket.get("first_seen_ts"), ts), first_seen_ts)
+            bucket["length_total"] += length_total
+            bucket["evidence_count"] += evidence
+            bucket_marks = bucket["punctuation"]
+            for mark, count in marks.items():
+                value = _safe_int(count, 0, 0)
+                if value > 0:
+                    bucket_marks[str(mark)] = _safe_int(bucket_marks.get(str(mark)), 0, 0) + value
+        patterns = []
+        for bucket in buckets.values():
+            evidence = max(1, _safe_int(bucket.get("evidence_count"), 1, 1))
+            bucket["length"] = round(_safe_int(bucket.get("length_total"), 0, 0) / evidence)
+            bucket["pattern_status"] = "active" if evidence >= 2 else "observing"
+            patterns.append(bucket)
+        patterns.sort(key=lambda item: (-_safe_int(item.get("evidence_count"), 0, 0), -_safe_float(item.get("ts"), 0.0)))
+        return patterns[: self.max_learned_expression_items]
+
+    def _normalize_group_expression_profile(self, profile: dict[str, Any], *, now: float | None = None) -> bool:
+        if not isinstance(profile, dict):
+            return False
+        before = profile.get("samples") if isinstance(profile.get("samples"), list) else []
+        patterns = self._group_expression_pattern_samples(profile, now=now)
+        changed = before != patterns
+        profile["samples"] = patterns
+        profile["pattern_count"] = len(patterns)
+        profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self._refresh_expression_profile_legacy_summary(profile)
+        return changed
+
+    @staticmethod
+    def _expression_rule_signature(item: dict[str, Any]) -> str:
+        def compact(value: Any, limit: int) -> str:
+            return re.sub(
+                r"[\s，。！？!?、；;：:‘’“”\"']",
+                "",
+                _single_line(value, limit).lower(),
+            )
+
+        parts = (
+            compact(item.get("kind"), 16),
+            compact(item.get("situation"), 80),
+            compact(item.get("pattern"), 100),
+            compact(item.get("instruction"), 140),
+        )
+        return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _expression_rule_source_parts(source_text: str, *, source_kind: str) -> tuple[list[str], set[str]]:
+        utterances: list[str] = []
+        speaker_names: set[str] = set()
+        for raw_line in str(source_text or "").splitlines():
+            line = raw_line.strip()
+            match = re.match(
+                r"^(?:\d{2}-\d{2}\s+\d{2}:\d{2}\s+)?([^:：]{1,40})[:：]\s*(.*)$",
+                line,
+            )
+            if not match:
+                continue
+            speaker, content = match.groups()
+            speaker = speaker.strip()
+            content = _single_line(content, 260)
+            if not content:
+                continue
+            if source_kind == "private":
+                if speaker != "用户":
+                    continue
+            else:
+                if speaker:
+                    speaker_names.add(speaker)
+            utterances.append(content)
+        return utterances, speaker_names
+
+    @staticmethod
+    def _expression_rule_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return _single_line(value, 16).lower() in {"1", "true", "yes", "on", "是", "有", "冲突"}
+
+    @staticmethod
+    def _normalize_expression_rule_values(
+        value: Any,
+        *,
+        allowed: set[str],
+        aliases: dict[str, str],
+        defaults: list[str],
+    ) -> list[str]:
+        if isinstance(value, str):
+            raw_values = re.split(r"[,，/、|\s]+", value)
+        elif isinstance(value, list):
+            raw_values = value
+        else:
+            raw_values = []
+        normalized: list[str] = []
+        for raw in raw_values:
+            item = _single_line(raw, 24).lower()
+            item = aliases.get(item, item)
+            if item == "all":
+                item = "any"
+            if item in allowed and item not in normalized:
+                normalized.append(item)
+        return normalized or list(defaults)
+
+    def _normalize_expression_rule_channels(self, value: Any, *, source_kind: str) -> list[str]:
+        # 来源与使用范围是两件事。群聊里学到的脱敏表达默认也可以用于
+        # 已配置的私聊/主动消息目标，最终仍会经过频道、关系和审核门控。
+        defaults = ["private", "group", "proactive"] if source_kind == "group" else ["private", "proactive"]
+        return self._normalize_expression_rule_values(
+            value,
+            allowed={"private", "group", "proactive", "qzone", "tts"},
+            aliases={
+                "私聊": "private",
+                "群聊": "group",
+                "主动": "proactive",
+                "主动消息": "proactive",
+                "空间": "qzone",
+                "qq空间": "qzone",
+                "说说": "qzone",
+                "语音": "tts",
+            },
+            defaults=defaults,
+        )
+
+    def _normalize_expression_relationship_stages(self, value: Any) -> list[str]:
+        return self._normalize_expression_rule_values(
+            value,
+            allowed={"any", "stranger", "familiar", "close"},
+            aliases={"不限": "any", "任意": "any", "陌生": "stranger", "熟悉": "familiar", "亲近": "close"},
+            defaults=["any"],
+        )
+
+    def _normalize_expression_emotion_gates(self, value: Any) -> list[str]:
+        return self._normalize_expression_rule_values(
+            value,
+            allowed={"any", "normal", "positive", "low", "guarded"},
+            aliases={
+                "不限": "any",
+                "任意": "any",
+                "普通": "normal",
+                "中性": "normal",
+                "轻松": "positive",
+                "积极": "positive",
+                "低落": "low",
+                "安抚": "low",
+                "防备": "guarded",
+                "边界": "guarded",
+            },
+            defaults=["any"],
+        )
+
+    @staticmethod
+    def _normalize_expression_intent(value: Any) -> str:
+        intent = _single_line(value, 32).lower()
+        aliases = {
+            "不限": "any",
+            "任意": "any",
+            "确认": "acknowledgement",
+            "提问": "question",
+            "请求": "request",
+            "求助": "help",
+            "安抚": "comfort",
+            "玩笑": "play",
+            "亲近": "intimacy",
+            "边界": "boundary",
+            "情绪": "emotion",
+            "闲聊": "casual",
+            "主动": "proactive",
+        }
+        intent = aliases.get(intent, intent)
+        allowed = {
+            "any",
+            "acknowledgement",
+            "question",
+            "request",
+            "help",
+            "comfort",
+            "play",
+            "tease",
+            "intimacy",
+            "boundary",
+            "emotion",
+            "casual",
+            "proactive",
+        }
+        return intent if intent in allowed else "any"
+
+    @staticmethod
+    def _expression_rule_payload_candidates(payload: Any) -> list[dict[str, Any]]:
+        """兼容旧 expression_rules，并优先接收 WaifuBot 式的双分类结果。"""
+        if not isinstance(payload, dict):
+            return []
+        result: list[dict[str, Any]] = []
+        sections = (
+            ("style_expressions", "style"),
+            ("grammar_expressions", "grammar"),
+            ("expression_rules", ""),
+        )
+        for key, forced_kind in sections:
+            values = payload.get(key)
+            if not isinstance(values, list):
+                continue
+            for raw in values:
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                if forced_kind:
+                    item["kind"] = forced_kind
+                pattern = _single_line(item.get("pattern") or item.get("style"), 120)
+                if pattern and not _single_line(item.get("instruction"), 160):
+                    if _single_line(item.get("kind"), 16).lower() == "grammar":
+                        item["instruction"] = f"在匹配情境中采用“{pattern}”的句法，内容仍按当前事实生成"
+                    else:
+                        item["instruction"] = f"在匹配情境中自然使用或轻微改写“{pattern}”，不要机械复读"
+                if "keywords" not in item and isinstance(item.get("tags"), list):
+                    item["keywords"] = list(item.get("tags") or [])
+                result.append(item)
+                if len(result) >= 12:
+                    return result
+        return result
+
+    @staticmethod
+    def _expression_style_pattern_is_reusable(pattern: str) -> bool:
+        value = _single_line(pattern, 100)
+        if len(value) < 2 or len(value) > 64:
+            return False
+        quoted = re.fullmatch(r"[“\"‘'](.{2,48})[”\"’']", value)
+        if quoted:
+            value = quoted.group(1).strip()
+        compact = re.sub(r"[\s，。！？!?、；;：:]", "", value)
+        if compact in {
+            "短句", "长句", "柔和收尾", "轻松语气", "自然表达", "口语化表达",
+            "先确认再补充", "先接住再延续", "简短回应", "语气自然",
+        }:
+            return False
+        has_template_marker = bool(re.search(r"_{2,}|\[[^\]]{1,20}\]|[（(][^）)]{1,20}[）)]|[“\"].{1,30}[”\"]", value))
+        meta_description = bool(
+            re.search(
+                r"(?:偏好|习惯|倾向|通常|经常|多用|常用|口语化|书面化|"
+                r"语气|风格|句式|句法|字数|主语|拆句|铺垫|柔和收尾|"
+                r"表达内容|表达方式|回应时|回复时|句子结构|长篇大论)",
+                value,
+            )
+        )
+        looks_like_instruction = bool(
+            re.match(
+                r"^(?:先|使用|采用|保持|表达|回复|回应|开头|结尾|收尾|"
+                r"语气|句式|句法|短句|长句|直接|简短|自然|柔和)",
+                value,
+            )
+        )
+        if meta_description or looks_like_instruction:
+            return False
+        return has_template_marker or len(value) <= 32
+
+    @staticmethod
+    def _expression_grammar_pattern_is_specific(pattern: str) -> bool:
+        value = _single_line(pattern, 100)
+        if len(value) < 4 or len(value) > 80:
+            return False
+        if re.search(r"(?:语气自然|自然表达|口语化表达|表达简洁|说话直接)$", value):
+            return False
+        return bool(
+            re.search(
+                r"(?:主语|省略|\d+\s*[—–~-]\s*\d+\s*字|\d+\s*字|"
+                r"[一二三四五六七八九十]+\s*[—–~-]\s*[一二三四五六七八九十]+\s*字|"
+                r"短句|长句|单句|双句|两句|拆句|断句|反问|祈使|问句|"
+                r"感叹句|陈述句|倒装|重复|叠词|标点|停顿|句首|句尾|连接词)",
+                value,
+            )
+        )
+
+    def _expression_rule_definition_is_valid(self, raw_rule: Any) -> bool:
+        if not isinstance(raw_rule, dict):
+            return False
+        kind = _single_line(raw_rule.get("kind") or raw_rule.get("type"), 16).lower()
+        situation = _single_line(raw_rule.get("situation"), 100)
+        pattern = _single_line(raw_rule.get("pattern") or raw_rule.get("style"), 100)
+        instruction = _single_line(raw_rule.get("instruction"), 160)
+        if kind not in {"style", "grammar"} or not situation or not pattern or not instruction:
+            return False
+        if kind == "style":
+            return self._expression_style_pattern_is_reusable(pattern)
+        return self._expression_grammar_pattern_is_specific(pattern)
+
+    def _prune_invalid_expression_rules(self, profile: dict[str, Any]) -> bool:
+        if not isinstance(profile, dict):
+            return False
+        changed = False
+        for storage_key in ("pending_rules", "learned_rules"):
+            existing = profile.get(storage_key)
+            if not isinstance(existing, list):
+                continue
+            kept = [
+                item
+                for item in existing
+                if (
+                    self._expression_rule_definition_is_valid(item)
+                    and _safe_int(item.get("evidence_count"), 0, 0) >= 1
+                )
+            ]
+            if kept != existing:
+                profile[storage_key] = kept
+                changed = True
+            if self._assign_expression_rule_families(kept):
+                changed = True
+        return changed
+
+    @staticmethod
+    def _expression_rule_evidence_key(value: Any) -> str:
+        text = _single_line(value, 96).lower()
+        return re.sub(r"[\s，。！？!?、；;：:‘’“”\"'（）()【】\[\]<>《》~～…—–_-]", "", text)
+
+    @staticmethod
+    def _expression_rule_text_similarity(left: Any, right: Any) -> float:
+        def grams(value: Any) -> set[str]:
+            compact = re.sub(
+                r"[\s，。！？!?、；;：:‘’“”\"'（）()【】\[\]<>《》~～…—–_-]",
+                "",
+                _single_line(value, 160).lower(),
+            )
+            if not compact:
+                return set()
+            if len(compact) == 1:
+                return {compact}
+            return {compact[index:index + 2] for index in range(len(compact) - 1)}
+
+        left_grams = grams(left)
+        right_grams = grams(right)
+        if not left_grams or not right_grams:
+            return 0.0
+        return len(left_grams & right_grams) / max(1, len(left_grams | right_grams))
+
+    def _expression_rule_pair_score(self, style: dict[str, Any], grammar: dict[str, Any]) -> float:
+        style_family = _single_line(style.get("family_id"), 64)
+        grammar_family = _single_line(grammar.get("family_id"), 64)
+        if style_family and style_family == grammar_family and not style_family.startswith("xs-"):
+            return 1000.0
+
+        style_key = _single_line(style.get("family_key"), 80).lower()
+        grammar_key = _single_line(grammar.get("family_key"), 80).lower()
+        if style_key and style_key == grammar_key:
+            return 900.0
+
+        style_examples = {
+            key
+            for value in (style.get("evidence_examples") if isinstance(style.get("evidence_examples"), list) else [])
+            if (key := self._expression_rule_evidence_key(value))
+        }
+        grammar_examples = {
+            key
+            for value in (grammar.get("evidence_examples") if isinstance(grammar.get("evidence_examples"), list) else [])
+            if (key := self._expression_rule_evidence_key(value))
+        }
+        overlap_count = len(style_examples & grammar_examples)
+        overlap_ratio = overlap_count / max(1, max(len(style_examples), len(grammar_examples)))
+        situation_similarity = self._expression_rule_text_similarity(
+            style.get("situation"),
+            grammar.get("situation"),
+        )
+        style_keywords = {
+            _single_line(value, 24).lower()
+            for value in (style.get("keywords") if isinstance(style.get("keywords"), list) else [])
+            if _single_line(value, 24)
+        }
+        grammar_keywords = {
+            _single_line(value, 24).lower()
+            for value in (grammar.get("keywords") if isinstance(grammar.get("keywords"), list) else [])
+            if _single_line(value, 24)
+        }
+        keyword_overlap = len(style_keywords & grammar_keywords)
+        same_batch = bool(
+            _single_line(style.get("last_batch_key"), 80)
+            and _single_line(style.get("last_batch_key"), 80)
+            == _single_line(grammar.get("last_batch_key"), 80)
+        )
+        same_evidence_count = _safe_int(style.get("evidence_count"), 0, 0) == _safe_int(
+            grammar.get("evidence_count"), 0, 0
+        )
+
+        # 旧规则没有 family_key，只在支持片段确实重叠时自动配对；
+        # 同批次、情境高度相近只作为辅助，避免把同一批中的不同规则强行绑在一起。
+        if overlap_ratio >= 0.45:
+            return 500.0 + overlap_ratio * 100 + situation_similarity * 20 + min(2, keyword_overlap) * 5
+        if overlap_count and same_batch and situation_similarity >= 0.3:
+            return 430.0 + situation_similarity * 40 + min(2, keyword_overlap) * 5
+        if same_batch and same_evidence_count and situation_similarity >= 0.72 and keyword_overlap:
+            return 320.0 + situation_similarity * 40 + min(2, keyword_overlap) * 5
+        return -1.0
+
+    def _assign_expression_rule_families(
+        self,
+        rules: Any,
+        *,
+        batch_key: str = "",
+    ) -> bool:
+        if not isinstance(rules, list):
+            return False
+        valid_rules = [item for item in rules if isinstance(item, dict)]
+        if not valid_rules:
+            return False
+        for item in valid_rules:
+            if batch_key and not _single_line(item.get("last_batch_key"), 80):
+                item["last_batch_key"] = _single_line(batch_key, 80)
+            family_key = _single_line(item.get("family_key"), 80).lower()
+            if family_key:
+                item["family_key"] = family_key
+
+        styles = [item for item in valid_rules if _single_line(item.get("kind"), 16).lower() == "style"]
+        grammars = [item for item in valid_rules if _single_line(item.get("kind"), 16).lower() == "grammar"]
+        pair_candidates: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+        for style in styles:
+            for grammar in grammars:
+                score = self._expression_rule_pair_score(style, grammar)
+                if score >= 0:
+                    pair_candidates.append((score, style, grammar))
+        pair_candidates.sort(key=lambda item: item[0], reverse=True)
+
+        paired_ids: set[int] = set()
+        family_by_object: dict[int, str] = {}
+        for _, style, grammar in pair_candidates:
+            if id(style) in paired_ids or id(grammar) in paired_ids:
+                continue
+            rule_ids = sorted([
+                value
+                for value in (
+                    _single_line(style.get("id"), 100) or self._expression_rule_signature(style),
+                    _single_line(grammar.get("id"), 100) or self._expression_rule_signature(grammar),
+                )
+                if value
+            ])
+            family_seed = "|".join(rule_ids)
+            family_id = f"xf-{hashlib.sha1(family_seed.encode('utf-8')).hexdigest()[:16]}"
+            family_by_object[id(style)] = family_id
+            family_by_object[id(grammar)] = family_id
+            paired_ids.update({id(style), id(grammar)})
+
+        changed = False
+        for item in valid_rules:
+            family_id = family_by_object.get(id(item))
+            if not family_id:
+                rule_id = _single_line(item.get("id"), 100) or self._expression_rule_signature(item)
+                family_id = f"xs-{hashlib.sha1(rule_id.encode('utf-8')).hexdigest()[:16]}"
+            if _single_line(item.get("family_id"), 64) != family_id:
+                item["family_id"] = family_id
+                changed = True
+        return changed
+
+    def _backfill_expression_rule_families(self, profile: Any) -> bool:
+        if not isinstance(profile, dict):
+            return False
+        changed = False
+        for storage_key in ("pending_rules", "learned_rules"):
+            rules = profile.get(storage_key)
+            if isinstance(rules, list) and self._assign_expression_rule_families(rules):
+                changed = True
+        return changed
+
+    def _expression_rule_groups(self, rules: Any) -> list[list[dict[str, Any]]]:
+        if not isinstance(rules, list):
+            return []
+        self._assign_expression_rule_families(rules)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for item in rules:
+            if not isinstance(item, dict):
+                continue
+            family_id = _single_line(item.get("family_id"), 64)
+            if not family_id:
+                continue
+            if family_id not in groups:
+                groups[family_id] = []
+                order.append(family_id)
+            groups[family_id].append(item)
+        return [groups[family_id] for family_id in order]
+
+    def _expression_rule_runtime_bundle(self, group: Any) -> dict[str, Any]:
+        items = [dict(item) for item in group if isinstance(item, dict)] if isinstance(group, list) else []
+        if not items:
+            return {}
+        items.sort(key=lambda item: 0 if _single_line(item.get("kind"), 16).lower() == "style" else 1)
+        style_rule = next((item for item in items if _single_line(item.get("kind"), 16).lower() == "style"), None)
+        grammar_rule = next((item for item in items if _single_line(item.get("kind"), 16).lower() == "grammar"), None)
+        primary = style_rule or grammar_rule or items[0]
+        family_id = _single_line(primary.get("family_id"), 64)
+        bundle = dict(primary)
+        bundle["id"] = family_id if len(items) > 1 else _single_line(primary.get("id"), 100)
+        bundle["family_id"] = family_id
+        bundle["kind"] = "combined" if style_rule and grammar_rule else _single_line(primary.get("kind"), 16).lower()
+        bundle["component_kinds"] = [
+            kind for kind in ("style", "grammar")
+            if any(_single_line(item.get("kind"), 16).lower() == kind for item in items)
+        ]
+        bundle["component_count"] = len(items)
+        bundle["component_rules"] = items
+        bundle["style_rule"] = dict(style_rule) if style_rule else None
+        bundle["grammar_rule"] = dict(grammar_rule) if grammar_rule else None
+        bundle["evidence_count"] = max(_safe_int(item.get("evidence_count"), 0, 0) for item in items)
+        bundle["positive_feedback"] = max(_safe_int(item.get("positive_feedback"), 0, 0) for item in items)
+        bundle["negative_feedback"] = max(_safe_int(item.get("negative_feedback"), 0, 0) for item in items)
+        bundle["use_count"] = max(_safe_int(item.get("use_count"), 0, 0) for item in items)
+        bundle["last_seen_ts"] = max(_safe_float(item.get("last_seen_ts"), 0.0) for item in items)
+        bundle["last_used_ts"] = max(_safe_float(item.get("last_used_ts"), 0.0) for item in items)
+        for field, limit in (("keywords", 8), ("tags", 8), ("signals", 8), ("channels", 8), ("relationship_stages", 8), ("emotion_gates", 8)):
+            values: list[str] = []
+            for item in items:
+                for value in item.get(field, []) if isinstance(item.get(field), list) else []:
+                    normalized = _single_line(value, 32)
+                    if normalized and normalized not in values:
+                        values.append(normalized)
+            bundle[field] = values[:limit]
+        examples: list[str] = []
+        refs: list[dict[str, str]] = []
+        ref_keys: set[tuple[str, str, str]] = set()
+        for item in items:
+            for example in item.get("evidence_examples", []) if isinstance(item.get("evidence_examples"), list) else []:
+                value = _single_line(example, 80)
+                if value and value not in examples:
+                    examples.append(value)
+            for raw_ref in item.get("source_refs", []) if isinstance(item.get("source_refs"), list) else []:
+                if not isinstance(raw_ref, dict):
+                    continue
+                ref = {
+                    "source_kind": _single_line(raw_ref.get("source_kind"), 16).lower(),
+                    "source_id": _single_line(raw_ref.get("source_id"), 80),
+                    "rule_id": _single_line(raw_ref.get("rule_id"), 40),
+                }
+                key = (ref["source_kind"], ref["source_id"], ref["rule_id"])
+                if all(key) and key not in ref_keys:
+                    ref_keys.add(key)
+                    refs.append(ref)
+        bundle["evidence_examples"] = examples[:6]
+        bundle["source_refs"] = refs
+        avoid_values = [
+            _single_line(item.get("avoid"), 160)
+            for item in items
+            if _single_line(item.get("avoid"), 160)
+        ]
+        bundle["avoid"] = "；".join(dict.fromkeys(avoid_values))[:240]
+        bundle["persona_conflict"] = any(self._expression_rule_bool(item.get("persona_conflict")) for item in items)
+        return bundle
+
+    @staticmethod
+    def _normalize_expression_evidence_examples(
+        value: Any,
+        *,
+        source_kind: str,
+        source_names: set[str],
+    ) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for raw in value:
+            example = _single_line(raw, 72)
+            example = re.sub(r"^[^:：]{1,32}[:：]\s*", "", example).strip()
+            if not example or re.search(r"https?://|@|\b\d{5,}\b|QQ|群号|用户ID", example, re.IGNORECASE):
+                continue
+            if source_kind == "group" and any(name and name in example for name in source_names):
+                continue
+            if example not in result:
+                result.append(example)
+            if len(result) >= 3:
+                break
+        return result
+
+    def _normalize_expression_rule_candidates(
+        self,
+        raw_rules: Any,
+        *,
+        source_kind: str,
+        source_text: str = "",
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_rules, list):
+            return []
+        source_utterances, source_names = self._expression_rule_source_parts(
+            source_text,
+            source_kind=source_kind,
+        )
+        compact_utterances = {
+            re.sub(r"\s+", "", line).lower()
+            for line in source_utterances
+            if line.strip()
+        }
+        result: list[dict[str, Any]] = []
+        for raw in raw_rules[:12]:
+            if not isinstance(raw, dict):
+                continue
+            kind = _single_line(raw.get("kind") or raw.get("type"), 16).lower()
+            if kind not in {"style", "grammar"}:
+                continue
+            situation = _single_line(raw.get("situation"), 80)
+            pattern = _single_line(raw.get("pattern") or raw.get("style"), 100)
+            instruction = _single_line(raw.get("instruction"), 140)
+            avoid = _single_line(raw.get("avoid"), 160)
+            evidence_examples = self._normalize_expression_evidence_examples(
+                raw.get("evidence_examples") or raw.get("examples"),
+                source_kind=source_kind,
+                source_names=source_names,
+            )
+            evidence = _safe_int(raw.get("evidence_count"), len(evidence_examples) or 1, 1, 20)
+            if not situation or not pattern or not instruction:
+                continue
+            if kind == "style" and not self._expression_style_pattern_is_reusable(pattern):
+                continue
+            if kind == "grammar" and not self._expression_grammar_pattern_is_specific(pattern):
+                continue
+            if source_utterances:
+                evidence = min(evidence, len(source_utterances))
+            if evidence < 1:
+                continue
+            combined_rule = f"{situation} {pattern} {instruction}"
+            if any(marker in combined_rule for marker in ("SELF", "系统提示", "提示词", "用户ID", "群号", "QQ号")):
+                continue
+            if re.search(r"@|\b\d{5,}\b|QQ|昵称为|ID为", combined_rule, re.IGNORECASE):
+                continue
+            if source_kind == "group":
+                if any(name and name in combined_rule for name in source_names):
+                    continue
+                # 允许保留短而有辨识度的表达或占位模板，这是 WaifuBot 式学习的核心；
+                # 仍拒绝长句照搬、成员身份和账号等不可迁移内容。
+                compact_pattern = re.sub(r"\s+", "", pattern).lower()
+                if len(pattern) > 48 and any(len(line) >= 16 and line in compact_pattern for line in compact_utterances):
+                    continue
+                quoted = re.findall(r"[“\"‘']([^”\"’']{2,40})[”\"’']", combined_rule)
+                if any(
+                    len(quote) > 24 and re.sub(r"\s+", "", quote).lower() in line
+                    for quote in quoted
+                    for line in compact_utterances
+                ):
+                    continue
+            raw_keywords = raw.get("keywords") if isinstance(raw.get("keywords"), list) else raw.get("tags")
+            keywords = []
+            if isinstance(raw_keywords, list):
+                for keyword in raw_keywords:
+                    value = _single_line(keyword, 24)
+                    if source_kind == "group" and (
+                        value in source_names
+                        or re.search(r"\d{5,}", value)
+                        or re.sub(r"\s+", "", value).lower() in compact_utterances
+                    ):
+                        continue
+                    if len(value) >= 2 and value not in keywords:
+                        keywords.append(value)
+                    if len(keywords) >= 8:
+                        break
+            item = {
+                "kind": kind,
+                "situation": situation,
+                "pattern": pattern,
+                "instruction": instruction,
+                "keywords": keywords,
+                "tags": list(keywords),
+                "evidence_examples": evidence_examples,
+                "evidence_count": evidence,
+                "source_kind": source_kind,
+                "family_key": _single_line(raw.get("family_key"), 80).lower(),
+                "channels": self._normalize_expression_rule_channels(raw.get("channels"), source_kind=source_kind),
+                "relationship_stages": self._normalize_expression_relationship_stages(raw.get("relationship_stages")),
+                "emotion_gates": self._normalize_expression_emotion_gates(raw.get("emotion_gates")),
+                "intent": self._normalize_expression_intent(raw.get("intent")),
+                "avoid": avoid or "事实、工具结果、安全边界或人格发生冲突时不用",
+                "persona_conflict": self._expression_rule_bool(raw.get("persona_conflict")) or bool(
+                    re.search(
+                        r"(?:假装|谎称|声称).{0,12}(?:成功|完成|已发|发过)|"
+                        r"(?:无视|覆盖|改写).{0,8}(?:人格|安全|事实|工具结果)|"
+                        r"(?:必须|永远|无条件).{0,10}(?:服从|同意|答应)",
+                        combined_rule,
+                        re.IGNORECASE,
+                    )
+                ),
+                "positive_feedback": 0,
+                "negative_feedback": 0,
+                "use_count": 0,
+            }
+            item["id"] = self._expression_rule_signature(item)
+            duplicate = next((old for old in result if old.get("id") == item["id"]), None)
+            if duplicate is not None:
+                duplicate["evidence_count"] = max(
+                    _safe_int(duplicate.get("evidence_count"), 0, 0),
+                    evidence,
+                )
+                continue
+            result.append(item)
+        return result[:6]
+
+    def _merge_learned_expression_rules(
+        self,
+        profile: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        *,
+        batch_key: str,
+        now: float,
+        pending: bool = False,
+    ) -> bool:
+        if not isinstance(profile, dict) or not candidates:
+            return False
+        candidates = [item for item in candidates if self._expression_rule_definition_is_valid(item)]
+        if not candidates:
+            return False
+        self._assign_expression_rule_families(candidates, batch_key=batch_key)
+        storage_key = "pending_rules" if pending else "learned_rules"
+        existing = [dict(item) for item in profile.get(storage_key, []) if isinstance(item, dict)]
+        families_changed = self._assign_expression_rule_families(existing)
+        by_id = {_single_line(item.get("id"), 40): item for item in existing if _single_line(item.get("id"), 40)}
+
+        def semantic_key(item: dict[str, Any]) -> str:
+            kind = _single_line(item.get("kind"), 16).lower()
+            situation = re.sub(
+                r"[\s，。！？!?、；;：:‘’“”\"']",
+                "",
+                _single_line(item.get("situation"), 80).lower(),
+            )
+            pattern = re.sub(
+                r"[\s，。！？!?、；;：:‘’“”\"']",
+                "",
+                _single_line(item.get("pattern") or item.get("style"), 100).lower(),
+            )
+            return f"{kind}|{situation}|{pattern}"
+
+        by_semantic_key = {
+            semantic_key(item): item
+            for item in existing
+            if semantic_key(item) != "||"
+        }
+        changed = families_changed
+        for candidate in candidates:
+            rule_id = _single_line(candidate.get("id"), 40)
+            old = by_id.get(rule_id) or by_semantic_key.get(semantic_key(candidate))
+            if old is None:
+                old = dict(candidate)
+                if pending:
+                    old["review_status"] = "pending"
+                old["created_ts"] = now
+                old["last_seen_ts"] = now
+                old["last_batch_key"] = batch_key
+                existing.append(old)
+                by_id[rule_id] = old
+                by_semantic_key[semantic_key(old)] = old
+                changed = True
+                continue
+            old["last_seen_ts"] = now
+            incoming_family_key = _single_line(candidate.get("family_key"), 80).lower()
+            if incoming_family_key and _single_line(old.get("family_key"), 80).lower() != incoming_family_key:
+                old["family_key"] = incoming_family_key
+            old["keywords"] = list(dict.fromkeys([
+                *[str(item) for item in old.get("keywords", []) if str(item).strip()],
+                *[str(item) for item in candidate.get("keywords", []) if str(item).strip()],
+            ]))[:8]
+            old["tags"] = list(old["keywords"])
+            old["evidence_examples"] = list(dict.fromkeys([
+                *[str(item) for item in old.get("evidence_examples", []) if str(item).strip()],
+                *[str(item) for item in candidate.get("evidence_examples", []) if str(item).strip()],
+            ]))[:3]
+            for field in ("channels", "relationship_stages", "emotion_gates"):
+                old_values = old.get(field) if isinstance(old.get(field), list) else []
+                candidate_values = candidate.get(field) if isinstance(candidate.get(field), list) else []
+                old[field] = list(dict.fromkeys([
+                    *[_single_line(item, 24).lower() for item in old_values if _single_line(item, 24)],
+                    *[_single_line(item, 24).lower() for item in candidate_values if _single_line(item, 24)],
+                ]))[:8]
+            old_intent = self._normalize_expression_intent(old.get("intent"))
+            candidate_intent = self._normalize_expression_intent(candidate.get("intent"))
+            old["intent"] = old_intent if old_intent == candidate_intent else "any"
+            candidate_avoid = _single_line(candidate.get("avoid"), 160)
+            if candidate_avoid and len(candidate_avoid) > len(_single_line(old.get("avoid"), 160)):
+                old["avoid"] = candidate_avoid
+            old["persona_conflict"] = bool(
+                self._expression_rule_bool(old.get("persona_conflict"))
+                or self._expression_rule_bool(candidate.get("persona_conflict"))
+            )
+            old["positive_feedback"] = _safe_int(old.get("positive_feedback"), 0, 0)
+            old["negative_feedback"] = _safe_int(old.get("negative_feedback"), 0, 0)
+            old["use_count"] = _safe_int(old.get("use_count"), 0, 0)
+            if _single_line(old.get("last_batch_key"), 40) != batch_key:
+                old["evidence_count"] = min(
+                    99,
+                    _safe_int(old.get("evidence_count"), 0, 0) + _safe_int(candidate.get("evidence_count"), 0, 0),
+                )
+                old["last_batch_key"] = batch_key
+            else:
+                old["evidence_count"] = max(
+                    _safe_int(old.get("evidence_count"), 0, 0),
+                    _safe_int(candidate.get("evidence_count"), 0, 0),
+                )
+            changed = True
+        if self._assign_expression_rule_families(existing, batch_key=batch_key):
+            changed = True
+        existing.sort(
+            key=lambda item: (
+                -_safe_int(item.get("evidence_count"), 0, 0),
+                -_safe_float(item.get("last_seen_ts"), 0.0),
+            )
+        )
+        profile[storage_key] = existing[: self.max_learned_expression_items]
+        return changed
+
+    def _select_learned_expression_rules(
+        self,
+        rules: Any,
+        *,
+        hint: str = "",
+        limit: int = 2,
+        context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(rules, list):
+            return []
+        self._assign_expression_rule_families(rules)
+        query = _single_line(hint, 300).lower()
+        context = context if isinstance(context, dict) else {}
+        channel = _single_line(context.get("channel"), 24).lower()
+        relationship_stage = _single_line(context.get("relationship_stage"), 24).lower()
+        emotion_gate = _single_line(context.get("emotion_gate"), 24).lower()
+        current_intent = self._normalize_expression_intent(context.get("intent"))
+        now = _now_ts()
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for raw in rules:
+            if not isinstance(raw, dict) or _safe_int(raw.get("evidence_count"), 0, 0) < 1:
+                continue
+            if not self._expression_rule_definition_is_valid(raw):
+                continue
+            review_status = _single_line(raw.get("review_status"), 24).lower()
+            if review_status in {"pending", "needs_review", "rejected"}:
+                continue
+            if self._expression_rule_bool(raw.get("persona_conflict")):
+                continue
+            negative_feedback = _safe_int(raw.get("negative_feedback"), 0, 0)
+            positive_feedback = _safe_int(raw.get("positive_feedback"), 0, 0)
+            if negative_feedback >= 2 and negative_feedback > positive_feedback:
+                continue
+
+            context_score = 0
+            channels = raw.get("channels") if isinstance(raw.get("channels"), list) else []
+            normalized_channels = {_single_line(item, 24).lower() for item in channels if _single_line(item, 24)}
+            if normalized_channels and channel and channel not in normalized_channels:
+                continue
+            if normalized_channels and channel in normalized_channels:
+                context_score += 4
+
+            relationship_stages = raw.get("relationship_stages") if isinstance(raw.get("relationship_stages"), list) else []
+            normalized_relationships = {
+                _single_line(item, 24).lower() for item in relationship_stages if _single_line(item, 24)
+            }
+            if normalized_relationships and "any" not in normalized_relationships:
+                if relationship_stage and relationship_stage not in normalized_relationships:
+                    continue
+                if relationship_stage in normalized_relationships:
+                    context_score += 3
+
+            emotion_gates = raw.get("emotion_gates") if isinstance(raw.get("emotion_gates"), list) else []
+            normalized_emotions = {_single_line(item, 24).lower() for item in emotion_gates if _single_line(item, 24)}
+            if normalized_emotions and "any" not in normalized_emotions:
+                if emotion_gate and emotion_gate not in normalized_emotions:
+                    continue
+                if emotion_gate in normalized_emotions:
+                    context_score += 3
+
+            rule_intent = self._normalize_expression_intent(raw.get("intent"))
+            intent_equivalents = {
+                "help": {"help", "request", "question"},
+                "comfort": {"comfort", "emotion"},
+                "play": {"play", "tease"},
+                "tease": {"play", "tease"},
+                "intimacy": {"intimacy", "emotion"},
+                "boundary": {"boundary"},
+                "acknowledgement": {"acknowledgement", "casual"},
+                "question": {"question", "help"},
+                "request": {"request", "help"},
+                "emotion": {"emotion", "comfort", "intimacy"},
+                "casual": {"casual", "acknowledgement"},
+                "proactive": {"proactive", "casual"},
+            }
+            if rule_intent != "any" and current_intent != "any":
+                if rule_intent not in intent_equivalents.get(current_intent, {current_intent}):
+                    continue
+                context_score += 5
+            keywords = [
+                _single_line(item, 24).lower()
+                for item in raw.get("keywords", [])
+                if _single_line(item, 24)
+            ] if isinstance(raw.get("keywords"), list) else []
+            matched = sum(1 for keyword in keywords if query and keyword in query)
+            if query and keywords and matched <= 0 and context_score <= 0:
+                continue
+            last_seen_ts = _safe_float(raw.get("last_seen_ts"), 0.0)
+            age_days = max(0.0, (now - last_seen_ts) / 86400) if last_seen_ts > 0 else 0.0
+            freshness = max(0.01, 1.0 - age_days / 30.0)
+            feedback_score = min(8, positive_feedback * 1.5) - min(16, negative_feedback * 4)
+            score = (
+                matched * 10
+                + context_score
+                + min(9, _safe_int(raw.get("evidence_count"), 0, 0)) * freshness
+                + feedback_score
+            )
+            ranked.append((score, raw))
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        grouped_ranked: dict[str, dict[str, Any]] = {}
+        group_order: list[str] = []
+        for score, item in ranked:
+            family_id = _single_line(item.get("family_id"), 64)
+            if not family_id:
+                family_id = f"xs-{hashlib.sha1(_single_line(item.get('id'), 100).encode('utf-8')).hexdigest()[:16]}"
+            if family_id not in grouped_ranked:
+                grouped_ranked[family_id] = {"score": score, "items": []}
+                group_order.append(family_id)
+            grouped_ranked[family_id]["score"] = max(_safe_float(grouped_ranked[family_id].get("score"), score), score)
+            grouped_ranked[family_id]["items"].append(item)
+
+        ranked_groups: list[tuple[float, dict[str, Any]]] = []
+        for family_id in group_order:
+            entry = grouped_ranked[family_id]
+            bundle = self._expression_rule_runtime_bundle(entry.get("items"))
+            if not bundle:
+                continue
+            complement_bonus = min(1.5, max(0, _safe_int(bundle.get("component_count"), 1, 1) - 1) * 0.75)
+            ranked_groups.append((_safe_float(entry.get("score"), 0.0) + complement_bonus, bundle))
+        ranked_groups.sort(key=lambda pair: pair[0], reverse=True)
+
+        limit = max(1, limit)
+        selected: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+        seen_kinds: set[str] = set()
+        # 同源的表达与语法作为一个规则组占一个名额；独立规则仍优先覆盖两种能力。
+        for _, bundle in ranked_groups:
+            component_kinds = {
+                _single_line(item, 16).lower()
+                for item in bundle.get("component_kinds", [])
+                if _single_line(item, 16).lower() in {"style", "grammar"}
+            }
+            if component_kinds and component_kinds.issubset(seen_kinds):
+                continue
+            selected.append(bundle)
+            selected_ids.add(_single_line(bundle.get("family_id"), 64) or _single_line(bundle.get("id"), 100))
+            seen_kinds.update(component_kinds)
+            if len(selected) >= limit:
+                return selected
+        for _, bundle in ranked_groups:
+            bundle_id = _single_line(bundle.get("family_id"), 64) or _single_line(bundle.get("id"), 100)
+            if bundle_id in selected_ids:
+                continue
+            selected.append(bundle)
+            if len(selected) >= limit:
+                break
+        return selected
+
     def _expression_sample_from_text(self, cleaned: str, now: float | None = None) -> dict[str, Any]:
         now = now or _now_ts()
         punctuation = {}
@@ -906,7 +2467,66 @@ class UserMemoryMixin:
             "punctuation": punctuation,
             "ending": ending,
             "phrase": phrase,
+            "scene": self._expression_scene_from_text(cleaned),
+            "features": self._expression_style_features_from_text(cleaned),
         }
+
+    @staticmethod
+    def _expression_scene_label(scene: Any) -> str:
+        labels = {
+            "acknowledgement": "短确认",
+            "question": "提问/追问",
+            "request": "提出请求",
+            "tease": "玩笑/打趣",
+            "emotion": "情绪表达",
+            "casual": "普通闲聊",
+        }
+        return labels.get(_single_line(scene, 32), "普通闲聊")
+
+    def _expression_scene_from_text(self, text: Any) -> str:
+        cleaned = _single_line(text, 180)
+        if not cleaned:
+            return "casual"
+        stripped = cleaned.rstrip("。！？!?~～… ").lower()
+        if re.search(r"(?:帮我|给我|麻烦|能不能|可不可以|要不|请你|记得|别忘|提醒我|帮忙)", cleaned):
+            return "request"
+        if re.search(r"(?:难过|委屈|烦|好累|累死|想哭|哭了|生气|不开心|emo|破防|崩溃|害怕|焦虑)", cleaned, re.I):
+            return "emotion"
+        if re.search(r"(?:笨蛋|坏蛋|哼|才不要|你又|真是你|可恶)", cleaned):
+            return "tease"
+        if "？" in cleaned or "?" in cleaned or re.search(r"(?:怎么|为什么|啥|什么|是不是|对吗|行吗|好不好)$", stripped):
+            return "question"
+        if len(stripped) <= 28 and re.search(r"^(?:嗯|好|行|可以|知道|收到|对|没事|好吧|好呀|行吧|确实|原来|懂了|哦|啊|诶)", stripped):
+            return "acknowledgement"
+        return "casual"
+
+    @staticmethod
+    def _expression_style_features_from_text(text: Any) -> list[str]:
+        cleaned = _single_line(text, 180)
+        if not cleaned:
+            return []
+        stripped = cleaned.rstrip("。！？!?~～… ")
+        features: list[str] = []
+        if len(cleaned) <= 18:
+            features.append("short")
+        if re.match(r"^(?:嗯|啊|诶|欸|唔|哎|哈哈|嘿嘿|哼|唉)", stripped):
+            features.append("casual_opener")
+        lowered = cleaned.lower()
+        if any(marker in lowered for marker in ("哈哈", "嘿嘿", "hh", "www")):
+            features.append("laugh_marker")
+        if not any(marker in lowered for marker in ("哈哈", "嘿嘿")) and re.search(r"([\u4e00-\u9fff])\1", stripped):
+            features.append("reduplication")
+        if "~" in cleaned or "～" in cleaned:
+            features.append("soft_wave")
+        if any(marker in lowered for marker in ("哈哈", "嘿嘿", "hh", "www", "~", "～", "捏", "哼")):
+            features.append("playful")
+        if stripped.endswith(("吧", "呀", "啦", "嘛", "呢", "哦", "诶")):
+            features.append("soft_ending")
+        if "…" in cleaned or "..." in cleaned:
+            features.append("pause")
+        if "？" in cleaned or "?" in cleaned:
+            features.append("question")
+        return features
 
     def _expression_learning_mode(self) -> str:
         mode = str(getattr(self, "expression_learning_mode", "balanced") or "balanced").strip().lower()
@@ -965,6 +2585,8 @@ class UserMemoryMixin:
             return True
         if re.search(r"(复制|日志|报错|堆栈|代码|配置|schema|版本号|commit|diff|traceback)", cleaned, re.IGNORECASE):
             return True
+        if re.search(r"^\s*(?:我叫|我是|叫我)[^。！？!?\n]{1,40}", cleaned):
+            return True
         return False
 
     def _safe_expression_phrase(self, phrase: Any, limit: int = 56) -> str:
@@ -1009,14 +2631,26 @@ class UserMemoryMixin:
         samples = profile.get("samples")
         if not isinstance(samples, list):
             return
-        profile["sample_count"] = len(samples)
-        profile["short_count"] = sum(1 for item in samples if isinstance(item, dict) and _safe_int(item.get("length"), 0, 0) <= 18)
+        profile["pattern_count"] = len(samples)
+        profile["sample_count"] = sum(
+            _safe_int(item.get("evidence_count"), 1, 1)
+            for item in samples
+            if isinstance(item, dict)
+        )
+        profile["short_count"] = sum(
+            _safe_int(item.get("evidence_count"), 1, 1)
+            for item in samples
+            if isinstance(item, dict) and _safe_int(item.get("length"), 0, 0) <= 18
+        )
         punctuation: dict[str, int] = {}
         endings: list[str] = []
         phrases: list[str] = []
+        scene_stats: dict[str, dict[str, Any]] = {}
+        fingerprint_features: dict[str, int] = {}
         for item in samples:
             if not isinstance(item, dict):
                 continue
+            evidence = _safe_int(item.get("evidence_count"), 1, 1)
             marks = item.get("punctuation")
             if isinstance(marks, dict):
                 for mark, count in marks.items():
@@ -1027,9 +2661,146 @@ class UserMemoryMixin:
             phrase = _single_line(item.get("phrase"), 40)
             if phrase and phrase not in phrases:
                 phrases.append(phrase)
+            sample_text = _single_line(item.get("text") or phrase, 180)
+            scene = _single_line(item.get("scene"), 32)
+            if scene not in {"acknowledgement", "question", "request", "tease", "emotion", "casual"}:
+                scene = self._expression_scene_from_text(sample_text)
+                item["scene"] = scene
+            raw_features = item.get("features")
+            features = [
+                _single_line(feature, 32)
+                for feature in raw_features
+                if _single_line(feature, 32)
+            ] if isinstance(raw_features, list) else self._expression_style_features_from_text(sample_text)
+            item["features"] = list(dict.fromkeys(features))
+            bucket = scene_stats.setdefault(
+                scene,
+                {"count": 0, "short_count": 0, "feature_counts": {}, "latest_ts": 0.0},
+            )
+            bucket["count"] += evidence
+            if _safe_int(item.get("length"), len(sample_text), 0) <= 18:
+                bucket["short_count"] += evidence
+            bucket["latest_ts"] = max(_safe_float(bucket.get("latest_ts"), 0.0), _safe_float(item.get("ts"), 0.0))
+            feature_counts = bucket["feature_counts"]
+            for feature in item["features"]:
+                feature_counts[feature] = _safe_int(feature_counts.get(feature), 0, 0) + evidence
+                fingerprint_features[feature] = _safe_int(fingerprint_features.get(feature), 0, 0) + evidence
         profile["punctuation"] = punctuation
         profile["endings"] = endings[: self.max_learned_expression_items]
         profile["recent_phrases"] = phrases[: self.max_learned_expression_items]
+        profile["scene_profiles"] = {
+            scene: {
+                "count": _safe_int(bucket.get("count"), 0, 0),
+                "short_ratio": round(
+                    _safe_int(bucket.get("short_count"), 0, 0) / max(1, _safe_int(bucket.get("count"), 0, 0)),
+                    2,
+                ),
+                "feature_counts": dict(bucket.get("feature_counts") or {}),
+                "latest_ts": _safe_float(bucket.get("latest_ts"), 0.0),
+            }
+            for scene, bucket in scene_stats.items()
+            if _safe_int(bucket.get("count"), 0, 0) > 0
+        }
+        profile["style_fingerprint"] = {
+            "short_ratio": round(profile["short_count"] / max(1, profile["sample_count"]), 2),
+            "feature_counts": fingerprint_features,
+        }
+        profile["expression_rules"] = self._expression_rules_from_scene_profiles(profile["scene_profiles"])
+
+    def _expression_rule_details_for_scene(
+        self,
+        scene: Any,
+        scene_profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_scene = _single_line(scene, 32)
+        count = _safe_int(scene_profile.get("count"), 0, 0)
+        if normalized_scene not in {"acknowledgement", "question", "request", "tease", "emotion", "casual"} or count < 2:
+            return {}
+        base_rules = {
+            "acknowledgement": "先用简短口语确认接住，不把一个短确认扩写成长说明",
+            "question": "先直接回应核心，再自然接下去，不绕成客服式解释",
+            "request": "先给明确答复或行动，再补必要说明",
+            "tease": "保持轻松有来有回，不突然说教或端着",
+            "emotion": "先接住情绪，短一点、慢一点，不急着讲道理",
+            "casual": "从眼前话头直接接，不套客气开场",
+        }
+        short_ratio = _safe_float(scene_profile.get("short_ratio"), 0.0)
+        raw_feature_counts = scene_profile.get("feature_counts")
+        feature_counts = raw_feature_counts if isinstance(raw_feature_counts, dict) else {}
+        feature_threshold = 2
+        actions = [base_rules[normalized_scene]]
+        signals: list[str] = []
+
+        if short_ratio >= 0.6:
+            actions.append("长度控制在一两句，保留即时聊天感")
+            signals.append("short")
+        elif short_ratio <= 0.2 and normalized_scene in {"emotion", "casual"}:
+            actions.append("可以完整一点，但不要写成说明书")
+        if _safe_int(feature_counts.get("casual_opener"), 0, 0) >= feature_threshold:
+            actions.append("开头可自然地随口起一句，避开客服式开场")
+            signals.append("casual_opener")
+        if _safe_int(feature_counts.get("laugh_marker"), 0, 0) >= feature_threshold:
+            actions.append("轻松时可放一个笑声式口语标记，不要连续堆叠")
+            signals.append("laugh_marker")
+        elif _safe_int(feature_counts.get("soft_wave"), 0, 0) >= feature_threshold:
+            actions.append("轻松时可用一个轻微波浪号收束，不要每句都加")
+            signals.append("soft_wave")
+        elif _safe_int(feature_counts.get("playful"), 0, 0) >= feature_threshold:
+            actions.append("保留一点轻松口语感，但不要硬塞口癖")
+            signals.append("playful")
+        if _safe_int(feature_counts.get("soft_ending"), 0, 0) >= feature_threshold:
+            actions.append("收尾可以放轻一点，不必强行加语气词")
+            signals.append("soft_ending")
+        if _safe_int(feature_counts.get("reduplication"), 0, 0) >= feature_threshold:
+            actions.append("亲近轻松的话题里可偶尔用一个自然叠词，不要生造")
+            signals.append("reduplication")
+        if _safe_int(feature_counts.get("pause"), 0, 0) >= feature_threshold:
+            actions.append("允许留一点停顿感，最多一个省略号")
+            signals.append("pause")
+
+        signals = list(dict.fromkeys(signals))
+        rule_id = f"{normalized_scene}:{'.'.join(signals[:3]) or 'scene'}"
+        return {
+            "id": rule_id,
+            "scene": normalized_scene,
+            "label": self._expression_scene_label(normalized_scene),
+            "evidence_count": count,
+            "confidence": min(0.96, round(0.45 + min(count, 8) * 0.06, 2)),
+            "actions": actions[:4],
+            "signals": signals[:4],
+            "instruction": "；".join(actions[:4]) + "。",
+        }
+
+    def _expression_rules_from_scene_profiles(self, scene_profiles: Any) -> list[dict[str, Any]]:
+        if not isinstance(scene_profiles, dict):
+            return []
+        rules: list[dict[str, Any]] = []
+        for scene, raw_profile in scene_profiles.items():
+            if not isinstance(raw_profile, dict):
+                continue
+            details = self._expression_rule_details_for_scene(scene, raw_profile)
+            if details:
+                rules.append(details)
+        rules.sort(key=lambda item: (-_safe_int(item.get("evidence_count"), 0, 0), _single_line(item.get("scene"), 32)))
+        return rules[:6]
+
+    def _expression_rule_details_for_inbound(self, profile: dict[str, Any], inbound_text: Any) -> dict[str, Any]:
+        scene = self._expression_scene_from_text(inbound_text)
+        raw_profiles = profile.get("scene_profiles") if isinstance(profile, dict) else {}
+        scene_profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+        scene_profile = scene_profiles.get(scene) if isinstance(scene_profiles.get(scene), dict) else {}
+        return self._expression_rule_details_for_scene(scene, scene_profile)
+
+    def _expression_scene_rule_for_inbound(self, profile: dict[str, Any], inbound_text: Any) -> str:
+        if self._expression_learning_mode() == "light":
+            return ""
+        details = self._expression_rule_details_for_inbound(profile, inbound_text)
+        if not details:
+            return ""
+        return (
+            f"当前场景「{details['label']}」已有 {details['evidence_count']} 条表达证据："
+            f"{details['instruction']}"
+        )
 
     def _classify_companion_memory_candidate(self, cleaned: str) -> dict[str, Any]:
         lowered = cleaned.lower()
@@ -1135,55 +2906,339 @@ class UserMemoryMixin:
         memory["items"] = deduped[: self.max_companion_memory_items]
         memory["updated_at"] = item["created_at"]
 
-    def _format_expression_profile_for_prompt(self, user: dict[str, Any]) -> str:
+    def _format_expression_profile_for_prompt(
+        self,
+        user: dict[str, Any],
+        *,
+        inbound_text: str = "",
+        include_semantic: bool = True,
+    ) -> str:
         profile = user.get("expression_profile")
         if not isinstance(profile, dict):
-            return "暂无足够样本。保持 AstrBot 默认人格的自然表达。"
-        raw_samples = profile.get("samples")
-        if isinstance(raw_samples, list):
-            sample_items = [item for item in raw_samples if isinstance(item, dict)]
-        else:
-            sample_count = _safe_int(raw_samples, 0, 0)
-            if sample_count <= 0:
-                return "暂无足够样本。保持 AstrBot 默认人格的自然表达。"
-            sample_items = []
-            short_count = _safe_int(profile.get("short_count"), 0, 0)
-            for idx in range(min(sample_count, self.max_learned_expression_items)):
-                sample_items.append({"length": 12 if idx < short_count else 32, "punctuation": {}})
-        if not sample_items:
-            return "暂无足够样本。保持 AstrBot 默认人格的自然表达。"
-        samples = max(1, len(sample_items))
-        short_ratio = sum(1 for item in sample_items if _safe_int(item.get("length"), 0, 0) <= 18) / samples
-        punctuation: dict[str, int] = {}
-        for item in sample_items:
-            marks = item.get("punctuation")
-            if not isinstance(marks, dict):
+            return "暂无已审核表达规则。保持 AstrBot 默认人格的自然表达。"
+        learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+        if not include_semantic or not learned_rules:
+            return "暂无已审核表达规则。保持 AstrBot 默认人格的自然表达。"
+        semantic_matches = self._select_learned_expression_rules(
+            learned_rules,
+            hint=inbound_text,
+            limit=2,
+        )
+        if not semantic_matches:
+            return "暂无匹配的已审核表达规则。保持 AstrBot 默认人格的自然表达。"
+        lines: list[str] = []
+        for rule in semantic_matches:
+            line = self._format_expression_rule_bundle_line(rule)
+            if line:
+                lines.append(line)
+        if lines:
+            lines.append(
+                "只使用已经审核通过的规则；观察素材、支持片段、句长和标点统计不得直接影响回复。"
+                "工具与事实、安全边界、AstrBot 人格、当前关系和情绪始终优先。"
+            )
+        return "\n".join(lines) if lines else "暂无匹配的已审核表达规则。保持 AstrBot 默认人格的自然表达。"
+
+    def _expression_visible_signals_in_reply(
+        self,
+        response_text: Any,
+        rule_details: dict[str, Any],
+    ) -> list[str]:
+        cleaned = _single_line(_strip_internal_message_blocks(response_text), 500)
+        if not cleaned or not isinstance(rule_details, dict):
+            return []
+        expected = {
+            _single_line(item, 32)
+            for item in rule_details.get("signals", [])
+            if _single_line(item, 32)
+        } if isinstance(rule_details.get("signals"), list) else set()
+        if not expected:
+            return []
+        actual = set(self._expression_style_features_from_text(cleaned))
+        if "short" in expected:
+            sentence_count = len(re.findall(r"[^。！？!?\n]+[。！？!?]?", cleaned))
+            if len(cleaned) <= 72 and sentence_count <= 2:
+                actual.add("short")
+        return [signal for signal in rule_details.get("signals", []) if signal in expected and signal in actual]
+
+    def _record_expression_rule_injection(
+        self,
+        user: dict[str, Any],
+        rule_details: dict[str, Any] | None,
+        response_text: Any,
+        *,
+        semantic_rules: list[dict[str, Any]] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        local_rule = rule_details if isinstance(rule_details, dict) and rule_details.get("id") else {}
+        selected_semantic_rules = [
+            dict(item)
+            for item in (semantic_rules if isinstance(semantic_rules, list) else [])
+            if isinstance(item, dict) and item.get("id")
+        ][:2]
+        if not isinstance(user, dict) or (not local_rule and not selected_semantic_rules):
+            return {}
+        profile = user.setdefault("expression_profile", {})
+        if not isinstance(profile, dict):
+            profile = {}
+            user["expression_profile"] = profile
+        usage = profile.setdefault("usage", {})
+        if not isinstance(usage, dict):
+            usage = {}
+            profile["usage"] = usage
+        visible_signals = self._expression_visible_signals_in_reply(response_text, local_rule)
+        injected_count = _safe_int(usage.get("injected_count"), 0, 0) + 1
+        visible_match_count = _safe_int(usage.get("visible_match_count"), 0, 0) + (1 if visible_signals else 0)
+        now = _now_ts()
+        primary_rule = local_rule or selected_semantic_rules[0]
+        semantic_primary = selected_semantic_rules[0] if selected_semantic_rules else {}
+        last = {
+            "ts": now,
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "rule_id": _single_line(primary_rule.get("id"), 100),
+            "scene": _single_line(primary_rule.get("scene") or primary_rule.get("intent") or primary_rule.get("kind"), 32),
+            "label": _single_line(primary_rule.get("label") or primary_rule.get("situation"), 80),
+            "instruction": _single_line(primary_rule.get("instruction"), 260),
+            "evidence_count": _safe_int(primary_rule.get("evidence_count"), 0, 0),
+            "confidence": max(
+                0.0,
+                min(
+                    1.0,
+                    _safe_float(
+                        primary_rule.get("confidence"),
+                        min(0.98, 0.52 + min(8, _safe_int(primary_rule.get("evidence_count"), 0, 0)) * 0.055),
+                    ),
+                ),
+            ),
+            "expected_signals": [
+                _single_line(item, 32)
+                for item in local_rule.get("signals", [])
+                if _single_line(item, 32)
+            ][:4] if isinstance(local_rule.get("signals"), list) else [],
+            "visible_signals": visible_signals[:4],
+            "rule_type": "heuristic" if local_rule else "semantic",
+            "semantic_rule_count": len(selected_semantic_rules),
+            "channel": _single_line((context or {}).get("channel"), 24),
+            "relationship_stage": _single_line((context or {}).get("relationship_stage"), 24),
+            "emotion_gate": _single_line((context or {}).get("emotion_gate"), 24),
+            "intent": _single_line((context or {}).get("intent"), 32),
+        }
+        if local_rule and semantic_primary:
+            last["semantic_rule_id"] = _single_line(semantic_primary.get("id"), 100)
+            last["semantic_label"] = _single_line(semantic_primary.get("situation"), 80)
+        usage.update(
+            {
+                "injected_count": injected_count,
+                "visible_match_count": visible_match_count,
+                "last_injection": last,
+                "updated_at": last["at"],
+            }
+        )
+        if selected_semantic_rules:
+            usage["semantic_injected_count"] = _safe_int(usage.get("semantic_injected_count"), 0, 0) + 1
+            feedback_rules: list[dict[str, Any]] = []
+            seen_refs: set[tuple[str, str, str]] = set()
+            for selected in selected_semantic_rules:
+                refs = selected.get("source_refs") if isinstance(selected.get("source_refs"), list) else []
+                compact_refs: list[dict[str, str]] = []
+                for raw_ref in refs:
+                    if not isinstance(raw_ref, dict):
+                        continue
+                    ref = {
+                        "source_kind": _single_line(raw_ref.get("source_kind"), 16).lower(),
+                        "source_id": _single_line(raw_ref.get("source_id"), 80),
+                        "rule_id": _single_line(raw_ref.get("rule_id"), 40),
+                    }
+                    key = (ref["source_kind"], ref["source_id"], ref["rule_id"])
+                    if not all(key) or key in seen_refs:
+                        continue
+                    seen_refs.add(key)
+                    compact_refs.append(ref)
+                    collection_key = "groups" if ref["source_kind"] == "group" else "users"
+                    collection = self.data.get(collection_key) if isinstance(getattr(self, "data", None), dict) else {}
+                    source_owner = collection.get(ref["source_id"]) if isinstance(collection, dict) else None
+                    source_profile = source_owner.get("expression_profile") if isinstance(source_owner, dict) else None
+                    source_rules = source_profile.get("learned_rules") if isinstance(source_profile, dict) else None
+                    if not isinstance(source_rules, list):
+                        continue
+                    for source_rule in source_rules:
+                        if not isinstance(source_rule, dict) or _single_line(source_rule.get("id"), 40) != ref["rule_id"]:
+                            continue
+                        source_rule["use_count"] = _safe_int(source_rule.get("use_count"), 0, 0) + 1
+                        source_rule["last_used_ts"] = now
+                        break
+                if compact_refs:
+                    feedback_rules.append(
+                        {
+                            "id": _single_line(selected.get("id"), 100),
+                            "situation": _single_line(selected.get("situation"), 80),
+                            "source_refs": compact_refs,
+                        }
+                    )
+            feedback_channel = _single_line((context or {}).get("channel"), 24).lower()
+            if feedback_rules and feedback_channel in {"private", "proactive", "group"}:
+                profile["pending_semantic_feedback"] = {
+                    "ts": now,
+                    "channel": feedback_channel,
+                    "seen_after": 0,
+                    "rules": feedback_rules,
+                }
+        profile["last_injected_at"] = last["at"]
+        return last
+
+    def _record_staged_expression_rule_injection(
+        self,
+        owner: dict[str, Any],
+        response_text: Any,
+        *,
+        channel: str,
+    ) -> dict[str, Any]:
+        if not isinstance(owner, dict):
+            return {}
+        profile = owner.get("expression_profile")
+        staged = profile.pop("staged_semantic_selection", None) if isinstance(profile, dict) else None
+        if not isinstance(staged, dict) or _now_ts() - _safe_float(staged.get("ts"), 0.0) > 15 * 60:
+            return {}
+        rules = staged.get("rules") if isinstance(staged.get("rules"), list) else []
+        context = dict(staged.get("context") or {}) if isinstance(staged.get("context"), dict) else {}
+        context["channel"] = _single_line(channel, 24).lower()
+        return self._record_expression_rule_injection(
+            owner,
+            {},
+            response_text,
+            semantic_rules=rules,
+            context=context,
+        )
+
+    @staticmethod
+    def _classify_expression_rule_feedback(text: Any, *, channel: str) -> str:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return ""
+        negative = bool(
+            re.search(
+                r"(别这么说|别这样说|别学|不像你|正常说话|好尬|尴尬|油腻|别夹|别装|"
+                r"这个语气.{0,6}(?:怪|烦|恶心|不喜欢)|你怎么说话|说话怎么.{0,6}怪|闭嘴|吵死)",
+                cleaned,
+                re.IGNORECASE,
+            )
+        )
+        if negative:
+            return "negative"
+        if channel == "group" and re.search(r"(哈哈|笑死|草|绷|乐|hhh|可以|确实|对啊)", cleaned, re.IGNORECASE):
+            return "positive"
+        positive = bool(
+            re.search(
+                r"(?:(?:这样说|这个语气|你这么说|你这样说|这个说法).{0,8}(?:好|喜欢|自然|舒服|可爱|对味))|"
+                r"(?:(?:好喜欢|很喜欢).{0,8}(?:你这样|这个语气|你这么说))",
+                cleaned,
+                re.IGNORECASE,
+            )
+        )
+        return "positive" if positive else ""
+
+    def _apply_expression_rule_feedback(
+        self,
+        owner: dict[str, Any],
+        text: Any,
+        *,
+        channel: str = "private",
+    ) -> dict[str, Any]:
+        if not isinstance(owner, dict):
+            return {}
+        profile = owner.get("expression_profile")
+        pending = profile.get("pending_semantic_feedback") if isinstance(profile, dict) else None
+        if not isinstance(pending, dict) or not pending:
+            return {}
+        now = _now_ts()
+        if now - _safe_float(pending.get("ts"), 0.0) > 10 * 60:
+            profile.pop("pending_semantic_feedback", None)
+            return {}
+        pending_channel = _single_line(pending.get("channel"), 24).lower()
+        current_channel = _single_line(channel, 24).lower()
+        if pending_channel == "group" and current_channel != "group":
+            return {}
+        if pending_channel in {"private", "proactive"} and current_channel != "private":
+            return {}
+
+        signal = self._classify_expression_rule_feedback(text, channel=current_channel)
+        pending["seen_after"] = _safe_int(pending.get("seen_after"), 0, 0) + 1
+        max_unmatched = 3 if current_channel == "group" else 1
+        if not signal:
+            if _safe_int(pending.get("seen_after"), 0, 0) >= max_unmatched:
+                profile.pop("pending_semantic_feedback", None)
+            return {}
+
+        feedback_field = "positive_feedback" if signal == "positive" else "negative_feedback"
+        updated = 0
+        demoted = 0
+        processed: set[tuple[str, str, str]] = set()
+        for pending_rule in pending.get("rules", []) if isinstance(pending.get("rules"), list) else []:
+            if not isinstance(pending_rule, dict):
                 continue
-            for mark, count in marks.items():
-                punctuation[str(mark)] = punctuation.get(str(mark), 0) + _safe_int(count, 0, 0)
-        length_hint = "用户常用短句,回复也可以更短更像即时聊天。" if short_ratio >= 0.55 else "用户能接受稍完整的句子,但仍避免说明书式长段。"
-        lines = [length_hint]
-        pause_count = sum(_safe_int(punctuation.get(mark), 0, 0) for mark in ("…", "~", "～"))
-        question_count = sum(_safe_int(punctuation.get(mark), 0, 0) for mark in ("？", "?"))
-        exclaim_count = sum(_safe_int(punctuation.get(mark), 0, 0) for mark in ("！", "!"))
-        if pause_count >= max(2, samples // 4):
-            lines.append("语气里留白感偏多,可以偶尔放慢半拍,但不要堆标点。")
-        if question_count >= max(2, samples // 5):
-            lines.append("对方常用短问句推进聊天,回复要直接接住问题,别绕开。")
-        if exclaim_count >= max(2, samples // 4):
-            lines.append("语气可以稍微轻快一点,但不要夸张。")
-        mode = self._expression_learning_mode()
-        if mode == "aggressive":
-            endings = self._expression_profile_endings(profile, limit=3)
-            phrases = self._expression_profile_phrases(profile, limit=3)
-            if endings:
-                lines.append("句尾可轻参考：" + "、".join(endings) + "；只学节奏,别照抄。")
-            if phrases:
-                lines.append("短句样本：" + " / ".join(phrases) + "；只取口语松紧,不要复读原句。")
-            lines.append("表达学习只用于节奏,不能学习身份、关系、群友口癖、脏话、日志格式或事实判断。")
-        elif mode == "light":
-            lines = lines[:2]
-        return "\n".join(lines)
+            refs = pending_rule.get("source_refs") if isinstance(pending_rule.get("source_refs"), list) else []
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                source_kind = _single_line(ref.get("source_kind"), 16).lower()
+                source_id = _single_line(ref.get("source_id"), 80)
+                rule_id = _single_line(ref.get("rule_id"), 40)
+                key = (source_kind, source_id, rule_id)
+                if not all(key) or key in processed:
+                    continue
+                processed.add(key)
+                collection_key = "groups" if source_kind == "group" else "users"
+                collection = self.data.get(collection_key) if isinstance(getattr(self, "data", None), dict) else {}
+                source_owner = collection.get(source_id) if isinstance(collection, dict) else None
+                source_profile = source_owner.get("expression_profile") if isinstance(source_owner, dict) else None
+                learned_rules = source_profile.get("learned_rules") if isinstance(source_profile, dict) else None
+                if not isinstance(learned_rules, list):
+                    continue
+                for index, source_rule in enumerate(list(learned_rules)):
+                    if not isinstance(source_rule, dict) or _single_line(source_rule.get("id"), 40) != rule_id:
+                        continue
+                    source_rule[feedback_field] = _safe_int(source_rule.get(feedback_field), 0, 0) + 1
+                    source_rule["last_feedback"] = signal
+                    source_rule["last_feedback_ts"] = now
+                    updated += 1
+                    if (
+                        signal == "negative"
+                        and _safe_int(source_rule.get("negative_feedback"), 0, 0) >= 2
+                        and _safe_int(source_rule.get("negative_feedback"), 0, 0)
+                        > _safe_int(source_rule.get("positive_feedback"), 0, 0)
+                    ):
+                        needs_review = dict(source_rule)
+                        needs_review["review_status"] = "needs_review"
+                        needs_review["review_reason"] = "连续收到 2 次明确负向表达反馈，已自动停用"
+                        needs_review["reviewed_back_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        learned_rules.pop(index)
+                        pending_rules = source_profile.get("pending_rules") if isinstance(source_profile.get("pending_rules"), list) else []
+                        pending_rules = [
+                            item
+                            for item in pending_rules
+                            if not isinstance(item, dict) or _single_line(item.get("id"), 40) != rule_id
+                        ]
+                        pending_rules.insert(0, needs_review)
+                        source_profile["learned_rules"] = learned_rules
+                        source_profile["pending_rules"] = pending_rules[: self.max_learned_expression_items]
+                        demoted += 1
+                    source_profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    break
+
+        usage = profile.setdefault("usage", {})
+        if isinstance(usage, dict):
+            counter = "feedback_positive" if signal == "positive" else "feedback_negative"
+            usage[counter] = _safe_int(usage.get(counter), 0, 0) + 1
+            usage["last_feedback"] = {
+                "signal": signal,
+                "ts": now,
+                "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "updated_rules": updated,
+                "demoted_rules": demoted,
+            }
+        profile.pop("pending_semantic_feedback", None)
+        if updated:
+            self._refresh_expression_voice_profile()
+        return {"signal": signal, "updated_rules": updated, "demoted_rules": demoted}
 
     def _format_companion_memory_for_prompt(self, user: dict[str, Any], *, style_only: bool = False) -> str:
         memory = user.get("companion_memory")
@@ -3572,6 +5627,120 @@ Local classifier result:
             return ""
         return text
 
+    @staticmethod
+    def _inbound_explicitly_owns_recent_media_event(inbound_text: str) -> bool:
+        """Return whether the user explicitly says the depicted event happened to/by them."""
+        inbound = _single_line(inbound_text, 220)
+        if not inbound:
+            return False
+        # Common exclamations and observation phrases contain “我” without assigning
+        # the depicted action to the user (for example “我的天，洒出来了”).
+        if re.match(r"^(?:我的天|我天|我去|我靠|我艹|我草|我勒个|我看(?:见|到|着)?|我觉得|我感觉|我想说)", inbound):
+            return False
+        return bool(
+            re.search(
+                r"(?:^|[，,。！？!?\s])(?:是)?我(?:自己)?"
+                r"[^。！？!?\n]{0,12}"
+                r"(?:把|将|弄|搞|打翻|碰倒|弄倒|洒|撒|溅|摔|掉|弄坏|打碎|"
+                r"受伤|烫|割|磕|撞|做的|干的|画的|拍的|发的)",
+                inbound,
+            )
+        )
+
+    def _recent_proactive_media_ownership_context(
+        self,
+        user: dict[str, Any],
+        inbound_text: str = "",
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a short reply as commentary on the Bot's latest proactive image."""
+        if not isinstance(user, dict):
+            return {}
+        inbound = _single_line(inbound_text, 220)
+        if not inbound or self._inbound_explicitly_owns_recent_media_event(inbound):
+            return {}
+
+        check_now = _now_ts() if now is None else now
+        action = _single_line(user.get("last_proactive_action"), 80).lower()
+        action_parts = {part.strip() for part in action.split("+") if part.strip()}
+        action_is_photo = "photo_text" in action_parts or "photo_text" in action
+        last_proactive_at = _safe_float(user.get("last_proactive_sent_at"), 0)
+
+        snapshot = user.get("last_photo_share_snapshot")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        snapshot_at = _safe_float(snapshot.get("sent_at"), 0)
+        snapshot_expires_at = _safe_float(snapshot.get("expires_at"), 0) or snapshot_at + 12 * 3600
+        snapshot_is_live = snapshot_at > 0 and check_now < snapshot_expires_at
+        newer_non_photo_proactive = (
+            last_proactive_at > snapshot_at + 1
+            and not action_is_photo
+        )
+        if not action_is_photo and (not snapshot_is_live or newer_non_photo_proactive):
+            return {}
+
+        sent_at = max(last_proactive_at if action_is_photo else 0, snapshot_at if snapshot_is_live else 0)
+        age = check_now - sent_at
+        if sent_at <= 0 or age < 0:
+            return {}
+
+        compact = self._compact_repeat_text(inbound)
+        direct_media_reference = bool(
+            re.search(r"(?:这|那|刚才|你发的)?(?:张)?(?:图|图片|照片|画面|里面|图里|照片里)", inbound)
+        )
+        reaction_cues = (
+            "洒", "撒", "溅", "打翻", "翻了", "翻车", "摔", "掉", "倒了", "漏", "碎", "破",
+            "糊", "焦", "坏", "着火", "冒烟", "脏", "湿", "好看", "漂亮", "可爱", "吓", "危险",
+            "小心", "完了", "救命", "哈哈", "笑死", "啊", "怎么", "手", "疼",
+        )
+        short_reaction = len(compact) <= 48 and any(cue in inbound for cue in reaction_cues)
+        if direct_media_reference:
+            if age > 12 * 3600:
+                return {}
+        elif not short_reaction or age > 30 * 60:
+            return {}
+
+        caption = _single_line(snapshot.get("caption"), 260)
+        if not caption:
+            summary = _single_line(user.get("last_proactive_behavior_summary"), 300)
+            caption = _single_line(re.split(r"[:：]", summary, maxsplit=1)[-1], 260) if summary else ""
+        return {
+            "sent_at": sent_at,
+            "action": action or "photo_text",
+            "caption": caption,
+            "subject_owner": _normalize_photo_subject_owner(snapshot.get("subject_owner")) or "unknown",
+            "proactive_text": _single_line(user.get("last_proactive_message"), 300),
+        }
+
+    def _format_recent_proactive_media_ownership_guard(
+        self,
+        user: dict[str, Any],
+        inbound_text: str = "",
+    ) -> str:
+        context = self._recent_proactive_media_ownership_context(user, inbound_text)
+        if not context:
+            return ""
+        caption = _single_line(context.get("caption"), 260)
+        subject_owner = _normalize_photo_subject_owner(context.get("subject_owner")) or "unknown"
+        owner_label = _photo_subject_owner_prompt_label(subject_owner)
+        if subject_owner == "bot":
+            ownership_rule = "- 结构化主体归属为 Bot：图中由“我/她/角色本人”做出的动作属于 Bot/当前人格。"
+        else:
+            ownership_rule = f"- 结构化主体归属为{owner_label}；动作属于该画面主体，不属于用户，也不要擅自改判成 Bot。"
+        return "\n".join(
+            part
+            for part in (
+                "【本轮主动图片归属（高优先级）】",
+                "- 用户是在评价 Bot 刚才主动发出的图片，不是在报告自己做了图中的事。",
+                f"- 图片发送者：Bot/当前人格；画面主体：{owner_label}",
+                f"- 刚才图片画面：{caption}" if caption else "",
+                ownership_rule,
+                "- 除非用户明确说“我把……弄洒了/做了”，否则绝不能把图中动作安到用户身上。",
+                "- 回复应从 Bot 或真实画面主体的角度承接，可以自然承认、自嘲或回应用户的担心；不得责怪用户笨手笨脚，也不得询问用户有没有被图中事件弄伤、弄湿或溅到。",
+            )
+            if part
+        )
+
     def _format_private_fact_attribution_guard(self, user: dict[str, Any], inbound_text: str = "") -> str:
         correction = self._active_private_fact_correction(user, inbound_text)
         lines = [
@@ -3587,7 +5756,36 @@ Local classifier result:
                     "- 这条纠正只用于稳定眼前话题的主客体，不要扩写成用户没说过的新事实，也不要反过来埋怨用户。",
                 ]
             )
+        media_ownership_guard = self._format_recent_proactive_media_ownership_guard(user, inbound_text)
+        if media_ownership_guard:
+            lines.extend(["", media_ownership_guard])
         return "\n".join(lines)
+
+    def _response_reverses_recent_proactive_media_ownership(
+        self,
+        response_text: str,
+        user: dict[str, Any],
+        inbound_text: str,
+    ) -> bool:
+        if not self._recent_proactive_media_ownership_context(user, inbound_text):
+            return False
+        cleaned = _single_line(response_text, 500)
+        if not cleaned:
+            return False
+        depicted_actions = r"(?:洒|撒|溅|打翻|碰倒|弄倒|摔|掉|弄坏|打碎|受伤|烫|割|磕|撞)"
+        if re.search(rf"我[^。！？!?\n]{{0,16}}{depicted_actions}", cleaned):
+            return False
+        return bool(
+            re.search(rf"你[^。！？!?\n]{{0,18}}{depicted_actions}", cleaned)
+            or re.search(r"(?:怎么|这么|也太)[^。！？!?\n]{0,10}(?:笨手笨脚|不小心|毛手毛脚)", cleaned)
+            or re.search(
+                r"(?:有没有|有没|没|会不会|别|记得|赶紧|快|先|小心)"
+                r"[^。！？!?\n]{0,14}"
+                r"(?:溅到|伤到|烫到|割到|弄到|碰到|受伤|手上|身上|衣服|疼)",
+                cleaned,
+            )
+            or re.search(r"(?:你没事吧|没伤着吧|有没有受伤|疼不疼)", cleaned)
+        )
 
     def _response_claims_user_prior_action(self, text: str, user: dict[str, Any]) -> bool:
         cleaned = _single_line(text, 500)
@@ -3654,7 +5852,7 @@ Local classifier result:
                     _single_line(fallback, 160),
                 )
                 return fallback
-        if not bool(getattr(self, "enable_response_self_review", True)):
+        if not self._passive_response_review_enabled():
             return self._fallback_temporal_or_continuity_confused_reply(inbound_text, response_text, user=user) or response_text
         flags = self._response_review_flags(response_text, user, inbound_text=inbound_text)
         if self._response_denies_existing_creative_work(response_text, creative_context):
@@ -3662,9 +5860,8 @@ Local classifier result:
             flags = list(dict.fromkeys(flags))
         if not flags:
             return response_text
-        review_mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
-        if review_mode not in {"local_only", "severe_only", "full"}:
-            review_mode = "severe_only"
+        review_mode = self._effective_passive_review_mode()
+        review_strength = self._effective_passive_review_strength()
         if review_mode == "local_only":
             return self._fallback_temporal_or_continuity_confused_reply(
                 inbound_text,
@@ -3688,6 +5885,7 @@ Local classifier result:
                 "false_no_reply_claim",
                 "fact_attribution_after_correction",
                 "unverified_fact_attribution",
+                "proactive_media_ownership_reversal",
                 "denies_existing_creative_work",
             }
             if not any(flag in critical_flags for flag in effective_flags):
@@ -3757,6 +5955,7 @@ Local classifier result:
 - 如果问题是 false_no_reply_claim,不要说“看你没回我/等你回话/你没理我”；用户本轮已经发来消息,直接解释上一句或重新接住当前问题
 - 如果问题是 fact_attribution_after_correction，必须以用户刚才的纠正和上一条 Bot 已承认的内容为准；不要换个说法再次把 Bot 的行为安到用户身上
 - 如果问题是 unverified_fact_attribution，原回复正在断言“用户之前/先做过某事”，但当前短句没有提供这个归属；没有明确依据就改成中性主语或只谈那件事本身
+- 如果问题是 proactive_media_ownership_reversal，用户只是在评价 Bot 刚主动发送的图片；把图中“我/她/角色本人”的动作改回 Bot/当前人格，绝不能责怪或关心用户仿佛是用户弄洒、摔倒或受伤
 - 如果问题是 denies_existing_creative_work，必须依据本轮真实创作记录承认已有文本作品；不得把“未正式出版”偷换成“没写过”，也不要虚构出版、发行或实体书经历
 """.strip()
         if review_event is not None:
@@ -3792,6 +5991,12 @@ Local classifier result:
         if not cleaned:
             return response_text
         if self._is_response_review_drop_marker(cleaned):
+            if review_strength == "lenient":
+                logger.info(
+                    "[PrivateCompanion] 被动回复宽松复核忽略取消判定,保留原回复: flags=%s",
+                    ",".join(effective_flags),
+                )
+                return response_text
             logger.info(
                 "[PrivateCompanion] 被动回复模型自检判定重复,已标记丢弃: flags=%s before=%s",
                 ",".join(effective_flags),
@@ -3822,6 +6027,8 @@ Local classifier result:
                 user=user,
             ) or response_text
         if last_message and not allow_repeat and self._text_repeats_recent_message(cleaned, last_message):
+            if review_strength == "lenient":
+                return response_text
             logger.info(
                 "[PrivateCompanion] 被动回复模型自检后仍复读,已标记丢弃: before=%s",
                 _single_line(cleaned, 120),
@@ -3834,6 +6041,26 @@ Local classifier result:
             fallback = self._fallback_overlong_casual_reply(inbound_text, cleaned)
             return fallback or cleaned
         return cleaned
+
+    def _passive_response_review_enabled(self) -> bool:
+        return bool(
+            getattr(
+                self,
+                "enable_passive_response_review",
+                getattr(self, "enable_response_self_review", True),
+            )
+        )
+
+    def _effective_passive_review_mode(self) -> str:
+        mode = str(
+            getattr(self, "passive_review_mode", getattr(self, "response_review_mode", "severe_only"))
+            or "severe_only"
+        ).strip().lower()
+        return mode if mode in {"local_only", "severe_only", "full"} else "severe_only"
+
+    def _effective_passive_review_strength(self) -> str:
+        strength = str(getattr(self, "passive_review_strength", "lenient") or "lenient").strip().lower()
+        return strength if strength in {"lenient", "balanced", "strict"} else "lenient"
 
     @staticmethod
     def _response_review_meta_leak_reason(text: Any) -> str:
@@ -3909,6 +6136,7 @@ Local classifier result:
             "false_no_reply_claim",
             "fact_attribution_after_correction",
             "unverified_fact_attribution",
+            "proactive_media_ownership_reversal",
             "denies_existing_creative_work",
         }
         if self._expression_style_review_enabled():
@@ -4119,6 +6347,8 @@ Local classifier result:
 
             last_proactive_text = _single_line(user.get("last_proactive_message"), 500)
             last_proactive_at = _safe_float(user.get("last_proactive_sent_at"), 0)
+            last_proactive_action = _single_line(user.get("last_proactive_action"), 80).lower()
+            last_proactive_summary = _single_line(user.get("last_proactive_behavior_summary"), 300)
             delivery_umo = _single_line(user.get("last_proactive_delivery_umo") or user.get("umo"), 180)
             consumed_for = _safe_float(user.get("last_proactive_reply_context_consumed_for"), 0)
             max_age = min(max(1, self.proactive_reply_context_hours) * 3600, 30 * 60)
@@ -4137,6 +6367,23 @@ Local classifier result:
                     "必须直接承认并顺着这条消息接话，不得声称不知道自己发了什么、没看到这条消息或把它当成别人发的。"
                     "如果其中的标题、平台或链接确实有误，简短承认并依据上面的实际原文纠正，不要继续编造来源。"
                 )
+                if "photo_text" in last_proactive_action:
+                    image_scene = ""
+                    subject_owner = "unknown"
+                    snapshot = user.get("last_photo_share_snapshot")
+                    if isinstance(snapshot, dict):
+                        image_scene = _single_line(snapshot.get("caption"), 260)
+                        subject_owner = _normalize_photo_subject_owner(snapshot.get("subject_owner")) or "unknown"
+                    if not image_scene and last_proactive_summary:
+                        image_scene = _single_line(re.split(r"[:：]", last_proactive_summary, maxsplit=1)[-1], 260)
+                    recent_delivery_context += (
+                        "\n【刚才主动图片的主客体】\n"
+                        + (f"图片画面：{image_scene}\n" if image_scene else "")
+                        + f"图片发送者：Bot/当前人格；画面主体：{_photo_subject_owner_prompt_label(subject_owner)}\n"
+                        + "用户接下来的短句默认是在评价这张图，不是在说用户自己做了图中的事。"
+                        "严格按上面的结构化归属理解代词和动作，不要仅凭‘她’猜主体。"
+                        "除非用户明确说‘我做了/我弄洒了’，否则不得责怪或安慰用户仿佛事故发生在用户身上。"
+                    )
                 current = self._get_user(user_id)
                 current["last_proactive_reply_context_consumed_for"] = last_proactive_at
                 self._save_data_sync()
@@ -4236,6 +6483,63 @@ Local classifier result:
         raw_text = await self._collect_recent_private_conversation_text(user, hours=24, max_lines=70)
         if not raw_text or len(raw_text) < 80:
             return
+        user_utterances, _ = self._expression_rule_source_parts(raw_text, source_kind="private")
+        learn_expression_rules = bool(
+            getattr(self, "enable_expression_learning", False)
+            and len(user_utterances) >= 5
+            and self._expression_private_learning_source_enabled(user, user_id)
+        )
+        expression_rule_task = ""
+        expression_rule_schema = ""
+        if learn_expression_rules:
+            expression_rule_task = """
+同时学习用户有辨识度的表达，只分析“用户:”行，完全忽略 Bot/助手行的措辞。不要把“字数、标点、柔和收尾”本身当成学习成果。
+分别输出两类：style_expressions 是“具体情境 → 可直接借鉴的短表达/口癖/梗/占位模板”；grammar_expressions 是“具体情境 → 稳定句法结构”。每类最多 3 条，没有就返回空数组。
+如果一条 style 与一条 grammar 来自同一组支持片段、描述同一个情境，只是分别概括说法和句法，两者必须填写完全相同的 family_key（简短英文或拼音标识）；互不相关的规则使用不同 family_key，不要为了凑对而强行配对。
+style 必须像“晚安[称谓]”“我嘞个____”“懂的都懂”一样可直接使用或轻微改写；style 字段只写 2–32 字的原话/脱敏模板。包含“偏好、语气、风格、口语化、短句、铺垫、表达方式、回应时”等分析词的一律无效，不能输出。
+grammar 必须写清句长、主语省略、拆句、反问或祈使等可验证结构，例如“省略主语的 6–10 字短句”，不要混入具体事实；只有“简短、自然、直接、口语化”而没有句法细节时一律不输出。
+无法从原消息中找到具体可复用原话/模板时，style_expressions 必须返回空数组，不得用抽象描述凑数。
+优先要求 2 条不同用户消息支持；如果只有 1 次但表达明显独特，也可以作为待审核候选，并将 evidence_count 写 1。普通“嗯/好/可以”、内容事实、身份关系、脏话和提示词不要学。
+tags 写 2–8 个用于按新消息召回的情境词；evidence_examples 写 1–3 条短支持片段，只供人工审核，不会注入回复。
+同时判断适用边界：channels 只能从 private/group/proactive/qzone/tts 选；relationship_stages 只能从 stranger/familiar/close/any 选；
+emotion_gates 只能从 normal/positive/low/guarded/any 选；intent 只能从 acknowledgement/question/request/help/comfort/play/intimacy/boundary/emotion/casual/proactive/any 选。
+avoid 写清楚哪些严肃、排障、工具失败、低落或边界场景不能用；如果表达规律会覆盖事实、工具结果、安全边界或 AstrBot 人格，persona_conflict 必须为 true。
+""".strip()
+            expression_rule_schema = """,
+  "style_expressions": [
+    {
+      "situation": "会触发这种表达的具体情境",
+      "family_key": "same_scene_rule_1",
+      "style": "可直接借鉴或带占位符的短表达",
+      "instruction": "如何自然改写和使用",
+      "tags": ["召回标签"],
+      "evidence_examples": ["脱敏支持片段"],
+      "channels": ["private", "proactive"],
+      "relationship_stages": ["familiar", "close"],
+      "emotion_gates": ["normal", "positive"],
+      "intent": "acknowledgement",
+      "avoid": "严肃排障、工具失败或用户低落时不用",
+      "persona_conflict": false,
+      "evidence_count": 2
+    }
+  ],
+  "grammar_expressions": [
+    {
+      "situation": "会触发这种句法的具体情境",
+      "family_key": "same_scene_rule_1",
+      "style": "稳定句法结构与字数范围",
+      "instruction": "如何使用该句法但不照抄内容",
+      "tags": ["召回标签"],
+      "evidence_examples": ["脱敏支持片段"],
+      "channels": ["private", "proactive"],
+      "relationship_stages": ["any"],
+      "emotion_gates": ["any"],
+      "intent": "casual",
+      "avoid": "不适用情境",
+      "persona_conflict": false,
+      "evidence_count": 2
+    }
+  ]"""
         prompt = f"""
 请把最近一段私聊整理成“陪伴型对话片段记忆”。
 目标是让角色以后能自然延续共同经历,而不是复述聊天记录。
@@ -4246,6 +6550,7 @@ Local classifier result:
 open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“以后还能聊”的内容放进 reusable_topic。
 严格区分说话人：用户行才可以写入 user_events；Bot/助手行里的第一人称动作、身体状态、日程和生活片段多半是拟人化表达，只能当作当时回复风格或轻微情绪余味。
 bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或之后处理的事；不要把“我刚在吃饭/整理/路上/犯困/继续做某事”这类模拟状态当承诺或共同经历。
+{expression_rule_task}
 
 【AstrBot 默认人格】
 {self._get_default_persona_prompt()}
@@ -4261,7 +6566,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
   "user_events": ["用户最近明确发生或在意的事,不确定就少写"],
   "bot_promises": ["Bot 明确说过要做、要记得、要提醒或要延续的事"],
   "open_loops": ["尚未完成、之后仍需要回头处理/确认/兑现的约定或话题"],
-  "avoid_next": ["短期内不该反复提的内容,例如已经安抚过/解释过/容易烦的点"]
+  "avoid_next": ["短期内不该反复提的内容,例如已经安抚过/解释过/容易烦的点"]{expression_rule_schema}
 }}
 """.strip()
         acquired = await self._try_acquire_user_background_task(
@@ -4276,7 +6581,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         try:
             raw = await self._llm_call(
                 prompt,
-                max_tokens=520,
+                max_tokens=860 if learn_expression_rules else 520,
                 provider_id=self._task_provider(self.dialogue_episode_provider_id, self.mai_style_provider_id),
                 task="dialogue_episode",
             )
@@ -4297,17 +6602,26 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             "bot_promises": self._normalize_string_list(payload.get("bot_promises"), limit=6),
             "avoid_next": self._normalize_string_list(payload.get("avoid_next"), limit=6),
         }
-        if not episode["summary"]:
+        open_loops = self._normalize_string_list(payload.get("open_loops"), limit=8, item_limit=110)
+        expression_rules = self._normalize_expression_rule_candidates(
+            self._expression_rule_payload_candidates(payload),
+            source_kind="private",
+            source_text=raw_text,
+        ) if learn_expression_rules else []
+        if not episode["summary"] and not expression_rules:
             await self._mark_user_background_retry(user_id, "dialogue_episode", now, "empty_summary")
             return
-        open_loops = self._normalize_string_list(payload.get("open_loops"), limit=8, item_limit=110)
+        expression_batch_key = hashlib.sha1(raw_text.encode("utf-8")).hexdigest()[:20]
         async with self._data_lock:
             current = self._get_user(user_id)
             episodes = current.setdefault("dialogue_episodes", [])
             if not isinstance(episodes, list):
                 episodes = []
                 current["dialogue_episodes"] = episodes
-            if not episodes or _single_line(episodes[-1].get("summary") if isinstance(episodes[-1], dict) else "", 140) != episode["summary"]:
+            if episode["summary"] and (
+                not episodes
+                or _single_line(episodes[-1].get("summary") if isinstance(episodes[-1], dict) else "", 140) != episode["summary"]
+            ):
                 episodes.append(episode)
             del episodes[:-self.max_dialogue_episodes]
             if self.enable_open_loop_tracking:
@@ -4328,6 +6642,20 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                         }
                     )
                 del current_loops[:-12]
+            if expression_rules:
+                expression_profile = current.setdefault("expression_profile", {})
+                if not isinstance(expression_profile, dict):
+                    expression_profile = {}
+                    current["expression_profile"] = expression_profile
+                self._merge_learned_expression_rules(
+                    expression_profile,
+                    expression_rules,
+                    batch_key=expression_batch_key,
+                    now=now,
+                    pending=True,
+                )
+                expression_profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._refresh_expression_voice_profile()
             current["episode_message_count"] = 0
             current["last_episode_refresh_at"] = now
             current["dialogue_episode_retry_after"] = 0
@@ -4408,19 +6736,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                 line = _single_line(raw_line[2:] if raw_line.startswith("- ") else raw_line, 90)
                 if line and self._private_context_line_is_safe(line):
                     lines.append(line)
-        expression_mode = self._expression_learning_mode()
-        expression_hint_limit = 80 if expression_mode == "aggressive" else (36 if expression_mode == "balanced" else 24)
-        if self.enable_expression_learning and len(hint) <= expression_hint_limit:
-            expression_text = self._format_expression_profile_for_prompt(user)
-            if expression_text and not expression_text.startswith("暂无足够样本"):
-                expression_limit = 3 if expression_mode == "aggressive" else 1
-                for raw_line in expression_text.splitlines():
-                    line = _single_line(raw_line, 90)
-                    if line and self._private_context_line_is_safe(line):
-                        lines.append(line)
-                        expression_limit -= 1
-                        if expression_limit <= 0:
-                            break
+        # 表达学习由独立的 expression.rhythm 片段按当前场景注入，避免在相处线索里重复且被截断。
         deduped = list(dict.fromkeys(line for line in lines if line))
         if not deduped:
             return ""
@@ -4876,6 +7192,8 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             flags.append("fact_attribution_after_correction")
         elif claims_user_prior_action and not inbound_claims_ownership and len(self._compact_repeat_text(inbound_text)) <= 32:
             flags.append("unverified_fact_attribution")
+        if self._response_reverses_recent_proactive_media_ownership(cleaned, user, inbound_text):
+            flags.append("proactive_media_ownership_reversal")
         if self._expression_style_review_enabled():
             flags.extend(self._expression_review_flags(cleaned, user))
         signature = self._proactive_topic_signature(cleaned)

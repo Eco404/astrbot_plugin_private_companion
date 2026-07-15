@@ -46,6 +46,8 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "admin_mention_keyword_voice_keywords": ("main_user_mention_voice_keywords",),
     "admin_mention_keyword_voice_probability": ("main_user_mention_voice_probability",),
     "admin_mention_keyword_voice_prompt": ("main_user_mention_voice_prompt",),
+    "enable_response_self_review": ("enable_passive_response_review", "enable_proactive_message_review"),
+    "response_review_mode": ("passive_review_mode",),
 }
 
 LEGACY_PROACTIVE_ACTION_FLAG_KEYS: dict[str, str] = {

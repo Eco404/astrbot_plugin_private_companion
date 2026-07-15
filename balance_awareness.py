@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import random
@@ -319,6 +320,41 @@ class BalanceAwarenessMixin:
     def _balance_auto_discovery_available(self) -> bool:
         return bool(self._balance_auto_provider_sources())
 
+    def _balance_query_config_signature(self) -> str:
+        """Return a secret-free signature so configuration changes bypass stale backoff."""
+        configured_url = str(getattr(self, "balance_api_url", "") or "").strip()
+        parts: list[str] = []
+        if configured_url:
+            parsed = urlparse(configured_url)
+            parts.append(f"manual:{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}")
+            parts.append(f"manual_key:{bool(str(getattr(self, 'balance_api_key', '') or '').strip())}")
+        else:
+            parts.append("auto")
+            for source in self._balance_auto_provider_sources():
+                source_id = _single_line(source.get("id") or source.get("provider_source_id"), 120)
+                api_base = str(
+                    source.get("api_base") or source.get("base_url") or source.get("api_base_url") or ""
+                ).strip()
+                parsed = urlparse(api_base)
+                parts.append(
+                    "|".join(
+                        (
+                            source_id,
+                            f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}",
+                            str(bool(self._balance_provider_source_key(source))),
+                        )
+                    )
+                )
+        parts.extend(
+            (
+                _single_line(getattr(self, "balance_json_path", ""), 120),
+                _single_line(getattr(self, "balance_total_json_path", ""), 120),
+                _single_line(getattr(self, "balance_used_json_path", ""), 120),
+                str(getattr(self, "balance_value_divisor", 1) or 1),
+            )
+        )
+        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:20]
+
     @staticmethod
     def _balance_same_origin_url(api_base: str, path: str) -> str:
         parsed = urlparse(str(api_base or "").strip())
@@ -539,6 +575,11 @@ class BalanceAwarenessMixin:
             if not isinstance(state, dict):
                 state = {}
                 self.data["balance_awareness"] = state
+            config_signature = self._balance_query_config_signature()
+            if _single_line(state.get("config_signature"), 40) != config_signature:
+                state["config_signature"] = config_signature
+                state["next_check_at"] = 0
+                state["consecutive_failures"] = 0
             if now < _safe_float(state.get("next_check_at"), 0.0):
                 return
             interval = max(5.0, _safe_float(getattr(self, "balance_check_interval_minutes", 60.0), 60.0, 5.0)) * 60.0
@@ -549,23 +590,40 @@ class BalanceAwarenessMixin:
             except Exception as exc:
                 safe_error = self._balance_safe_error(exc)
                 failures = int(_safe_float(state.get("consecutive_failures"), 0.0, 0.0)) + 1
-                retry = min(interval, max(5 * 60.0, 5 * 60.0 * (2 ** min(failures - 1, 4))))
+                auto_unsupported = not str(getattr(self, "balance_api_url", "") or "").strip() and (
+                    safe_error.startswith("未从 ")
+                    or safe_error.startswith("没有可用于自动查询余额的 AstrBot Provider")
+                )
+                if auto_unsupported:
+                    retry = max(interval, 12 * 3600.0)
+                else:
+                    retry = min(interval, max(5 * 60.0, 5 * 60.0 * (2 ** min(failures - 1, 4))))
                 state.update(
                     {
                         "last_check_at": now,
                         "next_check_at": now + retry,
                         "last_error": safe_error,
                         "consecutive_failures": failures,
+                        "config_signature": config_signature,
                     }
                 )
                 schedule_save = getattr(self, "_schedule_data_save", None)
                 if callable(schedule_save):
                     schedule_save(delay=0.5)
-                logger.warning(
-                    "[PrivateCompanion] 余额拉取失败,将在稍后重试: failures=%s error=%s",
-                    failures,
-                    safe_error,
-                )
+                if auto_unsupported:
+                    logger.warning(
+                        "[PrivateCompanion] 当前 Provider 不支持余额查询,已延长探测间隔: "
+                        "failures=%s retry_hours=%.1f error=%s",
+                        failures,
+                        retry / 3600.0,
+                        safe_error,
+                    )
+                else:
+                    logger.warning(
+                        "[PrivateCompanion] 余额拉取失败,将在稍后重试: failures=%s error=%s",
+                        failures,
+                        safe_error,
+                    )
                 return
 
             tier = self._balance_tier(snapshot)
@@ -594,6 +652,7 @@ class BalanceAwarenessMixin:
                     "last_success_at": now,
                     "last_error": "",
                     "consecutive_failures": 0,
+                    "config_signature": config_signature,
                     "tier": tier,
                     "previous_tier": previous_tier,
                     "amount": snapshot.get("amount"),

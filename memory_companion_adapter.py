@@ -1633,8 +1633,8 @@ class MemoryCompanionAdapterMixin:
         try:
             await recorder(
                 content=full_content,
-                scope="private",
-                session_id=f"private_companion:dream",
+                scope="unknown",
+                session_id="private_companion:dream",
                 memory_id=f"private_companion_dream_{uuid.uuid4().hex[:12]}",
                 metadata={
                     "dream_type": _single_line(dream_type, 40),

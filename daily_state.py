@@ -105,7 +105,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _normalize_outbound_punctuation_flow, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize_photo_subject_owner, _now_ts, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
 from .planning import (
     build_daily_plan_prompt,
@@ -1956,6 +1956,7 @@ class DailyStateMixin:
         action: str,
         action_summary: str,
         error_text: str,
+        photo_subject_owner: str = "",
         now: float | None = None,
     ) -> str:
         if not isinstance(user, dict):
@@ -2083,6 +2084,7 @@ class DailyStateMixin:
             "reason": _single_line(reason, 40) or "check_in",
             "action": _single_line(action, 40) or "message",
             "action_summary": _single_line(action_summary, 500),
+            "photo_subject_owner": _normalize_photo_subject_owner(photo_subject_owner),
             "last_error": clean_error,
             "delivery_key": delivery_key,
             "freshness": freshness,
@@ -4413,13 +4415,21 @@ class DailyStateMixin:
             context["followup_via_reply_at"] = check_now
             context["followup_due_at"] = 0
             self._cancel_planned_meal_care_followup(user, note="当前被动回复已承担唯一一次吃饭补问")
-        elif kind == "unrelated" and not followup_already_sent:
-            if _safe_float(context.get("followup_due_at"), 0) <= 0:
-                context["followup_due_at"] = check_now + followup_minutes * 60
-            followup_builder = getattr(self, "_meal_care_followup_event", None)
-            followup = followup_builder(user, now=check_now) if callable(followup_builder) else None
-            if isinstance(followup, dict):
-                user["pending_followup_event"] = followup
+        elif kind == "unrelated":
+            # The user has replied but deliberately did not continue the meal
+            # topic (for example, "我在忙"). Treat that as a soft refusal and
+            # stop this check-in instead of turning it into another proactive
+            # "吃了吗" message later.
+            context.update(
+                {
+                    "active": False,
+                    "stage": "closed_unrelated",
+                    "last_reply_at": check_now,
+                    "closed_at": check_now,
+                    "followup_due_at": 0,
+                }
+            )
+            self._cancel_planned_meal_care_followup(user, note="用户未承接饮食话题，本轮饭点关心已结束")
         user["meal_check_context"] = context
         if kind != "unrelated":
             user["meal_care_reply_hint"] = {
@@ -8330,6 +8340,7 @@ class DailyStateMixin:
         topic: str = "",
         motive: str = "",
         reason: str = "",
+        subject_owner: str = "",
         sent_at: float | None = None,
     ) -> None:
         if not isinstance(user, dict):
@@ -8337,8 +8348,18 @@ class DailyStateMixin:
         normalized_caption = _single_line(caption, 260)
         if not normalized_caption:
             return
+        normalized_owner = _normalize_photo_subject_owner(subject_owner)
+        if not normalized_owner:
+            normalized_owner = (
+                "bot"
+                if re.search(r"(?:^|[，,。！？!?\s])我(?:正|在|刚|把|的|坐|站|走|拿|看|拍|穿|写|做)", normalized_caption)
+                else "unknown"
+            )
         delivered_at = _now_ts() if sent_at is None else sent_at
         user["last_photo_share_snapshot"] = {
+            "schema_version": 2,
+            "sender_owner": "bot",
+            "subject_owner": normalized_owner,
             "caption": normalized_caption,
             "topic": _single_line(topic, 100),
             "motive": _single_line(motive, 180),
@@ -8368,14 +8389,20 @@ class DailyStateMixin:
         )
         if not (recent_short_followup or asks_photo):
             return ""
+        subject_owner = _normalize_photo_subject_owner(snapshot.get("subject_owner")) or "unknown"
+        owner_label = _photo_subject_owner_prompt_label(subject_owner)
         return "\n".join(
             part
             for part in (
                 "【最近一次真实图片分享】",
                 "这是刚刚已经实际发送给当前用户的图片语义。若本轮是在追问该图，必须以这里为准；不要用旧梦境、旧日程或其他图片自行补写来源。",
-                f"图片画面：{_single_line(snapshot.get('caption'), 260)}",
+                "图片发送者：Bot/当前人格",
+                f"画面主体归属：{owner_label}",
+                f"图片画面（主体={owner_label}）：{_single_line(snapshot.get('caption'), 260)}",
                 f"分享话题：{_single_line(snapshot.get('topic'), 100)}" if snapshot.get("topic") else "",
                 f"当时动机：{_single_line(snapshot.get('motive'), 180)}" if snapshot.get("motive") else "",
+                "归属边界：用户的短句通常是在评价图中画面，不代表用户亲自做了图中的动作。严格服从上面的结构化主体归属，不要仅凭“她”猜主语；只有用户明确说“我做了/我弄洒了”时才归到用户。",
+                "承接时不得把画面事故反过来责怪用户，也不要问用户是否被图里的事故溅到、弄伤或弄湿；应由 Bot/画面主体自然认领并回应。",
                 "如果用户只发“？”或问这是什么，直接简短解释这张图；不要声称它来自未发生的梦境、课堂或现实经历。",
             )
             if part
@@ -8464,7 +8491,7 @@ class DailyStateMixin:
             + f"\n{creative_continuity_hint}\n"
             + (f"{existence_rule}\n" if existence_rule else "")
             + (f"最近一句/片段：{snippet}\n" if snippet else "")
-            + "如果用户明确问作品/诗/小说/草稿,可以直接概括并给一小句片段；否则这不是必须回答的内容,可以只含糊说“在弄一点小东西”。不要主动汇报系统进度,不要一次给完整正文。"
+            + "如果用户明确问指定作品的正文、某一部分、写作想法或作者怎么看，下面的短片段只能用于定位，必须先调用 pc_view_creative_work 读取真实正文后再回答；不要先发“我去看看”，也不要凭短片段假装已经读完。若只是泛问最近有没有创作，可以直接概括并给一小句片段。否则这不是必须回答的内容，可以只含糊说“在弄一点小东西”。不要主动汇报系统进度，不要一次给完整正文。"
         )
 
     @staticmethod
@@ -10776,10 +10803,10 @@ class DailyStateMixin:
         source = self._sanitize_schedule_model_artifacts(text, limit=180)
         if not source:
             return ""
-        if not self._daily_plan_clause_has_unsafe_social_fact(source):
-            return source
         raw_clauses = [part for part in re.split(r"[，,。；;]+", source) if _single_line(part, 120)]
         unsafe_flags = [self._daily_plan_clause_has_unsafe_social_fact(part) for part in raw_clauses]
+        if not any(unsafe_flags):
+            return source
         kept = []
         for index, part in enumerate(raw_clauses):
             if unsafe_flags[index]:
@@ -10796,6 +10823,8 @@ class DailyStateMixin:
         cleaned = "，".join(kept).strip("，,。；; ")
         if not cleaned:
             cleaned = "放慢节奏处理手边的小事，把这段时间过得轻一点"
+        if cleaned == source:
+            return source
         log_key = "|".join((field or "-", _single_line(source, 120), _single_line(cleaned, 120)))
         now = _now_ts()
         recent_logs = getattr(self, "_recent_social_fact_sanitize_logs", None)
@@ -12575,6 +12604,12 @@ class DailyStateMixin:
             except Exception as exc:
                 logger.warning("[PrivateCompanion] 主动维护任务失败,不阻塞私聊主动: %s error=%s", label, _single_line(exc, 160))
 
+    @staticmethod
+    def _proactive_send_disables_segmenting(reason: str, *, friend_proactive: bool = False) -> bool:
+        # Long-form creative text must stay intact. External links are protected by
+        # the segmenter itself, so video/news/web shares should follow user scope.
+        return bool(friend_proactive) or normalize_legacy_tag_text(reason) == "creative_share"
+
     async def _tick(self):
         async with self._data_lock:
             runtime = self.data.setdefault("proactive_runtime", {})
@@ -12824,18 +12859,39 @@ class DailyStateMixin:
                     if isinstance(current_for_mark.get("planned_meal_care_context"), dict)
                     else {}
                 )
+                meal_followup_context = (
+                    current_for_mark.get("meal_check_context")
+                    if isinstance(current_for_mark.get("meal_check_context"), dict)
+                    else {}
+                )
                 if (
                     not is_troubleshooting_for_send
                     and not due_timer_id
-                    and current_reason == "meal_care"
-                    and self._food_prompt_cooldown_remaining(current_for_mark, now=_now_ts()) > 0
+                    and current_reason in {"meal_care", "meal_care_followup"}
+                    and (
+                        (
+                            current_reason == "meal_care"
+                            and (
+                                self._meal_care_interval_remaining(current_for_mark, now=_now_ts()) > 0
+                                or self._food_prompt_cooldown_remaining(current_for_mark, now=_now_ts()) > 0
+                            )
+                        )
+                        or (
+                            current_reason == "meal_care_followup"
+                            and self._meal_care_followup_blocked_by_newer_food_prompt(
+                                current_for_mark,
+                                meal_followup_context,
+                                now=_now_ts(),
+                            )
+                        )
+                    )
                 ):
-                    self._mark_planned_candidate_status(current_for_mark, "blocked", "近期已经聊过饮食，饭点关心进入共享冷却")
+                    self._mark_planned_candidate_status(current_for_mark, "blocked", "近期已经聊过饮食，本次饭点关心或补问进入共享冷却")
                     self._clear_pending_proactive_plan(current_for_mark)
                     current_for_mark["planned_meal_care_context"] = {}
                     self._schedule_next_proactive(current_for_mark, now=_now_ts())
                     self._save_data_sync()
-                    self._debug_tick_skip(user_id, "近期已经聊过饮食，饭点关心进入共享冷却", prefix="取消")
+                    self._debug_tick_skip(user_id, "近期已经聊过饮食，本次饭点关心或补问进入共享冷却", prefix="取消")
                     continue
                 if (
                     not is_troubleshooting_for_send
@@ -13019,12 +13075,16 @@ class DailyStateMixin:
             task_start_private_inbound_count = _safe_int(user.get("private_inbound_count"), 0)
             render_failure_stage = ""
             pending_send_retry = None if is_troubleshooting_for_send else self._pending_proactive_send_retry(user)
+            photo_subject_owner_for_send = ""
             if pending_send_retry:
                 reason = _single_line(pending_send_retry.get("reason"), 40) or normalize_legacy_tag_text(user.get("planned_proactive_reason")) or "check_in"
                 text = _single_line(pending_send_retry.get("text"), 1200)
                 image_path = _single_line(pending_send_retry.get("image_path"), 260)
                 extra_components = []
                 action_summary = _single_line(pending_send_retry.get("action_summary"), 500)
+                photo_subject_owner_for_send = _normalize_photo_subject_owner(
+                    pending_send_retry.get("photo_subject_owner")
+                )
                 effective_action_for_send = _single_line(pending_send_retry.get("action"), 40) or planned_action_for_send or "message"
                 logger.info(
                     "[PrivateCompanion] 复用待重发主动消息: user=%s retry=%s text=%s image=%s",
@@ -13036,6 +13096,9 @@ class DailyStateMixin:
             else:
                 try:
                     reason, text, image_path, extra_components, action_summary, effective_action_for_send = await self._render_message(user)
+                    photo_subject_owner_for_send = _normalize_photo_subject_owner(
+                        user.pop("_proactive_photo_subject_owner", "")
+                    )
                 except Exception as e:
                     logger.warning("[PrivateCompanion] 主动消息生成失败: user=%s error=%s", user_id, _single_line(e, 160), exc_info=True)
                     async with self._data_lock:
@@ -13098,9 +13161,7 @@ class DailyStateMixin:
                         image_path=image_path,
                     )
                 except Exception as exc:
-                    review_enabled = bool(getattr(self, "enable_response_self_review", True)) and bool(
-                        getattr(self, "enable_proactive_message_review", True)
-                    )
+                    review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
                     if review_enabled:
                         review_failure_signature = self._proactive_topic_signature(
                             " ".join(
@@ -13736,9 +13797,9 @@ class DailyStateMixin:
                     image_path,
                     extra_components=extra_components,
                     quote_message_id=proactive_quote_message_id,
-                    disable_segmenting=(
-                        reason in {"creative_share", "bili_video_share", "news_share", "web_exploration_share"}
-                        or friend_proactive_for_send
+                    disable_segmenting=self._proactive_send_disables_segmenting(
+                        reason,
+                        friend_proactive=friend_proactive_for_send,
                     ),
                 )
                 async with self._data_lock:
@@ -13796,6 +13857,7 @@ class DailyStateMixin:
                         image_path=image_path,
                         extra_components=extra_components,
                         action_summary=action_summary,
+                        photo_subject_owner=photo_subject_owner_for_send,
                     ),
                 )
                 if is_troubleshooting_for_send:
@@ -13844,6 +13906,7 @@ class DailyStateMixin:
                             action=effective_action_for_send or planned_action_for_send or "message",
                             action_summary=action_summary,
                             error_text=error_text,
+                            photo_subject_owner=photo_subject_owner_for_send,
                             now=_now_ts(),
                         )
                         retry_payload = current_after_failure.get("pending_proactive_send_retry")
@@ -13875,9 +13938,14 @@ class DailyStateMixin:
                 visible_text = self._visible_text_without_tts_reading(text, limit=500)
                 current["last_companion_message"] = _single_line(visible_text, 500)
                 current["last_proactive_message"] = _single_line(visible_text, 500)
+                staged_expression_recorder = getattr(self, "_record_staged_expression_rule_injection", None)
+                if callable(staged_expression_recorder):
+                    staged_expression_recorder(current, visible_text, channel="proactive")
                 current["last_proactive_sent_at"] = current["last_sent"]
                 current["last_companion_message_at"] = current["last_sent"]
                 current["last_proactive_reason"] = reason
+                if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
+                    current["last_external_link_share_at"] = current["last_sent"]
                 if reason in {"birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
                     birthday_event = current.get("birthday_event") if isinstance(current.get("birthday_event"), dict) else {}
                     birthday_context = current.get("planned_birthday_event_context") if isinstance(current.get("planned_birthday_event_context"), dict) else {}
@@ -13905,6 +13973,7 @@ class DailyStateMixin:
                         topic=planned_topic_for_send,
                         motive=planned_motive_for_send,
                         reason=reason,
+                        subject_owner=photo_subject_owner_for_send,
                         sent_at=current["last_sent"],
                     )
                 self._clear_pending_proactive_send_retry(current)

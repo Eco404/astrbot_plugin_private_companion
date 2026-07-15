@@ -106,8 +106,7 @@ class InteractionUtilsMixin:
         permission_id = self._permission_identity_id(user_id)
         if not permission_id:
             return False
-        target_ids = set(self._configured_target_ids())
-        if permission_id in target_ids:
+        if self._is_private_companion_owner_user_id(permission_id):
             return True
         return permission_id in self._configured_admin_ids()
 
@@ -122,11 +121,28 @@ class InteractionUtilsMixin:
             return normalizer(user_id)
         return _single_line(user_id, 128)
 
+    def _relationship_owner_user_ids(self) -> set[str]:
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(users, dict):
+            return set()
+        normalizer = getattr(self, "_normalize_private_user_role", None)
+        owner_ids: set[str] = set()
+        for raw_user_id, user in users.items():
+            if not isinstance(user, dict):
+                continue
+            role = normalizer(user.get("relationship_role")) if callable(normalizer) else str(user.get("relationship_role") or "").strip().lower()
+            permission_id = self._permission_identity_id(raw_user_id)
+            if role == "owner" and permission_id:
+                owner_ids.add(permission_id)
+        return owner_ids
+
     def _is_private_companion_owner_user_id(self, user_id: Any) -> bool:
         permission_id = self._permission_identity_id(user_id)
         if not permission_id:
             return False
-        return permission_id in set(self._configured_target_ids())
+        if permission_id in set(self._configured_target_ids()):
+            return True
+        return permission_id in self._relationship_owner_user_ids()
 
     def _is_configured_admin_user_id(self, user_id: Any) -> bool:
         permission_id = self._permission_identity_id(user_id)
@@ -163,7 +179,7 @@ class InteractionUtilsMixin:
     def _management_denied_text(self) -> str:
         return (
             "这个操作需要管理权限。\n"
-            "私聊里只认两类用户 ID：AstrBot 全局管理员 admins_id，或本插件私聊目标用户。\n"
+            "私聊里会识别三类用户 ID：AstrBot 全局管理员 admins_id、本插件私聊目标用户，或私聊页中关系角色设为主要用户的用户。\n"
             "OneBot/aiocqhttp 通常填 QQ 号；QQ 官方机器人请填日志或私聊页显示的 openid/平台用户 ID。\n"
             "优先直接填写用户 ID；误粘贴私聊 UMO 时会尝试提取 FriendMessage 后面的用户 ID。身份别名只用于归并记忆，不授予管理或跨用户查询权限。不要填写 UID、default、平台名或群聊会话串。"
         )

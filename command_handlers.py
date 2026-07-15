@@ -293,7 +293,8 @@ class CommandHandlersMixin:
             f"群聊唤醒增强：{self._feature_on_text(getattr(self, 'enable_group_wakeup_enhancement', False))}，短唤醒补话等待 {getattr(self, 'group_wakeup_short_text_wait_seconds', 0)} 秒",
             f"休息回复闸门：{self._feature_on_text(getattr(self, 'enable_rest_reply_simulation', False))}，模式 {getattr(self, 'rest_reply_mode', 'probability')}，概率 {rest_probability_text}，模型阈值 {getattr(self, 'rest_reply_llm_threshold', 0)}，清醒宽限 {getattr(self, 'rest_reply_awake_grace_minutes', 0)} 分钟",
             f"智能沉默：{self._feature_on_text(getattr(self, 'enable_smart_silence', True))}，模式 {getattr(self, 'smart_silence_judge_mode', 'boundary_only')}，置信度 {silence_confidence_text}，超时 {getattr(self, 'smart_silence_model_timeout_seconds', 0)} 秒",
-            f"回复复核：{self._feature_on_text(getattr(self, 'enable_response_self_review', True))}，模式 {getattr(self, 'response_review_mode', 'severe_only')}，被动长度阈值 {getattr(self, 'response_review_max_chars', 260)} 字",
+            f"被动回复复核：{self._feature_on_text(getattr(self, 'enable_passive_response_review', getattr(self, 'enable_response_self_review', True)))}，模式 {getattr(self, 'passive_review_mode', getattr(self, 'response_review_mode', 'severe_only'))}，强度 {getattr(self, 'passive_review_strength', 'lenient')}，长度阈值 {getattr(self, 'response_review_max_chars', 260)} 字",
+            f"主动消息终审：{self._feature_on_text(getattr(self, 'enable_proactive_message_review', True))}，模式 {getattr(self, 'proactive_review_mode', 'full')}，强度 {getattr(self, 'proactive_review_strength', 'lenient')}",
             f"非指令生图：{_single_line(getattr(self, 'natural_language_photo_generation_mode', 'tool_first'), 24) or 'tool_first'}，规则快判{self._feature_on_text(getattr(self, 'enable_natural_language_photo_generation', False))}，每日上限 {getattr(self, 'natural_language_photo_generation_max_daily', 0)}",
             f"拟人状态：健康 {self._feature_on_text(getattr(self, 'enable_health_state', True))}，饥饿 {self._feature_on_text(getattr(self, 'enable_hunger_state', True))}，生理期 {self._feature_on_text(getattr(self, 'enable_cycle_state', True))}，强度 {getattr(self, 'humanized_state_intensity', 0)}",
             f"回复风格：{'已配置' if reply_style else '未配置'}，长度 {len(reply_style)} 字",
@@ -495,8 +496,9 @@ class CommandHandlersMixin:
             },
             "smart_silence_min_confidence": {"type": "percent", "min": 0.0, "max": 1.0, "label": "智能沉默最低置信度"},
             "smart_silence_model_timeout_seconds": {"type": "float", "min": 0.2, "max": 5.0, "label": "智能沉默模型超时秒数"},
-            "enable_response_self_review": {"type": "bool", "label": "回复/主动复核"},
-            "response_review_mode": {
+            "enable_passive_response_review": {"type": "bool", "label": "被动回复复核"},
+            "enable_proactive_message_review": {"type": "bool", "label": "主动消息终审"},
+            "passive_review_mode": {
                 "type": "select",
                 "choices": {"local_only", "severe_only", "full"},
                 "aliases": {
@@ -510,8 +512,11 @@ class CommandHandlersMixin:
                     "全量": "full",
                     "积极": "full",
                 },
-                "label": "回复/主动复核模式",
+                "label": "被动回复复核模式",
             },
+            "passive_review_strength": {"type": "select", "choices": {"lenient", "balanced", "strict"}, "label": "被动回复复核强度"},
+            "proactive_review_mode": {"type": "select", "choices": {"local_only", "severe_only", "full"}, "label": "主动消息终审模式"},
+            "proactive_review_strength": {"type": "select", "choices": {"lenient", "balanced", "strict"}, "label": "主动消息终审强度"},
             "response_review_max_chars": {"type": "int", "min": 80, "max": 900, "label": "被动复核长度阈值"},
             "reply_style_prompt": {"type": "string", "max_len": 1200, "label": "回复风格约束"},
             "enable_group_wakeup_question": {"type": "bool", "label": "群聊解惑唤醒"},
@@ -621,9 +626,13 @@ class CommandHandlersMixin:
             "smart_silence_judge_mode": {"label": "智能沉默判断模式", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
             "smart_silence_min_confidence": {"label": "智能沉默最低置信度", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
             "smart_silence_model_timeout_seconds": {"label": "智能沉默模型超时秒数", "location": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默"},
-            "enable_response_self_review": {"label": "回复/主动复核", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
-            "response_review_mode": {"label": "回复/主动复核模式", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
-            "response_review_max_chars": {"label": "被动复核长度阈值", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
+            "enable_passive_response_review": {"label": "被动回复复核", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核"},
+            "passive_review_mode": {"label": "被动回复复核模式", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核详情"},
+            "passive_review_strength": {"label": "被动回复复核强度", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核详情"},
+            "enable_proactive_message_review": {"label": "主动消息终审", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 主动消息终审"},
+            "proactive_review_mode": {"label": "主动消息终审模式", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 主动消息终审详情"},
+            "proactive_review_strength": {"label": "主动消息终审强度", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 主动消息终审详情"},
+            "response_review_max_chars": {"label": "被动复核长度阈值", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核详情"},
             "enable_rest_reply_simulation": {"label": "休息回复闸门", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门"},
             "rest_reply_mode": {"label": "休息回复闸门模式", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门"},
             "rest_reply_probability": {"label": "休息闸门概率", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门"},
@@ -694,9 +703,13 @@ class CommandHandlersMixin:
             "smart_silence_judge_mode": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
             "smart_silence_min_confidence": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
             "smart_silence_model_timeout_seconds": "拓展页 -> 功能开关 -> 通用能力 -> 智能沉默",
-            "enable_response_self_review": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情",
-            "response_review_mode": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情",
-            "response_review_max_chars": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情",
+            "enable_passive_response_review": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核",
+            "passive_review_mode": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核详情",
+            "passive_review_strength": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核详情",
+            "enable_proactive_message_review": "拓展页 -> 功能开关 -> 私聊陪伴 -> 主动消息终审",
+            "proactive_review_mode": "拓展页 -> 功能开关 -> 私聊陪伴 -> 主动消息终审详情",
+            "proactive_review_strength": "拓展页 -> 功能开关 -> 私聊陪伴 -> 主动消息终审详情",
+            "response_review_max_chars": "拓展页 -> 功能开关 -> 私聊陪伴 -> 被动回复复核详情",
             "reply_style_prompt": "拓展页 -> 世界知识/角色与表达 -> 回复风格约束；也可在配置页搜索 reply_style_prompt",
             "enable_group_wakeup_question": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 解惑与冷群",
             "group_wakeup_question_threshold": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 解惑与冷群",
@@ -790,10 +803,12 @@ class CommandHandlersMixin:
             "智能沉默置信度": "smart_silence_min_confidence",
             "沉默模型超时": "smart_silence_model_timeout_seconds",
             "智能沉默超时": "smart_silence_model_timeout_seconds",
-            "回复复核": "enable_response_self_review",
-            "主动复核": "enable_response_self_review",
-            "复核模式": "response_review_mode",
-            "回复复核模式": "response_review_mode",
+            "回复复核": "enable_passive_response_review",
+            "被动复核": "enable_passive_response_review",
+            "主动复核": "enable_proactive_message_review",
+            "复核模式": "passive_review_mode",
+            "回复复核模式": "passive_review_mode",
+            "主动复核模式": "proactive_review_mode",
             "被动复核阈值": "response_review_max_chars",
             "复核长度阈值": "response_review_max_chars",
             "回复风格": "reply_style_prompt",
@@ -1451,21 +1466,21 @@ class CommandHandlersMixin:
                     )
 
         if response_review_issue:
-            if current_bool("enable_response_self_review", True) and any(word in compact for word in ("关闭", "关掉", "不要", "先关")):
+            if current_bool("enable_passive_response_review", True) and any(word in compact for word in ("关闭", "关掉", "不要", "先关")):
                 propose(
-                    "enable_response_self_review",
+                    "enable_passive_response_review",
                     False,
-                    "先关闭回复/主动复核可以止血，但会少一层重复、串台和工具回执外发保护，建议只在定位问题时临时使用。",
-                    "用户明确要求关闭复核",
-                    condition="问题里明确出现关闭/不要复核，且复核当前开启。",
+                    "先关闭被动回复复核可以止血，主动消息终审不会受影响。",
+                    "用户明确要求关闭被动复核",
+                    condition="问题里明确出现关闭/不要复核，且被动复核当前开启。",
                     strength="可尝试",
-                    confidence=0.58,
+                    confidence=0.72,
                     runtime_patterns=("最近被动未回复",),
                 )
-            mode = str(self._companion_manual_current_config_value("response_review_mode") or "severe_only").strip()
-            if current_bool("enable_response_self_review", True) and mode == "full":
+            mode = str(self._companion_manual_current_config_value("passive_review_mode") or "severe_only").strip()
+            if current_bool("enable_passive_response_review", True) and mode == "full":
                 propose(
-                    "response_review_mode",
+                    "passive_review_mode",
                     "severe_only",
                     "从 full 调回 severe_only，可以保留严重问题保护，同时减少普通被动回复被过度改写或误拦截。",
                     "回复复核过强/误杀",
@@ -1474,7 +1489,7 @@ class CommandHandlersMixin:
                     confidence=0.76,
                     runtime_patterns=("最近被动未回复",),
                 )
-            if current_bool("enable_response_self_review", True) and current_int("response_review_max_chars", 260) < 220:
+            if current_bool("enable_passive_response_review", True) and current_int("response_review_max_chars", 260) < 220:
                 propose(
                     "response_review_max_chars",
                     260,
@@ -1637,7 +1652,7 @@ class CommandHandlersMixin:
                 if (
                     ("休息闸门" in recent_no_reply_compact and (key.startswith("rest_") or key == "enable_rest_reply_simulation"))
                     or ("智能沉默" in recent_no_reply_compact and (key.startswith("smart_silence") or key == "enable_smart_silence"))
-                    or ("回复复核" in recent_no_reply_compact and key in {"enable_response_self_review", "response_review_mode", "response_review_max_chars"})
+                    or ("回复复核" in recent_no_reply_compact and key in {"enable_passive_response_review", "passive_review_mode", "passive_review_strength", "response_review_max_chars"})
                     or ("群聊答疑复核" in recent_no_reply_compact and key in {"group_wakeup_question_threshold", "enable_group_wakeup_question"})
                 ):
                     score += 22
@@ -1645,7 +1660,7 @@ class CommandHandlersMixin:
                 score += 16
             if "silence" in primary_tags and (key.startswith("smart_silence") or key == "enable_smart_silence"):
                 score += 16
-            if "review" in primary_tags and key in {"enable_response_self_review", "response_review_mode", "response_review_max_chars"}:
+            if "review" in primary_tags and key in {"enable_passive_response_review", "passive_review_mode", "passive_review_strength", "response_review_max_chars"}:
                 score += 16
             if "photo" in primary_tags and ("photo" in key or "image" in key):
                 score += 16
@@ -2242,9 +2257,9 @@ class CommandHandlersMixin:
             {
                 "title": "管理命令、夹层密码和权限为什么用不了",
                 "keywords": ["管理员命令", "管理权限", "管理员权限", "指令失效", "命令失效", "用不了命令", "不能用命令", "夹层密码", "输出夹层密码", "强制输出", "admins_id", "target_user_ids", "UMO", "UID", "default"],
-                "summary": "陪伴插件的管理命令会在执行前先检查发送者用户 ID。私聊管理权限只认 AstrBot 全局管理员 admins_id，或本插件私聊目标用户 ID；OneBot 通常是 QQ 号，QQ 官方机器人通常是 openid/平台用户 ID。",
+                "summary": "陪伴插件的管理命令会在执行前先检查发送者用户 ID。AstrBot 全局管理员、本插件私聊目标用户，以及私聊页中关系角色设为主要用户的用户都具有管理权限；OneBot 通常是 QQ 号，QQ 官方机器人通常是 openid/平台用户 ID。",
                 "checks": [
-                    "在 AstrBot 全局管理员配置 admins_id 里填真实用户 ID，或在插件拓展页「模块 → 快速启动」把该用户 ID 加为私聊服务对象。",
+                    "可以在 AstrBot 全局管理员配置 admins_id 中填写真实用户 ID、加入插件私聊目标用户，或在插件私聊页把该用户的关系角色改为主要用户。",
                     "OneBot/aiocqhttp 通常填 QQ 号；QQ 官方机器人请填日志或私聊页显示的 openid/平台用户 ID。",
                     "target_user_ids 一行一个或用逗号分隔；优先直接填写用户 ID，误粘贴私聊 UMO 时会尝试提取 FriendMessage 后面的用户 ID。",
                     "不要放 default、aiocqhttp、UID、平台名或群聊会话串；这些不是私聊发送者用户 ID。",
@@ -2256,7 +2271,7 @@ class CommandHandlersMixin:
                     "target_user_ids",
                 ],
                 "suggestions": [
-                    "先让用户发：陪伴 状态，确认命令能被插件接管；如果提示需要管理权限，就检查 admins_id 或私聊目标用户 ID。",
+                    "先让用户发：陪伴 状态，确认命令能被插件接管；如果提示需要管理权限，就检查 admins_id、私聊目标用户 ID或该用户的关系角色。",
                     "如果日志里看到 UID/default，说明查的是会话定位，不是权限 ID；权限配置要回到 event.get_sender_id() 对应的稳定用户 ID。",
                 ],
             },
@@ -2457,24 +2472,25 @@ class CommandHandlersMixin:
             {
                 "title": "回复复核/去重为什么会拦截",
                 "keywords": ["回复复核", "主动复核", "复核", "去重", "复读", "重复回复", "误杀", "截断", "被拦截", "为什么被拦截"],
-                "summary": "回复复核主要防止复读、串台、工具回执和异常文本外发。它在发送前工作；如果判定要丢弃，会清空待发送结果并写入被动未回复记录。",
+                "summary": "被动回复复核主要防止复读、串台、工具回执和异常文本外发；它与主动消息终审已经独立开关。",
                 "checks": [
                     "先看最近被动未回复记录里 source 是“回复复核去重”“发送前拦截”还是“群聊答疑复核”。",
-                    "response_review_mode=full 时，普通被动回复也更容易进入模型改写或复核；severe_only 更像默认保护层。",
+                    "passive_review_mode=full 时，普通被动回复也更容易进入模型改写；severe_only 更像默认保护层。",
                     "response_review_max_chars 太低时，短闲聊也可能被当成需要复核的长回复。",
                     "群聊答疑碰瓷复核不等同于普通去重，它只处理公共求助/答疑唤醒产生的可疑插话。",
                     "如果拦的是“消息已发送/发送成功”这类回执，通常是工具链回执被保护性拦截，不该关掉复核。",
                 ],
                 "settings": [
-                    "enable_response_self_review",
-                    "response_review_mode",
+                    "enable_passive_response_review",
+                    "passive_review_mode",
+                    "passive_review_strength",
                     "response_review_max_chars",
                     "RESPONSE_REVIEW_PROVIDER_ID",
                     "enable_group_wakeup_question",
                     "group_wakeup_question_threshold",
                 ],
                 "suggestions": [
-                    "误杀普通回复：优先把 response_review_mode 从 full 改回 severe_only，或把 response_review_max_chars 调回 260 左右。",
+                    "误杀普通回复：先使用 passive_review_strength=lenient；仍有问题可关闭 enable_passive_response_review，主动终审不会受影响。",
                     "只是群里答疑碰瓷被拦：优先调群聊解惑阈值，不要直接关整个复核。",
                 ],
             },

@@ -1246,7 +1246,7 @@
     "invisible": true
   },
   "enable_expression_learning": {
-    "description": "Legacy flat config: 启用表达节奏学习",
+    "description": "Legacy flat config: 启用表达方式学习",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -1258,7 +1258,7 @@
     "invisible": true
   },
   "enable_expression_manual_review": {
-    "description": "Legacy flat config: 表达样本手动审核",
+    "description": "Legacy flat config: 观察素材手动审核（模型表达规则始终需要审核）",
     "type": "bool",
     "default": false,
     "invisible": true
@@ -1270,9 +1270,71 @@
     "invisible": true
   },
   "max_learned_expression_items": {
-    "description": "Legacy flat config: 表达节奏样本上限",
+    "description": "Legacy flat config: 每个来源保留的表达规则与观察素材上限",
     "type": "int",
-    "default": 18,
+    "default": 60,
+    "invisible": true
+  },
+  "expression_private_learning_source_mode": {
+    "description": "Legacy flat config: 私聊表达学习来源范围",
+    "type": "string",
+    "default": "owner",
+    "invisible": true
+  },
+  "expression_private_learning_source_ids": {
+    "description": "Legacy flat config: 私聊表达学习来源 ID",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
+  "expression_group_learning_source_mode": {
+    "description": "Legacy flat config: 群聊表达学习来源范围",
+    "type": "string",
+    "default": "disabled",
+    "invisible": true
+  },
+  "expression_group_learning_source_ids": {
+    "description": "Legacy flat config: 群聊表达学习来源 ID",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
+  "expression_group_learning_daily_batch_limit": {
+    "description": "Legacy flat config: 群聊表达语义归纳每日批次上限",
+    "type": "int",
+    "default": 6,
+    "slider": {"min": 1, "max": 50, "step": 1},
+    "invisible": true
+  },
+  "expression_group_learning_min_new_messages": {
+    "description": "Legacy flat config: 群聊表达语义归纳最少新增消息数",
+    "type": "int",
+    "default": 20,
+    "slider": {"min": 5, "max": 80, "step": 5},
+    "invisible": true
+  },
+  "expression_private_application_mode": {
+    "description": "Legacy flat config: 私聊表达应用范围",
+    "type": "string",
+    "default": "all",
+    "invisible": true
+  },
+  "expression_private_application_user_ids": {
+    "description": "Legacy flat config: 私聊表达应用对象 ID",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
+  "expression_group_application_mode": {
+    "description": "Legacy flat config: 群聊表达应用范围",
+    "type": "string",
+    "default": "all",
+    "invisible": true
+  },
+  "expression_group_application_ids": {
+    "description": "Legacy flat config: 群聊表达应用对象 ID",
+    "type": "list",
+    "default": [],
     "invisible": true
   },
   "enable_user_habit_learning": {
@@ -1378,7 +1440,13 @@
     "invisible": true
   },
   "enable_response_self_review": {
-    "description": "Legacy flat config: 启用回复/主动复核",
+    "description": "Legacy flat config: 旧版回复/主动复核总开关",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_passive_response_review": {
+    "description": "Legacy flat config: 启用被动回复复核",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -1419,9 +1487,27 @@
     "invisible": true
   },
   "response_review_mode": {
-    "description": "Legacy flat config: 回复/主动复核模式",
+    "description": "Legacy flat config: 旧版回复复核模式",
     "type": "string",
     "default": "severe_only",
+    "invisible": true
+  },
+  "passive_review_mode": {
+    "description": "Legacy flat config: 被动回复复核模式",
+    "type": "string",
+    "default": "severe_only",
+    "invisible": true
+  },
+  "passive_review_strength": {
+    "description": "Legacy flat config: 被动回复复核强度",
+    "type": "string",
+    "default": "lenient",
+    "invisible": true
+  },
+  "proactive_review_mode": {
+    "description": "Legacy flat config: 主动消息终审模式",
+    "type": "string",
+    "default": "full",
     "invisible": true
   },
   "proactive_review_strength": {
@@ -1497,7 +1583,7 @@
     "invisible": true
   },
   "enable_livingmemory_integration": {
-    "description": "Legacy flat config: 启用记忆插件协同",
+    "description": "Legacy flat config: 启用外部记忆插件协同",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -1680,6 +1766,12 @@
     "description": "Legacy flat config: 自我关联冷却（小时）",
     "type": "int",
     "default": 12,
+    "invisible": true
+  },
+  "external_link_share_cooldown_hours": {
+    "description": "Legacy flat config: 主动外链统一冷却（小时）",
+    "type": "int",
+    "default": 72,
     "invisible": true
   },
   "news_max_items_per_source": {
@@ -3427,6 +3519,18 @@
     ],
     "invisible": true
   },
+  "enable_segmented_proactive_content_replacement": {
+    "description": "Legacy flat config: 主动分段内容替换",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "segmented_proactive_content_replacements": {
+    "description": "Legacy flat config: 主动分段内容替换规则",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
   "segmented_proactive_interval_method": {
     "description": "Legacy flat config: 主动分段间隔算法",
     "type": "string",
@@ -4163,7 +4267,7 @@
           "max": 1440,
           "step": 5
         },
-        "hint": "成功后按此间隔再次检查；失败会从 5 分钟起指数退避，最长不超过这里设置的间隔。",
+        "hint": "成功后按此间隔再次检查；临时失败会从 5 分钟起指数退避。自动模式确认当前 Provider 不支持余额查询时，至少暂停 12 小时；余额配置变化后会立即重新探测。",
         "condition": "enable_balance_awareness"
       },
       "balance_request_timeout_seconds": {
@@ -5112,7 +5216,7 @@
       "skill_growth_custom_skills": {
         "description": "自定义技能列表（兼容旧配置）",
         "type": "string",
-        "hint": "兼容旧配置。新的自定义技能请在扩展页观察页的“技能成长”卡片中新增、隐藏、冻结或合并别名。",
+        "hint": "兼容旧配置。新的自定义技能请在扩展页“学习”页的“技能成长”区域新增、隐藏、冻结或合并别名。",
         "default": "",
         "condition": {
           "enable_skill_growth_simulation": true
@@ -5209,18 +5313,18 @@
         }
       },
       "enable_expression_learning": {
-        "description": "启用表达节奏学习",
+        "description": "启用表达方式学习",
         "type": "bool",
-        "hint": "只统计用户私聊里的句长、常用标点、句尾味道和短句样本，用来调整回复节奏。不会学习稳定称呼、身份事实或长期偏好，也不会机械复读用户原话。",
+        "hint": "从允许的私聊或群聊里学习句长、口语起手、柔和句尾、自然叠词、笑声与停顿等表达特征；重复证据会归纳为场景规则，并用于私聊被动、私聊主动和群聊回复。群聊只保留抽象元数据，不保存原话；跨会话不会共享身份事实、关系称呼或私密内容。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
         }
       },
       "expression_learning_mode": {
-        "description": "表达学习模式",
+        "description": "表达应用模式",
         "type": "string",
-        "hint": "light 只学句长和少量标点；balanced 保持当前自然节奏学习；aggressive 会参考更多通过审核的短句和句尾样本，建议搭配手动审核。",
+        "hint": "light 只学句长和少量标点；balanced 会按短确认、提问、请求、玩笑、情绪等场景应用有重复证据的表达规则；aggressive 会额外参考更多通过审核的短句和句尾样本，建议搭配手动审核。",
         "default": "balanced",
         "options": [
           "light",
@@ -5232,9 +5336,9 @@
         }
       },
       "enable_expression_manual_review": {
-        "description": "表达样本手动审核",
+        "description": "观察素材手动审核",
         "type": "bool",
-        "hint": "开启后，新表达样本先进入对应私聊对象的待审核列表，页面通过后才会进入表达画像；适合 aggressive 模式。",
+        "hint": "仅控制原始观察素材是否先进入待整理区；模型生成的情境表达与语法习惯始终必须人工审核后才能使用。",
         "default": false,
         "condition": {
           "enable_expression_learning": true
@@ -5250,18 +5354,100 @@
         }
       },
       "max_learned_expression_items": {
-        "description": "表达节奏样本上限",
+        "description": "每来源学习资料上限",
         "type": "int",
-        "hint": "保留的短句、句尾和标点统计样本上限；只影响语气节奏，不作为长期记忆事实。",
+        "hint": "每个私聊或群聊来源最多保留多少条情境表达、语法习惯和观察素材；实际回复每轮最多召回 2 条已审核规则。",
         "slider": {
-          "min": 4,
-          "max": 60,
-          "step": 2
+          "min": 12,
+          "max": 240,
+          "step": 12
         },
-        "default": 18,
+        "default": 60,
         "condition": {
           "enable_expression_learning": true
         }
+      },
+      "expression_private_learning_source_mode": {
+        "description": "私聊学习来源",
+        "type": "string",
+        "hint": "在陪伴面板的“学习”页管理来源与画像。owner 仅从主要用户学习；selected 仅从勾选私聊学习；all 从全部私聊学习。",
+        "default": "owner",
+        "options": ["owner", "selected", "all"],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_private_learning_source_ids": {
+        "description": "私聊学习来源 ID",
+        "type": "list",
+        "default": [],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_group_learning_source_mode": {
+        "description": "群聊学习来源",
+        "type": "string",
+        "hint": "在陪伴面板的“学习”页管理来源与画像。群聊可归纳脱敏后的短表达、梗模板和句法；昵称、账号、关系、事实和支持片段不会进入回复。",
+        "default": "disabled",
+        "options": ["disabled", "selected", "all"],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_group_learning_source_ids": {
+        "description": "群聊学习来源 ID",
+        "type": "list",
+        "default": [],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_group_learning_daily_batch_limit": {
+        "description": "群聊语义归纳每日批次上限",
+        "type": "int",
+        "hint": "所有群共享的每日模型归纳批次上限；情境表达和语法习惯共用已有群片段整理调用，不会额外发起模型请求。",
+        "default": 6,
+        "slider": {"min": 1, "max": 50, "step": 1},
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_group_learning_min_new_messages": {
+        "description": "每批最少新增群消息",
+        "type": "int",
+        "hint": "只统计上次归纳后新增的群消息，数量不足时不要求模型归纳表达规则。",
+        "default": 20,
+        "slider": {"min": 5, "max": 80, "step": 5},
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_private_application_mode": {
+        "description": "私聊使用范围",
+        "type": "string",
+        "hint": "在陪伴面板的“学习”页管理使用范围。控制哪些私聊会使用去标识的全局表达底色；本地表达规则只对对应学习来源生效。",
+        "default": "all",
+        "options": ["all", "selected"],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_private_application_user_ids": {
+        "description": "私聊使用对象 ID",
+        "type": "list",
+        "default": [],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_group_application_mode": {
+        "description": "群聊使用范围",
+        "type": "string",
+        "hint": "在陪伴面板的“学习”页管理使用范围。仅影响 Bot 的回复口感；不会把私聊或群聊原话、昵称、关系和事实带入群聊。",
+        "default": "all",
+        "options": ["disabled", "all", "selected"],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
+      },
+      "expression_group_application_ids": {
+        "description": "群聊使用对象 ID",
+        "type": "list",
+        "default": [],
+        "invisible": true,
+        "condition": {"enable_expression_learning": true}
       },
       "enable_user_habit_learning": {
         "description": "启用用户习惯画像",
@@ -5293,7 +5479,7 @@
       "meal_care_max_daily": {
         "description": "每日最多饭点关心次数",
         "type": "int",
-        "hint": "早餐、午饭、晚饭每餐最多首次询问一次；默认每天只选择其中一餐，避免频繁像打卡。早餐会等早安发出且用户回应后才进入候选。填 0 可关闭首次饭点询问。",
+        "hint": "这是单日上限，不代表每天都会询问。早餐、午饭、晚饭每餐最多首次询问一次；默认单日最多选择其中一餐。早餐会等早安发出且用户回应后才进入候选。填 0 可关闭首次饭点询问。",
         "slider": {
           "min": 0,
           "max": 3,
@@ -5304,10 +5490,24 @@
           "enable_meal_care_proactive": true
         }
       },
+      "meal_care_min_interval_hours": {
+        "description": "饭点关心最短间隔小时",
+        "type": "int",
+        "hint": "控制跨天频率。默认 48 小时，通常最多隔天关心一次；期间 Bot 已经主动聊过饮食，也会从最近一次饮食话题重新计时，避免形成每日查岗。填 0 时仅使用每日上限和普通饮食冷却。",
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 12
+        },
+        "default": 48,
+        "condition": {
+          "enable_meal_care_proactive": true
+        }
+      },
       "meal_care_followup_minutes": {
         "description": "吃饭补问等待分钟",
         "type": "int",
-        "hint": "首次询问后仍没有具体饮食信息时，多久后允许一次低压补问。用户只答“吃了”会追问具体吃了什么；答“没吃”则改问后来有没有吃上或给少量候选。每餐最多补问一次。",
+        "hint": "首次询问后用户一直没有回应时，多久后允许一次低压补问。若用户回复忙碌或其他无关内容，会视为不想继续该话题并结束本轮关心；用户答“吃了”或“没吃”时，仅由当前回复自然承接，不再后台重复追问。每餐最多补问一次。",
         "slider": {
           "min": 15,
           "max": 180,
@@ -5372,18 +5572,25 @@
         }
       },
       "enable_response_self_review": {
-        "description": "启用回复/主动复核总开关",
+        "description": "旧版回复/主动复核总开关",
         "type": "bool",
-        "hint": "关闭后同时停止被动回复复核和主动消息终审；下方主动终审子开关只在本总开关开启时生效。最低限度的本地安全检查仍会保留，但不会调用模型改写。",
+        "hint": "仅用于兼容旧配置。新版请分别使用被动回复复核和主动消息终审开关。",
+        "default": true,
+        "invisible": true
+      },
+      "enable_passive_response_review": {
+        "description": "启用被动回复复核",
+        "type": "bool",
+        "hint": "控制用户消息触发的回复复核：用于私聊普通回复，也覆盖群聊答疑唤醒的插话保护；关闭后不会影响主动私聊终审。最低限度的本地事实与安全纠偏仍会保留。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
         }
       },
       "enable_proactive_message_review": {
-        "description": "主动消息发送前终审",
+        "description": "主动私聊发送前终审",
         "type": "bool",
-        "hint": "仅在回复/主动复核总开关开启时生效。主动消息发送前结合最近聊天、人格、动机和运行态判断原样发送、改写或取消；关闭后不调用模型润色。",
+        "hint": "仅作用于主动私聊发送前的模型终审；可以在被动回复复核关闭时单独开启，不处理普通私聊回复或群聊消息。关闭后不调用主动终审模型，但仍保留必要的本地来源与安全校验。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
@@ -5393,7 +5600,7 @@
       "enable_smart_silence": {
         "description": "启用智能沉默",
         "type": "bool",
-        "hint": "开启后，会在发送前调用小模型判断是否直接取消本轮回复，而不是继续发一句确认、追问或解释。默认只在用户明确表达边界时触发；可切到上下文模型判断。",
+        "hint": "私聊和群聊都会使用。开启后，会在发送前调用小模型判断是否直接取消本轮回复，而不是继续发一句确认、追问或解释。默认只在用户明确表达边界时触发；可切到上下文模型判断。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
@@ -5441,9 +5648,21 @@
         }
       },
       "response_review_mode": {
-        "description": "回复/主动复核模式",
+        "description": "旧版回复复核模式",
         "type": "string",
-        "hint": "local_only 只做本地识别；severe_only 会让主动消息发送前统一进行模型价值复核，被动回复只复核严重问题；full 会让更多被动回复也参与模型改写，可能明显增加延迟。",
+        "hint": "仅用于兼容旧配置。新版请使用被动回复复核模式。",
+        "default": "severe_only",
+        "options": [
+          "local_only",
+          "severe_only",
+          "full"
+        ],
+        "invisible": true
+      },
+      "passive_review_mode": {
+        "description": "被动回复复核模式",
+        "type": "string",
+        "hint": "local_only 只做本地识别；severe_only 只让严重问题进入模型复核；full 会让更多普通被动回复参与模型改写，可能增加延迟。",
         "default": "severe_only",
         "options": [
           "local_only",
@@ -5451,7 +5670,35 @@
           "full"
         ],
         "condition": {
-          "enable_response_self_review": true
+          "enable_passive_response_review": true
+        }
+      },
+      "passive_review_strength": {
+        "description": "被动回复复核强度",
+        "type": "string",
+        "hint": "lenient 允许纠正但不会因模型复读判断直接吞掉回复；balanced 允许取消高置信重复回复；strict 保留严格拦截行为。",
+        "default": "lenient",
+        "options": [
+          "lenient",
+          "balanced",
+          "strict"
+        ],
+        "condition": {
+          "enable_passive_response_review": true
+        }
+      },
+      "proactive_review_mode": {
+        "description": "主动消息终审模式",
+        "type": "string",
+        "hint": "local_only 只做本地安全检查；severe_only 仅在本地发现风险时进入模型；full 对每条准备发送的主动消息执行模型终审。",
+        "default": "full",
+        "options": [
+          "local_only",
+          "severe_only",
+          "full"
+        ],
+        "condition": {
+          "enable_proactive_message_review": true
         }
       },
       "proactive_review_strength": {
@@ -5465,7 +5712,7 @@
           "strict"
         ],
         "condition": {
-          "enable_response_self_review": true
+          "enable_proactive_message_review": true
         }
       },
       "proactive_review_hard_risk_threshold": {
@@ -5479,7 +5726,7 @@
         },
         "default": 0.7,
         "condition": {
-          "enable_response_self_review": true
+          "enable_proactive_message_review": true
         }
       },
       "proactive_review_low_score_threshold": {
@@ -5493,7 +5740,7 @@
         },
         "default": 0.34,
         "condition": {
-          "enable_response_self_review": true
+          "enable_proactive_message_review": true
         }
       },
       "proactive_review_pressure_threshold": {
@@ -5507,7 +5754,7 @@
         },
         "default": 0.55,
         "condition": {
-          "enable_response_self_review": true
+          "enable_proactive_message_review": true
         }
       },
       "response_review_max_chars": {
@@ -5521,7 +5768,7 @@
         },
         "default": 260,
         "condition": {
-          "enable_response_self_review": true
+          "enable_passive_response_review": true
         }
       },
       "enable_passive_topic_suppression": {
@@ -5610,14 +5857,14 @@
     }
   },
   "external_memory_config": {
-    "description": "记忆插件协同",
+    "description": "外部记忆插件协同",
     "type": "object",
-    "hint": "接入“我会牢牢记住你”或 LivingMemory 等外部长期记忆能力。检测到“我会牢牢记住你”时会自动展开更多协同配置项。",
+    "hint": "统一接入已适配的外部长期记忆插件。当前支持“我会牢牢记住你”/MemoryCompanion 与 LivingMemory；检测到不同插件时会展开各自适用的协同配置。",
     "items": {
       "enable_livingmemory_integration": {
-        "description": "启用记忆插件协同",
+        "description": "启用外部记忆插件协同",
         "type": "bool",
-        "hint": "检测到“我会牢牢记住你”或 LivingMemory 时，在私聊和群聊提示词中引导模型按需使用记忆召回能力。大规模长期记忆检索交给记忆插件，本插件继续负责人格、状态、关系和群聊气氛。",
+        "hint": "统一控制已适配的外部记忆插件协同，不只对应 LivingMemory。检测到“我会牢牢记住你”/MemoryCompanion 或 LivingMemory 时，在私聊和群聊提示词中按各自能力使用记忆上下文或召回工具；本插件继续负责人格、状态、关系和群聊气氛。",
         "default": true
       },
       "livingmemory_tool_name": {
@@ -5950,6 +6197,17 @@
         "condition": {
           "enable_external_event_self_link": true
         }
+      },
+      "external_link_share_cooldown_hours": {
+        "description": "主动外链统一冷却（小时）",
+        "type": "int",
+        "hint": "B 站视频、新闻和主动搜索三类主动外链共用的最小间隔。默认 72 小时，避免不同来源轮流发链接；设为 0 可关闭这道统一限制。只限制 Bot 自行发起的外链分享，不影响用户主动询问链接或官方定时消息。",
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 1
+        },
+        "default": 72
       },
       "news_max_items_per_source": {
         "description": "单源最多读取条数",
@@ -7177,7 +7435,7 @@
       "cross_user_memory_owner_only": {
         "description": "仅主要用户可查询跨用户互动",
         "type": "bool",
-        "hint": "开启后，只有 target_user_ids 中配置的主要用户能查询 Bot 与其他用户/群聊的互动；关闭后，AstrBot 全局管理员 admins_id 也可在私聊中查询。手动启用对象和身份别名不会获得该权限。",
+        "hint": "开启后，target_user_ids 中配置的用户以及私聊页中关系角色设为主要用户的用户能查询 Bot 与其他用户/群聊的互动；关闭后，AstrBot 全局管理员 admins_id 也可在私聊中查询。手动启用对象和身份别名不会获得该权限。",
         "default": true,
         "condition": {
           "enable_cross_user_memory_bridge": true
@@ -9550,6 +9808,25 @@
         "default": [
           "\n"
         ]
+      },
+      "enable_segmented_proactive_content_replacement": {
+        "description": "主动分段内容替换",
+        "type": "bool",
+        "hint": "开启后，先按下方规则替换正文，再计算长度并执行分段。网址、图片、语音、文件和 TTS 标签内容不会被替换。",
+        "default": false,
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_content_replacements": {
+        "description": "主动分段内容替换规则",
+        "type": "list",
+        "hint": "每行一条，格式为 原内容 => 新内容，按从上到下的顺序全量替换。例如：主人 => 比折大人。可用 <space>、<newline>、<tab>，替换结果写 <empty> 可删除匹配内容。",
+        "default": [],
+        "condition": {
+          "enable_segmented_proactive_reply": true,
+          "enable_segmented_proactive_content_replacement": true
+        }
       },
       "segmented_proactive_interval_method": {
         "description": "主动分段间隔算法",
