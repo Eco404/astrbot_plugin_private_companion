@@ -25,7 +25,7 @@ from quart import request, send_file
 
 from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_FONT_NAMES, PAGE_THEME_NAMES, _REASON_TEXT
 from .config_migration import _ensure_config_parent_dir
-from .helpers import _flat_get, _normalize_timezone_name, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
+from .helpers import _flat_get, _normalize_timezone_name, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
@@ -42,6 +42,27 @@ PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 
 class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanionPageApiUsersGroupsMixin):
     """AstrBot 官方插件拓展页面 API。"""
+
+    IMAGE_API_RUNTIME_SETTING_KEYS = {
+        "external_image_api_platform",
+        "EXTERNAL_IMAGE_API_BASE_URL",
+        "EXTERNAL_IMAGE_API_KEY",
+        "EXTERNAL_IMAGE_API_MODEL",
+        "external_image_api_size",
+        "external_image_api_timeout_seconds",
+        "external_image_api_custom_headers",
+        "external_image_download_proxy",
+        "external_image_download_use_environment_proxy",
+        "external_image_api_endpoints",
+        "enable_backup_external_image_api",
+        "backup_external_image_api_platform",
+        "BACKUP_EXTERNAL_IMAGE_API_BASE_URL",
+        "BACKUP_EXTERNAL_IMAGE_API_KEY",
+        "BACKUP_EXTERNAL_IMAGE_API_MODEL",
+        "backup_external_image_api_size",
+        "backup_external_image_api_timeout_seconds",
+        "backup_external_image_api_custom_headers",
+    }
 
     PERCENT_PROBABILITY_KEYS = {
         "group_repeat_follow_probability",
@@ -93,6 +114,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
 
+    def _image_api_runtime_lock(self) -> asyncio.Lock:
+        lock = getattr(self.plugin, "_external_image_api_runtime_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.plugin._external_image_api_runtime_lock = lock
+        return lock
+
     def register_routes(self) -> None:
         register = self.plugin.context.register_web_api
         routes = [
@@ -110,6 +138,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/group/slang/update", self.update_group_slang, ["POST"], "Private Companion Page update group slang"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
             ("/settings/swap_image_api", self.swap_image_api_settings, ["POST"], "Private Companion Page swap image API settings"),
+            ("/image_api/status", self.get_image_api_status, ["GET"], "Private Companion Page image API status"),
+            ("/image_api/test", self.test_image_api_endpoint, ["POST"], "Private Companion Page test one image API endpoint"),
             ("/config/export", self.export_migration_config, ["GET"], "Private Companion Page export migration config"),
             ("/config/backups", self.list_migration_backups, ["GET"], "Private Companion Page list migration backups"),
             ("/config/restore", self.restore_migration_backup, ["POST"], "Private Companion Page restore migration backup"),
@@ -281,6 +311,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "interjection_enabled": bool(getattr(self.plugin, "enable_group_interjection", False)),
                     "repeat_follow_enabled": bool(getattr(self.plugin, "enable_group_repeat_follow", False)),
                 },
+                "platform_adaptation": self.plugin._platform_adaptation_overview()
+                if hasattr(self.plugin, "_platform_adaptation_overview")
+                else {},
                 "features": self._feature_flags(),
                 "proactive_intensity": self._proactive_intensity_summary(),
                 "proactive_only": self._proactive_only_mode_snapshot(),
@@ -1007,8 +1040,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 flush_save = getattr(self.plugin, "_flush_scheduled_data_save", None)
                 if callable(flush_save):
                     await flush_save()
-            for key, value in changed.items():
-                self._apply_config_value(key, value, apply_overrides)
+            if self.IMAGE_API_RUNTIME_SETTING_KEYS & set(changed):
+                async with self._image_api_runtime_lock():
+                    for key, value in changed.items():
+                        self._apply_config_value(key, value, apply_overrides)
+            else:
+                for key, value in changed.items():
+                    self._apply_config_value(key, value, apply_overrides)
             expression_scope_keys = {
                 "expression_private_learning_source_mode",
                 "expression_private_learning_source_ids",
@@ -1095,8 +1133,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     return self._error(f"第二条在线图片 API 不可用，不能切换：{reason}")
                 changed = list(endpoints)
                 changed[0], changed[1] = changed[1], changed[0]
-                self._apply_config_value("external_image_api_endpoints", changed)
-                config_saved = await self._save_config_if_possible()
+                async with self._image_api_runtime_lock():
+                    self._apply_config_value("external_image_api_endpoints", changed)
+                    config_saved = await self._save_config_if_possible()
                 overview = await self.get_overview()
                 if overview.get("success"):
                     data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
@@ -1146,10 +1185,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             )
             changed["enable_backup_external_image_api"] = old_primary_complete
 
-            for key, value in changed.items():
-                self._apply_config_value(key, value, changed)
-            self._sync_photo_generation_runtime_config()
-            config_saved = await self._save_config_if_possible()
+            async with self._image_api_runtime_lock():
+                for key, value in changed.items():
+                    self._apply_config_value(key, value, changed)
+                self._sync_photo_generation_runtime_config()
+                config_saved = await self._save_config_if_possible()
             overview = await self.get_overview()
             if overview.get("success"):
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
@@ -1688,6 +1728,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "diagnostics": diagnostics,
                     "sqlite": visible_sqlite_status,
                     "chain_tests": chain_tests,
+                    "image_api_endpoints": self._troubleshooting_image_api_endpoints(),
                     "recent_photo_generations": self._recent_photo_generation_summary(data),
                     "passive_no_reply": passive_no_reply,
                     "prompt_injections": self._prompt_injection_summary(data),
@@ -1748,6 +1789,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def run_troubleshooting_test(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         test_type = self._single_line(payload.get("type"), 40)
+        result_key = test_type
         start = time.time()
         try:
             if test_type == "proactive_message":
@@ -1759,6 +1801,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 elif test_type == "image_generation_selfie":
                     image_payload["workflow_kind"] = "selfie"
                 result = await self._run_image_generation_chain_test(image_payload)
+            elif test_type == "image_api_endpoint":
+                result = await self._run_image_api_endpoint_test(payload)
+                result_key = self._single_line(result.get("test_key"), 80) or test_type
             elif test_type == "tts_generation":
                 result = await self._run_tts_generation_chain_test(payload)
             elif test_type == "screen_peek":
@@ -1783,11 +1828,375 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         result["elapsed_ms"] = self._int(result.get("elapsed_ms")) or int((time.time() - start) * 1000)
         result["ran_at"] = time.time()
         result["ran_at_text"] = self.plugin._format_timestamp_elapsed(result["ran_at"])
-        await self._remember_troubleshooting_test_result(test_type, result)
+        await self._remember_troubleshooting_test_result(result_key, result)
         return self._ok(result)
 
+    def _image_api_endpoint_test_key(self, endpoint: dict[str, Any]) -> str:
+        custom_headers = str(endpoint.get("custom_headers") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        identity = json.dumps(
+            [
+                bool(endpoint.get("enabled", True)),
+                str(endpoint.get("platform") or "auto").strip().lower(),
+                str(endpoint.get("base_url") or "").strip().rstrip("/"),
+                str(endpoint.get("model") or "").strip(),
+                str(endpoint.get("api_key") or "").strip(),
+                str(endpoint.get("size") or "1024x1024").strip().lower(),
+                str(endpoint.get("ratio") or "").strip().lower(),
+                self._int(endpoint.get("timeout_seconds"), 180, 20, 600),
+                custom_headers,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return f"image_api_endpoint_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}"
+
+    def _troubleshooting_safe_image_api_url(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = urlparse(raw)
+            if not parsed.scheme or not parsed.hostname:
+                return self._single_line(raw.split("?", 1)[0].split("#", 1)[0], 180)
+            host = parsed.hostname
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            try:
+                port = f":{parsed.port}" if parsed.port else ""
+            except ValueError:
+                port = ""
+            return self._single_line(f"{parsed.scheme}://{host}{port}{parsed.path or ''}", 180)
+        except Exception:
+            return self._single_line(raw.split("?", 1)[0].split("#", 1)[0], 180)
+
+    def _redact_image_api_test_text(self, value: Any, endpoint: Any = None, limit: int = 220) -> str:
+        cleaned = _redact_outbound_secrets(value, self.plugin)
+        endpoint_data = endpoint if isinstance(endpoint, dict) else {}
+        secrets_to_hide = [str(endpoint_data.get("api_key") or "").strip()]
+        custom_headers = str(endpoint_data.get("custom_headers") or "")
+        for line in custom_headers.splitlines():
+            _, separator, raw_value = line.partition(":")
+            if separator:
+                secrets_to_hide.append(raw_value.strip())
+        for secret in secrets_to_hide:
+            if len(secret) >= 4:
+                cleaned = cleaned.replace(secret, "[密钥已隐藏]")
+        return self._single_line(cleaned, limit)
+
+    def _image_api_test_artifact_path(self, value: Any) -> Path | None:
+        raw = str(value or "").strip()
+        data_dir = str(getattr(self.plugin, "data_dir", "") or "").strip()
+        if not raw or not data_dir:
+            return None
+        try:
+            path = Path(raw).resolve(strict=False)
+            root = (Path(data_dir) / "generated_photos").resolve(strict=False)
+            path.relative_to(root)
+        except (OSError, ValueError):
+            return None
+        if not path.name.startswith("private_companion_troubleshooting_"):
+            return None
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            return None
+        return path
+
+    async def _cleanup_image_api_test_artifact(self, value: Any) -> bool:
+        path = self._image_api_test_artifact_path(value)
+        if path is None or not path.exists():
+            return False
+        try:
+            await asyncio.to_thread(path.unlink)
+            return True
+        except OSError as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 清理生图 API 测试图片失败: path=%s error=%s",
+                self._single_line(path, 180),
+                self._single_line(exc, 160),
+            )
+            return False
+
+    async def _prune_stale_image_api_test_artifacts(self, max_age_seconds: int = 3600) -> int:
+        data_dir = str(getattr(self.plugin, "data_dir", "") or "").strip()
+        if not data_dir:
+            return 0
+        root = Path(data_dir) / "generated_photos"
+        cutoff = time.time() - max(300, int(max_age_seconds))
+
+        def prune() -> int:
+            if not root.exists():
+                return 0
+            removed = 0
+            for path in root.glob("private_companion_troubleshooting_*"):
+                if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    continue
+                try:
+                    if path.is_file() and path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+            return removed
+
+        return await asyncio.to_thread(prune)
+
+    @staticmethod
+    def _image_api_endpoint_configuration_note(endpoint: dict[str, Any]) -> str:
+        if not bool(endpoint.get("enabled", True)):
+            return "该端点已停用"
+        missing: list[str] = []
+        if not str(endpoint.get("base_url") or "").strip():
+            missing.append("API 地址")
+        if not str(endpoint.get("api_key") or "").strip():
+            missing.append("API Key")
+        if not str(endpoint.get("model") or "").strip():
+            missing.append("图片模型")
+        return f"缺少{'、'.join(missing)}" if missing else ""
+
+    def _troubleshooting_image_api_endpoints(self) -> list[dict[str, Any]]:
+        getter = getattr(self.plugin, "_external_image_api_endpoint_queue", None)
+        if not callable(getter):
+            return []
+        try:
+            endpoints = getter(include_incomplete=True, include_disabled=True)
+        except Exception:
+            return []
+        items: list[dict[str, Any]] = []
+        for index, endpoint in enumerate(endpoints[:12] if isinstance(endpoints, list) else []):
+            if isinstance(endpoint, dict):
+                items.append(self._troubleshooting_image_api_endpoint_summary(endpoint, index))
+        return items
+
+    def _troubleshooting_image_api_endpoint_summary(self, endpoint: dict[str, Any], index: int) -> dict[str, Any]:
+        platform_labels = {
+            "auto": "自动识别",
+            "openai": "OpenAI 兼容",
+            "agnes": "Agnes Image",
+            "sensenova": "SenseNova 日日新",
+            "bailian": "阿里云百炼",
+            "modelscope": "魔搭社区",
+            "doubao": "豆包/火山方舟",
+            "gemini": "Gemini",
+        }
+        note = self._image_api_endpoint_configuration_note(endpoint)
+        platform = self._single_line(endpoint.get("platform"), 30).lower() or "auto"
+        enabled = bool(endpoint.get("enabled", True))
+        return {
+            "index": index,
+            "test_key": self._image_api_endpoint_test_key(endpoint),
+            "name": self._single_line(endpoint.get("name"), 80) or f"在线 API {index + 1}",
+            "enabled": enabled,
+            "ready": not note,
+            "status": "disabled" if not enabled else ("incomplete" if note else "ready"),
+            "status_text": note or "配置完整，尚未单独测试",
+            "platform": platform,
+            "platform_label": platform_labels.get(platform, platform or "自动识别"),
+            "base_url": self._troubleshooting_safe_image_api_url(endpoint.get("base_url")),
+            "model": self._single_line(endpoint.get("model"), 100),
+            "size": self._single_line(endpoint.get("size"), 40) or "1024x1024",
+            "ratio": self._single_line(endpoint.get("ratio"), 20),
+            "timeout_seconds": self._int(endpoint.get("timeout_seconds"), 180, 20, 600),
+        }
+
+    async def get_image_api_status(self) -> dict[str, Any]:
+        try:
+            async with self.plugin._data_lock:
+                raw_results = deepcopy(self.plugin.data.get("troubleshooting_test_results", {}))
+            stored = raw_results if isinstance(raw_results, dict) else {}
+            items = self._troubleshooting_image_api_endpoints()
+            for item in items:
+                raw_result = stored.get(str(item.get("test_key") or ""))
+                item["result"] = self._sanitize_troubleshooting_test_result(raw_result) if isinstance(raw_result, dict) else {}
+            return self._ok(
+                {
+                    "items": items,
+                    "backend": self._single_line(getattr(self.plugin, "photo_generation_backend", "auto"), 30) or "auto",
+                }
+            )
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 获取生图 API 状态失败: %s", self._single_line(exc, 160), exc_info=True)
+            return self._error(str(exc))
+
+    async def test_image_api_endpoint(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        started = time.time()
+        try:
+            result = await self._run_image_api_endpoint_test(payload)
+        except Exception as exc:
+            endpoint = payload.get("endpoint") if isinstance(payload.get("endpoint"), dict) else {}
+            safe_error = self._redact_image_api_test_text(exc, endpoint, 220)
+            logger.warning("[PrivateCompanionPage] 生图 API 单独测试失败: %s", safe_error)
+            result = {"ok": False, "title": "在线图片 API 单独测试", "error": safe_error}
+        result["type"] = "image_api_endpoint"
+        result["elapsed_ms"] = self._int(result.get("elapsed_ms")) or int((time.time() - started) * 1000)
+        result["ran_at"] = time.time()
+        result["ran_at_text"] = self.plugin._format_timestamp_elapsed(result["ran_at"])
+        result_key = self._single_line(result.get("test_key"), 80) or "image_api_endpoint"
+        await self._remember_troubleshooting_test_result(result_key, result)
+        return self._ok(result)
+
+    async def _run_image_api_endpoint_test(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            endpoint_index = int(payload.get("endpoint_index"))
+        except (TypeError, ValueError):
+            endpoint_index = -1
+        submitted_endpoint = payload.get("endpoint")
+        if isinstance(submitted_endpoint, dict):
+            if endpoint_index < 0:
+                endpoint_index = 0
+            normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoint", None)
+            endpoint = normalizer(submitted_endpoint, index=endpoint_index) if callable(normalizer) else dict(submitted_endpoint)
+            if not isinstance(endpoint, dict) or not endpoint:
+                return {"ok": False, "title": "在线图片 API 单独测试", "error": "提交的生图 API 配置无效"}
+            summary = self._troubleshooting_image_api_endpoint_summary(endpoint, endpoint_index)
+        else:
+            summaries = self._troubleshooting_image_api_endpoints()
+            getter = getattr(self.plugin, "_external_image_api_endpoint_queue", None)
+            try:
+                endpoints = getter(include_incomplete=True, include_disabled=True) if callable(getter) else []
+            except Exception:
+                endpoints = []
+            if endpoint_index < 0 or endpoint_index >= len(endpoints) or endpoint_index >= len(summaries):
+                return {
+                    "ok": False,
+                    "title": "在线图片 API 单独测试",
+                    "error": "指定的在线图片 API 不存在或配置队列已变化，请刷新后重试",
+                }
+            endpoint = endpoints[endpoint_index]
+            summary = summaries[endpoint_index]
+        base_result = {
+            "test_key": summary["test_key"],
+            "title": f"{summary['name']} 单独测试",
+            "backend": "在线图片 API（单独）",
+            "endpoint_index": endpoint_index,
+            "endpoint_name": summary["name"],
+            "endpoint_platform": summary["platform_label"],
+            "endpoint_url": summary["base_url"],
+            "endpoint_status": summary["status"],
+            "image_model": summary["model"],
+            "image_size": summary["size"],
+            "endpoint_timeout_seconds": summary["timeout_seconds"],
+            "backend_preference": "external_endpoint",
+            "warnings": ["本次只调用所选在线 API，不会尝试队列中的其他 API，也不会回退到 ComfyUI 或 SDGen。"],
+        }
+        configuration_note = self._image_api_endpoint_configuration_note(endpoint)
+        if configuration_note:
+            return {
+                **base_result,
+                "ok": False,
+                "detail": configuration_note,
+                "error": configuration_note,
+            }
+        runner = getattr(self.plugin, "_run_external_photo_generation_with_endpoint", None)
+        if not callable(runner):
+            return {
+                **base_result,
+                "ok": False,
+                "error": "插件缺少单端点在线生图入口",
+            }
+
+        prompt_text = self._single_line(payload.get("prompt"), 600) or (
+            "A small green check mark sticker on a clean white desk beside a warm table lamp, "
+            "clear composition, realistic photo, no people, no text, no watermark"
+        )
+        endpoint_timeout = self._int(summary.get("timeout_seconds"), 180, 20, 600)
+        test_timeout = min(900, max(45, endpoint_timeout * 2 + 30))
+        queue_timeout = min(900, max(60, test_timeout))
+        started = time.time()
+        lock = self._image_api_runtime_lock()
+        wait_started = time.monotonic()
+        lock_acquired = False
+        try:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=queue_timeout)
+                lock_acquired = True
+            except asyncio.TimeoutError:
+                queue_wait_ms = int((time.monotonic() - wait_started) * 1000)
+                elapsed_ms = int((time.time() - started) * 1000)
+                return {
+                    **base_result,
+                    "ok": False,
+                    "prompt": prompt_text,
+                    "timeout_seconds": test_timeout,
+                    "queue_wait_ms": queue_wait_ms,
+                    "elapsed_ms": elapsed_ms,
+                    "detail": f"等待其他生图任务释放队列超过 {queue_timeout}s，所选接口尚未开始调用",
+                    "error": f"生图测试排队超时（{queue_timeout}s）",
+                }
+
+            queue_wait_ms = int((time.monotonic() - wait_started) * 1000)
+            try:
+                image_path, note = await asyncio.wait_for(
+                    runner(
+                        endpoint,
+                        prompt_text,
+                        session_key=f"private_companion_troubleshooting_{summary['test_key'][-12:]}",
+                        image_size=summary["size"],
+                    ),
+                    timeout=test_timeout,
+                )
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.time() - started) * 1000)
+                return {
+                    **base_result,
+                    "ok": False,
+                    "prompt": prompt_text,
+                    "timeout_seconds": test_timeout,
+                    "queue_wait_ms": queue_wait_ms,
+                    "elapsed_ms": elapsed_ms,
+                    "detail": f"接口开始调用后 {test_timeout}s 内仍未完成",
+                    "error": f"单端点接口测试超时（{test_timeout}s）",
+                }
+            except Exception as exc:
+                elapsed_ms = int((time.time() - started) * 1000)
+                safe_error = self._redact_image_api_test_text(exc, endpoint, 220)
+                logger.warning(
+                    "[PrivateCompanionPage] 在线图片 API 单端点测试失败: endpoint=%s error=%s",
+                    self._single_line(summary["name"], 80),
+                    safe_error,
+                )
+                return {
+                    **base_result,
+                    "ok": False,
+                    "prompt": prompt_text,
+                    "timeout_seconds": test_timeout,
+                    "queue_wait_ms": queue_wait_ms,
+                    "elapsed_ms": elapsed_ms,
+                    "error": safe_error or "单端点调用失败",
+                }
+        finally:
+            if lock_acquired:
+                lock.release()
+
+        elapsed_ms = int((time.time() - started) * 1000)
+        exists = False
+        file_size = 0
+        if image_path:
+            try:
+                image_file = Path(str(image_path))
+                exists = image_file.exists()
+                file_size = image_file.stat().st_size if exists else 0
+            except Exception:
+                exists = False
+        ok = bool(image_path and exists)
+        safe_note = self._redact_image_api_test_text(note, endpoint, 220)
+        artifact_cleaned = await self._cleanup_image_api_test_artifact(image_path)
+        await self._prune_stale_image_api_test_artifacts()
+        return {
+            **base_result,
+            "ok": ok,
+            "path": "" if artifact_cleaned else self._single_line(image_path, 260),
+            "file_size": file_size,
+            "detail": safe_note or ("已生成图片" if ok else "接口未返回有效图片文件"),
+            "prompt": prompt_text,
+            "timeout_seconds": test_timeout,
+            "queue_wait_ms": queue_wait_ms,
+            "elapsed_ms": elapsed_ms,
+            "error": "" if ok else (safe_note or "接口未返回有效图片文件"),
+        }
+
     async def _run_image_generation_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self._sync_photo_generation_runtime_config()
+        async with self._image_api_runtime_lock():
+            self._sync_photo_generation_runtime_config()
         generator = getattr(self.plugin, "_generate_photo_image", None)
         if not callable(generator):
             return {
@@ -2195,20 +2604,32 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             callable(getattr(self.plugin, "_test_qzone_integration", None))
             and callable(getattr(self.plugin, "_qzone_get_cookies", None))
         )
-        enabled = bool(getattr(self.plugin, "enable_qzone_integration", False))
+        platform_checker = getattr(self.plugin, "_qzone_platform_supported", None)
+        platform_supported = bool(platform_checker(None)) if callable(platform_checker) else True
+        enabled = bool(getattr(self.plugin, "enable_qzone_integration", False) and platform_supported)
         comment_enabled = bool(getattr(self.plugin, "enable_qzone_comment_inbox", False))
         add_step("内置服务", "ok" if service_available else "error", "可用" if service_available else "QQ 空间模块入口不可用")
+        add_step(
+            "平台能力",
+            "ok" if platform_supported else "error",
+            "OneBot/aiocqhttp 可用" if platform_supported else "QQ 官方机器人不支持 QQ 空间",
+        )
         add_step("整合开关", "ok" if enabled else "warn", "已开启" if enabled else "已关闭")
         if not service_available or not enabled:
+            unavailable_detail = (
+                "QQ 官方机器人不支持 QQ 空间；不会执行读取、发布、点赞、评论或后台轮询。"
+                if not platform_supported
+                else "QQ 空间整合未启用或模块入口不可用"
+            )
             return {
                 "ok": False,
                 "title": "QQ 空间链路测试",
                 "provider": "qzone",
-                "detail": "QQ 空间整合未启用或模块入口不可用",
-                "text_preview": "开启 QQ 空间整合后再测试 Cookie、读取和发布工具链路。",
+                "detail": unavailable_detail,
+                "text_preview": unavailable_detail if not platform_supported else "开启 QQ 空间整合后再测试 Cookie、读取和发布工具链路。",
                 "steps": steps,
                 "elapsed_ms": int((time.time() - started) * 1000),
-                "error": "QQ 空间整合未启用或模块入口不可用",
+                "error": unavailable_detail,
             }
 
         target_id = self._single_line(payload.get("target_id"), 40)
@@ -3279,6 +3700,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     raw = {}
                     self.plugin.data["troubleshooting_test_results"] = raw
                 raw[test_type] = self._sanitize_troubleshooting_test_result(result)
+                if test_type.startswith("image_api_endpoint_"):
+                    endpoint_results = sorted(
+                        (
+                            (key, value)
+                            for key, value in raw.items()
+                            if str(key).startswith("image_api_endpoint_") and isinstance(value, dict)
+                        ),
+                        key=lambda item: self._float(item[1].get("ran_at")),
+                        reverse=True,
+                    )
+                    for stale_key, _ in endpoint_results[24:]:
+                        raw.pop(stale_key, None)
                 self.plugin._save_data_sync()
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 保存排障测试结果失败: %s", self._single_line(exc, 120))
@@ -3332,6 +3765,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "kind": self._single_line(item.get("kind"), 30),
                     "backend": self._single_line(item.get("backend"), 80),
                     "ok": bool(item.get("ok")),
+                    "prompt_format": self._single_line(item.get("prompt_format"), 30),
                     "prompt": prompt[:500],
                     "prompt_preview": self._single_line(prompt, 180),
                     "path": self._single_line(item.get("path"), 260),
@@ -3541,11 +3975,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _sanitize_troubleshooting_test_result(self, result: dict[str, Any]) -> dict[str, Any]:
         return {
             "type": self._single_line(result.get("type"), 40),
+            "test_key": self._single_line(result.get("test_key"), 80),
             "ok": bool(result.get("ok")),
             "pending": bool(result.get("pending")),
             "title": self._single_line(result.get("title"), 60),
             "backend": self._single_line(result.get("backend"), 80),
             "image_model": self._single_line(result.get("image_model"), 80),
+            "image_size": self._single_line(result.get("image_size"), 40),
+            "endpoint_index": self._int(result.get("endpoint_index"), -1),
+            "endpoint_name": self._single_line(result.get("endpoint_name"), 80),
+            "endpoint_platform": self._single_line(result.get("endpoint_platform"), 60),
+            "endpoint_url": self._single_line(result.get("endpoint_url"), 180),
+            "endpoint_status": self._single_line(result.get("endpoint_status"), 20),
+            "endpoint_timeout_seconds": self._int(result.get("endpoint_timeout_seconds")),
+            "queue_wait_ms": self._int(result.get("queue_wait_ms")),
             "workflow_kind": self._single_line(result.get("workflow_kind"), 20),
             "reference_image": self._single_line(result.get("reference_image"), 260),
             "used_reference": bool(result.get("used_reference")),
@@ -3622,6 +4065,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "image_generation": "图片生成链路测试",
             "image_generation_text2img": "文生图链路测试",
             "image_generation_selfie": "自拍参考图链路测试",
+            "image_api_endpoint": "在线图片 API 单独测试",
             "tts_generation": "TTS 生成链路测试",
             "screen_peek": "窥屏链路测试",
             "qzone_integration": "QQ 空间链路测试",
@@ -8581,10 +9025,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         is_qq_user = user_id_text.isdigit()
         umo = str(user.get("umo", "") or "")
         source = self._single_line(umo.split(":", 1)[0], 40) if ":" in umo else ""
+        platform_profile_getter = getattr(self.plugin, "_platform_profile", None)
+        platform_profile = platform_profile_getter(umo=umo) if callable(platform_profile_getter) else {}
+        platform_kind = self._single_line((platform_profile or {}).get("kind"), 40) or ("onebot" if is_qq_user else "generic")
         nickname = self._single_line(user.get("nickname"), 40)
         generic_names = {"用户", "主人", "主要用户", "默认用户"}
         if is_qq_user:
             display_name = nickname if nickname and nickname not in generic_names else user_id_text
+        elif platform_kind == "qq_official":
+            display_name = nickname if nickname and nickname not in generic_names else f"QQ 官方 · {user_id_text[:8]}"
         else:
             display_name = f"临时会话 · {user_id_text[:8]}"
         relationship_stage = ""
@@ -8624,6 +9073,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "user_id": user_id_text,
             "display_name": display_name,
             "is_qq_user": is_qq_user,
+            "platform_kind": platform_kind,
+            "platform_label": self._single_line((platform_profile or {}).get("label"), 60),
+            "identity_label": self._single_line((platform_profile or {}).get("identity_label"), 60),
+            "stable_platform_identity": bool(platform_kind == "qq_official" or is_qq_user),
             "source": source,
             "enabled": bool(user.get("enabled", True)),
             "relationship_role": role,
@@ -10670,7 +11123,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": complex_model,
             "RESPONSE_REVIEW_PROVIDER_ID": fast or complex_model,
             "SMART_SILENCE_PROVIDER_ID": fast or complex_model,
-            "TROUBLESHOOTING_PROVIDER_ID": fast or complex_model,
+            "TROUBLESHOOTING_PROVIDER_ID": complex_model,
             "EMOTION_JUDGEMENT_PROVIDER_ID": fast or complex_model,
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": fast or complex_model,
             "REST_WAKEUP_PROVIDER_ID": fast or complex_model,
@@ -11722,6 +12175,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
+            "tts_fishaudio_model",
+            "tts_fishaudio_emotion_mode",
             "tts_delivery_mode",
             "tts_foreign_text_mode",
             "tts_conversion_scope",
@@ -11765,6 +12220,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_rest_backlog_reply",
             "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
+            "enable_busy_reply_gate",
+            "busy_reply_min_delay_seconds",
+            "busy_reply_max_delay_seconds",
+            "busy_reply_proactive_resume_buffer_minutes",
             "check_interval_seconds",
             "proactive_intensity_preset",
             "idle_minutes",
@@ -11815,6 +12274,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
             "COMFYUI_SELFIE_WORKFLOW_NAME",
             "photo_persona_reference_image_path",
+            "photo_reference_library",
             "enable_daily_outfit_photo",
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
@@ -11846,6 +12306,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "backup_external_image_api_size",
             "backup_external_image_api_timeout_seconds",
             "backup_external_image_api_custom_headers",
+            "photo_generation_prompt_format",
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt",
@@ -12068,6 +12529,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if key not in keys and key not in provider_keys:
                 keys.append(key)
         values = {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
+        busy_reply_defaults = {
+            "enable_busy_reply_gate": False,
+            "busy_reply_min_delay_seconds": 60,
+            "busy_reply_max_delay_seconds": 300,
+            "busy_reply_proactive_resume_buffer_minutes": 10,
+        }
+        for key, default in busy_reply_defaults.items():
+            persisted = self._config_get_raw(key, None)
+            if persisted in (None, ""):
+                values[key] = default
+            elif values.get(key) in (None, ""):
+                values[key] = persisted
         values["private_user_aliases"] = self._private_alias_config_text("private_user_aliases")
         values["private_user_delivery_aliases"] = self._private_alias_config_text("private_user_delivery_aliases")
         values.update(
@@ -13142,6 +13615,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enhancement_enabled": bool(getattr(self.plugin, "enable_tts_enhancement", False)),
             "mode": self._single_line(getattr(self.plugin, "tts_generation_mode", ""), 24) or "fast_tag",
             "language": self.plugin._tts_language_label() if hasattr(self.plugin, "_tts_language_label") else "",
+            "fishaudio_model": self._single_line(getattr(self.plugin, "tts_fishaudio_model", ""), 32) or "auto",
+            "fishaudio_emotion_mode": self._single_line(
+                getattr(self.plugin, "tts_fishaudio_emotion_mode", ""),
+                24,
+            ) or "balanced",
             "delivery_mode": self._single_line(getattr(self.plugin, "tts_delivery_mode", ""), 32) or "voice_and_text",
             "foreign_text_mode": self._single_line(getattr(self.plugin, "tts_foreign_text_mode", ""), 32) or "translation",
             "conversion_scope": self._single_line(getattr(self.plugin, "tts_conversion_scope", ""), 24) or "partial",
@@ -13530,6 +14008,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         tts_runtime_keys = {
             "tts_generation_mode",
             "tts_voice_language",
+            "tts_fishaudio_model",
+            "tts_fishaudio_emotion_mode",
             "tts_delivery_mode",
             "tts_foreign_text_mode",
             "tts_conversion_scope",
@@ -13659,6 +14139,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
             "photo_persona_reference_image_path": "photo_persona_reference_image_path",
+            "photo_reference_library": "photo_reference_library",
             "daily_outfit_photo_prompt": "daily_outfit_photo_prompt",
             "daily_outfit_rotation_days": "daily_outfit_rotation_days",
             "external_image_api_platform": "external_image_api_platform",
@@ -13675,17 +14156,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "backup_external_image_api_size": "backup_external_image_api_size",
             "backup_external_image_api_custom_headers": "backup_external_image_api_custom_headers",
             "external_image_api_endpoints": "external_image_api_endpoints",
+            "photo_generation_prompt_format": "photo_generation_prompt_format",
             "photo_generation_style": "photo_generation_style",
             "photo_generation_style_custom_prompt": "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt": "photo_generation_fixed_prompt",
             "photo_generation_scene_presets": "photo_generation_scene_presets",
         }
         for key, attr in mapping.items():
-            value = self._config_get_raw(key) if key == "external_image_api_endpoints" else self._config_get(key)
+            value = self._config_get_raw(key) if key in {"external_image_api_endpoints", "photo_reference_library"} else self._config_get(key)
             if key == "external_image_api_endpoints":
                 normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
                 endpoints = normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])
                 self.plugin.external_image_api_endpoints = endpoints
+                continue
+            if key == "photo_reference_library":
+                lines = value if isinstance(value, list) else str(value or "").splitlines()
+                setattr(self.plugin, attr, [str(item).strip() for item in lines if str(item or "").strip()][:24])
                 continue
             if key == "photo_persona_reference_image_path":
                 setattr(self.plugin, attr, str(value or "").strip())
@@ -13696,10 +14182,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     text = text.lower()
                     if text not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
                         text = "auto"
+                elif key == "photo_generation_prompt_format":
+                    normalizer = getattr(self.plugin, "_normalize_photo_generation_prompt_format", None)
+                    text = normalizer(text) if callable(normalizer) else text.lower()
+                    if text not in {"traditional", "natural_language"}:
+                        text = "traditional"
                 elif key in {"external_image_api_platform", "backup_external_image_api_platform"}:
                     normalizer = getattr(self.plugin, "_normalize_external_image_api_platform", None)
                     text = normalizer(text) if callable(normalizer) else text.lower()
-                    if text not in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"}:
+                    if text not in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini"}:
                         text = "auto"
                 setattr(self.plugin, attr, text)
         timeout = self._config_get("external_image_api_timeout_seconds")
@@ -14126,6 +14617,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
+            "tts_fishaudio_model",
+            "tts_fishaudio_emotion_mode",
             "tts_delivery_mode",
             "tts_foreign_text_mode",
             "tts_conversion_scope",
@@ -14168,6 +14661,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_rest_backlog_reply",
             "rest_backlog_max_messages",
             "REST_WAKEUP_PROVIDER_ID",
+            "enable_busy_reply_gate",
+            "busy_reply_min_delay_seconds",
+            "busy_reply_max_delay_seconds",
+            "busy_reply_proactive_resume_buffer_minutes",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
@@ -14207,6 +14704,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_SELFIE_WORKFLOW_NAME",
             "enable_photo_reference_image",
             "photo_persona_reference_image_path",
+            "photo_reference_library",
             "enable_daily_outfit_photo",
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
@@ -14238,6 +14736,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "backup_external_image_api_size",
             "backup_external_image_api_timeout_seconds",
             "backup_external_image_api_custom_headers",
+            "photo_generation_prompt_format",
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt",
@@ -14671,6 +15170,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "tts_voice_language":
             lang = str(value or "ja").strip().lower()
             return lang if lang in {"ja", "zh", "en"} else "ja"
+        if key == "tts_fishaudio_model":
+            model = str(value or "auto").strip().lower()
+            return model if model in {"auto", "s2.1-pro-free", "s2.1-pro", "s2-pro", "s1"} else "auto"
+        if key == "tts_fishaudio_emotion_mode":
+            mode = str(value or "balanced").strip().lower()
+            return mode if mode in {"balanced", "expressive", "manual"} else "balanced"
         if key == "tts_delivery_mode":
             mode = str(value or "voice_and_text").strip().lower()
             return mode if mode in {"voice_only", "voice_and_text"} else "voice_and_text"
@@ -14684,6 +15189,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return str(value or "").strip()[:1200]
         if key in {"natural_language_photo_extra_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"}:
             return str(value or "").strip()[:5000]
+        if key == "photo_generation_prompt_format":
+            normalizer = getattr(self.plugin, "_normalize_photo_generation_prompt_format", None)
+            if callable(normalizer):
+                return normalizer(value)
+            mode = str(value or "traditional").strip().lower().replace("-", "_")
+            return "natural_language" if mode in {"natural", "natural_language", "description", "prose", "自然语言", "自然语言描述"} else "traditional"
         if key == "natural_language_photo_generation_mode":
             mode = str(value or "tool_first").strip().lower()
             aliases = {
@@ -14722,6 +15233,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "photo_generation_backend":
             mode = str(value or "auto").strip().lower()
             return mode if mode in {"auto", "comfyui", "sdgen", "external", "tool_call"} else "auto"
+        if key == "photo_reference_library":
+            raw_items = value if isinstance(value, list) else str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            items: list[str] = []
+            for raw_item in raw_items:
+                if isinstance(raw_item, dict):
+                    path = self._single_line(raw_item.get("path") or raw_item.get("url"), 1000)
+                    note = self._single_line(raw_item.get("note") or raw_item.get("description"), 500)
+                    text = f"{path} || {note}" if path and note else path
+                else:
+                    text = str(raw_item or "").strip()
+                if text and text not in items:
+                    items.append(text[:1600])
+            return items[:24]
         if key == "external_image_api_endpoints":
             normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
             return normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])
@@ -14730,6 +15254,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             aliases = {
                 "openai兼容": "openai",
                 "openai-compatible": "openai",
+                "agnes": "agnes",
+                "agnes-ai": "agnes",
+                "agnes_ai": "agnes",
+                "sapiens": "agnes",
                 "百炼": "bailian",
                 "阿里云百炼": "bailian",
                 "dashscope": "bailian",
@@ -14748,9 +15276,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "google": "gemini",
                 "谷歌": "gemini",
                 "generativelanguage": "gemini",
+                "sensenova": "sensenova",
+                "sense-nova": "sensenova",
+                "日日新": "sensenova",
             }
             mode = aliases.get(mode, mode)
-            return mode if mode in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"} else "auto"
+            return mode if mode in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini"} else "auto"
         if key == "segmented_proactive_split_mode":
             mode = str(value or "regex").strip().lower()
             return mode if mode in {"regex", "words"} else "regex"
@@ -14910,6 +15441,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(0, min(240, int(value)))
             except (TypeError, ValueError):
                 return 30
+        if key in {"busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds"}:
+            try:
+                return max(0, min(900, int(value)))
+            except (TypeError, ValueError):
+                return 60 if key == "busy_reply_min_delay_seconds" else 300
+        if key == "busy_reply_proactive_resume_buffer_minutes":
+            try:
+                return max(0, min(120, int(value)))
+            except (TypeError, ValueError):
+                return 10
         if key == "proactive_persona_judge_send_threshold":
             try:
                 return max(0, min(100, int(value)))
@@ -15069,7 +15610,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "news_min_interval_hours",
             "news_max_items_per_source",
             "news_hot_max_items",
-            "ai_daily_check_interval_minutes",
             "external_event_self_link_cooldown_hours",
             "external_link_share_cooldown_hours",
             "qzone_life_publish_min_interval_hours",
@@ -16229,10 +16769,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _qzone_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("qzone_integration") if isinstance(data.get("qzone_integration"), dict) else {}
-        available = bool(
+        service_available = bool(
             callable(getattr(self.plugin, "_qzone_get_cookies", None))
             and callable(getattr(self.plugin, "_qzone_query_feeds", None))
         )
+        platform_checker = getattr(self.plugin, "_qzone_platform_supported", None)
+        platform_supported = bool(platform_checker(None)) if callable(platform_checker) else True
+        available = bool(service_available and platform_supported)
         enabled = bool(available and getattr(self.plugin, "enable_qzone_integration", False))
         return {
             "enabled": enabled,
@@ -16244,6 +16787,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 and getattr(self.plugin, "enable_qzone_emotional_vent_publish", False)
             ),
             "available": available,
+            "service_available": service_available,
+            "platform_supported": platform_supported,
+            "unavailable_reason": "" if platform_supported else "QQ 官方机器人不支持 QQ 空间；仅 OneBot/aiocqhttp 可用。",
             "last_life_publish_at": self.plugin._format_timestamp_elapsed(state.get("last_life_publish_at", 0)),
             "last_status": state.get("last_life_publish_status", ""),
             "last_text": state.get("last_life_publish_text", ""),
@@ -16899,7 +17445,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if str(user_id).isdigit():
                 label = nickname if nickname and nickname not in generic_names else user_id
             else:
-                label = f"临时会话 · {str(user_id)[:8]}"
+                umo = self._single_line(
+                    user.get("umo") or user.get("last_umo") or user.get("last_unified_msg_origin"),
+                    180,
+                )
+                profile_getter = getattr(self.plugin, "_platform_profile", None)
+                try:
+                    platform_profile = profile_getter(umo=umo) if callable(profile_getter) else {}
+                except Exception:
+                    platform_profile = {}
+                platform_kind = self._single_line((platform_profile or {}).get("kind"), 40)
+                if platform_kind == "qq_official":
+                    label = nickname if nickname and nickname not in generic_names else f"QQ 官方 · {str(user_id)[:8]}"
+                else:
+                    label = nickname if nickname and nickname not in generic_names else f"临时会话 · {str(user_id)[:8]}"
             return {"label": label or user_id or "未知用户", "role": role or "friend", "role_label": role_label}
 
         for item in raw[-240:]:
@@ -16910,7 +17469,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             note = self._single_line(item.get("note"), 160)
             if status == "blocked" and note in {"朋友关系不接收敏感主动", "次要用户关系不接收敏感主动"}:
                 continue
-            user_id = self._single_line(item.get("user_id"), 32)
+            user_id = self._single_line(item.get("user_id"), 128)
             user = users.get(user_id) if isinstance(users, dict) else None
             reason_raw = self._single_line(item.get("reason"), 40)
             action_raw = self._single_line(item.get("action"), 40)

@@ -122,6 +122,7 @@ from .helpers import (
 )
 from .config_migration import migrate_flat_config_into_schema_groups
 from .user_rest_gate import UserRestGateMixin
+from .busy_reply_gate import BusyReplyGateMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
@@ -153,6 +154,7 @@ except ModuleNotFoundError as exc:
 
     logger.warning("[PrivateCompanion] self_timeline.py 缺失，已跳过 Bot 自身时间线注入能力。请重新安装完整版本。")
 from .core_store import CoreStoreMixin
+from .platform_compat import PlatformCompatibilityMixin
 from .integration_status import IntegrationStatusMixin
 from .astrbot_knowledge import AstrBotKnowledgeMixin
 from .atrelay import AtRelayMixin
@@ -680,13 +682,15 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.10.0",
+    "5.10.1",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
+    PlatformCompatibilityMixin,
     AstrBotKnowledgeMixin,
     IntegrationStatusMixin,
     UserRestGateMixin,
+    BusyReplyGateMixin,
     MemoryCompanionAdapterMixin,
     PrivateImageMixin,
     ForwardMessageMixin,
@@ -1015,6 +1019,21 @@ class PrivateCompanionPlugin(
         self.enable_rest_backlog_reply = self._cfg_bool(c, "enable_rest_backlog_reply", True)
         self.rest_backlog_max_messages = self._cfg_int(c, "rest_backlog_max_messages", 4, 1, 12)
         self.rest_wakeup_provider_id = self._cfg_str(c, "REST_WAKEUP_PROVIDER_ID", "")
+        self.enable_busy_reply_gate = self._cfg_bool(c, "enable_busy_reply_gate", False)
+        self.busy_reply_min_delay_seconds = self._cfg_int(c, "busy_reply_min_delay_seconds", 60, 0, 900)
+        self.busy_reply_max_delay_seconds = self._cfg_int(c, "busy_reply_max_delay_seconds", 300, 0, 900)
+        if self.busy_reply_max_delay_seconds < self.busy_reply_min_delay_seconds:
+            self.busy_reply_min_delay_seconds, self.busy_reply_max_delay_seconds = (
+                self.busy_reply_max_delay_seconds,
+                self.busy_reply_min_delay_seconds,
+            )
+        self.busy_reply_proactive_resume_buffer_minutes = self._cfg_int(
+            c,
+            "busy_reply_proactive_resume_buffer_minutes",
+            10,
+            0,
+            120,
+        )
         self.enable_enhanced_dreams = self._cfg_bool(c, "enable_enhanced_dreams", False)
         self.dream_diary_provider_id = self._cfg_str(
             c,
@@ -1089,7 +1108,6 @@ class PrivateCompanionPlugin(
         self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)
         self.enable_personality_iteration_experiment = self._cfg_bool(c, "enable_personality_iteration_experiment", False)
         self.enable_personality_iteration_auto_tune = self._cfg_bool(c, "enable_personality_iteration_auto_tune", False)
-        self.enable_persona_standardization_experiment = self._cfg_bool(c, "enable_persona_standardization_experiment", False)
         # 临时预约与动作查岗属于内建主动类别，不再由第二套功能开关控制。
         # 保留属性名供既有调度、转写和旧配置迁移代码兼容。
         self.enable_llm_timer_scheduling = True
@@ -1172,6 +1190,15 @@ class PrivateCompanionPlugin(
         self.comfyui_text2img_workflow_name = self._cfg_str(c, "COMFYUI_TEXT2IMG_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.comfyui_selfie_workflow_name = self._cfg_str(c, "COMFYUI_SELFIE_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.photo_persona_reference_image_path = self._cfg_str(c, "photo_persona_reference_image_path", "")
+        raw_reference_library = self._cfg_raw(c, "photo_reference_library", [])
+        if isinstance(raw_reference_library, list):
+            self.photo_reference_library = [
+                str(item).strip() for item in raw_reference_library if str(item or "").strip()
+            ][:24]
+        else:
+            self.photo_reference_library = [
+                line.strip() for line in str(raw_reference_library or "").splitlines() if line.strip()
+            ][:24]
         self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
         self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
         if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
@@ -1216,6 +1243,9 @@ class PrivateCompanionPlugin(
         self.backup_external_image_api_custom_headers = self._cfg_str(c, "backup_external_image_api_custom_headers", "")
         self.external_image_api_endpoints = self._normalize_external_image_api_endpoints(
             self._cfg_raw(c, "external_image_api_endpoints", [])
+        )
+        self.photo_generation_prompt_format = self._normalize_photo_generation_prompt_format(
+            self._cfg_str(c, "photo_generation_prompt_format", "traditional", "traditional")
         )
         self.photo_generation_style = self._cfg_str(c, "photo_generation_style", "真实", "真实")
         self.photo_generation_style_custom_prompt = self._cfg_str(c, "photo_generation_style_custom_prompt", "")
@@ -1596,8 +1626,6 @@ class PrivateCompanionPlugin(
         self.enable_ai_daily_watch = self._cfg_bool(c, "enable_ai_daily_watch", True)
         self.ai_daily_sources = self._cfg_str(c, "ai_daily_sources", DEFAULT_AI_DAILY_SOURCES)
         self.ai_daily_source_uid = re.sub(r"\D+", "", self._cfg_str(c, "ai_daily_source_uid", "285286947")) or "285286947"
-        self.ai_daily_check_window = self._cfg_str(c, "ai_daily_check_window", "07:30-12:30")
-        self.ai_daily_check_interval_minutes = self._cfg_int(c, "ai_daily_check_interval_minutes", 40, 10, 240)
         self.ai_daily_prefer_text_version = self._cfg_bool(c, "ai_daily_prefer_text_version", True)
         self.news_sources = self._cfg_str(
             c,
@@ -3333,7 +3361,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if getattr(result, "use_t2i_", None) or getattr(result, "use_markdown_", None):
             return
-        if str(event.get_platform_name() or "") in {"qq_official", "weixin_official_account", "dingtalk"}:
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("segmented_reply", event=event):
             return
         if not chain:
             return
@@ -4186,10 +4215,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         part: int = 0,
         max_chars: int = 6000,
     ) -> str:
-        """只读查看 Bot 自己书柜中的真实创作项目与正文。
+        """只读查看 Bot 自己书柜的真实库存、创作项目与正文。
 
         Args:
-            action(string): list/get。list 列出作品；get 读取指定作品正文。
+            action(string): list/get。list 列出书柜库存与作品；get 读取指定作品正文。
             selector(string): 作品准确标题、项目 id 或列表编号；留空时 get 默认读取最近一篇。
             part(number): 可选，明确读取第几部分，按 1 开始；0 表示从第一部分起按预算读取。
             max_chars(number): 可选，本次最多返回正文字符数，默认 6000。
@@ -4709,6 +4738,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "兼容": "openai",
             "兼容模式": "openai",
             "external": "openai",
+            "agnes": "agnes",
+            "agnes-ai": "agnes",
+            "agnes_ai": "agnes",
+            "agnes image": "agnes",
+            "agnes-image": "agnes",
+            "sapiens": "agnes",
+            "sapiens ai": "agnes",
             "bailian": "bailian",
             "dashscope": "bailian",
             "aliyun": "bailian",
@@ -4743,7 +4779,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "日日新": "sensenova",
             "商汤日日新": "sensenova",
         }
-        return aliases.get(text, text if text in {"auto", "openai", "bailian", "modelscope", "doubao", "gemini", "sensenova"} else "auto")
+        return aliases.get(text, text if text in {"auto", "openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova"} else "auto")
 
     @staticmethod
     def _normalize_external_image_endpoint_enabled(value: Any, default: bool = True) -> bool:
@@ -4813,6 +4849,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 or "1024x1024"
             ).strip()
             or "1024x1024",
+            "ratio": _single_line(pick("ratio", "aspect_ratio", "image_ratio", default=""), 20),
             "timeout_seconds": _safe_int(
                 pick(
                     "timeout_seconds",
@@ -4838,6 +4875,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         }
         base_lower = str(endpoint.get("base_url") or "").lower()
         model_lower = str(endpoint.get("model") or "").lower()
+        if endpoint["platform"] in {"auto", "openai"} and (
+            "apihub.agnes-ai.com" in base_lower or model_lower.startswith("agnes-image-")
+        ):
+            endpoint["platform"] = "agnes"
         if endpoint["platform"] == "auto" and ("token.sensenova.cn" in base_lower or model_lower in {"senova-u1-fast", "sensenova-u1-fast"}):
             endpoint["platform"] = "sensenova"
         if endpoint["platform"] == "sensenova" and model_lower == "senova-u1-fast":
@@ -4946,13 +4987,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "group_episode_provider_id",
             "forward_message_provider_id",
             "proactive_persona_judge_provider_id",
+            "troubleshooting_provider_id",
         ):
             fill(attr, complex_model)
 
         for attr in (
             "response_review_provider_id",
             "smart_silence_provider_id",
-            "troubleshooting_provider_id",
             "emotion_judgement_provider_id",
             "smart_message_debounce_provider_id",
             "rest_wakeup_provider_id",
@@ -5590,6 +5631,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "没有可用工具且没有实际执行结果时,不要承诺“我这就拉你/我帮你操作/我已经处理/我去修/我给你弄好”。"
             "遇到拉人、开房间、修网、重启、登录、下载、现实代办等请求,只能自然说明自己做不到实际操作,可以提醒、陪用户确认、建议对方找能操作的人,或在确有工具时调用工具后再描述结果。"
         )
+        platform_boundary_getter = getattr(self, "_platform_capability_prompt", None)
+        if callable(platform_boundary_getter):
+            platform_boundary = platform_boundary_getter(event)
+            if platform_boundary:
+                boundary = f"{boundary}\n\n{platform_boundary}"
         req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
         await self._record_request_prompt_fragment(
             event,
@@ -5671,7 +5717,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 mode="conditional",
                 metadata={"注入位置": placement, "触发原因": "livingmemory" if livingmemory_relation_context and not relation_query else "query"},
             )
-        qzone_instruction = self._qzone_tool_instruction()
+        qzone_instruction = self._qzone_tool_instruction(event)
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         qzone_marker = "<!-- private_companion_qzone_tools_v1 -->"
@@ -5898,9 +5944,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         if self._record_creative_work_tool_result(event, tool, tool_args, tool_result):
             logger.info(
-                "[PrivateCompanion] 已记录本轮创作读取工具结果: action=%s status=%s session=%s",
+                "[PrivateCompanion] 已记录本轮创作读取工具结果: action=%s status=%s inventory_complete=%s session=%s",
                 _single_line((tool_args or {}).get("action") if isinstance(tool_args, dict) else "", 20) or "get",
                 _single_line(getattr(event, "private_companion_creative_work_tool_status", ""), 24) or "unknown",
+                bool(getattr(event, "private_companion_bookshelf_inventory_complete", False)),
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             )
 
@@ -7988,6 +8035,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
                 _single_line(rest_reason, 120),
             )
+        await self._apply_busy_reply_gate_delay(event, is_private_chat=is_private_chat)
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
         await self._enrich_request_context_image_placeholders(event, req)
         if (
@@ -8397,6 +8445,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 priority=25,
                 source="daily_state",
             )
+        busy_delay = _safe_float(getattr(event, "private_companion_busy_reply_delay_seconds", 0.0), 0.0)
+        if busy_delay > 0:
+            busy_schedule = _single_line(
+                getattr(event, "private_companion_busy_reply_schedule", ""),
+                180,
+            )
+            busy_reply_boundary = (
+                "【忙碌中的回复节奏】\n"
+                "当前日程正在专注处理事情，这轮消息已经自然晚了一点才看到。回复可以比平时更短、更聚焦，但必须完整回答用户真正问的内容。\n"
+                "不要汇报延迟秒数，不要说系统排队、闸门、后台或提示词，也不要每次都机械道歉；除非用户追问，通常不必主动解释为什么晚回。"
+                + (f"\n当前忙碌片段：{busy_schedule}" if busy_schedule else "")
+            )
+            prompt_surface.add("busy.reply_boundary", busy_reply_boundary, priority=31, source="daily_state")
         try:
             sleeping, _sleep_runtime, _sleep_item, sleep_schedule_text = self._rest_reply_sleep_context()
         except Exception:
@@ -8947,9 +9008,57 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or not self.enabled:
             return
         original_text = str(getattr(resp, "completion_text", "") or "")
+        same_session_tool = getattr(self, "_prepare_same_session_send_tool_response", None)
+        same_session_tool_call = False
+        if callable(same_session_tool):
+            try:
+                same_session_tool_call, _ = same_session_tool(event, resp)
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 同会话工具回复去重准备失败: %s",
+                    _single_line(exc, 120),
+                )
+        if same_session_tool_call:
+            # AstrBot yields completion_text even when the same response also has
+            # a tool call. The tool/final-response path is authoritative here.
+            try:
+                resp.result_chain = None
+            except Exception:
+                pass
+            resp.completion_text = ""
+            original_text = ""
         recovered_text, _ = await self._recover_plaintext_photo_tool_call(event, resp, original_text)
         if recovered_text != original_text:
             resp.completion_text = recovered_text
+        pending_tool_text = str(
+            getattr(event, "_private_companion_same_session_tool_text", "") or ""
+        ).strip()
+        tool_names = getattr(resp, "tools_call_name", None)
+        has_tool_call = bool(tool_names) if isinstance(tool_names, (list, tuple, set, str)) else False
+        if (
+            not same_session_tool_call
+            and pending_tool_text
+            and not has_tool_call
+            and not bool(getattr(event, "_private_companion_same_session_tool_finalized", False))
+        ):
+            # A same-session tool call already contains the intended visible
+            # message. Use it once as the final assistant response instead of
+            # sending the tool payload and then repeating it here.
+            try:
+                resp.result_chain = None
+            except Exception:
+                pass
+            resp.completion_text = pending_tool_text
+            recovered_text = pending_tool_text
+            try:
+                setattr(event, "_private_companion_same_session_tool_finalized", True)
+            except Exception:
+                pass
+            logger.info(
+                "[PrivateCompanion] 已将同会话工具文本恢复为唯一最终回复: session=%s text=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(pending_tool_text, 160),
+            )
         called_names = getattr(resp, "tools_call_name", None)
         creative_tool_called = bool(
             (isinstance(called_names, str) and called_names.strip() == "pc_view_creative_work")
@@ -9689,7 +9798,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "日期删除", "删除日期", "重要日期删除",
             "话头删除", "删除话头", "未完话头删除", "删除未完话头",
             "清空记忆", "忘记我",
-            "参考图", "人设参考图", "自拍参考图",
+            "参考图", "人设参考图", "自拍参考图", "参考图库",
             *image_api_status_actions,
             *image_api_swap_actions,
         }
@@ -9758,6 +9867,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = "正在结合说明书和当前运行状态做诊断。"
             elif action in {"参考图", "人设参考图", "自拍参考图"}:
                 response, response_image_path = await self._photo_reference_command_payload(event, user_id, value)
+            elif action == "参考图库":
+                response, response_image_path = await self._photo_reference_library_command_payload(event, user_id, value)
             elif action in daily_outfit_view_actions:
                 response, response_image_path = self._daily_outfit_command_payload()
             elif action in image_api_status_actions:

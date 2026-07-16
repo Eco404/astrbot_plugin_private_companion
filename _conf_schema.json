@@ -93,9 +93,9 @@
         "default": ""
       },
       "target_platform": {
-        "description": "私聊目标平台名",
+        "description": "未见过用户的兜底平台",
         "type": "string",
-        "hint": "用于拼接未见过用户的 unified_msg_origin，QQ/OneBot 通常是 aiocqhttp；QQ 官方机器人通常是 qq_official。若用户私聊过 Bot，会自动替换成真实会话来源。",
+        "hint": "只用于从未私聊过 Bot 的目标用户。收到真实消息后会按事件自动识别平台并保存真实会话；若对应类型只有一个运行实例，还会自动使用实例 ID。QQ/OneBot 通常为 aiocqhttp，QQ 官方机器人通常为 qq_official，不需要额外开启平台模式。",
         "default": "aiocqhttp"
       },
       "enable_environment_perception": {
@@ -538,7 +538,7 @@
     "invisible": true
   },
   "TROUBLESHOOTING_PROVIDER_ID": {
-    "description": "Legacy flat config: 排障检查模型（留空跟随回复/主动复核）",
+    "description": "Legacy flat config: 插件答疑/排障模型（留空优先使用复杂推理模型）",
     "type": "string",
     "default": "",
     "invisible": true
@@ -635,12 +635,6 @@
   },
   "enable_personality_iteration_auto_tune": {
     "description": "Legacy flat config: 允许角色贴合校准自主调节参数",
-    "type": "bool",
-    "default": false,
-    "invisible": true
-  },
-  "enable_persona_standardization_experiment": {
-    "description": "Legacy flat config: 人格标准化问卷旧开关（已改为扩展页入口）",
     "type": "bool",
     "default": false,
     "invisible": true
@@ -1045,12 +1039,6 @@
     "description": "Legacy flat config: 主动消息回复上下文保留时间（小时）",
     "type": "int",
     "default": 12,
-    "invisible": true
-  },
-  "enable_llm_timer_scheduling": {
-    "description": "Legacy flat config（已忽略）: 临时预约与动作查岗",
-    "type": "bool",
-    "default": true,
     "invisible": true
   },
   "enable_proactive_decorating_hooks": {
@@ -1736,18 +1724,6 @@
     "description": "Legacy flat config: 兼容旧版 AI 早报 UID",
     "type": "string",
     "default": "285286947",
-    "invisible": true
-  },
-  "ai_daily_check_window": {
-    "description": "Legacy flat config: 旧版 AI 早报检查窗口",
-    "type": "string",
-    "default": "07:30-12:30",
-    "invisible": true
-  },
-  "ai_daily_check_interval_minutes": {
-    "description": "Legacy flat config: 旧版 AI 早报检查间隔分钟",
-    "type": "int",
-    "default": 40,
     "invisible": true
   },
   "ai_daily_prefer_text_version": {
@@ -2761,6 +2737,30 @@
     "default": "",
     "invisible": true
   },
+  "enable_busy_reply_gate": {
+    "description": "Legacy flat config: 启用繁忙回复闸门",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "busy_reply_min_delay_seconds": {
+    "description": "Legacy flat config: 繁忙回复最短延迟秒数",
+    "type": "int",
+    "default": 60,
+    "invisible": true
+  },
+  "busy_reply_max_delay_seconds": {
+    "description": "Legacy flat config: 繁忙回复最长延迟秒数",
+    "type": "int",
+    "default": 300,
+    "invisible": true
+  },
+  "busy_reply_proactive_resume_buffer_minutes": {
+    "description": "Legacy flat config: 忙完后主动消息缓冲分钟数",
+    "type": "int",
+    "default": 10,
+    "invisible": true
+  },
   "enable_enhanced_dreams": {
     "description": "Legacy flat config: 启用强化梦境生成",
     "type": "bool",
@@ -2879,6 +2879,12 @@
     "description": "Legacy flat config: 人设参考图路径或图片 URL",
     "type": "string",
     "default": "",
+    "invisible": true
+  },
+  "photo_reference_library": {
+    "description": "Legacy flat config: 带用途注释的参考图库",
+    "type": "list",
+    "default": [],
     "invisible": true
   },
   "enable_daily_outfit_photo": {
@@ -3072,6 +3078,13 @@
     "default": [],
     "invisible": true
   },
+  "photo_generation_prompt_format": {
+    "description": "Legacy flat config: 生图提示词表达方式",
+    "type": "string",
+    "options": ["traditional", "natural_language"],
+    "default": "traditional",
+    "invisible": true
+  },
   "photo_generation_style": {
     "description": "Legacy flat config: 主动生图风格",
     "type": "string",
@@ -3172,6 +3185,18 @@
     "description": "Legacy flat config: TTS语音语种",
     "type": "string",
     "default": "ja",
+    "invisible": true
+  },
+  "tts_fishaudio_model": {
+    "description": "Legacy flat config: Fish Audio模型适配",
+    "type": "string",
+    "default": "auto",
+    "invisible": true
+  },
+  "tts_fishaudio_emotion_mode": {
+    "description": "Legacy flat config: Fish Audio情绪控制强度",
+    "type": "string",
+    "default": "balanced",
     "invisible": true
   },
   "tts_delivery_mode": {
@@ -3990,9 +4015,9 @@
         "_special": "select_provider"
       },
       "TROUBLESHOOTING_PROVIDER_ID": {
-        "description": "排障检查模型（留空跟随回复/主动复核）",
+        "description": "插件答疑/排障模型（留空优先使用复杂推理模型）",
         "type": "string",
-        "hint": "用于扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。建议选择便宜、指令遵循稳定、分类判断保守的小模型；留空会先回退到回复/主动复核模型，再回退到陪伴通用/主模型。",
+        "hint": "用于“陪伴 答疑”的插件专家问答，也用于扩展页排障中心的模型复核。需要阅读插件知识目录、相关源码、配置和运行状态后综合回答，建议选择上下文理解和代码推理较强的模型；留空时快速配置会使用复杂推理模型。",
         "default": "",
         "condition": {
           "provider_config_mode": "precision"
@@ -6152,29 +6177,6 @@
           "enable_ai_daily_watch": true
         }
       },
-      "ai_daily_check_window": {
-        "description": "旧版 AI 早报检查窗口",
-        "type": "string",
-        "hint": "旧版窗口轮询兼容项。新版本定时来源按每行 HH:MM 执行，不再依赖该窗口。",
-        "default": "07:30-12:30",
-        "condition": {
-          "enable_ai_daily_watch": true
-        }
-      },
-      "ai_daily_check_interval_minutes": {
-        "description": "旧版 AI 早报检查间隔分钟",
-        "type": "int",
-        "hint": "旧版窗口轮询兼容项。新版本到点后当天只尝试一次，避免频繁访问 B 站。",
-        "slider": {
-          "min": 10,
-          "max": 240,
-          "step": 5
-        },
-        "default": 40,
-        "condition": {
-          "enable_ai_daily_watch": true
-        }
-      },
       "ai_daily_prefer_text_version": {
         "description": "AI 日报/早报优先文字版",
         "type": "bool",
@@ -6423,7 +6425,7 @@
       "enable_qzone_integration": {
         "description": "启用 QQ 空间动态层",
         "type": "bool",
-        "hint": "整合 QQ 空间查看、点赞、评论和发布说说入口。用于让 Bot 理解空间动态是公开生活札记,并在用户明确要求时使用工具处理。",
+        "hint": "整合 QQ 空间查看、点赞、评论和发布说说入口。仅 OneBot/aiocqhttp 可用；QQ 官方机器人不支持，插件会自动跳过工具注入、后台轮询和发布任务。",
         "default": true
       },
       "QZONE_COOKIE": {
@@ -8197,6 +8199,57 @@
         "condition": {
           "enable_rest_reply_simulation": true
         }
+      },
+      "enable_busy_reply_gate": {
+        "description": "启用繁忙回复闸门",
+        "type": "bool",
+        "hint": "默认关闭。开启后，当前日程处于上课、学习、工作、开会等忙碌片段时，普通被动回复会随机延迟，但不会静默或丢失；紧急、安全和管理命令会立即放行。主动消息会顺延到忙碌结束并经过缓冲后再候选，用户预约、到期便签和环境突变不延后。",
+        "default": false,
+        "condition": {
+          "enable_humanized_states": true
+        }
+      },
+      "busy_reply_min_delay_seconds": {
+        "description": "繁忙回复最短延迟（秒）",
+        "type": "int",
+        "hint": "私聊普通消息命中繁忙日程时的最短等待时间，默认 60 秒。群聊会自动限制在 12 秒内，避免回复时话题已经变化。",
+        "slider": {
+          "min": 0,
+          "max": 900,
+          "step": 15
+        },
+        "default": 60,
+        "condition": {
+          "enable_busy_reply_gate": true
+        }
+      },
+      "busy_reply_max_delay_seconds": {
+        "description": "繁忙回复最长延迟（秒）",
+        "type": "int",
+        "hint": "私聊普通消息命中繁忙日程时的最长等待时间，默认 300 秒；小于最短值时保存后会自动交换。最多可设为 900 秒。",
+        "slider": {
+          "min": 0,
+          "max": 900,
+          "step": 15
+        },
+        "default": 300,
+        "condition": {
+          "enable_busy_reply_gate": true
+        }
+      },
+      "busy_reply_proactive_resume_buffer_minutes": {
+        "description": "忙完后主动缓冲（分钟）",
+        "type": "int",
+        "hint": "普通主动消息会移动到当前忙碌片段结束后，并再等待这段缓冲时间，避免刚下课或刚忙完就立刻发消息。用户预约、到期便签和环境突变保持及时。",
+        "slider": {
+          "min": 0,
+          "max": 120,
+          "step": 5
+        },
+        "default": 10,
+        "condition": {
+          "enable_busy_reply_gate": true
+        }
       }
     }
   },
@@ -8415,6 +8468,16 @@
           "enable_photo_reference_image": true
         }
       },
+      "photo_reference_library": {
+        "description": "带注释的参考图库",
+        "type": "list",
+        "hint": "可选，一行一张，格式为“图片路径或 URL || 用途注释”。注释应写清服装、地点和适用场景，例如：C:\\role_home.png || 居家服，在家、卧室、睡前或刚起床时使用。生成前 Bot 会结合最终画面提示词自动选择最合适的一张；今日穿搭图不再无条件优先。也可在私聊中发送一张或多张图片并使用“陪伴 参考图库 添加 注释”上传。最多保存 24 张。",
+        "default": [],
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_photo_reference_image": true
+        }
+      },
       "enable_daily_outfit_photo": {
         "description": "每日穿搭照片",
         "type": "bool",
@@ -8577,7 +8640,7 @@
       "external_image_api_platform": {
         "description": "在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、sensenova、bailian、modelscope、doubao、gemini。sensenova 适用于 SenseNova U1 Fast 独立信息图接口，会使用官方 Model ID、固定 2K 尺寸且不支持参考图；auto 会按地址和模型名自动识别。",
+        "hint": "可填：auto、openai、agnes、sensenova、bailian、modelscope、doubao、gemini。agnes 适用于 Agnes Image 2.x，会使用官方 /v1/images/generations JSON 协议，并通过 extra_body.image 传参考图；auto 会按地址和模型名自动识别。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true
@@ -8586,7 +8649,7 @@
       "EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "在线图片 API 地址",
         "type": "string",
-        "hint": "SenseNova 日日新填写 https://token.sensenova.cn/v1 或完整 /v1/images/generations；官方模型为 sensenova-u1-fast。其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
+        "hint": "Agnes Image 填写 https://apihub.agnes-ai.com/v1，模型使用 agnes-image-2.1-flash；SenseNova 填写 https://token.sensenova.cn/v1。其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -8604,7 +8667,7 @@
       "EXTERNAL_IMAGE_API_MODEL": {
         "description": "在线图片模型",
         "type": "string",
-        "hint": "必须填写该平台的图片模型名。openai 平台按 OpenAI 兼容 images/generations 请求；bailian 平台可填 qwen-image、wan 系列等百炼图片模型，并按模型能力自动走多模态同步或任务轮询；modelscope 平台会提交异步文生图任务并轮询任务结果；doubao 平台可填 seedream 系列图片模型；gemini 平台可填支持图片生成的 Gemini/Imagen 模型。",
+        "hint": "必须填写该平台的图片模型名。Agnes 推荐 agnes-image-2.1-flash；openai 平台按兼容 images/generations 请求；bailian 可填 qwen-image、wan 系列；modelscope 会提交异步任务；doubao 可填 seedream；gemini 可填支持图片生成的 Gemini/Imagen 模型。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -8613,7 +8676,7 @@
       "external_image_api_size": {
         "description": "在线生图尺寸",
         "type": "string",
-        "hint": "格式如 1024x1024、768x1344。openai 平台会原样使用；bailian 平台会自动转换为百炼常用的 1024*1024 格式。",
+        "hint": "格式如 1024x1024、768x1344。Agnes 队列项还可填写 1K、2K、3K、4K，并在拓展页单独填写 ratio；openai 平台会原样使用，bailian 会转换为 1024*1024 格式。",
         "default": "1024x1024",
         "condition": {
           "enable_photo_text_action": true
@@ -8672,7 +8735,7 @@
       "backup_external_image_api_platform": {
         "description": "备选在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、sensenova、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
+        "hint": "可填：auto、openai、agnes、sensenova、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true,
@@ -8747,8 +8810,25 @@
       "external_image_api_endpoints": {
         "description": "在线生图 API 优先级队列",
         "type": "list",
-        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、timeout_seconds、custom_headers。通过拓展页队列编辑器修改最方便；为空时继续沿用上面的主用/备选在线 API 字段。",
+        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、ratio、timeout_seconds、custom_headers。Agnes 可用 size=1K-4K 与 ratio=1:1/2:3/16:9 等组合；为空时继续沿用主用/备选字段。",
         "default": [],
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_prompt_format": {
+        "description": "生图提示词表达方式",
+        "type": "string",
+        "options": [
+          "traditional",
+          "natural_language"
+        ],
+        "option_labels": [
+          "传统文生图提示词（标签/短语）",
+          "自然语言描述"
+        ],
+        "hint": "控制所有图片生成最终提交给后端的提示词组织方式。传统模式使用 Positive/Negative prompt 与逗号分隔短语，适合 Stable Diffusion、ComfyUI 等标签式工作流；自然语言模式使用连贯英文场景描述，适合理解长描述的多模态图片模型。不会改变生图后端或参考图设置。",
+        "default": "traditional",
         "condition": {
           "enable_photo_text_action": true
         }
@@ -8982,6 +9062,25 @@
           "S1 旧版"
         ],
         "hint": "只在当前会话使用 Fish Audio TTS provider 时生效。S2/S2.1 使用方括号自然语言控制，S1 使用圆括号固定标签。自动模式读取 provider 模型；官方 Fish Audio 接口未声明模型时按文档使用 s2.1-pro-free，自建兼容接口不会被强制改写。",
+        "condition": {
+          "enable_tts_enhancement": true
+        }
+      },
+      "tts_fishaudio_emotion_mode": {
+        "description": "Fish Audio 情绪控制",
+        "type": "string",
+        "default": "balanced",
+        "options": [
+          "balanced",
+          "expressive",
+          "manual"
+        ],
+        "labels": [
+          "自然平衡（推荐）",
+          "更有表现力",
+          "手动控制"
+        ],
+        "hint": "只在 Fish Audio TTS 下生效。自然平衡会在最终合成前按上下文补 1 个主要情绪，必要时再补 1 个语气控制；更有表现力最多组合 3 个；手动控制不会自动补标，只保留已有合法控制词。无论转换模型是否输出标签，自动模式都会在 get_audio 前兜底，控制词不会显示在聊天正文中。",
         "condition": {
           "enable_tts_enhancement": true
         }

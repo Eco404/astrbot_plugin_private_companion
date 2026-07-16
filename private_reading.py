@@ -1201,7 +1201,22 @@ class PrivateReadingMixin:
         if credential_only:
             direct_matches = [token for token in direct_matches if token not in {"密码", "口令", "钥匙"}]
             access_matches = [token for token in access_matches if token != "给我密码"]
-        likely = bool(direct_matches or (context_matches and access_matches))
+        secret_scope_tokens = (
+            "夹层", "暗格", "抽屉", "日记", "密码", "口令", "钥匙", "私密", "秘密", "藏了什么", "藏着什么", "藏本",
+        )
+        inventory_only = bool(
+            any(token in compact for token in ("书柜", "书架"))
+            and any(
+                token in compact
+                for token in (
+                    "能看到", "看得到", "能看见", "可以看", "看看", "看一下", "查一下", "查查",
+                    "查询", "检索", "列一下", "列出", "里面有什么", "有什么", "有哪些", "有几", "多少",
+                    "空不空", "是不是空", "还是空", "空的", "现在有",
+                )
+            )
+            and not any(token in compact for token in secret_scope_tokens)
+        )
+        likely = bool(not inventory_only and (direct_matches or (context_matches and access_matches)))
         mention = bool(direct_matches or context_matches)
         return {
             "mention": mention,

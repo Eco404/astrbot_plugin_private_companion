@@ -78,11 +78,26 @@ class QzoneMixin(QzoneMediaMixin):
     def _find_qzone_instance(self) -> Any | None:
         return None
 
-    def _qzone_available(self) -> bool:
-        return bool(self.enable_qzone_integration)
+    def _qzone_platform_supported(self, event: AstrMessageEvent | None = None) -> bool:
+        platform_supports = getattr(self, "_platform_supports", None)
+        if event is not None and callable(platform_supports):
+            return bool(platform_supports("qzone", event=event))
+        platform_available = getattr(self, "_platform_kind_available", None)
+        if callable(platform_available):
+            return bool(platform_available("onebot"))
+        return True
+
+    @staticmethod
+    def _qzone_platform_unavailable_message() -> str:
+        return "QQ 官方机器人不支持 QQ 空间；该能力仅在 OneBot/aiocqhttp 平台可用。"
+
+    def _qzone_available(self, event: AstrMessageEvent | None = None) -> bool:
+        return bool(self.enable_qzone_integration and self._qzone_platform_supported(event))
 
     def _qzone_note_event_bot(self, event: AstrMessageEvent | None) -> None:
         """Cache the latest OneBot connection for background Qzone jobs."""
+        if event is not None and not self._qzone_platform_supported(event):
+            return
         bot = getattr(event, "bot", None) if event is not None else None
         if bot is None:
             return
@@ -599,6 +614,8 @@ class QzoneMixin(QzoneMediaMixin):
         }
 
     async def _qzone_get_cookies(self, event: AstrMessageEvent | None = None) -> str:
+        if not self._qzone_platform_supported(event):
+            raise QzoneIntegrationError("平台不支持", self._qzone_platform_unavailable_message())
         manual_cookie = str(getattr(self, "qzone_cookie", "") or "").strip()
         if manual_cookie:
             try:
@@ -1676,7 +1693,7 @@ class QzoneMixin(QzoneMediaMixin):
         return await self._qzone_comment_post(event, post, content=_single_line(reply, 120))
 
     async def _maybe_process_qzone_comment_inbox(self) -> None:
-        if not (getattr(self, "enable_qzone_integration", False) and getattr(self, "enable_qzone_comment_inbox", False)):
+        if not (self._qzone_available() and getattr(self, "enable_qzone_comment_inbox", False)):
             return
         now = _now_ts()
         state = self._qzone_state_dict()
@@ -2323,6 +2340,9 @@ class QzoneMixin(QzoneMediaMixin):
         lines = ["QQ 空间发布链路模拟："]
         lines.append(f"- 整合开关：{'开启' if self.enable_qzone_integration else '关闭'}")
         lines.append("- 真实发布：否，本指令只模拟工具链路")
+        if not self._qzone_platform_supported(event):
+            lines.append(f"结果：{self._qzone_platform_unavailable_message()}")
+            return "\n".join(lines)
 
         try:
             empty_result_raw = await self._pc_qzone_publish_feed_impl(event, "")
@@ -2464,6 +2484,9 @@ class QzoneMixin(QzoneMediaMixin):
         lines.append(f"- 配图开关：{'开启' if image_enabled else '关闭'}")
         lines.append(f"- 自动配图概率：{image_probability:.0%}（本测试会绕过概率，只检查生图链路）")
         lines.append(f"- 生图入口：{'可用' if generator_available else '不可用'}")
+        if not self._qzone_platform_supported(event):
+            lines.append(f"结果：{self._qzone_platform_unavailable_message()}")
+            return "\n".join(lines)
         summary_getter = getattr(self, "_photo_generation_backend_config_summary", None)
         if callable(summary_getter):
             try:
@@ -2602,6 +2625,10 @@ class QzoneMixin(QzoneMediaMixin):
         lines.append(f"- 整合开关：{'开启' if self.enable_qzone_integration else '关闭'}")
         lines.append("- 内置服务：可用")
         lines.append("- 外部插件依赖：无")
+
+        if not self._qzone_platform_supported(event):
+            lines.append(f"结果：{self._qzone_platform_unavailable_message()}")
+            return "\n".join(lines)
 
         if not self.enable_qzone_integration:
             lines.append("结果：整合开关关闭。")
@@ -2821,7 +2848,11 @@ class QzoneMixin(QzoneMediaMixin):
         reference_getter = getattr(self, "_photo_persona_reference_image_for_kind_async", None)
         if callable(reference_getter):
             try:
-                qzone_selfie_reference_path = await reference_getter("selfie", allow_daily_outfit=True)
+                qzone_selfie_reference_path = await reference_getter(
+                    "selfie",
+                    allow_daily_outfit=True,
+                    selection_context=f"说说：{post_text}\n当前日程：{current_desc}\n当前状态：{state_desc}",
+                )
             except Exception as ref_exc:
                 logger.info(
                     "[PrivateCompanion] QQ 空间自拍参考图预检失败: reason=%s error=%s",
@@ -3049,7 +3080,7 @@ class QzoneMixin(QzoneMediaMixin):
         return [image_path]
 
     async def _maybe_publish_qzone_life_post(self) -> None:
-        if not (self.enable_qzone_integration and self.enable_qzone_life_publish):
+        if not (self._qzone_available() and self.enable_qzone_life_publish):
             return
         now = _now_ts()
         state = self.data.setdefault("qzone_integration", {})
@@ -3218,7 +3249,7 @@ class QzoneMixin(QzoneMediaMixin):
         intent: dict[str, Any] | None = None,
     ) -> None:
         if not (
-            self.enable_qzone_integration
+            self._qzone_available()
             and getattr(self, "enable_emotion_simulation", False)
             and getattr(self, "enable_qzone_emotional_vent_publish", False)
         ):

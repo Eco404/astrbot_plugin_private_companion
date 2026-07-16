@@ -2606,6 +2606,29 @@ class ProactiveEngineMixin:
         if rest_until > now and scheduled < rest_until:
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="用户明确休息中", user=user)
             return False
+        busy_gate = getattr(self, "_busy_reply_proactive_block_until", None)
+        busy_until = 0.0
+        if callable(busy_gate):
+            try:
+                busy_until = _safe_float(
+                    busy_gate(
+                        user,
+                        now=now,
+                        reason=candidate.get("reason"),
+                        source=source,
+                    ),
+                    0.0,
+                )
+            except Exception:
+                busy_until = 0.0
+        if busy_until > now and scheduled < busy_until:
+            shift = busy_until - scheduled
+            candidate = dict(candidate)
+            for key in ("scheduled_ts", "window_start_at", "preferred_ts", "best_until_at", "expire_at"):
+                value = _safe_float(candidate.get(key), 0.0)
+                if value > 0:
+                    candidate[key] = value + shift
+            scheduled = _safe_float(candidate.get("scheduled_ts"), busy_until)
         if not self._user_enabled_for_proactive(str(user_id), user):
             self._clear_pending_proactive_plan(user)
             return False
@@ -2968,6 +2991,37 @@ class ProactiveEngineMixin:
             and not due_timer_active
         ):
             return False, "用户明确休息中"
+        busy_until = 0.0
+        busy_gate = getattr(self, "_busy_reply_proactive_block_until", None)
+        if not is_troubleshooting and not due_timer_active and callable(busy_gate):
+            try:
+                busy_until = _safe_float(
+                    busy_gate(
+                        user,
+                        now=now,
+                        reason=user.get("planned_proactive_reason"),
+                        source=planned_source,
+                    ),
+                    0.0,
+                )
+            except Exception:
+                busy_until = 0.0
+        if busy_until > now:
+            defer_busy = getattr(self, "_defer_proactive_for_busy", None)
+            changed = bool(defer_busy(user, now=now, until=busy_until)) if callable(defer_busy) else False
+            if changed:
+                self._mark_planned_candidate_status(user, "deferred", "Bot 当前日程忙碌，已顺延到忙完后")
+                schedule_save = getattr(self, "_schedule_data_save", None)
+                if callable(schedule_save):
+                    schedule_save()
+                logger.info(
+                    "[PrivateCompanion] 繁忙回复闸门已顺延主动消息: user=%s until=%s reason=%s source=%s",
+                    _single_line(user.get("user_id") or user.get("umo") or user.get("nickname"), 80),
+                    int(busy_until),
+                    _single_line(user.get("planned_proactive_reason"), 48) or "check_in",
+                    planned_source or "unknown",
+                )
+            return False, "Bot 当前日程忙碌，主动消息已顺延"
         if not is_troubleshooting and self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
             return False, "免打扰时段"
         pre_gate_next_at = _safe_float(user.get("next_proactive_at"), 0)
@@ -3610,6 +3664,35 @@ class ProactiveEngineMixin:
             5 if not rest_blocked else -45,
             "未命中静默" if not rest_blocked else "用户明确休息中",
             blocker=rest_blocked,
+        )
+
+        busy_until = 0.0
+        busy_gate = getattr(self, "_busy_reply_proactive_block_until", None)
+        if callable(busy_gate):
+            try:
+                busy_until = _safe_float(
+                    busy_gate(
+                        user,
+                        now=now,
+                        reason=user.get("planned_proactive_reason"),
+                        source=source,
+                    ),
+                    0.0,
+                )
+            except Exception:
+                busy_until = 0.0
+        busy_blocked = busy_until > now and not due_timer_active
+        add(
+            "bot_busy",
+            "Bot 忙碌日程",
+            not busy_blocked,
+            4 if not busy_blocked else -35,
+            (
+                "当前不忙"
+                if not busy_blocked
+                else f"顺延到 {self._environment_fromtimestamp(busy_until).strftime('%H:%M')} 后"
+            ),
+            blocker=busy_blocked,
         )
 
         quiet_blocked = self._is_quiet_time() and not self._can_send_insomnia_night_message(user)
@@ -7066,7 +7149,12 @@ class ProactiveEngineMixin:
         if not parts:
             return True
         screen_quota_exempt = bool(isinstance(user, dict) and user.get("planned_proactive_quota_exempt"))
+        user_umo = str((user or {}).get("umo") or "") if isinstance(user, dict) else ""
+        platform_supports = getattr(self, "_platform_supports", None)
         for part in parts:
+            capability = {"poke": "poke", "photo_text": "image", "voice": "voice"}.get(part)
+            if capability and callable(platform_supports) and not platform_supports(capability, umo=user_umo):
+                return False
             if part == "screen_peek" and not self._screen_glance_available(user, ignore_daily_limit=screen_quota_exempt):
                 return False
             if part == "photo_text" and not self._photo_text_available(user):

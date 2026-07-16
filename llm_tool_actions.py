@@ -156,8 +156,11 @@ class LlmToolActionsMixin:
 - 查不到就自然说明没在关系网里确认过，不要编造。
 """.strip()
 
-    def _qzone_tool_instruction(self) -> str:
+    def _qzone_tool_instruction(self, event: AstrMessageEvent | None = None) -> str:
+        availability = getattr(self, "_qzone_available", None)
         if not (self.enabled and self.enable_qzone_integration):
+            return ""
+        if callable(availability) and not availability(event):
             return ""
         instruction = """
 【QQ 空间动态工具】
@@ -193,23 +196,46 @@ class LlmToolActionsMixin:
 """.strip()
 
     def _creative_work_tool_instruction(self) -> str:
-        if not (self.enabled and getattr(self, "enable_creative_writing", False)):
+        if not self.enabled:
             return ""
         return """
-【自己的创作读取工具】
+【书柜与自己的创作读取工具】
+当用户询问能否看到书柜/书架、书柜是否为空、里面有什么或有几篇作品时，必须先调用 `pc_view_creative_work`，action=list。list 返回的是插件当前真实保存的书柜库存；主要用户还会得到日记、私密阅读和便签的分类数量。
 当用户询问你自己的某篇创作写了什么、某一部分/片段的内容、你如何看待这篇创作、为什么这样写，或要求你结合原文讲讲时，必须先调用 `pc_view_creative_work` 读取真实创作，再依据工具结果回答。
 - 按标题读取：action=get，selector 传用户提到的作品标题；只有用户明确指定“第 N 部分/第 N 段”时才传 part=N。
 - 不确定有哪些作品或用户泛问“最近写了什么”：先 action=list；拿到准确标题后，如需正文再 action=get。
 - 讨论整篇作品时 part=0，工具会按顺序返回预算内的正文；结果若 truncated=true，可继续用 next_part 读取。
 - 工具返回 success 前，不要说“我看过了/我刚检查了”；也不要先发送“我先去看看”等准备动作。直接调用工具，取得结果后一次性自然回答。
+- 回复必须直接说读取结果，不要用“（翻了翻书柜）”“（挠挠头）”之类括号动作代替结果。
 - 不得把被动提示中的短片段、长期记忆或聊天印象冒充完整原文；找不到作品或部分时如实说明，并可根据 candidates 请用户进一步说明。
 - 这是只读工具，不能修改、续写或删除创作。
 """.strip()
+
+    @staticmethod
+    def _creative_work_inventory_query_matches(text: Any) -> bool:
+        normalized = _single_line(text, 260)
+        if not normalized or any(
+            token in normalized
+            for token in ("书柜密码", "书架密码", "夹层密码", "抽屉密码", "输出密码", "重置密码")
+        ):
+            return False
+        shelf_terms = ("书柜", "书架", "作品柜", "创作柜")
+        query_terms = (
+            "能看到", "看得到", "能看见", "可以看到", "能不能看", "能读到",
+            "看看", "看一下", "查一下", "查查", "查询", "检索", "列一下", "列出",
+            "里面有什么", "有什么", "有哪些",
+            "有几", "多少", "空不空", "是不是空", "还是空", "空的", "现在有",
+        )
+        return any(token in normalized for token in shelf_terms) and any(
+            token in normalized for token in query_terms
+        )
 
     def _creative_work_query_instruction_matches(self, text: Any) -> bool:
         normalized = _single_line(text, 260)
         if not normalized:
             return False
+        if self._creative_work_inventory_query_matches(normalized):
+            return True
         work_terms = (
             "创作", "作品", "写作", "札记", "随笔", "散文", "小说", "故事",
             "诗", "歌词", "剧本", "手稿", "草稿", "正文", "片段", "章节",
@@ -222,6 +248,55 @@ class LlmToolActionsMixin:
         return any(token in normalized for token in work_terms) and any(
             token in normalized for token in query_terms
         )
+
+    @staticmethod
+    def _creative_work_tool_result_payload(tool_result: Any) -> dict[str, Any]:
+        """Extract the plugin JSON from AstrBot's CallToolResult wrapper."""
+        pending: list[Any] = [tool_result]
+        seen: set[int] = set()
+        while pending and len(seen) < 24:
+            value = pending.pop(0)
+            if value is None:
+                continue
+            marker = id(value)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            if isinstance(value, dict):
+                if "status" in value:
+                    return dict(value)
+                for key in (
+                    "structuredContent", "structured_content", "result", "data", "content", "text",
+                ):
+                    if key in value:
+                        pending.append(value.get(key))
+                continue
+            if isinstance(value, (list, tuple)):
+                pending.extend(value)
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    if "status" in parsed:
+                        return parsed
+                    pending.append(parsed)
+                continue
+            for attr in (
+                "structuredContent", "structured_content", "result", "data", "content", "text",
+            ):
+                try:
+                    nested = getattr(value, attr, None)
+                except Exception:
+                    nested = None
+                if nested is not None:
+                    pending.append(nested)
+        return {}
 
     @staticmethod
     def _record_creative_work_tool_result(
@@ -238,34 +313,182 @@ class LlmToolActionsMixin:
                 (tool_args or {}).get("action") if isinstance(tool_args, dict) else "",
                 20,
             ).lower() or "get"
-            payload: dict[str, Any] = {}
-            if isinstance(tool_result, dict):
-                payload = dict(tool_result)
-            elif isinstance(tool_result, str):
-                try:
-                    parsed = json.loads(tool_result)
-                    payload = parsed if isinstance(parsed, dict) else {}
-                except Exception:
-                    payload = {}
+            payload = LlmToolActionsMixin._creative_work_tool_result_payload(tool_result)
             success = bool(
-                action == "get"
+                action in {"list", "get"}
                 and _single_line(payload.get("status"), 24).lower() == "success"
+                and not bool(getattr(tool_result, "isError", False))
             )
             setattr(event, "private_companion_creative_work_read_success", success)
+            setattr(event, "private_companion_creative_work_tool_action", action)
             setattr(event, "private_companion_creative_work_tool_status", _single_line(payload.get("status"), 24))
+            setattr(
+                event,
+                "private_companion_bookshelf_inventory_complete",
+                bool(action == "list" and isinstance(payload.get("bookshelf"), dict)),
+            )
         except Exception:
             pass
         return True
 
     @staticmethod
-    def _guard_unread_creative_work_response(event: AstrMessageEvent, text: Any) -> str:
+    def _strip_bookshelf_stage_directions(text: Any) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        action_terms = (
+            "查", "看", "翻", "找", "确认", "检查", "扫", "数", "挠头", "挠挠头",
+            "点头", "摇头", "眨眼", "歪头", "低头", "抬头", "叹气", "笑", "脸红",
+            "不好意思", "认真", "仔细", "凑近", "摊手", "耸肩",
+        )
+        pattern = re.compile(r"(?:^|\n)\s*[（(]([^（）()\n]{1,80})[）)]\s*")
+
+        def replace(match: re.Match[str]) -> str:
+            content = match.group(1)
+            return "\n" if any(token in content for token in action_terms) else match.group(0)
+
+        cleaned = pattern.sub(replace, raw)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
+
+    @staticmethod
+    def _bookshelf_requester_is_owner(event: AstrMessageEvent, plugin: Any) -> bool:
+        try:
+            requester = event.get_sender_id()
+        except Exception:
+            requester = ""
+        identity = getattr(plugin, "_permission_identity_id", None)
+        if callable(identity):
+            try:
+                requester = identity(requester)
+            except Exception:
+                requester = ""
+        checker = getattr(plugin, "_is_private_companion_owner_user_id", None)
+        if not requester or not callable(checker):
+            return False
+        try:
+            return bool(checker(requester))
+        except Exception:
+            return False
+
+    def _bookshelf_inventory_snapshot(
+        self,
+        event: AstrMessageEvent,
+        projects: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        source_projects = projects
+        if source_projects is None:
+            raw_projects = self.data.get("creative_projects") if isinstance(getattr(self, "data", None), dict) else []
+            source_projects = list(raw_projects) if isinstance(raw_projects, list) else []
+        eligible = self._creative_work_project_candidates(source_projects, "")
+        snapshot: dict[str, Any] = {
+            "scope": "public",
+            "creative_count": len(eligible),
+            "creative_projects": [
+                self._creative_work_project_summary(project, index)
+                for index, project in enumerate(eligible[-20:], start=max(1, len(eligible) - 19))
+            ],
+        }
+        if not self._bookshelf_requester_is_owner(event, self):
+            return snapshot
+
+        raw_diaries = self.data.get("bot_diaries") if isinstance(self.data.get("bot_diaries"), list) else []
+        diaries = [item for item in raw_diaries if isinstance(item, dict)]
+        raw_shelf_items = self.data.get("bookshelf_items") if isinstance(self.data.get("bookshelf_items"), list) else []
+        reading_items = [
+            item for item in raw_shelf_items
+            if isinstance(item, dict) and item.get("type") == "jm_album"
+        ]
+        raw_notes = self.data.get("memo_notes") if isinstance(self.data.get("memo_notes"), list) else []
+        notes = [note for note in (normalize_memo_note(item) for item in raw_notes) if note]
+        snapshot.update(
+            {
+                "scope": "owner",
+                "diary_count": len(diaries),
+                "private_reading_count": len(reading_items),
+                "private_reading_titles": [
+                    _single_line(item.get("title"), 80) or "未命名阅读记录"
+                    for item in reading_items[-8:]
+                ],
+                "memo_active_count": sum(1 for note in notes if note.get("status") == "active"),
+                "memo_completed_count": sum(1 for note in notes if note.get("status") == "completed"),
+            }
+        )
+        return snapshot
+
+    def _format_bookshelf_inventory_reply(self, event: AstrMessageEvent) -> str:
+        snapshot = self._bookshelf_inventory_snapshot(event)
+        creative_projects = snapshot.get("creative_projects") if isinstance(snapshot.get("creative_projects"), list) else []
+        titles = [
+            _single_line(item.get("title"), 60)
+            for item in creative_projects[-5:]
+            if isinstance(item, dict) and _single_line(item.get("title"), 60)
+        ]
+        creative_count = _safe_int(snapshot.get("creative_count"), 0, 0)
+        sections: list[str] = []
+        if creative_count:
+            title_text = f"，最近的是{'、'.join(f'《{title}》' for title in titles)}" if titles else ""
+            sections.append(f"创作区有 {creative_count} 篇带正文的作品{title_text}")
+        else:
+            sections.append("创作区暂时没有带正文的作品")
+        if snapshot.get("scope") == "owner":
+            sections.extend(
+                (
+                    f"日记本有 {_safe_int(snapshot.get('diary_count'), 0, 0)} 天记录",
+                    f"私密阅读有 {_safe_int(snapshot.get('private_reading_count'), 0, 0)} 条记录",
+                    f"便签区有 {_safe_int(snapshot.get('memo_active_count'), 0, 0)} 张进行中便签",
+                )
+            )
+        return "能看到。现在" + "；".join(sections) + "。"
+
+    def _bookshelf_reply_conflicts_with_inventory(self, event: AstrMessageEvent, text: Any) -> bool:
+        cleaned = _single_line(text, 500)
+        if not cleaned:
+            return True
+        snapshot = self._bookshelf_inventory_snapshot(event)
+        visible_count = _safe_int(snapshot.get("creative_count"), 0, 0)
+        if snapshot.get("scope") == "owner":
+            visible_count += _safe_int(snapshot.get("diary_count"), 0, 0)
+            visible_count += _safe_int(snapshot.get("private_reading_count"), 0, 0)
+            visible_count += _safe_int(snapshot.get("memo_active_count"), 0, 0)
+            visible_count += _safe_int(snapshot.get("memo_completed_count"), 0, 0)
+        claims_empty = bool(
+            re.search(
+                r"(?:书柜|书架)?[^。！？!?\n]{0,12}(?:还是|仍然|依旧|目前|现在)?"
+                r"(?:空空的|是空的|空着|什么都没有|没有东西|没东西|没有内容)",
+                cleaned,
+            )
+        )
+        return visible_count > 0 and claims_empty
+
+    def _guard_unread_creative_work_response(self, event: AstrMessageEvent, text: Any) -> str:
         raw = str(text or "")
-        if not raw.strip() or not bool(
-            getattr(event, "private_companion_creative_work_tool_required", False)
+        if not bool(getattr(event, "private_companion_creative_work_tool_required", False)):
+            return raw
+        inbound_text = str(getattr(event, "message_str", "") or "")
+        inventory_query = self._creative_work_inventory_query_matches(inbound_text)
+        cleaned = self._strip_bookshelf_stage_directions(raw) if inventory_query else raw.strip()
+        read_success = bool(getattr(event, "private_companion_creative_work_read_success", False))
+        inventory_complete = bool(getattr(event, "private_companion_bookshelf_inventory_complete", False))
+        if read_success and cleaned and not (
+            inventory_query
+            and (
+                not inventory_complete
+                or self._bookshelf_reply_conflicts_with_inventory(event, cleaned)
+            )
         ):
-            return raw
+            return cleaned
+        if inventory_query:
+            logger.warning(
+                "[PrivateCompanion] 书柜查询未形成可信正文，已按本地真实库存回答: attempted=%s status=%s inventory_complete=%s session=%s",
+                bool(getattr(event, "private_companion_creative_work_tool_attempted", False)),
+                _single_line(getattr(event, "private_companion_creative_work_tool_status", ""), 24) or "none",
+                inventory_complete,
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return self._format_bookshelf_inventory_reply(event)
         if bool(getattr(event, "private_companion_creative_work_tool_attempted", False)):
-            return raw
+            return "我这次没能实际读取到对应的创作原文，先不凭印象乱讲。你可以再告诉我准确标题或第几部分，我读到后再认真和你说。"
         logger.warning(
             "[PrivateCompanion] 指定创作问答未实际调用读取工具，已阻止凭片段作答: session=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -390,11 +613,6 @@ class LlmToolActionsMixin:
         part: int = 0,
         max_chars: int = 6000,
     ) -> str:
-        if not getattr(self, "enable_creative_writing", False):
-            return json.dumps(
-                {"status": "disabled", "message": "创作功能未启用。"},
-                ensure_ascii=False,
-            )
         try:
             is_private = bool(getattr(event, "is_private_chat", lambda: False)())
         except Exception:
@@ -426,6 +644,8 @@ class LlmToolActionsMixin:
                         "action": "list",
                         "count": len(summaries),
                         "projects": summaries[-20:],
+                        "bookshelf": self._bookshelf_inventory_snapshot(event, projects),
+                        "instruction": "直接依据这份真实库存回答，不要写查找动作，也不要把未列出的内容补成存在。",
                     },
                     ensure_ascii=False,
                 )
@@ -1682,7 +1902,15 @@ class LlmToolActionsMixin:
         selector: str = "",
         fid: str = "",
     ) -> str:
-        if not self.enable_qzone_integration:
+        availability = getattr(self, "_qzone_available", None)
+        if callable(availability) and not availability(event):
+            supported = getattr(self, "_qzone_platform_supported", None)
+            if callable(supported) and not supported(event):
+                message_getter = getattr(self, "_qzone_platform_unavailable_message", None)
+                message = message_getter() if callable(message_getter) else "当前平台不支持 QQ 空间"
+                return json.dumps({"status": "unsupported_platform", "message": message}, ensure_ascii=False)
+            return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
+        if not callable(availability) and not self.enable_qzone_integration:
             return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
         target = _single_line(user_id, 40)
         if not target:
@@ -1732,6 +1960,14 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "error", "message": _single_line(exc, 160)}, ensure_ascii=False)
 
     async def _pc_qzone_publish_feed_impl(self, event: AstrMessageEvent, text: str = "", **kwargs) -> str:
+        availability = getattr(self, "_qzone_available", None)
+        if callable(availability) and not availability(event):
+            supported = getattr(self, "_qzone_platform_supported", None)
+            if callable(supported) and not supported(event):
+                message_getter = getattr(self, "_qzone_platform_unavailable_message", None)
+                message = message_getter() if callable(message_getter) else "当前平台不支持 QQ 空间"
+                return json.dumps({"status": "unsupported_platform", "success": False, "message": message}, ensure_ascii=False)
+            return json.dumps({"status": "disabled", "success": False, "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
         content = _single_line(text or kwargs.get("content") or kwargs.get("message") or kwargs.get("draft"), 300)
         images: list[str] = []
         for key in ("images", "image_paths", "image_urls"):

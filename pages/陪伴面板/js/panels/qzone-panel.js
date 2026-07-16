@@ -106,7 +106,7 @@ window.PrivateCompanionQzonePanel = (() => {
         ? "正在读取 QQ 空间状态"
         : summary.enabled
         ? `QQ 空间已启用 · ${summary.last_status || "等待操作"}`
-        : (summary.available ? "QQ 空间模块已加载，但整合开关未开启" : "QQ 空间模块不可用");
+        : (summary.available ? "QQ 空间模块已加载，但整合开关未开启" : (summary.unavailable_reason || "QQ 空间模块不可用"));
     }
     const summaryBox = document.getElementById("qzoneQuickSummary");
     if (summaryBox) {
@@ -639,6 +639,13 @@ window.PrivateCompanionQzonePanel = (() => {
     renderFeed();
     try {
       await loadStatus();
+      if (state.status?.summary?.platform_supported === false) {
+        state.posts = [];
+        state.loaded = true;
+        renderFeed();
+        setNotice(state.status.summary.unavailable_reason || "当前平台不支持 QQ 空间。", "warn");
+        return;
+      }
       await loadFeed();
     } catch (error) {
       setNotice(error.message || "QQ 空间面板初始化失败", "error");

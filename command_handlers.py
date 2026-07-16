@@ -292,6 +292,7 @@ class CommandHandlersMixin:
             f"消息收口：{self._feature_on_text(getattr(self, 'enable_message_debounce', False))}，智能文本收口 {self._feature_on_text(getattr(self, 'enable_smart_message_debounce', False))}，文本最长等待 {getattr(self, 'text_message_debounce_max_wait_seconds', 0)} 秒",
             f"群聊唤醒增强：{self._feature_on_text(getattr(self, 'enable_group_wakeup_enhancement', False))}，短唤醒补话等待 {getattr(self, 'group_wakeup_short_text_wait_seconds', 0)} 秒",
             f"休息回复闸门：{self._feature_on_text(getattr(self, 'enable_rest_reply_simulation', False))}，模式 {getattr(self, 'rest_reply_mode', 'probability')}，概率 {rest_probability_text}，模型阈值 {getattr(self, 'rest_reply_llm_threshold', 0)}，清醒宽限 {getattr(self, 'rest_reply_awake_grace_minutes', 0)} 分钟",
+            f"繁忙回复闸门：{self._feature_on_text(getattr(self, 'enable_busy_reply_gate', False))}，私聊延迟 {getattr(self, 'busy_reply_min_delay_seconds', 60)}-{getattr(self, 'busy_reply_max_delay_seconds', 300)} 秒，群聊上限 12 秒，忙完后主动缓冲 {getattr(self, 'busy_reply_proactive_resume_buffer_minutes', 10)} 分钟",
             f"智能沉默：{self._feature_on_text(getattr(self, 'enable_smart_silence', True))}，模式 {getattr(self, 'smart_silence_judge_mode', 'boundary_only')}，置信度 {silence_confidence_text}，超时 {getattr(self, 'smart_silence_model_timeout_seconds', 0)} 秒",
             f"被动回复复核：{self._feature_on_text(getattr(self, 'enable_passive_response_review', getattr(self, 'enable_response_self_review', True)))}，模式 {getattr(self, 'passive_review_mode', getattr(self, 'response_review_mode', 'severe_only'))}，强度 {getattr(self, 'passive_review_strength', 'lenient')}，长度阈值 {getattr(self, 'response_review_max_chars', 260)} 字",
             f"主动消息终审：{self._feature_on_text(getattr(self, 'enable_proactive_message_review', True))}，模式 {getattr(self, 'proactive_review_mode', 'full')}，强度 {getattr(self, 'proactive_review_strength', 'lenient')}",
@@ -543,6 +544,10 @@ class CommandHandlersMixin:
             "rest_reply_awake_grace_minutes": {"type": "int", "min": 0, "max": 240, "label": "休息清醒宽限分钟"},
             "enable_rest_backlog_reply": {"type": "bool", "label": "醒后补看私聊"},
             "rest_backlog_max_messages": {"type": "int", "min": 1, "max": 12, "label": "醒后最多补看条数"},
+            "enable_busy_reply_gate": {"type": "bool", "label": "繁忙回复闸门"},
+            "busy_reply_min_delay_seconds": {"type": "int", "min": 0, "max": 900, "label": "繁忙回复最短延迟秒数"},
+            "busy_reply_max_delay_seconds": {"type": "int", "min": 0, "max": 900, "label": "繁忙回复最长延迟秒数"},
+            "busy_reply_proactive_resume_buffer_minutes": {"type": "int", "min": 0, "max": 120, "label": "忙完后主动缓冲分钟数"},
             "enable_health_state": {"type": "bool", "label": "健康/不适状态"},
             "enable_hunger_state": {"type": "bool", "label": "饥饿/胃口状态"},
             "enable_cycle_state": {"type": "bool", "label": "生理期模拟"},
@@ -571,8 +576,13 @@ class CommandHandlersMixin:
             "enable_photo_reference_image": {"type": "bool", "label": "启用人设/穿搭参考图一致性"},
             "backup_external_image_api_platform": {
                 "type": "select",
-                "choices": {"auto", "openai", "bailian", "modelscope", "doubao", "gemini"},
+                "choices": {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini"},
                 "aliases": {
+                    "agnes-ai": "agnes",
+                    "sapiens": "agnes",
+                    "Agnes": "agnes",
+                    "日日新": "sensenova",
+                    "商汤日日新": "sensenova",
                     "百炼": "bailian",
                     "阿里云百炼": "bailian",
                     "魔搭": "modelscope",
@@ -615,7 +625,7 @@ class CommandHandlersMixin:
             "RESPONSE_REVIEW_PROVIDER_ID": {"label": "回复复核模型", "location": "拓展页 -> 模型/Provider -> RESPONSE_REVIEW_PROVIDER_ID"},
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": {"label": "智能收口小模型", "location": "拓展页 -> 模型/Provider -> SMART_MESSAGE_DEBOUNCE_PROVIDER_ID；也可在 功能开关 -> 通用能力 -> 消息收口防抖详情 -> 智能文本收口 查看"},
             "SMART_SILENCE_PROVIDER_ID": {"label": "智能沉默模型", "location": "拓展页 -> 模型/Provider -> SMART_SILENCE_PROVIDER_ID；也可在 功能开关 -> 通用能力 -> 智能沉默 查看"},
-            "TROUBLESHOOTING_PROVIDER_ID": {"label": "排障/答疑模型", "location": "拓展页 -> 模型/Provider -> TROUBLESHOOTING_PROVIDER_ID"},
+            "TROUBLESHOOTING_PROVIDER_ID": {"label": "插件答疑/排障模型", "location": "拓展页 -> 模型/Provider -> TROUBLESHOOTING_PROVIDER_ID"},
             "enable_group_wakeup_enhancement": {"label": "群聊唤醒增强", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强"},
             "group_access_mode": {"label": "群聊访问模式", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊启用范围"},
             "group_wakeup_context_words": {"label": "群聊弱相关唤醒词", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊唤醒增强详情 -> 唤醒词"},
@@ -640,6 +650,10 @@ class CommandHandlersMixin:
             "rest_reply_awake_grace_minutes": {"label": "休息清醒宽限分钟", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门"},
             "enable_rest_backlog_reply": {"label": "醒后补看私聊", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门"},
             "rest_backlog_max_messages": {"label": "醒后最多补看条数", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门"},
+            "enable_busy_reply_gate": {"label": "繁忙回复闸门", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门"},
+            "busy_reply_min_delay_seconds": {"label": "繁忙回复最短延迟秒数", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门"},
+            "busy_reply_max_delay_seconds": {"label": "繁忙回复最长延迟秒数", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门"},
+            "busy_reply_proactive_resume_buffer_minutes": {"label": "忙完后主动缓冲分钟数", "location": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门"},
             "enable_health_state": {"label": "健康/不适状态", "location": "拓展页 -> 功能开关 -> 拟人状态 -> 身体状态"},
             "enable_hunger_state": {"label": "饥饿/胃口状态", "location": "拓展页 -> 功能开关 -> 拟人状态 -> 身体状态"},
             "enable_cycle_state": {"label": "生理期模拟", "location": "拓展页 -> 功能开关 -> 拟人状态 -> 生理期模拟"},
@@ -659,8 +673,10 @@ class CommandHandlersMixin:
             "backup_external_image_api_size": {"label": "备选在线生图尺寸", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "backup_external_image_api_timeout_seconds": {"label": "备选在线生图超时秒数", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 备选在线图片 API"},
             "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图一致性；也可用命令 陪伴 参考图 设置"},
+            "photo_reference_library": {"label": "带注释的参考图库", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图一致性；也可用命令 陪伴 参考图库"},
             "natural_language_photo_generation_mode": {"label": "非指令生图处理方式", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
             "natural_language_photo_extra_prompt": {"label": "规则快判生图附加提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
+            "photo_generation_prompt_format": {"label": "生图提示词表达方式", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "photo_generation_scene_presets": {"label": "生图场景预设", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "photo_generation_fixed_prompt": {"label": "全局固定生图提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
             "enable_qzone_integration": {"label": "QQ 空间联动", "location": "拓展页 -> 功能开关 -> 长线主动 -> QQ 空间联动"},
@@ -722,6 +738,10 @@ class CommandHandlersMixin:
             "rest_reply_awake_grace_minutes": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门",
             "enable_rest_backlog_reply": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门",
             "rest_backlog_max_messages": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 休息回复闸门",
+            "enable_busy_reply_gate": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门",
+            "busy_reply_min_delay_seconds": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门",
+            "busy_reply_max_delay_seconds": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门",
+            "busy_reply_proactive_resume_buffer_minutes": "拓展页 -> 功能开关 -> 拟人状态/休息 -> 繁忙回复闸门",
             "enable_health_state": "拓展页 -> 功能开关 -> 拟人状态 -> 身体状态",
             "enable_hunger_state": "拓展页 -> 功能开关 -> 拟人状态 -> 身体状态",
             "enable_cycle_state": "拓展页 -> 功能开关 -> 拟人状态 -> 生理期模拟",
@@ -832,6 +852,13 @@ class CommandHandlersMixin:
             "休息清醒宽限": "rest_reply_awake_grace_minutes",
             "醒后补看": "enable_rest_backlog_reply",
             "醒后补看条数": "rest_backlog_max_messages",
+            "繁忙闸门": "enable_busy_reply_gate",
+            "繁忙回复闸门": "enable_busy_reply_gate",
+            "忙碌回复闸门": "enable_busy_reply_gate",
+            "繁忙最短延迟": "busy_reply_min_delay_seconds",
+            "繁忙最长延迟": "busy_reply_max_delay_seconds",
+            "忙完主动缓冲": "busy_reply_proactive_resume_buffer_minutes",
+            "繁忙主动缓冲": "busy_reply_proactive_resume_buffer_minutes",
             "健康状态": "enable_health_state",
             "不适状态": "enable_health_state",
             "饥饿状态": "enable_hunger_state",
@@ -2446,6 +2473,28 @@ class CommandHandlersMixin:
                 ],
             },
             {
+                "title": "繁忙回复闸门和主动顺延",
+                "keywords": ["繁忙闸门", "繁忙回复", "忙碌回复", "回复太快", "忙时延迟", "忙完再发", "主动顺延"],
+                "summary": "繁忙回复闸门默认关闭。开启后只根据 Bot 当前日程和细化状态判断忙碌，不增加模型调用；普通被动消息会延迟但不会静默，普通主动消息会顺延到忙完并经过缓冲。",
+                "checks": [
+                    "总开关：enable_busy_reply_gate；关闭时被动和主动链路都保持原节奏。",
+                    "私聊延迟：busy_reply_min_delay_seconds 到 busy_reply_max_delay_seconds；群聊会自动把最长等待限制到 12 秒。",
+                    "紧急、安全风险和插件管理命令立即放行，不等待繁忙延迟。",
+                    "主动缓冲：busy_reply_proactive_resume_buffer_minutes；普通主动候选顺延到当前忙碌片段结束后再等待这段时间。",
+                    "用户预约、到期便签、环境突变、排障和模拟消息不参与主动顺延。",
+                ],
+                "settings": [
+                    "enable_busy_reply_gate",
+                    "busy_reply_min_delay_seconds",
+                    "busy_reply_max_delay_seconds",
+                    "busy_reply_proactive_resume_buffer_minutes",
+                ],
+                "suggestions": [
+                    "默认私聊会等待 1-5 分钟；想让忙碌感更明显，可继续提高，但单项最多 15 分钟。",
+                    "群聊无需单独配置；页面设置再大也会自动限制在 12 秒内。",
+                ],
+            },
+            {
                 "title": "智能沉默和结束话题",
                 "keywords": ["智能沉默", "智能静默", "沉默", "静默", "不继续话题", "结束话题", "别回", "别说话", "不想聊", "停止回复"],
                 "summary": "智能沉默是在回复发送前工作的。主模型先生成回复，小模型再判断这轮是否应该安静收住；默认只看明确边界，也可以切到上下文模型判断。",
@@ -2522,7 +2571,7 @@ class CommandHandlersMixin:
                 "checks": [
                     "主聊天回复通常使用 AstrBot 当前会话选择的人格和 Provider。",
                     "可以先用快速配置只填 4 类：快速响应模型、复杂推理模型、创作模型、插件视觉模型；高级单项留空时会自动套用这些快速配置。",
-                    "陪伴答疑优先使用 TROUBLESHOOTING_PROVIDER_ID，未填时依次回退到 RESPONSE_REVIEW_PROVIDER_ID、MAI_STYLE_PROVIDER_ID、LLM_PROVIDER_ID。",
+                    "陪伴答疑优先使用 TROUBLESHOOTING_PROVIDER_ID；快速配置下默认使用复杂推理模型，精准配置未填时优先回退到复杂推理/插件主模型。",
                     "智能收口使用 SMART_MESSAGE_DEBOUNCE_PROVIDER_ID；留空时跟随插件主模型。",
                     "生图模型不等于聊天模型，需要在生图平台/后端配置里单独确认。",
                     "日志出现 Request timed out、无有效 JSON、降级本地判定时，说明这次不是人格问题，而是某个小模型/主模型没在预算内稳定返回。",
@@ -2623,8 +2672,11 @@ class CommandHandlersMixin:
                     "非指令生图模式：natural_language_photo_generation_mode，可选 tool_first / rule_fast / off。",
                     "规则快判前置接管需要 enable_natural_language_photo_generation=true；显式指令和 pc_generate_photo 工具不依赖这个开关。",
                     "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空|查看>，也可带图或回复图片；查看会把当前实际参考图发出来检查。",
+                    "多参考图库：发送一张或多张图片并使用“陪伴 参考图库 添加 <用途注释>”；支持列表、预览、删除和清空。用途注释写清服装、地点和适用场景，生图时会结合最终画面自动选一张，今日穿搭图不会无条件优先。",
                     "规则快判上限：natural_language_photo_generation_max_daily，只作用于 rule_fast。",
                     "规则快判补充提示词：natural_language_photo_extra_prompt，只作用于 rule_fast；全局固定提示词仍看 photo_generation_fixed_prompt。",
+                    "提示词表达方式：photo_generation_prompt_format，可选 traditional（传统标签/短语）或 natural_language（自然语言描述），全局作用于实际生图提示词。",
+                    "Agnes Image 可选 platform=agnes，推荐 agnes-image-2.1-flash；参考图走 generations + extra_body.image，队列项可配置 1K-4K 与 ratio。",
                     "排障页可看最近生图提示词、参考图数量、后端错误和任务状态。",
                 ],
                 "settings": [
@@ -2636,6 +2688,7 @@ class CommandHandlersMixin:
                     "enable_photo_reference_image",
                     "photo_persona_reference_image_path",
                     "photo_generation_backend",
+                    "photo_generation_prompt_format",
                     "photo_generation_fixed_prompt",
                     "photo_generation_scene_presets",
                 ],
@@ -2714,16 +2767,9 @@ class CommandHandlersMixin:
             for item in (selected or [])
             if isinstance(item, dict) and _single_line(item.get("title"), 80)
         }
-        ordered: list[dict[str, Any]] = []
-        if selected:
-            ordered.extend(item for item in selected if isinstance(item, dict))
-        ordered.extend(
-            item
-            for item in entries
-            if isinstance(item, dict) and _single_line(item.get("title"), 80) not in selected_titles
-        )
+        detailed_entries = [item for item in (selected or []) if isinstance(item, dict)][:4]
         blocks: list[str] = []
-        for entry in ordered:
+        for entry in detailed_entries:
             title = _single_line(entry.get("title"), 80)
             if not title:
                 continue
@@ -2745,6 +2791,121 @@ class CommandHandlersMixin:
                     ]
                 )
             )
+        index_lines: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            title = _single_line(entry.get("title"), 80)
+            if not title or title in selected_titles:
+                continue
+            summary = _single_line(entry.get("summary"), 220)
+            settings = ", ".join(
+                _single_line(item, 80)
+                for item in (entry.get("settings") if isinstance(entry.get("settings"), list) else [])[:8]
+                if _single_line(item, 80)
+            )
+            index_lines.append(f"- {title}：{summary or '见插件实现'}；相关配置：{settings or '无'}")
+        if index_lines:
+            blocks.append("【其他能力索引（用于发现相关链路，不是预设答案）】\n" + "\n".join(index_lines))
+        return "\n\n".join(blocks)[:18000]
+
+    @staticmethod
+    def _companion_manual_source_file_names() -> tuple[str, ...]:
+        return (
+            "README.md",
+            "CHANGELOG.md",
+            "_conf_schema.json",
+            "constants.py",
+            "main.py",
+            "command_handlers.py",
+            "proactive.py",
+            "proactive_engine.py",
+            "proactive_message.py",
+            "daily_state.py",
+            "event_dispatch.py",
+            "llm_tool_actions.py",
+            "creative.py",
+            "page_api.py",
+            "user_memory.py",
+            "private_image.py",
+            "group_wakeup.py",
+            "group_observation.py",
+            "qzone_integration.py",
+            "tts_enhancement.py",
+            "token_budget.py",
+        )
+
+    def _companion_manual_source_context(
+        self,
+        question: str,
+        selected: list[dict[str, Any]] | None = None,
+        *,
+        max_chars: int = 12000,
+    ) -> str:
+        """Retrieve small UTF-8 source excerpts so the model can answer beyond hard-coded FAQ entries."""
+        query = str(question or "").strip()
+        terms: list[str] = []
+
+        def add_term(value: Any) -> None:
+            term = _single_line(value, 100).strip().lower()
+            if len(term) >= 2 and term not in terms:
+                terms.append(term)
+
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,12}", query):
+            add_term(token)
+        for entry in (selected or [])[:4]:
+            if not isinstance(entry, dict):
+                continue
+            add_term(entry.get("title"))
+            for keyword in (entry.get("keywords") if isinstance(entry.get("keywords"), list) else [])[:16]:
+                keyword_text = _single_line(keyword, 40)
+                if keyword_text and (keyword_text.lower() in query.lower() or len(keyword_text) <= 5):
+                    add_term(keyword_text)
+            for key in (entry.get("settings") if isinstance(entry.get("settings"), list) else [])[:12]:
+                add_term(key)
+        for key in self._companion_manual_mentioned_config_keys(query):
+            add_term(key)
+        if not terms:
+            return ""
+
+        root = Path(__file__).resolve().parent
+        candidates: list[tuple[int, str, int, list[str]]] = []
+        for file_name in self._companion_manual_source_file_names():
+            path = root / file_name
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
+                continue
+            scored_lines: list[tuple[int, int]] = []
+            for index, line in enumerate(lines):
+                lowered = line.lower()
+                score = sum((8 if "_" in term else min(5, len(term))) for term in terms if term in lowered)
+                if score > 0:
+                    scored_lines.append((score, index))
+            scored_lines.sort(key=lambda item: (-item[0], item[1]))
+            used_ranges: list[tuple[int, int]] = []
+            for score, index in scored_lines[:12]:
+                start = max(0, index - 3)
+                end = min(len(lines), index + 5)
+                if any(not (end <= old_start or start >= old_end) for old_start, old_end in used_ranges):
+                    continue
+                used_ranges.append((start, end))
+                excerpt = lines[start:end]
+                candidates.append((score, file_name, start + 1, excerpt))
+                if len(used_ranges) >= 3:
+                    break
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+        blocks: list[str] = []
+        length = 0
+        for _score, file_name, start_line, excerpt in candidates[:18]:
+            block = f"【{file_name}:{start_line}】\n" + "\n".join(excerpt)
+            if length + len(block) > max_chars:
+                remaining = max_chars - length
+                if remaining > 240:
+                    blocks.append(block[:remaining])
+                break
+            blocks.append(block)
+            length += len(block) + 2
         return "\n\n".join(blocks)
 
     def _companion_manual_local_answer(self, event: AstrMessageEvent, question: str) -> tuple[str, list[dict[str, Any]]]:
@@ -2843,16 +3004,18 @@ class CommandHandlersMixin:
         if callable(provider_selector):
             provider_id = provider_selector(
                 getattr(self, "troubleshooting_provider_id", ""),
+                getattr(self, "complex_reasoning_provider_id", ""),
+                getattr(self, "llm_provider_id", ""),
                 getattr(self, "response_review_provider_id", ""),
                 getattr(self, "mai_style_provider_id", ""),
-                getattr(self, "llm_provider_id", ""),
             )
         else:
             provider_id = str(
                 getattr(self, "troubleshooting_provider_id", "")
+                or getattr(self, "complex_reasoning_provider_id", "")
+                or getattr(self, "llm_provider_id", "")
                 or getattr(self, "response_review_provider_id", "")
                 or getattr(self, "mai_style_provider_id", "")
-                or getattr(self, "llm_provider_id", "")
                 or ""
             )
         if not provider_id:
@@ -2888,6 +3051,7 @@ class CommandHandlersMixin:
             except Exception:
                 persona_text = ""
         runtime = self._companion_manual_runtime_snapshot(event)
+        source_context = self._companion_manual_source_context(question, selected)
         memory_context = ""
         composer = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(composer):
@@ -2906,21 +3070,20 @@ class CommandHandlersMixin:
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 答疑 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
         prompt = f"""
-你是 AstrBot 陪伴插件当前人格下的答疑助手。用户不是在闲聊,是在问插件功能为什么这样运行。
+你是 PrivateCompanion 的插件专家答疑助手。你理解插件的功能边界、模块协作、配置、运行状态和关键实现，目标是像熟悉整个项目的维护者一样回答，而不是把问题套进关键词规则。
 
 回答方式：
-- 把这当成一次小型现场诊断，不是功能说明书问答。先判断用户在问“刚才发生的现象”、配置怎么调，还是功能是否生效。
-- 先给一个最可能结论；只引用能支持这条结论的 1-2 个运行态、截图或记录证据。没有证据就说“更像是”，不要凑多种可能。
-- 默认只给一个下一步动作；用户没有明确问参数时，不要列配置项、位置、阈值或全量开关。
-- 如果用户明确点名某个配置，才说明该配置当前值和它会影响什么；最多提 1 个相关配置。
-- 不要把“完整功能说明书”“关键词初筛”“本地回退”“当前配置快照”等实现过程说给用户，也不要照搬它们的分段结构。
-- 回复 3-6 行，口语、清楚、能行动；不写报告标题、不写表格、不写客服套话。
-- 只能使用“完整功能说明书”里出现过的配置项；不要编造不存在的配置项。
+- 先直接回答用户真正问的内容。可以解释设计目的、实际调用链、模块关系、配置影响、已知限制、故障根因或改进方案，不要强行把所有问题改写成“现象排障”。
+- 以当前源码摘录、配置结构和真实运行状态为最高优先级；静态能力索引和关键词候选只帮助检索，绝不是预设结论。若候选与问题不符，必须忽略。
+- 用户问“能不能、为什么、怎么实现、这一改动是否有效”时，要结合实现链路进行推理，明确区分“部分解决”“完全解决”和“没有解决”。
+- 用户问最近发生的具体事件时才做现场诊断；有证据就引用关键证据，没有证据就明确不确定，不要用规则命中伪装成事实。
+- 回答深度由问题决定：简单问题可以短答，架构、代码或复杂排障可以充分展开，不受 3-6 行限制。
+- 不要把“完整功能说明书”“关键词初筛”“本地回退”“当前配置快照”“源码检索”等内部过程说给用户。
+- 不要编造不存在的配置项、模块、日志或已经执行过的操作；配置项以配置目录和源码为准。
 - 提到配置时必须同时写中文名和参数名,格式类似“高强度唤醒阈值（group_high_intensity_wakeup_threshold）”。
-- 用户明确追问“在哪里设置”时，再给具体位置；否则不要为了完整而附带路径。
-- 涉及调参时，只有在证据支持时才给具体数值；否则先说明要观察什么，不要假装已经知道最佳值。
+- 涉及调参时，说明作用范围和副作用；只有证据支持时才给具体数值。
 - 可执行改配置由本地白名单规则另行生成；你只负责解释和建议,不要声称已经修改配置。
-- 语气口语化,像插件作者在排障,不要写客服套话,不要输出表格。
+- 语气自然、清楚，像插件作者本人在解释和排障，不要写客服套话。
 - 不要说“内置说明书没匹配到”“关键词没命中”“去扩展页排障中心”这类暴露实现的话；如果不确定,就自然说明需要更具体的现象或日志。
 - 不要要求用户复制文件；用户和你在同一机器上。
 
@@ -2940,11 +3103,14 @@ class CommandHandlersMixin:
 {memory_context or '暂无可用的近期记忆。'}
 使用方式：只辅助理解这台实例最近发生过什么；本地运行状态、截图和日志证据优先。不要说“我查记忆发现”。
 
-【检索提示】
+【关键词候选（只用于检索，可能不准确）】
 {selected_hint}
 
-【完整功能说明书】
+【插件能力知识目录】
 {manual_context}
+
+【与本题相关的当前源码/文档摘录】
+{source_context or '没有检索到直接相关的源码片段；此时只能依据能力目录、配置和运行状态回答。'}
 
 【用户明确提到的配置项】
 {mentioned_config_text}
@@ -2952,21 +3118,35 @@ class CommandHandlersMixin:
 【当前运行状态快照】
 {runtime or '没有拿到当前会话专项状态,只能按配置和说明书判断。'}
 
-【本地规则初判】
+【本地采集到的候选证据（可能与问题无关，不得直接当结论）】
 {local_hint}
 
 请输出：
-一段自然答复。可以有很短的分行,但不要写成长报告。
+直接回答用户的问题。按问题复杂度组织内容，必要时说明调用链、依据、边界和下一步。
 """.strip()
+        timeout_resolver = getattr(self, "_model_timeout_seconds_for_call", None)
+        answer_timeout = None
+        if callable(timeout_resolver):
+            try:
+                answer_timeout = timeout_resolver(
+                    task="companion_manual_diagnosis",
+                    provider_id=provider_id,
+                    timeout_key="TROUBLESHOOTING_PROVIDER_ID",
+                )
+            except Exception:
+                answer_timeout = None
+        answer_timeout = max(15.0, min(180.0, float(answer_timeout or 45.0)))
         try:
             raw = await asyncio.wait_for(
                 caller(
                     prompt,
-                    max_tokens=700,
+                    max_tokens=1400,
                     provider_id=provider_id,
                     task="companion_manual_diagnosis",
+                    timeout_key="TROUBLESHOOTING_PROVIDER_ID",
+                    timeout_seconds=answer_timeout,
                 ),
-                timeout=6.0,
+                timeout=answer_timeout + 3.0,
             )
         except asyncio.TimeoutError:
             logger.info("[PrivateCompanion] 陪伴答疑模型诊断超时,回退本地说明: question=%s", _single_line(question, 120))
@@ -3244,23 +3424,37 @@ class CommandHandlersMixin:
         event: AstrMessageEvent,
         user_id: str,
     ) -> tuple[str, str, bool]:
-        saw_image = False
-        for source in await self._photo_reference_sources_from_current_event(event, user_id):
-            saw_image = True
-            path = await self._photo_reference_source_to_stable_path(source, stem="message", event=event)
-            if path:
-                return path, "随消息发送的图片", True
-        for source in self._photo_reference_sources_from_reply_cache(event):
-            saw_image = True
-            path = await self._photo_reference_source_to_stable_path(source, stem="reply", event=event)
-            if path:
-                return path, "引用消息里的图片", True
-        for source in await self._photo_reference_sources_from_reply_event(event):
-            saw_image = True
-            path = await self._photo_reference_source_to_stable_path(source, stem="reply", event=event)
-            if path:
-                return path, "引用消息里的图片", True
+        images, saw_image = await self._photo_reference_images_from_command_context(event, user_id, limit=1)
+        if images:
+            return images[0][0], images[0][1], True
         return "", "", saw_image
+
+    async def _photo_reference_images_from_command_context(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        *,
+        limit: int = 12,
+    ) -> tuple[list[tuple[str, str]], bool]:
+        images: list[tuple[str, str]] = []
+        saw_image = False
+
+        async def collect(sources: list[str], label: str, stem: str) -> None:
+            nonlocal saw_image
+            for source in sources:
+                saw_image = True
+                if len(images) >= max(1, limit):
+                    return
+                path = await self._photo_reference_source_to_stable_path(source, stem=stem, event=event)
+                if path and all(existing_path != path for existing_path, _ in images):
+                    images.append((path, label))
+
+        await collect(await self._photo_reference_sources_from_current_event(event, user_id), "随消息发送的图片", "message_library")
+        if len(images) < max(1, limit):
+            await collect(self._photo_reference_sources_from_reply_cache(event), "引用消息里的图片", "reply_library")
+        if len(images) < max(1, limit):
+            await collect(await self._photo_reference_sources_from_reply_event(event), "引用消息里的图片", "reply_library")
+        return images, saw_image
 
     def _resolve_photo_reference_command_path(self, value: str) -> tuple[str, str]:
         raw = _single_line(value, 1000).strip().strip('"').strip("'")
@@ -3294,6 +3488,103 @@ class CommandHandlersMixin:
             return bool(saved)
         except Exception:
             return False
+
+    def _set_photo_reference_library_config(self, items: list[Any]) -> bool:
+        normalized: list[str] = []
+        for raw_item in items[:24]:
+            text = str(raw_item or "").strip()
+            if text and text not in normalized:
+                normalized.append(text[:1600])
+        self.photo_reference_library = normalized
+        try:
+            saved = _set_into_config(self.config, "photo_reference_library", normalized)
+            if saved:
+                self._save_config_if_possible()
+            return bool(saved)
+        except Exception:
+            return False
+
+    async def _photo_reference_library_command_payload(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        value: str = "",
+    ) -> tuple[str, str]:
+        action = str(value or "").strip()
+        entries_getter = getattr(self, "_photo_reference_library_entries", None)
+        entries = entries_getter() if callable(entries_getter) else []
+        if action in {"", "列表", "查看", "状态", "list", "show"}:
+            if not entries:
+                return (
+                    "参考图库目前为空。\n"
+                    "发送一张或多张图片并附上：陪伴 参考图库 添加 居家服，在家、卧室、睡前使用\n"
+                    "也可以在陪伴面板按“路径或 URL || 用途注释”一行一张填写。"
+                ), ""
+            lines = [f"参考图库：{len(entries)}/24 张"]
+            for index, item in enumerate(entries, start=1):
+                lines.append(f"{index}. {_single_line(item.get('note'), 160)}\n   {_single_line(item.get('source'), 260)}")
+            lines.append("预览：陪伴 参考图库 预览 编号；删除：陪伴 参考图库 删除 编号")
+            return "\n".join(lines), ""
+        preview_match = re.match(r"^(?:预览|查看|preview|show)\s*(\d{1,2})$", action, flags=re.I)
+        if preview_match:
+            index = int(preview_match.group(1)) - 1
+            if not 0 <= index < len(entries):
+                return "没有这个编号的参考图。", ""
+            item = entries[index]
+            path = self._photo_reference_local_path(item.get("source", "")) if callable(getattr(self, "_photo_reference_local_path", None)) else ""
+            if not path and re.match(r"^https?://", item.get("source", ""), flags=re.I):
+                path = await self._photo_reference_source_to_stable_path(item["source"], stem=f"library_preview_{index + 1}")
+            if not path:
+                return f"第 {index + 1} 张参考图当前不可用，请检查路径或 URL。", ""
+            return f"参考图 {index + 1}：{_single_line(item.get('note'), 260)}", path
+        delete_match = re.match(r"^(?:删除|移除|delete|remove)\s*(\d{1,2})$", action, flags=re.I)
+        if delete_match:
+            index = int(delete_match.group(1)) - 1
+            if not 0 <= index < len(entries):
+                return "没有这个编号的参考图。", ""
+            removed = entries[index]
+            kept = [
+                f"{item['source']} || {item['note']}"
+                for item_index, item in enumerate(entries)
+                if item_index != index
+            ]
+            saved = self._set_photo_reference_library_config(kept)
+            return (
+                f"已从参考图库删除第 {index + 1} 张：{_single_line(removed.get('note'), 160)}"
+                + ("" if saved else "\n但配置保存可能失败，请到面板确认。")
+            ), ""
+        if action in {"清空", "全部清空", "clear", "clear all"}:
+            saved = self._set_photo_reference_library_config([])
+            return "已清空参考图库。" + ("" if saved else "\n但配置保存可能失败，请到面板确认。"), ""
+
+        add_match = re.match(r"^(?:添加|上传|新增|add|upload)(?:\s+([\s\S]*))?$", action, flags=re.I)
+        if add_match:
+            note = _single_line(add_match.group(1), 500) or "通用人物参考图；没有更具体的服装或场景匹配时使用"
+            images, saw_image = await self._photo_reference_images_from_command_context(event, user_id, limit=12)
+            if not images:
+                if saw_image:
+                    return "找到了图片，但没能保存为参考图；请确认是 png、jpg、jpeg 或 webp。", ""
+                return "请把一张或多张图片与命令一起发送，或回复图片后发送“陪伴 参考图库 添加 用途注释”。", ""
+            current = [f"{item['source']} || {item['note']}" for item in entries]
+            available = max(0, 24 - len(current))
+            added = images[:available]
+            if not added:
+                return "参考图库已达到 24 张上限，请先删除不用的图片。", ""
+            current.extend(f"{path} || {note}" for path, _label in added)
+            saved = self._set_photo_reference_library_config(current)
+            return (
+                f"已向参考图库添加 {len(added)} 张图片。\n用途注释：{note}\n"
+                "生成时会结合地点、服装和画面要求自动选择其中一张；今日穿搭图不再无条件优先。"
+                + ("" if saved else "\n但配置保存可能失败，请到面板确认。")
+            ), added[0][0]
+        return (
+            "可用命令：\n"
+            "陪伴 参考图库 添加 <用途注释>（可同时携带多张图）\n"
+            "陪伴 参考图库 列表\n"
+            "陪伴 参考图库 预览 <编号>\n"
+            "陪伴 参考图库 删除 <编号>\n"
+            "陪伴 参考图库 清空"
+        ), ""
 
     async def _photo_reference_command_text(self, event: AstrMessageEvent, user_id: str, value: str = "") -> str:
         text, _ = await self._photo_reference_command_payload(event, user_id, value)

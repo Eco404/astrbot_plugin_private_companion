@@ -51,6 +51,7 @@ const state = {
   featureDraft: {},
   selectedFeatureKey: "",
   imageApiEndpointDraft: null,
+  imageApiEndpointSavedFingerprints: [],
   setupGuideOpen: false,
   setupGuideMode: "home",
   setupGuideStep: 0,
@@ -78,10 +79,13 @@ const state = {
   roleplayPersonas: [],
   providerFilter: "",
   providerMode: "all",
+  modelsSection: "providers",
   providerConfigMode: "",
   providerDraft: {},
   providerTimeoutDraft: {},
   providerFallbackDraft: {},
+  imageApiStatus: null,
+  imageApiEndpointTestResults: {},
   proactiveCandidateFilter: "all",
   imageCacheItems: [],
   imageCacheTotal: 0,
@@ -107,6 +111,7 @@ const state = {
   lazyLoaded: {
     diagnostics: false,
     providers: false,
+    imageApiStatus: false,
     roleplayPersonas: false,
     tokenStats: false,
     configBackups: false,
@@ -146,7 +151,6 @@ const featureSwitchExcludedKeys = new Set([
   "enable_experimental_motivation_model",
   "enable_personality_iteration_experiment",
   "enable_emotion_simulation",
-  "enable_persona_standardization_experiment",
 ]);
 
 const providerLabels = {
@@ -169,7 +173,7 @@ const providerLabels = {
   RESPONSE_REVIEW_PROVIDER_ID: "回复/主动复核",
   SMART_SILENCE_PROVIDER_ID: "智能沉默判定",
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定",
-  TROUBLESHOOTING_PROVIDER_ID: "排障检查",
+  TROUBLESHOOTING_PROVIDER_ID: "插件答疑/排障",
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "智能收口判断",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断",
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: "关系站位分析",
@@ -431,6 +435,7 @@ function featureDraftFromOverview(overview = {}) {
   const settings = overview.settings || {};
   const settingBackedFeatureKeys = [
     "enable_rest_reply_simulation",
+    "enable_busy_reply_gate",
     "enable_worldview_perception",
     "enable_group_injection_guard",
     "enable_group_persona_denoise",
@@ -453,10 +458,10 @@ const pluginIntegrationAvailabilityRules = {
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.compatible_available || state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
-  enable_qzone_integration: () => true,
-  enable_qzone_life_publish: () => true,
-  enable_qzone_generated_image_publish: () => true,
-  enable_qzone_comment_inbox: () => true,
+  enable_qzone_integration: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_life_publish: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_generated_image_publish: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
 
@@ -615,11 +620,11 @@ const providerGuides = {
     fallback: "留空时复用回复/主动复核模型，再回退到陪伴通用模型。",
   },
   TROUBLESHOOTING_PROVIDER_ID: {
-    preference: "speed",
+    preference: "quality",
     passiveImpact: "async",
-    purpose: "扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。",
-    fit: "适合便宜、低延迟、指令遵循稳定、分类判断保守的小模型。",
-    fallback: "留空时先跟随回复/主动复核模型，再回退到陪伴通用模型和主模型。",
+    purpose: "负责“陪伴 答疑”的插件专家问答，并承担扩展页配置异常和诊断类复核。",
+    fit: "适合上下文理解、代码阅读和多链路推理较强的模型；不建议只用轻量分类模型。",
+    fallback: "留空时快速配置使用复杂推理模型；精准配置再回退到插件主模型。",
   },
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: {
     preference: "speed",
@@ -1014,6 +1019,7 @@ const embeddedFeatureParentByKey = {
   enable_hunger_state: "enable_humanized_states",
   enable_cycle_state: "enable_humanized_states",
   enable_rest_reply_simulation: "enable_humanized_states",
+  enable_busy_reply_gate: "enable_humanized_states",
   enable_daily_plan: "enable_humanized_states",
   enable_detail_enhancement: "enable_humanized_states",
   enable_daily_diary: "enable_humanized_states",
@@ -1220,6 +1226,7 @@ const configLabels = {
   tts_generation_mode: "TTS生成路径",
   tts_voice_language: "TTS语音语种",
   tts_fishaudio_model: "Fish Audio 模型适配",
+  tts_fishaudio_emotion_mode: "Fish Audio 情绪控制",
   tts_delivery_mode: "语音发送形态",
   tts_foreign_text_mode: "外语文字显示",
   tts_conversion_scope: "语音转换范围",
@@ -1394,6 +1401,10 @@ const configLabels = {
   enable_rest_backlog_reply: "醒后补看私聊",
   rest_backlog_max_messages: "醒后最多补看条数",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断模型",
+  enable_busy_reply_gate: "繁忙回复闸门",
+  busy_reply_min_delay_seconds: "私聊最短延迟（秒）",
+  busy_reply_max_delay_seconds: "私聊最长延迟（秒）",
+  busy_reply_proactive_resume_buffer_minutes: "忙完后主动缓冲（分钟）",
   enable_cycle_state: "生理期模拟",
   worldview_adaptation_mode: "世界观适配模式",
   worldview_adaptation_prompt: "自定义世界观适配",
@@ -1532,8 +1543,6 @@ const configLabels = {
   enable_ai_daily_watch: "AI 日报/早报追踪",
   ai_daily_sources: "AI 日报/早报来源",
   ai_daily_source_uid: "兼容旧版 UP 主 UID",
-  ai_daily_check_window: "旧版检查窗口",
-  ai_daily_check_interval_minutes: "旧版检查间隔",
   ai_daily_prefer_text_version: "优先文字版",
   enable_news_daily_hot_read: "每日获取热点",
   enable_news_boredom_read: "无聊看新闻",
@@ -1570,6 +1579,7 @@ const configLabels = {
   COMFYUI_SELFIE_WORKFLOW_NAME: "自拍工作流",
   enable_photo_reference_image: "参考图一致性",
   photo_persona_reference_image_path: "人设参考图路径",
+  photo_reference_library: "带注释的参考图库",
   enable_daily_outfit_photo: "每日穿搭照片",
   enable_creative_cover_generation: "为创作内容生成封面",
   daily_outfit_photo_prompt: "每日穿搭提示词",
@@ -1599,6 +1609,7 @@ const configLabels = {
   backup_external_image_api_size: "备选在线生图尺寸",
   backup_external_image_api_timeout_seconds: "备选在线超时秒数",
   backup_external_image_api_custom_headers: "备选在线生图自定义请求头",
+  photo_generation_prompt_format: "生图提示词表达方式",
   photo_generation_style: "主动生图风格",
   photo_generation_style_custom_prompt: "自定义风格说明",
   photo_generation_fixed_prompt: "固定附加提示词",
@@ -1746,6 +1757,10 @@ const configDescriptions = {
   enable_rest_backlog_reply: "休息闸门静默拦截的目标私聊会暂存成简短摘要；下一次醒来或被叫醒回复时，Bot 会像刚补看消息一样自然接上。只记录私聊，不记录群聊。",
   rest_backlog_max_messages: "休息期间最多保留多少条未回复私聊。超过后只留最近几条，避免醒来后被旧消息淹没。",
   REST_WAKEUP_PROVIDER_ID: "可选。用于休息醒来判断的轻量模型；留空时优先使用回复审校模型，再回退主模型。",
+  enable_busy_reply_gate: "默认关闭。开启后，上课、学习、工作、开会等忙碌日程中的普通回复会自然晚一点，但不会静默或丢失消息；紧急、安全和管理命令立即放行。普通主动消息会顺延，预约、便签和环境突变保持及时。",
+  busy_reply_min_delay_seconds: "繁忙日程中普通私聊的最短等待时间。群聊不使用完整私聊范围，会自动限制在 12 秒内。",
+  busy_reply_max_delay_seconds: "繁忙日程中普通私聊的最长等待时间，默认 5 分钟、最多 15 分钟。若小于最短值，运行时会自动交换两者。",
+  busy_reply_proactive_resume_buffer_minutes: "普通主动消息顺延到当前忙碌片段结束后，再额外等待这段时间，避免刚忙完就立即开口。",
   enable_cycle_state: "开启后即视为适用，可能在“当前扮演状态”里出现生理期前、处于生理期或生理期后的相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
@@ -1786,7 +1801,7 @@ const configDescriptions = {
   enable_almanac_perception: "开启后生成轻量宜忌氛围标签，只作表达参考。",
   enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
-  TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随回复/主动复核模型，再回退到陪伴通用/主模型。",
+  TROUBLESHOOTING_PROVIDER_ID: "用于“陪伴 答疑”的插件专家问答和排障中心模型复核。建议使用能阅读长上下文、理解代码和配置关系的模型；留空时快速配置使用复杂推理模型。",
   proactive_intensity_preset: "默认关闭，完全沿用手动参数。开启后只在运行态调整私聊主动、群聊唤醒和插话的有效频率，并会在排障页显示当前预设；最高档不限制每日主动次数和每日群聊插话次数，不再替用户节省主动成本，会忽略 Token 软限额降载，但不会绕过免打扰、休息、用户拒绝、隐私和每日 Token 硬限额。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
@@ -1799,6 +1814,7 @@ const configDescriptions = {
   tts_generation_mode: "先决定语音从哪里来。快速标签模式追求低延迟：主模型可写 <pc_tts>，插件发送前轻处理。后处理模式追求稳定：主模型只写普通回复，发送前由 TTS 文本模型判断是否需要语音并完成翻译/改写。",
   tts_voice_language: "控制真正送入 TTS 的语音正文语种。可让聊天文本保留中文，<pc_tts> 内使用日语、中文或英语朗读；日语模式会尽量避免明显非日语文本直接进入 TTS，并会给缺少说明的外语语音块补中文释义。",
   tts_fishaudio_model: "只在 Fish Audio TTS 下生效。S2/S2.1 使用方括号自然语言控制，S1 使用圆括号固定标签。自动模式读取 provider 模型；官方接口未声明时使用文档默认的 S2.1 Free，自建兼容接口不强制覆盖。",
+  tts_fishaudio_emotion_mode: "控制最终送入 Fish Audio 的情绪标签。自然平衡会按原中文上下文和朗读文本补清晰情绪；更有表现力最多组合 3 个；手动控制只保留已有标签。兜底发生在合成前，标签不会出现在用户看到的正文中。",
   tts_delivery_mode: "选择语音成功后是用语音替换对应文字，还是语音和文字一起发送。仅语音不会影响失败兜底：合成失败时仍会发送可读文字。",
   tts_foreign_text_mode: "日语或英语语音同时发送文字时，可显示最终朗读原文、中文译文，或原文与中文双语。中文译文会参考当前人格，不使用生硬字幕腔。",
   tts_conversion_scope: "统一控制快速标签自动语音和后处理路径。局部转换只朗读最适合听的一段；全量转换要求朗读整条回复的全部有效内容。",
@@ -1982,8 +1998,6 @@ const configDescriptions = {
   enable_ai_daily_watch: "开启后按来源配置的固定时间读取 AI 日报/早报；默认 12:00 黑鸦Heya早报，23:00 橘鸦Juya日报。",
   ai_daily_sources: "每行一个来源：名称|UP主名|UID|关键词|HH:MM。到点后当天只尝试一次，会优先文字版，再尝试字幕和视频公开信息。",
   ai_daily_source_uid: "旧版单 UP 配置兼容项。新版本请优先使用 AI 日报/早报来源。",
-  ai_daily_check_window: "旧版窗口轮询兼容项。定时来源按每行 HH:MM 执行。",
-  ai_daily_check_interval_minutes: "旧版窗口轮询兼容项。定时来源到点后当天只尝试一次。",
   ai_daily_prefer_text_version: "开启后优先读取视频简介里的文字版链接，失败时尝试公开视频字幕，再退回视频公开信息。",
   news_hot_sources: "热点来源配置。用于每日热点候选。",
   news_hot_max_items: "热点候选最多抓取多少条。",
@@ -2012,6 +2026,7 @@ const configDescriptions = {
   COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。开启参考图一致性并配置参考图后，会优先寻找 images=1 的自拍工作流。",
   enable_photo_reference_image: "可选。开启后，自拍、人像、头像和角色表情包会自动使用今日穿搭图或下方人设参考图来保持外观一致；关闭后不自动读取固定参考图，只按提示词生成。用户显式发送或引用图片要求改图时不受影响。",
   photo_persona_reference_image_path: "可选。仅在参考图一致性开启时使用。png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 不支持参考图。",
+  photo_reference_library: "一行一张，格式：图片路径或 URL || 用途注释。请写清服装、地点和适用场景；Bot 会结合最终画面自动选择，不再机械优先使用今日穿搭图。也可私聊发送图片后使用“陪伴 参考图库 添加 注释”。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
   enable_creative_cover_generation: "默认关闭。开启后，已有正文但没有封面的创作项目会在空闲创作推进时调用当前文生图后端生成封面，并按悬疑、科幻奇幻、诗歌散文、古风、日常治愈等作品特征自动匹配画风。失败最多重试 3 次并带冷却；关闭后不再生成，但不会删除已有封面。",
   daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
@@ -2030,7 +2045,7 @@ const configDescriptions = {
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
   local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
   local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini、sensenova。auto 会根据 API 地址和模型名自动判断；SenseNova U1 Fast 会自动纠正模型别名并映射官方 2K 尺寸。",
+  external_image_api_platform: "可填 auto、openai、agnes、bailian、modelscope、doubao、gemini、sensenova。auto 会根据 API 地址和模型名自动判断；Agnes 使用官方 generations JSON 协议和 extra_body.image 参考图。",
   EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口；魔搭可填 https://api-inference.modelscope.cn/v1；豆包/火山方舟可填 https://ark.cn-beijing.volces.com/api/v3；Gemini 可填 https://generativelanguage.googleapis.com/v1beta。",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
   EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写普通聊天/文本模型。示例：gpt-image-1、qwen-image、wanx、seedream、gemini-*-image 或 imagen。",
@@ -2038,13 +2053,14 @@ const configDescriptions = {
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
   external_image_api_custom_headers: "可选。每行一个请求头，格式：Key: Value。会追加到在线生图 API 请求；下载同源结果图时也会安全复用。",
   enable_backup_external_image_api: "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选 API，再回退本地 ComfyUI/SDGen。",
-  backup_external_image_api_platform: "可填 auto、openai、bailian、modelscope、doubao、gemini、sensenova。含义与主在线生图平台一致，只在备选 API 生效时使用。",
+  backup_external_image_api_platform: "可填 auto、openai、agnes、bailian、modelscope、doubao、gemini、sensenova。含义与主在线生图平台一致，只在备选 API 生效时使用。",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线生图接口地址。主在线 API 失败后才会使用。",
   BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
   BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选平台的图片模型名，不要填写聊天/文本模型。",
   backup_external_image_api_size: "备选在线生图尺寸，例如 1024x1024、768x1344。",
   backup_external_image_api_timeout_seconds: "等待备选在线图片 API 返回结果的最长时间。",
   backup_external_image_api_custom_headers: "可选。每行一个请求头，格式：Key: Value。仅在备选在线图片 API 生效时使用。",
+  photo_generation_prompt_format: "控制所有生图最终提交给后端的提示词形式。传统文生图提示词使用 Positive/Negative prompt 和逗号分隔短语；自然语言描述使用连贯英文句子。只改变提示词组织，不改变后端、参考图或画面风格。",
   photo_generation_style: "影响主动生图提示词的整体风格倾向，可填 真实、二次元 或 其他。",
   photo_generation_style_custom_prompt: "当风格为“其他”时，把这里作为额外风格要求注入生图提示词。",
   photo_generation_fixed_prompt: "所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
@@ -2169,11 +2185,12 @@ const featureSettingGroups = {
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
-  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state", "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
+  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
   enable_daily_plan: ["daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "daily_plan_prompt"],
   enable_detail_enhancement: ["detail_enhancement_lead_minutes"],
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
+  enable_busy_reply_gate: ["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
   enable_health_state: ["humanized_state_intensity"],
@@ -2236,7 +2253,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -2245,7 +2262,7 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
-  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
   enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
   creative_hidden_mode: ["creative_share_probability"],
@@ -2379,6 +2396,11 @@ const featureSettingSections = {
       title: "休息回复闸门",
       note: "睡眠、午休或休息段是否静默，以及醒来后如何补看消息。",
       keys: ["enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
+    },
+    {
+      title: "繁忙回复闸门",
+      note: "忙碌日程中延缓普通回复，并把非即时主动消息顺延到忙完后。默认关闭。",
+      keys: ["enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
     },
   ],
   enable_message_debounce: [
@@ -2728,11 +2750,6 @@ const featureSettingSections = {
       keys: ["proactive_photo_text_probability", "photo_action_max_daily"],
     },
     {
-      title: "后端选择",
-      note: "选择自动、在线 API、ComfyUI、SDGen 或函数工具作为生图后端。",
-      keys: ["photo_generation_backend"],
-    },
-    {
       title: "函数工具生图",
       note: "选择“函数工具”后，在此填写其他插件注册的工具名及其参数映射。",
       keys: ["custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params"],
@@ -2745,7 +2762,7 @@ const featureSettingSections = {
     {
       title: "参考图一致性",
       note: "可选。只在你需要自拍、头像或角色表情包稳定外观时开启；普通文生图和用户显式改图不依赖它。",
-      keys: ["enable_photo_reference_image", "photo_persona_reference_image_path"],
+      keys: ["enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library"],
     },
     {
       title: "群聊安全投递",
@@ -2768,24 +2785,14 @@ const featureSettingSections = {
       keys: ["enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes"],
     },
     {
-      title: "在线图片 API",
-      note: "作为 external 后端，或 auto 模式下本地忙时的备选后端。",
-      keys: ["external_image_api_platform", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "external_image_api_custom_headers"],
-    },
-    {
       title: "图片结果下载",
       note: "仅影响在线生图结果 URL 的下载，不改变生图 API 请求或本地后端。",
       keys: ["external_image_download_proxy", "external_image_download_use_environment_proxy"],
     },
     {
-      title: "备选在线图片 API",
-      note: "主在线 API 失败后先尝试这组配置，再回退本地后端。",
-      keys: ["enable_backup_external_image_api", "backup_external_image_api_platform", "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "BACKUP_EXTERNAL_IMAGE_API_KEY", "BACKUP_EXTERNAL_IMAGE_API_MODEL", "backup_external_image_api_size", "backup_external_image_api_timeout_seconds", "backup_external_image_api_custom_headers"],
-    },
-    {
       title: "画面风格",
       note: "只影响提示词组织，不改变后端配置。",
-      keys: ["photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+      keys: ["photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
     },
   ],
   enable_screen_glance_action: [
@@ -2821,32 +2828,37 @@ const featureSettingSections = {
       keys: ["tts_delivery_mode", "tts_voice_language", "tts_foreign_text_mode", "tts_conversion_scope"],
     },
     {
-      title: "2. 生成与转换",
-      note: "选择低延迟标签路径或发送前模型后处理，并指定负责翻译与改写的文本模型。",
-      keys: ["tts_generation_mode", "tts_fishaudio_model", "tts_conversion_provider_id", "tts_extra_prompt"],
+      title: "2. Fish Audio 表现力",
+      note: "Fish Audio 会在最终合成前兜底补齐情绪控制；其他 TTS Provider 会忽略这两项。",
+      keys: ["tts_fishaudio_model", "tts_fishaudio_emotion_mode"],
     },
     {
-      title: "3. 触发概率",
+      title: "3. 生成与转换",
+      note: "选择低延迟标签路径或发送前模型后处理，并指定负责翻译与改写的文本模型。",
+      keys: ["tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt"],
+    },
+    {
+      title: "4. 触发概率",
       note: "全局频控用默认概率和间隔控制双路径；私聊/群聊覆盖项填 -1 则继承默认值。",
       keys: ["tts_frequency_control_mode", "tts_constraint_mode", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability"],
     },
     {
-      title: "4. 会话间隔",
+      title: "5. 会话间隔",
       note: "分别控制默认、私聊和群聊的最小语音间隔；覆盖项填 -1 表示继承默认值。",
       keys: ["tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds"],
     },
     {
-      title: "5. 快速标签自动语音",
+      title: "6. 快速标签自动语音",
       note: "仅快速标签模式使用：模型没写 <pc_tts>/<tts> 时，是否把普通短文本转成语音。",
       keys: ["auto_voice_enabled", "auto_voice_max_chars"],
     },
     {
-      title: "6. 旧版兼容频率",
+      title: "7. 旧版兼容频率",
       note: "仅“旧版行为”使用：保留旧的快速标签自动语音概率、冷却和主用户强触发。",
       keys: ["auto_voice_probability", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
     },
     {
-      title: "7. 本机与直播联动",
+      title: "8. 本机与直播联动",
       note: "TTS 音频生成后可在运行 AstrBot 的电脑播放，并同步推送到直播插件打字机字幕。",
       keys: ["enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url"],
     },
@@ -2857,6 +2869,7 @@ const featureSettingTypes = {
   forward_message_mode: { type: "select", options: [["inject", "注入"], ["transcribe", "转述"]] },
   tts_generation_mode: { type: "select", options: [["fast_tag", "快速标签：主模型写私有标签"], ["postprocess", "后处理：判断+翻译模型"]] },
   tts_fishaudio_model: { type: "select", options: [["auto", "自动识别（官方接口默认 S2.1 Free）"], ["s2.1-pro-free", "S2.1 Pro Free"], ["s2.1-pro", "S2.1 Pro"], ["s2-pro", "S2 Pro"], ["s1", "S1 旧版"]] },
+  tts_fishaudio_emotion_mode: { type: "select", options: [["balanced", "自然平衡（推荐）"], ["expressive", "更有表现力"], ["manual", "手动控制"]] },
   tts_delivery_mode: { type: "select", options: [["voice_only", "仅语音：替换对应文字"], ["voice_and_text", "语音和文字都发送"]] },
   tts_foreign_text_mode: { type: "select", options: [["original", "显示朗读原文"], ["translation", "显示中文译文"], ["bilingual", "原文和中文都显示"]] },
   tts_conversion_scope: { type: "select", options: [["partial", "局部转换：只朗读一段"], ["full", "全量转换：朗读整条回复"]] },
@@ -2897,6 +2910,9 @@ const featureSettingTypes = {
   poke_action_cooldown_minutes: { type: "number", min: 0, max: 1440, step: 5 },
   voice_action_max_chars: { type: "number", min: 6, max: 80, step: 2 },
   rest_reply_awake_grace_minutes: { type: "number", min: 0, max: 240, step: 5 },
+  busy_reply_min_delay_seconds: { type: "number", min: 0, max: 900, step: 15 },
+  busy_reply_max_delay_seconds: { type: "number", min: 0, max: 900, step: 15 },
+  busy_reply_proactive_resume_buffer_minutes: { type: "number", min: 0, max: 120, step: 5 },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   expression_learning_mode: { type: "select", options: [["light", "轻量：只学节奏"], ["balanced", "标准：当前行为"], ["aggressive", "激进：参考审核样本"]] },
   passive_review_mode: { type: "select", options: [["severe_only", "仅严重问题"], ["local_only", "仅本地识别"], ["full", "积极复核（延迟更高）"]] },
@@ -2963,13 +2979,14 @@ const featureSettingTypes = {
   proactive_chat_bridge_review_mode: { type: "select", options: [["local", "轻量本地（更即时）"], ["follow_proactive_review", "跟随主动终审（更稳）"]] },
   proactive_chat_bridge_collision_window_seconds: { type: "number", min: 10, max: 600, step: 10, unit: "秒" },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"]] },
-  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
-  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   WEB_EXPLORATION_API_KEY: { type: "password" },
   balance_api_key: { type: "password" },
   balance_api_custom_headers: { type: "textarea" },
+  photo_generation_prompt_format: { type: "select", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"]] },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
   segmented_proactive_send_as_forward: { type: "checkbox" },
@@ -3007,6 +3024,7 @@ const featureSettingTypes = {
   photo_generation_fixed_prompt: { type: "textarea" },
   natural_language_photo_extra_prompt: { type: "textarea" },
   photo_generation_scene_presets: { type: "textarea" },
+  photo_reference_library: { type: "textarea" },
   segmented_proactive_regex: { type: "textarea" },
   segmented_proactive_split_words: { type: "textarea" },
   segmented_proactive_content_cleanup_rule: { type: "textarea" },
@@ -3113,6 +3131,7 @@ function collectSettingValue(key, input) {
 const PHOTO_API_PLATFORM_OPTIONS = [
   ["auto", "自动识别"],
   ["openai", "OpenAI 兼容"],
+  ["agnes", "Agnes Image"],
   ["sensenova", "SenseNova 日日新"],
   ["bailian", "阿里云百炼"],
   ["modelscope", "魔搭社区"],
@@ -3126,6 +3145,10 @@ function normalizePhotoApiPlatform(value) {
     "openai-compatible": "openai",
     "openai_compatible": "openai",
     "openai兼容": "openai",
+    "agnes": "agnes",
+    "agnes-ai": "agnes",
+    "agnes_ai": "agnes",
+    "sapiens": "agnes",
     "sensenova": "sensenova",
     "sense-nova": "sensenova",
     "日日新": "sensenova",
@@ -3158,6 +3181,7 @@ function normalizePhotoApiEndpoint(item = {}, index = 0) {
     api_key: String(endpoint.api_key || endpoint.key || endpoint.EXTERNAL_IMAGE_API_KEY || "").trim(),
     model: String(endpoint.model || endpoint.model_name || endpoint.EXTERNAL_IMAGE_API_MODEL || "").trim(),
     size: String(endpoint.size || endpoint.external_image_api_size || "1024x1024").trim() || "1024x1024",
+    ratio: String(endpoint.ratio || endpoint.aspect_ratio || "").trim(),
     timeout_seconds: Math.max(20, Math.min(600, Number.isFinite(timeout) ? Math.round(timeout) : 180)),
     custom_headers: String(endpoint.custom_headers || endpoint.headers || endpoint.external_image_api_custom_headers || "").trim(),
   };
@@ -3220,18 +3244,21 @@ function photoApiEndpointEditorHiddenValue(endpoints) {
   return JSON.stringify((endpoints || []).map((item, index) => normalizePhotoApiEndpoint(item, index)));
 }
 
-function photoApiEndpointEditorHtml() {
+function photoApiEndpointEditorHtml(options = {}) {
+  const showTests = Boolean(options.showTests);
+  const title = options.title || "在线 API 优先级队列";
+  const description = options.description || "从上到下依次尝试；上一条失败或超时后自动换下一条。保存后第一条会同步为旧“主用”，第二条同步为旧“备选”。";
   const endpoints = photoApiEndpointDraft();
   const hidden = escapeHtml(photoApiEndpointEditorHiddenValue(endpoints));
   return `
     <section class="feature-param-section image-api-endpoint-panel" data-image-api-editor>
       <header>
-        <b>在线 API 优先级队列</b>
-        <span>从上到下依次尝试；上一条失败或超时后自动换下一条。保存后第一条会同步为旧“主用”，第二条同步为旧“备选”。</span>
+        <b>${escapeHtml(title)}</b>
+        <span>${escapeHtml(description)}</span>
       </header>
       <input type="hidden" data-feature-param="external_image_api_endpoints" value="${hidden}">
       <div class="image-api-endpoint-list">
-        ${endpoints.map((endpoint, index) => photoApiEndpointCardHtml(endpoint, index, endpoints.length)).join("")}
+        ${endpoints.map((endpoint, index) => photoApiEndpointCardHtml(endpoint, index, endpoints.length, { showTests })).join("")}
       </div>
       <div class="image-api-endpoint-actions">
         <button type="button" class="soft" data-image-api-action="add">新增备用 API</button>
@@ -3241,9 +3268,64 @@ function photoApiEndpointEditorHtml() {
   `;
 }
 
-function photoApiEndpointCardHtml(endpoint, index, total) {
+function photoApiEndpointFingerprint(endpoint, index = 0) {
+  const item = normalizePhotoApiEndpoint(endpoint, index);
+  return JSON.stringify({
+    enabled: item.enabled,
+    platform: item.platform,
+    base_url: item.base_url,
+    api_key: item.api_key,
+    model: item.model,
+    size: item.size,
+    timeout_seconds: item.timeout_seconds,
+    custom_headers: item.custom_headers,
+  });
+}
+
+function photoApiComparableUrl(value) {
+  return String(value || "").trim().replace(/[?#].*$/, "").replace(/\/$/, "");
+}
+
+function photoApiEndpointResult(endpoint, index) {
+  const fingerprint = photoApiEndpointFingerprint(endpoint, index);
+  const local = state.imageApiEndpointTestResults?.[index];
+  if (local?.fingerprint === fingerprint) {
+    const result = local.result || null;
+    return result && (result.ran_at || result.ran_at_text || result.error || result.detail) ? result : null;
+  }
+  if (state.imageApiEndpointSavedFingerprints?.[index] !== fingerprint) return null;
+  const saved = Array.isArray(state.imageApiStatus?.items) ? state.imageApiStatus.items[index] : null;
+  if (!saved) return null;
+  const item = normalizePhotoApiEndpoint(endpoint, index);
+  const matches = String(saved.platform || "auto") === item.platform
+    && String(saved.model || "") === item.model
+    && photoApiComparableUrl(saved.base_url) === photoApiComparableUrl(item.base_url);
+  const result = matches && saved.result && typeof saved.result === "object" ? saved.result : null;
+  return result && (result.ran_at || result.ran_at_text || result.error || result.detail) ? result : null;
+}
+
+function photoApiEndpointResultHtml(result) {
+  if (!result || !(result.ran_at || result.ran_at_text || result.error || result.detail)) return "";
+  const ok = Boolean(result.ok);
+  const meta = [
+    result.ran_at_text || "",
+    result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
+    result.queue_wait_ms ? `排队 ${result.queue_wait_ms}ms` : "",
+    result.file_size ? formatBytes(result.file_size) : "",
+  ].filter(Boolean).join(" · ");
+  return `
+    <div class="image-api-test-result ${ok ? "ok" : "error"}">
+      <b>${escapeHtml(ok ? "最近测试通过" : "最近测试失败")}</b>
+      <span>${escapeHtml(result.error || result.detail || (ok ? "接口已返回有效图片" : "接口未返回有效图片"))}</span>
+      ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+    </div>
+  `;
+}
+
+function photoApiEndpointCardHtml(endpoint, index, total, options = {}) {
   const item = normalizePhotoApiEndpoint(endpoint, index);
   const ready = photoApiEndpointComplete(item);
+  const result = options.showTests ? photoApiEndpointResult(item, index) : null;
   return `
     <article class="image-api-endpoint-card ${ready ? "ready" : "incomplete"}" data-image-api-index="${index}">
       <header>
@@ -3253,6 +3335,7 @@ function photoApiEndpointCardHtml(endpoint, index, total) {
           <small>${escapeHtml(ready ? "配置完整" : "需要地址、Key 和图片模型")}</small>
         </div>
         <div class="image-api-endpoint-buttons">
+          ${options.showTests ? `<button type="button" class="test" data-image-api-test data-index="${index}" ${!ready ? "disabled" : ""}>${result ? "重新测试" : "单独测试"}</button>` : ""}
           <button type="button" title="上移" data-image-api-action="up" data-index="${index}" ${index <= 0 ? "disabled" : ""}>↑</button>
           <button type="button" title="下移" data-image-api-action="down" data-index="${index}" ${index >= total - 1 ? "disabled" : ""}>↓</button>
           <button type="button" title="删除" data-image-api-action="delete" data-index="${index}" ${total <= 1 ? "disabled" : ""}>删除</button>
@@ -3275,7 +3358,11 @@ function photoApiEndpointCardHtml(endpoint, index, total) {
         </label>
         <label>
           <span>尺寸</span>
-          <input type="text" data-image-api-field="size" data-index="${index}" value="${escapeHtml(item.size)}" placeholder="1024x1024">
+          <input type="text" data-image-api-field="size" data-index="${index}" value="${escapeHtml(item.size)}" placeholder="1024x1024；Agnes 可填 1K-4K">
+        </label>
+        <label>
+          <span>宽高比</span>
+          <input type="text" data-image-api-field="ratio" data-index="${index}" value="${escapeHtml(item.ratio)}" placeholder="Agnes 可填 1:1 / 2:3 / 16:9">
         </label>
         <label class="wide">
           <span>API 地址</span>
@@ -3298,6 +3385,7 @@ function photoApiEndpointCardHtml(endpoint, index, total) {
           <textarea rows="2" data-image-api-field="custom_headers" data-index="${index}" placeholder="X-Custom-Header: value">${escapeHtml(item.custom_headers)}</textarea>
         </label>
       </div>
+      ${photoApiEndpointResultHtml(result)}
     </article>
   `;
 }
@@ -4231,6 +4319,8 @@ function applyOverviewData(overview) {
   hydrateTokenStatsFromOverview(overview);
   state.featureDraft = featureDraftFromOverview(overview);
   state.imageApiEndpointDraft = null;
+  state.imageApiEndpointSavedFingerprints = photoApiEndpointInitialList(overview?.settings || {})
+    .map((endpoint, index) => photoApiEndpointFingerprint(endpoint, index));
   state.providerConfigMode = inferProviderConfigMode(overview);
   state.providerTimeoutDraft = normalizeModelTimeoutOverrides(overview?.settings?.model_timeout_overrides);
   state.providerFallbackDraft = normalizeModelFallbackOverrides(overview?.settings?.model_fallback_overrides);
@@ -4529,6 +4619,15 @@ async function loadAvailableProviders(force = false) {
   return state.availableProviders;
 }
 
+async function loadImageApiStatus(force = false) {
+  if (state.lazyLoaded.imageApiStatus && !force) return state.imageApiStatus;
+  const status = await fetchJson("/image_api/status");
+  state.imageApiStatus = status || { items: [] };
+  state.lazyLoaded.imageApiStatus = true;
+  if (state.activeTab === "models" && state.modelsSection === "image") renderProviders();
+  return state.imageApiStatus;
+}
+
 async function loadRoleplayPersonas(force = false) {
   if (state.lazyLoaded.roleplayPersonas && !force) return state.roleplayPersonas;
   const result = await fetchJson("/roleplay/personas").catch(() => ({ items: [] }));
@@ -4560,7 +4659,10 @@ async function ensureTabData(tabName, force = false) {
   if (tabName === "tokens") {
     await loadTokenStats(force);
   } else if (tabName === "models") {
-    await loadAvailableProviders(force);
+    await Promise.all([
+      loadAvailableProviders(force),
+      loadImageApiStatus(force),
+    ]);
   } else if (tabName === "roleplay") {
     loadAvailableProviders(force).catch(() => {});
   } else if (tabName === "config") {
@@ -5265,7 +5367,7 @@ const setupGuideAdvancedItems = {
         { key: "custom_photo_tool_kind_param", type: "text", label: "类型参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持传入生图类型（如 selfie/text2img/edit），填写对应参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
         { key: "custom_photo_tool_reference_param", type: "text", label: "参考图参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持参考图/改图，填写参考图路径对应的参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
         { key: "custom_photo_tool_extra_params", type: "textarea", label: "额外参数（JSON）", placeholder: '{"size":"1024x1024"}', description: "JSON 格式的额外参数，调用工具时会一并传入。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
-        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]], description: "SenseNova U1 Fast 使用独立信息图接口和官方 2K 固定尺寸，不支持参考图。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
+        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]], description: "Agnes 自动使用官方 generations JSON 协议并支持参考图；SenseNova 使用独立信息图接口。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_BASE_URL", type: "text", label: "在线图片 API 地址", placeholder: "https://.../v1/images/generations", description: "可填完整生图接口，也可填平台根地址；留空则不会走在线 API。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_KEY", type: "password", label: "在线图片 API Key", placeholder: "sk-...", description: "只用于在线图片 API；不走在线后端可以留空。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / qwen-image / seedream / gemini-*-image", description: "请填写图片模型，不要填普通聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
@@ -5274,10 +5376,12 @@ const setupGuideAdvancedItems = {
         { key: "COMFYUI_SELFIE_WORKFLOW_NAME", type: "text", label: "ComfyUI 自拍工作流", placeholder: "selfie_workflow", description: "用于自拍、人像、头像和角色表情包；没有单独工作流可先填同一个。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
         { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。" },
         { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "仅在参考图一致性开启时使用；本地路径和图片 URL 都可以。", showWhen: (draft) => Boolean(draft.enable_photo_reference_image) },
+        { key: "photo_reference_library", type: "textarea", label: "带注释的参考图库", placeholder: "C:\\path\\home.png || 居家服，在家、卧室、睡前使用\nC:\\path\\outdoor.png || 外出服，逛街、通勤时使用", description: "一行一张。Bot 会根据最终场景选择一张；今日穿搭图只在场景确实匹配时参与选择。", showWhen: (draft) => Boolean(draft.enable_photo_reference_image) },
         { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "feature", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
         { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => Boolean(draft.enable_group_nsfw_private_fallback) },
         { key: "enable_daily_outfit_photo", type: "bool", kind: "feature", label: "每日穿搭照片", description: "日程生成后额外生成一张角色当天穿搭照。" },
         { key: "enable_creative_cover_generation", type: "bool", kind: "feature", label: "为创作内容生成封面", description: "可选。作品已有正文后自动生成一次封面，并按内容自动匹配画风；失败最多重试 3 次。" },
+        { key: "photo_generation_prompt_format", type: "select", label: "提示词表达方式", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"]], description: "全局作用于主动拍照、每日穿搭、创作封面、自然语言生图及函数工具生图。" },
         { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
         { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => String(draft.photo_generation_style || "") === "其他" },
         { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
@@ -5335,8 +5439,8 @@ const setupGuideAdvancedItems = {
       key: "enable_qzone_integration",
       title: "QQ 空间",
       ask: "是否让 Bot 读取/发布 QQ 空间相关内容？",
-      description: "可用于生活说说、自动配图、评论收件箱和情绪宣泄说说。",
-      caution: "这是外部账号动作，建议先只开总集成，不要马上开启自动发布。",
+      description: "仅 OneBot/aiocqhttp 可用于生活说说、自动配图、评论收件箱和情绪宣泄说说；QQ 官方机器人不支持。",
+      caution: "这是 OneBot 外部账号动作，建议先只开总集成，不要马上开启自动发布。",
       dependencies: [
         { label: "内置", text: "QQ 空间动作已内置参考 astrbot_plugin_qzone，不需要再装同名插件。" },
         { label: "凭据", text: "需要 OneBot/NapCat 能获取 Cookie；获取不到时必须手动填写 QZONE_COOKIE。" },
@@ -5504,6 +5608,7 @@ const setupGuideDynamicFields = new Set([
   "groupWakeColdGroup",
   "worldbookSelfRegistration",
   "photo_generation_backend",
+  "photo_generation_prompt_format",
   "photo_generation_style",
   "enable_natural_language_photo_generation",
   "natural_language_photo_generation_mode",
@@ -6992,7 +7097,7 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
       ${setupGuideStatusPills(overview)}
       <div class="setup-guide-question">
         <h4>插件基本连接</h4>
-        ${setupGuideHint(overview.plugin ? "页面 API 已连接。平台默认 aiocqhttp；不是 OneBot 时修改下方 target_platform。" : "页面 API 未连接。先刷新拓展页，或检查插件是否加载。", overview.plugin ? "ok" : "warn")}
+        ${setupGuideHint(overview.plugin ? "页面 API 已连接。平台会按真实事件自动识别；下方兜底平台只用于从未私聊过 Bot 的目标用户。" : "页面 API 未连接。先刷新拓展页，或检查插件是否加载。", overview.plugin ? "ok" : "warn")}
       </div>
       <div class="setup-guide-question">
         <h4>目标用户</h4>
@@ -7888,6 +7993,9 @@ function renderDashboardLifeDesk(overview = {}) {
     const groupInfo = overview.group || {};
     const intensity = overview.proactive_intensity || {};
     const providers = overview.providers || {};
+    const platformAdaptation = overview.platform_adaptation || {};
+    const platformProfiles = Array.isArray(platformAdaptation.profiles) ? platformAdaptation.profiles : [];
+    const primaryPlatform = platformProfiles[0] || {};
     const proactiveLimit = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
     const fastProvider = String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim();
     const complexProvider = String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim();
@@ -7915,6 +8023,14 @@ function renderDashboardLifeDesk(overview = {}) {
         label: "模型分流",
         value: fastProvider && complexProvider ? "快速与复杂模型已配置" : "需要补充模型",
         ready: Boolean(fastProvider && complexProvider),
+      },
+      {
+        tab: "private",
+        label: "平台适配",
+        value: platformAdaptation.qq_official_detected
+          ? "QQ 官方 · 自动适配"
+          : (primaryPlatform.label || "自动识别"),
+        ready: Boolean(platformAdaptation.auto_detect),
       },
     ];
     capabilityRoot.innerHTML = capabilities.map((item) => `
@@ -8157,7 +8273,7 @@ function moduleShortcutNote(overview) {
     ["长期创作", Boolean(features.enable_creative_writing || settings.enable_creative_writing)],
     ["新闻阅读", Boolean(features.enable_news_integration || settings.enable_news_integration)],
     ["主动搜索", Boolean(features.enable_web_exploration || settings.enable_web_exploration)],
-    ["QQ 空间", Boolean(features.enable_qzone_integration || settings.enable_qzone_integration)],
+    ["QQ 空间", Boolean((features.enable_qzone_integration || settings.enable_qzone_integration) && overview?.qzone?.platform_supported !== false)],
   ];
   if (overview?.private_reading?.available) {
     items.push(["夹层阅读", Boolean(features.enable_private_reading_integration || settings.enable_private_reading_integration)]);
@@ -9281,6 +9397,7 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
               item.ok ? "成功" : "失败",
               item.backend || "",
               item.kind ? `类型 ${item.kind}` : "",
+              item.prompt_format === "natural_language" ? "自然语言提示词" : (item.prompt_format === "traditional" ? "传统提示词" : ""),
               item.intent_kind ? `意图 ${item.intent_kind}` : "",
               item.trigger ? `来源 ${item.trigger}` : "",
               item.sent ? "已发送" : "",
@@ -9698,7 +9815,7 @@ function renderRelationshipChart() {
 }
 
 function renderQuotaChart() {
-  const quotaUsers = state.users.filter((user) => user.is_qq_user);
+  const quotaUsers = state.users.filter((user) => user.is_qq_user || user.stable_platform_identity);
   const rows = (quotaUsers.length ? quotaUsers : state.users).slice(0, 12).map((user) => {
     const used = Number(user.sent_today || 0);
     const limit = Number(user.effective_daily_limit || state.overview?.proactive_intensity?.effective?.max_daily_messages || state.overview?.private?.max_daily_messages || 0);
@@ -9725,6 +9842,15 @@ function userQuotaLabel(user) {
   const genericNames = new Set(["用户", "主人", "主要用户", "默认用户"]);
   if (!nickname || genericNames.has(nickname)) return id || "未命名";
   return id ? `${nickname} · ${id.slice(-4)}` : nickname;
+}
+
+function userPlatformBadge(user) {
+  if (user?.platform_kind === "qq_official") {
+    return `<span class="badge ok" title="${escapeHtml(user.identity_label || "openid / 平台用户ID")}">QQ 官方</span>`;
+  }
+  if (user?.is_qq_user || user?.platform_kind === "onebot") return "";
+  const label = String(user?.platform_label || "其他平台").trim() || "其他平台";
+  return `<span class="badge off">${escapeHtml(label)}</span>`;
 }
 
 function renderGroupBubbleChart() {
@@ -11300,7 +11426,7 @@ function renderUsers() {
   $("#userRows").innerHTML = rows.length
     ? rows.map((user) => `
       <tr data-user-id="${escapeHtml(user.user_id)}" class="${user.user_id === state.selectedUserId ? "is-selected" : ""}">
-        <td class="user-cell identity"><strong title="${escapeHtml(user.display_name || user.nickname || user.user_id)}">${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong>${user.is_qq_user ? "" : ` <span class="badge off">非 QQ</span>`}${Array.isArray(user.alias_user_ids) && user.alias_user_ids.length ? ` <span class="badge ok" title="${escapeHtml(user.alias_user_ids.join("\\n"))}">已合并 ${escapeHtml(user.alias_user_ids.length)} 个身份</span>` : ""}<br><span class="user-id-line"><span class="muted mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span><button type="button" class="copy-id-btn" data-copy-user-id="${escapeHtml(user.user_id)}">复制</button></span></td>
+        <td class="user-cell identity"><strong title="${escapeHtml(user.display_name || user.nickname || user.user_id)}">${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong> ${userPlatformBadge(user)}${Array.isArray(user.alias_user_ids) && user.alias_user_ids.length ? ` <span class="badge ok" title="${escapeHtml(user.alias_user_ids.join("\\n"))}">已合并 ${escapeHtml(user.alias_user_ids.length)} 个身份</span>` : ""}<br><span class="user-id-line"><span class="muted mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span><button type="button" class="copy-id-btn" data-copy-user-id="${escapeHtml(user.user_id)}">复制</button></span></td>
         <td class="user-cell relation"><span class="badge ${user.enabled ? "" : "off"}">${escapeHtml(user.enabled ? "启用" : "停用")}</span> <span class="badge">${escapeHtml(user.relationship_role_label || "次要用户")}</span> <span class="muted">${escapeHtml(user.relationship_stage || "未分层")}</span><br><span>分数 ${escapeHtml(user.relationship_score)}</span></td>
         <td class="user-cell compact">入站 ${escapeHtml(user.inbound_count)} · 回复 ${escapeHtml(user.reply_count)}<br><span class="muted">记忆 ${escapeHtml(user.memory_items)} 条</span></td>
         <td class="user-cell proactive"><span>今日 ${escapeHtml(user.sent_today)} · 总计 ${escapeHtml(user.proactive_sent_count)}</span><br><span class="muted truncate" title="${escapeHtml(user.next_proactive || "")}">${escapeHtml(user.next_proactive)}</span></td>
@@ -16844,8 +16970,8 @@ function renderLongTermStrategyOverview(selector, { creative = {}, bili = {}, qz
     },
     {
       title: "QQ 空间",
-      tone: qzone.enabled && qzone.available ? (qzone.last_status && qzone.last_status.startsWith("paused:") ? "warn" : "ok") : qzone.enabled ? "warn" : "off",
-      meta: [qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭", qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭", qzone.comment_inbox_enabled ? "评论收件箱开启" : ""].filter(Boolean),
+      tone: qzone.platform_supported === false ? "off" : qzone.enabled && qzone.available ? (qzone.last_status && qzone.last_status.startsWith("paused:") ? "warn" : "ok") : qzone.enabled ? "warn" : "off",
+      meta: [qzone.platform_supported === false ? "QQ 官方不支持" : (qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭"), qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭", qzone.comment_inbox_enabled ? "评论收件箱开启" : ""].filter(Boolean),
       text: qzone.last_status && qzone.last_status.startsWith("paused:") ? `自动说说已暂停：${qzone.auth_failure_reason || qzone.last_status}` : (qzone.last_text || "暂无最近说说"),
     },
     {
@@ -16996,7 +17122,7 @@ function renderQuickStartStatus(settings) {
       tab: null,
     },
     {
-      label: "运行平台",
+      label: "陌生用户兜底",
       value: platform || "未配置",
       ok: Boolean(platform),
       tab: null,
@@ -19035,6 +19161,7 @@ function featureRelatedSettings(key) {
       tts_generation_mode: "fast_tag",
       tts_voice_language: "ja",
       tts_fishaudio_model: "auto",
+      tts_fishaudio_emotion_mode: "balanced",
       tts_delivery_mode: "voice_and_text",
       tts_foreign_text_mode: "translation",
       tts_conversion_scope: "partial",
@@ -19054,6 +19181,10 @@ function featureRelatedSettings(key) {
       tts_local_playback_min_interval_seconds: 0,
       enable_tts_live_subtitle_sync: false,
       tts_live_subtitle_url: "",
+      enable_busy_reply_gate: false,
+      busy_reply_min_delay_seconds: 60,
+      busy_reply_max_delay_seconds: 300,
+      busy_reply_proactive_resume_buffer_minutes: 10,
       auto_voice_enabled: true,
       tts_conversion_scope: "full",
       auto_voice_max_chars: 80,
@@ -19143,6 +19274,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     const dreamChildren = new Set(["dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"]);
     if (dreamChildren.has(settingKey) && !boolSetting("enable_enhanced_dreams")) return false;
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
+    const busyChildren = new Set(["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"]);
     if (settingKey === "enable_qq_custom_presence_sync") {
       return boolSetting("enable_qq_presence_sync");
     }
@@ -19154,6 +19286,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       if (settingKey === "rest_backlog_max_messages") return boolSetting("enable_rest_backlog_reply");
       return true;
     }
+    if (busyChildren.has(settingKey)) return boolSetting("enable_busy_reply_gate");
     return true;
   }
   if (featureKey === "enable_environment_perception") {
@@ -20211,7 +20344,6 @@ function featureDetailPage(key) {
   const ungroupedRows = related.filter((item) => !renderedSectionKeys.has(item.key)).map(settingRow).join("");
   const extraParamPanel = [
     key === "enable_segmented_proactive_reply" ? segmentedPreviewPanelHtml() : "",
-    key === "enable_photo_text_action" ? photoApiEndpointEditorHtml() : "",
   ].filter(Boolean).join("");
   const customFeaturePanel = key === "enable_food_menu_recommendation" ? foodMenuFeaturePanelHtml() : "";
   const settingsRows = related.length
@@ -20348,8 +20480,11 @@ function bindFeatureDetailActions() {
               renderFeatureSwitches();
             }
           };
-          if (state.selectedFeatureKey === "enable_humanized_states" && input.dataset.featureParam === "enable_rest_reply_simulation") {
-            syncSettingBackedFeatureParam("enable_rest_reply_simulation", { rerender: input.checked });
+          if (
+            state.selectedFeatureKey === "enable_humanized_states"
+            && ["enable_rest_reply_simulation", "enable_busy_reply_gate"].includes(input.dataset.featureParam)
+          ) {
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
           if (
             state.selectedFeatureKey === "enable_humanized_states"
@@ -20486,9 +20621,6 @@ function bindFeatureDetailActions() {
   if (state.selectedFeatureKey === "enable_segmented_proactive_reply") {
     bindSegmentedPreview($("#featureFlags"));
   }
-  if (state.selectedFeatureKey === "enable_photo_text_action") {
-    bindPhotoApiEndpointEditor($("#featureFlags"));
-  }
   if (state.selectedFeatureKey === "enable_food_menu_recommendation") {
     bindFoodMenuFeatureActions();
   }
@@ -20518,7 +20650,42 @@ function bindPhotoApiEndpointEditor(root = document) {
         [endpoints[index + 1], endpoints[index]] = [endpoints[index], endpoints[index + 1]];
       }
       state.imageApiEndpointDraft = endpoints.map(normalizePhotoApiEndpoint);
-      renderFeatureSwitches();
+      if (editor.closest('[data-models-pane="image"]')) renderImageModelConfig();
+      else renderFeatureSwitches();
+    });
+  });
+  editor.querySelectorAll("[data-image-api-test]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const endpoints = collectPhotoApiEndpointEditor(root) || photoApiEndpointDraft();
+      const index = Number(button.dataset.index || -1);
+      const endpoint = endpoints[index];
+      if (!endpoint || !photoApiEndpointComplete(endpoint)) {
+        showToast("请先补齐地址、Key 和图片模型", "error");
+        return;
+      }
+      setActionBusy(button, true);
+      try {
+        const result = await postJson("/image_api/test", {
+          endpoint_index: index,
+          endpoint,
+        });
+        state.imageApiEndpointTestResults = {
+          ...(state.imageApiEndpointTestResults || {}),
+          [index]: {
+            fingerprint: photoApiEndpointFingerprint(endpoint, index),
+            result,
+          },
+        };
+        renderImageModelConfig();
+        showToast(
+          result.ok ? `${endpoint.name} 测试通过` : `${endpoint.name} 测试失败：${result.error || "未返回有效图片"}`,
+          result.ok ? "success" : "error",
+        );
+      } catch (error) {
+        showToast(`${endpoint.name} 测试失败：${error.message}`, "error");
+      } finally {
+        setActionBusy(button, false);
+      }
     });
   });
 }
@@ -20565,7 +20732,92 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
   });
 }
 
+function syncModelsSectionControls() {
+  const section = state.modelsSection === "image" ? "image" : "providers";
+  state.modelsSection = section;
+  document.querySelectorAll("[data-models-section]").forEach((button) => {
+    const active = button.dataset.modelsSection === section;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+    if (button.dataset.modelsSectionBound !== "1") {
+      button.addEventListener("click", () => {
+        state.modelsSection = button.dataset.modelsSection === "image" ? "image" : "providers";
+        renderProviders();
+        if (state.modelsSection === "image" && !state.lazyLoaded.imageApiStatus) {
+          loadImageApiStatus().catch((error) => showToast(`读取生图 API 状态失败：${error.message}`, "error"));
+        }
+      });
+      button.dataset.modelsSectionBound = "1";
+    }
+  });
+  document.querySelectorAll("[data-models-pane]").forEach((pane) => {
+    pane.hidden = pane.dataset.modelsPane !== section;
+  });
+  return section;
+}
+
+function renderImageModelConfig() {
+  const summary = document.getElementById("imageModelSummary");
+  const editor = document.getElementById("imageModelEditor");
+  if (!summary || !editor) return;
+  const settings = state.overview?.settings || {};
+  const endpoints = photoApiEndpointDraft();
+  const enabled = endpoints.filter((item) => item.enabled);
+  const ready = endpoints.filter(photoApiEndpointComplete);
+  const tested = endpoints.filter((item, index) => Boolean(photoApiEndpointResult(item, index)?.ran_at || photoApiEndpointResult(item, index)?.ran_at_text));
+  const passed = endpoints.filter((item, index) => Boolean(photoApiEndpointResult(item, index)?.ok));
+  const backend = String(settings.photo_generation_backend || "auto");
+  const backendOptions = [
+    ["auto", "自动：在线 API → ComfyUI → SDGen"],
+    ["external", "只用在线图片 API"],
+    ["comfyui", "只用 ComfyUI"],
+    ["sdgen", "只用 SDGen"],
+    ["tool_call", "函数工具"],
+  ];
+  const backendLabel = backendOptions.find(([value]) => value === backend)?.[1] || backend;
+  summary.innerHTML = `
+    <div>
+      <span>当前路由</span>
+      <b>${escapeHtml(backendLabel)}</b>
+    </div>
+    <div>
+      <span>在线 API</span>
+      <b>${escapeHtml(`${ready.length}/${endpoints.length} 配置完整`)}</b>
+    </div>
+    <div>
+      <span>单独测试</span>
+      <b>${escapeHtml(tested.length ? `${passed.length}/${tested.length} 通过` : "尚未测试")}</b>
+    </div>
+    <div>
+      <span>启用队列</span>
+      <b>${escapeHtml(`${enabled.length} 条`)}</b>
+    </div>
+  `;
+  editor.innerHTML = `
+    <section class="image-model-backend">
+      <div>
+        <b>生图后端</b>
+        <span>决定真实生图时使用在线队列、本地工作流或函数工具。</span>
+      </div>
+      <select id="imageGenerationBackend">
+        ${backendOptions.map(([value, label]) => `<option value="${escapeHtml(value)}"${backend === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+      </select>
+    </section>
+    ${photoApiEndpointEditorHtml({
+      showTests: true,
+      title: "在线生图 API 队列",
+      description: "调整优先级后保存即可切换主用模型；单独测试只调用当前这一条，不触发队列和本地后端回退。",
+    })}
+  `;
+  bindPhotoApiEndpointEditor(document.getElementById("modelsImagePane"));
+}
+
 function renderProviders() {
+  const section = syncModelsSectionControls();
+  if (section === "image") {
+    renderImageModelConfig();
+    return;
+  }
   if (window.PrivateCompanionProviderTree?.renderProviders) {
     const saveButton = document.getElementById("saveProvidersBtn");
     const testButton = document.getElementById("testAllProvidersBtn");
@@ -25789,6 +26041,31 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   state.overview.settings.model_timeout_overrides = { ...timeoutOverrides };
   state.overview.settings.model_fallback_overrides = { ...fallbackOverrides };
   state.providerConfigMode = provider_config_mode;
+  renderProviders();
+});
+
+$("#saveImageModelsBtn").addEventListener("click", async () => {
+  const pane = document.getElementById("modelsImagePane");
+  const endpoints = collectPhotoApiEndpointEditor(pane) || photoApiEndpointDraft();
+  const photo_generation_backend = document.getElementById("imageGenerationBackend")?.value || "auto";
+  const saved = await runAction(
+    () => postJson("/settings/update", {
+      settings: {
+        photo_generation_backend,
+        external_image_api_endpoints: endpoints,
+      },
+    }),
+    "已保存并应用生图模型配置",
+    $("#saveImageModelsBtn"),
+    { reload: false },
+  );
+  if (!saved) return;
+  state.imageApiEndpointDraft = endpoints.map(normalizePhotoApiEndpoint);
+  state.imageApiEndpointSavedFingerprints = state.imageApiEndpointDraft
+    .map((endpoint, index) => photoApiEndpointFingerprint(endpoint, index));
+  state.imageApiEndpointTestResults = {};
+  state.lazyLoaded.imageApiStatus = false;
+  await loadImageApiStatus(true).catch((error) => showToast(`刷新生图 API 状态失败：${error.message}`, "error"));
   renderProviders();
 });
 

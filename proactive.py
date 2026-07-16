@@ -570,7 +570,12 @@ class ProactiveMixin:
         user_id = normalizer(user_id) if callable(normalizer) else _single_line(user_id, 128)
         if not user_id or self._is_bot_self_user_id(user_id):
             return ""
-        platform = _single_line(getattr(self, "target_platform", ""), 40) or "aiocqhttp"
+        platform = ""
+        instance_resolver = getattr(self, "_preferred_platform_instance_id", None)
+        if callable(instance_resolver):
+            platform = _single_line(instance_resolver(), 80)
+        if not platform:
+            platform = _single_line(getattr(self, "target_platform", ""), 80) or "aiocqhttp"
         return f"{platform}:FriendMessage:{user_id}"
 
     def _private_delivery_user_id_for(self, user_id: str) -> str:
@@ -2065,6 +2070,22 @@ class ProactiveMixin:
             )
             if rest_until > now and _safe_float(impulse.get("window_start_at"), 0) < rest_until:
                 shift = rest_until - _safe_float(impulse.get("window_start_at"), 0) + random.uniform(20 * 60, 90 * 60)
+                impulse["window_start_at"] = _safe_float(impulse.get("window_start_at"), 0) + shift
+                impulse["preferred_ts"] = _safe_float(impulse.get("preferred_ts"), 0) + shift
+                impulse["best_until_at"] = _safe_float(impulse.get("best_until_at"), 0) + shift
+                impulse["expire_at"] = _safe_float(impulse.get("expire_at"), 0) + shift
+            busy_gate = getattr(self, "_busy_reply_proactive_block_until", None)
+            busy_until = 0.0
+            if callable(busy_gate):
+                try:
+                    busy_until = _safe_float(
+                        busy_gate(user, now=now, reason=reason, source=source),
+                        0.0,
+                    )
+                except Exception:
+                    busy_until = 0.0
+            if busy_until > now and _safe_float(impulse.get("window_start_at"), 0) < busy_until:
+                shift = busy_until - _safe_float(impulse.get("window_start_at"), 0)
                 impulse["window_start_at"] = _safe_float(impulse.get("window_start_at"), 0) + shift
                 impulse["preferred_ts"] = _safe_float(impulse.get("preferred_ts"), 0) + shift
                 impulse["best_until_at"] = _safe_float(impulse.get("best_until_at"), 0) + shift

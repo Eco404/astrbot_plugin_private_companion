@@ -3271,26 +3271,6 @@ class NewsExplorationMixin:
             state["ai_daily"] = ai_state
         return ai_state
 
-    def _is_now_in_ai_daily_window(self, now_dt: datetime | None = None) -> bool:
-        now_dt = now_dt or datetime.now()
-        start, end = self._parse_window_minutes(str(getattr(self, "ai_daily_check_window", "") or "07:30-12:30"))
-        if start is None or end is None:
-            start, end = 7 * 60 + 30, 12 * 60 + 30
-        minute = now_dt.hour * 60 + now_dt.minute
-        if end < start:
-            return minute >= start or minute <= end
-        return start <= minute <= end
-
-    def _ai_daily_window_has_passed(self, now_dt: datetime | None = None) -> bool:
-        now_dt = now_dt or datetime.now()
-        start, end = self._parse_window_minutes(str(getattr(self, "ai_daily_check_window", "") or "07:30-12:30"))
-        if start is None or end is None:
-            start, end = 7 * 60 + 30, 12 * 60 + 30
-        minute = now_dt.hour * 60 + now_dt.minute
-        if end < start:
-            return False
-        return minute > end
-
     @staticmethod
     def _news_item_is_today(item: dict[str, Any], today: str | None = None) -> bool:
         today = today or _today_key()

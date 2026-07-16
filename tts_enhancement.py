@@ -36,6 +36,7 @@ EMOTION_TAG_PATTERN = re.compile(r"\[([^\[\]\n]{1,24})\]")
 FISH_AUDIO_S2_CUE_PATTERN = re.compile(r"\[([^\[\]\n]{1,40})\]")
 FISH_AUDIO_S1_CUE_PATTERN = re.compile(r"\(([^()\n]{1,24})\)", re.IGNORECASE)
 FISH_AUDIO_MODELS = {"s1", "s2-pro", "s2.1-pro", "s2.1-pro-free"}
+FISH_AUDIO_EMOTION_MODES = {"balanced", "expressive", "manual"}
 FISH_AUDIO_S1_CUES = frozenset({
     "angry", "sad", "excited", "surprised", "satisfied", "delighted",
     "scared", "worried", "upset", "nervous", "frustrated", "depressed",
@@ -156,6 +157,14 @@ class TtsEnhancementMixin:
         self.tts_fishaudio_model = self._cfg_str(config, "tts_fishaudio_model", "auto", "auto").lower()
         if self.tts_fishaudio_model not in {"auto", *FISH_AUDIO_MODELS}:
             self.tts_fishaudio_model = "auto"
+        self.tts_fishaudio_emotion_mode = self._cfg_str(
+            config,
+            "tts_fishaudio_emotion_mode",
+            "balanced",
+            "balanced",
+        ).lower()
+        if self.tts_fishaudio_emotion_mode not in FISH_AUDIO_EMOTION_MODES:
+            self.tts_fishaudio_emotion_mode = "balanced"
         self.tts_frequency_control_mode = self._cfg_str(config, "tts_frequency_control_mode", "global", "global").lower()
         if self.tts_frequency_control_mode not in {"global", "legacy"}:
             self.tts_frequency_control_mode = "global"
@@ -350,17 +359,26 @@ class TtsEnhancementMixin:
         positive, negative = self._tts_emotion_tag_examples(provider_kind)
         if not positive or not negative:
             return ""
+        emotion_mode = str(getattr(self, "tts_fishaudio_emotion_mode", "balanced") or "balanced").lower()
+        if provider_kind.startswith("fishaudio") and emotion_mode == "manual":
+            syntax = "英文圆括号" if provider_kind == "fishaudio_s1" else "方括号"
+            return f"Fish Audio 手动模式：{subject}只保留输入中已有的合法{syntax}控制词，不要自动新增情绪或语气控制。"
         if provider_kind == "fishaudio_s1":
-            return (
+            base = (
                 f"Fish Audio S1 在{subject}只使用官方英文圆括号控制标记，如 {positive}、{negative}、"
                 "(whispering)、(sighing)；句级情绪放在句首，每句只选一个主要情绪，避免冲突和滥用。"
             )
+            if emotion_mode == "expressive":
+                return base + "情绪明确时可再组合语气或音效，总数最多 3 个。"
+            return base + "仅在情绪明确时使用 1 个主要情绪，必要时再加 1 个语气控制。"
         if provider_kind.startswith("fishaudio"):
-            return (
+            base = (
                 f"Fish Audio S2 在{subject}使用简短方括号自然语言控制，如 {positive}、{negative}、"
                 "[whispering]、[sighing]、[break]；句级情绪通常放句首，语气或音效放在生效位置。"
-                "每句只选一个主要情绪，组合控制最多 3 个，避免冲突、长描述和短句滥用。"
             )
+            if emotion_mode == "expressive":
+                return base + "每句只选一个主要情绪，可组合必要的语气或音效，总数最多 3 个，避免冲突和长描述。"
+            return base + "组合控制最多 3 个；本模式仅在情绪明确时使用 1 个主要情绪，必要时再加 1 个语气控制，中性短句不要硬加标签。"
         return f"可以在{subject}插入方括号情绪标签，如 {positive}、{negative}。"
 
     def _tts_language_label(self) -> str:
@@ -747,6 +765,106 @@ class TtsEnhancementMixin:
         source = FISH_AUDIO_S1_CUE_PATTERN.sub(repl, source)
         source = FISH_AUDIO_S2_CUE_PATTERN.sub(repl, source)
         return source
+
+    def _fishaudio_emotion_mode(self) -> str:
+        mode = str(getattr(self, "tts_fishaudio_emotion_mode", "balanced") or "balanced").strip().lower()
+        return mode if mode in FISH_AUDIO_EMOTION_MODES else "balanced"
+
+    @staticmethod
+    def _fishaudio_context_emotion_cues(text: str, *, mode: str) -> list[str]:
+        source = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+        if not source:
+            return []
+
+        emotion_rules = (
+            ("angry", ((r"气死|氣死|生气|生氣|火大|滚开|滾開|混蛋|ふざけ|むかつ|怒って|怒る", 4),)),
+            ("upset", (
+                (r"笨蛋|ばか|バカ|都说了|都說了|怎么还|怎麼還|不许|不許|不准|烦死|煩死|讨厌啦|討厭啦|やめて|って言った|しつこい|ひどい", 3),
+                (r"(?:^|[\s，,。.!！?？…~～])(哼|ふん|むぅ|まったく)(?:[\s，,。.!！?？…~～]|$)", 1),
+            )),
+            ("sad", ((r"难过|難過|伤心|傷心|想哭|泪|淚|悲しい|つらい|寂しい|泣きたい", 3),)),
+            ("worried", ((r"担心|擔心|小心一点|小心一點|没事吧|沒事吧|还好吗|還好嗎|心配|大丈夫[？?]|気をつけ", 3),)),
+            ("surprised", ((r"竟然|居然|真的吗|真的嗎|真的假的|没想到|沒想到|えっ|ええっ|まさか|本当[？?]", 3),)),
+            ("excited", ((r"好期待|太棒了|好耶|冲冲冲|衝衝衝|迫不及待|楽しみ|わくわく|最高|やった", 3),)),
+            ("happy", ((r"开心|開心|高兴|高興|喜欢你|喜歡你|爱你|愛你|太好了|嬉しい|楽しい|大好き|よかった", 3),)),
+            ("grateful", ((r"谢谢你|謝謝你|感谢|感謝|多亏你|多虧你|ありがとう|助かった", 3),)),
+            ("comforting", ((r"别怕|別怕|没关系|沒關係|我陪你|我在呢|慢慢来|慢慢來|そばにいる|無理しないで|安心して", 3),)),
+            ("sleepy", ((r"好困|困死|想睡|睡着|睡著|打哈欠|眠い|眠たい|寝たい|あくび", 3),)),
+            ("embarrassed", ((r"害羞|羞死|脸红|臉紅|不好意思|别看|別看|被发现|被發現|恥ずか|照れ|顔が赤|見ないで", 3),)),
+        )
+        scores: dict[str, int] = {}
+        for cue, patterns in emotion_rules:
+            scores[cue] = sum(weight for pattern, weight in patterns if re.search(pattern, source, flags=re.IGNORECASE))
+
+        playful_complaint = bool(re.search(r"嘛|啦|呀|哦|呜|嗚|唔|じゃん|だもん|バカ|ばか|[~～]", source))
+        if scores.get("upset", 0) >= 3 and scores.get("angry", 0) < scores["upset"] and playful_complaint:
+            scores["embarrassed"] = max(scores.get("embarrassed", 0), 2)
+
+        priority = (
+            "angry", "upset", "sad", "worried", "surprised", "excited",
+            "happy", "grateful", "comforting", "sleepy", "embarrassed",
+        )
+        primary_candidates = [cue for cue in priority if scores.get(cue, 0) >= 3]
+        primary = max(primary_candidates, key=lambda cue: (scores[cue], -priority.index(cue))) if primary_candidates else ""
+
+        tone_rules = (
+            ("sighing", r"(?:^|[\s，,、。.!！?？…~～])(唉|哎|呜+|嗚+|唔|はぁ|ふぅ|うーん|まったく)(?:[\s，,、。.!！?？…~～]|$)"),
+            ("whispering", r"悄悄|小声|小聲|耳边|耳邊|こっそり|囁|小声で"),
+            ("laughing", r"哈哈|嘿嘿|嘻嘻|笑死|ふふ|はは|あはは|笑っ"),
+            ("sobbing", r"哭了|哭泣|抽泣|泣いて|すすり泣|しくしく"),
+            ("soft tone", r"晚安|慢慢说|慢慢說|轻声|輕聲|おやすみ|優しく|そっと"),
+        )
+        tones = [cue for cue, pattern in tone_rules if re.search(pattern, source, flags=re.IGNORECASE)]
+        if not primary:
+            return tones[:1]
+
+        cues = [primary]
+        if primary == "upset" and scores.get("embarrassed", 0) >= 2:
+            cues.append("embarrassed")
+
+        max_cues = 3 if mode == "expressive" else 2
+        for cue in tones:
+            if cue not in cues and len(cues) < max_cues:
+                cues.append(cue)
+        return cues[:max_cues]
+
+    def _apply_fishaudio_emotion_control(
+        self,
+        text: str,
+        *,
+        provider_kind: str,
+        source_text: str = "",
+    ) -> tuple[str, list[str]]:
+        spoken = str(text or "").strip()
+        if not spoken or not provider_kind.startswith("fishaudio"):
+            return spoken, []
+        mode = self._fishaudio_emotion_mode()
+        if mode == "manual":
+            return spoken, []
+
+        s1 = provider_kind == "fishaudio_s1"
+        cue_pattern = FISH_AUDIO_S1_CUE_PATTERN if s1 else FISH_AUDIO_S2_CUE_PATTERN
+        for match in cue_pattern.finditer(spoken):
+            if self._fishaudio_canonical_cue(match.group(1), s1=s1):
+                return spoken, []
+
+        context = f"{source_text}\n{spoken}".strip()
+        context = FISH_AUDIO_S2_CUE_PATTERN.sub("", context)
+        context = FISH_AUDIO_S1_CUE_PATTERN.sub("", context)
+        inferred = self._fishaudio_context_emotion_cues(context, mode=mode)
+        canonical: list[str] = []
+        for cue in inferred:
+            normalized = self._fishaudio_canonical_cue(cue, s1=s1)
+            if normalized and normalized not in canonical:
+                canonical.append(normalized)
+        if not canonical:
+            return spoken, []
+
+        if s1:
+            prefix = "".join(f"({cue})" for cue in canonical)
+        else:
+            prefix = "".join(f"[{cue}]" for cue in canonical)
+        return f"{prefix}{spoken}", canonical
 
     def _strip_or_keep_emotion_tags(self, text: str, *, provider_kind: str) -> str:
         if provider_kind == "fishaudio_s1":
@@ -1180,6 +1298,9 @@ TTS 朗读文本：
         conversion_scope = getattr(self, "tts_conversion_scope", "partial")
         full_scope = conversion_scope == "full"
         supports_emotion = self._tts_provider_allows_emotion_tags(provider_kind)
+        auto_emotion = supports_emotion and not (
+            provider_kind.startswith("fishaudio") and self._fishaudio_emotion_mode() == "manual"
+        )
         if mode == "fast_tag":
             if frequency_mode == "legacy":
                 usage_rule = "由你根据当前回复是否适合被听见、情绪是否更贴近、用户是否明显期待语音来自行判断；不要为了格式而滥用。"
@@ -1208,21 +1329,21 @@ TTS 朗读文本：
                 examples = (
                     "示例：\n"
                     "不使用语音：嗯，我在听。你慢慢说。\n"
-                    f"使用语音：<pc_tts>{positive_emotion if supports_emotion else ''}嗯，我在听。你慢慢说。</pc_tts>"
+                    f"使用语音：<pc_tts>{positive_emotion if auto_emotion else ''}嗯，我在听。你慢慢说。</pc_tts>"
                 )
             elif full_scope and voice_lang == "en":
                 visible = "" if delivery_mode == "voice_only" or foreign_text_mode == "original" else "我在听，你慢慢说。"
                 examples = (
                     "示例：\n"
                     "不使用语音：我在听，你慢慢说。\n"
-                    f"使用语音：<pc_tts>{negative_emotion if supports_emotion else ''}I am listening. Take your time.</pc_tts>{visible}"
+                    f"使用语音：<pc_tts>{negative_emotion if auto_emotion else ''}I am listening. Take your time.</pc_tts>{visible}"
                 )
             elif full_scope:
                 visible = "" if delivery_mode == "voice_only" or foreign_text_mode == "original" else "我有在好好听哦，你慢慢说。"
                 examples = (
                     "示例：\n"
                     "不使用语音：我有在好好听哦，你慢慢说。\n"
-                    f"使用语音：<pc_tts>{negative_emotion if supports_emotion else ''}ちゃんと聞いてるよ。ゆっくり話してね。</pc_tts>{visible}"
+                    f"使用语音：<pc_tts>{negative_emotion if auto_emotion else ''}ちゃんと聞いてるよ。ゆっくり話してね。</pc_tts>{visible}"
                 )
             elif voice_lang == "zh":
                 examples = "示例：先别急，<pc_tts>我陪你想一下。</pc_tts>这件事可以一点点拆开。"
@@ -3084,6 +3205,13 @@ Provider 规则：{emotion_rule}
         provider = await self._get_tts_conversion_provider(event) if event is not None else None
         lang = self._tts_language_label()
         persona_context = await self._format_tts_persona_voice_context(event)
+        fish_rule = ""
+        if provider_kind.startswith("fishaudio"):
+            fish_rule = (
+                "\n- "
+                + self._tts_emotion_tag_rule(provider_kind, subject="最终朗读文本中")
+                + " 这些控制词属于合成指令，不要翻译成口语，也不要另行解释。"
+            )
         prompt = f"""
 把下面内容改写成自然{lang}口语，只输出朗读文本，不要解释。
 要求：
@@ -3091,6 +3219,7 @@ Provider 规则：{emotion_rule}
 - 中文评价、语气词和说明句必须改成{lang}，不要夹中文。
 - 保留原回复的情绪，并贴合当前人格的称呼、距离感、口癖和说话方式。
 - 不要添加原文没有的新信息。
+{fish_rule}
 {persona_context}
 
 原文：
@@ -3157,8 +3286,9 @@ Provider 规则：{emotion_rule}
         source: str = "private_companion",
     ) -> Any | None:
         provider_kind = self._tts_provider_kind(tts_provider, provider_settings)
+        fish_model = ""
         if provider_kind.startswith("fishaudio"):
-            self._prepare_fishaudio_provider_model(tts_provider, provider_settings)
+            fish_model = self._prepare_fishaudio_provider_model(tts_provider, provider_settings)
         sanitized = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
         if not sanitized:
             return None
@@ -3168,6 +3298,24 @@ Provider 规则：{emotion_rule}
                 _single_line(spoken, 80),
                 _single_line(sanitized, 80),
             )
+        if provider_kind.startswith("fishaudio"):
+            sanitized, applied_cues = self._apply_fishaudio_emotion_control(
+                sanitized,
+                provider_kind=provider_kind,
+                source_text=source_text,
+            )
+            if applied_cues:
+                s1 = provider_kind == "fishaudio_s1"
+                rendered_cues = "".join(
+                    f"({cue})" if s1 else f"[{cue}]"
+                    for cue in applied_cues
+                )
+                logger.info(
+                    "[PrivateCompanion] FishAudio 专用情绪控制已应用: model=%s mode=%s cues=%s",
+                    fish_model or ("s1" if s1 else "s2-compatible"),
+                    self._fishaudio_emotion_mode(),
+                    rendered_cues,
+                )
         try:
             audio_path = await self._tts_generate_audio_path(tts_provider, sanitized)
         except Exception as exc:

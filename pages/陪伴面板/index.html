@@ -1396,38 +1396,51 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-models">
         <div class="section-head">
-          <h2>分项能力模型</h2>
-          <span class="muted">模型分流</span>
+          <h2>模型配置</h2>
+          <span class="muted">任务分流与生图后端</span>
         </div>
-        <div id="providerSummary" class="provider-summary"></div>
-        <div id="deepseekPeakCard"></div>
-        <div id="providerFlow" class="provider-flow"></div>
-        <div class="provider-config-mode-card">
-          <div>
-            <b>模型配置模式</b>
-            <span id="providerConfigModeHint">快速配置和精准配置互斥，保存时只写入当前模式下可见的模型。</span>
+        <nav class="models-subnav" aria-label="模型配置分类" role="tablist">
+          <button type="button" class="active" data-models-section="providers" role="tab" aria-selected="true">任务模型</button>
+          <button type="button" data-models-section="image" role="tab" aria-selected="false">生图模型</button>
+        </nav>
+        <div id="modelsProviderPane" data-models-pane="providers">
+          <div id="providerSummary" class="provider-summary"></div>
+          <div id="deepseekPeakCard"></div>
+          <div id="providerFlow" class="provider-flow"></div>
+          <div class="provider-config-mode-card">
+            <div>
+              <b>模型配置模式</b>
+              <span id="providerConfigModeHint">快速配置和精准配置互斥，保存时只写入当前模式下可见的模型。</span>
+            </div>
+            <div class="provider-config-mode" aria-label="模型配置模式">
+              <button type="button" data-provider-config-mode="quick" class="active">快速配置</button>
+              <button type="button" data-provider-config-mode="precision">精准配置</button>
+            </div>
           </div>
-          <div class="provider-config-mode" aria-label="模型配置模式">
-            <button type="button" data-provider-config-mode="quick" class="active">快速配置</button>
-            <button type="button" data-provider-config-mode="precision">精准配置</button>
+          <div class="provider-toolbar">
+            <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
+            <div class="provider-mode-switch" aria-label="模型配置筛选">
+              <button type="button" data-provider-mode="all" class="active">全部</button>
+              <button type="button" data-provider-mode="configured">已配置</button>
+              <button type="button" data-provider-mode="inherited">自动回退</button>
+              <button type="button" data-provider-mode="speed">低延迟优先</button>
+              <button type="button" data-provider-mode="quality">效果优先</button>
+              <button type="button" data-provider-mode="vision">视觉/外部</button>
+            </div>
+            <div class="provider-toolbar-actions">
+              <button id="testAllProvidersBtn" type="button">测试全部模型</button>
+              <button id="saveProvidersBtn" type="button">保存并覆盖两套模型配置</button>
+            </div>
+          </div>
+          <form id="providerForm" class="provider-groups"></form>
+        </div>
+        <div id="modelsImagePane" class="image-model-pane" data-models-pane="image" hidden>
+          <div id="imageModelSummary" class="image-model-summary"></div>
+          <div id="imageModelEditor"></div>
+          <div class="image-model-actions">
+            <button id="saveImageModelsBtn" type="button">保存并应用生图配置</button>
           </div>
         </div>
-        <div class="provider-toolbar">
-          <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
-          <div class="provider-mode-switch" aria-label="模型配置筛选">
-            <button type="button" data-provider-mode="all" class="active">全部</button>
-            <button type="button" data-provider-mode="configured">已配置</button>
-            <button type="button" data-provider-mode="inherited">自动回退</button>
-            <button type="button" data-provider-mode="speed">低延迟优先</button>
-            <button type="button" data-provider-mode="quality">效果优先</button>
-            <button type="button" data-provider-mode="vision">视觉/外部</button>
-          </div>
-          <div class="provider-toolbar-actions">
-            <button id="testAllProvidersBtn" type="button">测试全部模型</button>
-            <button id="saveProvidersBtn" type="button">保存并覆盖两套模型配置</button>
-          </div>
-        </div>
-        <form id="providerForm" class="provider-groups"></form>
       </section>
 
       <section class="panel qzone-panel" id="panel-qzone">

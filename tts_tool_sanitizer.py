@@ -14,6 +14,80 @@ from .helpers import _redact_outbound_secrets, _single_line, _strip_nonstandard_
 class TtsToolSanitizerMixin:
     """Handle TTS tags in send_message_to_user tool calls."""
 
+    @staticmethod
+    def _tool_response_names_and_args(resp: Any) -> tuple[list[str], list[Any]]:
+        names = getattr(resp, "tools_call_name", None)
+        if isinstance(names, str):
+            names = [names]
+        elif not isinstance(names, (list, tuple)):
+            names = []
+        args = getattr(resp, "tools_call_args", None)
+        if not isinstance(args, (list, tuple)):
+            args = []
+        return [str(item or "").strip() for item in names], list(args)
+
+    def _same_session_tool_text(self, event: Any, kwargs: dict[str, Any]) -> str:
+        messages = kwargs.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return ""
+        try:
+            current_session = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            current_session = ""
+        target_session = str(kwargs.get("session") or current_session or "")
+        if not current_session or target_session != current_session:
+            return ""
+        visible_parts: list[str] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                return ""
+            msg_type = str(item.get("type") or "").strip().lower()
+            if msg_type == "plain":
+                text = self._clean_tool_plain_text_tts_markup(item.get("text"))
+            elif msg_type == "record" and not (item.get("path") or item.get("url")):
+                text = self._clean_tool_plain_text_tts_markup(
+                    item.get("text") or item.get("content") or item.get("message")
+                )
+            else:
+                return ""
+            text = _redact_outbound_secrets(text, self).strip()
+            if text:
+                visible_parts.append(text)
+        return "\n".join(visible_parts).strip()
+
+    def _prepare_same_session_send_tool_response(self, event: Any, resp: Any) -> tuple[bool, str]:
+        names, args = self._tool_response_names_and_args(resp)
+        for index, name in enumerate(names):
+            if name != "send_message_to_user":
+                continue
+            payload = args[index] if index < len(args) and isinstance(args[index], dict) else {}
+            text = self._same_session_tool_text(event, payload)
+            if not text:
+                continue
+            try:
+                setattr(event, "_private_companion_same_session_tool_pending", True)
+                setattr(event, "_private_companion_same_session_tool_text", text)
+            except Exception:
+                pass
+            return True, text
+        return False, ""
+
+    def _defer_same_session_send_tool(self, event: Any, kwargs: dict[str, Any]) -> str:
+        text = self._same_session_tool_text(event, kwargs)
+        if not text:
+            return ""
+        try:
+            setattr(event, "_private_companion_same_session_tool_pending", True)
+            setattr(event, "_private_companion_same_session_tool_text", text)
+        except Exception:
+            pass
+        logger.info(
+            "[PrivateCompanion] 同会话 send_message_to_user 文本延后到最终回复: session=%s text=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            _single_line(text, 160),
+        )
+        return text
+
     def _clean_tool_plain_text_tts_markup(self, raw_text: Any) -> str:
         text = str(raw_text or "")
         if not text:
@@ -104,6 +178,14 @@ class TtsToolSanitizerMixin:
         messages = kwargs.get("messages")
         if not isinstance(messages, list) or not messages:
             return None
+        try:
+            event = context.context.event
+        except Exception:
+            event = None
+        if event is not None:
+            deferred_text = self._defer_same_session_send_tool(event, kwargs)
+            if deferred_text:
+                return "Current-session text delivery is deferred to the final assistant response; do not send it again."
         if not any(
             isinstance(item, dict)
             and (

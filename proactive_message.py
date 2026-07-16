@@ -421,6 +421,21 @@ class ProactiveMessageMixin:
                     return "user_explicit_rest"
             except Exception:
                 pass
+        busy_gate = getattr(self, "_busy_reply_proactive_block_until", None)
+        if callable(busy_gate):
+            try:
+                if _safe_float(
+                    busy_gate(
+                        user,
+                        now=now,
+                        reason="check_in",
+                        source="proactive_chat",
+                    ),
+                    0,
+                ) > now:
+                    return "bot_busy_schedule"
+            except Exception:
+                pass
         quiet_checker = getattr(self, "_is_quiet_time", None)
         insomnia_checker = getattr(self, "_can_send_insomnia_night_message", None)
         try:
@@ -5817,6 +5832,10 @@ Output:
     ) -> str:
         if not self.enable_poke_action:
             return "poke：未启用"
+        user_umo = str(user.get("umo") or "")
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("poke", umo=user_umo):
+            return "poke：当前平台不支持戳一戳，已改用普通文字"
         client = self._resolve_aiocqhttp_client()
         if client is None:
             return "poke：未找到可用的 QQ 客户端"
@@ -6088,6 +6107,9 @@ Output:
 
     def _input_status_user_id_from_umo(self, umo: str) -> str:
         if not umo or ":FriendMessage:" not in str(umo):
+            return ""
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("input_status", umo=umo):
             return ""
         session = self._parse_message_session(umo)
         if not session:
@@ -6690,6 +6712,7 @@ Output:
             reference_image_path = await self._photo_persona_reference_image_for_kind_async(
                 "selfie",
                 allow_daily_outfit=True,
+                selection_context=scene["prompt"],
             )
         backend_name, image_path, workflow_note = await self._generate_photo_image(
             workflow_kind=workflow_kind,
@@ -7689,6 +7712,7 @@ Output:
                 "kind": _single_line(workflow_kind, 30),
                 "backend": _single_line(backend, 80),
                 "ok": bool(ok),
+                "prompt_format": self._photo_generation_prompt_format_mode(),
                 "prompt": _single_line(prompt_text, 900),
                 "path": _single_line(image_path, 260),
                 "note": _single_line(note, 240),
@@ -7759,6 +7783,70 @@ Output:
         if fixed in prompt:
             return _single_line(prompt, 1800)
         return _single_line(f"{prompt}\n\nAdditional fixed prompt: {fixed}".strip(), 1800)
+
+    @staticmethod
+    def _normalize_photo_generation_prompt_format(value: Any) -> str:
+        text = str(value or "traditional").strip().lower().replace("-", "_")
+        if text in {"natural", "natural_language", "description", "prose", "自然语言", "自然语言描述"}:
+            return "natural_language"
+        return "traditional"
+
+    def _photo_generation_prompt_format_mode(self) -> str:
+        return self._normalize_photo_generation_prompt_format(
+            getattr(self, "photo_generation_prompt_format", "traditional")
+        )
+
+    def _photo_generation_prompt_format_instruction(self) -> str:
+        if self._photo_generation_prompt_format_mode() == "natural_language":
+            return (
+                "使用自然语言描述：用连贯、具体的英文句子描述主体、外观、动作、场景、光线、镜头、构图和风格；"
+                "不要输出标签堆、权重语法或 Positive prompt/Negative prompt 标题。需要避免的内容可在末句用 Avoid ... 自然表达。"
+            )
+        return (
+            "使用传统文生图提示词：英文短词组和逗号分隔标签，按主体、外观、服装、场景、光线、镜头、构图、风格排列；"
+            "使用 Positive prompt: ... Negative prompt: ... 结构，不要写解释性段落。"
+        )
+
+    def _apply_photo_generation_prompt_format(self, prompt_text: str) -> str:
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            return ""
+        mode = self._photo_generation_prompt_format_mode()
+        positive_match = re.search(
+            r"positive\s+prompt\s*:\s*(.*?)(?=negative\s+prompt\s*:|$)",
+            prompt,
+            flags=re.I | re.S,
+        )
+        negative_match = re.search(r"negative\s+prompt\s*:\s*(.*)$", prompt, flags=re.I | re.S)
+        if mode == "natural_language":
+            if not positive_match:
+                return _single_line(prompt, 1800)
+            positive = re.sub(r"\s+", " ", positive_match.group(1)).strip(" ,.;；。")
+            negative = re.sub(r"\s+", " ", negative_match.group(1) if negative_match else "").strip(" ,.;；。")
+            natural = f"Create a single coherent image showing {positive}."
+            if negative:
+                natural += f" Avoid {negative}."
+            return _single_line(natural, 1800)
+        if positive_match:
+            return _single_line(prompt, 1800)
+
+        positive_parts: list[str] = []
+        negative_parts: list[str] = []
+        for part in re.split(r"(?:\r?\n+|[。；;]+|(?<=[.!?])\s+)", prompt):
+            cleaned = re.sub(r"\s+", " ", str(part or "")).strip(" ,.;；。")
+            if not cleaned:
+                continue
+            if re.match(r"^(?:do\s+not|don't|avoid|without|no\b|不要|避免|禁止|不得)", cleaned, flags=re.I):
+                cleaned = re.sub(r"^(?:do\s+not|don't|avoid|without|no\b|不要|避免|禁止|不得)\s*", "", cleaned, flags=re.I)
+                if cleaned:
+                    negative_parts.append(cleaned)
+            else:
+                positive_parts.append(cleaned)
+        positive = ", ".join(positive_parts) or re.sub(r"\s+", " ", prompt)
+        formatted = f"Positive prompt: {positive}."
+        if negative_parts:
+            formatted += f" Negative prompt: {', '.join(negative_parts)}."
+        return _single_line(formatted, 1800)
 
     def _photo_generation_selfie_schedule_scene_hint(self) -> str:
         plan = self.data.get("daily_plan", {}) if isinstance(getattr(self, "data", {}), dict) else {}
@@ -8106,6 +8194,7 @@ Output:
     ) -> tuple[str, str, str]:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
+        prompt_text = self._apply_photo_generation_prompt_format(prompt_text)
         prompt_text, preset_names = self._apply_photo_generation_scene_presets(prompt_text, workflow_kind)
         prompt_text, selfie_scene_hint = self._apply_photo_generation_selfie_schedule_scene_prompt(
             prompt_text,
@@ -8119,6 +8208,7 @@ Output:
             reference_image_path = await self._photo_persona_reference_image_for_kind_async(
                 workflow_kind,
                 allow_daily_outfit=allow_daily_outfit_reference,
+                selection_context=prompt_text,
             )
         if selfie_scene_hint:
             logger.info(
@@ -8344,13 +8434,16 @@ Output:
 {style_name}
 风格要求：{style_instruction}
 
+【提示词表达方式】
+{self._photo_generation_prompt_format_instruction()}
+
 主动原因：{reason}
 
 输出 JSON：
 {{
   "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
   "use_persona_reference": true,
-  "prompt": "English image-generation prompt in this form: Positive prompt: subject, appearance, outfit, scene, lighting, camera, composition, style. Negative prompt: cropped head, faceless, mirror selfie unless explicitly requested, full-length mirror shot, phone covering face, text, watermark, logo, nsfw. Do not write chat tone or explanations.",
+  "prompt": "按上方提示词表达方式输出的英文生图提示词",
   "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
 }}
 
@@ -8358,7 +8451,7 @@ Output:
 1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。日程是背景参考，不可单独当作动作已经发生的证明。
 2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。若本次来自延后候选，画面应与原话题连续，不应伪装成发送当下的新现场。
 3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
-4. `prompt` 必须使用英文生图提示词形式,优先短语和逗号分隔标签；可以把必要中文专名作为 visual note 保留,但不要写任务说明。
+4. `prompt` 必须使用英文，并严格遵守“提示词表达方式”；可以把必要中文专名作为 visual note 保留，但不要写任务说明或聊天口吻。
 5. `prompt` 里要明确体现上面的风格要求。
 6. 不要包含 NSFW、隐私信息、用户真实电脑画面。
 7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
@@ -8485,6 +8578,49 @@ Output:
             return str(path)
         return ""
 
+    def _photo_reference_library_entries(self) -> list[dict[str, str]]:
+        raw_items = getattr(self, "photo_reference_library", [])
+        if not isinstance(raw_items, list):
+            raw_items = str(raw_items or "").splitlines()
+        entries: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for index, raw_item in enumerate(raw_items[:24], start=1):
+            if isinstance(raw_item, dict):
+                source = _single_line(raw_item.get("path") or raw_item.get("url"), 1000)
+                note = _single_line(raw_item.get("note") or raw_item.get("description"), 500)
+            else:
+                text = str(raw_item or "").strip()
+                parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)
+                source = _single_line(parts[0] if parts else "", 1000)
+                note = _single_line(parts[1] if len(parts) > 1 else "", 500)
+            source = source.strip().strip('"').strip("'")
+            if not source or source in seen:
+                continue
+            seen.add(source)
+            entries.append({
+                "id": f"library_{index}",
+                "source": source,
+                "note": note or "通用人物参考图；没有更具体的服装或场景匹配时使用",
+                "kind": "library",
+            })
+        return entries
+
+    def _photo_reference_local_path(self, source: str) -> str:
+        raw = _single_line(source, 1000).strip().strip('"').strip("'")
+        if not raw or re.match(r"^https?://", raw, flags=re.I):
+            return ""
+        candidates = [Path(raw).expanduser()]
+        if not candidates[0].is_absolute():
+            candidates.append(Path(self.data_dir) / raw)
+        for candidate in candidates:
+            try:
+                path = candidate.resolve()
+                if path.exists() and path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+                    return str(path)
+            except (OSError, ValueError):
+                continue
+        return ""
+
     def _daily_outfit_reference_image_path(self) -> str:
         item = self.data.get("daily_outfit_photo") if isinstance(getattr(self, "data", None), dict) else {}
         if not isinstance(item, dict):
@@ -8550,25 +8686,149 @@ Output:
         logger.info("[PrivateCompanion] 配置页人设参考图 URL 已缓存为本地文件: path=%s", _single_line(stable_path, 160))
         return stable_path
 
-    async def _photo_persona_reference_image_for_kind_async(
+    async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
+        updated_library: list[str] = []
+        library_changed = False
+        resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
+        for item in self._photo_reference_library_entries():
+            source = item["source"]
+            path = self._photo_reference_local_path(source)
+            if not path and re.match(r"^https?://", source, flags=re.I) and callable(resolver):
+                try:
+                    path = await resolver(source, stem=item["id"])
+                except Exception as exc:
+                    logger.info(
+                        "[PrivateCompanion] 参考图库远程图片下载失败: item=%s error=%s",
+                        item["id"],
+                        _single_line(exc, 120),
+                    )
+                if path:
+                    library_changed = True
+            persisted_source = path or source
+            updated_library.append(f"{persisted_source} || {item['note']}")
+            if path:
+                candidates.append({**item, "path": path})
+        if library_changed:
+            setter = getattr(self, "_set_photo_reference_library_config", None)
+            if callable(setter):
+                setter(updated_library)
+
+        if allow_daily_outfit:
+            outfit_path = self._daily_outfit_reference_image_path()
+            if outfit_path:
+                candidates.append({
+                    "id": "daily_outfit",
+                    "path": outfit_path,
+                    "source": outfit_path,
+                    "kind": "daily_outfit",
+                    "note": "今天生成的外出穿搭；仅在画面明确承接今天外出、通勤、上学、逛街或展示当日穿搭时使用，在家、卧室、睡前、刚起床等场景不要使用",
+                })
+        persona_path = await self._photo_persona_reference_image_path_async()
+        if persona_path and all(item.get("path") != persona_path for item in candidates):
+            candidates.append({
+                "id": "persona_default",
+                "path": persona_path,
+                "source": persona_path,
+                "kind": "persona",
+                "note": "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
+            })
+        return candidates
+
+    @staticmethod
+    def _photo_reference_candidate_score(candidate: dict[str, str], context_text: str) -> float:
+        context = re.sub(r"\s+", "", str(context_text or "")).lower()
+        note = re.sub(r"\s+", "", str(candidate.get("note") or "")).lower()
+        score = 2.0 if candidate.get("kind") == "persona" else 1.0
+        categories = (
+            ("home", ("在家", "居家", "卧室", "房间", "客厅", "宅家", "室内日常")),
+            ("sleep", ("睡衣", "睡前", "起床", "刚醒", "床上", "夜晚休息")),
+            ("outdoor", ("外出", "通勤", "上学", "上班", "逛街", "商场", "街头", "旅行")),
+            ("sport", ("运动", "健身", "跑步", "瑜伽", "泳装", "游泳")),
+            ("formal", ("正式", "礼服", "宴会", "约会", "聚会", "舞会")),
+            ("cos", ("cos", "cosplay", "角色扮演", "制服", "表演服")),
+        )
+        for name, words in categories:
+            context_hit = any(word in context for word in words)
+            note_hit = any(word in note for word in words)
+            if context_hit and candidate.get("kind") == "daily_outfit" and name in {"home", "sleep"}:
+                score -= 20.0
+            elif context_hit and note_hit:
+                score += 12.0
+        for token in re.split(r"[，,。；;、/|：:\s]+", note):
+            if len(token) >= 2 and token in context:
+                score += min(6.0, float(len(token)))
+        return score
+
+    async def _select_photo_reference_image_async(
         self,
         workflow_kind: str,
         *,
         allow_daily_outfit: bool = True,
+        selection_context: str = "",
     ) -> str:
         if not bool(getattr(self, "enable_photo_reference_image", False)):
             return ""
         if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
             return ""
-        if allow_daily_outfit:
-            outfit_path = self._daily_outfit_reference_image_path()
-            if outfit_path:
-                logger.info(
-                    "[PrivateCompanion] 自拍参考图优先使用今日穿搭图: path=%s",
-                    _single_line(outfit_path, 160),
-                )
-                return outfit_path
-        return await self._photo_persona_reference_image_path_async()
+        candidates = await self._photo_reference_candidates_async(allow_daily_outfit=allow_daily_outfit)
+        if not candidates:
+            return ""
+        selected = max(candidates, key=lambda item: self._photo_reference_candidate_score(item, selection_context))
+        provider_selector = getattr(self, "_task_provider", None)
+        provider_id = ""
+        if callable(provider_selector):
+            provider_id = provider_selector(
+                getattr(self, "photo_prompt_provider_id", ""),
+                getattr(self, "fast_response_provider_id", ""),
+                getattr(self, "llm_provider_id", ""),
+                getattr(self, "mai_style_provider_id", ""),
+            )
+        llm_call = getattr(self, "_llm_call", None)
+        if selection_context and len(candidates) > 1 and callable(llm_call):
+            options = "\n".join(
+                f"{index}. id={item['id']}；注释={_single_line(item.get('note'), 360)}"
+                for index, item in enumerate(candidates, start=1)
+            )
+            prompt = f"""
+你在为角色生图选择一张人物参考图。只依据画面需求与管理员给每张图的用途注释选择，不要总是选今日穿搭。
+如果画面在家、卧室、睡前或刚起床，应优先匹配居家服/睡衣；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
+只输出候选编号，不要解释。
+
+【最终画面需求】
+{_single_line(selection_context, 1600)}
+
+【候选参考图】
+{options}
+""".strip()
+            try:
+                raw = await llm_call(prompt, max_tokens=12, provider_id=provider_id or None, task="photo_reference_selection")
+                match = re.search(r"\b(\d{1,2})\b", str(raw or ""))
+                if match and 1 <= int(match.group(1)) <= len(candidates):
+                    selected = candidates[int(match.group(1)) - 1]
+            except Exception as exc:
+                logger.info("[PrivateCompanion] 参考图库模型选图失败，使用场景匹配结果: %s", _single_line(exc, 120))
+        logger.info(
+            "[PrivateCompanion] 参考图库已选图: id=%s kind=%s note=%s candidates=%s",
+            selected.get("id"),
+            selected.get("kind"),
+            _single_line(selected.get("note"), 160),
+            len(candidates),
+        )
+        return str(selected.get("path") or "")
+
+    async def _photo_persona_reference_image_for_kind_async(
+        self,
+        workflow_kind: str,
+        *,
+        allow_daily_outfit: bool = True,
+        selection_context: str = "",
+    ) -> str:
+        return await self._select_photo_reference_image_async(
+            workflow_kind,
+            allow_daily_outfit=allow_daily_outfit,
+            selection_context=selection_context,
+        )
 
     async def _run_comfyui_photo_workflow(
         self,
@@ -8973,10 +9233,17 @@ Output:
         normalizer = getattr(self, "_normalize_external_image_api_platform", None)
         configured = getattr(self, "external_image_api_platform", "auto")
         platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
-        if platform in {"openai", "bailian", "modelscope", "doubao", "gemini", "sensenova"}:
+        raw_base = str(getattr(self, "external_image_api_base_url", "") or "").strip().lower()
+        model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        if platform in {"auto", "openai"} and (
+            "apihub.agnes-ai.com" in raw_base or model.startswith("agnes-image-")
+        ):
+            return "agnes"
+        if platform in {"openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova"}:
             return platform
         base = self._normalized_external_image_api_base_url(platform=platform).lower()
-        model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        if "apihub.agnes-ai.com" in base or model.startswith("agnes-image-"):
+            return "agnes"
         if "token.sensenova.cn" in base or model in {"senova-u1-fast", "sensenova-u1-fast"}:
             return "sensenova"
         if any(token in base for token in ("volces.com", "volcengine.com", "ark.cn-", "ark.ap-", "visual.volcengineapi.com")):
@@ -9008,6 +9275,12 @@ Output:
         parsed = urlparse(raw)
         host = (parsed.netloc or "").strip().lower()
         path = (parsed.path or "").strip()
+
+        if resolved_platform == "agnes" or host == "apihub.agnes-ai.com":
+            scheme = parsed.scheme or "https"
+            api_root = re.match(r"^(.*?/v1)(?:/images/(?:generations|edits))?$", path, flags=re.I)
+            prefix = api_root.group(1) if api_root else "/v1"
+            return f"{scheme}://{host or 'apihub.agnes-ai.com'}{prefix}"
 
         console_hosts = {
             "bailian.console.aliyun.com",
@@ -9117,12 +9390,17 @@ Output:
             return "Gemini"
         if resolved == "openai":
             return "OpenAI 兼容"
+        if resolved == "agnes":
+            return "Agnes Image"
         if resolved == "sensenova":
             return "SenseNova 日日新"
         return "在线图片 API"
 
     def _external_image_endpoint(self, endpoint_type: str = "generations") -> str:
-        base = self._normalized_external_image_api_base_url(platform="openai").rstrip("/")
+        platform = self._resolved_external_image_api_platform()
+        base = self._normalized_external_image_api_base_url(
+            platform="agnes" if platform == "agnes" else "openai"
+        ).rstrip("/")
         if not base:
             return ""
         endpoint_type = str(endpoint_type or "generations").strip().lower()
@@ -9138,7 +9416,10 @@ Output:
         if not primary:
             return []
         candidates = [primary]
-        base = self._normalized_external_image_api_base_url(platform="openai").rstrip("/")
+        platform = self._resolved_external_image_api_platform()
+        base = self._normalized_external_image_api_base_url(
+            platform="agnes" if platform == "agnes" else "openai"
+        ).rstrip("/")
         endpoint_type = str(endpoint_type or "generations").strip().lower()
         target = "edits" if endpoint_type == "edits" else "generations"
         lowered_base = base.lower()
@@ -9161,6 +9442,66 @@ Output:
         if re.fullmatch(r"\d{2,5}x\d{2,5}", raw):
             return raw
         return "1024x1024"
+
+    @staticmethod
+    def _normalize_agnes_image_ratio(value: Any) -> str:
+        text = str(value or "").strip().lower().replace("：", ":").replace("/", ":")
+        aliases = {
+            "square": "1:1",
+            "方形": "1:1",
+            "portrait": "3:4",
+            "竖版": "3:4",
+            "landscape": "4:3",
+            "横版": "4:3",
+            "widescreen": "16:9",
+            "宽屏": "16:9",
+        }
+        text = aliases.get(text, text)
+        return text if text in {"1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2", "21:9"} else ""
+
+    def _agnes_image_size_and_ratio(self, image_size: str = "", prompt_text: str = "") -> tuple[str, str]:
+        raw = str(image_size or getattr(self, "external_image_api_size", "") or "1K").strip()
+        configured_ratio = self._normalize_agnes_image_ratio(getattr(self, "external_image_api_ratio", ""))
+        inline = re.fullmatch(
+            r"\s*([1-4])k(?:\s*[@|,;]\s*(1:1|3:4|4:3|16:9|9:16|2:3|3:2|21:9))?\s*",
+            raw,
+            flags=re.I,
+        )
+        inline_ratio = ""
+        if inline:
+            size = f"{inline.group(1)}K"
+            inline_ratio = self._normalize_agnes_image_ratio(inline.group(2))
+            ratio = inline_ratio or configured_ratio
+        elif re.fullmatch(r"\d{2,5}x\d{2,5}", raw.lower()):
+            size = raw.lower()
+            ratio = configured_ratio
+        else:
+            size = "1K"
+            ratio = configured_ratio
+
+        prompt = _single_line(prompt_text, 1800).lower().replace("：", ":")
+        prompt_ratio = ""
+        ratio_match = re.search(r"(?<!\d)(21:9|16:9|9:16|3:4|4:3|2:3|3:2|1:1)(?!\d)", prompt)
+        if ratio_match:
+            prompt_ratio = self._normalize_agnes_image_ratio(ratio_match.group(1))
+        elif re.search(r"\b(?:vertical|tall)\b|竖版|竖构图|纵向构图", prompt, flags=re.I):
+            prompt_ratio = "3:4"
+        elif re.search(r"\b(?:widescreen|ultrawide)\b|宽屏|超宽", prompt, flags=re.I):
+            prompt_ratio = "16:9"
+        ratio = configured_ratio or inline_ratio or prompt_ratio or ratio
+
+        exact = re.fullmatch(r"(\d{2,5})x(\d{2,5})", size)
+        if exact and ratio:
+            width, height = int(exact.group(1)), int(exact.group(2))
+            ratio_width, ratio_height = (int(part) for part in ratio.split(":"))
+            if abs((width / max(1, height)) - (ratio_width / max(1, ratio_height))) > 0.08:
+                longest = max(width, height)
+                tier = 1 if longest <= 1400 else 2 if longest <= 2600 else 3 if longest <= 3800 else 4
+                size = f"{tier}K"
+        if re.fullmatch(r"\d{2,5}x\d{2,5}", size):
+            # Agnes only documents ratio as a companion to 1K-4K tiers.
+            ratio = ""
+        return size, ratio
 
     def _sanitize_bailian_image_size(self, override: str = "") -> str:
         size = self._sanitize_external_image_size(override)
@@ -9502,6 +9843,10 @@ Output:
             return ""
         if platform == "gemini" and any(token in lowered for token in ("image", "imagen", "nano-banana")):
             return ""
+        if platform == "agnes":
+            if lowered.startswith("agnes-image-"):
+                return ""
+            return "Agnes Image 必须填写图片模型 ID，例如 agnes-image-2.1-flash"
         if platform == "sensenova":
             if lowered in {"senova-u1-fast", "sensenova-u1-fast"}:
                 return ""
@@ -9510,22 +9855,38 @@ Output:
             return f"在线图片模型填成了文本/聊天模型：{model}。请改成该平台的图片模型名，例如支持 /images/generations 或 /images/edits 的模型。"
         return ""
 
+    def _external_image_diagnostic_text(self, value: Any, limit: int = 220) -> str:
+        cleaned = _redact_outbound_secrets(value, self)
+        try:
+            header_values = self._external_image_custom_headers().values()
+        except Exception:
+            header_values = ()
+        for raw_secret in header_values:
+            secret = str(raw_secret or "").strip()
+            if len(secret) >= 4:
+                cleaned = cleaned.replace(secret, "[密钥已隐藏]")
+        return _single_line(cleaned, limit)
+
     def _external_image_api_error_note(self, status: int, text: str, *, reference: bool = False, endpoint: str = "") -> str:
-        raw = _single_line(text, 260)
+        diagnostic_text = getattr(self, "_external_image_diagnostic_text", None)
+        if not callable(diagnostic_text):
+            diagnostic_text = lambda value, limit=220: _single_line(_redact_outbound_secrets(value, self), limit)
+        raw = diagnostic_text(text, 260)
         lowered = raw.lower()
         if "requires an image model" in lowered or "image model" in lowered and "got" in lowered:
             return self._external_image_model_misconfiguration_note() or (
                 f"在线图片模型不支持 images 接口。当前模型：{_single_line(getattr(self, 'external_image_api_model', ''), 80) or '-'}，请改成图片模型。"
             )
         prefix = "参考图接口" if reference else ""
-        endpoint_note = f"端点 {endpoint} " if endpoint else ""
+        safe_endpoint = diagnostic_text(endpoint, 180)
+        endpoint_note = f"端点 {safe_endpoint} " if safe_endpoint else ""
         platform_getter = getattr(self, "_resolved_external_image_api_platform", None)
         platform = platform_getter() if callable(platform_getter) else ""
         if platform == "sensenova" and int(status) == 403:
             return (
                 f"{prefix}{endpoint_note}HTTP 403：SenseNova 官方错误码表示当前请求语言不受支持。"
                 "请把提示词改为中文或英文，并避免仅使用无法识别的混合符号/小语种后重试。"
-                f"返回：{_single_line(text, 120)}"
+                f"返回：{diagnostic_text(raw, 120)}"
             )
         if platform == "sensenova" and int(status) == 401:
             if "authorization not found" in lowered or "missing authorization" in lowered:
@@ -9536,7 +9897,7 @@ Output:
             return (
                 f"{prefix}{endpoint_note}HTTP 401：SenseNova 已收到 Bearer，但 API Key 无效或当前额度不足。"
                 "请在 platform.sensenova.cn 控制台检查 Key 状态与 Token Plan。"
-                f"返回：{_single_line(text, 120)}"
+                f"返回：{diagnostic_text(raw, 120)}"
             )
         if int(status) in {401, 403}:
             if "authorization not found" in lowered or "missing authorization" in lowered:
@@ -9549,15 +9910,22 @@ Output:
                 permission_causes += "；也可能命中账号/IP 白名单或网关 WAF"
             return (
                 f"{prefix}{endpoint_note}HTTP {status}：鉴权已送达但服务拒绝访问。"
-                f"常见原因：{permission_causes}。返回：{_single_line(text, 120)}"
+                f"常见原因：{permission_causes}。返回：{diagnostic_text(raw, 120)}"
             )
         if int(status) == 404:
             return (
                 f"{prefix}{endpoint_note}HTTP 404：未找到生图接口。"
                 "请检查在线 API 地址是否需要 /v1，或该代理是否支持 /images/generations。"
-                f"返回：{_single_line(text, 120)}"
+                f"返回：{diagnostic_text(raw, 120)}"
             )
-        return f"{prefix}{endpoint_note}HTTP {status}: {_single_line(text, 180)}"
+        if platform == "agnes" and int(status) in {400, 422}:
+            return (
+                f"{prefix}{endpoint_note}HTTP {status}：Agnes Image 请求参数不符合模型要求。"
+                "请确认模型为 agnes-image-2.1-flash，文生图包含 model/prompt/size；"
+                "参考图放在 extra_body.image，response_format 放在 extra_body，且不要发送 tags。"
+                f"返回：{diagnostic_text(raw, 140)}"
+            )
+        return f"{prefix}{endpoint_note}HTTP {status}: {diagnostic_text(raw, 180)}"
 
     def _url_same_origin(self, left: str, right: str) -> bool:
         try:
@@ -9741,7 +10109,7 @@ Output:
                         "[PrivateCompanion] 下载在线生图结果失败: status=%s headers=%s url=%s",
                         response.status,
                         header_note,
-                        _single_line(target, 180),
+                        self._external_image_diagnostic_text(target, 180),
                     )
                     return "", f"下载图片失败：HTTP {response.status}"
                 content_type = str(response.headers.get("Content-Type", "") or "").lower()
@@ -9751,7 +10119,7 @@ Output:
                         "[PrivateCompanion] 下载在线生图结果过大,已停止: bytes=%s limit=%s url=%s",
                         declared_size,
                         max_bytes,
-                        _single_line(target, 180),
+                        self._external_image_diagnostic_text(target, 180),
                     )
                     return "", f"下载图片过大（超过 {max_bytes // (1024 * 1024)} MB）"
                 ext = ".png"
@@ -9770,7 +10138,7 @@ Output:
                                 "[PrivateCompanion] 下载在线生图结果超过大小上限,已停止: bytes=%s limit=%s url=%s",
                                 received_size,
                                 max_bytes,
-                                _single_line(target, 180),
+                                self._external_image_diagnostic_text(target, 180),
                             )
                             return "", f"下载图片过大（超过 {max_bytes // (1024 * 1024)} MB）"
                         output.write(chunk)
@@ -9789,7 +10157,7 @@ Output:
                 bool(proxy_url),
                 use_environment_proxy,
                 download_timeout,
-                _single_line(target, 180),
+                self._external_image_diagnostic_text(target, 180),
             )
             logger.info(
                 "[PrivateCompanion] 生图文件已保存: session=%s path=%s bytes=%s",
@@ -9800,11 +10168,16 @@ Output:
             return str(output_path), "ok"
         except asyncio.TimeoutError:
             note = f"下载在线图片结果超时（{download_timeout} 秒内未完成），请检查运行 Bot 的服务器是否能直连该图片 URL"
-            logger.info("[PrivateCompanion] 下载在线生图结果超时: url=%s note=%s", _single_line(target, 180), note)
+            logger.info(
+                "[PrivateCompanion] 下载在线生图结果超时: url=%s note=%s",
+                self._external_image_diagnostic_text(target, 180),
+                note,
+            )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 下载在线生图结果失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 下载在线生图结果失败: %s", safe_error)
+            return "", safe_error
         finally:
             if temporary_path is not None:
                 try:
@@ -9849,7 +10222,7 @@ Output:
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             logger.info(
                 "[PrivateCompanion] 百炼多模态生图提交: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
-                _single_line(endpoint, 160),
+                self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _single_line(payload["parameters"]["size"], 40),
                 used_reference,
@@ -9862,10 +10235,10 @@ Output:
                         "[PrivateCompanion] 百炼多模态生图响应: status=%s chars=%s preview=%s",
                         response.status,
                         len(text or ""),
-                        _single_line(text, 220),
+                        self._external_image_diagnostic_text(text, 220),
                     )
                     if response.status >= 400:
-                        return "", f"百炼多模态生图 HTTP {response.status}: {_single_line(text, 180)}"
+                        return "", f"百炼多模态生图 HTTP {response.status}: {self._external_image_diagnostic_text(text, 180)}"
             data = self._extract_json_payload(text) if text else {}
             if not isinstance(data, dict):
                 return "", "百炼多模态生图返回格式无效"
@@ -9901,14 +10274,15 @@ Output:
             note = self._external_image_timeout_note(label="百炼多模态生图接口")
             logger.info(
                 "[PrivateCompanion] 百炼多模态生图超时: endpoint=%s model=%s timeout=%ss",
-                _single_line(endpoint, 160),
+                self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 百炼多模态生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 百炼多模态生图失败: %s", safe_error)
+            return "", safe_error
 
     async def _run_bailian_async_photo_generation(
         self,
@@ -9941,7 +10315,7 @@ Output:
                 for endpoint in endpoints:
                     logger.info(
                         "[PrivateCompanion] 百炼异步生图提交: endpoint=%s model=%s size=%s prompt_preview=%s",
-                        _single_line(endpoint, 160),
+                        self._external_image_diagnostic_text(endpoint, 160),
                         _single_line(self.external_image_api_model, 80),
                         _single_line(payload["parameters"]["size"], 40),
                         _single_line(prompt_text, 180),
@@ -9952,10 +10326,10 @@ Output:
                             "[PrivateCompanion] 百炼异步生图响应: status=%s chars=%s preview=%s",
                             response.status,
                             len(text or ""),
-                            _single_line(text, 220),
+                            self._external_image_diagnostic_text(text, 220),
                         )
                         if response.status >= 400:
-                            submit_note = f"百炼异步生图 HTTP {response.status}: {_single_line(text, 180)}"
+                            submit_note = f"百炼异步生图 HTTP {response.status}: {self._external_image_diagnostic_text(text, 180)}"
                             if response.status in {404, 405}:
                                 continue
                             return "", submit_note
@@ -9993,10 +10367,10 @@ Output:
                             response.status,
                             _single_line(task_id, 80),
                             len(text or ""),
-                            _single_line(text, 220),
+                            self._external_image_diagnostic_text(text, 220),
                         )
                         if response.status >= 400:
-                            return "", f"百炼任务查询 HTTP {response.status}: {_single_line(text, 180)}"
+                            return "", f"百炼任务查询 HTTP {response.status}: {self._external_image_diagnostic_text(text, 180)}"
                     data = self._extract_json_payload(text) if text else {}
                     if not isinstance(data, dict):
                         await asyncio.sleep(2)
@@ -10053,8 +10427,9 @@ Output:
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 百炼异步生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 百炼异步生图失败: %s", safe_error)
+            return "", safe_error
 
     async def _run_modelscope_photo_generation(
         self,
@@ -10085,7 +10460,7 @@ Output:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 logger.info(
                     "[PrivateCompanion] 魔搭异步生图提交: endpoint=%s model=%s size=%s prompt_preview=%s",
-                    _single_line(endpoint, 160),
+                    self._external_image_diagnostic_text(endpoint, 160),
                     _single_line(self.external_image_api_model, 80),
                     _single_line(payload["size"], 40),
                     _single_line(prompt_text, 180),
@@ -10096,10 +10471,10 @@ Output:
                         "[PrivateCompanion] 魔搭生图提交响应: status=%s chars=%s preview=%s",
                         response.status,
                         len(text or ""),
-                        _single_line(text, 220),
+                        self._external_image_diagnostic_text(text, 220),
                     )
                     if response.status >= 400:
-                        return "", f"魔搭生图 HTTP {response.status}: {_single_line(text, 180)}"
+                        return "", f"魔搭生图 HTTP {response.status}: {self._external_image_diagnostic_text(text, 180)}"
                 data = self._extract_json_payload(text) if text else {}
                 if not isinstance(data, dict):
                     return "", "魔搭生图返回格式无效"
@@ -10131,10 +10506,10 @@ Output:
                             response.status,
                             _single_line(task_id, 80),
                             len(poll_text or ""),
-                            _single_line(poll_text, 220),
+                            self._external_image_diagnostic_text(poll_text, 220),
                         )
                         if response.status >= 400:
-                            return "", f"魔搭任务查询 HTTP {response.status}: {_single_line(poll_text, 180)}"
+                            return "", f"魔搭任务查询 HTTP {response.status}: {self._external_image_diagnostic_text(poll_text, 180)}"
                     poll_data = self._extract_json_payload(poll_text) if poll_text else {}
                     if not isinstance(poll_data, dict):
                         await asyncio.sleep(2)
@@ -10170,8 +10545,9 @@ Output:
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 魔搭异步生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 魔搭异步生图失败: %s", safe_error)
+            return "", safe_error
 
     async def _run_doubao_photo_generation(
         self,
@@ -10199,7 +10575,7 @@ Output:
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             logger.info(
                 "[PrivateCompanion] 豆包/火山方舟生图提交: endpoint=%s model=%s size=%s prompt_preview=%s",
-                _single_line(endpoint, 160),
+                self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _single_line(payload["size"], 40),
                 _single_line(prompt_text, 180),
@@ -10211,10 +10587,10 @@ Output:
                         "[PrivateCompanion] 豆包/火山方舟生图响应: status=%s chars=%s preview=%s",
                         response.status,
                         len(text or ""),
-                        _single_line(text, 220),
+                        self._external_image_diagnostic_text(text, 220),
                     )
                     if response.status >= 400:
-                        return "", f"豆包/火山方舟生图 HTTP {response.status}: {_single_line(text, 180)}"
+                        return "", f"豆包/火山方舟生图 HTTP {response.status}: {self._external_image_diagnostic_text(text, 180)}"
             data = self._extract_json_payload(text) if text else {}
             if not isinstance(data, dict):
                 return "", "豆包/火山方舟生图返回格式无效"
@@ -10234,8 +10610,9 @@ Output:
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 豆包/火山方舟生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 豆包/火山方舟生图失败: %s", safe_error)
+            return "", safe_error
 
     async def _run_gemini_photo_generation(
         self,
@@ -10291,7 +10668,7 @@ Output:
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             logger.info(
                 "[PrivateCompanion] Gemini 生图提交: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
-                _single_line(endpoint, 160),
+                self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _single_line(size_hint, 40),
                 used_reference,
@@ -10304,10 +10681,10 @@ Output:
                         "[PrivateCompanion] Gemini 生图响应: status=%s chars=%s preview=%s",
                         response.status,
                         len(text or ""),
-                        _single_line(text, 220),
+                        self._external_image_diagnostic_text(text, 220),
                     )
                     if response.status >= 400:
-                        return "", f"Gemini 生图 HTTP {response.status}: {_single_line(text, 180)}"
+                        return "", f"Gemini 生图 HTTP {response.status}: {self._external_image_diagnostic_text(text, 180)}"
             data = self._extract_json_payload(text) if text else {}
             if not isinstance(data, dict):
                 return "", "Gemini 生图返回格式无效"
@@ -10345,8 +10722,9 @@ Output:
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] Gemini 生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] Gemini 生图失败: %s", safe_error)
+            return "", safe_error
 
     async def _run_external_photo_generation(
         self,
@@ -10408,6 +10786,7 @@ Output:
             "external_image_api_key",
             "external_image_api_model",
             "external_image_api_size",
+            "external_image_api_ratio",
             "external_image_api_timeout_seconds",
             "external_image_api_custom_headers",
         )
@@ -10422,6 +10801,7 @@ Output:
             "api_key": getattr(self, f"{prefix}external_image_api_key", ""),
             "model": getattr(self, f"{prefix}external_image_api_model", ""),
             "size": getattr(self, f"{prefix}external_image_api_size", "1024x1024"),
+            "ratio": getattr(self, f"{prefix}external_image_api_ratio", ""),
             "timeout_seconds": getattr(self, f"{prefix}external_image_api_timeout_seconds", 180),
             "custom_headers": getattr(self, f"{prefix}external_image_api_custom_headers", ""),
         }
@@ -10516,6 +10896,7 @@ Output:
         setattr(self, "external_image_api_key", str(endpoint.get("api_key") or "").strip())
         setattr(self, "external_image_api_model", str(endpoint.get("model") or "").strip())
         setattr(self, "external_image_api_size", str(endpoint.get("size") or "1024x1024").strip() or "1024x1024")
+        setattr(self, "external_image_api_ratio", _single_line(endpoint.get("ratio"), 20))
         setattr(self, "external_image_api_timeout_seconds", _safe_int(endpoint.get("timeout_seconds"), 180, 20, 600))
         setattr(self, "external_image_api_custom_headers", str(endpoint.get("custom_headers") or "").strip())
 
@@ -10597,6 +10978,110 @@ Output:
             for key, value in old_values.items():
                 setattr(self, key, value)
 
+    async def _run_agnes_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        endpoint = self._external_image_endpoint("generations")
+        if not endpoint:
+            return "", "未配置 Agnes Image API 地址"
+        model = _single_line(getattr(self, "external_image_api_model", ""), 120)
+        if not model:
+            return "", "未配置 Agnes Image 模型"
+        size, ratio = self._agnes_image_size_and_ratio(image_size, prompt_text)
+        extra_body: dict[str, Any] = {"response_format": "url"}
+        reference_image_path = _single_line(reference_image_path, 260)
+        if reference_image_path:
+            data_url = await self._reference_image_to_data_url(reference_image_path)
+            if not data_url:
+                return "", "Agnes 参考图无法转换为 Data URI"
+            extra_body["image"] = [data_url]
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": str(prompt_text or "").strip(),
+            "size": size,
+            "extra_body": extra_body,
+        }
+        if ratio:
+            payload["ratio"] = ratio
+        try:
+            import aiohttp
+
+            headers = {
+                "Authorization": f"Bearer {self.external_image_api_key}",
+                "Content-Type": "application/json",
+            }
+            headers.update(self._external_image_custom_headers())
+            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            endpoints = self._external_image_endpoint_candidates("generations") or [endpoint]
+            last_error = ""
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for index, candidate in enumerate(endpoints):
+                    logger.info(
+                        "[PrivateCompanion] Agnes Image 提交: endpoint=%s model=%s size=%s ratio=%s reference=%s prompt_chars=%s prompt_preview=%s",
+                        self._external_image_diagnostic_text(candidate, 160),
+                        model,
+                        size,
+                        ratio or "-",
+                        bool(reference_image_path),
+                        len(str(prompt_text or "")),
+                        _single_line(prompt_text, 180),
+                    )
+                    async with session.post(candidate, headers=headers, json=payload) as response:
+                        text = await response.text()
+                        response_preview = re.sub(
+                            r'("b64_json"\s*:\s*")[^"]+',
+                            r'\1[base64 omitted]',
+                            text or "",
+                            flags=re.I,
+                        )
+                        logger.info(
+                            "[PrivateCompanion] Agnes Image 响应: endpoint=%s status=%s chars=%s preview=%s",
+                            self._external_image_diagnostic_text(candidate, 160),
+                            response.status,
+                            len(text or ""),
+                            self._external_image_diagnostic_text(response_preview, 220),
+                        )
+                        if response.status >= 400:
+                            last_error = self._external_image_api_error_note(
+                                response.status,
+                                text,
+                                reference=bool(reference_image_path),
+                                endpoint=candidate,
+                            )
+                            if response.status == 404 and index + 1 < len(endpoints):
+                                continue
+                            return "", last_error
+                    data = self._extract_json_payload(text) if text else {}
+                    if not isinstance(data, dict):
+                        return "", "Agnes Image 返回格式无效"
+                    items = data.get("data")
+                    first = items[0] if isinstance(items, list) and items else None
+                    if not isinstance(first, dict):
+                        return "", "Agnes Image 未返回图片数据"
+                    saved, note = await self._materialize_external_image_value(
+                        first,
+                        session_key=session_key,
+                        success_note="ok",
+                    )
+                    if saved:
+                        detail = f"ok；Agnes Image {size}{('/' + ratio) if ratio else ''}"
+                        if reference_image_path:
+                            detail += "；已使用参考图"
+                        return saved, detail
+                    return "", note
+            return "", last_error or "Agnes Image 未返回数据"
+        except asyncio.TimeoutError:
+            return "", self._external_image_timeout_note(reference=bool(reference_image_path))
+        except Exception as exc:
+            safe_error = self._external_image_diagnostic_text(exc, 220)
+            logger.warning("[PrivateCompanion] Agnes Image 生图失败: %s", safe_error)
+            return "", safe_error
+
     async def _run_external_photo_generation_once(
         self,
         prompt_text: str,
@@ -10677,12 +11162,19 @@ Output:
                 reference_image_path=reference_image_path,
                 image_size=image_size,
             )
+        if platform == "agnes":
+            return await self._run_agnes_photo_generation(
+                prompt_text,
+                session_key=session_key,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
+            )
         if platform == "sensenova" and reference_image_path:
             return "", "SenseNova U1 Fast 官方接口不支持参考图输入，请使用纯文生图或切换其他参考图后端"
         if reference_image_path and os.path.exists(reference_image_path):
             logger.info(
                 "[PrivateCompanion] 在线图片 API 尝试参考图接口: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
-                _single_line(self._external_image_endpoint("edits"), 160),
+                self._external_image_diagnostic_text(self._external_image_endpoint("edits"), 160),
                 _single_line(self.external_image_api_model, 80),
                 self._sanitize_external_image_size(image_size),
                 _single_line(reference_image_path, 160),
@@ -10698,9 +11190,9 @@ Output:
                 return image_path, note
             logger.info(
                 "[PrivateCompanion] 在线图片 API 参考图生图失败,停止纯文回退: %s",
-                _single_line(note, 180),
+                self._external_image_diagnostic_text(note, 180),
             )
-            return "", f"参考图接口失败：{_single_line(note, 180)}"
+            return "", f"参考图接口失败：{self._external_image_diagnostic_text(note, 180)}"
         try:
             import aiohttp
 
@@ -10724,7 +11216,7 @@ Output:
                 for index, candidate_endpoint in enumerate(endpoints):
                     logger.info(
                         "[PrivateCompanion] 在线图片 API 生图提交: endpoint=%s model=%s size=%s prompt_chars=%s prompt_preview_chars=%s prompt_preview=%s",
-                        _single_line(candidate_endpoint, 160),
+                        self._external_image_diagnostic_text(candidate_endpoint, 160),
                         _single_line(self.external_image_api_model, 80),
                         payload["size"],
                         len(str(prompt_text or "")),
@@ -10735,18 +11227,18 @@ Output:
                         text = await response.text()
                         logger.info(
                             "[PrivateCompanion] 在线图片 API 生图响应: endpoint=%s status=%s chars=%s preview=%s",
-                            _single_line(candidate_endpoint, 160),
+                            self._external_image_diagnostic_text(candidate_endpoint, 160),
                             response.status,
                             len(text or ""),
-                            _single_line(text, 220),
+                            self._external_image_diagnostic_text(text, 220),
                         )
                         if response.status >= 400:
                             last_error_note = self._external_image_api_error_note(response.status, text, endpoint=candidate_endpoint)
                             if response.status == 404 and index + 1 < len(endpoints):
                                 logger.info(
                                     "[PrivateCompanion] 在线图片 API 生图端点 404,尝试候选端点: failed=%s next=%s",
-                                    _single_line(candidate_endpoint, 160),
-                                    _single_line(endpoints[index + 1], 160),
+                                    self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                    self._external_image_diagnostic_text(endpoints[index + 1], 160),
                                 )
                                 continue
                             return "", last_error_note
@@ -10778,7 +11270,10 @@ Output:
                 return path, "ok" if path else "保存在线图片失败"
             image_url = str(first.get("url") or "").strip()
             if image_url:
-                logger.info("[PrivateCompanion] 在线图片 API 生图返回 URL: %s", _single_line(image_url, 180))
+                logger.info(
+                    "[PrivateCompanion] 在线图片 API 生图返回 URL: %s",
+                    self._external_image_diagnostic_text(image_url, 180),
+                )
                 return await self._download_external_image_url(
                     image_url,
                     session_key=session_key,
@@ -10788,14 +11283,15 @@ Output:
             note = self._external_image_timeout_note()
             logger.info(
                 "[PrivateCompanion] 在线图片 API 生图超时: endpoint=%s model=%s timeout=%ss",
-                _single_line(endpoint, 160),
+                self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 在线图片 API 生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 在线图片 API 生图失败: %s", safe_error)
+            return "", safe_error
 
     async def _run_external_photo_edit_generation(
         self,
@@ -10847,7 +11343,7 @@ Output:
                 for index, candidate_endpoint in enumerate(endpoints):
                     logger.info(
                         "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference=%s bytes=%s prompt_preview=%s",
-                        _single_line(candidate_endpoint, 160),
+                        self._external_image_diagnostic_text(candidate_endpoint, 160),
                         _single_line(self.external_image_api_model, 80),
                         self._sanitize_external_image_size(image_size),
                         _single_line(str(path), 160),
@@ -10858,18 +11354,18 @@ Output:
                         text = await response.text()
                         logger.info(
                             "[PrivateCompanion] 在线图片 API 参考图响应: endpoint=%s status=%s chars=%s preview=%s",
-                            _single_line(candidate_endpoint, 160),
+                            self._external_image_diagnostic_text(candidate_endpoint, 160),
                             response.status,
                             len(text or ""),
-                            _single_line(text, 220),
+                            self._external_image_diagnostic_text(text, 220),
                         )
                         if response.status >= 400:
                             last_error_note = self._external_image_api_error_note(response.status, text, reference=True, endpoint=candidate_endpoint)
                             if response.status == 404 and index + 1 < len(endpoints):
                                 logger.info(
                                     "[PrivateCompanion] 在线图片 API 参考图端点 404,尝试候选端点: failed=%s next=%s",
-                                    _single_line(candidate_endpoint, 160),
-                                    _single_line(endpoints[index + 1], 160),
+                                    self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                    self._external_image_diagnostic_text(endpoints[index + 1], 160),
                                 )
                                 continue
                             return "", last_error_note
@@ -10901,7 +11397,10 @@ Output:
                 return saved, "ok；已使用本地人设参考图" if saved else "保存在线参考图生图失败"
             image_url = str(first.get("url") or "").strip()
             if image_url:
-                logger.info("[PrivateCompanion] 在线图片 API 参考图返回 URL: %s", _single_line(image_url, 180))
+                logger.info(
+                    "[PrivateCompanion] 在线图片 API 参考图返回 URL: %s",
+                    self._external_image_diagnostic_text(image_url, 180),
+                )
                 saved, note = await self._download_external_image_url(
                     image_url,
                     session_key=session_key,
@@ -10912,15 +11411,16 @@ Output:
             note = self._external_image_timeout_note(reference=True)
             logger.info(
                 "[PrivateCompanion] 在线图片 API 参考图生图超时: endpoint=%s model=%s timeout=%ss reference=%s",
-                _single_line(endpoint, 160),
+                self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
                 _single_line(str(path), 160),
             )
             return "", note
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] 在线图片 API 参考图生图失败: {e}", exc_info=True)
-            return "", str(e)
+            safe_error = self._external_image_diagnostic_text(e, 220)
+            logger.warning("[PrivateCompanion] 在线图片 API 参考图生图失败: %s", safe_error)
+            return "", safe_error
 
     def _find_photo_workflow_with_text_count(
         self,
@@ -11615,6 +12115,9 @@ Output:
         return False
 
     async def _send_segmented_proactive_forward_message(self, umo: str, segments: list[str], *, source: str = "proactive") -> bool:
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("merged_forward", umo=umo):
+            return False
         session = self._parse_message_session(umo)
         if not session:
             return False
@@ -11630,6 +12133,9 @@ Output:
         )
 
     async def _send_segmented_event_forward_message(self, event: AstrMessageEvent, segments: list[str], *, source: str = "decorating_result") -> bool:
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("merged_forward", event=event):
+            return False
         try:
             if bool(getattr(event, "is_private_chat", lambda: False)()):
                 user_id = _single_line(event.get_sender_id(), 80)
@@ -11801,8 +12307,14 @@ Output:
                         notifier("proactive_block", source="主动发送平台校验", reason="目标平台未运行", source_session=umo, before=self._chain_text_for_forbidden_recall(processed_chain))
                     return
                 session_obj = self._session_for_platform(session, platform)
-                await platform.send_by_session(session_obj, MessageChain(processed_chain))
-                return
+                precise_result = await platform.send_by_session(session_obj, MessageChain(processed_chain))
+                if precise_result is not False:
+                    return
+                precise_error = RuntimeError("精确平台发送返回 False（平台未接受消息）")
+                logger.warning(
+                    "[PrivateCompanion] 精确平台发送未被目标平台接受,回退核心发送: target=%s",
+                    self._describe_send_target(umo, session, platform),
+                )
             except Exception as e:
                 precise_error = e
                 if self._is_onebot_event_checker_send_rejection(e):
@@ -11826,10 +12338,17 @@ Output:
             core_result = await self.context.send_message(core_session, self._build_result_from_chain(processed_chain))
             if core_result is not False:
                 return
-            logger.warning(
-                "[PrivateCompanion] 主动核心发送未找到匹配平台,尝试 OneBot 原生兜底: target=%s",
-                self._describe_send_target(umo, session, platform),
-            )
+            platform_supports = getattr(self, "_platform_supports", None)
+            if not callable(platform_supports) or platform_supports("onebot_actions", umo=umo):
+                logger.warning(
+                    "[PrivateCompanion] 主动核心发送未找到匹配平台,尝试 OneBot 原生兜底: target=%s",
+                    self._describe_send_target(umo, session, platform),
+                )
+            else:
+                logger.warning(
+                    "[PrivateCompanion] 主动核心发送未被官方平台接受,不使用 OneBot 原生兜底: target=%s",
+                    self._describe_send_target(umo, session, platform),
+                )
         except Exception as e:
             core_error = e
             if self._is_onebot_event_checker_send_rejection(e):
@@ -11847,6 +12366,16 @@ Output:
                 precise_text,
                 fallback_text,
             )
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("onebot_actions", umo=umo):
+            target = self._describe_send_target(umo, session, platform)
+            precise_text = self._format_send_exception(precise_error) or "未尝试或未失败"
+            fallback_text = self._format_send_exception(core_error) if core_error is not None else (
+                "AstrBot 核心发送返回 False（平台未找到或官方通道拒绝）"
+            )
+            raise RuntimeError(
+                f"主动消息发送失败: {target}; precise={precise_text}; fallback={fallback_text}; 当前平台不使用 OneBot 原生兜底"
+            ) from core_error
         direct_ok, direct_error = await self._send_chain_components_via_onebot_direct(umo, session, processed_chain)
         if direct_ok:
             return
@@ -11888,11 +12417,20 @@ Output:
             extra_components = []
         if text:
             await self._maybe_send_input_status(umo, text)
+        platform_supports = getattr(self, "_platform_supports", None)
+        platform_segmented = not callable(platform_supports) or platform_supports("segmented_reply", umo=umo)
+        platform_quote = not callable(platform_supports) or platform_supports("reply_quote", umo=umo)
+        if quote_message_id and not platform_quote:
+            logger.info(
+                "[PrivateCompanion] 当前平台不支持主动引用，已降级为普通发送: umo=%s",
+                _single_line(umo, 140),
+            )
+            quote_message_id = ""
         segments = self._split_proactive_text(
             text,
             image_path="",
             extra_components=None,
-            disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
+            disable_segmenting=disable_segmenting or not platform_segmented or not self._segmented_scope_allows_umo(umo),
         )
         if len(segments) > 1:
             logger.info(

@@ -2483,7 +2483,10 @@ class DailyStateMixin:
             return random.choice(pool[1:])
 
         sleep_pick = pick(sleep_pool, 0.42)
-        dream_pick = await self._generate_enhanced_dream_pick(weather) or pick(dream_pool, 0.55)
+        enhanced_dream = None
+        if bool(getattr(self, "enable_enhanced_dreams", False)):
+            enhanced_dream = await self._generate_enhanced_dream_pick(weather)
+        dream_pick = enhanced_dream or pick(dream_pool, 0.55)
         self._remember_daily_dream_pick(dream_pick)
         hunger_pick = pick(hunger_pool, 0.22)
         specs = [
@@ -8166,6 +8169,8 @@ class DailyStateMixin:
         normalized = _single_line(text, 220)
         if not normalized:
             return False
+        if self._user_asks_bookshelf_creative_inventory(normalized):
+            return True
         if re.search(r"(最近|刚才|现在|今天|这两天|这会儿|近来).{0,18}(创作|作品|写作|草稿|手稿|写了什么|写什么|诗|小说|随笔|散文|剧本|设定|世界观|歌词)", normalized):
             return True
         if re.search(r"你.{0,10}(创作|作品|写作|草稿|手稿|写了什么|写什么|写诗|写小说|写随笔|写剧本|写设定)", normalized):
@@ -8175,6 +8180,24 @@ class DailyStateMixin:
         if self._user_asks_creative_work_existence(normalized):
             return True
         return False
+
+    @staticmethod
+    def _user_asks_bookshelf_creative_inventory(text: str) -> bool:
+        normalized = _single_line(text, 220)
+        if not normalized or any(
+            token in normalized for token in ("书柜密码", "书架密码", "夹层密码", "抽屉密码")
+        ):
+            return False
+        return bool(
+            re.search(
+                r"(?:书柜|书架|作品柜|创作柜).{0,12}(?:能看到|看得到|能看见|可以看|看看|查一下|查询|检索|列一下|列出|有什么|有哪些|有几|多少|空不空|是不是空|还是空|空的)",
+                normalized,
+            )
+            or re.search(
+                r"(?:能看到|看得到|能看见|可以看|看看|查一下|查询|检索|列一下|列出).{0,12}(?:书柜|书架|作品柜|创作柜)",
+                normalized,
+            )
+        )
 
     @staticmethod
     def _user_asks_creative_work_existence(text: str) -> bool:
@@ -8417,6 +8440,7 @@ class DailyStateMixin:
         mentioned_title = self._mentioned_creative_project_title(inbound_text)
         asks_creative = self._user_asks_recent_creative_activity(inbound_text)
         asks_existence = self._user_asks_creative_work_existence(inbound_text)
+        asks_bookshelf_inventory = self._user_asks_bookshelf_creative_inventory(inbound_text)
         asks_activity = self._user_asks_recent_bot_activity(inbound_text)
         if not (mentioned_title or asks_creative or asks_activity):
             return ""
@@ -8442,6 +8466,12 @@ class DailyStateMixin:
             if len(candidates) >= 4 and (not mentioned_title or any(item[0] >= 100 for item in candidates)):
                 break
         if not candidates:
+            if asks_bookshelf_inventory:
+                return (
+                    "【书柜创作区真实库存】\n"
+                    "用户正在询问能否看到书柜或书柜里有什么。当前书柜创作区确实没有保存过正文的作品。\n"
+                    "必须直接说明真实结果；不要假装翻找，不要用括号动作、挠头或含糊的场景描写代替回答。"
+                )
             return ""
         if mentioned_title or asks_creative:
             candidates.sort(key=lambda item: item[0], reverse=True)
@@ -8454,6 +8484,9 @@ class DailyStateMixin:
         ask_line = (
             f"用户提到了你私下创作过的作品《{mentioned_title}》。"
             if mentioned_title
+            else
+            "用户正在询问能否看到书柜或书柜里有哪些真实内容。"
+            if asks_bookshelf_inventory
             else
             "用户正在确认你是否写过自己的书、小说或其他文本作品。"
             if asks_existence
@@ -8491,7 +8524,7 @@ class DailyStateMixin:
             + f"\n{creative_continuity_hint}\n"
             + (f"{existence_rule}\n" if existence_rule else "")
             + (f"最近一句/片段：{snippet}\n" if snippet else "")
-            + "如果用户明确问指定作品的正文、某一部分、写作想法或作者怎么看，下面的短片段只能用于定位，必须先调用 pc_view_creative_work 读取真实正文后再回答；不要先发“我去看看”，也不要凭短片段假装已经读完。若只是泛问最近有没有创作，可以直接概括并给一小句片段。否则这不是必须回答的内容，可以只含糊说“在弄一点小东西”。不要主动汇报系统进度，不要一次给完整正文。"
+            + "如果用户询问书柜库存，必须直接依据真实数量和标题回答，禁止用括号动作或假装翻找代替结果。如果用户明确问指定作品的正文、某一部分、写作想法或作者怎么看，下面的短片段只能用于定位，必须先调用 pc_view_creative_work 读取真实正文后再回答；不要先发“我去看看”，也不要凭短片段假装已经读完。若只是泛问最近有没有创作，可以直接概括并给一小句片段。否则这不是必须回答的内容，可以只含糊说“在弄一点小东西”。不要主动汇报系统进度，不要一次给完整正文。"
         )
 
     @staticmethod

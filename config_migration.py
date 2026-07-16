@@ -13,6 +13,17 @@ from astrbot.api import logger
 
 LEGACY_PROACTIVE_ACTIONS_KEY = "enabled_proactive_actions"
 
+# These fields were removed from the active configuration surface.  Keep the
+# cleanup here so existing configs do not retain stale root or grouped copies.
+OBSOLETE_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "enable_persona_standardization_experiment",
+        "enable_llm_timer_scheduling",
+        "ai_daily_check_window",
+        "ai_daily_check_interval_minutes",
+    }
+)
+
 LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "target_group_ids": ("group_whitelist_ids",),
     "timezone": ("environment_perception_timezone",),
@@ -180,7 +191,11 @@ def _migrate_flat_config_into_schema_groups(
     # 旧别名键只负责迁移；仍在 schema 中登记的 flat 兼容键重置为默认值，
     # 避免 AstrBot 每次启动都反复补齐并刷屏。
     removed_legacy_keys: list[str] = []
-    cleanup_keys = set(LEGACY_KEY_ALIASES) | {LEGACY_PROACTIVE_ACTIONS_KEY, "require_target_group"}
+    cleanup_keys = (
+        set(LEGACY_KEY_ALIASES)
+        | OBSOLETE_CONFIG_KEYS
+        | {LEGACY_PROACTIVE_ACTIONS_KEY, "require_target_group"}
+    )
     for old_key in cleanup_keys:
         item = schema_map.get(old_key)
         if old_key in root:
@@ -203,6 +218,12 @@ def _migrate_flat_config_into_schema_groups(
                 legacy_group.pop(old_key, None)
                 if old_key not in removed_legacy_keys:
                     removed_legacy_keys.append(old_key)
+        if old_key in OBSOLETE_CONFIG_KEYS:
+            for container in root.values():
+                if isinstance(container, dict) and old_key in container:
+                    container.pop(old_key, None)
+                    if old_key not in removed_legacy_keys:
+                        removed_legacy_keys.append(old_key)
     if removed_legacy_keys:
         changed.extend(f"{key}~cleanup" for key in removed_legacy_keys)
 

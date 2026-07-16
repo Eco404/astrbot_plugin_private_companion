@@ -1561,6 +1561,68 @@ class CreativeMixin:
                 "Use a people-free symbolic composition: no people, faces, bodies, silhouettes, portraits, human reflections, "
                 "figures in mirrors/windows/portals/screens, framed photos, statues, or crowds. "
             )
+        format_normalizer = getattr(self, "_normalize_photo_generation_prompt_format", None)
+        if callable(format_normalizer):
+            prompt_format = format_normalizer(getattr(self, "photo_generation_prompt_format", "traditional"))
+        else:
+            raw_format = str(getattr(self, "photo_generation_prompt_format", "traditional") or "traditional").strip().lower()
+            prompt_format = "natural_language" if raw_format in {"natural", "natural_language", "自然语言", "自然语言描述"} else "traditional"
+        if prompt_format == "traditional":
+            positive_parts = [
+                "polished book cover illustration",
+                "vertical 2:3 composition",
+                f"genre: {_single_line(project.get('work_type'), 50) or 'fiction'}",
+                f"story motifs: {visual_source or 'an intimate original story with a clear central visual symbol'}",
+                style_instruction,
+                "one focused scene",
+                "strong readable silhouette",
+                "layered depth",
+                "deliberate lighting",
+                "quiet title-safe negative space",
+            ]
+            if has_person_subject and person_reference_available:
+                positive_parts.extend(
+                    [
+                        "exactly one visible person",
+                        "same identity and appearance as the supplied reference image",
+                        f"primary character: {character_hint}" if character_hint else "single reference character",
+                    ]
+                )
+            else:
+                positive_parts.extend(["people-free composition", "symbolic objects and environment"])
+            negative_parts = [
+                "readable text",
+                "letters",
+                "typography",
+                "logo",
+                "watermark",
+                "mockup",
+                "border",
+                "second person",
+                "companion character",
+                "multiple people",
+                "crowd",
+                "extra face",
+                "human silhouette",
+                "human reflection",
+                "person in mirror",
+                "person in window",
+                "person in portal",
+                "person on screen",
+                "person in framed photo",
+                "human statue",
+                "shadow person",
+            ]
+            if not (has_person_subject and person_reference_available):
+                negative_parts.extend(["person", "human face", "human body", "portrait"])
+            return _single_line(
+                "Positive prompt: "
+                + ", ".join(_single_line(part, 900) for part in positive_parts if _single_line(part, 900))
+                + ". Negative prompt: "
+                + ", ".join(negative_parts)
+                + ".",
+                1800,
+            )
         return _single_line(
             "Create a polished book cover illustration with a vertical 2:3 composition. "
             f"Genre: {_single_line(project.get('work_type'), 50) or 'fiction'}. "
@@ -1657,7 +1719,11 @@ class CreativeMixin:
                 if callable(reference_getter):
                     try:
                         reference_image_path = _single_line(
-                            await reference_getter("portrait", allow_daily_outfit=False),
+                            await reference_getter(
+                                "portrait",
+                                allow_daily_outfit=False,
+                                selection_context=json.dumps(project_snapshot, ensure_ascii=False),
+                            ),
                             500,
                         )
                     except Exception as exc:

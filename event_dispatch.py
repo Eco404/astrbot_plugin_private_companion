@@ -1785,6 +1785,23 @@ class EventDispatchMixin:
         message_id = _single_line(message_id, 120)
         if not message_id:
             return False
+        platform_supports = getattr(self, "_platform_supports", None)
+        if callable(platform_supports) and not platform_supports("message_recall", event=event):
+            profile_getter = getattr(self, "_platform_profile", None)
+            try:
+                profile = profile_getter(event=event) if callable(profile_getter) else {}
+            except Exception:
+                profile = {}
+            platform_label = _single_line(
+                (profile or {}).get("label") or (profile or {}).get("raw_platform"),
+                40,
+            ) or self._quote_cache_key(event)
+            logger.debug(
+                "[PrivateCompanion] 当前平台不支持原生撤回，已跳过: platform=%s message_id=%s",
+                platform_label,
+                message_id,
+            )
+            return False
         call = getattr(self, "_call_platform_action", None)
         if not callable(call):
             return False
@@ -1877,6 +1894,13 @@ class EventDispatchMixin:
         return platform or origin or "default"
 
     def _make_reply_component(self, message_id: str, event: AstrMessageEvent | None = None) -> Any | None:
+        platform_supports = getattr(self, "_platform_supports", None)
+        if event is not None and callable(platform_supports) and not platform_supports("reply_quote", event=event):
+            logger.debug(
+                "[PrivateCompanion] 当前平台不支持指定消息引用，已降级为普通发送: platform=%s",
+                self._quote_cache_key(event),
+            )
+            return None
         if Reply is None:
             logger.debug("[PrivateCompanion] 当前 AstrBot 运行环境缺少 Reply 组件，引用触发消息已降级。")
             return None

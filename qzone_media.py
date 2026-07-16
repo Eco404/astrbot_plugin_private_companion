@@ -909,7 +909,15 @@ class QzoneMediaMixin:
         auto_generate_image: bool = False,
         publish_reason: str = "manual_publish",
     ) -> dict[str, Any]:
-        if not self.enable_qzone_integration:
+        availability = getattr(self, "_qzone_available", None)
+        if callable(availability) and not availability(event):
+            supported = getattr(self, "_qzone_platform_supported", None)
+            if callable(supported) and not supported(event):
+                message_getter = getattr(self, "_qzone_platform_unavailable_message", None)
+                message = message_getter() if callable(message_getter) else "当前平台不支持 QQ 空间"
+                return {"success": False, "message": message}
+            return {"success": False, "message": "QQ 空间动态层未启用"}
+        if not callable(availability) and not self.enable_qzone_integration:
             return {"success": False, "message": "QQ 空间动态层未启用"}
         content = _single_line(text, 300)
         image_list = [str(item).strip() for item in list(images or []) if str(item or "").strip()]
