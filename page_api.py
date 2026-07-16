@@ -284,6 +284,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "features": self._feature_flags(),
                 "proactive_intensity": self._proactive_intensity_summary(),
                 "proactive_only": self._proactive_only_mode_snapshot(),
+                "proactive_chat": self._proactive_chat_summary(data),
                 "expression_scope": self._expression_learning_scope_summary(data),
                 "providers": self._provider_settings(),
                 "settings": self._runtime_settings(),
@@ -417,6 +418,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "relationship_role",
             "last_seen",
             "last_sent",
+            "proactive_chat_bridge_last_sent_at",
             "sent_today",
             "sent_day",
             "last_proactive_skip_at",
@@ -10315,9 +10317,70 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "items": items,
         }
 
+    def _proactive_chat_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        installed = False
+        detector = getattr(self.plugin, "_integrated_plugin_installed", None)
+        if callable(detector):
+            try:
+                installed = bool(detector("astrbot_plugin_proactive_chat"))
+            except Exception:
+                installed = False
+        enabled = bool(getattr(self.plugin, "enable_proactive_chat_integration", True))
+        review_mode = str(getattr(self.plugin, "proactive_chat_bridge_review_mode", "local") or "local")
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        linked_users = 0
+        last_sent_at = 0.0
+        for user in users.values():
+            if not isinstance(user, dict):
+                continue
+            sent_at = self._float(user.get("proactive_chat_bridge_last_sent_at"))
+            if sent_at <= 0:
+                continue
+            linked_users += 1
+            last_sent_at = max(last_sent_at, sent_at)
+        formatter = getattr(self.plugin, "_format_timestamp_elapsed", None)
+        last_sent = formatter(last_sent_at) if last_sent_at > 0 and callable(formatter) else ""
+        runtime_status: dict[str, Any] = {}
+        runtime_bridge = getattr(self.plugin, "_proactive_chat_runtime_bridge", None)
+        status_getter = getattr(runtime_bridge, "status", None)
+        if callable(status_getter):
+            try:
+                value = status_getter()
+                runtime_status = value if isinstance(value, dict) else {}
+            except Exception as exc:
+                runtime_status = {
+                    "mode": "fallback",
+                    "mode_label": "发送前兼容",
+                    "last_error": self._single_line(exc, 160),
+                }
+        runtime_mode = str(runtime_status.get("mode") or ("fallback" if installed and enabled else "waiting"))
+        runtime_label = str(runtime_status.get("mode_label") or ("发送前兼容" if installed and enabled else "等待运行实例"))
+        return {
+            "installed": installed,
+            "enabled": enabled,
+            "active": bool(installed and enabled),
+            "deep_active": bool(runtime_status.get("attached")),
+            "runtime_mode": runtime_mode,
+            "runtime_mode_label": runtime_label,
+            "runtime_version": self._single_line(runtime_status.get("version"), 40),
+            "runtime_method_count": self._int(runtime_status.get("method_count")),
+            "runtime_methods": list(runtime_status.get("methods") or []),
+            "runtime_last_event": self._single_line(runtime_status.get("last_event"), 180),
+            "runtime_last_error": self._single_line(runtime_status.get("last_error"), 180),
+            "runtime_open_attempts": self._int(runtime_status.get("open_attempt_count")),
+            "runtime_counters": dict(runtime_status.get("counters") or {}),
+            "scope": "private",
+            "review_mode": review_mode,
+            "review_mode_label": "跟随主动终审" if review_mode == "follow_proactive_review" else "轻量本地复核",
+            "linked_user_count": linked_users,
+            "last_sent_at": last_sent_at,
+            "last_sent": last_sent,
+        }
+
     def _feature_flags(self) -> dict[str, bool]:
         keys = [
             "enable_proactive_only_mode",
+            "enable_proactive_chat_integration",
             "enable_mai_style_integration",
             "enable_companion_memory",
             "enable_expression_learning",

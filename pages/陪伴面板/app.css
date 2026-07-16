@@ -16815,6 +16815,13 @@ textarea {
   min-width: 0;
 }
 
+.proactive-mode-heading-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
 .proactive-mode-kicker {
   width: fit-content;
   border-radius: 999px;
@@ -16830,6 +16837,33 @@ textarea {
   color: #9b3f34;
 }
 
+.proactive-chat-status {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  border: 1px solid rgba(26, 75, 140, 0.16);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.proactive-chat-status.on {
+  border-color: rgba(42, 124, 96, 0.24);
+  background: rgba(224, 243, 234, 0.86);
+  color: #23694f;
+}
+
+.proactive-chat-status.paused {
+  border-color: rgba(176, 119, 31, 0.24);
+  background: rgba(250, 240, 218, 0.88);
+  color: #875d19;
+}
+
 .proactive-mode-main h3 {
   margin: 7px 0 5px;
   font-size: 18px;
@@ -16839,6 +16873,14 @@ textarea {
   color: var(--muted);
   line-height: 1.45;
   font-size: 13px;
+}
+
+.proactive-mode-main .proactive-mode-runtime {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .proactive-mode-settings-row {

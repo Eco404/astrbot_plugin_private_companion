@@ -158,6 +158,7 @@ from .astrbot_knowledge import AstrBotKnowledgeMixin
 from .atrelay import AtRelayMixin
 from .proactive_engine import ProactiveEngineMixin
 from .proactive_message import ProactiveMessageMixin
+from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .daily_state import DailyStateMixin
 from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
@@ -241,6 +242,54 @@ class PrivateCompanionExtensionAPI:
 
     def list_proactive_abilities(self) -> list[dict[str, Any]]:
         return self._plugin.external_proactive_abilities()
+
+    async def prepare_proactive_chat(
+        self,
+        session_id: str,
+        *,
+        unanswered_count: int = 0,
+    ) -> dict[str, Any]:
+        return await self._plugin._prepare_proactive_chat_bridge(
+            session_id,
+            unanswered_count=unanswered_count,
+        )
+
+    async def review_proactive_chat_message(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        token: str = "",
+    ) -> dict[str, Any]:
+        return await self._plugin._review_proactive_chat_bridge_message(
+            session_id,
+            text,
+            token=token,
+        )
+
+    async def notify_proactive_chat_sent(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        token: str = "",
+    ) -> dict[str, Any]:
+        return await self._plugin._record_proactive_chat_bridge_sent(
+            session_id,
+            text,
+            token=token,
+        )
+
+    async def cancel_proactive_chat(
+        self,
+        session_id: str,
+        *,
+        token: str = "",
+    ) -> bool:
+        return await self._plugin._cancel_proactive_chat_bridge(
+            session_id,
+            token=token,
+        )
 
     def resolve_historical_chat_identities(self, speakers: list[str]) -> dict[str, Any]:
         plugin = self._plugin
@@ -1014,6 +1063,22 @@ class PrivateCompanionPlugin(
         self.voice_prompt_provider_id = self._cfg_str(c, "VOICE_PROMPT_PROVIDER_ID", "")
         self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
+        self.enable_proactive_chat_integration = self._cfg_bool(c, "enable_proactive_chat_integration", True)
+        self.proactive_chat_bridge_review_mode = self._cfg_str(
+            c,
+            "proactive_chat_bridge_review_mode",
+            "local",
+            "local",
+        ).lower()
+        if self.proactive_chat_bridge_review_mode not in {"local", "follow_proactive_review"}:
+            self.proactive_chat_bridge_review_mode = "local"
+        self.proactive_chat_bridge_collision_window_seconds = self._cfg_int(
+            c,
+            "proactive_chat_bridge_collision_window_seconds",
+            90,
+            10,
+            600,
+        )
         self.enable_llm_proactive_persona_judge = self._cfg_bool(c, "enable_llm_proactive_persona_judge", True)
         self.proactive_persona_judge_provider_id = self._cfg_str(c, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "")
         self.proactive_persona_judge_send_threshold = self._cfg_int(c, "proactive_persona_judge_send_threshold", 62, 0, 100)
@@ -1707,6 +1772,7 @@ class PrivateCompanionPlugin(
         load_elapsed_ms = int((time.perf_counter() - startup_load_started) * 1000)
         if load_elapsed_ms > 1200:
             logger.warning("[PrivateCompanion] 启动读取数据耗时较高: elapsed=%sms", load_elapsed_ms)
+        self._proactive_chat_runtime_bridge = ProactiveChatRuntimeBridge(self)
         self.page_api = None
         self._register_page_api_if_available()
 
@@ -1936,6 +2002,7 @@ class PrivateCompanionPlugin(
             "refresh_passive_injection_cache",
             self._refresh_passive_injection_cache,
         )
+        await self._proactive_chat_runtime_bridge.start()
 
     def _create_startup_background_task(self, label: str, operation: Any) -> asyncio.Task:
         previous = self._startup_background_tasks.get(label)
@@ -2051,6 +2118,16 @@ class PrivateCompanionPlugin(
     async def terminate(self):
         global _private_companion_plugin
         self._stop_event.set()
+
+        runtime_bridge = getattr(self, "_proactive_chat_runtime_bridge", None)
+        if runtime_bridge is not None:
+            try:
+                await runtime_bridge.stop()
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 终止 Proactive Chat 深度联动失败: %s",
+                    _single_line(exc, 160),
+                )
 
         async def cancel_task(task: Any, label: str, timeout: float = 3.0) -> None:
             if not isinstance(task, asyncio.Task) or task.done():
@@ -2183,6 +2260,158 @@ class PrivateCompanionPlugin(
             _single_line(hit, 40),
             message_id,
         )
+
+    @filter.on_decorating_result(priority=10000)
+    async def bridge_proactive_chat_outbound(self, event: AstrMessageEvent, *args, **kwargs):
+        """识别 Proactive Chat 的装饰发送链，接入状态、边界和 TTS 统一出口。"""
+        if self is None or not self.enabled or not self.enable_proactive_chat_integration:
+            return
+        bridge_context = self._proactive_chat_decorating_context()
+        if not bridge_context.get("detected"):
+            return
+        try:
+            if not bool(event.is_private_chat()):
+                return
+        except Exception:
+            return
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        user_id, user = self._proactive_chat_bridge_user(session_id)
+        if not user_id or not isinstance(user, dict) or not self._user_enabled_for_proactive(user_id, user):
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain:
+            return
+        chain_text = "".join(
+            str(getattr(component, "text", "") or "")
+            for component in chain
+            if isinstance(component, Plain)
+        ).strip()
+        source_text = str(bridge_context.get("full_text") or chain_text).strip()
+        if not source_text:
+            return
+        attempt_id = _single_line(bridge_context.get("attempt_id"), 100)
+        replaced_attempts = getattr(self, "_proactive_chat_bridge_replaced_record_attempts", None)
+        if not isinstance(replaced_attempts, dict):
+            replaced_attempts = {}
+            self._proactive_chat_bridge_replaced_record_attempts = replaced_attempts
+        now = _now_ts()
+        for stale_attempt, created_at in list(replaced_attempts.items()):
+            if now - _safe_float(created_at, 0) > 10 * 60:
+                replaced_attempts.pop(stale_attempt, None)
+        if attempt_id and attempt_id in replaced_attempts and chain_text:
+            event.set_result(self._build_result_from_chain([]))
+            event.stop_event()
+            logger.info(
+                "[PrivateCompanion] 已跳过 Proactive Chat 改写后的重复文本分支: session=%s attempt=%s",
+                _single_line(session_id, 120),
+                attempt_id,
+            )
+            return
+        token = _single_line(bridge_context.get("token"), 80)
+        if _single_line(user.get("proactive_chat_bridge_session"), 180) == _single_line(session_id, 180):
+            token = token or _single_line(user.get("proactive_chat_bridge_token"), 80)
+        segment_count = max(1, _safe_int(bridge_context.get("segment_count"), 1, 1))
+        segment_index = max(0, min(_safe_int(bridge_context.get("segment_index"), 0, 0), segment_count - 1))
+        setattr(event, "private_companion_proactive_framework", True)
+        setattr(event, "_private_companion_external_proactive_source", "proactive_chat")
+        setattr(event, "_private_companion_proactive_chat_attempt_id", attempt_id)
+        setattr(event, "_private_companion_proactive_chat_token", token)
+        setattr(event, "_private_companion_proactive_full_text", source_text)
+        setattr(event, "_private_companion_proactive_segment_index", segment_index)
+        setattr(event, "_private_companion_proactive_segment_count", segment_count)
+        if segment_count > 1:
+            setattr(event, "_private_companion_external_presegmented", True)
+        review = await self._review_proactive_chat_bridge_message(
+            session_id,
+            source_text,
+            token=token,
+            attempt_id=attempt_id,
+        )
+        if not review.get("ok") or not review.get("text"):
+            event.set_result(self._build_result_from_chain([]))
+            event.stop_event()
+            if token:
+                await self._cancel_proactive_chat_bridge(session_id, token=token)
+            logger.info(
+                "[PrivateCompanion] 已拦截 Proactive Chat 主动候选: session=%s decision=%s reason=%s",
+                _single_line(session_id, 120),
+                _single_line(review.get("decision"), 24) or "drop",
+                _single_line(review.get("reason"), 160),
+            )
+            return
+        replacement = str(review["text"])
+        should_replace_full_attempt = replacement != source_text and (
+            any(isinstance(component, Record) for component in chain)
+            or segment_count > 1
+        )
+        if should_replace_full_attempt:
+            event.set_result(self._build_result_from_chain([Plain(replacement)]))
+            source_text = replacement
+            setattr(event, "_private_companion_proactive_full_text", replacement)
+            if attempt_id:
+                replaced_attempts[attempt_id] = now
+        elif replacement != source_text:
+            rebuilt: list[Any] = []
+            replaced = False
+            for component in chain:
+                if isinstance(component, Plain):
+                    if not replaced:
+                        rebuilt.append(Plain(replacement))
+                        replaced = True
+                    continue
+                rebuilt.append(component)
+            if replaced:
+                event.set_result(self._build_result_from_chain(rebuilt))
+                source_text = replacement
+                setattr(event, "_private_companion_proactive_full_text", replacement)
+        if bool(bridge_context.get("tts_sent")) and not should_replace_full_attempt:
+            setattr(event, "_private_companion_skip_tts_enhancement", "proactive_chat_prebuilt_tts")
+        logger.info(
+            "[PrivateCompanion] 已接入 Proactive Chat 发送前链路: session=%s segment=%s/%s upstream_tts=%s text=%s",
+            _single_line(session_id, 120),
+            segment_index + 1,
+            segment_count,
+            bool(bridge_context.get("tts_sent")),
+            _single_line(source_text, 160),
+        )
+
+    @filter.on_decorating_result(priority=-20000)
+    async def finalize_proactive_chat_outbound_bridge(self, event: AstrMessageEvent, *args, **kwargs):
+        """在所有装饰器结束后，仅为仍有实际发送内容的 Proactive Chat 链同步状态。"""
+        if self is None or not self.enabled or not self.enable_proactive_chat_integration:
+            return
+        if str(getattr(event, "_private_companion_external_proactive_source", "") or "") != "proactive_chat":
+            return
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        token = _single_line(getattr(event, "_private_companion_proactive_chat_token", ""), 80)
+        attempt_id = _single_line(getattr(event, "_private_companion_proactive_chat_attempt_id", ""), 100)
+        runtime_bridge = getattr(self, "_proactive_chat_runtime_bridge", None)
+        if runtime_bridge is not None and runtime_bridge.owns_outbound(session_id, attempt_id):
+            # 深度桥接会在平台 send_by_session/context.send_message 无异常返回后统一结算。
+            # 此处仍处于发送前装饰阶段，不能把非空消息链提前当成已送达。
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain:
+            if token:
+                await self._cancel_proactive_chat_bridge(session_id, token=token)
+            return
+        source_text = str(getattr(event, "_private_companion_proactive_full_text", "") or "").strip()
+        if not source_text:
+            return
+        recorded = await self._record_proactive_chat_bridge_sent(
+            session_id,
+            source_text,
+            token=token,
+            attempt_id=attempt_id,
+        )
+        if recorded.get("recorded"):
+            logger.info(
+                "[PrivateCompanion] 已同步 Proactive Chat 最终发送状态: session=%s text=%s",
+                _single_line(session_id, 120),
+                _single_line(source_text, 160),
+            )
 
     @filter.on_decorating_result()
     async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent, *args, **kwargs):
@@ -3068,11 +3297,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """按回复范围与分段策略整理 LLM 输出，减少长回复和误引用。"""
         if self is None or not self.enabled:
             return
+        external_proactive = (
+            str(getattr(event, "_private_companion_external_proactive_source", "") or "")
+            == "proactive_chat"
+        )
         if self._proactive_only_blocks_passive_event(event, "enable_segmented_proactive_reply"):
             return
         if not self._feature_enabled_or_temp_unlocked("enable_segmented_proactive_reply"):
             return
-        if self.segmented_proactive_scope != "all_llm":
+        if self.segmented_proactive_scope != "all_llm" and not external_proactive:
+            return
+        if external_proactive and bool(getattr(event, "_private_companion_external_presegmented", False)):
             return
         if not self._segmented_scope_allows_event(event):
             return
@@ -3090,7 +3325,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             chain = list(getattr(result, "chain", []) or []) if result is not None else []
             if not chain:
                 return
-        if not is_llm_result and not self._friend_private_plain_result_allows_segmenting(event, chain):
+        if (
+            not is_llm_result
+            and not external_proactive
+            and not self._friend_private_plain_result_allows_segmenting(event, chain)
+        ):
             return
         if getattr(result, "use_t2i_", None) or getattr(result, "use_markdown_", None):
             return
@@ -8490,14 +8729,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if reply_image_sources:
                 reply_image_limit = self._private_image_vision_text_limit(len(reply_image_sources))
                 reply_image_vision = _single_line(
-                    await self._transcribe_private_inbound_images(
-                        reply_image_sources,
-                        umo=str(getattr(event, "unified_msg_origin", "") or ""),
-                        user_text=inbound_text,
-                        force_contextual=self._private_image_user_has_specific_vision_request(inbound_text),
-                    ),
+                    getattr(event, "private_companion_reply_image_vision_text", ""),
                     reply_image_limit,
                 )
+                if not reply_image_vision:
+                    reply_image_vision = _single_line(
+                        await self._transcribe_private_inbound_images(
+                            reply_image_sources,
+                            umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                            user_text=inbound_text,
+                            force_contextual=self._private_image_user_has_specific_vision_request(inbound_text),
+                        ),
+                        reply_image_limit,
+                    )
                 if reply_image_vision:
                     intent_line = self._private_image_intent_line(reply_image_vision)
                     ownership_line = self._private_image_ownership_line(reply_image_vision)

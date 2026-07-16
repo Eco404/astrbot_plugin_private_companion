@@ -33,6 +33,58 @@ TTS_TAG_PATTERN = re.compile(r"</?t{2,}s\b[^>]*>", re.IGNORECASE)
 TTS_BLOCK_TOKEN_PATTERN = re.compile(r"\[\[TTSBLOCK:([0-9a-f]{16})\]\]")
 PRIVATE_TTS_BLOCK_TOKEN_PATTERN = re.compile(r"\[\[PCTTS:([0-9a-f]{16})\]\]")
 EMOTION_TAG_PATTERN = re.compile(r"\[([^\[\]\n]{1,24})\]")
+FISH_AUDIO_S2_CUE_PATTERN = re.compile(r"\[([^\[\]\n]{1,40})\]")
+FISH_AUDIO_S1_CUE_PATTERN = re.compile(r"\(([^()\n]{1,24})\)", re.IGNORECASE)
+FISH_AUDIO_MODELS = {"s1", "s2-pro", "s2.1-pro", "s2.1-pro-free"}
+FISH_AUDIO_S1_CUES = frozenset({
+    "angry", "sad", "excited", "surprised", "satisfied", "delighted",
+    "scared", "worried", "upset", "nervous", "frustrated", "depressed",
+    "empathetic", "embarrassed", "disgusted", "moved", "proud", "relaxed",
+    "grateful", "confident", "interested", "curious", "confused", "joyful",
+    "disdainful", "unhappy", "anxious", "hysterical", "indifferent",
+    "impatient", "guilty", "scornful", "panicked", "furious", "reluctant",
+    "keen", "disapproving", "negative", "denying", "astonished", "serious",
+    "sarcastic", "conciliative", "comforting", "sincere", "sneering",
+    "hesitating", "yielding", "painful", "awkward", "amused",
+    "in a hurry tone", "shouting", "screaming", "whispering", "soft tone",
+    "laughing", "chuckling", "sobbing", "crying loudly", "sighing", "panting",
+    "groaning", "crowd laughing", "background laughter", "audience laughing",
+})
+FISH_AUDIO_CUE_ALIASES = {
+    "开心": "happy", "高兴": "happy", "快乐": "happy", "嬉しい": "happy",
+    "喜び": "happy", "难过": "sad", "難過": "sad", "悲しい": "sad",
+    "伤心": "sad", "傷心": "sad", "生气": "angry", "生氣": "angry",
+    "怒り": "angry", "兴奋": "excited", "興奮": "excited",
+    "惊讶": "surprised", "驚訝": "surprised", "驚き": "surprised",
+    "平静": "calm", "平靜": "calm", "落ち着く": "calm",
+    "紧张": "nervous", "緊張": "nervous", "害怕": "scared", "怖い": "scared",
+    "担心": "worried", "擔心": "worried", "心配": "worried",
+    "委屈": "upset", "拗ねる": "upset", "沮丧": "frustrated",
+    "沮喪": "frustrated", "害羞": "embarrassed", "照れ": "embarrassed",
+    "恥ずかしい": "embarrassed", "厌恶": "disgusted", "嫌悪": "disgusted",
+    "感动": "moved", "感動": "moved", "骄傲": "proud", "誇らしい": "proud",
+    "放松": "relaxed", "放鬆": "relaxed", "感谢": "grateful",
+    "感謝": "grateful", "自信": "confident", "好奇": "curious",
+    "困惑": "confused", "懐かしい": "nostalgic", "怀旧": "nostalgic",
+    "懷舊": "nostalgic", "眠い": "sleepy", "困倦": "sleepy",
+    "考え込む": "thoughtful", "沉思": "thoughtful", "耳语": "whispering",
+    "耳語": "whispering", "囁き": "whispering", "小声": "soft tone",
+    "小聲": "soft tone", "大喊": "shouting", "叫ぶ": "shouting",
+    "笑": "laughing", "笑う": "laughing", "轻笑": "chuckling",
+    "輕笑": "chuckling", "叹气": "sighing", "嘆氣": "sighing",
+    "ため息": "sighing", "哭泣": "sobbing", "すすり泣く": "sobbing",
+    "喘气": "panting", "喘氣": "panting", "あくび": "yawning",
+    "哈欠": "yawning", "停顿": "break", "停頓": "break", "間": "break",
+}
+FISH_AUDIO_S1_ALIAS_OVERRIDES = {
+    "happy": "joyful",
+    "calm": "relaxed",
+    "sleepy": "soft tone",
+    "thoughtful": "hesitating",
+    "nostalgic": "moved",
+    "yawning": "soft tone",
+    "break": "hesitating",
+}
 DEFAULT_AUTO_VOICE_PROMPT_MARKERS = (
     "随机日语语音模式",
     "日语语音",
@@ -60,7 +112,7 @@ DEFAULT_TTS_SANITIZE_REPLACEMENTS = {
     "999": "很棒",
     "555": "呜呜呜",
 }
-TTS_EMOTION_PLACEHOLDER_PREFIX = "__PRIVATE_COMPANION_TTS_EMOTION_"
+TTS_EMOTION_PLACEHOLDER_PREFIX = "PCTTSEMOTION"
 TTS_VISIBLE_LABEL_PATTERN = re.compile(
     r"^(?:[\s:：|｜-]*(?:中文含义|中文释义|对应文本|原中文文本|显示文本|可见文本|文本|翻译|释义)[\s:：|｜-]*)+"
 )
@@ -101,6 +153,9 @@ class TtsEnhancementMixin:
             self.tts_foreign_text_mode = "translation"
         self.tts_conversion_provider_id = self._cfg_str(config, "tts_conversion_provider_id", "")
         self.tts_extra_prompt = self._cfg_str(config, "tts_extra_prompt", "")
+        self.tts_fishaudio_model = self._cfg_str(config, "tts_fishaudio_model", "auto", "auto").lower()
+        if self.tts_fishaudio_model not in {"auto", *FISH_AUDIO_MODELS}:
+            self.tts_fishaudio_model = "auto"
         self.tts_frequency_control_mode = self._cfg_str(config, "tts_frequency_control_mode", "global", "global").lower()
         if self.tts_frequency_control_mode not in {"global", "legacy"}:
             self.tts_frequency_control_mode = "global"
@@ -183,10 +238,45 @@ class TtsEnhancementMixin:
         self.tts_local_playback_volume = self._cfg_int(config, "tts_local_playback_volume", 35, 0, 100)
         self.tts_local_playback_min_interval_seconds = self._cfg_float(config, "tts_local_playback_min_interval_seconds", 0.0, 0.0)
         self._tts_local_playback_last_at = 0.0
+        self._tts_local_playback_failures = 0
+        self._tts_local_playback_retry_after = 0.0
         self._tts_auto_voice_last_at: dict[str, float] = {}
         if not isinstance(getattr(self, "_tts_session_last_at", None), dict):
             self._tts_session_last_at: dict[str, float] = {}
         self._apply_tts_runtime_overrides()
+
+    def _tts_fishaudio_model_for_provider(
+        self,
+        tts_provider: Any = None,
+        provider_settings: dict[str, Any] | None = None,
+    ) -> str:
+        configured = str(getattr(self, "tts_fishaudio_model", "auto") or "auto").strip().lower()
+        if configured in FISH_AUDIO_MODELS:
+            return configured
+
+        candidates: list[str] = []
+        if tts_provider is not None:
+            get_model = getattr(tts_provider, "get_model", None)
+            if callable(get_model):
+                try:
+                    candidates.append(str(get_model() or ""))
+                except Exception:
+                    pass
+            for attr in ("model_name", "model"):
+                candidates.append(str(getattr(tts_provider, attr, "") or ""))
+        if provider_settings:
+            candidates.append(str(provider_settings.get("model", "") or ""))
+        for candidate in candidates:
+            normalized = candidate.strip().lower()
+            if normalized in FISH_AUDIO_MODELS:
+                return normalized
+
+        api_base = str(getattr(tts_provider, "api_base", "") or "").strip().lower()
+        if not api_base and provider_settings:
+            api_base = str(provider_settings.get("api_base", "") or "").strip().lower()
+        if "api.fish.audio" in api_base or "api.fish-audio.cn" in api_base:
+            return "s2.1-pro-free"
+        return ""
 
     def _tts_provider_kind(self, tts_provider: Any = None, provider_settings: dict[str, Any] | None = None) -> str:
         pieces: list[str] = []
@@ -201,7 +291,8 @@ class TtsEnhancementMixin:
                 pieces.append(str(provider_settings.get(key, "") or ""))
         text = " ".join(pieces).lower()
         if "fish" in text:
-            return "fishaudio"
+            model = self._tts_fishaudio_model_for_provider(tts_provider, provider_settings)
+            return "fishaudio_s1" if model == "s1" else "fishaudio_s2"
         if "gsv" in text or "gptsovits" in text or "so-vits" in text:
             return "gsv"
         if "openai" in text:
@@ -239,11 +330,15 @@ class TtsEnhancementMixin:
         return self._tts_provider_kind(tts_provider, provider_settings)
 
     def _tts_provider_allows_emotion_tags(self, kind: str) -> bool:
-        return kind in {"fishaudio", "gsv"}
+        return kind.startswith("fishaudio") or kind == "gsv"
 
     def _tts_emotion_tag_examples(self, provider_kind: str = "generic") -> tuple[str, str]:
         if not self._tts_provider_allows_emotion_tags(provider_kind):
             return "", ""
+        if provider_kind == "fishaudio_s1":
+            return "(joyful)", "(sad)"
+        if provider_kind.startswith("fishaudio"):
+            return "[happy]", "[sad]"
         voice_lang = getattr(self, "tts_voice_language", "ja")
         if voice_lang == "zh":
             return "[开心]", "[难过]"
@@ -255,6 +350,17 @@ class TtsEnhancementMixin:
         positive, negative = self._tts_emotion_tag_examples(provider_kind)
         if not positive or not negative:
             return ""
+        if provider_kind == "fishaudio_s1":
+            return (
+                f"Fish Audio S1 在{subject}只使用官方英文圆括号控制标记，如 {positive}、{negative}、"
+                "(whispering)、(sighing)；句级情绪放在句首，每句只选一个主要情绪，避免冲突和滥用。"
+            )
+        if provider_kind.startswith("fishaudio"):
+            return (
+                f"Fish Audio S2 在{subject}使用简短方括号自然语言控制，如 {positive}、{negative}、"
+                "[whispering]、[sighing]、[break]；句级情绪通常放句首，语气或音效放在生效位置。"
+                "每句只选一个主要情绪，组合控制最多 3 个，避免冲突、长描述和短句滥用。"
+            )
         return f"可以在{subject}插入方括号情绪标签，如 {positive}、{negative}。"
 
     def _tts_language_label(self) -> str:
@@ -588,7 +694,65 @@ class TtsEnhancementMixin:
                 parts.append(self._tts_component_log_note(comp))
         return "；".join(parts)
 
+    @staticmethod
+    def _fishaudio_canonical_cue(label: str, *, s1: bool) -> str:
+        raw = re.sub(r"\s+", " ", str(label or "").strip())
+        if not raw:
+            return ""
+        canonical = FISH_AUDIO_CUE_ALIASES.get(raw, raw.lower() if raw.isascii() else raw)
+        if s1:
+            canonical = FISH_AUDIO_S1_ALIAS_OVERRIDES.get(canonical, canonical)
+            return canonical if canonical in FISH_AUDIO_S1_CUES else ""
+        if (
+            len(canonical) > 40
+            or re.fullmatch(r"[\d\W_]+", canonical, flags=re.UNICODE)
+            or re.search(r"(?:https?://|www\.|<|>|=|\{|\}|\[|\])", canonical, flags=re.IGNORECASE)
+            or re.match(r"^(?:at|qq|pctts|ttsblock)\s*:", canonical, flags=re.IGNORECASE)
+        ):
+            return ""
+        return canonical
+
+    def _normalize_fishaudio_s2_cues(self, text: str) -> str:
+        source = str(text or "")
+        segments = re.split(r"([。！？.!?]+)", source)
+        normalized: list[str] = []
+        for segment in segments:
+            if not segment or re.fullmatch(r"[。！？.!?]+", segment):
+                normalized.append(segment)
+                continue
+            cue_count = 0
+
+            def repl(match: re.Match[str]) -> str:
+                nonlocal cue_count
+                if match.end() < len(segment) and segment[match.end()] == "(":
+                    return ""
+                canonical = self._fishaudio_canonical_cue(match.group(1), s1=False)
+                if not canonical or cue_count >= 3:
+                    return ""
+                cue_count += 1
+                return f"[{canonical}]"
+
+            normalized_segment = FISH_AUDIO_S2_CUE_PATTERN.sub(repl, segment)
+            normalized_segment = re.sub(r"\[[^\[\]\n]{41,200}\]", "", normalized_segment)
+            normalized.append(normalized_segment)
+        return "".join(normalized)
+
+    def _normalize_fishaudio_s1_cues(self, text: str) -> str:
+        source = str(text or "")
+
+        def repl(match: re.Match[str]) -> str:
+            canonical = self._fishaudio_canonical_cue(match.group(1), s1=True)
+            return f"({canonical})" if canonical else ""
+
+        source = FISH_AUDIO_S1_CUE_PATTERN.sub(repl, source)
+        source = FISH_AUDIO_S2_CUE_PATTERN.sub(repl, source)
+        return source
+
     def _strip_or_keep_emotion_tags(self, text: str, *, provider_kind: str) -> str:
+        if provider_kind == "fishaudio_s1":
+            return self._normalize_fishaudio_s1_cues(text)
+        if provider_kind.startswith("fishaudio"):
+            return self._normalize_fishaudio_s2_cues(text)
         if self._tts_provider_allows_emotion_tags(provider_kind):
             return str(text or "")
         return EMOTION_TAG_PATTERN.sub("", str(text or "")).strip()
@@ -619,15 +783,20 @@ class TtsEnhancementMixin:
         """Clean text immediately before get_audio, scoped to TTS强化 only."""
         if not text:
             return ""
-        source = str(text)
+        source = self._strip_or_keep_emotion_tags(str(text), provider_kind=provider_kind)
         protected: dict[str, str] = {}
         if self._tts_provider_allows_emotion_tags(provider_kind):
             def _protect_emotion(match: re.Match[str]) -> str:
-                token = f"{TTS_EMOTION_PLACEHOLDER_PREFIX}{len(protected)}__"
+                token = f"{TTS_EMOTION_PLACEHOLDER_PREFIX}{len(protected)}TOKEN"
                 protected[token] = match.group(0)
                 return token
 
-            source = EMOTION_TAG_PATTERN.sub(_protect_emotion, source)
+            if provider_kind == "fishaudio_s1":
+                source = FISH_AUDIO_S1_CUE_PATTERN.sub(_protect_emotion, source)
+            elif provider_kind.startswith("fishaudio"):
+                source = FISH_AUDIO_S2_CUE_PATTERN.sub(_protect_emotion, source)
+            else:
+                source = EMOTION_TAG_PATTERN.sub(_protect_emotion, source)
 
         if len(source) > 10000:
             return ""
@@ -2528,10 +2697,22 @@ Provider 规则：{emotion_rule}
         if should_play_local:
             interval = max(0.0, float(getattr(self, "tts_local_playback_min_interval_seconds", 0.0) or 0.0))
             now = time.time()
+            retry_after = float(getattr(self, "_tts_local_playback_retry_after", 0.0) or 0.0)
+            if retry_after > now:
+                logger.debug(
+                    "[PrivateCompanion] TTS 本机播放处于失败退避: remain=%.1fs failures=%s",
+                    retry_after - now,
+                    int(getattr(self, "_tts_local_playback_failures", 0) or 0),
+                )
+                if subtitle_task is not None:
+                    await subtitle_task
+                return
             if interval <= 0 or now - float(getattr(self, "_tts_local_playback_last_at", 0.0) or 0.0) >= interval:
                 self._tts_local_playback_last_at = now
                 try:
                     await asyncio.to_thread(self._open_tts_audio_file_local, audio_path)
+                    self._tts_local_playback_failures = 0
+                    self._tts_local_playback_retry_after = 0.0
                     logger.info(
                         "[PrivateCompanion] 已触发 TTS 本机播放: source=%s live_only=%s path=%s",
                         source or "unknown",
@@ -2539,7 +2720,16 @@ Provider 规则：{emotion_rule}
                         _single_line(audio_path, 160),
                     )
                 except Exception as exc:
-                    logger.warning("[PrivateCompanion] TTS 本机播放失败: %s", _single_line(exc, 120))
+                    failures = int(getattr(self, "_tts_local_playback_failures", 0) or 0) + 1
+                    retry_seconds = min(1800.0, 30.0 * (2 ** min(6, failures - 1)))
+                    self._tts_local_playback_failures = failures
+                    self._tts_local_playback_retry_after = now + retry_seconds
+                    logger.warning(
+                        "[PrivateCompanion] TTS 本机播放失败,已进入退避: failures=%s retry=%.0fs error=%s",
+                        failures,
+                        retry_seconds,
+                        _single_line(exc, 120),
+                    )
         if subtitle_task is not None:
             await subtitle_task
 
@@ -2548,12 +2738,22 @@ Provider 规则：{emotion_rule}
         visible = re.sub(r"<tts\b[^>]*>.*?</tts>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
         visible = re.sub(TTS_TAG_PATTERN, "", visible).strip()
         if visible:
-            return self._sanitize_tts_visible_text(visible)
+            return self._sanitize_tts_visible_text(
+                visible,
+                max_chars=self._tts_complete_text_limit(visible, 800),
+            )
         fallback = str(fallback_plain or "").strip()
         if fallback:
-            return self._sanitize_tts_visible_text(fallback)
+            return self._sanitize_tts_visible_text(
+                fallback,
+                max_chars=self._tts_complete_text_limit(fallback, 800),
+            )
         if getattr(self, "tts_voice_language", "ja") == "zh":
-            return self._sanitize_tts_visible_text(re.sub(TTS_TAG_PATTERN, "", normalized).strip())
+            visible_zh = re.sub(TTS_TAG_PATTERN, "", normalized).strip()
+            return self._sanitize_tts_visible_text(
+                visible_zh,
+                max_chars=self._tts_complete_text_limit(visible_zh, 800),
+            )
         return ""
 
     def _enforce_full_tts_scope_markup(self, text: str, *, source_text: str = "") -> tuple[str, str]:
@@ -2911,6 +3111,28 @@ Provider 规则：{emotion_rule}
             pass
         return text
 
+    def _prepare_fishaudio_provider_model(
+        self,
+        tts_provider: Any,
+        provider_settings: dict[str, Any] | None = None,
+    ) -> str:
+        model = self._tts_fishaudio_model_for_provider(tts_provider, provider_settings)
+        if not model:
+            return ""
+        headers = getattr(tts_provider, "headers", None)
+        if isinstance(headers, dict):
+            previous = str(headers.get("model", "") or "")
+            headers["model"] = model
+            if previous != model:
+                logger.info("[PrivateCompanion] FishAudio TTS 已应用模型请求头: model=%s", model)
+        set_model = getattr(tts_provider, "set_model", None)
+        if callable(set_model):
+            try:
+                set_model(model)
+            except Exception:
+                pass
+        return model
+
     async def _tts_generate_audio_path(self, tts_provider: Any, text: str) -> str:
         if hasattr(tts_provider, "get_audio"):
             result = tts_provider.get_audio(text)
@@ -2935,6 +3157,8 @@ Provider 规则：{emotion_rule}
         source: str = "private_companion",
     ) -> Any | None:
         provider_kind = self._tts_provider_kind(tts_provider, provider_settings)
+        if provider_kind.startswith("fishaudio"):
+            self._prepare_fishaudio_provider_model(tts_provider, provider_settings)
         sanitized = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
         if not sanitized:
             return None

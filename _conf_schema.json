@@ -135,7 +135,7 @@
       "enable_model_perception": {
         "description": "感知当前模型配置",
         "type": "bool",
-        "hint": "把当前会话 LLM 和视觉转述模型配置作为环境信息注入。该信息只供 Bot 判断自身能力边界和表达方式，不要求主动报告模型名。",
+        "hint": "把当前会话 LLM、视觉转述、生图以及 TTS 合成 Provider/文本转换模型的可用性作为环境信息注入；TTS 同时包含语种、转换范围和交付方式。该信息只供 Bot 判断自身能力边界和表达方式，不要求主动报告模型名，也不会注入密钥、接口地址或音频路径。",
         "default": true,
         "condition": "enable_environment_perception"
       },
@@ -967,6 +967,24 @@
     "description": "Legacy flat config: 主动消息发送前调用 LLM 生成文本",
     "type": "bool",
     "default": true,
+    "invisible": true
+  },
+  "enable_proactive_chat_integration": {
+    "description": "Legacy flat config: 联动 Proactive Chat",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "proactive_chat_bridge_review_mode": {
+    "description": "Legacy flat config: Proactive Chat 联动复核模式",
+    "type": "string",
+    "default": "local",
+    "invisible": true
+  },
+  "proactive_chat_bridge_collision_window_seconds": {
+    "description": "Legacy flat config: Proactive Chat 调度防撞窗口（秒）",
+    "type": "int",
+    "default": 90,
     "invisible": true
   },
   "proactive_prompt_template": {
@@ -4877,6 +4895,39 @@
         "type": "bool",
         "hint": "开启后，主动消息只用规则决定是否发送和发送动机，真正文本会调用 AstrBot 默认人格生成；失败时才回退模板。",
         "default": true
+      },
+      "enable_proactive_chat_integration": {
+        "description": "联动 Proactive Chat",
+        "type": "bool",
+        "hint": "检测到 Proactive Chat 时，在其私聊主动消息发送前接入本插件的收件人边界、本地安全检查、TTS/分段去重和发送状态同步。不会修改或接管 Proactive Chat 的定时策略；未安装时保持开启也不会产生额外任务。",
+        "default": true
+      },
+      "proactive_chat_bridge_review_mode": {
+        "description": "Proactive Chat 联动复核模式",
+        "type": "string",
+        "hint": "local 只做确定性本地检查，延迟最低；follow_proactive_review 跟随本插件主动终审配置，可结合关系、运行状态和表达习惯做模型终审，但会增加一次模型调用和等待。",
+        "options": [
+          "local",
+          "follow_proactive_review"
+        ],
+        "default": "local",
+        "condition": {
+          "enable_proactive_chat_integration": true
+        }
+      },
+      "proactive_chat_bridge_collision_window_seconds": {
+        "description": "调度防撞窗口（秒）",
+        "type": "int",
+        "hint": "深度联动会在生成模型调用前检查两套主动链路。任一链路刚发送或正在发送时，另一条在此窗口内不再重复生成，避免几乎同时发出两条消息；不会改变 Proactive Chat 自身的长期触发频率。",
+        "slider": {
+          "min": 10,
+          "max": 600,
+          "step": 10
+        },
+        "default": 90,
+        "condition": {
+          "enable_proactive_chat_integration": true
+        }
       },
       "proactive_prompt_template": {
         "description": "主动消息提示词模板",
@@ -8908,6 +8959,29 @@
           "英语"
         ],
         "hint": "控制 <pc_tts> 标签内真正送入 TTS 的语种。可让标签外保留中文显示文本，标签内使用日语或英语朗读；日语模式会尽量避免把明显非日语文本直接送进 TTS，并会给缺少说明的外语语音块补中文释义。",
+        "condition": {
+          "enable_tts_enhancement": true
+        }
+      },
+      "tts_fishaudio_model": {
+        "description": "Fish Audio 模型适配",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "s2.1-pro-free",
+          "s2.1-pro",
+          "s2-pro",
+          "s1"
+        ],
+        "labels": [
+          "自动识别（官方接口默认 S2.1 Free）",
+          "S2.1 Pro Free",
+          "S2.1 Pro",
+          "S2 Pro",
+          "S1 旧版"
+        ],
+        "hint": "只在当前会话使用 Fish Audio TTS provider 时生效。S2/S2.1 使用方括号自然语言控制，S1 使用圆括号固定标签。自动模式读取 provider 模型；官方 Fish Audio 接口未声明模型时按文档使用 s2.1-pro-free，自建兼容接口不会被强制改写。",
         "condition": {
           "enable_tts_enhancement": true
         }

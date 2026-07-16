@@ -311,6 +311,14 @@ class IntegrationStatusMixin:
             if self._integrated_plugin_installed(*plugin_names):
                 state = "开启" if bool(getattr(self, key, False)) else "关闭"
                 logger.info("[PrivateCompanion] %s", message % state)
+        if self._integrated_plugin_installed("astrbot_plugin_proactive_chat"):
+            enabled = bool(getattr(self, "enable_proactive_chat_integration", True))
+            review_mode = str(getattr(self, "proactive_chat_bridge_review_mode", "local") or "local")
+            logger.info(
+                "[PrivateCompanion] 已检测到 Proactive Chat，私聊主动发送联动%s（复核模式=%s）；不会修改对方调度配置。",
+                "开启" if enabled else "关闭",
+                review_mode,
+            )
 
     def _worldview_mode_effective(self) -> str:
         mode = str(getattr(self, "worldview_adaptation_mode", "auto") or "auto")
@@ -773,7 +781,98 @@ class IntegrationStatusMixin:
         photo_generation = self._format_photo_generation_perception()
         if photo_generation:
             lines.append(f"生图能力={photo_generation}")
+        tts_perception = self._format_tts_model_perception(event)
+        if tts_perception:
+            lines.append(f"TTS能力={tts_perception}")
         return "；".join(lines)
+
+    def _format_tts_model_perception(self, event: AstrMessageEvent) -> str:
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        config: dict[str, Any] = {}
+        get_config = getattr(self.context, "get_config", None)
+        if callable(get_config):
+            try:
+                config = get_config(umo) if umo else get_config()
+                if not isinstance(config, dict):
+                    config = {}
+            except Exception:
+                config = {}
+        raw_settings = config.get("provider_tts_settings", {}) if isinstance(config, dict) else {}
+        provider_settings = dict(raw_settings) if isinstance(raw_settings, dict) else {}
+        provider = None
+        provider_getter = getattr(self.context, "get_using_tts_provider", None)
+        if callable(provider_getter):
+            for args in ((umo,), ()):
+                try:
+                    provider = provider_getter(*args)
+                    break
+                except TypeError:
+                    continue
+                except Exception:
+                    provider = None
+                    break
+
+        enhancement_enabled = bool(getattr(self, "enable_tts_enhancement", False))
+        if provider is None:
+            availability = "已配置但当前会话不可用" if bool(provider_settings.get("enable", False)) else "当前会话未配置 TTS Provider"
+        else:
+            provider_id = (
+                self._provider_config_value(provider, "id", "provider_id")
+                or _single_line(getattr(provider, "provider_id", ""), 120)
+            )
+            provider_label = self._provider_identity_label(provider_id, provider)
+            if provider_label == "AstrBot 默认会话模型":
+                provider_label = _single_line(provider.__class__.__name__, 80) or "可用 TTS Provider"
+            kind_getter = getattr(self, "_tts_provider_kind", None)
+            try:
+                provider_kind = kind_getter(provider, provider_settings) if callable(kind_getter) else ""
+            except Exception:
+                provider_kind = ""
+            kind_label = {
+                "fishaudio": "FishAudio",
+                "gsv": "GPT-SoVITS",
+                "openai": "OpenAI TTS",
+                "edge": "Edge TTS",
+                "azure": "Azure TTS",
+                "gemini": "Gemini TTS",
+                "minimax": "MiniMax TTS",
+                "mimo_tts": "MiMo TTS",
+                "aliyun": "阿里云 TTS",
+                "volcengine": "火山引擎 TTS",
+            }.get(provider_kind, "")
+            if kind_label and kind_label.lower() not in provider_label.lower():
+                provider_label = f"{kind_label} / {provider_label}"
+            availability = f"合成 Provider 可用 / {provider_label}"
+
+        parts = [availability, f"TTS强化:{'开启' if enhancement_enabled else '关闭'}"]
+        if enhancement_enabled:
+            mode_label = {
+                "fast_tag": "快速标签",
+                "postprocess": "后处理",
+            }.get(str(getattr(self, "tts_generation_mode", "fast_tag") or "fast_tag"), "快速标签")
+            scope_label = "全量转换" if str(getattr(self, "tts_conversion_scope", "partial") or "partial") == "full" else "局部转换"
+            delivery_label = "仅语音" if str(getattr(self, "tts_delivery_mode", "voice_and_text") or "voice_and_text") == "voice_only" else "语音+文字"
+            language_getter = getattr(self, "_tts_language_label", None)
+            language_label = language_getter() if callable(language_getter) else {
+                "ja": "日语",
+                "zh": "中文",
+                "en": "英语",
+            }.get(str(getattr(self, "tts_voice_language", "ja") or "ja"), "日语")
+            conversion_id = _single_line(getattr(self, "tts_conversion_provider_id", ""), 120)
+            if conversion_id:
+                conversion_label = self._provider_model_label(conversion_id)
+            else:
+                conversion_label = "跟随当前对话模型"
+            parts.extend(
+                [
+                    f"文本转换模型:{conversion_label}",
+                    f"路径:{mode_label}",
+                    f"语种:{language_label}",
+                    f"范围:{scope_label}",
+                    f"交付:{delivery_label}",
+                ]
+            )
+        return " / ".join(parts)
 
     def _format_photo_generation_perception(self) -> str:
         if not (

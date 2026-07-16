@@ -818,7 +818,7 @@ const featureMeta = {
   enable_balance_awareness: ["余额感知", "定期读取可支配余额；余额偏低时生成贴合人设、低压力的主动念头。"],
   enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
   enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
-  enable_model_perception: ["模型感知", "识别当前会话 LLM、视觉转述模型和生图后端/图片模型配置。"],
+  enable_model_perception: ["模型感知", "识别当前会话 LLM、视觉转述、生图和 TTS 合成/文本转换能力。"],
   enable_worldview_perception: ["世界观适配感知", "把插件能力和生活语境转换成当前人设世界观说法，默认关闭，避免和 AstrBot 人设重复。"],
   enable_lunar_perception: ["农历感知", "可用时注入农历日期，辅助节日、生活氛围和日记语境。"],
   enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
@@ -1202,6 +1202,9 @@ const configLabels = {
   roleplay_user_profile_prompt: "用户与关系补充",
   max_daily_messages: "每日主动上限",
   enable_llm_proactive_message: "主动文本使用 LLM 生成",
+  enable_proactive_chat_integration: "联动 Proactive Chat",
+  proactive_chat_bridge_review_mode: "联动复核模式",
+  proactive_chat_bridge_collision_window_seconds: "调度防撞窗口",
   proactive_prompt_template: "主动生成提示词模板",
   enable_llm_proactive_persona_judge: "主动人格/世界观判定",
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定模型",
@@ -1216,6 +1219,7 @@ const configLabels = {
   enable_tts_enhancement: "TTS强化",
   tts_generation_mode: "TTS生成路径",
   tts_voice_language: "TTS语音语种",
+  tts_fishaudio_model: "Fish Audio 模型适配",
   tts_delivery_mode: "语音发送形态",
   tts_foreign_text_mode: "外语文字显示",
   tts_conversion_scope: "语音转换范围",
@@ -1669,6 +1673,9 @@ const configLabels = {
 const configDescriptions = {
   enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发本插件的被动回复增强，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复主动消息时仍会被轻量记为已回应。适合只想使用主动陪伴、或担心本插件被动链路误接管/误识别的场景。",
   enable_llm_proactive_message: "开启后，主动调度只负责挑选动机和时机，真正文本会调用 AstrBot 人格生成；关闭时回退为本地模板，更省但更机械。",
+  enable_proactive_chat_integration: "检测到 Proactive Chat 时自动建立深度运行时联动：生成前检查两套调度是否撞车，并注入当前关系、状态、时机和已审核表达；生成后统一复核；平台发送无异常返回后才结算成功。不会修改对方插件文件或配置，也不会新建第二套定时任务。版本不兼容时自动降级为发送前装饰联动。",
+  proactive_chat_bridge_review_mode: "轻量本地只做确定性检查，适合追求即时触达；跟随主动终审会按本插件当前主动终审配置加入关系、状态和表达复核，质量更稳，但会多一次模型调用和等待。",
+  proactive_chat_bridge_collision_window_seconds: "只防止两套主动链路在很短时间内重复生成和连续发送，不接管 Proactive Chat 的长期频率。建议保持 90 秒；平台或模型较慢时可适当增加。",
   proactive_prompt_template: "自定义主动消息生成提示词。留空使用内置模板；适合把角色口吻、世界观约束和“不要像回复空气”这类要求固定下来。",
   enable_llm_proactive_persona_judge: "主动计划到点后，先让模型判断这个念头是否符合角色、世界观、关系温度和当下打扰边界；可放行、改写、延后或丢弃。",
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "用于主动人格/世界观判定的轻量模型。建议选择 JSON 稳定、判断保守、理解角色边界的小到中型模型。",
@@ -1791,6 +1798,7 @@ const configDescriptions = {
   passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
   tts_generation_mode: "先决定语音从哪里来。快速标签模式追求低延迟：主模型可写 <pc_tts>，插件发送前轻处理。后处理模式追求稳定：主模型只写普通回复，发送前由 TTS 文本模型判断是否需要语音并完成翻译/改写。",
   tts_voice_language: "控制真正送入 TTS 的语音正文语种。可让聊天文本保留中文，<pc_tts> 内使用日语、中文或英语朗读；日语模式会尽量避免明显非日语文本直接进入 TTS，并会给缺少说明的外语语音块补中文释义。",
+  tts_fishaudio_model: "只在 Fish Audio TTS 下生效。S2/S2.1 使用方括号自然语言控制，S1 使用圆括号固定标签。自动模式读取 provider 模型；官方接口未声明时使用文档默认的 S2.1 Free，自建兼容接口不强制覆盖。",
   tts_delivery_mode: "选择语音成功后是用语音替换对应文字，还是语音和文字一起发送。仅语音不会影响失败兜底：合成失败时仍会发送可读文字。",
   tts_foreign_text_mode: "日语或英语语音同时发送文字时，可显示最终朗读原文、中文译文，或原文与中文双语。中文译文会参考当前人格，不使用生硬字幕腔。",
   tts_conversion_scope: "统一控制快速标签自动语音和后处理路径。局部转换只朗读最适合听的一段；全量转换要求朗读整条回复的全部有效内容。",
@@ -2157,7 +2165,7 @@ const featureSettingGroups = {
   enable_open_loop_tracking: [],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
-  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
+  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
@@ -2237,7 +2245,7 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
-  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
   enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
   creative_hidden_mode: ["creative_share_probability"],
@@ -2256,6 +2264,11 @@ const featureSettingSections = {
       title: "保留主动链路",
       note: "开启仅保留主动能力后，仍保留主动念头、调度和主动文本生成。",
       keys: ["enable_llm_proactive_message", "proactive_prompt_template"],
+    },
+    {
+      title: "Proactive Chat 联动",
+      note: "对方保留触发频率，本插件从生成前开始加入关系、状态、表达、边界和调度互斥，并按真实平台发送结果结算。",
+      keys: ["enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds"],
     },
     {
       title: "人格/世界观复核",
@@ -2810,7 +2823,7 @@ const featureSettingSections = {
     {
       title: "2. 生成与转换",
       note: "选择低延迟标签路径或发送前模型后处理，并指定负责翻译与改写的文本模型。",
-      keys: ["tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt"],
+      keys: ["tts_generation_mode", "tts_fishaudio_model", "tts_conversion_provider_id", "tts_extra_prompt"],
     },
     {
       title: "3. 触发概率",
@@ -2843,6 +2856,7 @@ const featureSettingSections = {
 const featureSettingTypes = {
   forward_message_mode: { type: "select", options: [["inject", "注入"], ["transcribe", "转述"]] },
   tts_generation_mode: { type: "select", options: [["fast_tag", "快速标签：主模型写私有标签"], ["postprocess", "后处理：判断+翻译模型"]] },
+  tts_fishaudio_model: { type: "select", options: [["auto", "自动识别（官方接口默认 S2.1 Free）"], ["s2.1-pro-free", "S2.1 Pro Free"], ["s2.1-pro", "S2.1 Pro"], ["s2-pro", "S2 Pro"], ["s1", "S1 旧版"]] },
   tts_delivery_mode: { type: "select", options: [["voice_only", "仅语音：替换对应文字"], ["voice_and_text", "语音和文字都发送"]] },
   tts_foreign_text_mode: { type: "select", options: [["original", "显示朗读原文"], ["translation", "显示中文译文"], ["bilingual", "原文和中文都显示"]] },
   tts_conversion_scope: { type: "select", options: [["partial", "局部转换：只朗读一段"], ["full", "全量转换：朗读整条回复"]] },
@@ -2946,6 +2960,8 @@ const featureSettingTypes = {
   tts_group_trigger_probability: { type: "number", min: -1, max: 100, step: 1 },
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
+  proactive_chat_bridge_review_mode: { type: "select", options: [["local", "轻量本地（更即时）"], ["follow_proactive_review", "跟随主动终审（更稳）"]] },
+  proactive_chat_bridge_collision_window_seconds: { type: "number", min: 10, max: 600, step: 10, unit: "秒" },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"]] },
   external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
@@ -18890,6 +18906,15 @@ function renderProactiveOnlyModeCard() {
   if (!root) return;
   const key = "enable_proactive_only_mode";
   const checked = toBool(state.featureDraft[key]);
+  const proactiveChat = state.overview?.proactive_chat || {};
+  const proactiveChatState = proactiveChat.enabled
+    ? (proactiveChat.runtime_mode_label || (proactiveChat.installed ? "发送前兼容" : "等待运行实例"))
+    : "联动已关闭";
+  const proactiveChatTone = proactiveChat.deep_active ? "on" : proactiveChat.installed ? "paused" : "off";
+  const proactiveRuntimeVersion = String(proactiveChat.runtime_version || "未知").replace(/^v/i, "");
+  const proactiveRuntimeMeta = proactiveChat.deep_active
+    ? `v${proactiveRuntimeVersion} · 已接管 ${Number(proactiveChat.runtime_method_count || 0)} 个关键方法`
+    : (proactiveChat.runtime_last_error || proactiveChat.runtime_last_event || "");
   const settings = state.overview?.settings || {};
   const injectionPosition = String(settings.passive_injection_position || "prompt");
   root.innerHTML = `
@@ -18901,9 +18926,13 @@ function renderProactiveOnlyModeCard() {
             <span class="feature-toggle-visual"></span>
           </label>
           <div class="proactive-mode-main">
-            <div class="proactive-mode-kicker">兼容与隔离</div>
+            <div class="proactive-mode-heading-row">
+              <div class="proactive-mode-kicker">兼容与隔离</div>
+              <span class="proactive-chat-status ${escapeHtml(proactiveChatTone)}">Proactive Chat · ${escapeHtml(proactiveChatState)}</span>
+            </div>
             <h3>${escapeHtml(featureLabel(key))}</h3>
             <p>只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给 AstrBot 默认主链或其他插件。</p>
+            ${proactiveRuntimeMeta ? `<small class="proactive-mode-runtime">${escapeHtml(proactiveRuntimeMeta)}</small>` : ""}
             <small class="proactive-mode-code">${escapeHtml(key)}</small>
           </div>
           <button type="button" class="proactive-mode-detail proactive-mode-button soft" data-feature-open="${escapeHtml(key)}">查看说明</button>
@@ -19005,6 +19034,7 @@ function featureRelatedSettings(key) {
       smart_message_debounce_examples_limit: 8,
       tts_generation_mode: "fast_tag",
       tts_voice_language: "ja",
+      tts_fishaudio_model: "auto",
       tts_delivery_mode: "voice_and_text",
       tts_foreign_text_mode: "translation",
       tts_conversion_scope: "partial",
@@ -19090,6 +19120,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_proactive_only_mode") {
     if (settingKey === "proactive_prompt_template") return boolSetting("enable_llm_proactive_message");
+    if (["proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds"].includes(settingKey)) return boolSetting("enable_proactive_chat_integration");
     if (["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"].includes(settingKey)) {
       return boolSetting("enable_llm_proactive_persona_judge");
     }
@@ -19455,7 +19486,14 @@ async function saveCurrentFeatureDetail(control = null, successMessage = "已保
 function featureDependencyLines(key) {
   const dependencies = [];
   if (featureLockedByProactiveOnlyMode(key)) dependencies.push(["仅保留主动能力", "普通被动链路中此功能被本插件跳过，原配置保留；关闭仅保留主动能力后生效。"]);
-  if (key === "enable_proactive_only_mode") dependencies.push(["注意", "只跳过本插件的普通被动增强，不会阻止默认回复或其他插件"]);
+  if (key === "enable_proactive_only_mode") {
+    dependencies.push(["注意", "只跳过本插件的普通被动增强，不会阻止默认回复或其他插件"]);
+    const proactiveChat = state.overview?.proactive_chat || {};
+    if (proactiveChat.deep_active) dependencies.push(["Proactive Chat", `深度联动；生成前上下文与调度互斥、生成后复核、平台发送结算均已接管（${proactiveChat.runtime_method_count || 0} 个方法），最近同步 ${proactiveChat.last_sent || "暂无记录"}`]);
+    else if (proactiveChat.active) dependencies.push(["Proactive Chat", `当前为${proactiveChat.runtime_mode_label || "发送前兼容"}；${proactiveChat.runtime_last_error || proactiveChat.runtime_last_event || "等待兼容运行实例"}`]);
+    else if (proactiveChat.installed) dependencies.push(["Proactive Chat", "已检测到插件；开启联动后会优先建立深度运行时桥接"]);
+    else dependencies.push(["Proactive Chat", "未检测到；安装后无需修改对方插件，本页联动开关会自动生效"]);
+  }
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
   if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_proactive_message_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
@@ -19489,9 +19527,9 @@ function featureDependencyLines(key) {
 
 const featureDetailGuides = {
   enable_proactive_only_mode: {
-    summary: "让本插件只负责主动来找用户的链路，并放行普通聊天给 AstrBot 默认主链或其他插件。",
+    summary: "让本插件只负责主动来找用户的链路，并可与 Proactive Chat 共享发送出口和主动状态，普通聊天继续放行给 AstrBot 默认主链或其他插件。",
     trigger: "普通私聊、群聊事件和非主动框架 LLM 请求到达时生效。",
-    enabled: "插件仍会跑日程、状态、主动意愿和私聊主动发送；普通聊天不会注入本插件状态、TTS、图片/转发摘要或群聊上下文，也不会使用插件工具。插件不会拦截默认回复或其他插件处理。用户回复主动消息仍会被轻量记录为已回应。",
+    enabled: "插件仍会跑日程、状态、主动意愿和私聊主动发送；普通聊天不会注入本插件状态、TTS、图片/转发摘要或群聊上下文，也不会使用插件工具。若检测到 Proactive Chat，其私聊主动任务会在生成前接入关系、状态、表达与调度互斥，发送后按平台结果同步状态；不会产生第二套定时任务。用户回复主动消息仍会被轻量记录为已回应。",
     disabled: "按各功能开关正常参与私聊被动增强、群聊观察、图片/转发处理和提示词注入。",
   },
   enable_mai_style_integration: {
@@ -19729,9 +19767,9 @@ const featureDetailGuides = {
     disabled: "媒介信息减少，复杂消息的场景判断会变弱。",
   },
   enable_model_perception: {
-    summary: "识别当前对话 LLM、图片转述视觉模型，以及可用的生图后端/图片模型。",
+    summary: "识别当前对话 LLM、图片转述视觉模型、生图能力，以及当前会话的 TTS 合成与文本转换能力。",
     trigger: "环境感知注入时。",
-    enabled: "Bot 能知道当前文本模型、视觉转述模型，以及生图后端或在线图片模型的大致来源，遇到不同配置时更容易判断自己的能力边界。",
+    enabled: "Bot 能知道当前文本/视觉/生图配置，以及 TTS Provider 是否可用、文本转换模型、语种、转换范围和语音交付方式，更准确地判断能否读图、出图或发送语音。",
     disabled: "Bot 不再获得模型环境信息，只按普通对话上下文回复。",
   },
   enable_worldview_perception: {

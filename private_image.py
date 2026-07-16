@@ -3338,6 +3338,166 @@ class PrivateImageMixin:
                     return sent_texts
         return sent_texts
 
+    async def prepare_keyword_model_router_image_caption(
+        self, event: AstrMessageEvent
+    ) -> str:
+        """在主 Provider 创建前提供本轮图片转述，供关键词路由插件匹配。"""
+        existing_fields = (
+            "private_companion_image_caption_route_text",
+            "private_companion_delayed_image_vision_text",
+            "private_companion_reply_image_vision_text",
+        )
+        for field_name in existing_fields:
+            existing = _single_line(getattr(event, field_name, ""), 8000)
+            if existing:
+                setattr(event, "private_companion_image_caption_route_text", existing)
+                return existing
+
+        if not bool(getattr(self, "enabled", False)):
+            return ""
+        try:
+            if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                return ""
+            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+        except Exception:
+            return ""
+        raw_users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        user = raw_users.get(user_id) if user_id and isinstance(raw_users, dict) else None
+        if not (
+            isinstance(user, dict)
+            and self._is_target_private_user(user_id, user)
+            and bool(user.get("enabled", True))
+        ):
+            return ""
+        feature_checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
+        if callable(feature_checker) and not feature_checker(
+            "enable_private_image_self_recognition"
+        ):
+            return ""
+
+        key = self._semantic_buffer_key(f"private:{user_id}", user_id)
+        buffers = getattr(self, "_semantic_message_buffers", None)
+        buffer = buffers.get(key) if isinstance(buffers, dict) else None
+        buffered_images: list[str] = []
+        vision_text = ""
+        if isinstance(buffer, dict):
+            max_age = max(30.0, self._message_debounce_seconds("image") + 30.0)
+            updated_ts = _safe_float(
+                buffer.get("updated_ts"), buffer.get("first_ts"), 0
+            )
+            if _now_ts() - updated_ts <= max_age:
+                buffered_images = [
+                    str(item)
+                    for item in (buffer.get("images") or [])[:5]
+                    if str(item or "").strip()
+                ]
+                image_limit = self._private_image_vision_text_limit(
+                    len(buffered_images)
+                )
+                vision_text = _single_line(buffer.get("vision_text"), image_limit)
+                vision_task = buffer.get("vision_task")
+                if not vision_text and isinstance(vision_task, asyncio.Task):
+                    try:
+                        if vision_task.done():
+                            vision_text = self._completed_private_image_vision_task_text(
+                                vision_task
+                            )
+                        else:
+                            timeout = self._private_image_vision_wait_budget_seconds()
+                            if timeout > 0:
+                                vision_text = _single_line(
+                                    await asyncio.wait_for(
+                                        asyncio.shield(vision_task), timeout=timeout
+                                    ),
+                                    image_limit,
+                                )
+                    except asyncio.TimeoutError:
+                        logger.debug(
+                            "[PrivateCompanion] 关键词模型路由等待图片转述超时: user=%s",
+                            user_id,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "[PrivateCompanion] 关键词模型路由读取图片转述失败: user=%s error=%s",
+                            user_id,
+                            _single_line(exc, 120),
+                        )
+                if vision_text:
+                    buffer["vision_text"] = vision_text
+
+        source_field = "private_companion_delayed_image_vision_text"
+        if not vision_text and not buffered_images:
+            finder = getattr(self, "_find_reply_image_sources_for_event", None)
+            transcriber = getattr(self, "_transcribe_private_inbound_images", None)
+            if callable(finder) and callable(transcriber):
+                try:
+                    reply_sources = await finder(event)
+                    if reply_sources:
+                        image_limit = self._private_image_vision_text_limit(
+                            len(reply_sources)
+                        )
+                        inbound_text = _single_line(
+                            getattr(event, "message_str", ""), 800
+                        )
+                        vision_text = _single_line(
+                            await transcriber(
+                                reply_sources,
+                                umo=str(
+                                    getattr(event, "unified_msg_origin", "") or ""
+                                ),
+                                user_text=inbound_text,
+                                force_contextual=self._private_image_user_has_specific_vision_request(
+                                    inbound_text
+                                ),
+                            ),
+                            image_limit,
+                        )
+                        source_field = "private_companion_reply_image_vision_text"
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 关键词模型路由预取引用图片转述失败: user=%s error=%s",
+                        user_id,
+                        _single_line(exc, 120),
+                    )
+
+        if not vision_text:
+            return ""
+        setattr(event, source_field, vision_text)
+        setattr(event, "private_companion_image_caption_route_text", vision_text)
+        logger.info(
+            "[PrivateCompanion] 图片转述已提供给关键词模型路由: user=%s source=%s preview=%s",
+            user_id,
+            source_field,
+            _single_line(vision_text, 160),
+        )
+        return vision_text
+
+    def _route_private_image_caption_with_keyword_router(
+        self, event: AstrMessageEvent, vision_text: str
+    ) -> bool:
+        """让绕过标准流水线的纯图片 Agent 也能应用关键词模型路由。"""
+        caption = _single_line(vision_text, 8000)
+        if not caption:
+            return False
+        context = self._private_image_framework_context()
+        getter = getattr(context, "get_registered_star", None)
+        if not callable(getter):
+            return False
+        try:
+            metadata = getter("astrbot_plugin_keyword_model_router")
+            router = getattr(metadata, "star_cls", None) if metadata is not None else None
+            route = getattr(router, "route_companion_image_caption", None)
+            if not callable(route):
+                return False
+            setattr(event, "private_companion_image_caption_route_text", caption)
+            return bool(route(event, caption))
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 调用关键词模型路由失败，保留原 Provider: %s",
+                _single_line(exc, 120),
+            )
+            return False
+
     def _take_buffered_private_image_context_for_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         try:
             sender_id = str(event.get_sender_id())
@@ -3671,6 +3831,10 @@ class PrivateImageMixin:
             setattr(framework_event, "private_companion_skip_external_token_stats", True)
             setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
             setattr(framework_event, "private_companion_delayed_image_sources", list(request_image_refs))
+            if vision_text:
+                self._route_private_image_caption_with_keyword_router(
+                    framework_event, vision_text
+                )
             buffered_image_mode = _single_line(buffer.get("image_mode"), 20)
             main_provider_supports_image = self._event_main_provider_supports_image(framework_event)
             has_visual_provider = self._has_private_image_visual_provider(umo)
@@ -3716,6 +3880,9 @@ class PrivateImageMixin:
                     setattr(framework_event, "private_companion_delayed_image_mode", "no_vision")
                 if vision_text:
                     setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
+                    self._route_private_image_caption_with_keyword_router(
+                        framework_event, vision_text
+                    )
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
                     reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
@@ -3780,6 +3947,14 @@ class PrivateImageMixin:
                 conversation=conv,
                 session_id=getattr(framework_event, "session_id", None) or umo,
             )
+            try:
+                selected_model = framework_event.get_extra("selected_model")
+            except Exception:
+                selected_model = None
+            if isinstance(selected_model, str) and selected_model.strip():
+                # This path passes an explicit request to build_main_agent, so the
+                # framework cannot copy selected_model from the event for us.
+                req.model = selected_model.strip()
             previous_selected_provider = ""
             selected_provider_changed = False
             if direct_image_mode:
