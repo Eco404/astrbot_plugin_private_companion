@@ -5271,9 +5271,9 @@
     }
   },
   "memory_habit_config": {
-    "description": "记忆、表达与习惯",
+    "description": "记忆、通用表达与习惯",
     "type": "object",
-    "hint": "整理长期画像、表达学习、用户习惯和吃什么候选。",
+    "hint": "分别管理私聊长期画像、跨私聊/群聊的通用表达学习、用户习惯和吃什么候选。",
     "items": {
       "enable_companion_memory": {
         "description": "启用用户陪伴记忆",
@@ -5313,13 +5313,10 @@
         }
       },
       "enable_expression_learning": {
-        "description": "启用表达方式学习",
+        "description": "启用跨会话表达方式学习",
         "type": "bool",
         "hint": "从允许的私聊或群聊里学习句长、口语起手、柔和句尾、自然叠词、笑声与停顿等表达特征；重复证据会归纳为场景规则，并用于私聊被动、私聊主动和群聊回复。群聊只保留抽象元数据，不保存原话；跨会话不会共享身份事实、关系称呼或私密内容。",
-        "default": true,
-        "condition": {
-          "enable_mai_style_integration": true
-        }
+        "default": true
       },
       "expression_learning_mode": {
         "description": "表达应用模式",

@@ -66,6 +66,35 @@ class TtsToolSanitizerMixin:
             cleaned_messages.append(copied)
         return cleaned_messages if changed else messages
 
+    async def _process_tool_plain_tts_components(
+        self,
+        text: str,
+        event: Any,
+        *,
+        fallback_plain: str,
+    ) -> list[Any]:
+        if not bool(getattr(self, "enable_tts_enhancement", False)):
+            return []
+        if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
+            converter = getattr(self, "_maybe_convert_plain_reply_to_tts", None)
+            return await converter(fallback_plain, event) if callable(converter) else []
+        processor = getattr(self, "_process_tts_tags", None)
+        if not callable(processor):
+            return []
+        normalized = text
+        full_scope_fallback = ""
+        scope_enforcer = getattr(self, "_enforce_full_tts_scope_markup", None)
+        if callable(scope_enforcer):
+            normalized, full_scope_fallback = scope_enforcer(
+                text,
+                source_text=fallback_plain,
+            )
+        return await processor(
+            normalized,
+            event,
+            fallback_plain=full_scope_fallback or fallback_plain,
+        )
+
     async def _send_message_to_user_tool_with_tts_processing(
         self,
         tool_self: Any,
@@ -122,20 +151,11 @@ class TtsToolSanitizerMixin:
                         return f"error: messages[{idx}].text is required for plain component."
                     if re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
                         fallback_plain = self._clean_tool_plain_text_tts_markup(text)
-                        if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
-                            converter = getattr(self, "_maybe_convert_plain_reply_to_tts", None)
-                            tts_components = (
-                                await converter(fallback_plain, event)
-                                if callable(converter) and bool(getattr(self, "enable_tts_enhancement", False))
-                                else []
-                            )
-                        else:
-                            processor = getattr(self, "_process_tts_tags", None)
-                            tts_components = (
-                                await processor(text, event, fallback_plain=fallback_plain)
-                                if callable(processor) and bool(getattr(self, "enable_tts_enhancement", False))
-                                else []
-                            )
+                        tts_components = await self._process_tool_plain_tts_components(
+                            text,
+                            event,
+                            fallback_plain=fallback_plain,
+                        )
                         if tts_components:
                             components.extend(tts_components)
                         elif fallback_plain:

@@ -896,7 +896,7 @@ const featurePublicKeyAliases = {
 const featureGroups = [
   {
     title: "通用能力",
-    note: "私聊、群聊和主动链路都会参考的状态、媒介、收口与发送能力。",
+    note: "私聊、群聊和主动链路都会参考的状态、媒介、表达学习、收口与发送能力。",
     keys: [
       "enable_humanized_states",
       "enable_segmented_proactive_reply",
@@ -908,6 +908,7 @@ const featureGroups = [
       "enable_recall_enhancement",
       "enable_private_image_self_recognition",
       "enable_forward_message_adaptation",
+      "enable_expression_learning",
       "enable_passive_response_review",
       "enable_smart_silence",
       "enable_proactive_quote_trigger_message",
@@ -920,7 +921,6 @@ const featureGroups = [
     keys: [
       "enable_mai_style_integration",
       "enable_companion_memory",
-      "enable_expression_learning",
       "enable_intent_emotion_analysis",
       "enable_proactive_message_review",
       "enable_passive_topic_suppression",
@@ -4733,12 +4733,12 @@ const setupGuideAdvancedBlocks = [
   {
     id: "common",
     title: "通用能力",
-    body: "配置所有场景都会用到的基础增强：环境感知、回复复核、静默判断、消息收口和语音。适合先把安全边界和回复体验调稳。",
+    body: "配置所有场景都会用到的基础增强：环境感知、表达学习、回复复核、静默判断、消息收口和语音。适合先把安全边界和回复体验调稳。",
   },
   {
     id: "private",
     title: "私聊增强",
-    body: "配置私聊里的主动终审、读图、合并转发、撤回、未回复跟进和夹层阅读。适合想让私聊更像长期陪伴，但要注意模型成本和隐私边界。",
+    body: "配置私聊里的长期画像、主动终审、读图、合并转发、撤回、未回复跟进和夹层阅读。适合想让私聊更像长期陪伴，但要注意模型成本和隐私边界。",
   },
   {
     id: "group",
@@ -4777,17 +4777,17 @@ const setupGuideAdvancedItems = {
       ],
     },
     {
-      key: "enable_companion_memory",
-      title: "长期画像与表达学习",
-      ask: "是否让 Bot 把长期偏好、边界、关系线索和说话习惯沉淀下来？",
-      description: "这会让它不只记住单条聊天，而是逐步形成用户画像、表达习惯和可复用的共同经历。",
-      caution: "记忆越多越需要定期清理。首次建议开启画像，但表达学习可以先保持人工审核或低频整理。",
+      key: "enable_expression_learning",
+      title: "跨会话表达学习",
+      ask: "是否从允许的私聊和群聊中归纳可复用的表达方式？",
+      description: "已审核的情境表达和语法习惯可按范围用于私聊回复、私聊主动和群聊回复；不会跨会话共享原话、称呼、关系或事实。",
+      caution: "建议保留发送前审核，并在学习页明确选择学习来源和使用范围。",
       kind: "feature",
       settings: [
-        { key: "memory_refresh_interval_minutes", type: "number", label: "画像整理间隔分钟", placeholder: "120", min: 5 },
-        { key: "max_companion_memory_items", type: "number", label: "长期画像上限", placeholder: "80", min: 1 },
-        { key: "enable_expression_learning", type: "bool", kind: "feature", label: "学习表达习惯", description: "从对话里提炼口癖、偏好措辞和风格线索。" },
+        { key: "expression_learning_mode", type: "select", label: "表达应用模式", options: [["light", "轻量"], ["balanced", "均衡"], ["aggressive", "积极"]] },
         { key: "enable_expression_manual_review", type: "bool", label: "观察素材人工审核", description: "仅控制原始观察素材；模型归纳规则始终需要审核。" },
+        { key: "enable_expression_style_review", type: "bool", label: "表达发送前审核", description: "检查异常断句、照抄样本和表达学习过头。" },
+        { key: "max_learned_expression_items", type: "number", label: "每来源资料上限", placeholder: "60", min: 12, max: 240, step: 12 },
       ],
     },
     {
@@ -4911,6 +4911,18 @@ const setupGuideAdvancedItems = {
     },
   ],
   private: [
+    {
+      key: "enable_companion_memory",
+      title: "私聊长期画像",
+      ask: "是否让 Bot 从长期私聊中整理稳定偏好、边界、关系线索和重要事实？",
+      description: "长期画像服务于对应私聊对象，不承担跨私聊或群聊的表达学习。",
+      caution: "画像越多越需要定期清理；整理间隔太短会增加后台模型调用。",
+      kind: "feature",
+      settings: [
+        { key: "memory_refresh_interval_minutes", type: "number", label: "画像整理间隔分钟", placeholder: "360", min: 30 },
+        { key: "max_companion_memory_items", type: "number", label: "长期画像上限", placeholder: "36", min: 8 },
+      ],
+    },
     {
       key: "enable_private_image_self_recognition",
       title: "私聊图片识别",
@@ -15958,6 +15970,7 @@ function renderProactiveCandidates() {
     : allItems.filter((item) => String(item.user_id || "") === selectedFilter);
   const counts = selectedFilter === "all" ? (data.counts || {}) : countProactiveCandidateItems(items, "status");
   const sourceCounts = selectedFilter === "all" ? (data.source_counts || {}) : countProactiveCandidateItems(items, "source");
+  const sourceLabels = data.source_labels || {};
   const totalAttempts = selectedFilter === "all" ? (data.total || 0) : sumObjectValues(counts);
   const totalRecords = selectedFilter === "all" ? (data.record_total || data.visible_total || allItems.length || 0) : items.length;
   const pendingTotal = selectedFilter === "all"
@@ -15976,7 +15989,7 @@ function renderProactiveCandidates() {
   ].join("");
   $("#proactiveSourceChart").innerHTML = donutChart(sourceCounts, {
     emptyText: "暂无来源数据",
-    labelFormatter: (label) => proactiveCandidateSourceLabel(label),
+    labelFormatter: (label) => sourceLabels[label] || proactiveCandidateSourceLabel(label),
     maxSegments: 6,
     mergeBelowPercent: 0.035,
     otherLabel: "其他来源",
@@ -16275,6 +16288,11 @@ function proactiveCandidateSourceLabel(source) {
     group_share: "群聊见闻",
     web_exploration: "主动搜索",
     news: "新闻阅读",
+    environment_change: "环境突变",
+    meal_care: "饭点关心",
+    group_ignore_complaint: "群内冒泡关心",
+    jm_cosmos: "私密阅读",
+    personal_goal: "个人目标",
     candidate: "主动候选",
     followup: "补一句",
     external: "外部主动能力",
@@ -19490,15 +19508,15 @@ const featureDetailGuides = {
   },
   enable_expression_learning: {
     summary: "从允许的私聊或群聊提取句长、场景和口语特征，让私聊被动、私聊主动与群聊回复共享稳定的 Bot 表达底色。",
-    trigger: "允许来源有新文本时本地更新统计，不调用模型；范围在私聊对象页快捷管理。",
-    enabled: "私聊保留各自的本地适配；跨会话只共享抽象特征，不共享原话、称呼、关系或事实。",
+    trigger: "允许来源有新文本时更新观察；语义归纳复用私聊/群聊片段整理调用，学习来源和使用范围统一在学习页管理。",
+    enabled: "只有审核通过的情境表达与语法习惯会按范围进入私聊回复、私聊主动或群聊回复；不会共享原话、称呼、关系或事实。",
     disabled: "不会继续更新表达方式统计，也不会向私聊主动、私聊被动或群聊回复注入表达底色。",
   },
   enable_expression_manual_review: {
-    summary: "把新表达样本先放进待审核池，避免激进学习把噪音、群友口癖或复制内容直接写入画像。",
-    trigger: "私聊文本到达并通过本地过滤后。",
-    enabled: "“学习”页会出现待审核表达样本，通过后才会用于表达注入。",
-    disabled: "通过本地过滤的样本会直接进入表达画像。",
+    summary: "控制原始观察素材是否先进入待整理区；不改变语义表达规则必须人工审核的硬边界。",
+    trigger: "允许的私聊或群聊文本通过本地过滤并形成观察素材时。",
+    enabled: "原始观察素材先留待整理；模型归纳的情境表达与语法习惯仍必须在学习页审核。",
+    disabled: "原始观察素材可直接归档，但未审核的语义规则仍不会进入任何回复。",
   },
   enable_expression_style_review: {
     summary: "回复发送前检查表达学习是否过头，重点处理异常逗号、奇怪断句、照抄用户样本和提示词泄露。",

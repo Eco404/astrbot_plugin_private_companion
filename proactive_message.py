@@ -5965,8 +5965,11 @@ Output:
                 provider_settings,
                 config,
             )
-            if components:
-                return components, note
+            records = [component for component in components if isinstance(component, Record)]
+            if records:
+                # The proactive message generator supplies the visible companion text.
+                # Keep only the prebuilt audio here so it cannot be sent twice.
+                return records, note
         try:
             audio_path = await tts_provider.get_audio(spoken_text)
         except Exception as e:
@@ -10636,6 +10639,27 @@ Output:
             message_obj.timestamp = int(time.time())
             event = AstrMessageEvent("", message_obj, platform.meta(), message_obj.session_id)
             event.set_result(self._build_result_from_chain(chain))
+            for component in chain:
+                raw_full_text = getattr(component, "_private_companion_proactive_full_text", "")
+                if not raw_full_text:
+                    continue
+                setattr(event, "_private_companion_proactive_full_text", raw_full_text)
+                setattr(
+                    event,
+                    "_private_companion_proactive_segment_index",
+                    max(0, int(getattr(component, "_private_companion_proactive_segment_index", 0) or 0)),
+                )
+                setattr(
+                    event,
+                    "_private_companion_proactive_segment_count",
+                    max(1, int(getattr(component, "_private_companion_proactive_segment_count", 1) or 1)),
+                )
+                break
+            if any(
+                bool(getattr(component, "_private_companion_skip_tts_enhancement", False))
+                for component in chain
+            ):
+                setattr(event, "_private_companion_skip_tts_enhancement", "proactive_prebuilt_voice")
         except Exception as e:
             logger.debug("[PrivateCompanion] 构造主动消息装饰事件失败,跳过 hooks: %s", e)
             return chain
@@ -10667,14 +10691,20 @@ Output:
         full_text: str = "",
         index: int = 0,
         count: int = 1,
+        suppress_tts: bool = False,
     ) -> Plain:
         comp = Plain(text)
-        clean_full = _single_line(full_text, 1200)
+        clean_full = _single_line(full_text, max(1200, len(str(full_text or "")) + 32))
         if clean_full:
             try:
-                setattr(comp, "_private_companion_proactive_full_text", clean_full)
-                setattr(comp, "_private_companion_proactive_segment_index", max(0, int(index)))
-                setattr(comp, "_private_companion_proactive_segment_count", max(1, int(count)))
+                object.__setattr__(comp, "_private_companion_proactive_full_text", clean_full)
+                object.__setattr__(comp, "_private_companion_proactive_segment_index", max(0, int(index)))
+                object.__setattr__(comp, "_private_companion_proactive_segment_count", max(1, int(count)))
+            except Exception:
+                pass
+        if suppress_tts:
+            try:
+                object.__setattr__(comp, "_private_companion_skip_tts_enhancement", True)
             except Exception:
                 pass
         return comp
@@ -11357,6 +11387,7 @@ Output:
         disable_segmenting: bool = False,
     ) -> None:
         trigger_message_id = _single_line(quote_message_id, 120)
+        has_prebuilt_voice = any(isinstance(component, Record) for component in (extra_components or []))
         if self._contains_inline_image_tag(text):
             image_path = ""
             extra_components = []
@@ -11387,7 +11418,15 @@ Output:
                 await self._send_chain_components(
                     umo,
                     self._with_optional_reply(
-                        [self._proactive_plain_segment_component(outbound_text, full_text=text, index=0, count=1)],
+                        [
+                            self._proactive_plain_segment_component(
+                                outbound_text,
+                                full_text=text,
+                                index=0,
+                                count=1,
+                                suppress_tts=has_prebuilt_voice,
+                            )
+                        ],
                         quote_message_id,
                     ),
                 )
@@ -11407,7 +11446,13 @@ Output:
                     if recalled_message_id:
                         logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
                         return
-                    segment_comp = self._proactive_plain_segment_component(segment, full_text=text, index=index, count=len(segments))
+                    segment_comp = self._proactive_plain_segment_component(
+                        segment,
+                        full_text=text,
+                        index=index,
+                        count=len(segments),
+                        suppress_tts=has_prebuilt_voice,
+                    )
                     chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
                     await self._send_chain_components(umo, chain)
                     quote_message_id = ""

@@ -12685,10 +12685,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         else:
             add("info", "每日 Token 软限额已关闭", "功能全开时后台任务会按各自开关正常运行")
 
-        if features.get("enable_companion_memory") and features.get("enable_expression_learning"):
-            add("ok", "私聊学习链路完整", "长期画像与表达学习均已打开")
+        if features.get("enable_companion_memory"):
+            add("ok", "私聊长期画像已启用", "按私聊对象整理偏好、边界、关系线索和重要事实")
         else:
-            add("warn", "私聊学习链路不完整", "画像记忆或表达学习未开启", "在配置页打开对应功能开关", "memory.learning_incomplete")
+            add("info", "私聊长期画像已关闭", "不会新增私聊长期画像，已有资料仍可管理")
+        if features.get("enable_expression_learning"):
+            add("ok", "通用表达学习已启用", "按学习页设置的来源与范围用于私聊、主动私聊和群聊")
+        else:
+            add("info", "通用表达学习已关闭", "不会继续归纳或注入表达规则")
 
         if features.get("enable_livingmemory_integration"):
             living_summary = self._livingmemory_summary()
@@ -16741,6 +16745,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "web_exploration": {"label": "主动搜索", "note": ""},
             "news": {"label": "新闻阅读", "note": ""},
             "environment_change": {"label": "环境突变", "note": "实时环境出现明显变化后形成的短时主动。"},
+            "meal_care": {"label": "饭点关心", "note": "在合适饭点形成的低压力饮食关心。"},
+            "group_ignore_complaint": {
+                "label": "群内冒泡关心",
+                "note": "对方暂未回复私聊、但刚在群内出现后形成的低压力关心。",
+            },
+            "jm_cosmos": {"label": "私密阅读", "note": ""},
             "personal_goal": {"label": "个人目标", "note": "非创作型长期目标在真实推进、停滞或完成后形成的主动。"},
             "candidate": {"label": "主动候选", "note": ""},
             "followup": {"label": "补一句", "note": "前面的话还差个具体点，所以顺手再接一句。"},
@@ -17034,6 +17044,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "visible_total": len(items),
             "counts": counts,
             "source_counts": source_counts,
+            "source_labels": {key: self._proactive_source_label(key) for key in source_counts},
             "users": sorted(
                 user_counts.values(),
                 key=lambda item: (self._int(item.get("total")), self._single_line(item.get("label"), 40)),

@@ -3101,6 +3101,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         chunks, changed, text = self._segment_llm_reply_chain(event, chain)
         if not chunks or not text:
             return
+        chunks = self._limit_private_routine_check_segments(
+            str(getattr(event, "message_str", "") or ""),
+            chunks,
+        )
         if len(chunks) <= 1:
             if changed:
                 event.set_result(self._build_result_from_chain(chunks[0]))
@@ -5685,6 +5689,41 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return False
         return True
 
+    @staticmethod
+    def _is_private_routine_check_invocation(text: str) -> bool:
+        cleaned = _single_line(text, 80)
+        if not cleaned or len(cleaned) > 28:
+            return False
+        compact = re.sub(r"[\s，。！？!?,.、~～…]+", "", cleaned)
+        markers = ("例行检查", "日常检查", "每日检查", "晚间检查", "夜间检查")
+        prefixes = (
+            "开始", "来", "继续", "进行", "该",
+            "那", "那么", "那就", "嗯", "嗯那", "嗯那就", "好", "好吧", "好那就",
+        )
+        suffixes = ("啦", "咯", "了", "开始", "时间", "时间到", "一下")
+        variants = set(markers)
+        for marker in markers:
+            variants.update(f"{prefix}{marker}" for prefix in prefixes)
+            variants.update(f"{marker}{suffix}" for suffix in suffixes)
+            variants.update(f"{prefix}{marker}{suffix}" for prefix in prefixes for suffix in suffixes)
+        return compact in variants
+
+    def _format_private_routine_check_boundary(self, text: str) -> str:
+        if not self._is_private_routine_check_invocation(text):
+            return ""
+        return (
+            "【轻量例行检查边界】\n"
+            "用户正在发起一次例行检查，但这不等于要求你自动展开固定健康清单。\n"
+            "优先承接当前原始对话或可靠记忆中已经明确的双方约定；整次回复最多两个短句、最多提出一个问题。\n"
+            "只询问当前消息、最近原始对话、明确提醒/便签或可靠记忆实际支持的项目。没有依据时，不要假定用户正在服药、生病、没吃饭或遗漏了某项现实任务。\n"
+            "如果没有明确检查项目，就自然问今天想先检查哪一项；不要一口气连续追问晚饭、吃药和睡觉。"
+        )
+
+    def _limit_private_routine_check_segments(self, text: str, chunks: list[list[Any]]) -> list[list[Any]]:
+        if len(chunks or []) <= 2 or not self._is_private_routine_check_invocation(text):
+            return chunks
+        return [chunks[0], flatten_component_chunks(chunks[1:])]
+
     def _private_passive_state_fingerprint(self, state: dict[str, Any], current_user: dict[str, Any] | None = None) -> dict[str, Any]:
         now = self._environment_now()
         time_label, _ = self._current_time_period_label(now)
@@ -8021,6 +8060,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         reply_style_prompt = self._format_reply_style_prompt()
         if reply_style_prompt:
             prompt_surface.add("reply.style", reply_style_prompt, priority=12, source="reply_style")
+        routine_check_boundary = self._format_private_routine_check_boundary(inbound_text)
+        if routine_check_boundary:
+            prompt_surface.add(
+                "turn.routine_check_boundary",
+                routine_check_boundary,
+                priority=14,
+                source="conversation",
+            )
         if self._record_recent_private_fact_correction(current_user, inbound_text):
             self._schedule_data_save()
         fact_attribution_guard = self._format_private_fact_attribution_guard(current_user, inbound_text)
