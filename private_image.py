@@ -878,15 +878,11 @@ class PrivateImageMixin:
         return merged
 
     def _private_image_caption_provider_id(self, umo: str = "") -> tuple[str, str, str]:
+        candidates = self._private_image_visual_provider_candidates(umo)
+        if candidates:
+            return candidates[0]
         provider_settings = self._astrbot_provider_settings_for_umo(umo)
-        astrbot_provider_id = _single_line(provider_settings.get("default_image_caption_provider_id"), 160)
-        prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
-        if astrbot_provider_id:
-            return astrbot_provider_id, "astrbot_image_caption", prompt
-        fallback_provider_id = self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id)
-        if fallback_provider_id:
-            return fallback_provider_id, "plugin_vision", prompt
-        return "", "", prompt
+        return "", "", str(provider_settings.get("image_caption_prompt") or "").strip()
 
     def _private_image_provider_by_id(self, provider_id: str) -> Any:
         provider_id = _single_line(provider_id, 160)
@@ -924,6 +920,24 @@ class PrivateImageMixin:
     def _private_image_visual_provider_card_key(self) -> str:
         mode = str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower()
         return "PLUGIN_VISION_PROVIDER_ID" if mode == "quick" else "NARRATION_PROVIDER_ID"
+
+    @staticmethod
+    def _normalize_private_image_vision_provider_priority(value: Any) -> str:
+        text = _single_line(value, 80).lower()
+        aliases = {
+            "astrbot": "astrbot_first",
+            "framework": "astrbot_first",
+            "default": "astrbot_first",
+            "官方优先": "astrbot_first",
+            "plugin": "plugin_first",
+            "插件优先": "plugin_first",
+            "recent": "recent_success_first",
+            "adaptive": "recent_success_first",
+            "动态": "recent_success_first",
+            "近期成功优先": "recent_success_first",
+        }
+        normalized = aliases.get(text, text)
+        return normalized if normalized in {"astrbot_first", "plugin_first", "recent_success_first"} else "astrbot_first"
 
     @staticmethod
     def _private_image_visual_provider_source_allowed(provider_source: str) -> bool:
@@ -1038,26 +1052,52 @@ class PrivateImageMixin:
         now = _now_ts()
         ordered: list[tuple[str, str, str]] = []
         used: set[str] = set()
+        priority = self._normalize_private_image_vision_provider_priority(
+            getattr(self, "private_image_vision_provider_priority", "astrbot_first")
+        )
+        base_ordered = list(base)
+        if priority == "plugin_first":
+            source_rank = {
+                "plugin_vision": 0,
+                "plugin_vision_fallback": 1,
+                "astrbot_image_caption": 2,
+            }
+            base_ordered = sorted(
+                enumerate(base_ordered),
+                key=lambda pair: (source_rank.get(_single_line(pair[1][1], 80), 9), pair[0]),
+            )
+            base_ordered = [item for _index, item in base_ordered]
 
-        for provider_id, provider_source, prompt in base:
-            clean_id = _single_line(provider_id, 160)
-            if not clean_id or clean_id in used:
-                continue
-            ordered.append((clean_id, provider_source, prompt))
-            used.add(clean_id)
-
+        recent_rows: list[tuple[int, dict[str, Any]]] = []
         if isinstance(recent, list):
-            rows: list[tuple[int, dict[str, Any]]] = [
-                (index, item) for index, item in enumerate(recent) if isinstance(item, dict)
-            ]
+            recent_rows = [(index, item) for index, item in enumerate(recent) if isinstance(item, dict)]
 
             def recent_provider_sort_key(pair: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
                 item = pair[1]
                 same_session_rank = 0 if clean_umo and _single_line(item.get("umo"), 160) == clean_umo else 1
                 return same_session_rank, -_safe_float(item.get("ts"), 0), pair[0]
 
-            rows.sort(**{"key": recent_provider_sort_key})
-            for _index, item in rows:
+            recent_rows.sort(**{"key": recent_provider_sort_key})
+
+        if priority == "recent_success_first":
+            for _index, item in recent_rows:
+                provider_id = _single_line(item.get("provider_id"), 160)
+                if not provider_id or provider_id in used or provider_id not in by_provider:
+                    continue
+                if now - _safe_float(item.get("ts"), 0) > 7 * 86400:
+                    continue
+                ordered.append(by_provider[provider_id])
+                used.add(provider_id)
+
+        for provider_id, provider_source, prompt in base_ordered:
+            clean_id = _single_line(provider_id, 160)
+            if not clean_id or clean_id in used:
+                continue
+            ordered.append((clean_id, provider_source, prompt))
+            used.add(clean_id)
+
+        if recent_rows:
+            for _index, item in recent_rows:
                 provider_id = _single_line(item.get("provider_id"), 160)
                 item_source = _single_line(item.get("source"), 80)
                 if not provider_id or provider_id in used:
@@ -1189,6 +1229,9 @@ class PrivateImageMixin:
 
         failures.sort(**{"key": failure_until_sort_key, "reverse": True})
         return {
+            "priority": self._normalize_private_image_vision_provider_priority(
+                getattr(self, "private_image_vision_provider_priority", "astrbot_first")
+            ),
             "last_success": {
                 "provider_id": _single_line(last_success.get("provider_id"), 160),
                 "source": _single_line(last_success.get("source"), 80),

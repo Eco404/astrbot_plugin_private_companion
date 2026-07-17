@@ -279,11 +279,47 @@ class GroupWakeupMixin:
         return token in cleaned
 
     def _configured_group_direct_wakeup_words(self) -> list[str]:
-        words = list(self.group_wakeup_direct_words or [])
+        words = list(getattr(self, "group_wakeup_direct_words", []) or [])
         bot_name = _single_line(self.bot_name, 40)
         if bot_name and bot_name not in words:
             words.insert(0, bot_name)
         return list(dict.fromkeys(word for word in words if _single_line(word, 60)))
+
+    def _configured_group_owner_direct_wakeup_words(self) -> list[str]:
+        words = list(getattr(self, "group_wakeup_owner_direct_words", []) or [])
+        return list(dict.fromkeys(word for word in words if _single_line(word, 60)))
+
+    def _group_sender_is_primary_user(self, sender_id: str) -> bool:
+        raw_id = _single_line(sender_id, 128)
+        if not raw_id:
+            return False
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        try:
+            canonical_id = _single_line(canonicalizer(raw_id), 128) if callable(canonicalizer) else raw_id
+        except Exception:
+            canonical_id = raw_id
+        target_getter = getattr(self, "_configured_target_ids", None)
+        try:
+            target_ids = {
+                _single_line(canonicalizer(item), 128) if callable(canonicalizer) else _single_line(item, 128)
+                for item in (target_getter() if callable(target_getter) else [])
+            }
+        except Exception:
+            target_ids = set()
+        if canonical_id in target_ids:
+            return True
+        data = getattr(self, "data", {})
+        users = data.get("users") if isinstance(data, dict) and isinstance(data.get("users"), dict) else {}
+        user = users.get(canonical_id) or users.get(raw_id)
+        if not isinstance(user, dict):
+            return False
+        role_getter = getattr(self, "_private_user_role", None)
+        if callable(role_getter):
+            try:
+                return role_getter(user, canonical_id) == "owner"
+            except Exception:
+                pass
+        return str(user.get("relationship_role") or "").strip().lower() in {"owner", "main", "primary"}
 
     def _generated_group_interest_keywords(self, group: dict[str, Any] | None = None) -> list[str]:
         words: list[str] = []
@@ -487,6 +523,7 @@ class GroupWakeupMixin:
         reason = str(reason or "")
         labels = {
             "direct_wakeup_word": "提到 Bot 名字或强唤醒词",
+            "owner_direct_wakeup_word": "主要用户使用专属强唤醒词",
             "contextual_wakeup_word": "提到弱相关唤醒词且语境需要 Bot 接话",
             "interest_keyword": "命中兴趣关键词",
             "probability_miss": "命中兴趣词但概率未触发",
@@ -1040,6 +1077,18 @@ class GroupWakeupMixin:
         if str(scene.get("trigger") or "") in {"at_other", "reply_other", "at_all"}:
             return {}
         now = _now_ts()
+        if self._group_sender_is_primary_user(sender_id):
+            owner_direct_words = self._configured_group_owner_direct_wakeup_words()
+            for word in owner_direct_words:
+                if self._text_contains_wakeup_word(cleaned, word):
+                    strength = self._group_wakeup_strength("direct_word", group, scene)
+                    return {
+                        "type": "direct_word",
+                        "word": word,
+                        "strength": strength,
+                        "reason": "owner_direct_wakeup_word",
+                        "note": "主要用户使用了专属强唤醒词。",
+                    }
         direct_words = self._configured_group_direct_wakeup_words()
         for word in direct_words:
             if self._text_contains_wakeup_word(cleaned, word):

@@ -786,6 +786,7 @@ const featureMeta = {
   enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
   enable_passive_response_review: ["被动回复复核", "复核用户消息触发的回复；用于私聊普通回复，也用于群聊答疑唤醒保护，不影响主动消息终审。"],
+  enable_framework_error_leak_guard: ["框架异常文本外发拦截", "阻止 Provider/API 报错、工具循环总结和 Agent 内部执行摘要直接发进聊天；误拦技术讨论时可独立关闭。"],
   enable_proactive_message_review: ["主动私聊发送前终审", "仅作用于主动私聊，独立按人格、上下文和真实来源判断原样发送、改写或取消。"],
   enable_smart_silence: ["智能沉默", "私聊和群聊发送前判断是否应该收住话题；可只看明确边界，也可交给小模型结合上下文判断。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
@@ -915,6 +916,7 @@ const featureGroups = [
       "enable_forward_message_adaptation",
       "enable_expression_learning",
       "enable_passive_response_review",
+      "enable_framework_error_leak_guard",
       "enable_smart_silence",
       "enable_proactive_quote_trigger_message",
       "enable_tts_enhancement",
@@ -1068,8 +1070,13 @@ const embeddedFeatureParentByKey = {
   enable_qzone_generated_image_publish: "enable_qzone_integration",
   enable_qzone_comment_inbox: "enable_qzone_integration",
   enable_qzone_emotional_vent_publish: "enable_emotion_simulation",
+  enable_backup_external_image_api: "enable_photo_text_action",
   enable_photo_reference_image: "enable_photo_text_action",
   enable_group_nsfw_private_fallback: "enable_photo_text_action",
+  enable_daily_outfit_photo: "enable_photo_text_action",
+  enable_creative_cover_generation: "enable_photo_text_action",
+  enable_natural_language_photo_generation: "enable_photo_text_action",
+  enable_local_photo_load_guard: "enable_photo_text_action",
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
   enable_private_reading_preference_influence: "enable_private_reading_integration",
@@ -1174,6 +1181,7 @@ const safeFeatureKeys = [
   "enable_companion_memory",
   "enable_expression_learning",
   "enable_passive_response_review",
+  "enable_framework_error_leak_guard",
   "enable_group_privacy_guard",
   "enable_relationship_state_machine",
   "enable_dialogue_episode_memory",
@@ -1318,6 +1326,7 @@ const configLabels = {
   quote_target_strategy: "引用目标策略",
   private_image_vision_wait_seconds: "单图等待识图秒数",
   private_image_provider_timeout_seconds: "单个识图模型超时秒数",
+  private_image_vision_provider_priority: "识图增强优先级",
   enable_private_image_gif_enhancement: "GIF 动图强化",
   private_image_gif_max_frames: "GIF 抽帧数",
   enable_private_image_self_recognition: "图片转述增强",
@@ -1476,6 +1485,7 @@ const configLabels = {
   group_repeat_interrupt_image_path: "打断表情包路径",
   group_scene_recent_limit: "场景感知消息数",
   group_wakeup_direct_words: "强唤醒词",
+  group_wakeup_owner_direct_words: "主要用户专属强唤醒词",
   group_wakeup_context_words: "弱相关唤醒词",
   group_wakeup_interest_keywords: "手动兴趣关键词",
   group_wakeup_interest_probability: "兴趣唤醒概率",
@@ -1881,6 +1891,7 @@ const configDescriptions = {
   quote_target_strategy: "current 引用用户当前这条触发消息；quoted/auto 在用户引用 Bot 旧消息追问时优先引用那条旧消息。",
   private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片收口时间；视觉提前完成会立刻进入主链。",
   private_image_provider_timeout_seconds: "每个视觉 provider 单次最多等待多久；超时后会临时降权并切下一个视觉模型，避免某个上游 503 或重试过久拖慢整条单图回复。",
+  private_image_vision_provider_priority: "AstrBot 优先会先用当前会话的默认图片转文字模型；插件优先会先用模型配置中的插件识图模型及其备用；近期成功优先只提升仍在当前配置中的近期成功模型，不会让已删除的旧模型重新成为首选。所有模式都会在失败或超时后继续尝试后续候选。",
   enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
   private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
   private_image_self_recognition_hint: "只补充当前角色自己的外观、头像、名字、表情包特征或聊天截图昵称，让视觉转述更容易判断图里是不是当前角色。不要写用户资料。",
@@ -1929,6 +1940,7 @@ const configDescriptions = {
   group_scene_recent_limit: "判断群聊场景时参考最近多少条群消息。",
   enable_group_reality_promise_guard: "仅群聊生效。开启后 Bot 不会承诺自己能拉人、修网、开房间、登录或操作现实设备；私聊扮演不受影响。",
   group_wakeup_direct_words: "消息中出现即唤醒 Bot。适合填写 Bot 名字、昵称、固定称呼。多个词可用换行、逗号或顿号分隔。",
+  group_wakeup_owner_direct_words: "仅主要用户在群聊中说出时强唤醒 Bot。次要用户和普通群友说出相同词不会触发；适合填写主要用户专用称呼或约定词。",
   group_wakeup_context_words: "与 Bot 身份、称呼或设定弱相关的关键词。命中后不会直接回复，而是先结合群聊上下文、关系网和句式判断是否适合自然接话。适合填写“机器人”“bot”、外号、作品名、设定称呼或常被拿来指代 Bot 的梗；不适合填“你怎么看”“问问你”这类泛请求句。",
   group_wakeup_interest_keywords: "手动补充 Bot 感兴趣的话题关键词。命中后按概率唤醒，不会每次都抢话。",
   group_wakeup_interest_probability: "群聊出现兴趣关键词时进入回复链的基础概率，填写 0-100。",
@@ -2204,7 +2216,7 @@ const featureSettingGroups = {
   enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "quote_group_reply_once_per_target", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
-  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_private_image_self_recognition: ["private_image_vision_provider_priority", "private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit", "forward_message_image_vision_timeout_seconds"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
   enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
@@ -2224,7 +2236,7 @@ const featureSettingGroups = {
   enable_group_high_intensity_mode: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
   enable_group_context_injection: ["max_group_recent_messages", "enable_group_scene_awareness", "group_scene_recent_limit", "FORWARD_MESSAGE_PROVIDER_ID"],
   enable_group_injection_guard: ["enable_group_privacy_guard", "enable_group_persona_denoise", "enable_group_reality_promise_guard"],
-  enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit", "group_wakeup_debounce_pending_penalty", "enable_group_interjection", "group_interject_min_interval_minutes", "group_interject_max_daily", "enable_group_interjection_feedback", "GROUP_INTERJECT_PROVIDER_ID"],
+  enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_owner_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit", "group_wakeup_debounce_pending_penalty", "enable_group_interjection", "group_interject_min_interval_minutes", "group_interject_max_daily", "enable_group_interjection_feedback", "GROUP_INTERJECT_PROVIDER_ID"],
   enable_group_member_profiles: ["enable_group_relationship_graph", "max_group_relationship_edges", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths", "enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_summary_minutes", "group_slang_web_search_terms", "group_slang_web_search_results", "enable_group_topic_threads", "max_group_topic_threads", "enable_group_episode_memory", "group_episode_refresh_minutes", "max_group_episodes", "GROUP_SLANG_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID"],
   enable_group_slang_learning: ["max_group_slang_terms", "max_group_recent_messages", "enable_group_slang_meanings", "enable_group_slang_web_search", "group_slang_web_search_terms", "group_slang_web_search_results"],
   enable_group_slang_meanings: ["max_group_slang_terms", "enable_group_slang_web_search"],
@@ -2253,7 +2265,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -2468,6 +2480,11 @@ const featureSettingSections = {
   ],
   enable_private_image_self_recognition: [
     {
+      title: "识图模型优先级",
+      note: "选择首选视觉模型来源；首选失败、超时或不支持图片时仍会自动切换后续候选。",
+      keys: ["private_image_vision_provider_priority"],
+    },
+    {
       title: "视觉等待",
       note: "收口结束后等待图片转述结果；视觉提前完成会直接进入主链。",
       keys: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds"],
@@ -2566,7 +2583,7 @@ const featureSettingSections = {
     {
       title: "唤醒词与节流",
       note: "被明确叫到或弱相关叫到时，控制识别词、等待、冷却、疲劳和记录量。",
-      keys: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit"],
+      keys: ["group_wakeup_direct_words", "group_wakeup_owner_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit"],
     },
     {
       title: "非明确接话",
@@ -2745,8 +2762,13 @@ const featureSettingSections = {
   ],
   enable_photo_text_action: [
     {
-      title: "触发与额度",
-      note: "控制多久会把合适的主动消息升级成带图，以及每天最多生成几张。",
+      title: "后端与使用方式",
+      note: "这里选择运行后端和非指令请求的处理方式；在线 API 地址、Key、模型与队列统一到“模型配置 → 生图模型”维护。",
+      keys: ["photo_generation_backend", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"],
+    },
+    {
+      title: "主动发送频率",
+      note: "只控制插件主动消息升级为带图的频率，不限制用户明确要求的生图。",
       keys: ["proactive_photo_text_probability", "photo_action_max_daily"],
     },
     {
@@ -2760,6 +2782,16 @@ const featureSettingSections = {
       keys: ["COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "comfyui_photo_wait_seconds"],
     },
     {
+      title: "电脑负载保护",
+      note: "仅在可能使用本地 ComfyUI/SDGen 时显示；关闭保护后隐藏阈值与延后参数。",
+      keys: ["enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes"],
+    },
+    {
+      title: "在线结果下载",
+      note: "仅在自动或在线 API 后端显示；这里只控制结果图片下载时使用的代理。",
+      keys: ["external_image_download_proxy", "external_image_download_use_environment_proxy"],
+    },
+    {
       title: "参考图一致性",
       note: "可选。只在你需要自拍、头像或角色表情包稳定外观时开启；普通文生图和用户显式改图不依赖它。",
       keys: ["enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library"],
@@ -2770,24 +2802,9 @@ const featureSettingSections = {
       keys: ["enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds"],
     },
     {
-      title: "每日穿搭与创作封面",
-      note: "可分别开启每日穿搭照和创作作品封面；两者共用当前生图后端。",
+      title: "派生图片能力",
+      note: "每日穿搭的附加参数只在穿搭开关开启后显示；创作封面共用当前生图后端。",
       keys: ["enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days"],
-    },
-    {
-      title: "非指令生图/改图",
-      note: "注册工具后建议工具优先；规则快判只作为工具调用不稳定时的前置接管兜底。",
-      keys: ["natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"],
-    },
-    {
-      title: "电脑负载保护",
-      note: "电脑忙时抑制或延后本地生图，避免影响正在使用的机器。",
-      keys: ["enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes"],
-    },
-    {
-      title: "图片结果下载",
-      note: "仅影响在线生图结果 URL 的下载，不改变生图 API 请求或本地后端。",
-      keys: ["external_image_download_proxy", "external_image_download_use_environment_proxy"],
     },
     {
       title: "画面风格",
@@ -2963,6 +2980,7 @@ const featureSettingTypes = {
   memory_companion_context_top_k: { type: "number", min: 1, max: 10, step: 1 },
   memory_companion_context_max_chars: { type: "number", min: 240, max: 1800, step: 60 },
   natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
+  private_image_vision_provider_priority: { type: "select", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]] },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
@@ -3014,6 +3032,7 @@ const featureSettingTypes = {
   external_image_api_custom_headers: { type: "textarea" },
   backup_external_image_api_custom_headers: { type: "textarea" },
   group_wakeup_direct_words: { type: "textarea" },
+  group_wakeup_owner_direct_words: { type: "textarea" },
   group_wakeup_context_words: { type: "textarea" },
   group_wakeup_interest_keywords: { type: "textarea" },
   recall_forbidden_words: { type: "textarea" },
@@ -4814,6 +4833,7 @@ const setupGuideDraftDefaults = {
   privateIgnoreTokenSoftLimit: false,
   privateIgnoreDailyLimit: false,
   groupWakeDirectWords: "在吗, 出来玩, 你怎么看",
+  groupWakeOwnerDirectWords: "",
   groupWakeContextWords: "机器人, bot",
   groupWakeInterestKeywords: "",
   groupWakeInterestProbability: 18,
@@ -4920,6 +4940,15 @@ const setupGuideAdvancedItems = {
         { key: "passive_review_strength", type: "select", label: "复核强度", options: [["lenient", "宽松：不吞回复"], ["balanced", "标准"], ["strict", "严格"]] },
         { key: "response_review_max_chars", type: "number", label: "最长复核文本", placeholder: "1800", min: 200 },
       ],
+    },
+    {
+      key: "enable_framework_error_leak_guard",
+      title: "框架异常文本外发拦截",
+      ask: "是否阻止框架报错和工具循环内部摘要直接发进聊天？",
+      description: "只处理 framework_error 和 tool_loop_summary 文本；不会关闭回复复核、去重、违禁词或工具回执保护。",
+      caution: "关闭后真实 Provider/API 报错可能原样发送给用户；只有正常技术讨论被误拦时才建议关闭。",
+      kind: "feature",
+      settings: [],
     },
     {
       key: "enable_relationship_state_machine",
@@ -5052,6 +5081,7 @@ const setupGuideAdvancedItems = {
       ],
       kind: "feature",
       settings: [
+        { key: "private_image_vision_provider_priority", type: "select", label: "识图增强优先级", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]], description: "首选不可用、超时或不支持图片时会继续尝试后续候选。" },
         { key: "enable_private_image_vision_cache", type: "bool", label: "重复图片缓存", description: "推荐开启，表情包和重复图不会反复读。" },
         { key: "enable_private_image_gif_enhancement", type: "bool", label: "GIF 多帧增强", description: "会更懂动图，但更耗时。" },
         { key: "private_image_self_recognition_hint", type: "textarea", label: "自我识别提示", placeholder: "例如：图片里出现某个固定角色/头像时如何判断是 Bot 自己。" },
@@ -5237,6 +5267,7 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "group_wakeup_direct_words", type: "textarea", label: "强唤醒词", placeholder: "Bot 名字、昵称、固定称呼；一行一个或逗号分隔。" },
+        { key: "group_wakeup_owner_direct_words", type: "textarea", label: "主要用户专属强唤醒词", placeholder: "主要用户的私有称呼、约定词；一行一个。", description: "只有主要用户在群聊中说出时直接唤醒，其他群友说出相同词不会触发。" },
         { key: "group_wakeup_context_words", type: "textarea", label: "弱相关唤醒词", placeholder: "机器人, bot" },
         { key: "group_wakeup_short_text_wait_seconds", type: "number", label: "短唤醒等待秒数", placeholder: "15", min: 0 },
         { key: "group_wakeup_cooldown_seconds", type: "number", label: "唤醒冷却秒数", placeholder: "90", min: 0 },
@@ -5352,45 +5383,50 @@ const setupGuideAdvancedItems = {
       key: "enable_photo_text_action",
       title: "主动带图/拍照",
       ask: "是否允许 Bot 主动生成或搭配图片一起发？",
-      description: "可用于生活照片、穿搭、自拍感配图或图文主动消息。这里会直接配置生图后端需要的关键信息。",
+      description: "可用于生活照片、穿搭、自拍感配图或图文主动消息。这里配置生图行为；在线 API 地址、Key、模型和队列请到“模型配置 → 生图模型”维护。",
       caution: "生图比纯文字更容易失败，也更耗时。建议先把后端跑通，再把每日上限和触发概率调高。",
       dependencies: [
-        { label: "在线 API", text: "选择 external/auto 且想走在线生图时，需要填写图片 API 地址、Key 和图片模型名。" },
+        { label: "在线 API", text: "选择 external/auto 时，请到“模型配置 → 生图模型”填写 API 地址、Key、模型和优先级队列。" },
         { label: "ComfyUI", text: "选择 comfyui/auto 且想走本地生图时，需要安装 astrbot_plugin_comfyui，并填写文生图/自拍工作流名。" },
         { label: "SDGen", text: "选择 sdgen 时，需要安装 astrbot_plugin_SDGen 或 astrbot_plugin_sdgen，并在 SDGen 插件里配好 WebUI。" },
       ],
       kind: "feature",
       settings: [
-        { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "不知道选什么就先用自动；如果只配置了其中一种后端，也可以直接指定。选择 tool_call 可调用其他插件注册的函数工具来生图。" },
-        { key: "custom_photo_tool_name", type: "text", label: "自定义生图函数工具名", placeholder: "例如 generate_selfie", description: "填写其他插件通过 @filter.llm_tool 注册的函数工具名。填写后将生图后端切为“函数工具”；未选择该后端时此项不会生效。" },
-        { key: "custom_photo_tool_prompt_param", type: "text", label: "提示词参数名", placeholder: "prompt", description: "调用工具时提示词使用的参数名，默认为 prompt。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
-        { key: "custom_photo_tool_kind_param", type: "text", label: "类型参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持传入生图类型（如 selfie/text2img/edit），填写对应参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
-        { key: "custom_photo_tool_reference_param", type: "text", label: "参考图参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持参考图/改图，填写参考图路径对应的参数名。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
-        { key: "custom_photo_tool_extra_params", type: "textarea", label: "额外参数（JSON）", placeholder: '{"size":"1024x1024"}', description: "JSON 格式的额外参数，调用工具时会一并传入。", showWhen: (draft) => String(draft.photo_generation_backend || "auto") === "tool_call" },
-        { key: "external_image_api_platform", type: "select", label: "在线生图平台", options: [["auto", "自动识别"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]], description: "Agnes 自动使用官方 generations JSON 协议并支持参考图；SenseNova 使用独立信息图接口。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "EXTERNAL_IMAGE_API_BASE_URL", type: "text", label: "在线图片 API 地址", placeholder: "https://.../v1/images/generations", description: "可填完整生图接口，也可填平台根地址；留空则不会走在线 API。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "EXTERNAL_IMAGE_API_KEY", type: "password", label: "在线图片 API Key", placeholder: "sk-...", description: "只用于在线图片 API；不走在线后端可以留空。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "EXTERNAL_IMAGE_API_MODEL", type: "text", label: "在线图片模型名", placeholder: "例如 gpt-image-1 / qwen-image / seedream / gemini-*-image", description: "请填写图片模型，不要填普通聊天模型。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "external_image_api_size", type: "text", label: "在线生图尺寸", placeholder: "1024x1024", description: "按平台支持的尺寸填写。", showWhen: (draft) => ["auto", "external"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "COMFYUI_TEXT2IMG_WORKFLOW_NAME", type: "text", label: "ComfyUI 文生图工作流", placeholder: "text2img_workflow", description: "选择 ComfyUI 或自动模式时填写；对应 ComfyUI 插件里的工作流名称。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "COMFYUI_SELFIE_WORKFLOW_NAME", type: "text", label: "ComfyUI 自拍工作流", placeholder: "selfie_workflow", description: "用于自拍、人像、头像和角色表情包；没有单独工作流可先填同一个。", showWhen: (draft) => ["auto", "comfyui"].includes(String(draft.photo_generation_backend || "auto")) },
-        { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。" },
-        { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "仅在参考图一致性开启时使用；本地路径和图片 URL 都可以。", showWhen: (draft) => Boolean(draft.enable_photo_reference_image) },
-        { key: "photo_reference_library", type: "textarea", label: "带注释的参考图库", placeholder: "C:\\path\\home.png || 居家服，在家、卧室、睡前使用\nC:\\path\\outdoor.png || 外出服，逛街、通勤时使用", description: "一行一张。Bot 会根据最终场景选择一张；今日穿搭图只在场景确实匹配时参与选择。", showWhen: (draft) => Boolean(draft.enable_photo_reference_image) },
-        { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "feature", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
-        { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => Boolean(draft.enable_group_nsfw_private_fallback) },
-        { key: "enable_daily_outfit_photo", type: "bool", kind: "feature", label: "每日穿搭照片", description: "日程生成后额外生成一张角色当天穿搭照。" },
-        { key: "enable_creative_cover_generation", type: "bool", kind: "feature", label: "为创作内容生成封面", description: "可选。作品已有正文后自动生成一次封面，并按内容自动匹配画风；失败最多重试 3 次。" },
-        { key: "photo_generation_prompt_format", type: "select", label: "提示词表达方式", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"]], description: "全局作用于主动拍照、每日穿搭、创作封面、自然语言生图及函数工具生图。" },
-        { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
-        { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => String(draft.photo_generation_style || "") === "其他" },
-        { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
+        { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
+        { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
+        { key: "enable_natural_language_photo_generation", type: "bool", kind: "setting", label: "允许规则快判生图/改图", description: "开启后，插件会在主链前直接接管高置信图片请求。", showWhen: (draft) => photoSettingVisibleForValues("enable_natural_language_photo_generation", draft) },
+        { key: "natural_language_photo_generation_max_daily", type: "number", label: "规则快判每日上限", placeholder: "3", min: 0, showWhen: (draft) => photoSettingVisibleForValues("natural_language_photo_generation_max_daily", draft) },
+        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "keep character identity consistent, clean composition, no text, no watermark", showWhen: (draft) => photoSettingVisibleForValues("natural_language_photo_extra_prompt", draft) },
         { key: "photo_action_max_daily", type: "number", label: "每日主动带图上限", placeholder: "1", min: 0 },
         { key: "proactive_photo_text_probability", type: "number", label: "主动带图概率", placeholder: "12", min: 0, max: 100 },
-        { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
-        { key: "enable_natural_language_photo_generation", type: "bool", kind: "feature", label: "允许规则快判生图/改图", description: "开启后，插件会在主链前直接接管高置信图片请求。", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" },
-        { key: "natural_language_photo_generation_max_daily", type: "number", label: "规则快判每日上限", placeholder: "3", min: 0, showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
-        { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "keep character identity consistent, clean composition, no text, no watermark", showWhen: (draft) => String(draft.natural_language_photo_generation_mode || "tool_first") === "rule_fast" && Boolean(draft.enable_natural_language_photo_generation) },
+        { key: "custom_photo_tool_name", type: "text", label: "自定义生图函数工具名", placeholder: "例如 generate_selfie", description: "填写其他插件通过 @filter.llm_tool 注册的函数工具名。", showWhen: (draft) => photoSettingVisibleForValues("custom_photo_tool_name", draft) },
+        { key: "custom_photo_tool_prompt_param", type: "text", label: "提示词参数名", placeholder: "prompt", description: "调用工具时提示词使用的参数名，默认为 prompt。", showWhen: (draft) => photoSettingVisibleForValues("custom_photo_tool_prompt_param", draft) },
+        { key: "custom_photo_tool_kind_param", type: "text", label: "类型参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持传入生图类型（如 selfie/text2img/edit），填写对应参数名。", showWhen: (draft) => photoSettingVisibleForValues("custom_photo_tool_kind_param", draft) },
+        { key: "custom_photo_tool_reference_param", type: "text", label: "参考图参数名（可选）", placeholder: "留空不传", description: "如果目标工具支持参考图/改图，填写参考图路径对应的参数名。", showWhen: (draft) => photoSettingVisibleForValues("custom_photo_tool_reference_param", draft) },
+        { key: "custom_photo_tool_extra_params", type: "textarea", label: "额外参数（JSON）", placeholder: '{"size":"1024x1024"}', description: "JSON 格式的额外参数，调用工具时会一并传入。", showWhen: (draft) => photoSettingVisibleForValues("custom_photo_tool_extra_params", draft) },
+        { key: "COMFYUI_TEXT2IMG_WORKFLOW_NAME", type: "text", label: "ComfyUI 文生图工作流", placeholder: "text2img_workflow", description: "选择 ComfyUI 或自动模式时填写；对应 ComfyUI 插件里的工作流名称。", showWhen: (draft) => photoSettingVisibleForValues("COMFYUI_TEXT2IMG_WORKFLOW_NAME", draft) },
+        { key: "COMFYUI_SELFIE_WORKFLOW_NAME", type: "text", label: "ComfyUI 自拍工作流", placeholder: "selfie_workflow", description: "用于自拍、人像、头像和角色表情包；没有单独工作流可先填同一个。", showWhen: (draft) => photoSettingVisibleForValues("COMFYUI_SELFIE_WORKFLOW_NAME", draft) },
+        { key: "comfyui_photo_wait_seconds", type: "number", label: "本地生图等待秒数", placeholder: "90", min: 5, max: 600, showWhen: (draft) => photoSettingVisibleForValues("comfyui_photo_wait_seconds", draft) },
+        { key: "enable_local_photo_load_guard", type: "bool", kind: "setting", label: "电脑高负荷保护", description: "本地后端运行前检查 CPU 和内存，忙时延后或在自动模式下改走在线后端。", showWhen: (draft) => photoSettingVisibleForValues("enable_local_photo_load_guard", draft) },
+        { key: "local_photo_cpu_busy_percent", type: "number", label: "CPU 忙碌阈值", placeholder: "85", min: 1, max: 100, showWhen: (draft) => photoSettingVisibleForValues("local_photo_cpu_busy_percent", draft) },
+        { key: "local_photo_memory_busy_percent", type: "number", label: "内存忙碌阈值", placeholder: "88", min: 1, max: 100, showWhen: (draft) => photoSettingVisibleForValues("local_photo_memory_busy_percent", draft) },
+        { key: "local_photo_defer_minutes", type: "number", label: "忙时延后分钟数", placeholder: "30", min: 1, max: 240, showWhen: (draft) => photoSettingVisibleForValues("local_photo_defer_minutes", draft) },
+        { key: "external_image_download_proxy", type: "text", label: "在线结果下载代理", placeholder: "http://127.0.0.1:7890", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_proxy", draft) },
+        { key: "external_image_download_use_environment_proxy", type: "bool", label: "结果下载使用系统代理", description: "仅影响在线生图结果 URL 的下载。", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_use_environment_proxy", draft) },
+        { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。", showWhen: (draft) => photoSettingVisibleForValues("enable_photo_reference_image", draft) },
+        { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "仅在参考图一致性开启时使用；本地路径和图片 URL 都可以。", showWhen: (draft) => photoSettingVisibleForValues("photo_persona_reference_image_path", draft) },
+        { key: "photo_reference_library", type: "textarea", label: "带注释的参考图库", placeholder: "C:\\path\\home.png || 居家服，在家、卧室、睡前使用\nC:\\path\\outdoor.png || 外出服，逛街、通勤时使用", description: "一行一张。Bot 会根据最终场景选择一张；今日穿搭图只在场景确实匹配时参与选择。", showWhen: (draft) => photoSettingVisibleForValues("photo_reference_library", draft) },
+        { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "setting", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
+        { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_timeout_seconds", draft) },
+        { key: "enable_daily_outfit_photo", type: "bool", kind: "setting", label: "每日穿搭照片", description: "日程生成后额外生成一张角色当天穿搭照。" },
+        { key: "enable_creative_cover_generation", type: "bool", kind: "setting", label: "为创作内容生成封面", description: "可选。作品已有正文后自动生成一次封面，并按内容自动匹配画风；失败最多重试 3 次。" },
+        { key: "daily_outfit_photo_prompt", type: "textarea", label: "每日穿搭提示词", placeholder: "可选：季节、配色、固定饰品", showWhen: (draft) => photoSettingVisibleForValues("daily_outfit_photo_prompt", draft) },
+        { key: "daily_outfit_rotation_days", type: "number", label: "穿搭轮换冷却天数", placeholder: "10", min: 1, max: 30, showWhen: (draft) => photoSettingVisibleForValues("daily_outfit_rotation_days", draft) },
+        { key: "photo_generation_prompt_format", type: "select", label: "提示词表达方式", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"]], description: "全局作用于主动拍照、每日穿搭、创作封面、自然语言生图及函数工具生图。" },
+        { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
+        { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_style_custom_prompt", draft) },
+        { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
+        { key: "photo_generation_scene_presets", type: "textarea", label: "场景预设", placeholder: "按现有格式配置不同场景的提示词。" },
       ],
     },
     {
@@ -5610,8 +5646,12 @@ const setupGuideDynamicFields = new Set([
   "photo_generation_backend",
   "photo_generation_prompt_format",
   "photo_generation_style",
+  "enable_photo_reference_image",
+  "enable_group_nsfw_private_fallback",
+  "enable_daily_outfit_photo",
   "enable_natural_language_photo_generation",
   "natural_language_photo_generation_mode",
+  "enable_local_photo_load_guard",
 ]);
 
 function setupRunStatusLabel(level) {
@@ -5659,6 +5699,7 @@ function setupGuideDraft() {
       privateIgnoreTokenSoftLimit: setupGuideBoolValue(effective.ignore_token_soft_limit, false),
       privateIgnoreDailyLimit: setupGuideBoolValue(effective.ignore_daily_limit, false),
       groupWakeDirectWords: String(settings.group_wakeup_direct_words || setupGuideDraftDefaults.groupWakeDirectWords),
+      groupWakeOwnerDirectWords: String(settings.group_wakeup_owner_direct_words || setupGuideDraftDefaults.groupWakeOwnerDirectWords),
       groupWakeContextWords: String(settings.group_wakeup_context_words || setupGuideDraftDefaults.groupWakeContextWords),
       groupWakeInterestKeywords: String(settings.group_wakeup_interest_keywords || setupGuideDraftDefaults.groupWakeInterestKeywords),
       groupWakeInterestProbability: setupGuidePercentValue(settings.group_wakeup_interest_probability, effective.group_wakeup_interest_probability, setupGuideDraftDefaults.groupWakeInterestProbability),
@@ -6580,7 +6621,8 @@ function setupGuideLaterStepSummaryHtml(index) {
     ]);
   }
   if (index === 6) {
-    const wakeWords = String(setupGuideFieldValue("groupWakeDirectWords") || "").trim();
+    const wakeWords = ["groupWakeDirectWords", "groupWakeOwnerDirectWords"]
+      .some((key) => String(setupGuideFieldValue(key) || "").trim());
     const wakeEnhancement = Boolean(setupGuideFieldValue("groupWakeEnhancement"));
     const interjection = String(setupGuideFieldValue("groupInterjection") || "observe");
     const worldbookReady = Boolean(String(setupGuideFieldValue("worldbookUserId") || "").trim() && String(setupGuideFieldValue("worldbookNickname") || "").trim());
@@ -6924,6 +6966,9 @@ function setupGuideGroupConfigHtml() {
         badgeTone: "recommended",
         description: "消息中出现这些词时，会被视为明确叫到 Bot。",
       })}
+      ${setupGuideText("groupWakeOwnerDirectWords", "主要用户专属强唤醒词", "主要用户的私有称呼或约定词；多个词可用逗号或换行分隔。", true, {
+        description: "只有主要用户在群聊中说出这些词时，才会被视为明确叫到 Bot。",
+      })}
       <div class="setup-guide-choice-grid">
         ${setupGuideCheck("groupWakeEnhancement", "开启唤醒增强", "结合弱相关词、兴趣词、问题句和冷群场景判断是否进入回复链。")}
       </div>
@@ -7242,7 +7287,7 @@ function setupGuideRunThroughItems(overview = state.overview || {}) {
   const visionProvider = setupGuideProviderValue("PLUGIN_VISION_PROVIDER_ID", providers);
   const requiredQuickProvidersReady = setupGuideAllProviderTestsPassed();
   const hasTargetUsers = Boolean(targetUsers.length || draftTargetUsers.length);
-  const hasGroupConfig = Boolean(String(draft.groupWakeDirectWords || "").trim() || draft.proactiveGroup || draft.groupInterjection !== "off");
+  const hasGroupConfig = Boolean(String(draft.groupWakeDirectWords || draft.groupWakeOwnerDirectWords || "").trim() || draft.proactiveGroup || draft.groupInterjection !== "off");
   const hasWorldbookDraft = Boolean(String(draft.worldbookUserId || draft.worldbookNickname || draft.worldbookContent || "").trim());
 
   const items = [
@@ -19220,6 +19265,67 @@ function featureRelatedSettings(key) {
     }));
 }
 
+function photoSettingVisibleForValues(settingKey, values = {}) {
+  const backend = String(values.photo_generation_backend || "auto").trim().toLowerCase();
+  const enabled = (key) => toBool(values[key]);
+  const toolOnly = new Set([
+    "custom_photo_tool_name",
+    "custom_photo_tool_prompt_param",
+    "custom_photo_tool_kind_param",
+    "custom_photo_tool_reference_param",
+    "custom_photo_tool_extra_params",
+  ]);
+  const comfyOnly = new Set([
+    "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
+    "COMFYUI_SELFIE_WORKFLOW_NAME",
+    "comfyui_photo_wait_seconds",
+  ]);
+  const localBackends = new Set(["auto", "comfyui", "sdgen"]);
+  const onlineBackends = new Set(["auto", "external"]);
+  const onlineModelOnly = new Set([
+    "external_image_api_platform",
+    "EXTERNAL_IMAGE_API_BASE_URL",
+    "EXTERNAL_IMAGE_API_KEY",
+    "EXTERNAL_IMAGE_API_MODEL",
+    "external_image_api_size",
+    "external_image_api_timeout_seconds",
+    "external_image_api_custom_headers",
+    "external_image_api_endpoints",
+  ]);
+
+  if (onlineModelOnly.has(settingKey)) return false;
+  if (toolOnly.has(settingKey)) return backend === "tool_call";
+  if (comfyOnly.has(settingKey)) return ["auto", "comfyui"].includes(backend);
+  if (settingKey === "enable_local_photo_load_guard") return localBackends.has(backend);
+  if (["local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes"].includes(settingKey)) {
+    return localBackends.has(backend) && enabled("enable_local_photo_load_guard");
+  }
+  if (["external_image_download_proxy", "external_image_download_use_environment_proxy"].includes(settingKey)) {
+    return onlineBackends.has(backend);
+  }
+  if (settingKey === "enable_photo_reference_image") return backend !== "sdgen";
+  if (["photo_persona_reference_image_path", "photo_reference_library"].includes(settingKey)) {
+    return backend !== "sdgen" && enabled("enable_photo_reference_image");
+  }
+  if (settingKey === "group_nsfw_image_review_timeout_seconds") {
+    return enabled("enable_group_nsfw_private_fallback");
+  }
+  if (["daily_outfit_photo_prompt", "daily_outfit_rotation_days"].includes(settingKey)) {
+    return enabled("enable_daily_outfit_photo");
+  }
+  if (settingKey === "enable_natural_language_photo_generation") {
+    return String(values.natural_language_photo_generation_mode || "tool_first") === "rule_fast";
+  }
+  if (["natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"].includes(settingKey)) {
+    return String(values.natural_language_photo_generation_mode || "tool_first") === "rule_fast"
+      && enabled("enable_natural_language_photo_generation");
+  }
+  if (settingKey === "photo_generation_style_custom_prompt") {
+    return String(values.photo_generation_style || "") === "其他";
+  }
+  return true;
+}
+
 function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = state.overview?.settings || {}) {
   const boolSetting = (name) => {
     if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return Boolean(state.featureDraft[name]);
@@ -19390,15 +19496,10 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return true;
   }
   if (featureKey === "enable_photo_text_action") {
-    if (settingKey === "photo_persona_reference_image_path") return boolSetting("enable_photo_reference_image");
-    if (["daily_outfit_photo_prompt", "daily_outfit_rotation_days"].includes(settingKey)) return boolSetting("enable_daily_outfit_photo");
-    if (settingKey === "enable_natural_language_photo_generation") {
-      return String(valueSetting("natural_language_photo_generation_mode", "tool_first")) === "rule_fast";
-    }
-    if (["natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"].includes(settingKey)) {
-      return String(valueSetting("natural_language_photo_generation_mode", "tool_first")) === "rule_fast" && boolSetting("enable_natural_language_photo_generation");
-    }
-    return true;
+    return photoSettingVisibleForValues(settingKey, {
+      ...settings,
+      ...(state.featureDraft || {}),
+    });
   }
   if (featureKey === "enable_emotion_simulation") {
     if (settingKey === "emotion_judgement_mode") return boolSetting("enable_llm_emotion_judgement");
@@ -19567,9 +19668,6 @@ function syncFeatureProviderInput(select) {
 }
 
 function collectFeatureDetailPayload(featureKey, root = document) {
-  if (featureKey === "enable_photo_text_action") {
-    collectPhotoApiEndpointEditor(root);
-  }
   const overviewSettings = state.overview?.settings || {};
   const features = {};
   const settings = {};
@@ -19712,6 +19810,12 @@ const featureDetailGuides = {
     trigger: "私聊普通回复生成后、发送前，以及群聊答疑唤醒准备插话时；按模式只处理严重问题或扩大到一般质量问题。",
     enabled: "可按配置改写异常回复；宽松强度不会因模型复读判断直接吞掉回复。",
     disabled: "普通被动回复不再进入复核模型，也不会由回复复核取消；智能沉默仍由自己的开关控制。",
+  },
+  enable_framework_error_leak_guard: {
+    summary: "独立拦截框架报错、Provider/API 异常和工具循环内部摘要外发。",
+    trigger: "普通回复最终发送前，本地检查纯文本是否包含明确的框架异常或 Agent 执行摘要标记。",
+    enabled: "命中时取消这条异常文本，并在最近被动未回复记录中标记 framework_error 或 tool_loop_summary。",
+    disabled: "不再按这些框架异常关键词拦截；其他发送前安全保护仍正常运行。",
   },
   enable_proactive_message_review: {
     summary: "独立控制主动私聊发送前终审，可与被动回复复核分别开关。",
@@ -20549,6 +20653,36 @@ function bindFeatureDetailActions() {
           ) {
             syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
+          if (
+            state.selectedFeatureKey === "enable_photo_text_action"
+            && [
+              "enable_photo_reference_image",
+              "enable_group_nsfw_private_fallback",
+              "enable_daily_outfit_photo",
+              "enable_natural_language_photo_generation",
+              "enable_local_photo_load_guard",
+            ].includes(input.dataset.featureParam)
+          ) {
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
+          }
+        });
+      }
+      if (
+        state.selectedFeatureKey === "enable_photo_text_action"
+        && ["photo_generation_backend", "natural_language_photo_generation_mode", "photo_generation_style"].includes(input.dataset.featureParam)
+      ) {
+        input.addEventListener("change", () => {
+          state.overview.settings = state.overview.settings || {};
+          form.querySelectorAll("[data-feature-param]").forEach((control) => {
+            const key = control.dataset.featureParam;
+            if (!key || isProviderConfigKey(key)) return;
+            const value = collectSettingValue(key, control);
+            state.overview.settings[key] = value;
+            if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
+              state.featureDraft[key] = toBool(value);
+            }
+          });
+          renderFeatureSwitches();
         });
       }
       if (state.selectedFeatureKey === "enable_emotion_simulation" && input.dataset.featureParam === "emotion_judgement_mode") {
@@ -20608,14 +20742,11 @@ function bindFeatureDetailActions() {
       event.preventDefault();
       const featureKey = form.dataset.featureParamForm || state.selectedFeatureKey;
       const payload = collectFeatureDetailPayload(featureKey, form);
-      const result = await runAction(
+      await runAction(
         () => postJson("/settings/update", payload),
         "已保存功能参数",
         form.querySelector(".feature-param-save"),
       );
-      if (result && featureKey === "enable_photo_text_action") {
-        state.imageApiEndpointDraft = null;
-      }
     });
   });
   if (state.selectedFeatureKey === "enable_segmented_proactive_reply") {

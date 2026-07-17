@@ -2061,14 +2061,34 @@ TTS 朗读文本：
                                 return
                     except Exception:
                         pass
+                proactive_umo = _single_line(
+                    getattr(event, "_private_companion_proactive_delivery_umo", ""),
+                    180,
+                )
                 try:
-                    await event.send(event.chain_result(chunk))
+                    proactive_sender = getattr(self, "_send_chain_components", None)
+                    if proactive_umo and callable(proactive_sender):
+                        await proactive_sender(
+                            proactive_umo,
+                            chunk,
+                            apply_decorating_hooks=False,
+                        )
+                    else:
+                        await event.send(event.chain_result(chunk))
                     logger.info(
                         "[PrivateCompanion] TTS 分块后台补发完成: session=%s %s",
                         _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
                         self._tts_chain_log_text(chunk),
                     )
                 except Exception as exc:
+                    if proactive_umo:
+                        logger.warning(
+                            "[PrivateCompanion] TTS 主动消息中文正文补发失败: session=%s error=%s %s",
+                            proactive_umo,
+                            _single_line(exc, 160),
+                            self._tts_chain_log_text(chunk),
+                        )
+                        return
                     try:
                         await event.send(self._build_result_from_chain(chunk))
                         logger.info(

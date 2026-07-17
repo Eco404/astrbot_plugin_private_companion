@@ -4658,6 +4658,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         ]
         provider_cooldowns = provider_runtime.get("cooldowns") if isinstance(provider_runtime.get("cooldowns"), list) else []
         last_success = provider_runtime.get("last_success") if isinstance(provider_runtime.get("last_success"), dict) else {}
+        vision_priority = self._single_line(provider_runtime.get("priority"), 40) or "astrbot_first"
+        vision_priority_label = {
+            "astrbot_first": "AstrBot 图片转文字优先",
+            "plugin_first": "插件识图模型优先",
+            "recent_success_first": "近期成功模型优先",
+        }.get(vision_priority, "AstrBot 图片转文字优先")
         if provider_runtime.get("error"):
             add("warn", "私聊图片识别调度状态读取失败", provider_runtime.get("error") or "无法读取当前视觉模型状态。", "刷新排障页或查看日志", "troubleshooting", "vision.runtime_unreadable")
         elif not usable_vision:
@@ -4672,8 +4678,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         elif last_success.get("provider_id"):
             add(
                 "ok",
-                "私聊图片识别会尊重配置并记住视觉恢复候选",
-                f"AstrBot 图片转文字配置仍保留首位；最近成功视觉模型：{last_success.get('provider_id')}（{last_success.get('source') or '来源未知'}，{last_success.get('time') or '刚刚'}）；当前可用 {len(usable_vision)} 个。",
+                f"私聊图片识别：{vision_priority_label}",
+                f"最近成功视觉模型：{last_success.get('provider_id')}（{last_success.get('source') or '来源未知'}，{last_success.get('time') or '刚刚'}）；当前可用 {len(usable_vision)} 个。首选失败时会继续切换后续候选。",
                 "",
                 "troubleshooting",
             )
@@ -6780,6 +6786,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_unanswered_max_interval_multiplier": number_value("privateUnansweredMaxIntervalMultiplier", 1.65),
             "friend_unanswered_max_cooldown_hours": number_value("privateFriendUnansweredMaxCooldownHours", 30),
             "group_wakeup_direct_words": text_value("groupWakeDirectWords", 1200),
+            "group_wakeup_owner_direct_words": text_value("groupWakeOwnerDirectWords", 1200),
             "group_wakeup_context_words": text_value("groupWakeContextWords", 1200),
             "group_wakeup_interest_keywords": text_value("groupWakeInterestKeywords", 1200),
             "group_wakeup_interest_probability": number_value("groupWakeInterestProbability", 18),
@@ -10839,6 +10846,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_expression_learning",
             "enable_intent_emotion_analysis",
             "enable_passive_response_review",
+            "enable_framework_error_leak_guard",
             "enable_proactive_message_review",
             "enable_smart_silence",
             "enable_llm_proactive_message",
@@ -12312,6 +12320,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_fixed_prompt",
             "photo_generation_scene_presets",
             "private_image_vision_wait_seconds",
+            "private_image_provider_timeout_seconds",
+            "private_image_vision_provider_priority",
             "enable_context_image_captioning",
             "context_image_caption_max_items",
             "context_image_caption_timeout_seconds",
@@ -12358,6 +12368,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "group_scene_recent_limit",
             "enable_group_reality_promise_guard",
             "group_wakeup_direct_words",
+            "group_wakeup_owner_direct_words",
             "group_wakeup_context_words",
             "group_wakeup_interest_keywords",
             "group_wakeup_interest_probability",
@@ -14375,6 +14386,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_intent_emotion_analysis",
             "enable_response_self_review",
             "enable_passive_response_review",
+            "enable_framework_error_leak_guard",
             "enable_proactive_message_review",
             "enable_smart_silence",
             "enable_llm_proactive_message",
@@ -14742,6 +14754,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_fixed_prompt",
             "photo_generation_scene_presets",
             "private_image_vision_wait_seconds",
+            "private_image_provider_timeout_seconds",
+            "private_image_vision_provider_priority",
             "enable_context_image_captioning",
             "context_image_caption_max_items",
             "context_image_caption_timeout_seconds",
@@ -14788,6 +14802,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "group_wakeup_direct_words",
+            "group_wakeup_owner_direct_words",
             "group_wakeup_context_words",
             "group_wakeup_interest_keywords",
             "group_wakeup_interest_probability",
@@ -15084,7 +15099,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return "这个称呼我不记。" if reply in {"这个称呼我先不记。", "你是小猪"} else reply
         if key == "QZONE_COOKIE":
             return str(value or "").replace("\r", ";").replace("\n", ";").strip()[:8000]
-        if key in {"group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "recall_forbidden_words"}:
+        if key in {"group_wakeup_direct_words", "group_wakeup_owner_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "recall_forbidden_words"}:
             parser = getattr(self.plugin, "_parse_text_list_config", None)
             if callable(parser):
                 limit = 300 if key == "recall_forbidden_words" else 120
@@ -15714,6 +15729,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(0.0, min(90.0, float(value)))
             except (TypeError, ValueError):
                 return 30.0
+        if key == "private_image_provider_timeout_seconds":
+            try:
+                return max(3.0, min(60.0, float(value)))
+            except (TypeError, ValueError):
+                return 12.0
+        if key == "private_image_vision_provider_priority":
+            normalizer = getattr(self.plugin, "_normalize_private_image_vision_provider_priority", None)
+            if callable(normalizer):
+                return normalizer(value)
+            normalized = str(value or "astrbot_first").strip().lower()
+            return normalized if normalized in {"astrbot_first", "plugin_first", "recent_success_first"} else "astrbot_first"
         if key == "context_image_caption_timeout_seconds":
             try:
                 return max(0.0, min(30.0, float(value)))

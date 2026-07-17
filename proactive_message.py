@@ -11634,6 +11634,7 @@ Output:
             message_obj.timestamp = int(time.time())
             event = AstrMessageEvent("", message_obj, platform.meta(), message_obj.session_id)
             event.set_result(self._build_result_from_chain(chain))
+            setattr(event, "_private_companion_proactive_delivery_umo", umo)
             for component in chain:
                 raw_full_text = getattr(component, "_private_companion_proactive_full_text", "")
                 if not raw_full_text:
@@ -12230,7 +12231,13 @@ Output:
             return True, ""
         return False, error or f"OneBot 原生动作 {action} 返回失败"
 
-    async def _send_chain_components(self, umo: str, chain: list[Any]) -> None:
+    async def _send_chain_components(
+        self,
+        umo: str,
+        chain: list[Any],
+        *,
+        apply_decorating_hooks: bool = True,
+    ) -> None:
         chain_redactor = getattr(self, "_redact_outbound_chain_secrets", None)
         if callable(chain_redactor):
             chain, redacted = chain_redactor(chain)
@@ -12253,7 +12260,11 @@ Output:
                     before=self._chain_text_for_forbidden_recall(chain),
                 )
             return
-        processed_chain = await self._trigger_proactive_decorating_hooks(umo, chain)
+        processed_chain = (
+            await self._trigger_proactive_decorating_hooks(umo, chain)
+            if apply_decorating_hooks
+            else list(chain)
+        )
         if not processed_chain:
             notifier = getattr(self, "_schedule_reply_interception_forward", None)
             if callable(notifier):

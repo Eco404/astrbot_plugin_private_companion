@@ -813,6 +813,12 @@
     "default": 12,
     "invisible": true
   },
+  "private_image_vision_provider_priority": {
+    "description": "Legacy flat config: 识图增强模型优先级",
+    "type": "string",
+    "default": "astrbot_first",
+    "invisible": true
+  },
   "enable_context_image_captioning": {
     "description": "Legacy flat config: 上下文图片摘要补全",
     "type": "bool",
@@ -1453,6 +1459,12 @@
   },
   "enable_passive_response_review": {
     "description": "Legacy flat config: 启用被动回复复核",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_framework_error_leak_guard": {
+    "description": "Legacy flat config: 拦截框架异常文本外发",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -2118,6 +2130,12 @@
   },
   "group_wakeup_direct_words": {
     "description": "Legacy flat config: 强唤醒词",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
+  "group_wakeup_owner_direct_words": {
+    "description": "Legacy flat config: 主要用户专属强唤醒词",
     "type": "list",
     "default": [],
     "invisible": true
@@ -4659,6 +4677,18 @@
         "default": 12,
         "condition": "enable_private_image_self_recognition"
       },
+      "private_image_vision_provider_priority": {
+        "description": "识图增强模型优先级",
+        "type": "string",
+        "hint": "astrbot_first：优先使用 AstrBot 当前会话的默认图片转文字模型；plugin_first：优先使用模型配置里的插件识图模型及其备用模型；recent_success_first：优先复用同会话近期成功且仍在当前配置中的视觉模型。失败、超时或不支持图片时都会继续尝试后续候选。",
+        "default": "astrbot_first",
+        "options": [
+          "astrbot_first",
+          "plugin_first",
+          "recent_success_first"
+        ],
+        "condition": "enable_private_image_self_recognition"
+      },
       "enable_context_image_captioning": {
         "description": "上下文图片摘要补全",
         "type": "bool",
@@ -5655,6 +5685,15 @@
         "description": "启用被动回复复核",
         "type": "bool",
         "hint": "控制用户消息触发的回复复核：用于私聊普通回复，也覆盖群聊答疑唤醒的插话保护；关闭后不会影响主动私聊终审。最低限度的本地事实与安全纠偏仍会保留。",
+        "default": true,
+        "condition": {
+          "enable_mai_style_integration": true
+        }
+      },
+      "enable_framework_error_leak_guard": {
+        "description": "拦截框架异常文本外发",
+        "type": "bool",
+        "hint": "默认开启。阻止 Provider/API 报错、数据库异常、工具循环总结和 Agent 内部执行摘要直接发进聊天。关闭后不再执行 framework_error/tool_loop_summary 关键词拦截；回复复核、重复回复保护、违禁词、内部控制标签和孤立工具发送回执保护不受影响。若模型正常正文经常讨论 API error、image_url 等技术词而被误拦，可关闭此项。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
@@ -6946,6 +6985,15 @@
         "description": "强唤醒词",
         "type": "list",
         "hint": "群聊消息中出现任一词就直接唤醒 Bot。适合填写 Bot 名字、昵称、固定称呼。Bot 名字会自动加入，即使这里留空也可生效。",
+        "default": [],
+        "condition": {
+          "enable_group_wakeup_enhancement": true
+        }
+      },
+      "group_wakeup_owner_direct_words": {
+        "description": "主要用户专属强唤醒词",
+        "type": "list",
+        "hint": "群聊中只有主要用户发送的消息命中这些词时才直接唤醒 Bot；次要用户和普通群友说出相同词不会触发。主要用户按 target_user_ids、身份别名以及私聊页手动设置的关系角色识别。适合放主要用户对 Bot 的私有称呼或约定词，一行一个。",
         "default": [],
         "condition": {
           "enable_group_wakeup_enhancement": true

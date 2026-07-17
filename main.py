@@ -899,6 +899,9 @@ class PrivateCompanionPlugin(
         self.semantic_message_debounce_seconds = self.text_message_debounce_seconds
         self.private_image_vision_wait_seconds = self._cfg_float(c, "private_image_vision_wait_seconds", 30.0, 0.0)
         self.private_image_provider_timeout_seconds = self._cfg_float(c, "private_image_provider_timeout_seconds", 12.0, 3.0)
+        self.private_image_vision_provider_priority = self._normalize_private_image_vision_provider_priority(
+            self._cfg_str(c, "private_image_vision_provider_priority", "astrbot_first")
+        )
         self.enable_private_image_self_recognition = self._cfg_bool(c, "enable_private_image_self_recognition", True)
         self.enable_private_image_vision_cache = self._cfg_bool(c, "enable_private_image_vision_cache", True)
         self.private_image_vision_cache_max_items = self._cfg_int(c, "private_image_vision_cache_max_items", 300, 0, 3000)
@@ -1380,6 +1383,11 @@ class PrivateCompanionPlugin(
             "enable_passive_response_review",
             legacy_response_review_enabled,
         )
+        self.enable_framework_error_leak_guard = self._cfg_bool(
+            c,
+            "enable_framework_error_leak_guard",
+            True,
+        )
         # Runtime alias for older integrations. It no longer gates proactive review.
         self.enable_response_self_review = self.enable_passive_response_review
         self.enable_proactive_message_review = self._cfg_bool(
@@ -1510,6 +1518,9 @@ class PrivateCompanionPlugin(
         self.enable_group_reality_promise_guard = self._cfg_bool(c, "enable_group_reality_promise_guard", True)
         self.enable_group_wakeup_enhancement = self._cfg_bool(c, "enable_group_wakeup_enhancement", True)
         self.group_wakeup_direct_words = self._parse_text_list_config(self._cfg_raw(c, "group_wakeup_direct_words", []))
+        self.group_wakeup_owner_direct_words = self._parse_text_list_config(
+            self._cfg_raw(c, "group_wakeup_owner_direct_words", [])
+        )
         self.group_wakeup_context_words = self._parse_text_list_config(
             self._cfg_raw(c, "group_wakeup_context_words", ["机器人", "bot"])
         )
@@ -2767,6 +2778,8 @@ class PrivateCompanionPlugin(
                 pass
             event.set_result(empty_result)
             event.stop_event()
+            return
+        if not bool(getattr(self, "enable_framework_error_leak_guard", True)):
             return
         error_markers = (
             "error occurred while processing agent request",
