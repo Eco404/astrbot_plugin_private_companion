@@ -7295,65 +7295,286 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             preference = "普通"
         return level, preference
 
-    async def _refresh_persona_relationship(self, user_id: str, user: dict[str, Any]):
-        persona = await self._refresh_default_persona_prompt(str(user.get("umo") or user_id))
-        proactive_count = _safe_int(user.get("proactive_sent_count"), 0)
-        reply_count = _safe_int(user.get("reply_count"), 0)
-        inbound_count = _safe_int(user.get("inbound_count"), 0)
-        reply_rate_available = proactive_count > 0
-        reply_rate = reply_count / proactive_count if reply_rate_available else 0.0
-        reply_rate_text = f"{reply_rate:.0%}" if reply_rate_available else "暂无样本"
-        prompt = f"""
-请根据 AstrBot 默认人格,评估该人格会如何理解它和用户之间的亲近程度与打扰边界。
-不要使用固定阈值,要结合人格设定、互动数据和社交边界。
-如果互动样本很少,不能把“暂无回复率样本”当成用户冷淡；默认优先相信 AstrBot 默认人格里写明的关系设定。
+    @staticmethod
+    def _relationship_analysis_reply_rate_band(proactive_count: int, reply_count: int) -> str:
+        if proactive_count <= 0:
+            return "no_sample"
+        reply_rate = reply_count / proactive_count
+        if reply_rate < 0.15:
+            return "low"
+        if reply_rate < 0.35:
+            return "guarded"
+        if reply_rate < 0.5:
+            return "steady"
+        return "warm"
 
-【AstrBot 默认人格】
-{persona}
+    def _relationship_analysis_metrics(self, user: dict[str, Any]) -> dict[str, Any]:
+        proactive_count = _safe_int(user.get("proactive_sent_count"), 0, 0)
+        reply_count = _safe_int(user.get("reply_count"), 0, 0)
+        inbound_count = _safe_int(user.get("inbound_count"), 0, 0)
+        relationship_score = _safe_int(user.get("relationship_score"), 0)
+        ignored_streak = _safe_int(user.get("ignored_streak"), 0, 0)
+        if ignored_streak >= 4:
+            ignored_band = "high"
+        elif ignored_streak >= 2:
+            ignored_band = "guarded"
+        elif ignored_streak == 1:
+            ignored_band = "single"
+        else:
+            ignored_band = "none"
+        if relationship_score >= 16:
+            score_band = "close"
+        elif relationship_score >= 3 or inbound_count >= 1:
+            score_band = "familiar"
+        else:
+            score_band = "new"
+        return {
+            "inbound_count": inbound_count,
+            "proactive_count": proactive_count,
+            "reply_count": reply_count,
+            "interaction_count": inbound_count + proactive_count,
+            "reply_rate_band": self._relationship_analysis_reply_rate_band(proactive_count, reply_count),
+            "relationship_score_band": score_band,
+            "ignored_streak_band": ignored_band,
+            "last_user_message_at": _safe_float(user.get("last_user_message_at"), 0),
+        }
 
-【互动数据】
+    @staticmethod
+    def _relationship_analysis_signal(user: dict[str, Any]) -> str:
+        intent = user.get("intent_profile")
+        if not isinstance(intent, dict):
+            return ""
+        if not bool(intent.get("boundary_durable")):
+            return ""
+        if _safe_float(intent.get("confidence"), 0) < 0.82:
+            return ""
+        seed = "|".join(
+            (
+                str(_safe_float(user.get("last_user_message_at"), 0)),
+                _single_line(user.get("last_user_message"), 240),
+                _single_line(intent.get("source"), 40),
+            )
+        )
+        return f"boundary:{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:16]}"
+
+    def _relationship_analysis_refresh_reason(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+        force: bool = False,
+    ) -> str:
+        if force:
+            return "forced"
+        profile = user.get("persona_relationship")
+        if not isinstance(profile, dict) or not profile.get("level"):
+            return "initial"
+        if now < _safe_float(user.get("relationship_retry_after"), 0):
+            return ""
+        previous_metrics = profile.get("source_metrics")
+        analyzed_at = _safe_float(profile.get("analyzed_at_ts"), 0)
+        if not isinstance(previous_metrics, dict) or analyzed_at <= 0:
+            return "legacy_profile"
+
+        current_signal = self._relationship_analysis_signal(user)
+        if current_signal and current_signal != str(profile.get("source_signal") or ""):
+            return "durable_boundary"
+
+        metrics = self._relationship_analysis_metrics(user)
+        age = max(0.0, now - analyzed_at)
+        min_interval = max(
+            10.0,
+            _safe_float(getattr(self, "relationship_analysis_min_interval_minutes", 45), 45),
+        ) * 60
+        if (
+            metrics["ignored_streak_band"] in {"guarded", "high"}
+            and metrics["ignored_streak_band"] != str(previous_metrics.get("ignored_streak_band") or "")
+            and age >= min(min_interval, 15 * 60)
+        ):
+            return "ignored_streak_changed"
+        if (
+            metrics["relationship_score_band"] != str(previous_metrics.get("relationship_score_band") or "")
+            and age >= min_interval
+        ):
+            return "relationship_stage_changed"
+        if (
+            metrics["proactive_count"] >= 3
+            and metrics["reply_rate_band"] != str(previous_metrics.get("reply_rate_band") or "")
+            and age >= min_interval
+        ):
+            return "reply_rate_changed"
+
+        interaction_delta = max(
+            0,
+            _safe_int(metrics.get("interaction_count"), 0)
+            - _safe_int(previous_metrics.get("interaction_count"), 0),
+        )
+        message_batch = max(
+            4,
+            _safe_int(getattr(self, "relationship_analysis_interaction_batch", 8), 8, 1),
+        )
+        if interaction_delta >= message_batch and age >= min_interval:
+            return "interaction_batch"
+        max_stale = max(
+            min_interval * 2,
+            _safe_float(getattr(self, "relationship_analysis_max_stale_hours", 8), 8) * 3600,
+        )
+        if interaction_delta > 0 and age >= max_stale:
+            return "stale_with_new_interaction"
+        return ""
+
+    async def _refresh_persona_relationship(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        trigger: str = "interaction",
+        force: bool = False,
+    ) -> bool:
+        if not bool(getattr(self, "enable_relationship_analysis", True)):
+            return False
+        now = _now_ts()
+        async with self._data_lock:
+            analysis_user = dict(self._get_user(user_id))
+        refresh_reason = self._relationship_analysis_refresh_reason(analysis_user, now=now, force=force)
+        if not refresh_reason:
+            return False
+        acquired = await self._try_acquire_user_background_task(
+            user_id,
+            "relationship",
+            now,
+            refresh_key="last_relationship_refresh_at",
+            refresh_seconds=0,
+        )
+        if not acquired:
+            return False
+        async with self._data_lock:
+            analysis_user = dict(self._get_user(user_id))
+
+        try:
+            persona = await self._refresh_default_persona_prompt(str(analysis_user.get("umo") or user_id))
+            previous_profile = analysis_user.get("persona_relationship")
+            if not isinstance(previous_profile, dict):
+                previous_profile = {}
+            persona_signature = hashlib.sha1(str(persona or "").encode("utf-8")).hexdigest()[:16]
+            persona_context = str(persona or "").strip()
+            proactive_count = _safe_int(analysis_user.get("proactive_sent_count"), 0)
+            reply_count = _safe_int(analysis_user.get("reply_count"), 0)
+            inbound_count = _safe_int(analysis_user.get("inbound_count"), 0)
+            reply_rate_available = proactive_count > 0
+            reply_rate = reply_count / proactive_count if reply_rate_available else 0.0
+            reply_rate_text = f"{reply_rate:.0%}" if reply_rate_available else "暂无样本"
+            previous_summary = (
+                f"{_single_line(previous_profile.get('level'), 12) or '暂无'}｜"
+                f"{_single_line(previous_profile.get('preference'), 16) or '普通'}｜"
+                f"{_safe_int(previous_profile.get('score'), 0, 0, 100)}分｜"
+                f"{_single_line(previous_profile.get('note'), 80) or '暂无说明'}"
+            )
+            prompt = f"""
+请复核 AstrBot 人格与该用户之间的亲近程度和打扰边界。这是阶段性复核，不是对最近单句做情绪化反应。
+
+判断原则：
+- 以上次判断为基线；只有累计互动、回复习惯或明确且持续的边界发生可靠变化时才调整。
+- 普通闲聊、一次性情绪、玩笑和单句撒娇不应让关系等级突然升降。
+- 明确的长期边界优先；样本少时不要把“暂无回复率”理解为冷淡，优先尊重人格中的既有关系设定。
+- 最近消息只用于理解变化，不要仅凭这一句话重写长期关系。
+
+【本轮刷新原因】
+{refresh_reason}（触发来源：{_single_line(trigger, 24) or 'interaction'}）
+
+【上次关系判断】
+{previous_summary}
+
+【AstrBot 人格相关设定】
+{persona_context}
+
+【当前互动数据】
 用户 ID：{user_id}
 用户主动私聊次数：{inbound_count}
 Bot 主动消息次数：{proactive_count}
 Bot 主动后用户回复次数：{reply_count}
 主动后回复率：{reply_rate_text}
-连续未回复次数：{_safe_int(user.get('ignored_streak'), 0)}
-最近用户消息：{_single_line(user.get('last_user_message'), 120) or '（暂无）'}
+连续未回复次数：{_safe_int(analysis_user.get('ignored_streak'), 0)}
+最近用户消息：{_single_line(analysis_user.get('last_user_message'), 120) or '（暂无）'}
 
-只输出 JSON：
+只输出紧凑 JSON，不解释过程：
 {{
   "level": "陌生/熟悉/亲近 之一",
   "preference": "低打扰/普通/可轻分享 之一",
   "score": 0到100的整数,
-  "note": "一句话说明这个人格为什么会这样判断"
+  "note": "不超过40字的一句话理由"
 }}
 """.strip()
-        raw_text = await self._llm_call(
-            prompt,
-            max_tokens=220,
-            provider_id=self._task_provider(self.relationship_analysis_provider_id, self.mai_style_provider_id),
-            task="relationship",
-        )
-        payload = self._extract_json_payload(raw_text or "")
-        if not isinstance(payload, dict):
-            return
-        level = str(payload.get("level") or "").strip()
-        preference = str(payload.get("preference") or "").strip()
-        if level not in {"陌生", "熟悉", "亲近"}:
-            return
-        if preference not in {"低打扰", "普通", "可轻分享"}:
-            preference = "普通"
-        profile = {
-            "level": level,
-            "preference": preference,
-            "score": _safe_int(payload.get("score"), 0, 0, 100),
-            "note": _single_line(payload.get("note"), 120),
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-        async with self._data_lock:
-            current = self._get_user(user_id)
-            current["persona_relationship"] = profile
-            self._save_data_sync()
+            raw_text = await self._llm_call(
+                prompt,
+                max_tokens=180,
+                provider_id=self._task_provider(self.relationship_analysis_provider_id, self.mai_style_provider_id),
+                task="relationship",
+            )
+            payload = self._extract_json_payload(raw_text or "")
+            if not isinstance(payload, dict):
+                await self._mark_user_background_retry(user_id, "relationship", now, "invalid_json")
+                return False
+            level = str(payload.get("level") or "").strip()
+            preference = str(payload.get("preference") or "").strip()
+            if level not in {"陌生", "熟悉", "亲近"}:
+                await self._mark_user_background_retry(user_id, "relationship", now, "invalid_level")
+                return False
+            if preference not in {"低打扰", "普通", "可轻分享"}:
+                preference = str(previous_profile.get("preference") or "普通")
+                if preference not in {"低打扰", "普通", "可轻分享"}:
+                    preference = "普通"
+            source_metrics = self._relationship_analysis_metrics(analysis_user)
+            source_signal = self._relationship_analysis_signal(analysis_user)
+            profile = {
+                "level": level,
+                "preference": preference,
+                "score": _safe_int(
+                    payload.get("score"),
+                    _safe_int(previous_profile.get("score"), 0, 0, 100),
+                    0,
+                    100,
+                ),
+                "note": _single_line(payload.get("note"), 80),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "analyzed_at_ts": now,
+                "analysis_reason": refresh_reason,
+                "persona_signature": persona_signature,
+                "source_metrics": source_metrics,
+                "source_signal": source_signal,
+            }
+            followup_user: dict[str, Any] | None = None
+            async with self._data_lock:
+                current = self._get_user(user_id)
+                current["persona_relationship"] = profile
+                current["last_relationship_refresh_at"] = now
+                current["relationship_retry_after"] = 0
+                current["relationship_last_error"] = ""
+                current["relationship_running_at"] = 0
+                latest_signal = self._relationship_analysis_signal(current)
+                if latest_signal and latest_signal != source_signal:
+                    followup_user = dict(current)
+                self._save_data_sync()
+            logger.info(
+                "[PrivateCompanion] 关系分析已按互动变化刷新: user=%s reason=%s trigger=%s level=%s preference=%s",
+                user_id,
+                refresh_reason,
+                _single_line(trigger, 24) or "interaction",
+                level,
+                preference,
+            )
+            if followup_user is not None:
+                asyncio.create_task(
+                    self._refresh_persona_relationship(
+                        user_id,
+                        followup_user,
+                        trigger="pending_boundary",
+                    )
+                )
+            return True
+        except Exception as exc:
+            await self._mark_user_background_retry(user_id, "relationship", now, exc)
+            return False
 
     def _format_relationship_summary(self, user: dict[str, Any]) -> str:
         profile = self._relationship_profile(user)

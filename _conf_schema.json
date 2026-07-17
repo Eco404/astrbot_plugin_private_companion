@@ -1385,6 +1385,12 @@
     "default": true,
     "invisible": true
   },
+  "enable_relationship_analysis": {
+    "description": "Legacy flat config: 启用模型关系站位分析",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "enable_emotion_simulation": {
     "description": "Legacy flat config: 启用情绪模拟",
     "type": "bool",
@@ -5669,6 +5675,15 @@
         "description": "启用关系距离感",
         "type": "bool",
         "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身被刺到后的短期余波由“实验性功能 → 情绪模拟”单独控制。",
+        "default": true,
+        "condition": {
+          "enable_mai_style_integration": true
+        }
+      },
+      "enable_relationship_analysis": {
+        "description": "启用模型关系站位分析",
+        "type": "bool",
+        "hint": "阶段性使用完整人格和互动数据，让模型复核陌生/熟悉/亲近及打扰偏好。关闭后不再产生“关系分析”模型 Token；关系距离感、本地边界判断和基于互动次数/回复率的兜底仍可继续工作。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true

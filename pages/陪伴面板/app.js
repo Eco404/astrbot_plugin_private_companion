@@ -790,6 +790,7 @@ const featureMeta = {
   enable_proactive_message_review: ["主动私聊发送前终审", "仅作用于主动私聊，独立按人格、上下文和真实来源判断原样发送、改写或取消。"],
   enable_smart_silence: ["智能沉默", "私聊和群聊发送前判断是否应该收住话题；可只看明确边界，也可交给小模型结合上下文判断。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
+  enable_relationship_analysis: ["模型关系站位分析", "阶段性用完整人格和互动数据复核亲近程度与打扰偏好；可独立关闭模型调用。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
   enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身被刺到、缓和、恢复和短暂回避的余波。"],
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
@@ -931,6 +932,7 @@ const featureGroups = [
       "enable_intent_emotion_analysis",
       "enable_proactive_message_review",
       "enable_passive_topic_suppression",
+      "enable_relationship_analysis",
       "enable_relationship_state_machine",
       "enable_dialogue_episode_memory",
       "enable_open_loop_tracking",
@@ -1183,6 +1185,7 @@ const safeFeatureKeys = [
   "enable_passive_response_review",
   "enable_framework_error_leak_guard",
   "enable_group_privacy_guard",
+  "enable_relationship_analysis",
   "enable_relationship_state_machine",
   "enable_dialogue_episode_memory",
   "enable_open_loop_tracking",
@@ -4947,6 +4950,15 @@ const setupGuideAdvancedItems = {
       ask: "是否阻止框架报错和工具循环内部摘要直接发进聊天？",
       description: "只处理 framework_error 和 tool_loop_summary 文本；不会关闭回复复核、去重、违禁词或工具回执保护。",
       caution: "关闭后真实 Provider/API 报错可能原样发送给用户；只有正常技术讨论被误拦时才建议关闭。",
+      kind: "feature",
+      settings: [],
+    },
+    {
+      key: "enable_relationship_analysis",
+      title: "模型关系站位分析",
+      ask: "是否让模型阶段性复核与用户的亲近程度和打扰偏好？",
+      description: "使用完整人格、互动次数、主动回复率和最近消息，生成陌生/熟悉/亲近及低打扰/普通/可轻分享判断。关闭后不会再产生“关系分析”模型 Token。",
+      caution: "关闭不会停用关系距离感：本地边界识别、未回复降频和互动数据兜底仍然保留，只是不再由模型定期重评。",
       kind: "feature",
       settings: [],
     },
@@ -19727,7 +19739,7 @@ function featureDependencyLines(key) {
   }
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
-  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_proactive_message_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
+  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_proactive_message_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_analysis", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
     dependencies.push(["依赖", "私聊互动策略"]);
   }
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
@@ -19834,6 +19846,12 @@ const featureDetailGuides = {
     trigger: "私聊回复生成后和下一轮回复审校时。",
     enabled: "相似话题会被标记为重复；被动 full 模式下可能参与轻微改写，默认只做本地抑制。",
     disabled: "Bot 可能更频繁重复刚提过的内容或相似收尾。",
+  },
+  enable_relationship_analysis: {
+    summary: "阶段性使用完整人格和互动数据，由模型复核关系层级与打扰偏好。",
+    trigger: "首次建立关系画像、明确长期边界、互动阶段或回复率跨档，以及累计一段新互动后。",
+    enabled: "按变化调用关系分析模型，并保存陌生/熟悉/亲近、打扰偏好、关系分和简短理由供其他陪伴功能读取。",
+    disabled: "停止全部“关系分析”模型调用；已有结果继续可用，没有结果时使用本地互动次数、回复率和关系分兜底。",
   },
   enable_relationship_state_machine: {
     summary: "维护 Bot 和用户之间的距离感，让回复和主动行为随亲近、冷淡、边界、长期未联系和主动消息回应情况自然变化。",

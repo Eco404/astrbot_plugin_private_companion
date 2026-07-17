@@ -3476,6 +3476,62 @@ Bot 近期回复：
             }
         )
 
+    def _refresh_group_bot_conversation_after_reply(
+        self,
+        group: dict[str, Any],
+        sender_id: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Start the follow-up window from the confirmed Bot reply time."""
+        if (
+            not self.enable_group_conversation_followup
+            or self.group_conversation_followup_seconds <= 0
+            or self.group_conversation_followup_max_turns <= 0
+        ):
+            return False
+        store = self._group_active_conversation(group)
+        if not store or str(store.get("sender_id") or "") != str(sender_id or ""):
+            return False
+        reply_ts = _now_ts() if now is None else float(now)
+        store["last_ts"] = reply_ts
+        store["last_bot_reply_ts"] = reply_ts
+        store["expires_at"] = reply_ts + max(5, self.group_conversation_followup_seconds)
+        store["message_count"] = _safe_int(group.get("message_count"), 0, 0)
+        return True
+
+    async def _refresh_group_conversation_after_confirmed_send(self, event: AstrMessageEvent) -> None:
+        if not bool(getattr(event, "_has_send_oper", False)):
+            return
+        scene = getattr(event, "private_companion_group_scene", None)
+        if not isinstance(scene, dict) or str(scene.get("talking_to") or "") != "bot":
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id:
+            return
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        if not sender_id:
+            return
+        refreshed = False
+        expires_in = 0.0
+        async with self._data_lock:
+            group = self._get_group(group_id)
+            refreshed = self._refresh_group_bot_conversation_after_reply(group, sender_id)
+            if refreshed:
+                active = self._group_active_conversation(group)
+                expires_in = max(0.0, _safe_float(active.get("expires_at"), 0) - _now_ts())
+                self._save_data_sync()
+        if refreshed:
+            logger.info(
+                "[PrivateCompanion] Bot 回复已确认发送，群聊续接窗口从实际回复时间重新计时: group=%s sender=%s window=%.1fs",
+                group_id,
+                sender_id,
+                expires_in,
+            )
+
     async def _mark_group_conversation_from_llm_request(self, event: AstrMessageEvent) -> None:
         checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         group_enabled = checker("enable_group_companion") if callable(checker) else self.enable_group_companion

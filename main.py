@@ -1426,6 +1426,7 @@ class PrivateCompanionPlugin(
         self.proactive_review_low_score_threshold = self._cfg_unit_interval(c, "proactive_review_low_score_threshold", 0.34, 0.0)
         self.proactive_review_pressure_threshold = self._cfg_unit_interval(c, "proactive_review_pressure_threshold", 0.55, 0.0)
         self.enable_passive_topic_suppression = self._cfg_bool(c, "enable_passive_topic_suppression", True)
+        self.enable_relationship_analysis = self._cfg_bool(c, "enable_relationship_analysis", True)
         self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
         self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
         self.enable_llm_emotion_judgement = self._cfg_bool(c, "enable_llm_emotion_judgement", False)
@@ -2497,6 +2498,7 @@ class PrivateCompanionPlugin(
         candidate = getattr(event, "_private_companion_outbound_text_candidate", None)
         if isinstance(candidate, dict):
             self._confirm_outbound_text_candidate(candidate)
+        await self._refresh_group_conversation_after_confirmed_send(event)
 
     @filter.on_decorating_result()
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
@@ -10958,7 +10960,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         elif is_target_user:
             pass
         if is_target_user:
-            asyncio.create_task(self._refresh_persona_relationship(user_id, user_snapshot))
+            asyncio.create_task(
+                self._refresh_persona_relationship(user_id, user_snapshot, trigger="inbound")
+            )
             asyncio.create_task(self._maybe_refresh_companion_memory(user_id, user_snapshot))
             asyncio.create_task(self._maybe_refresh_dialogue_episode(user_id, user_snapshot))
 
