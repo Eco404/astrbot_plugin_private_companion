@@ -471,10 +471,30 @@ class ProactiveEngineMixin:
             created = _safe_float(item.get("created_ts"), 0)
             updated = _safe_float(item.get("updated_ts"), created)
             state = str(item.get("state") or "queued").strip().lower()
+            window_start_at = _safe_float(item.get("window_start_at"), 0)
+            preferred_ts = _safe_float(item.get("preferred_ts"), window_start_at)
+            best_until_at = _safe_float(item.get("best_until_at"), preferred_ts)
             expire_at = _safe_float(item.get("expire_at"), 0)
             if state in {"sent", "blocked", "cancelled", "dropped"}:
                 if max(created, updated, expire_at) > 0 and check_now - max(created, updated, expire_at) <= 12 * 3600:
                     kept.append(item)
+                continue
+            if expire_at > 0 and check_now > expire_at:
+                item["state"] = "blocked"
+                item["last_status"] = "blocked"
+                item["last_note"] = "潜在念头窗口已过期"
+                item["updated_ts"] = check_now
+                kept.append(item)
+                continue
+            if not (
+                window_start_at > 0
+                and window_start_at <= preferred_ts <= best_until_at <= expire_at
+            ):
+                item["state"] = "blocked"
+                item["last_status"] = "blocked"
+                item["last_note"] = "潜在念头时间窗口无效"
+                item["updated_ts"] = check_now
+                kept.append(item)
                 continue
             if expire_at > 0 and check_now - expire_at > 2 * 3600:
                 continue
@@ -680,6 +700,140 @@ class ProactiveEngineMixin:
         expire_at = max(end_ts + grace_span, preferred_ts + 5 * 60.0)
         return start_ts, preferred_ts, end_ts, expire_at
 
+    def _proactive_origin_event_id(self, candidate: dict[str, Any], *, source: str = "") -> str:
+        explicit = _single_line(
+            candidate.get("origin_event_id")
+            or candidate.get("event_id")
+            or candidate.get("source_event_id")
+            or candidate.get("key")
+            or candidate.get("id"),
+            80,
+        )
+        if explicit:
+            return explicit
+        context = candidate.get("context") if isinstance(candidate.get("context"), dict) else {}
+        context_id = _single_line(
+            context.get("id")
+            or context.get("memo_id")
+            or context.get("goal_id")
+            or context.get("event_id"),
+            80,
+        )
+        scheduled_ts = _safe_float(
+            candidate.get("_scheduled_ts")
+            or candidate.get("scheduled_ts")
+            or candidate.get("window_start_at")
+            or candidate.get("preferred_ts"),
+            0,
+        )
+        window = _single_line(candidate.get("window"), 40)
+        date_text = _single_line(candidate.get("date"), 20)
+        if not date_text and scheduled_ts > 0:
+            try:
+                date_text = self._environment_fromtimestamp(scheduled_ts).strftime("%Y-%m-%d")
+            except Exception:
+                date_text = datetime.fromtimestamp(scheduled_ts).strftime("%Y-%m-%d")
+        # 有明确日期/时段的来源事件，其随机落点分钟不是事件身份的一部分。
+        # 否则同一饭点、问候或日程事件每次重选随机分钟都会得到新 ID。
+        scheduled_anchor = "" if window else str(int(scheduled_ts // 60))
+        raw = "|".join(
+            (
+                _single_line(source or candidate.get("source"), 40),
+                _single_line(candidate.get("reason"), 40),
+                date_text,
+                window,
+                scheduled_anchor,
+                context_id,
+                _single_line(candidate.get("topic"), 80),
+            )
+        )
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    def _prepare_proactive_candidate_window(
+        self,
+        candidate: dict[str, Any],
+        *,
+        reason: str,
+        source: str,
+        now: float,
+    ) -> tuple[dict[str, Any] | None, str]:
+        if not isinstance(candidate, dict):
+            return None, "主动来源无效"
+        prepared = dict(candidate)
+        origin_event_id = self._proactive_origin_event_id(candidate, source=source)
+        prepared["origin_event_id"] = origin_event_id
+        if origin_event_id and not _single_line(candidate.get("origin_event_id"), 80):
+            candidate["origin_event_id"] = origin_event_id
+        window_start_at = _safe_float(prepared.get("window_start_at"), 0)
+        preferred_ts = _safe_float(prepared.get("preferred_ts"), 0)
+        best_until_at = _safe_float(prepared.get("best_until_at"), 0)
+        expire_at = _safe_float(prepared.get("expire_at"), 0)
+        if any(value <= 0 for value in (window_start_at, preferred_ts, best_until_at, expire_at)):
+            window_start_at, preferred_ts, best_until_at, expire_at = self._event_time_window_bounds(
+                prepared,
+                reason=reason,
+                now=now,
+            )
+        time_exempt = source in {"timer", "troubleshooting", "simulation"}
+        if not time_exempt and expire_at <= now:
+            candidate["lifecycle_status"] = "expired"
+            candidate["expired_at"] = now
+            candidate["lifecycle_updated_at"] = now
+            candidate["lifecycle_note"] = "来源事件有效窗口已过期"
+            return None, "来源事件有效窗口已过期"
+        if not (
+            window_start_at > 0
+            and window_start_at <= preferred_ts <= best_until_at <= expire_at
+        ):
+            candidate["lifecycle_status"] = "skipped"
+            candidate["lifecycle_updated_at"] = now
+            candidate["lifecycle_note"] = "来源事件时间窗口无效"
+            return None, "来源事件时间窗口无效"
+
+        quiet_end_getter = getattr(self, "_quiet_hours_end_timestamp", None)
+        quiet_end = 0.0
+        if not time_exempt and callable(quiet_end_getter):
+            try:
+                quiet_end = _safe_float(quiet_end_getter(max(window_start_at, preferred_ts)), 0.0)
+            except Exception:
+                quiet_end = 0.0
+        if quiet_end > max(window_start_at, preferred_ts):
+            target = quiet_end + 2 * 60
+            freshness = self._proactive_item_freshness_class(
+                action=str(prepared.get("action") or "message"),
+                reason=reason,
+                source=source,
+                semantic_kind=str(prepared.get("semantic_kind") or ""),
+            )
+            if expire_at <= target and freshness != "durable":
+                candidate["lifecycle_status"] = "skipped"
+                candidate["expired_at"] = now
+                candidate["lifecycle_updated_at"] = now
+                candidate["lifecycle_note"] = "免打扰覆盖整个有效窗口"
+                return None, "免打扰覆盖整个有效窗口"
+            if expire_at <= target:
+                shift = target - window_start_at
+                window_start_at += shift
+                preferred_ts = max(preferred_ts + shift, window_start_at)
+                best_until_at = max(best_until_at + shift, preferred_ts + 20 * 60)
+                expire_at = max(expire_at + shift, best_until_at + 20 * 60)
+            else:
+                window_start_at = max(window_start_at, target)
+                preferred_ts = max(preferred_ts, target)
+                best_until_at = max(best_until_at, min(expire_at, target + 20 * 60))
+            prepared["quiet_hours_adjusted"] = True
+            prepared["quiet_hours_until"] = quiet_end
+
+        prepared["window_start_at"] = window_start_at
+        prepared["preferred_ts"] = preferred_ts
+        prepared["best_until_at"] = best_until_at
+        prepared["expire_at"] = expire_at
+        prepared["scheduled_ts"] = max(
+            _safe_float(prepared.get("scheduled_ts") or prepared.get("_scheduled_ts"), window_start_at),
+            window_start_at,
+        )
+        return prepared, ""
+
     def _build_proactive_impulse(
         self,
         user: dict[str, Any],
@@ -702,6 +856,7 @@ class ProactiveEngineMixin:
         context: Any = None,
         opener_mode: str = "",
         followup_kind: str = "",
+        origin_event_id: str = "",
     ) -> dict[str, Any]:
         role = self._private_user_role(user)
         impulse_reason = _single_line(reason, 40) or "check_in"
@@ -791,6 +946,7 @@ class ProactiveEngineMixin:
             "context": dict(context) if isinstance(context, dict) else context,
             "opener_mode": _single_line(opener_mode, 24),
             "followup_kind": _single_line(followup_kind, 32),
+            "origin_event_id": _single_line(origin_event_id, 80),
         }
 
     def _proactive_impulse_orchestration_priority(self, impulse: dict[str, Any]) -> int:
@@ -880,7 +1036,28 @@ class ProactiveEngineMixin:
         disabled = getattr(self, "_proactive_generation_disabled", None)
         if callable(disabled) and disabled(user):
             return {}
+        check_now = _now_ts()
+        prepared, invalid_reason = self._prepare_proactive_candidate_window(
+            impulse,
+            reason=_single_line(impulse.get("reason"), 40) or "check_in",
+            source=_single_line(impulse.get("source"), 40) or "random",
+            now=check_now,
+        )
+        if not isinstance(prepared, dict):
+            impulse["state"] = "blocked"
+            impulse["last_status"] = "blocked"
+            impulse["last_note"] = invalid_reason
+            impulse["updated_ts"] = check_now
+            return {}
+        impulse = prepared
         pool = self._cleanup_proactive_impulses(user)
+        origin_event_id = _single_line(impulse.get("origin_event_id"), 80)
+        if origin_event_id:
+            for existing in reversed(pool):
+                if _single_line(existing.get("origin_event_id"), 80) != origin_event_id:
+                    continue
+                if str(existing.get("state") or "queued") in {"sent", "blocked", "cancelled", "dropped"}:
+                    return {}
         signature = self._proactive_impulse_signature(impulse)
         reason = _single_line(impulse.get("reason"), 40)
         source = _single_line(impulse.get("source"), 40)
@@ -1022,16 +1199,18 @@ class ProactiveEngineMixin:
         action = _single_line(candidate.get("action"), 40) or "message"
         motive = _single_line(candidate.get("motive"), 180)
         topic = _single_line(candidate.get("topic"), 80)
-        window_start_at = _safe_float(candidate.get("window_start_at"), 0)
-        preferred_ts = _safe_float(candidate.get("preferred_ts"), 0)
-        best_until_at = _safe_float(candidate.get("best_until_at"), 0)
-        expire_at = _safe_float(candidate.get("expire_at"), 0)
-        if any(value <= 0 for value in (window_start_at, preferred_ts, best_until_at, expire_at)):
-            window_start_at, preferred_ts, best_until_at, expire_at = self._event_time_window_bounds(
-                candidate,
-                reason=reason,
-                now=check_now,
-            )
+        prepared, _invalid_reason = self._prepare_proactive_candidate_window(
+            candidate,
+            reason=reason,
+            source=source,
+            now=check_now,
+        )
+        if not isinstance(prepared, dict):
+            return None
+        window_start_at = _safe_float(prepared.get("window_start_at"), 0)
+        preferred_ts = _safe_float(prepared.get("preferred_ts"), 0)
+        best_until_at = _safe_float(prepared.get("best_until_at"), 0)
+        expire_at = _safe_float(prepared.get("expire_at"), 0)
         return self._build_proactive_impulse(
             user,
             reason=reason,
@@ -1043,13 +1222,13 @@ class ProactiveEngineMixin:
             preferred_ts=preferred_ts,
             best_until_at=best_until_at,
             expire_at=expire_at,
-            chain=candidate.get("chain") if isinstance(candidate.get("chain"), list) else [],
-            trigger_message_id=self._candidate_trigger_message_id(candidate),
-            trigger_umo=_single_line(candidate.get("trigger_umo") or candidate.get("umo"), 160),
-            trigger_ts=_safe_float(candidate.get("trigger_ts") or candidate.get("created_ts"), 0),
-            quota_exempt=bool(candidate.get("_free_screen_peek")),
-            context_key=_single_line(candidate.get("context_key"), 60),
-            context=candidate.get("context"),
+            chain=prepared.get("chain") if isinstance(prepared.get("chain"), list) else [],
+            trigger_message_id=self._candidate_trigger_message_id(prepared),
+            trigger_umo=_single_line(prepared.get("trigger_umo") or prepared.get("umo"), 160),
+            trigger_ts=_safe_float(prepared.get("trigger_ts") or prepared.get("created_ts"), 0),
+            quota_exempt=bool(prepared.get("_free_screen_peek")),
+            context_key=_single_line(prepared.get("context_key"), 60),
+            context=prepared.get("context"),
             opener_mode="name_only" if candidate.get("_name_only_opener") else "",
             followup_kind=(
                 "suspended_opener"
@@ -1058,6 +1237,7 @@ class ProactiveEngineMixin:
                 if candidate.get("_chain_followup")
                 else ""
             ),
+            origin_event_id=_single_line(prepared.get("origin_event_id"), 80),
         )
 
     def _impulse_ready_now(self, impulse: dict[str, Any], *, now: float | None = None) -> bool:
@@ -2298,6 +2478,74 @@ class ProactiveEngineMixin:
             return False
         return bool(_single_line(user.get("planned_proactive_impulse_id"), 20) != current_id)
 
+    def _defer_planned_proactive_to_quiet_end(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> tuple[bool, str]:
+        check_now = _now_ts() if now is None else now
+        quiet_end_getter = getattr(self, "_quiet_hours_end_timestamp", None)
+        quiet_end = _safe_float(quiet_end_getter(check_now), 0.0) if callable(quiet_end_getter) else 0.0
+        if quiet_end <= check_now:
+            return False, "当前不在免打扰时段"
+        source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40)
+        if source in {"timer", "troubleshooting", "simulation"}:
+            return False, "来源不参与免打扰改期"
+        target = quiet_end + random.uniform(2 * 60, 8 * 60)
+        delivery = self._ensure_planned_proactive_delivery_state(user, now=check_now)
+        freshness = _single_line(delivery.get("freshness"), 24) or self._planned_proactive_freshness_class(user)
+        expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+        impulse = self._planned_proactive_impulse(user)
+        if expire_at > 0 and target >= expire_at and freshness != "durable":
+            self._mark_planned_candidate_status(user, "blocked", "免打扰覆盖整个有效窗口")
+            if isinstance(impulse, dict):
+                impulse["state"] = "blocked"
+                impulse["last_status"] = "blocked"
+                impulse["last_note"] = "免打扰覆盖整个有效窗口"
+                impulse["updated_ts"] = check_now
+            self._clear_pending_proactive_plan(user)
+            self._schedule_next_proactive(user, now=quiet_end, delay_hours=(0.08, 0.35))
+            return True, "有效窗口被免打扰覆盖，已跳过并在免打扰结束后重排"
+
+        old_start = _safe_float(user.get("planned_proactive_window_start_at"), check_now)
+        old_best = _safe_float(user.get("planned_proactive_best_until_at"), old_start)
+        if expire_at > 0 and target >= expire_at:
+            shift = target - old_start
+            new_best = max(old_best + shift, target + 20 * 60)
+            new_expire = max(expire_at + shift, new_best + 20 * 60)
+        else:
+            new_best = max(old_best, min(expire_at, target + 20 * 60) if expire_at > 0 else target + 20 * 60)
+            new_expire = expire_at if expire_at > 0 else new_best + 40 * 60
+        user["next_proactive_at"] = target
+        user["planned_proactive_window_start_at"] = target
+        user["planned_proactive_best_until_at"] = new_best
+        user["planned_proactive_expire_at"] = new_expire
+        user["planned_proactive_delivery_state"] = "deferred"
+        if isinstance(impulse, dict):
+            impulse["state"] = "deferred"
+            impulse["window_start_at"] = target
+            impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), target)
+            impulse["best_until_at"] = new_best
+            impulse["expire_at"] = new_expire
+            impulse["updated_ts"] = check_now
+            impulse["last_status"] = "deferred"
+            impulse["last_note"] = "免打扰时段，已直接移到结束后"
+        candidate_id = _single_line(user.get("planned_candidate_id"), 40)
+        if candidate_id:
+            for item in self._cleanup_proactive_candidate_pool(now=check_now):
+                if _single_line(item.get("id"), 40) != candidate_id:
+                    continue
+                item["status"] = "deferred"
+                item["note"] = "免打扰时段，已直接移到结束后"
+                item["scheduled_ts"] = target
+                item["window_start_at"] = target
+                item["best_until_at"] = new_best
+                item["expire_at"] = new_expire
+                item["updated_ts"] = check_now
+                break
+        return True, "已直接调度到免打扰结束后"
+
     def _remember_proactive_hesitation(
         self,
         user: dict[str, Any],
@@ -2371,7 +2619,11 @@ class ProactiveEngineMixin:
             review_at = check_now
         else:
             future = sorted(
-                active,
+                [
+                    item for item in active
+                    if _safe_float(item.get("expire_at"), 0) > check_now
+                    and _safe_float(item.get("window_start_at"), 0) > check_now
+                ],
                 key=lambda item: (
                     _safe_float(item.get("window_start_at"), check_now + 365 * 24 * 3600),
                     -self._score_proactive_impulse(user, item, now=check_now),
@@ -2394,6 +2646,20 @@ class ProactiveEngineMixin:
                 ),
             )
             review_at = _safe_float(selected.get("window_start_at"), check_now)
+        last_materialized_at = _safe_float(selected.get("last_materialized_at"), 0)
+        materialized_count = _safe_int(selected.get("materialized_count"), 0, 0)
+        if materialized_count >= 3 and check_now - last_materialized_at <= 15 * 60:
+            selected["state"] = "blocked"
+            selected["last_status"] = "blocked"
+            selected["last_note"] = "同一来源短时间重复物化已熔断"
+            selected["updated_ts"] = check_now
+            logger.warning(
+                "[PrivateCompanion] 主动念头重复物化熔断: user=%s origin=%s count=%s",
+                _single_line(user_id, 40),
+                _single_line(selected.get("origin_event_id"), 80) or _single_line(selected.get("id"), 20),
+                materialized_count,
+            )
+            return self._materialize_best_proactive_impulse(user, now=check_now)
         candidate = {
             "source": self._normalize_legacy_proactive_text(selected.get("source"), limit=40) or "impulse",
             "reason": self._normalize_legacy_proactive_text(selected.get("reason"), limit=40) or "check_in",
@@ -2405,6 +2671,11 @@ class ProactiveEngineMixin:
             "context_key": _single_line(selected.get("context_key"), 60),
             "context": selected.get("context"),
             "chain": selected.get("chain") if isinstance(selected.get("chain"), list) else [],
+            "origin_event_id": _single_line(selected.get("origin_event_id"), 80),
+            "window_start_at": _safe_float(selected.get("window_start_at"), 0),
+            "preferred_ts": _safe_float(selected.get("preferred_ts"), 0),
+            "best_until_at": _safe_float(selected.get("best_until_at"), 0),
+            "expire_at": _safe_float(selected.get("expire_at"), 0),
         }
         item = self._record_proactive_candidate(
             user_id,
@@ -2454,6 +2725,10 @@ class ProactiveEngineMixin:
             user[context_key] = dict(context)
         selected["updated_ts"] = check_now
         selected["state"] = "queued"
+        materialized_at = _safe_float(selected.get("last_materialized_at"), 0)
+        materialized_count = _safe_int(selected.get("materialized_count"), 0, 0)
+        selected["materialized_count"] = materialized_count + 1 if check_now - materialized_at <= 15 * 60 else 1
+        selected["last_materialized_at"] = check_now
         return True
 
     def _record_proactive_candidate(
@@ -2479,6 +2754,7 @@ class ProactiveEngineMixin:
         source = _single_line(candidate.get("source"), 40) or "unknown"
         reason = _single_line(candidate.get("reason"), 40) or "check_in"
         scheduled = _safe_float(candidate.get("scheduled_ts"), now)
+        origin_event_id = _single_line(candidate.get("origin_event_id"), 80)
         signature = self._proactive_topic_signature(topic, motive)
         semantics: dict[str, Any] = {}
         if isinstance(user, dict):
@@ -2518,17 +2794,44 @@ class ProactiveEngineMixin:
                     continue
                 if status == "accepted" and str(existing.get("id") or "") == str(candidate.get("id") or ""):
                     continue
-                if not self._topic_signature_similar(signature, str(existing.get("signature") or "")):
+                same_origin = bool(
+                    origin_event_id
+                    and origin_event_id == _single_line(existing.get("origin_event_id"), 80)
+                )
+                if not same_origin and not self._topic_signature_similar(signature, str(existing.get("signature") or "")):
                     continue
                 if now - _safe_float(existing.get("last_seen_ts") or existing.get("created_ts"), 0) > 18 * 3600:
                     continue
                 repeat_limit = self._candidate_repeat_count_limit(status)
                 previous_repeat = _safe_int(existing.get("repeat_count"), 1, 1)
                 existing["repeat_count"] = min(repeat_limit, previous_repeat + 1)
+                existing["merged_trigger_count"] = _safe_int(
+                    existing.get("merged_trigger_count"),
+                    max(0, previous_repeat - 1),
+                    0,
+                ) + 1
+                merged_by_day = existing.get("merged_by_day")
+                if not isinstance(merged_by_day, dict):
+                    merged_by_day = {}
+                    existing["merged_by_day"] = merged_by_day
+                today_key = _today_key()
+                merged_by_day[today_key] = _safe_int(merged_by_day.get(today_key), 0, 0) + 1
+                if len(merged_by_day) > 8:
+                    existing["merged_by_day"] = {
+                        key: merged_by_day[key]
+                        for key in sorted(merged_by_day)[-8:]
+                    }
                 if previous_repeat + 1 > repeat_limit:
                     existing["repeat_count_capped"] = True
                 existing["last_seen_ts"] = now
+                existing["updated_ts"] = now
                 existing["scheduled_ts"] = max(_safe_float(existing.get("scheduled_ts"), scheduled), scheduled)
+                if origin_event_id:
+                    existing["origin_event_id"] = origin_event_id
+                for key in ("window_start_at", "preferred_ts", "best_until_at", "expire_at"):
+                    incoming_value = _safe_float(candidate.get(key), 0)
+                    if incoming_value > 0:
+                        existing[key] = incoming_value
                 existing["source"] = source or _single_line(existing.get("source"), 40)
                 existing["reason"] = reason or _single_line(existing.get("reason"), 40)
                 existing["action"] = action or _single_line(existing.get("action"), 40)
@@ -2545,6 +2848,11 @@ class ProactiveEngineMixin:
             "created_ts": now,
             "last_seen_ts": now,
             "scheduled_ts": scheduled,
+            "window_start_at": _safe_float(candidate.get("window_start_at"), 0),
+            "preferred_ts": _safe_float(candidate.get("preferred_ts"), 0),
+            "best_until_at": _safe_float(candidate.get("best_until_at"), 0),
+            "expire_at": _safe_float(candidate.get("expire_at"), 0),
+            "origin_event_id": origin_event_id,
             "user_id": str(user_id),
             "source": source,
             "reason": reason,
@@ -2556,6 +2864,8 @@ class ProactiveEngineMixin:
             "status": status,
             "note": _single_line(note, 160),
             "repeat_count": 1,
+            "merged_trigger_count": 0,
+            "merged_by_day": {},
             **(semantic_fields if semantics else {}),
         }
         pool.append(item)
@@ -2588,6 +2898,23 @@ class ProactiveEngineMixin:
         user["user_id"] = str(user.get("user_id") or user_id)
         now = _now_ts()
         source = _single_line(candidate.get("source"), 40) or "unknown"
+        scheduled = _safe_float(candidate.get("scheduled_ts"), now)
+        prepared, invalid_window_reason = self._prepare_proactive_candidate_window(
+            candidate,
+            reason=_single_line(candidate.get("reason"), 40) or "check_in",
+            source=source,
+            now=now,
+        )
+        if not isinstance(prepared, dict):
+            logger.info(
+                "[PrivateCompanion] 主动来源在入队前终止: user=%s source=%s reason=%s note=%s",
+                _single_line(user_id, 40),
+                source,
+                _single_line(candidate.get("reason"), 40),
+                _single_line(invalid_window_reason, 120),
+            )
+            return False
+        candidate = prepared
         scheduled = _safe_float(candidate.get("scheduled_ts"), now)
         social_relay_note = self._unverified_social_relay_plan_reason(
             candidate,
@@ -2680,10 +3007,14 @@ class ProactiveEngineMixin:
         if source != "environment_change" and self._proactive_candidate_repeated(user, candidate):
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="近期主题过于相似", user=user)
             return False
-        item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划", user=user)
         impulse = self._candidate_to_impulse(user, candidate, source=source, now=now)
-        if isinstance(impulse, dict):
-            self._queue_proactive_impulse(user, impulse)
+        if not isinstance(impulse, dict):
+            return False
+        queued_impulse = self._queue_proactive_impulse(user, impulse)
+        if not isinstance(queued_impulse, dict) or not queued_impulse:
+            return False
+        impulse = queued_impulse
+        item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划", user=user)
         self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate.get("reason"), limit=40) or "check_in"
@@ -2965,6 +3296,21 @@ class ProactiveEngineMixin:
             if _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=now)
             return False, "对话临时预约已交给官方定时计划"
+        planned_impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        planned_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+        if (
+            not is_troubleshooting
+            and planned_expire_at > 0
+            and now > planned_expire_at
+            and not due_timer_active
+            and planned_source != "timer"
+        ):
+            expired_note = "潜在念头窗口已过期" if planned_impulse_id else "主动计划窗口已过期"
+            self._mark_planned_candidate_status(user, "blocked", expired_note)
+            self._clear_pending_proactive_plan(user)
+            if not self._materialize_best_proactive_impulse(user, now=now):
+                self._schedule_next_proactive(user, now=now, delay_hours=(1.0, 3.0))
+            return False, "原主动计划已过期,已重新挑选"
         silence_reason_getter = getattr(self, "_friend_unanswered_silence_reason", None)
         silence_reason = silence_reason_getter(user, now=now) if callable(silence_reason_getter) else ""
         if (
@@ -3087,20 +3433,6 @@ class ProactiveEngineMixin:
             planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
             planned_source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or planned_source
         next_at = _safe_float(user.get("next_proactive_at"), 0)
-        planned_impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
-        planned_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
-        if (
-            not is_troubleshooting
-            and planned_impulse_id
-            and planned_expire_at > 0
-            and now > planned_expire_at
-            and not due_timer_active
-        ):
-            self._mark_planned_candidate_status(user, "blocked", "潜在念头窗口已过期")
-            self._clear_pending_proactive_plan(user)
-            if not self._materialize_best_proactive_impulse(user, now=now):
-                self._schedule_next_proactive(user, now=now, delay_hours=(1.0, 3.0))
-            return False, "原主动念头已过期,已重新挑选"
         if next_at <= 0:
             self._schedule_next_proactive(user, now=now)
             return False, "已安排下一次候选主动时间"
@@ -3125,6 +3457,7 @@ class ProactiveEngineMixin:
             return False, "低价值念头已过最佳窗口,已重新挑选"
         if not is_troubleshooting and self._promote_earlier_daily_greeting_event(user, now=now):
             planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
+            planned_source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or planned_source
             next_at = _safe_float(user.get("next_proactive_at"), 0)
             impulse_value = self._planned_impulse_value(user, now=now)
             window_phase, window_detail = self._planned_impulse_window_phase(user, now=now)
@@ -5800,7 +6133,9 @@ class ProactiveEngineMixin:
         for event in events:
             if not isinstance(event, dict):
                 continue
-            if _single_line(event.get("lifecycle_status"), 20).lower() in {"cancelled", "canceled", "取消", "已取消"}:
+            if _single_line(event.get("lifecycle_status"), 20).lower() in {
+                "cancelled", "canceled", "取消", "已取消", "expired", "skipped", "completed",
+            }:
                 continue
             if self._unverified_social_relay_plan_reason(
                 event,
@@ -5808,7 +6143,19 @@ class ProactiveEngineMixin:
                 has_trigger=bool(_single_line(event.get("trigger_message_id"), 120)),
             ):
                 continue
-            event_ts = self._timestamp_from_story_event(event, str(event.get("reason") or "check_in"))
+            reason = str(event.get("reason") or "check_in")
+            prepared, _invalid_reason = self._prepare_proactive_candidate_window(
+                event,
+                reason=reason,
+                source="story",
+                now=now,
+            )
+            if not isinstance(prepared, dict):
+                continue
+            event_ts = _safe_float(
+                prepared.get("scheduled_ts"),
+                self._timestamp_from_story_event(event, reason),
+            )
             if event_ts > now or (event_ts > 0 and now - event_ts <= self.max_proactive_plan_lag_minutes * 60):
                 future_events.append((event_ts, event))
         if not future_events:

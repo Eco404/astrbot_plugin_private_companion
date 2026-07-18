@@ -1161,20 +1161,33 @@ class ProactiveMixin:
             changed = True
         return changed
 
-    def _is_quiet_time(self) -> bool:
+    def _quiet_hours_end_timestamp(self, at_ts: float | None = None) -> float:
         match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*", self.quiet_hours)
         if not match:
-            return False
+            return 0.0
         sh, sm, eh, em = [int(part) for part in match.groups()]
+        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+            return 0.0
         start = sh * 60 + sm
         end = eh * 60 + em
-        now = datetime.now()
+        check_ts = _now_ts() if at_ts is None else float(at_ts)
+        converter = getattr(self, "_environment_fromtimestamp", None)
+        now = converter(check_ts) if callable(converter) else datetime.fromtimestamp(check_ts)
         current = now.hour * 60 + now.minute
         if start == end:
-            return True
+            return (now + timedelta(days=1)).replace(hour=eh, minute=em, second=0, microsecond=0).timestamp()
         if start < end:
-            return start <= current < end
-        return current >= start or current < end
+            if not (start <= current < end):
+                return 0.0
+            return now.replace(hour=eh, minute=em, second=0, microsecond=0).timestamp()
+        if current >= start:
+            return (now + timedelta(days=1)).replace(hour=eh, minute=em, second=0, microsecond=0).timestamp()
+        if current < end:
+            return now.replace(hour=eh, minute=em, second=0, microsecond=0).timestamp()
+        return 0.0
+
+    def _is_quiet_time(self) -> bool:
+        return self._quiet_hours_end_timestamp() > _now_ts()
 
     def _reset_daily_counter_if_needed(self, user: dict[str, Any]):
         today = _today_key()
@@ -2055,12 +2068,16 @@ class ProactiveMixin:
                 topic = friend_safe["topic"]
                 motive = friend_safe["motive"]
             candidate = dict(event)
+            candidate["origin_event_id"] = self._proactive_origin_event_id(event, source=source)
             candidate["reason"] = reason
             candidate["action"] = action
             candidate["topic"] = topic
             candidate["motive"] = motive
             impulse = self._candidate_to_impulse(user, candidate, source=source, now=now)
             if not isinstance(impulse, dict):
+                for key in ("lifecycle_status", "lifecycle_note", "lifecycle_updated_at", "expired_at"):
+                    if key in candidate:
+                        event[key] = candidate.get(key)
                 continue
             rest_until = self._proactive_rest_block_until(
                 user,
@@ -2090,8 +2107,8 @@ class ProactiveMixin:
                 impulse["preferred_ts"] = _safe_float(impulse.get("preferred_ts"), 0) + shift
                 impulse["best_until_at"] = _safe_float(impulse.get("best_until_at"), 0) + shift
                 impulse["expire_at"] = _safe_float(impulse.get("expire_at"), 0) + shift
-            self._queue_proactive_impulse(user, impulse)
-            queued += 1
+            if self._queue_proactive_impulse(user, impulse):
+                queued += 1
         return queued
 
     def _queue_random_proactive_impulse(
@@ -2478,7 +2495,20 @@ class ProactiveMixin:
         reason = str(event.get("reason") or "")
         if not (self._is_sticky_greeting_reason(reason) or bool(event.get("_daily_meal_care"))):
             return False
-        scheduled = self._timestamp_from_story_event(event, reason)
+        source = "daily_greeting" if event.get("_daily_greeting") else "meal_care"
+        prepared, _invalid_reason = self._prepare_proactive_candidate_window(
+            event,
+            reason=reason,
+            source=source,
+            now=now,
+        )
+        if not isinstance(prepared, dict):
+            return False
+        event = prepared
+        scheduled = _safe_float(
+            event.get("scheduled_ts"),
+            self._timestamp_from_story_event(event, reason),
+        )
         if scheduled <= 0 or scheduled >= current_next - 60:
             return False
         action = str(event.get("action") or "message")
@@ -2492,20 +2522,15 @@ class ProactiveMixin:
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = reason
         user["planned_proactive_action"] = action
-        user["planned_proactive_source"] = (
-            "daily_greeting"
-            if event.get("_daily_greeting")
-            else "meal_care"
-            if event.get("_daily_meal_care")
-            else "event"
-        )
+        user["planned_proactive_source"] = source
         user["planned_proactive_motive"] = motive
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
         user["planned_proactive_impulse_id"] = ""
-        user["planned_proactive_window_start_at"] = scheduled
-        active_span, grace_span = self._proactive_impulse_default_window_seconds(reason)
-        user["planned_proactive_best_until_at"] = scheduled + active_span
-        user["planned_proactive_expire_at"] = scheduled + active_span + grace_span
+        user["planned_proactive_window_start_at"] = _safe_float(event.get("window_start_at"), scheduled)
+        user["planned_proactive_best_until_at"] = _safe_float(event.get("best_until_at"), scheduled)
+        user["planned_proactive_expire_at"] = _safe_float(event.get("expire_at"), scheduled)
+        # 该入口会替换当前计划，但不消费原念头；不能让新问候继续引用旧候选 ID。
+        user["planned_candidate_id"] = ""
         semantics = self._planned_proactive_semantics(user)
         user["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
         user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)

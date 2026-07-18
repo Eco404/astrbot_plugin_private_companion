@@ -12717,6 +12717,25 @@ class DailyStateMixin:
             if not should_send:
                 if not is_troubleshooting_for_send and _safe_float(user.get("next_proactive_at"), 0) <= now:
                     guard_reason = _single_line(reason, 120)
+                    if "免打扰" in guard_reason and normalize_legacy_tag_text(user.get("planned_proactive_source")) != "timer":
+                        async with self._data_lock:
+                            current_for_quiet = self._get_user(user_id)
+                            handled, quiet_note = self._defer_planned_proactive_to_quiet_end(
+                                current_for_quiet,
+                                now=now,
+                            )
+                            if handled:
+                                self._sync_live_user_proactive_schedule(user_id, current_for_quiet)
+                                self._save_data_sync()
+                                logger.info(
+                                    "[PrivateCompanion] 免打扰主动任务已一次性改期: user=%s next=%s note=%s",
+                                    user_id,
+                                    int(max(0, _safe_float(current_for_quiet.get("next_proactive_at"), now) - now)),
+                                    _single_line(quiet_note, 120),
+                                )
+                        if handled:
+                            self._debug_tick_skip(user_id, quiet_note)
+                            continue
                     if any(token in guard_reason for token in ("情绪", "关系", "收敛", "免打扰", "安静", "太频繁", "刚聊过")):
                         async with self._data_lock:
                             current_for_guard = self._get_user(user_id)

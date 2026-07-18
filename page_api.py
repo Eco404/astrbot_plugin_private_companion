@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 import uuid
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -559,8 +559,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             elif value is not None:
                 data[key] = value
 
+        candidate_pool = raw_data.get("proactive_candidate_pool")
+        data["proactive_candidate_pool"] = (
+            [dict(item) if isinstance(item, dict) else item for item in candidate_pool]
+            if isinstance(candidate_pool, list)
+            else []
+        )
+
         for key, limit in (
-            ("proactive_candidate_pool", 240),
             ("proactive_audit_log", 120),
             ("bot_diaries", 8),
             ("dream_fragments", 40),
@@ -17434,12 +17440,24 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         raw = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
         users = data.get("users") if isinstance(data.get("users"), dict) else {}
         now = time.time()
+        converter = getattr(self.plugin, "_environment_fromtimestamp", None)
+        try:
+            current_dt = converter(now) if callable(converter) else datetime.fromtimestamp(now)
+        except Exception:
+            current_dt = datetime.fromtimestamp(now)
+        today_start = current_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        tomorrow_start = (current_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()
+        today_key = current_dt.strftime("%Y-%m-%d")
         buckets: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
         source_counts: dict[str, int] = {}
         user_counts: dict[str, dict[str, Any]] = {}
         total_attempts = 0
         pending_total = 0
+        pool_record_total = len([item for item in raw if isinstance(item, dict)])
+        today_record_total = 0
+        today_merge_trigger_count = 0
+        today_blocked_record_total = 0
 
         def pending_status(status: Any) -> bool:
             normalized = self._single_line(status, 24).lower()
@@ -17489,12 +17507,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     label = nickname if nickname and nickname not in generic_names else f"临时会话 · {str(user_id)[:8]}"
             return {"label": label or user_id or "未知用户", "role": role or "friend", "role_label": role_label}
 
-        for item in raw[-240:]:
+        for item in raw:
             if not isinstance(item, dict):
                 continue
             status = self._single_line(item.get("status"), 24) or "unknown"
             repeat_count = normalized_repeat(item, status)
             note = self._single_line(item.get("note"), 160)
+            created_ts = self._float(item.get("created_ts"))
+            status_ts = self._float(item.get("updated_ts")) or created_ts
+            created_today = today_start <= created_ts < tomorrow_start
+            if created_today:
+                today_record_total += 1
+            merged_by_day = item.get("merged_by_day") if isinstance(item.get("merged_by_day"), dict) else {}
+            if today_key in merged_by_day:
+                today_merge_trigger_count += self._int(merged_by_day.get(today_key))
+            elif created_today:
+                # 兼容升级前只有 repeat_count、没有逐日合并计数的候选。
+                today_merge_trigger_count += max(0, repeat_count - 1)
+            if status == "blocked" and today_start <= status_ts < tomorrow_start:
+                today_blocked_record_total += 1
             if status == "blocked" and note in {"朋友关系不接收敏感主动", "次要用户关系不接收敏感主动"}:
                 continue
             user_id = self._single_line(item.get("user_id"), 128)
@@ -17544,7 +17575,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             counts[status] = counts.get(status, 0) + repeat_count
             source_counts[display_source] = source_counts.get(display_source, 0) + repeat_count
             scheduled = self._float(item.get("scheduled_ts"))
-            created = self._float(item.get("created_ts"))
+            created = created_ts
             last_seen = self._float(item.get("last_seen_ts")) or created
             reason = reason_raw
             action = action_raw
@@ -17687,11 +17718,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             item["scheduled"] = self.plugin._format_timestamp_elapsed(scheduled)
             items.append(item)
         items.sort(key=lambda item: item.get("last_seen_ts") or item.get("scheduled_ts") or 0, reverse=True)
+        display_limit = 60
+        displayed_items = items[:display_limit]
         return {
             "total": total_attempts,
             "pending_total": pending_total,
-            "record_total": len([item for item in raw if isinstance(item, dict)]),
+            "record_total": pool_record_total,
+            "pool_record_total": pool_record_total,
+            "today_record_total": today_record_total,
+            "today_merge_trigger_count": today_merge_trigger_count,
+            "today_blocked_record_total": today_blocked_record_total,
             "visible_total": len(items),
+            "list_total": len(items),
+            "list_displayed_total": len(displayed_items),
+            "list_limit": display_limit,
+            "list_truncated": len(items) > len(displayed_items),
             "counts": counts,
             "source_counts": source_counts,
             "source_labels": {key: self._proactive_source_label(key) for key in source_counts},
@@ -17700,7 +17741,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 key=lambda item: (self._int(item.get("total")), self._single_line(item.get("label"), 40)),
                 reverse=True,
             ),
-            "items": items[:60],
+            "items": displayed_items,
         }
 
     def _proactive_motivation_runtime_summary(self, value: Any) -> dict[str, Any]:

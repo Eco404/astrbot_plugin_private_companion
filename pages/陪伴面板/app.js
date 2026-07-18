@@ -16175,10 +16175,15 @@ function renderProactiveCandidates() {
   const pendingTotal = selectedFilter === "all"
     ? (data.pending_total || 0)
     : sumProactivePendingCandidateItems(items);
+  const listTotal = Number(data.list_total || data.visible_total || allItems.length || 0);
+  const listDisplayedTotal = Number(data.list_displayed_total || allItems.length || 0);
+  const listTruncated = Boolean(data.list_truncated);
   const taskData = state.overview?.proactive_tasks || {};
   const runtime = taskData.runtime || {};
   $("#proactiveSummary").innerHTML = [
-    proactiveSummaryCard("候选记录", totalRecords, `${formatNumber(totalAttempts)} 次合并触发`),
+    proactiveSummaryCard("今日新增", data.today_record_total || 0, `候选池现有 ${formatNumber(data.pool_record_total || totalRecords)} 条`),
+    proactiveSummaryCard("今日合并", data.today_merge_trigger_count || 0, "同一来源或相近候选合并次数"),
+    proactiveSummaryCard("今日拦截", data.today_blocked_record_total || 0, "按实际拦截记录统计"),
     proactiveSummaryCard("待发送候选", pendingTotal, "不含已拦截/失败记录"),
     proactiveSummaryCard("已进入计划", counts.accepted || 0, "当前或历史接受候选"),
     proactiveSummaryCard("已发送", counts.sent || 0, "实际发出的主动"),
@@ -16199,11 +16204,14 @@ function renderProactiveCandidates() {
   });
   renderProactiveTasks();
   renderProactiveCandidateFilters(users, selectedFilter, data.record_total || allItems.length, totalAttempts, items.length);
+  const truncationNotice = listTruncated
+    ? `<div class="proactive-task-compact-note"><span>候选统计基于完整候选池；列表为避免页面卡顿，仅显示最新 ${escapeHtml(String(listDisplayedTotal))} / ${escapeHtml(String(listTotal))} 条合并后记录。</span></div>`
+    : "";
   if (!items.length) {
-    $("#proactiveCandidateList").innerHTML = `<div class="empty small">暂无符合筛选的主动候选</div>`;
+    $("#proactiveCandidateList").innerHTML = `${truncationNotice}<div class="empty small">暂无符合筛选的主动候选</div>`;
     return;
   }
-  $("#proactiveCandidateList").innerHTML = items.map((item) => {
+  $("#proactiveCandidateList").innerHTML = truncationNotice + items.map((item) => {
     const status = proactiveStatusLabel(item.status);
     const repeat = Number(item.repeat_count || 1);
     const userLabel = item.user_label || item.user_id || "-";
