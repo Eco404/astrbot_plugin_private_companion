@@ -2232,6 +2232,7 @@ class PrivateCompanionPlugin(
         if not self.enabled:
             return
         self._note_inbound_activity_for_scope(event)
+        self._busy_reply_note_inbound_event(event)
         if not self.enable_recall_enhancement:
             return
         raw = self._event_raw_payload(event)
@@ -8050,7 +8051,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
                 _single_line(rest_reason, 120),
             )
-        await self._apply_busy_reply_gate_delay(event, is_private_chat=is_private_chat)
+        _busy_delay, busy_delay_reason = await self._apply_busy_reply_gate_delay(
+            event,
+            is_private_chat=is_private_chat,
+        )
+        if busy_delay_reason == "superseded_by_newer_private_message":
+            return
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
         await self._enrich_request_context_image_placeholders(event, req)
         if (
@@ -9045,6 +9051,25 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         recovered_text, _ = await self._recover_plaintext_photo_tool_call(event, resp, original_text)
         if recovered_text != original_text:
             resp.completion_text = recovered_text
+        sent_photo_caption = str(
+            getattr(event, "_private_companion_photo_tool_sent_caption", "") or ""
+        ).strip()
+        if (
+            bool(getattr(event, "_private_companion_photo_tool_sent", False))
+            and self._photo_tool_followup_is_redundant(sent_photo_caption, recovered_text)
+        ):
+            try:
+                resp.result_chain = None
+            except Exception:
+                pass
+            resp.completion_text = ""
+            original_text = ""
+            recovered_text = ""
+            logger.info(
+                "[PrivateCompanion] 已移除生图工具成功发送后的重复承接正文: session=%s caption=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(sent_photo_caption, 120),
+            )
         pending_tool_text = str(
             getattr(event, "_private_companion_same_session_tool_text", "") or ""
         ).strip()

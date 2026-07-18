@@ -40,6 +40,81 @@ class BusyReplyGateMixin:
         "environment_change",
     }
 
+    def _busy_reply_private_scope(self, event: Any) -> str:
+        umo = _single_line(getattr(event, "unified_msg_origin", ""), 160)
+        if umo:
+            return umo
+        try:
+            sender_id = _single_line(event.get_sender_id(), 80)
+        except Exception:
+            sender_id = ""
+        return f"private:{sender_id}" if sender_id else ""
+
+    def _busy_reply_note_inbound_event(self, event: Any) -> int:
+        """Give each meaningful private inbound event a monotonic session token."""
+        if not bool(getattr(self, "enable_busy_reply_gate", False)):
+            return 0
+        if bool(getattr(event, "_private_companion_busy_reply_inbound_token", 0)):
+            return _safe_int(getattr(event, "_private_companion_busy_reply_inbound_token", 0), 0, 0)
+        try:
+            if not bool(event.is_private_chat()):
+                return 0
+        except Exception:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if ":FriendMessage:" not in umo:
+                return 0
+        text = str(getattr(event, "message_str", "") or "").strip()
+        message_obj = getattr(event, "message_obj", None)
+        components = list(getattr(message_obj, "message", []) or []) if message_obj is not None else []
+        if not text and not components:
+            return 0
+        sender_getter = getattr(self, "_event_sender_id", None)
+        self_getter = getattr(self, "_event_self_id", None)
+        try:
+            sender_id = _single_line(sender_getter(event), 80) if callable(sender_getter) else ""
+            self_id = _single_line(self_getter(event), 80) if callable(self_getter) else ""
+        except Exception:
+            sender_id = self_id = ""
+        if sender_id and self_id and sender_id == self_id:
+            return 0
+        scope = self._busy_reply_private_scope(event)
+        if not scope:
+            return 0
+        sequence = _safe_int(getattr(self, "_busy_reply_inbound_sequence", 0), 0, 0) + 1
+        self._busy_reply_inbound_sequence = sequence
+        versions = getattr(self, "_busy_reply_latest_inbound_tokens", None)
+        if not isinstance(versions, dict):
+            versions = {}
+            self._busy_reply_latest_inbound_tokens = versions
+        versions[scope] = sequence
+        while len(versions) > 2000:
+            versions.pop(next(iter(versions)), None)
+        try:
+            setattr(event, "_private_companion_busy_reply_inbound_scope", scope)
+            setattr(event, "_private_companion_busy_reply_inbound_token", sequence)
+        except Exception:
+            pass
+        return sequence
+
+    def _busy_reply_event_is_superseded(self, event: Any) -> bool:
+        scope = _single_line(getattr(event, "_private_companion_busy_reply_inbound_scope", ""), 160)
+        token = _safe_int(getattr(event, "_private_companion_busy_reply_inbound_token", 0), 0, 0)
+        versions = getattr(self, "_busy_reply_latest_inbound_tokens", None)
+        return bool(scope and token > 0 and isinstance(versions, dict) and _safe_int(versions.get(scope), 0, 0) != token)
+
+    @staticmethod
+    def _busy_reply_stop_superseded_event(event: Any) -> None:
+        try:
+            setattr(event, "_private_companion_busy_reply_superseded", True)
+        except Exception:
+            pass
+        stopper = getattr(event, "stop_event", None)
+        if callable(stopper):
+            try:
+                stopper()
+            except Exception:
+                pass
+
     def _busy_reply_presence_status(self, item: dict[str, Any]) -> tuple[str, str]:
         key = _single_line(item.get("key"), 80)
         enhanced = self.data.get("detail_enhanced_segments") if isinstance(getattr(self, "data", None), dict) else None
@@ -191,6 +266,11 @@ class BusyReplyGateMixin:
             setattr(event, "_private_companion_busy_reply_delay_applied", True)
         except Exception:
             pass
+        if is_private_chat:
+            self._busy_reply_note_inbound_event(event)
+            if self._busy_reply_event_is_superseded(event):
+                self._busy_reply_stop_superseded_event(event)
+                return 0.0, "superseded_by_newer_private_message"
         context = self._busy_reply_context()
         if not bool(context.get("busy")):
             return 0.0, str(context.get("reason") or "not_busy")
@@ -223,6 +303,15 @@ class BusyReplyGateMixin:
             _single_line(context.get("schedule"), 140) or context.get("reason"),
         )
         await asyncio.sleep(delay)
+        if is_private_chat and self._busy_reply_event_is_superseded(event):
+            self._busy_reply_stop_superseded_event(event)
+            logger.info(
+                "[PrivateCompanion] 繁忙等待期间收到更新私聊，已取消陈旧回复: session=%s delay=%.1fs text=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                delay,
+                _single_line(getattr(event, "message_str", ""), 100),
+            )
+            return delay, "superseded_by_newer_private_message"
         return delay, str(context.get("reason") or "busy")
 
     def _busy_reply_proactive_block_until(

@@ -19,7 +19,15 @@ try:
 except ImportError:
     from astrbot.api.message_components import At, Plain
 
-from .helpers import _missing_optional_model_dependency, _now_ts, _redact_outbound_secrets, _safe_float, _safe_int, _single_line
+from .helpers import (
+    _missing_optional_model_dependency,
+    _now_ts,
+    _redact_outbound_secrets,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+)
 from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_memo_note
 from .qzone_selection import parse_qzone_post_selection
 
@@ -190,10 +198,27 @@ class LlmToolActionsMixin:
 - 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。
 - 默认 `send=true`，工具会把生成图片发送到当前会话；如果只想拿路径再决定，可传 `send=false`。
 - 在实际调用本工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。
-- 只有工具返回 `sent=true` 时才表示图片已经发出；后续只需要很短地承接，不要复述本地路径或再假装发送一次。
+  - 只有工具返回 `sent=true` 时才表示图片已经发出。工具发送时已经把 caption 和图片一起交付；成功后不要再发送可见的承接句、重复 caption 或额外表情，避免同一轮重复回复。
 - 工具返回 `sent=false` 时，无论图片是否生成，都表示用户没有收到图片；必须按 `message/actual_error` 如实说明，绝对不能说已经发送。
 - 如果工具返回失败，按失败原因说明，不要假装图片已生成或已发送。
-""".strip()
+        """.strip()
+
+    @staticmethod
+    def _photo_tool_followup_is_redundant(sent_caption: Any, followup_text: Any) -> bool:
+        """Only catch clear repeats of a caption already delivered with the image."""
+
+        def compact(value: Any) -> str:
+            text = _strip_internal_message_blocks(str(value or "")).lower()
+            return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+
+        caption = compact(sent_caption)
+        followup = compact(followup_text)
+        if len(caption) < 6 or len(followup) < 6:
+            return False
+        if caption == followup:
+            return True
+        shorter, longer = sorted((caption, followup), key=len)
+        return shorter in longer and len(shorter) / max(1, len(longer)) >= 0.45
 
     def _creative_work_tool_instruction(self) -> str:
         if not self.enabled:
@@ -1810,6 +1835,12 @@ class LlmToolActionsMixin:
                     _single_line(exc, 180),
                 )
             sent = bool(delivery.get("sent"))
+            if sent:
+                try:
+                    setattr(event, "_private_companion_photo_tool_sent", True)
+                    setattr(event, "_private_companion_photo_tool_sent_caption", message)
+                except Exception:
+                    pass
         if callable(annotator):
             annotator(
                 image_path=image_path,
