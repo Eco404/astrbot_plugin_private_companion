@@ -6,6 +6,21 @@ let cachedPageBridge = null;
 let cachedPageEndpointStyle = "";
 let pageBridgeProbePromise = null;
 let loadAllRequestSeq = 0;
+const DASHBOARD_LAYOUT_STORAGE_KEY = "pc_dashboard_layout";
+
+function normalizeDashboardLayout(value) {
+  return String(value || "").trim().toLowerCase() === "life" ? "life" : "standard";
+}
+
+function initialDashboardLayout() {
+  const documentValue = document.documentElement.dataset.dashboardLayout;
+  if (documentValue) return normalizeDashboardLayout(documentValue);
+  try {
+    return normalizeDashboardLayout(window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY));
+  } catch (_error) {
+    return "standard";
+  }
+}
 
 const state = {
   overview: null,
@@ -124,6 +139,7 @@ const state = {
   dailyOutfitHydrateKey: "",
   pageFontFamily: "original",
   pageTheme: "classic",
+  dashboardLayout: initialDashboardLayout(),
   overviewRefreshedAt: 0,
   uxReviewShowAll: false,
   selectedFoodMenuIds: new Set(),
@@ -433,9 +449,15 @@ function featureDraftFromOverview(overview = {}) {
     delete draft[key];
   });
   const settings = overview.settings || {};
+  Object.keys(draft).forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) {
+      draft[key] = toBool(settings[key]);
+    }
+  });
   const settingBackedFeatureKeys = [
     "enable_rest_reply_simulation",
     "enable_busy_reply_gate",
+    "enable_segmented_proactive_reply",
     "enable_worldview_perception",
     "enable_group_injection_guard",
     "enable_group_persona_denoise",
@@ -7830,6 +7852,300 @@ function statCard(value, label, jumpTab = "") {
   return `<article class="stat ${jumpTab ? "is-link" : ""}" ${jumpTab ? `data-jump-tab="${escapeHtml(jumpTab)}"` : ""}><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></article>`;
 }
 
+function applyDashboardLayout(value, options = {}) {
+  const { persist = true, focus = false } = options;
+  const layout = normalizeDashboardLayout(value);
+  state.dashboardLayout = layout;
+  document.documentElement.dataset.dashboardLayout = layout;
+  document.querySelectorAll("[data-dashboard-layout-option]").forEach((button) => {
+    const selected = button.dataset.dashboardLayoutOption === layout;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.tabIndex = selected ? 0 : -1;
+    if (focus && selected) button.focus();
+  });
+  document.querySelectorAll("[data-dashboard-view]").forEach((view) => {
+    const selected = view.dataset.dashboardView === layout;
+    view.hidden = !selected;
+    view.setAttribute("aria-hidden", selected ? "false" : "true");
+  });
+  const description = $("#dashboardOverviewDescription");
+  if (description) {
+    description.textContent = layout === "life"
+      ? "日程、状态、主动与记忆集中在这里；配置和诊断按需展开。"
+      : "运行状态、覆盖范围与近期安排集中在这里；详细观察按需展开。";
+  }
+  if (persist) {
+    try {
+      window.localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, layout);
+    } catch (_error) {
+      // WebView 禁用 localStorage 时，仍保留本次页面内切换。
+    }
+  }
+  if (layout === "standard") renderConventionalDashboard(state.overview || {});
+  return layout;
+}
+
+function bindDashboardLayoutSwitch() {
+  const buttons = [...document.querySelectorAll("[data-dashboard-layout-option]")];
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => applyDashboardLayout(button.dataset.dashboardLayoutOption));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const currentIndex = Math.max(0, buttons.indexOf(button));
+      let nextIndex = currentIndex;
+      if (event.key === "Home") nextIndex = 0;
+      if (event.key === "End") nextIndex = buttons.length - 1;
+      if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+      if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % buttons.length;
+      const next = buttons[nextIndex];
+      if (next) applyDashboardLayout(next.dataset.dashboardLayoutOption, { focus: true });
+    });
+  });
+  applyDashboardLayout(state.dashboardLayout, { persist: false });
+}
+
+function dashboardStandardMetricRows(rows = []) {
+  return `<dl class="dashboard-standard-metrics">${rows.map(([label, value, tone = ""]) => `
+    <div class="${tone ? `is-${escapeHtml(tone)}` : ""}">
+      <dt>${escapeHtml(label)}</dt>
+      <dd>${escapeHtml(dashboardLifeText(value, "暂无"))}</dd>
+    </div>
+  `).join("")}</dl>`;
+}
+
+function renderConventionalDashboard(overview = {}) {
+  const plugin = overview.plugin || {};
+  const privateInfo = overview.private || {};
+  const groupInfo = overview.group || {};
+  const daily = overview.daily_state || {};
+  const life = overview.life_observation || {};
+  const current = life.current_plan || {};
+  const timeline = overview.daily_timeline || {};
+  const proactive = overview.proactive_candidates || {};
+  const proactiveCounts = proactive.counts || {};
+  const intensity = overview.proactive_intensity || {};
+  const worldbook = overview.worldbook || {};
+  const livingmemory = overview.livingmemory || {};
+  const providers = overview.providers || {};
+  const settings = overview.settings || {};
+  const features = overview.features || {};
+  const budget = state.tokenStats?.budget || overview.token_stats?.budget || {};
+  const dailyUsed = Number(budget.used || 0);
+  const dailyLimit = Number(budget.limit || 0);
+  const energy = daily.energy === undefined || daily.energy === ""
+    ? null
+    : Math.max(0, Math.min(100, Number(daily.energy || 0)));
+  const pluginReady = Boolean(plugin.enabled);
+  const enabledPrivate = Number(privateInfo.enabled_user_count || 0);
+  const enabledGroups = Number(groupInfo.enabled_group_count || 0);
+
+  const kpiRoot = $("#dashboardStandardKpis");
+  if (kpiRoot) {
+    const kpis = [
+      {
+        label: "插件状态",
+        value: pluginReady ? "运行中" : "当前停用",
+        note: `${plugin.bot_name || "Private Companion"} · ${plugin.storage_backend || "存储待确认"}`,
+        tone: pluginReady ? "ok" : "attention",
+        tab: "troubleshooting",
+      },
+      {
+        label: "陪伴范围",
+        value: `${enabledPrivate} 私聊 · ${enabledGroups} 群聊`,
+        note: `记录对象 ${privateInfo.user_count || 0} 个 · 群聊 ${groupInfo.group_count || 0} 个`,
+        tone: enabledPrivate || enabledGroups ? "ok" : "quiet",
+        tab: "private",
+      },
+      {
+        label: "今日 Token",
+        value: dailyLimit > 0
+          ? `${formatCompactNumber(dailyUsed)} / ${formatCompactNumber(dailyLimit)}`
+          : `${formatCompactNumber(dailyUsed)} / 不限`,
+        note: budget.soft_active ? "已进入节省模式" : (budget.deferred_calls ? `${budget.deferred_calls} 次调用已延后` : "预算状态平稳"),
+        tone: budget.exceeded ? "attention" : "info",
+        tab: "tokens",
+      },
+      {
+        label: "当前能量",
+        value: energy === null ? "等待状态" : `${Math.round(energy)} / 100`,
+        note: normalizeRoleplayStateText(daily.mood_bias) || daily.note || daily.health || "暂无状态补充",
+        tone: energy !== null && energy < 30 ? "attention" : "warm",
+        tab: "memory",
+      },
+    ];
+    kpiRoot.innerHTML = kpis.map((item) => `
+      <button type="button" class="dashboard-standard-kpi is-${escapeHtml(item.tone)}" data-jump-tab="${escapeHtml(item.tab)}">
+        <span><i aria-hidden="true"></i>${escapeHtml(item.label)}</span>
+        <b>${escapeHtml(item.value)}</b>
+        <small title="${escapeHtml(item.note)}">${escapeHtml(item.note)}</small>
+      </button>
+    `).join("");
+  }
+
+  const refreshRoot = $("#dashboardStandardRefresh");
+  if (refreshRoot) refreshRoot.textContent = dashboardRefreshLabel();
+
+  const currentRoot = $("#dashboardStandardCurrent");
+  if (currentRoot) {
+    const currentWindow = current.end
+      ? `${current.time || "--:--"}-${current.end}`
+      : (current.time || "当前时段");
+    const energyLabel = energy === null ? "状态待更新" : `${roleplayEnergyLabel(energy) || "能量"} · ${Math.round(energy)}/100`;
+    currentRoot.innerHTML = `
+      <div class="dashboard-standard-focus">
+        <span>${escapeHtml([currentWindow, scheduleLifecycleLabel(current.lifecycle)].filter(Boolean).join(" · ") || "当前日程")}</span>
+        <b>${escapeHtml(dashboardLifeText(current.activity, "暂无当前日程"))}</b>
+        <p>${escapeHtml(dashboardLifeText(current.message_seed || daily.note, "暂无状态补充"))}</p>
+      </div>
+      <div class="dashboard-standard-energy">
+        <div><span>心理能量</span><b>${escapeHtml(energyLabel)}</b></div>
+        <div class="dashboard-standard-track" role="meter" aria-label="当前心理能量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${energy === null ? 0 : Math.round(energy)}"><i style="width:${energy === null ? 0 : energy}%"></i></div>
+      </div>
+      ${dashboardStandardMetricRows([
+        ["情绪", normalizeRoleplayStateText(daily.mood_bias) || daily.note],
+        ["健康", daily.health],
+        ["位置", daily.location],
+        ["睡眠", daily.sleep_phase || daily.sleep],
+      ])}
+    `;
+  }
+
+  const scheduleRoot = $("#dashboardStandardSchedule");
+  if (scheduleRoot) {
+    const segments = Array.isArray(timeline.segments) ? timeline.segments : [];
+    const isCurrent = (segment) => {
+      const lifecycle = String(segment?.lifecycle || "").toLowerCase();
+      return lifecycle === "active" || Boolean(current.time && String(segment?.window || "").startsWith(String(current.time)));
+    };
+    const currentIndex = segments.findIndex(isCurrent);
+    const pendingIndex = segments.findIndex((segment) => !["completed", "done", "cancelled"].includes(String(segment?.lifecycle || "").toLowerCase()));
+    const startIndex = currentIndex >= 0 ? currentIndex : (pendingIndex >= 0 ? pendingIndex : Math.max(0, segments.length - 4));
+    const visibleSegments = segments.slice(startIndex, startIndex + 4);
+    scheduleRoot.innerHTML = visibleSegments.length ? `
+      <ol class="dashboard-standard-schedule-list">
+        ${visibleSegments.map((segment) => {
+          const active = isCurrent(segment);
+          const lifecycle = String(segment.lifecycle || "planned").toLowerCase();
+          return `
+            <li class="${active ? "is-current" : ""}">
+              <time>${escapeHtml(segment.window || "未定")}</time>
+              <span><b>${escapeHtml(segment.summary || segment.activity || "这一段尚未细化")}</b><small>${escapeHtml(active ? "当前进行" : (scheduleLifecycleLabel(lifecycle) || "计划中"))}</small></span>
+            </li>
+          `;
+        }).join("")}
+      </ol>
+    ` : `<div class="dashboard-standard-empty">暂无近期日程</div>`;
+  }
+
+  const proactiveRoot = $("#dashboardStandardProactive");
+  if (proactiveRoot) {
+    const nextUser = state.users
+      .filter((item) => Number(item.next_proactive_ts || 0) > 0)
+      .sort((a, b) => Number(a.next_proactive_ts || 0) - Number(b.next_proactive_ts || 0))[0];
+    const proactiveLimit = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
+    proactiveRoot.innerHTML = `
+      <div class="dashboard-standard-focus is-compact">
+        <span>下一次主动</span>
+        <b>${escapeHtml(nextUser ? (nextUser.nickname || nextUser.user_id) : "暂无待发送计划")}</b>
+        <p>${escapeHtml(nextUser ? `${nextUser.next_proactive || "时间待定"} · ${proactiveActionLabel(nextUser.planned_action || "message")}` : "有新候选时会在这里显示")}</p>
+      </div>
+      ${dashboardStandardMetricRows([
+        ["候选", `${proactiveCounts.accepted || proactiveCounts.pending || 0} 个`],
+        ["每日上限", Number(proactiveLimit || 0) > 0 ? `${proactiveLimit} 条` : "按需启用"],
+        ["私聊间隔", privateInfo.min_interval_minutes ? `${privateInfo.min_interval_minutes} 分钟` : "自动"],
+      ])}
+    `;
+  }
+
+  const memoryRoot = $("#dashboardStandardMemory");
+  if (memoryRoot) {
+    const memoryPlugin = livingmemory.selected_plugin_name
+      || livingmemory.memory_companion_display_name
+      || (livingmemory.compatible_available ? "长期记忆已接入" : "暂未接入长期记忆");
+    memoryRoot.innerHTML = `
+      ${dashboardStandardMetricRows([
+        ["关系成员", `${worldbook.enabled_member_count || 0}/${worldbook.member_count || 0} 个已启用`],
+        ["待整理观察", `${worldbook.pending_observation_total || 0} 条`],
+        ["生活日记", `${Array.isArray(life.diaries) ? life.diaries.length : 0} 篇`],
+        ["长期记忆", memoryPlugin, livingmemory.compatible_available ? "ok" : "quiet"],
+      ])}
+      ${livingmemory.conflict ? `<p class="dashboard-standard-note is-attention">${escapeHtml(livingmemory.conflict_warning || "检测到多个长期记忆来源，建议确认当前主用项。")}</p>` : ""}
+    `;
+  }
+
+  const readinessRoot = $("#dashboardStandardReadiness");
+  if (readinessRoot) {
+    const targetUsers = Array.isArray(settings.target_user_ids)
+      ? settings.target_user_ids.filter(Boolean)
+      : (Array.isArray(privateInfo.target_user_ids) ? privateInfo.target_user_ids.filter(Boolean) : []);
+    const checks = [
+      ["页面与插件", pluginReady, pluginReady ? "已连接" : "建议确认启用状态"],
+      ["陪伴对象", Boolean(targetUsers.length || enabledPrivate), targetUsers.length || enabledPrivate ? "已有目标" : "建议添加目标"],
+      ["模型分流", Boolean(String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim() && String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim()), "快速与复杂模型"],
+      ["数据存储", Boolean(plugin.storage_backend), plugin.storage_backend || "建议确认存储方式"],
+    ];
+    const readyCount = checks.filter((item) => item[1]).length;
+    readinessRoot.innerHTML = `
+      <div class="dashboard-standard-readiness-score"><b>${readyCount}/${checks.length}</b><span>${readyCount === checks.length ? "核心项已就绪" : "还有可补充项"}</span></div>
+      <ul class="dashboard-standard-checks">${checks.map(([label, ready, value]) => `
+        <li class="${ready ? "is-ready" : "is-suggested"}"><i aria-hidden="true"></i><span><b>${escapeHtml(label)}</b><small>${escapeHtml(value)}</small></span></li>
+      `).join("")}</ul>
+    `;
+  }
+
+  const contentRoot = $("#dashboardStandardContent");
+  if (contentRoot) {
+    const creative = overview.creative || {};
+    const news = overview.news || {};
+    const exploration = overview.web_exploration || {};
+    const contentItems = [
+      {
+        label: "长线创作",
+        title: creative.latest_title || "暂无新创作",
+        meta: `${creative.active_projects || 0} 个项目进行中`,
+        tab: "bookshelf",
+      },
+      {
+        label: "新闻见闻",
+        title: news.last_digest?.headline || news.last_digest?.topic || "暂无新闻记录",
+        meta: news.last_read_at || "尚未标记时间",
+        scroll: "dashboardNewsCard",
+      },
+      {
+        label: "主动搜索",
+        title: exploration.last_digest?.topic || exploration.last_query?.query || "暂无搜索记录",
+        meta: exploration.last_explore_at || "尚未标记时间",
+        scroll: "dashboardWebExplorationCard",
+      },
+    ];
+    contentRoot.innerHTML = `<div class="dashboard-standard-content-list">${contentItems.map((item) => `
+      <button type="button" ${item.tab ? `data-jump-tab="${escapeHtml(item.tab)}"` : `data-scroll-target="${escapeHtml(item.scroll)}"`}>
+        <span>${escapeHtml(item.label)}</span>
+        <b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b>
+        <small>${escapeHtml(item.meta)}</small>
+      </button>
+    `).join("")}</div>`;
+  }
+
+  const capabilityRoot = $("#dashboardStandardCapabilities");
+  if (capabilityRoot) {
+    const featureKeys = visibleTopLevelFeatureKeys(features);
+    const enabledFeatures = featureKeys.filter((key) => features[key]).length;
+    const externalAbilities = Number(overview.external_abilities?.enabled_count || 0);
+    const qzoneEnabled = Boolean(features.enable_qzone_integration || settings.enable_qzone_integration);
+    const platformProfiles = Array.isArray(overview.platform_adaptation?.profiles) ? overview.platform_adaptation.profiles : [];
+    capabilityRoot.innerHTML = dashboardStandardMetricRows([
+      ["主功能", `${enabledFeatures}/${featureKeys.length} 项开启`],
+      ["外部能力", `${externalAbilities} 项可用`],
+      ["QQ 空间", qzoneEnabled ? "已启用" : "按需启用", qzoneEnabled ? "ok" : "quiet"],
+      ["私聊阅读", overview.private_reading?.available ? "已接入" : "暂不可用", overview.private_reading?.available ? "ok" : "quiet"],
+      ["平台适配", platformProfiles[0]?.label || (overview.platform_adaptation?.auto_detect ? "自动识别" : "等待识别")],
+    ]);
+  }
+}
+
 function renderDashboard() {
   renderDashboardPulse();
   renderStrategyOverview();
@@ -8103,6 +8419,7 @@ function renderDashboardLifeDesk(overview = {}) {
 function renderDashboardPulse() {
   const overview = state.overview || {};
   renderDashboardLifeDesk(overview);
+  renderConventionalDashboard(overview);
   const proactive = overview.proactive_candidates || {};
   const proactiveCounts = proactive.counts || {};
   const creative = overview.creative || {};
@@ -12818,6 +13135,7 @@ async function renderGroupDetail(forceFetch = false) {
       <div class="group-detail-actions">
         <button data-group-action="toggle">${escapeHtml(detail.enabled ? "停用" : "启用")}</button>
         <button data-group-action="reset_interjection">重置插话</button>
+        <button data-group-action="reset_atmosphere">重置气氛</button>
         <button data-group-action="clear_observation" class="danger">清空观测</button>
         <button data-group-action="delete" class="danger">删除群聊</button>
       </div>
@@ -13180,6 +13498,7 @@ function bindGroupActions(detail) {
       const body = { group_id: detail.group_id };
       if (action === "toggle") body.enabled = !detail.enabled;
       if (action === "reset_interjection") body.reset_interjection = true;
+      if (action === "reset_atmosphere") body.reset_atmosphere = true;
       if (action === "clear_observation") {
         if (!requireSecondClick(button, `group-clear:${detail.group_id}`, "再次点击清空该群的观测数据", "再次点击清空")) return;
         body.clear_observation = true;
@@ -19605,6 +19924,23 @@ function featureSettingInputType(key, value) {
   return { type: "text" };
 }
 
+function featureTextareaValue(key, value) {
+  if (!Array.isArray(value)) return String(value ?? "");
+  return value.map((item) => {
+    if (!item || typeof item !== "object") return String(item ?? "");
+    if (key === "segmented_proactive_content_replacements") {
+      const from = item.from ?? item.old ?? item.source ?? "";
+      const to = item.to ?? item.new ?? item.replacement ?? "";
+      return `${String(from)} => ${String(to)}`;
+    }
+    try {
+      return JSON.stringify(item);
+    } catch {
+      return String(item);
+    }
+  }).join("\n");
+}
+
 function featureSettingInput(key, value) {
   const spec = featureSettingInputType(key, value);
   const safeKey = escapeHtml(key);
@@ -19632,7 +19968,7 @@ function featureSettingInput(key, value) {
     return featureProviderSelect(key, value);
   }
   if (spec.type === "textarea") {
-    return `<textarea data-feature-param="${safeKey}" rows="3"${disabledAttr}>${escapeHtml(Array.isArray(value) ? value.join("\n") : value ?? "")}</textarea>`;
+    return `<textarea data-feature-param="${safeKey}" rows="3"${disabledAttr}>${escapeHtml(featureTextareaValue(key, value))}</textarea>`;
   }
   const password = spec.type === "password";
   const numeric = spec.type === "number" || typeof value === "number";
@@ -26236,4 +26572,5 @@ $("#testAllProvidersBtn").addEventListener("click", async () => {
   }
 });
 
+bindDashboardLayoutSwitch();
 loadAll();

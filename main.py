@@ -682,7 +682,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.10.1",
+    "5.10.2",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -4165,6 +4165,45 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             **kwargs,
         )
 
+    @filter.llm_tool(name="pc_find_reaction_image")
+    async def pc_find_reaction_image(
+        self,
+        event: AstrMessageEvent,
+        query: str = "",
+        context: str = "",
+        meme_only: bool = True,
+        send: bool = True,
+        caption: str = "",
+    ) -> str:
+        """从智能图片对话插件的本地图库检索并发送一张已有图片。
+
+        Args:
+            query(string): 表情或图片需求，例如“震惊又无语的反应图”。
+            context(string): 可选，当前对话语境或希望表达的情绪。
+            meme_only(boolean): 是否只检索标记为表情包的图片，默认 true。
+            send(boolean): 是否直接发送到当前会话，默认 true。
+            caption(string): 可选，随图片发送的短文字。
+        """
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return json.dumps(
+                {
+                    "status": "disabled",
+                    "success": False,
+                    "found": False,
+                    "sent": False,
+                    "message": "主动消息专用模式下不可使用图库表情工具。",
+                },
+                ensure_ascii=False,
+            )
+        return await self._pc_find_reaction_image_impl(
+            event,
+            query=query,
+            context=context,
+            meme_only=meme_only,
+            send=send,
+            caption=caption,
+        )
+
     @filter.llm_tool(name="pc_manage_memo")
     async def pc_manage_memo(
         self,
@@ -4220,6 +4259,91 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             clear_due=clear_due,
             clear_content=clear_content,
             confirmation_token=confirmation_token,
+        )
+
+    @filter.llm_tool(name="pc_manage_schedule")
+    async def pc_manage_schedule(
+        self,
+        event: AstrMessageEvent,
+        action: str = "list",
+        selector: str = "",
+    ) -> str:
+        """按时间、序号或活动名查看、重新细化或取消主要用户的今日日程段。
+
+        Args:
+            action(string): list/regenerate/cancel。用户说删除、删掉、移除时使用 cancel。
+            selector(string): 用户指定的时间、序号或活动关键词，例如“下午三点”“第二段”“整理房间”。
+        """
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return json.dumps(
+                {"status": "disabled", "saved": False, "message": "主动消息专用模式下不可管理日程。"},
+                ensure_ascii=False,
+            )
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        if not is_private or not self._can_manage_private_companion(event):
+            return json.dumps(
+                {"status": "forbidden", "saved": False, "message": "只有主要用户可以在私聊中管理今日日程。"},
+                ensure_ascii=False,
+            )
+        normalized_action = _single_line(action, 24).lower()
+        normalized_action = {
+            "delete": "cancel",
+            "remove": "cancel",
+            "删除": "cancel",
+            "取消": "cancel",
+            "移除": "cancel",
+            "reset": "regenerate",
+            "redo": "regenerate",
+            "重置": "regenerate",
+            "重做": "regenerate",
+            "重新细化": "regenerate",
+        }.get(normalized_action, normalized_action or "list")
+        if normalized_action == "list":
+            async with self._data_lock:
+                plan = self.data.get("daily_plan", {})
+                segments = self._collect_detail_segments(
+                    plan if isinstance(plan, dict) else {},
+                    {},
+                    include_cancelled=True,
+                )
+                labels = [self._schedule_segment_label(segment) for segment in segments]
+            return json.dumps(
+                {
+                    "status": "success",
+                    "saved": False,
+                    "action": "list",
+                    "segments": labels,
+                    "message": "\n".join(labels) if labels else "今天还没有可操作的日程。",
+                },
+                ensure_ascii=False,
+            )
+        if normalized_action == "cancel":
+            ok, message = await self._cancel_daily_plan_segment_by_selector(selector)
+            return json.dumps(
+                {"status": "success" if ok else "error", "saved": ok, "action": "cancel", "message": message},
+                ensure_ascii=False,
+            )
+        if normalized_action == "regenerate":
+            ok, message, detail = await self._regenerate_daily_plan_segment_by_selector(
+                selector,
+                generate_detail_enhancement,
+            )
+            return json.dumps(
+                {
+                    "status": "success" if ok else "error",
+                    "saved": ok,
+                    "action": "regenerate",
+                    "message": message,
+                    "summary": _single_line(detail.get("summary"), 140) if isinstance(detail, dict) else "",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"status": "error", "saved": False, "message": "不支持的日程操作，请使用 list/regenerate/cancel。"},
+            ensure_ascii=False,
         )
 
     @filter.llm_tool(name="pc_view_creative_work")
@@ -5758,6 +5882,41 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     mode="conditional",
                     metadata={"注入位置": placement},
                 )
+        schedule_management_instruction = self._schedule_management_tool_instruction()
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        schedule_management_marker = "<!-- private_companion_schedule_management_v1 -->"
+        try:
+            schedule_management_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            schedule_management_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
+        if (
+            schedule_management_private
+            and self._can_manage_private_companion(event)
+            and self._schedule_management_instruction_matches(message_text)
+            and schedule_management_instruction
+            and schedule_management_marker not in current_prompt
+            and schedule_management_marker not in current_turn_prompt
+        ):
+            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                req,
+                schedule_management_marker,
+                schedule_management_instruction,
+                priority=88,
+                source="tools",
+            ) else "system_prompt"
+            if placement == "system_prompt":
+                current_prompt = f"{current_prompt}\n\n{schedule_management_marker}\n{schedule_management_instruction}".strip()
+                req.system_prompt = current_prompt
+            await self._record_request_prompt_fragment(
+                event,
+                title="指定日程管理工具注入",
+                key="tools.schedule_management",
+                text=schedule_management_instruction,
+                source="tools",
+                mode="conditional",
+                metadata={"注入位置": placement},
+            )
         memo_instruction = self._memo_management_tool_instruction()
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -8495,6 +8654,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         is_wake_event = bool(getattr(event, "is_wake", False)) or bool(
             getattr(event, "is_at_or_wake_command", False)
         )
+        group_share_reply_context_getter = getattr(self, "_format_recent_group_share_snapshot_for_reply", None)
+        if callable(group_share_reply_context_getter):
+            group_share_reply_context = group_share_reply_context_getter(
+                current_user,
+                inbound_text,
+                event_umo=_single_line(getattr(event, "unified_msg_origin", ""), 180),
+            )
+            if group_share_reply_context:
+                prompt_surface.add("group_share.reply_source", group_share_reply_context, priority=44, source="group_observation")
         if not is_wake_event:
             proactive_context = await self._format_proactive_reply_context(event)
             if proactive_context:
@@ -9721,6 +9889,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         args = raw_text.replace("\u3000", " ").split(maxsplit=2)
         action = args[1].strip() if len(args) >= 2 else "帮助"
         value = args[2].strip() if len(args) >= 3 else ""
+        action, value = self._normalize_companion_command_action(action, value)
         companion_manual_query_actions = {"答疑", "排障", "诊断", "说明"}
         companion_manual_confirm_actions = {"答疑确认", "排障确认", "诊断确认", "应用答疑建议", "应用建议"}
         companion_manual_cancel_actions = {"答疑取消", "排障取消", "诊断取消", "取消答疑建议", "取消建议"}
@@ -9733,6 +9902,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "生成今日穿搭", "生成今日穿搭图", "生成每日穿搭", "生成每日穿搭图",
         }
         photo_command_actions = {"生图", "画图", "绘图", "生成图片", "出图", "自拍", "拍照", "拍一张", "改图", "修图", "重绘", "P图", "p图"}
+        daily_schedule_regenerate_actions = {"重置日程", "生成日程", "刷新日程", "重新生成日程"}
+        daily_schedule_cancel_actions = {"删除日程", "取消日程", "移除日程"}
         image_api_status_actions = {"查看生图API", "查看生图api", "生图API状态", "生图api状态", "在线生图API", "在线生图api", "生图接口"}
         image_api_swap_actions = {
             "切换生图API", "切换生图api", "交换生图API", "交换生图api",
@@ -9785,10 +9956,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         response_image_path = ""
         response_extra_components: list[Any] = []
         deferred_actions = {
-            "重置插件", "重置", "全部重置",
+            "重置插件", "全部重置",
             "查看提示词", "提示词", "prompt",
             "重置细化",
-            "重置日程", "生成日程", "刷新日程",
+            *daily_schedule_regenerate_actions,
+            *daily_schedule_cancel_actions,
             *daily_outfit_generate_actions,
             "生成状态", "刷新状态", "重生状态",
             "增添状态", "添加状态",
@@ -9819,9 +9991,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
 
         management_actions = {
-            "重置插件", "重置", "全部重置",
+            "重置插件", "全部重置",
             "查看提示词", "提示词", "prompt",
-            "重置细化", "重置日程", "生成日程", "刷新日程",
+            "重置细化", *daily_schedule_regenerate_actions, *daily_schedule_cancel_actions,
             *daily_outfit_generate_actions,
             "生成状态", "刷新状态", "重生状态",
             "增添状态", "添加状态",
@@ -9921,8 +10093,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = self._explain_proactive_decision(user)
             elif action in {"能力列表", "主动能力", "工具列表"}:
                 response = self._format_proactive_ability_list_for_user(user)
-            elif action in {"重置插件", "重置", "全部重置"}:
+            elif action in {"重置插件", "全部重置"}:
                 response = "正在清空插件状态,并重新生成今天的状态和日程。"
+            elif action == "重置":
+                response = "请明确要重置的对象，例如“陪伴 重置 日程”“陪伴 重置 细化”或“陪伴 重置 插件”。"
             elif action in {"查看提示词", "提示词", "prompt"}:
                 response = "正在整理当前这层提示词。"
             elif action in {"重置细化"}:
@@ -9934,8 +10108,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             elif action in {"查看今日日程", "查看日程", "今日日程", "日程"}:
                 plan = self.data.get("daily_plan", {})
                 response = self._format_daily_plan(plan)
-            elif action in {"重置日程", "生成日程", "刷新日程"}:
-                response = "正在生成今天的日程,我先把今天怎么过想清楚。"
+            elif action in daily_schedule_regenerate_actions:
+                response = (
+                    "正在重新细化指定的日程段。"
+                    if value
+                    else "正在生成今天的日程,我先把今天怎么过想清楚。"
+                )
+            elif action in daily_schedule_cancel_actions:
+                response = "正在取消指定的日程段。"
             elif action in daily_outfit_generate_actions:
                 response = "正在按今日日程生成每日穿搭照片。"
             elif action in {"生成状态", "刷新状态", "重生状态"}:
@@ -10108,7 +10288,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if action in bookshelf_password_reset_actions:
             await self._reply(event, response)
-        if action in {"重置插件", "重置", "全部重置"}:
+        if action in {"重置插件", "全部重置"}:
             await self._reset_plugin_store()
             state, plan, _ = await self._rebuild_today_after_reset()
             await self._reply(
@@ -10118,14 +10298,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 + "\n\n"
                 + self._format_daily_plan(plan or {}),
             )
-        if action in {"重置日程", "生成日程", "刷新日程"}:
-            plan = await self._ensure_daily_plan(force=True)
-            async with self._data_lock:
-                self.data["detail_enhanced_day"] = str((plan or {}).get("date") or _today_key())
-                self.data["detail_enhanced_segments"] = {}
-                self.data["daily_story_plan"] = {}
-                self._save_data_sync()
-            await self._reply(event, self._format_daily_plan(plan or {}))
+        if action in daily_schedule_regenerate_actions:
+            if value:
+                ok, message, detail = await self._regenerate_daily_plan_segment_by_selector(
+                    value,
+                    generate_detail_enhancement,
+                )
+                if ok and isinstance(detail, dict):
+                    summary = _single_line(detail.get("summary"), 140)
+                    if summary:
+                        message = f"{message}\n{summary}"
+                await self._reply(event, message)
+            else:
+                plan = await self._ensure_daily_plan(force=True)
+                async with self._data_lock:
+                    self.data["detail_enhanced_day"] = str((plan or {}).get("date") or _today_key())
+                    self.data["detail_enhanced_segments"] = {}
+                    self.data["daily_story_plan"] = {}
+                    self._save_data_sync()
+                await self._reply(event, self._format_daily_plan(plan or {}))
+        if action in daily_schedule_cancel_actions:
+            _, message = await self._cancel_daily_plan_segment_by_selector(value)
+            await self._reply(event, message)
         if action in daily_outfit_generate_actions:
             outfit_generator = getattr(self, "_ensure_daily_outfit_photo", None)
             outfit_lock = getattr(self, "_daily_outfit_photo_generation_lock", None)
@@ -10192,20 +10386,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             plan = await self._ensure_daily_plan(force=False)
             if not plan:
                 plan = await self._ensure_daily_plan(force=True)
-            await self._ensure_detail_enhancement(force=False)
-            detail_text = self._format_current_detail_view()
-            if any(
-                marker in detail_text
-                for marker in (
-                    "还没有",
-                    "没有落地",
-                    "没有生成出可展示",
-                    "当前时间段还没有",
-                )
-            ):
-                await self._ensure_detail_enhancement(force=True)
+            ok, message, detail = await self._regenerate_daily_plan_segment_by_selector(
+                "当前",
+                generate_detail_enhancement,
+                reason="用户通过聊天命令重置当前日程细化",
+            )
+            if ok:
                 detail_text = self._format_current_detail_view()
-            await self._reply(event, detail_text)
+                if detail_text:
+                    message = f"{message}\n{detail_text}"
+            await self._reply(event, message)
         if action in {"生成日记", "刷新日记"}:
             diary = await self._ensure_daily_diary(force=True)
             await self._reply(event, self._format_single_diary(diary or {}))

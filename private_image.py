@@ -1357,6 +1357,9 @@ class PrivateImageMixin:
         image_path: str,
         caption: str = "",
     ) -> dict[str, Any]:
+        marker = getattr(self, "_mark_smart_imagechat_skip_proactive_emoji", None)
+        if callable(marker):
+            marker(event)
         chain = self._build_outbound_chain(caption, image_path)
 
         async def send_to_current_event() -> tuple[bool, str]:

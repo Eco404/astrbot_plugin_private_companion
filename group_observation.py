@@ -887,7 +887,37 @@ class GroupObservationMixin:
             "trigger_sender_id": trigger_sender_id,
             "event_ts": latest_ts,
             "created_ts": now,
+            "addressed_to_bot": self._group_message_addresses_bot(chosen),
+            "source_talking_to": _single_line(chosen.get("talking_to"), 40),
+            "source_talking_to_name": _single_line(chosen.get("talking_to_name"), 80),
+            "source_trigger": _single_line(chosen.get("scene_trigger"), 40),
         }
+
+    def _group_message_addresses_bot(self, item: dict[str, Any]) -> bool:
+        """Return whether the recorded scene actually points at the Bot."""
+        if not isinstance(item, dict):
+            return False
+        talking_to = _single_line(item.get("talking_to"), 40).lower()
+        trigger = _single_line(item.get("scene_trigger"), 40).lower()
+        at_targets = item.get("at_targets") if isinstance(item.get("at_targets"), list) else []
+        if talking_to == "bot" or trigger in {
+            "at_bot",
+            "reply_bot",
+            "mention_bot_name",
+            "bot_conversation_followup",
+        } or trigger.startswith("group_wakeup_"):
+            return True
+        if any(isinstance(target, dict) and bool(target.get("is_bot")) for target in at_targets):
+            return True
+        if talking_to not in {"", "group", "bot"} or trigger in {"at_other", "reply_other"}:
+            return False
+        if at_targets:
+            # Structured targets exist and none of them is the Bot.
+            return False
+        text = _single_line(item.get("text"), 140)
+        folded = text.casefold()
+        markers = [self.bot_name, "bot", "机器人", "小星"]
+        return any(str(marker or "").strip().casefold() in folded for marker in markers if str(marker or "").strip())
 
     def _group_bot_harassment_candidate(
         self,
@@ -907,8 +937,6 @@ class GroupObservationMixin:
         ]
         if not window:
             return None
-        bot_markers = {self.bot_name, "bot", "Bot", "机器人", "小星"}
-        bot_markers = {marker for marker in bot_markers if marker}
         pressure_markers = (
             "出来", "在吗", "人呢", "说话", "别装死", "怎么不回", "快回", "理我",
             "笨蛋", "傻", "蠢", "废物", "垃圾", "闭嘴", "滚", "不会吧", "急了",
@@ -919,14 +947,14 @@ class GroupObservationMixin:
         for item in window:
             text = _single_line(item.get("text"), 140)
             sender_id = str(item.get("sender_id") or "")
-            looks_addressed = any(marker and marker in text for marker in bot_markers) or text.startswith("@")
+            looks_addressed = self._group_message_addresses_bot(item)
             looks_pressuring = any(marker in text for marker in pressure_markers)
             repeated_ping = bool(re.fullmatch(r"[@\s\w\u4e00-\u9fff]{1,12}[?？!！。]*", text)) and looks_addressed
-            if looks_addressed or (looks_pressuring and len(text) <= 36):
+            if looks_addressed:
                 addressed.append(item)
                 if sender_id:
                     by_sender[sender_id] = by_sender.get(sender_id, 0) + 1
-            if looks_pressuring and (looks_addressed or repeated_ping or len(text) <= 42):
+            if looks_addressed and (looks_pressuring or repeated_ping):
                 abusive.append(item)
         if not addressed:
             return None
@@ -967,6 +995,10 @@ class GroupObservationMixin:
             "trigger_sender_id": trigger_sender_id,
             "event_ts": latest_ts,
             "created_ts": now,
+            "addressed_to_bot": True,
+            "source_talking_to": _single_line(chosen.get("talking_to"), 40) or "bot",
+            "source_talking_to_name": _single_line(chosen.get("talking_to_name"), 80) or "你",
+            "source_trigger": _single_line(chosen.get("scene_trigger"), 40),
         }
 
     def _maybe_schedule_group_private_share(self, group_id: str, group: dict[str, Any], *, trigger_sender_id: str = "") -> bool:
@@ -1019,6 +1051,7 @@ class GroupObservationMixin:
             topic = _single_line(candidate.get("topic"), 60) or "群里的小片段"
             context = {
                 "group_id": str(group_id),
+                "group_name": _single_line(group.get("name") or group.get("group_name"), 80),
                 "kind": kind,
                 "topic": topic,
                 "speaker_id": _single_line(candidate.get("speaker_id"), 40),
@@ -1030,6 +1063,10 @@ class GroupObservationMixin:
                 "window_minutes": _safe_int(candidate.get("window_minutes"), 0, 0),
                 "event_ts": _safe_float(candidate.get("event_ts"), _safe_float(candidate.get("created_ts"), now)),
                 "created_ts": now,
+                "addressed_to_bot": bool(candidate.get("addressed_to_bot")),
+                "source_talking_to": _single_line(candidate.get("source_talking_to"), 40),
+                "source_talking_to_name": _single_line(candidate.get("source_talking_to_name"), 80),
+                "source_trigger": _single_line(candidate.get("source_trigger"), 40),
             }
             target_absence = self._format_elapsed(now - member_last_seen).removesuffix("前")
             accepted = self._offer_proactive_candidate(
@@ -1597,7 +1634,16 @@ class GroupObservationMixin:
     def _update_group_atmosphere(self, group: dict[str, Any]) -> None:
         recent = self._filtered_group_recent_messages(group)
         now = _now_ts()
-        window = [item for item in recent if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= 12 * 60]
+        previous = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
+        reset_at = _safe_float(previous.get("reset_at"), 0)
+        window_start = now - 12 * 60
+        if window_start < reset_at <= now:
+            window_start = reset_at
+        window = [
+            item
+            for item in recent
+            if isinstance(item, dict) and window_start < _safe_float(item.get("ts"), 0) <= now
+        ]
         texts = [str(item.get("text") or "") for item in window]
         joined = "\n".join(texts)
         active_speakers = len({str(item.get("sender_id") or "") for item in window if isinstance(item, dict)})
@@ -1609,17 +1655,22 @@ class GroupObservationMixin:
         mood = "平稳"
         if re.search(r"(哈哈|笑死|草|乐|绷|hhh)", joined, re.IGNORECASE):
             mood = "玩笑"
-        if re.search(r"(烦|累|难受|吵|别吵|急|骂|生气)", joined):
+        strong_tension_hits = re.findall(r"(别吵|吵架|争吵|闭嘴|骂人|生气|急眼|烦死)", joined)
+        soft_tension_hits = re.findall(r"(烦|累|难受|着急)", joined)
+        if strong_tension_hits or (active_speakers >= 2 and len(soft_tension_hits) >= 2):
             mood = "紧绷"
         if re.search(r"(求助|怎么|为什么|报错|帮|救命)", joined):
             mood = "求助"
-        group["atmosphere"] = {
+        atmosphere = {
             "pace": pace,
             "mood": mood,
             "active_speakers": active_speakers,
             "recent_count": len(window),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
+        if reset_at > now - 12 * 60:
+            atmosphere["reset_at"] = reset_at
+        group["atmosphere"] = atmosphere
 
     def _group_topic_signature(self, text: str) -> str:
         return self._proactive_topic_signature(text)
@@ -2530,6 +2581,7 @@ class GroupObservationMixin:
             return ""
         recency_text = self._group_share_recency_label(share)
         group_id = _single_line(share.get("group_id"), 24)
+        group_name = _single_line(share.get("group_name"), 80)
         speaker = _single_line(share.get("speaker"), 64) or "群友"
         text = _single_line(share.get("text"), 120)
         summary = _single_line(share.get("summary"), 220)
@@ -2538,8 +2590,18 @@ class GroupObservationMixin:
         participants = share.get("participants") if isinstance(share.get("participants"), list) else []
         participant_text = "、".join(_single_line(item, 64) for item in participants[:6] if _single_line(item, 64))
         window_minutes = _safe_int(share.get("window_minutes"), 0, 0)
+        source_target = _single_line(share.get("source_talking_to_name"), 80)
+        source_talking_to = _single_line(share.get("source_talking_to"), 40)
+        if "addressed_to_bot" not in share:
+            direction_text = "消息指向：旧候选没有保存可靠指向证据；不得据此声称有人艾特、寻找或评价 Bot。"
+        elif bool(share.get("addressed_to_bot")):
+            direction_text = "消息指向：结构化场景确认该消息对 Bot 说话。"
+        elif source_talking_to and source_talking_to != "group":
+            direction_text = f"消息指向：明确对群友 {source_target or source_talking_to}说话，不是对 Bot。"
+        else:
+            direction_text = "消息指向：面向整个群，没有证据表明在艾特、寻找或评价 Bot。"
         parts = [
-            f"群聊分享线索：群 {group_id}" if group_id else "群聊分享线索",
+            f"群聊分享线索：{group_name}（群号 {group_id}）" if group_name and group_id else (f"群聊分享线索：群 {group_id}" if group_id else "群聊分享线索"),
             f"发生时间：{recency_text}的一段群聊；超过 30 分钟不要写成刚刚/刚才",
             f"时间窗：约 {window_minutes} 分钟的一段群聊" if window_minutes else "",
             f"参与者：{participant_text}" if participant_text else "",
@@ -2548,8 +2610,115 @@ class GroupObservationMixin:
             f"代表性片段：{speaker}: {text}" if text else "",
             f"话题推进样本：{summary}" if summary else "",
             f"话题钩子：{topic}" if topic else "",
+            direction_text,
+            "事实边界：昵称、群名、头像文字、表情符号和被艾特对象的名字只是身份信息，不能改写成群友对 Bot 的评价；只转述来源中能逐字或直接推出的事实。",
         ]
         return "\n".join(part for part in parts if part)
+
+    def _remember_recent_group_share_snapshot(
+        self,
+        user: dict[str, Any],
+        *,
+        share_context: dict[str, Any] | None,
+        shared_text: str,
+        sent_at: float | None = None,
+        delivery_umo: str = "",
+    ) -> None:
+        if not isinstance(user, dict) or not isinstance(share_context, dict):
+            return
+        delivered_at = _now_ts() if sent_at is None else sent_at
+        user["last_group_share_snapshot"] = {
+            "schema_version": 1,
+            "group_id": _single_line(share_context.get("group_id"), 40),
+            "group_name": _single_line(share_context.get("group_name"), 80),
+            "kind": _single_line(share_context.get("kind"), 32),
+            "topic": _single_line(share_context.get("topic"), 100),
+            "speaker_id": _single_line(share_context.get("speaker_id"), 40),
+            "speaker": _single_line(share_context.get("speaker"), 64),
+            "source_text": _single_line(share_context.get("text"), 240),
+            "summary": _single_line(share_context.get("summary"), 420),
+            "topic_summary": _single_line(share_context.get("topic_summary"), 420),
+            "addressed_to_bot": bool(share_context.get("addressed_to_bot")),
+            "has_address_evidence": "addressed_to_bot" in share_context,
+            "source_talking_to": _single_line(share_context.get("source_talking_to"), 40),
+            "source_talking_to_name": _single_line(share_context.get("source_talking_to_name"), 80),
+            "source_trigger": _single_line(share_context.get("source_trigger"), 40),
+            "shared_text": _single_line(shared_text, 500),
+            "delivery_umo": _single_line(delivery_umo, 180),
+            "event_ts": _safe_float(share_context.get("event_ts"), 0),
+            "sent_at": delivered_at,
+            "expires_at": delivered_at + 12 * 3600,
+        }
+
+    @staticmethod
+    def _group_share_followup_needs_source(inbound_text: str) -> bool:
+        text = _single_line(inbound_text, 220)
+        if not text:
+            return False
+        return bool(re.search(
+            r"(哪个群|哪一个群|什么群|群里|群名|群号|具体|谁|哪位|哪个人|原话|说了什么|怎么说|聊天记录|翻.{0,4}记录|艾特|@|找你|找我|说你|说我|外星人)",
+            text,
+            flags=re.I,
+        ))
+
+    def _format_recent_group_share_snapshot_for_reply(
+        self,
+        user: dict[str, Any] | None,
+        inbound_text: str,
+        *,
+        event_umo: str = "",
+        now: float | None = None,
+    ) -> str:
+        if not isinstance(user, dict) or not self._group_share_followup_needs_source(inbound_text):
+            return ""
+        check_now = _now_ts() if now is None else now
+        delivery_umo = _single_line(event_umo, 180)
+        snapshot = user.get("last_group_share_snapshot")
+        if isinstance(snapshot, dict):
+            expires_at = _safe_float(snapshot.get("expires_at"), 0)
+            snapshot_umo = _single_line(snapshot.get("delivery_umo"), 180)
+            if expires_at > check_now and not (snapshot_umo and delivery_umo and snapshot_umo != delivery_umo):
+                speaker = re.sub(r"\s*\[QQ:[^\]]+\]\s*", "", _single_line(snapshot.get("speaker"), 64)).strip()
+                source_target = re.sub(r"\s*\[QQ:[^\]]+\]\s*", "", _single_line(snapshot.get("source_talking_to_name"), 80)).strip()
+                if not bool(snapshot.get("has_address_evidence")):
+                    direction = "来源未保存可靠的消息指向，不能声称群友在艾特、寻找或评价 Bot。"
+                elif bool(snapshot.get("addressed_to_bot")):
+                    direction = "结构化场景确认该消息是对 Bot 说的。"
+                elif _single_line(snapshot.get("source_talking_to"), 40) not in {"", "group"}:
+                    direction = f"该消息明确对群友 {source_target or '另一名群友'}说，不是对 Bot。"
+                else:
+                    direction = "该消息面向整个群，没有证据表明在艾特、寻找或评价 Bot。"
+                group_id = _single_line(snapshot.get("group_id"), 40)
+                group_name = _single_line(snapshot.get("group_name"), 80)
+                return "\n".join(part for part in (
+                    "【最近一次群聊主动消息的事实来源】",
+                    "用户正在追问你刚才主动提到的群聊。以下是成功发送前保存的来源快照；优先直接回答用户问的具体点，不要用含糊撒娇回避。",
+                    f"你实际主动发送的正文：{_single_line(snapshot.get('shared_text'), 500)}" if snapshot.get("shared_text") else "",
+                    f"来源群：{group_name}（群号 {group_id}）" if group_name and group_id else (f"来源群号：{group_id}" if group_id else "来源群名和群号均未可靠保存"),
+                    f"来源成员：{speaker}" if speaker else "来源成员未可靠保存",
+                    f"来源原文：{_single_line(snapshot.get('source_text'), 240)}" if snapshot.get("source_text") else "来源原文未可靠保存",
+                    f"上下文摘要：{_single_line(snapshot.get('summary') or snapshot.get('topic_summary'), 420)}" if snapshot.get("summary") or snapshot.get("topic_summary") else "",
+                    f"消息指向证据：{direction}",
+                    "回答边界：只说快照能证明的群、成员、原话和指向关系。昵称、群名、头像文字、表情符号不等于别人对 Bot 的评价；若用户要求快照中没有的细节，优先调用可用的群聊查询工具，否则坦白说没有记清，绝不能补出人物、说法或事件。",
+                ) if part)
+
+        last_reason = _single_line(user.get("last_proactive_reason"), 40)
+        last_sent_at = _safe_float(user.get("last_proactive_sent_at"), 0)
+        last_umo = _single_line(user.get("last_proactive_delivery_umo"), 180)
+        max_age = min(max(1, _safe_int(getattr(self, "proactive_reply_context_hours", 12), 12, 1, 72)), 12) * 3600
+        if (
+            last_reason == "group_share"
+            and last_sent_at > 0
+            and 0 <= check_now - last_sent_at <= max_age
+            and not (last_umo and delivery_umo and last_umo != delivery_umo)
+        ):
+            return (
+                "【群聊主动消息追问的事实边界】\n"
+                "用户正在追问你前面主动提到的群聊，但这条旧消息没有保存可核验的群号、成员和原文快照。"
+                "不要根据自己上一条说法继续补全，也不要猜‘哪个群、谁、艾特了谁、说了什么’；优先调用可用的群聊查询工具，"
+                "仍查不到时就如实说明没有记清。"
+            )
+        return ""
 
     def _group_share_send_block_reason(self, user_id: str, user: dict[str, Any], *, now: float | None = None) -> str:
         if str(user.get("planned_proactive_reason") or "") != "group_share":

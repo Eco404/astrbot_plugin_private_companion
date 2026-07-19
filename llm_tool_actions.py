@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -88,6 +89,9 @@ class LlmToolActionsMixin:
                 "头像",
                 "表情包",
                 "贴纸",
+                "反应图",
+                "梗图",
+                "斗图",
                 "壁纸",
                 "改图",
                 "修图",
@@ -119,12 +123,36 @@ class LlmToolActionsMixin:
         return explicit_request or self._character_photo_request_matches(compact)
 
     def _media_delivery_truth_instruction(self) -> str:
-        if not (self.enabled and getattr(self, "enable_photo_text_action", False)):
+        if not getattr(self, "enabled", False):
+            return ""
+        photo_enabled = bool(getattr(self, "enable_photo_text_action", False))
+        if not photo_enabled and self._smart_imagechat_api() is None:
             return ""
         return (
             "【媒体真实性硬规则】只有本轮消息链实际包含图片，或媒体工具明确返回 `sent=true`，"
             "才能说“已经发了/给你看了/图片在上面”。其他情况必须承认未发送；人格和角色扮演不能覆盖真实发送状态。"
         )
+
+    @staticmethod
+    def _mark_smart_imagechat_skip_proactive_emoji(event: Any) -> None:
+        setter = getattr(event, "set_extra", None)
+        if not callable(setter):
+            return
+        try:
+            setter("smart_imagesender_skip_proactive_emoji", True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _smart_imagechat_api() -> Any | None:
+        try:
+            bridge_module = importlib.import_module(
+                "astrbot_plugin_smart_imagechat_hub.main"
+            )
+            api_getter = getattr(bridge_module, "get_smart_imagechat_api", None)
+            return api_getter() if callable(api_getter) else None
+        except Exception:
+            return None
 
     def _photo_tool_call_timeout_seconds(self) -> float:
         context = getattr(self, "context", None)
@@ -184,24 +212,45 @@ class LlmToolActionsMixin:
         return f"{instruction}\n\n{recent_context}".strip() if recent_context else instruction
 
     def _photo_generation_tool_instruction(self) -> str:
-        if not (self.enabled and getattr(self, "enable_photo_text_action", False)):
+        if not getattr(self, "enabled", False):
             return ""
+        reaction_enabled = self._smart_imagechat_api() is not None
+        photo_enabled = bool(getattr(self, "enable_photo_text_action", False))
         mode = _single_line(getattr(self, "natural_language_photo_generation_mode", "tool_first"), 40).lower()
-        if mode == "off":
+        photo_enabled = photo_enabled and mode != "off"
+        if not reaction_enabled and not photo_enabled:
             return ""
-        return """
-【生图/自拍工具】
-当用户明确要求你生成图片、画图、出图、自拍、拍照、头像、表情包，或要求基于参考图改图时，可以使用 `pc_generate_photo`。
-- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。
-- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写”；普通穿搭优先日常穿搭，只有明确“镜前/对镜/镜子”时才用镜前穿搭；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。
-- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。
-- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。
-- 默认 `send=true`，工具会把生成图片发送到当前会话；如果只想拿路径再决定，可传 `send=false`。
-- 在实际调用本工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。
-  - 只有工具返回 `sent=true` 时才表示图片已经发出。工具发送时已经把 caption 和图片一起交付；成功后不要再发送可见的承接句、重复 caption 或额外表情，避免同一轮重复回复。
-- 工具返回 `sent=false` 时，无论图片是否生成，都表示用户没有收到图片；必须按 `message/actual_error` 如实说明，绝对不能说已经发送。
-- 如果工具返回失败，按失败原因说明，不要假装图片已生成或已发送。
-        """.strip()
+        lines = ["【图库表情与生图工具】"]
+        if reaction_enabled:
+            lines.extend(
+                [
+                    "- 用户要“找/发/来一张已有表情包”、要用现成反应图回应当前语境时，优先使用 `pc_find_reaction_image`，把需求和当前语境写进 `query/context`。",
+                    "- 图库未匹配时可以自然改用文字回应，不要擅自声称已发图。",
+                ]
+            )
+        if photo_enabled:
+            if reaction_enabled:
+                lines.append(
+                    "- 只有用户明确要求“生成/画/制作”新的角色表情包或贴纸时，才使用 `pc_generate_photo(kind=\"sticker\")`。不要把普通的现成表情包请求误当成生图。"
+                )
+            lines.extend(
+                [
+                    "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
+                    '- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
+                    '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写”；普通穿搭优先日常穿搭，只有明确“镜前/对镜/镜子”时才用镜前穿搭；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
+                    '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
+                    '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。',
+                ]
+            )
+        lines.extend(
+            [
+                "- 默认 `send=true`；如果只想拿路径再决定，可传 `send=false`。",
+                "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
+                "- 只有工具返回 `sent=true` 时才表示图片已经发出。成功后不要再发送可见的承接句、重复 caption 或额外表情，避免同一轮重复回复。",
+                "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
+            ]
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _photo_tool_followup_is_redundant(sent_caption: Any, followup_text: Any) -> bool:
@@ -531,7 +580,9 @@ class LlmToolActionsMixin:
             "pc_qzone_view_feed",
             "pc_qzone_publish_feed",
             "pc_generate_photo",
+            "pc_find_reaction_image",
             "pc_manage_memo",
+            "pc_manage_schedule",
             "pc_view_creative_work",
             "pc_get_group_id_by_name",
             "pc_get_user_id_by_name",
@@ -989,6 +1040,28 @@ class LlmToolActionsMixin:
 - 含 due_at 且开启提醒的便签，其提醒已经由便签自身负责；成功保存后不得再调用 `future_task`，也不得再输出 `<timer>`，否则会重复提醒。
 - 只有工具明确返回 `saved=true`，才能说便签已经新增、修改、完成、恢复、置顶或删除；cancel_delete 返回 `cancelled=true` 时才能说已取消删除。其他 `saved=false`、失败、歧义或等待确认必须如实说明。
 - 便签是待办，不是已经发生的经历；不要把未完成事项说成用户已经做过。
+""".strip()
+
+    @staticmethod
+    def _schedule_management_instruction_matches(text: Any) -> bool:
+        compact = re.sub(r"\s+", "", _single_line(text, 240))
+        if not compact:
+            return False
+        operation = bool(re.search(r"(重置|重做|重新细化|重新生成|刷新|取消|删除|删掉|移除|去掉)", compact))
+        target = bool(
+            re.search(r"(日程|行程|安排|计划|时段|时间段|这段|那段|第[一二两三四五六七八九十\d]+段)", compact)
+            or re.search(r"(?:凌晨|早上|上午|中午|下午|傍晚|晚上|今晚)?(?:\d{1,2}|[一二两三四五六七八九十]+)(?:点|时|:|：).{0,10}(?:那段|的安排|的计划)", compact)
+        )
+        return bool(operation and target)
+
+    def _schedule_management_tool_instruction(self) -> str:
+        return """
+【指定日程管理工具】
+主要用户在私聊中明确要求重置、重做、重新细化、取消或删除某一段今日日程时，使用 `pc_manage_schedule`，不要只口头承诺。
+- 重新细化：action=regenerate；取消/删除/移除：action=cancel。“删除”采用取消语义，保留历史依据，但不会再作为当前活动、细化重试或主动消息契机。
+- selector 必须保留用户明确给出的时间、序号或活动关键词，例如“下午三点”“第二段”“整理房间”；不要自行猜一个日程段。工具返回歧义或未命中时，把候选自然列给用户继续选择。
+- 只有用户明确要求操作已有日程时才调用。普通聊天中的“我下午出门”“今晚想晚点睡”“你可以休息”等生活信息仍按对话和柔性日程调整理解，不得擅自取消或重置日程。
+- 只有工具返回 `saved=true` 才能说操作已经完成；失败、歧义或未找到时必须如实说明。
 """.strip()
 
     def _memo_tool_authorization(self, event: AstrMessageEvent) -> tuple[bool, str]:
@@ -1610,6 +1683,8 @@ class LlmToolActionsMixin:
             return default
 
         send_image = bool_arg(send, True)
+        if send_image:
+            self._mark_smart_imagechat_skip_proactive_emoji(event)
         reference_path = _single_line(
             reference_image_path
             or kwargs.get("reference")
@@ -1922,6 +1997,197 @@ class LlmToolActionsMixin:
                 }
             )
         return json.dumps(result_payload, ensure_ascii=False)
+
+    async def _pc_find_reaction_image_impl(
+        self,
+        event: AstrMessageEvent,
+        query: str = "",
+        context: str = "",
+        meme_only: bool = True,
+        send: bool = True,
+        caption: str = "",
+    ) -> str:
+        query_text = _single_line(query, 500)
+        if not query_text:
+            getter = getattr(event, "get_message_str", None)
+            query_text = _single_line(
+                getter() if callable(getter) else getattr(event, "message_str", ""),
+                500,
+            )
+        if not query_text:
+            return json.dumps(
+                {
+                    "status": "need_query",
+                    "success": False,
+                    "found": False,
+                    "sent": False,
+                    "message": "缺少表情包检索需求",
+                    "must_not_claim_sent": True,
+                },
+                ensure_ascii=False,
+            )
+
+        def bool_arg(value: Any, default: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return default
+            normalized = str(value).strip().lower()
+            if normalized in {"1", "true", "yes", "on", "是", "发送"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "否", "不发送"}:
+                return False
+            return default
+
+        send_image = bool_arg(send, True)
+        meme_filter = bool_arg(meme_only, True)
+        if send_image:
+            self._mark_smart_imagechat_skip_proactive_emoji(event)
+
+        api = self._smart_imagechat_api()
+        if api is None or not callable(getattr(api, "find_image", None)):
+            return json.dumps(
+                {
+                    "status": "unavailable",
+                    "success": False,
+                    "found": False,
+                    "sent": False,
+                    "message": "智能图片对话插件未加载，暂时无法检索本地图库",
+                    "must_not_claim_sent": True,
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            lookup = await api.find_image(
+                event,
+                query_text,
+                context=_single_line(context, 1000),
+                meme_only=meme_filter,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 智能图片对话图库检索失败: %s",
+                _single_line(exc, 180),
+                exc_info=True,
+            )
+            lookup = {
+                "success": False,
+                "status": "error",
+                "message": f"图库检索失败：{_single_line(exc, 160)}",
+            }
+        if not isinstance(lookup, dict) or not lookup.get("success"):
+            lookup = lookup if isinstance(lookup, dict) else {}
+            return json.dumps(
+                {
+                    "status": _single_line(lookup.get("status"), 40) or "not_found",
+                    "success": False,
+                    "found": False,
+                    "sent": False,
+                    "message": _single_line(lookup.get("message"), 220) or "图库中没有找到合适的表情包",
+                    "need": _single_line(lookup.get("need"), 220),
+                    "reason": _single_line(lookup.get("reason"), 220),
+                    "must_not_claim_sent": True,
+                },
+                ensure_ascii=False,
+            )
+
+        image_path = _single_line(lookup.get("path"), 1000)
+        if not image_path or not os.path.isfile(image_path):
+            return json.dumps(
+                {
+                    "status": "missing_file",
+                    "success": False,
+                    "found": False,
+                    "sent": False,
+                    "message": "匹配到的图库图片文件不可用",
+                    "must_not_claim_sent": True,
+                },
+                ensure_ascii=False,
+            )
+
+        sent = False
+        delivery: dict[str, Any] = {}
+        visible_caption = _single_line(caption, 120)
+        if send_image:
+            try:
+                delivery = await self._deliver_generated_image_to_event(
+                    event,
+                    image_path=image_path,
+                    caption=visible_caption,
+                )
+            except Exception as exc:
+                delivery = {
+                    "sent": False,
+                    "destination": "error",
+                    "message": f"图片发送失败：{_single_line(exc, 180) or '未知错误'}",
+                }
+            sent = bool(delivery.get("sent"))
+            if sent:
+                try:
+                    setattr(event, "_private_companion_photo_tool_sent", True)
+                    setattr(event, "_private_companion_photo_tool_sent_caption", visible_caption)
+                except Exception:
+                    pass
+
+        tags = [
+            _single_line(item, 60)
+            for item in lookup.get("tags", [])
+            if _single_line(item, 60)
+        ]
+        need = _single_line(lookup.get("need"), 220) or query_text
+        match_reason = _single_line(lookup.get("reason"), 220)
+        snapshot_caption = "；".join(
+            part
+            for part in (
+                f"图库标签：{'、'.join(tags[:8])}" if tags else "",
+                f"表达需求：{need}" if need else "",
+                f"选图依据：{match_reason}" if match_reason else "",
+            )
+            if part
+        )
+        if sent and snapshot_caption:
+            try:
+                user_id = str(event.get_sender_id())
+            except Exception:
+                user_id = ""
+            if user_id:
+                async with self._data_lock:
+                    user = self._get_user(user_id)
+                    self._remember_recent_photo_share_snapshot(
+                        user,
+                        caption=snapshot_caption,
+                        topic=need,
+                        motive=match_reason,
+                        reason="smart_reaction_image",
+                        subject_owner="unknown",
+                    )
+                    self._save_data_sync()
+
+        success = bool(image_path and (not send_image or sent))
+        return json.dumps(
+            {
+                "status": "success" if success else "delivery_failed",
+                "success": success,
+                "found": True,
+                "send_requested": send_image,
+                "sent": sent,
+                "message": (
+                    _single_line(delivery.get("message"), 220)
+                    if send_image
+                    else "已找到图库图片，但按请求未发送"
+                ),
+                "path": image_path,
+                "image_id": _single_line(lookup.get("image_id"), 120),
+                "tags": tags,
+                "need": need,
+                "reason": match_reason,
+                "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
+                "delivery": _single_line(delivery.get("destination"), 40),
+                "must_not_claim_sent": not sent,
+            },
+            ensure_ascii=False,
+        )
 
     async def _pc_qzone_view_feed_impl(
         self,

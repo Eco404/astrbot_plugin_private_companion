@@ -465,6 +465,7 @@ _DEFAULT_USER_TEMPLATE = {
     "group_share_context": {},
     "last_group_share_key": "",
     "last_group_share_at": 0,
+    "last_group_share_snapshot": {},
     "bilibili_video_context": {},
     "last_bilibili_share_key": "",
     "last_bilibili_share_at": 0,

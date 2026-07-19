@@ -330,7 +330,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 ]
                 shadow_count = len(groups) - len(visible_groups)
             await self._refresh_group_names_from_platform(visible_groups)
-            items = [self._group_summary(group_id, group) for group_id, group in visible_groups]
+            items = [
+                self._group_summary(group_id, self._refresh_group_atmosphere_for_page(group))
+                for group_id, group in visible_groups
+            ]
             items.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             if elapsed_ms > 1200:
@@ -339,6 +342,18 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取群列表失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    def _refresh_group_atmosphere_for_page(self, group: dict[str, Any]) -> dict[str, Any]:
+        updater = getattr(self.plugin, "_update_group_atmosphere", None)
+        if callable(updater):
+            try:
+                updater(group)
+            except Exception as exc:
+                logger.info(
+                    "[PrivateCompanionPage] 群气氛读取时重算失败: %s",
+                    self._single_line(exc, 120),
+                )
+        return group
 
     def _looks_like_member_shadow_group(self, group_id: str, group: dict[str, Any]) -> bool:
         """Hide historical records created when a sender id was mistaken for a group id."""
@@ -594,6 +609,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             if not isinstance(group, dict):
                 return self._error("群不存在")
             await self._refresh_group_names_from_platform([(group_id, group)], force=True)
+            self._refresh_group_atmosphere_for_page(group)
             detail = self._group_summary(group_id, group)
             detail.update(
                 {
@@ -633,6 +649,22 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     group["interject_today"] = 0
                     group["last_bot_interjection"] = {}
                     group["interjection_feedback"] = {}
+                if payload.get("reset_atmosphere"):
+                    current_atmosphere = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
+                    group["atmosphere"] = {**current_atmosphere, "reset_at": time.time()}
+                    updater = getattr(self.plugin, "_update_group_atmosphere", None)
+                    if callable(updater):
+                        updater(group)
+                    else:
+                        group["atmosphere"].update(
+                            {
+                                "pace": "安静",
+                                "mood": "平稳",
+                                "active_speakers": 0,
+                                "recent_count": 0,
+                                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            }
+                        )
                 if payload.get("clear_observation"):
                     enabled = bool(group.get("enabled", True))
                     group.clear()

@@ -7,18 +7,21 @@
   <link rel="stylesheet" href="./app.css?v=20260716-proactive-deep-bridge-v10" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
-  <link rel="stylesheet" href="./css/polish.css?v=20260715-learning-nav-merged-v1" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260719-dashboard-standard-v1" />
   <script>
     (function () {
       try {
         var theme = localStorage.getItem("pc_theme") || "classic";
         var font = localStorage.getItem("pc_font") || "original";
+        var dashboardLayout = localStorage.getItem("pc_dashboard_layout") || "standard";
         var allowedThemes = ["classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"];
         if (allowedThemes.indexOf(theme) === -1) theme = "classic";
         var allowedFonts = ["original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng"];
         if (allowedFonts.indexOf(font) === -1) font = "original";
+        if (["standard", "life"].indexOf(dashboardLayout) === -1) dashboardLayout = "standard";
         document.documentElement.dataset.theme = theme;
         document.documentElement.dataset.pageFont = font;
+        document.documentElement.dataset.dashboardLayout = dashboardLayout;
       } catch (e) {}
     })();
   </script>
@@ -127,13 +130,17 @@
         <div class="section-head dashboard-overview-head">
           <div>
             <h2>今日概览</h2>
-            <p class="section-desc">日程、状态、主动与记忆集中在这里；配置和诊断按需展开。</p>
+            <p id="dashboardOverviewDescription" class="section-desc">运行状态、覆盖范围与近期安排集中在这里；详细观察按需展开。</p>
           </div>
-          <div class="actions compact">
+          <div class="dashboard-head-actions">
+            <div class="dashboard-layout-switch" role="tablist" aria-label="总览样式">
+              <button id="dashboardStandardLayoutTab" class="is-active" type="button" role="tab" aria-selected="true" aria-controls="dashboardStandardView" data-dashboard-layout-option="standard">常规总览</button>
+              <button id="dashboardLifeLayoutTab" type="button" role="tab" aria-selected="false" aria-controls="dashboardLifeView" tabindex="-1" data-dashboard-layout-option="life">生活工作台</button>
+            </div>
             <button id="exportSnapshotBtn" type="button">导出快照</button>
           </div>
         </div>
-        <section class="dashboard-life-desk" aria-label="今日生活工作台">
+        <section id="dashboardLifeView" class="dashboard-layout-view dashboard-life-desk" data-dashboard-view="life" role="tabpanel" aria-labelledby="dashboardLifeLayoutTab" aria-label="今日生活工作台">
           <aside class="dashboard-life-column dashboard-life-column-left">
             <article class="life-desk-card life-desk-today">
               <div class="life-desk-card-head">
@@ -186,6 +193,60 @@
               <div id="dashboardCapabilitySummary" class="life-capability-list"></div>
             </article>
           </aside>
+        </section>
+        <section id="dashboardStandardView" class="dashboard-layout-view dashboard-standard-view" data-dashboard-view="standard" role="tabpanel" aria-labelledby="dashboardStandardLayoutTab" aria-label="常规运行总览">
+          <div id="dashboardStandardKpis" class="dashboard-standard-kpis" aria-label="核心运行指标"></div>
+          <div class="dashboard-standard-grid">
+            <article class="dashboard-standard-card dashboard-standard-current">
+              <header class="dashboard-standard-card-head">
+                <div><span>01</span><h3>当前状态</h3></div>
+                <small id="dashboardStandardRefresh">等待刷新</small>
+              </header>
+              <div id="dashboardStandardCurrent"></div>
+            </article>
+            <article class="dashboard-standard-card dashboard-standard-schedule">
+              <header class="dashboard-standard-card-head">
+                <div><span>02</span><h3>近期日程</h3></div>
+                <button type="button" data-jump-tab="memory">完整日程</button>
+              </header>
+              <div id="dashboardStandardSchedule"></div>
+            </article>
+            <article class="dashboard-standard-card dashboard-standard-proactive">
+              <header class="dashboard-standard-card-head">
+                <div><span>03</span><h3>主动计划</h3></div>
+                <button type="button" data-jump-tab="proactive">查看候选</button>
+              </header>
+              <div id="dashboardStandardProactive"></div>
+            </article>
+            <article class="dashboard-standard-card dashboard-standard-memory">
+              <header class="dashboard-standard-card-head">
+                <div><span>04</span><h3>记忆概况</h3></div>
+                <button type="button" data-jump-tab="worldbook">打开关系网</button>
+              </header>
+              <div id="dashboardStandardMemory"></div>
+            </article>
+            <article class="dashboard-standard-card dashboard-standard-readiness">
+              <header class="dashboard-standard-card-head">
+                <div><span>05</span><h3>配置健康</h3></div>
+                <button type="button" data-jump-tab="config">检查配置</button>
+              </header>
+              <div id="dashboardStandardReadiness"></div>
+            </article>
+            <article class="dashboard-standard-card dashboard-standard-content">
+              <header class="dashboard-standard-card-head">
+                <div><span>06</span><h3>最新内容</h3></div>
+                <small>新闻 · 搜索 · 创作</small>
+              </header>
+              <div id="dashboardStandardContent"></div>
+            </article>
+            <article class="dashboard-standard-card dashboard-standard-capabilities">
+              <header class="dashboard-standard-card-head">
+                <div><span>07</span><h3>能力与覆盖</h3></div>
+                <button type="button" data-jump-tab="models">模型配置</button>
+              </header>
+              <div id="dashboardStandardCapabilities"></div>
+            </article>
+          </div>
         </section>
         <section class="dashboard-secondary" aria-label="更多运行信息">
           <details class="dashboard-disclosure">
@@ -1564,6 +1625,6 @@ QQ空间 = 公开札记
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260711-provider-debug"></script>
   <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
-  <script src="./app.js?v=20260716-proactive-deep-bridge-v10"></script>
+  <script src="./app.js?v=20260719-dashboard-standard-v1"></script>
 </body>
 </html>

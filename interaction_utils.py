@@ -17,6 +17,52 @@ from .helpers import _single_line
 class InteractionUtilsMixin:
     """Common command permission and reply helpers."""
 
+    @staticmethod
+    def _normalize_companion_command_action(action: Any, value: Any) -> tuple[str, str]:
+        verb = str(action or "").strip()
+        remainder = str(value or "").strip()
+        if not verb or not remainder:
+            return verb, remainder
+        aliases = {
+            ("重置", "插件"): "重置插件",
+            ("重置", "日程"): "重置日程",
+            ("刷新", "日程"): "刷新日程",
+            ("生成", "日程"): "生成日程",
+            ("重新生成", "日程"): "重新生成日程",
+            ("删除", "日程"): "删除日程",
+            ("取消", "日程"): "取消日程",
+            ("移除", "日程"): "移除日程",
+            ("重置", "细化"): "重置细化",
+            ("重置", "穿搭图"): "重置穿搭图",
+            ("刷新", "穿搭图"): "刷新穿搭图",
+            ("生成", "穿搭图"): "生成穿搭图",
+            ("重新生成", "穿搭图"): "重新生成穿搭图",
+            ("重置", "穿搭"): "重置穿搭",
+            ("刷新", "穿搭"): "刷新穿搭",
+            ("生成", "穿搭"): "生成穿搭",
+            ("重新生成", "穿搭"): "重新生成穿搭",
+            ("重置", "夹层密码"): "重置夹层密码",
+            ("重置", "书柜密码"): "重置书柜密码",
+            ("重置", "抽屉密码"): "重置书柜密码",
+            ("删除", "重要日期"): "重要日期删除",
+            ("删除", "日期"): "日期删除",
+            ("添加", "重要日期"): "重要日期添加",
+            ("添加", "日期"): "日期添加",
+            ("删除", "未完话头"): "删除未完话头",
+            ("删除", "话头"): "删除话头",
+        }
+        targets = sorted(
+            (target for alias_verb, target in aliases if alias_verb == verb),
+            key=len,
+            reverse=True,
+        )
+        for target in targets:
+            if not remainder.startswith(target):
+                continue
+            tail = remainder[len(target) :].strip()
+            return aliases[(verb, target)], tail
+        return verb, remainder
+
     def _help_text(self) -> str:
         return (
             "我会永远陪着你 命令：\n"
@@ -27,6 +73,8 @@ class InteractionUtilsMixin:
             "陪伴 增添状态 <状态描述>[|持续小时]\n"
             "陪伴 查看今日日程\n"
             "陪伴 重置日程\n"
+            "陪伴 重置日程 <时间|活动名>\n"
+            "陪伴 删除日程 <时间|活动名>\n"
             "陪伴 当前细化\n"
             "陪伴 重置细化\n"
             "陪伴 今日穿搭图\n"
@@ -209,6 +257,10 @@ class InteractionUtilsMixin:
         if recalled_message_id:
             return
         if (image_path and os.path.exists(image_path)) or extra_components:
+            if image_path and os.path.exists(image_path):
+                marker = getattr(self, "_mark_smart_imagechat_skip_proactive_emoji", None)
+                if callable(marker):
+                    marker(event)
             await event.send(
                 event.chain_result(
                     self._with_optional_reply(

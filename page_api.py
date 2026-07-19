@@ -5872,6 +5872,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
                 if payload.get("delete"):
                     changed = bool(skill_id and skills.pop(skill_id, None) is not None)
+                    if not changed:
+                        return self._error("没有找到要删除的技能，请刷新后重试")
                     state["updated_ts"] = time.time()
                     self.plugin._save_data_sync()
                     return self._ok({"changed": changed, "message": "已删除技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
@@ -5959,10 +5961,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     -1,
                 )
                 if payload.get("delete"):
-                    if index >= 0:
-                        goals.pop(index)
+                    if index < 0:
+                        return self._error("没有找到要删除的个人目标，请刷新后重试")
+                    goals.pop(index)
                     self.plugin._save_data_sync()
-                    return self._ok({"changed": index >= 0, "message": "已删除个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
+                    return self._ok({"changed": True, "message": "已删除个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
                 if not title:
                     return self._error("缺少目标名称")
                 category = self._single_line(payload.get("category"), 24) or "生活"
@@ -10485,8 +10488,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             } if last_wakeup else {},
             "atmosphere": {
                 "mood": atmosphere.get("mood", ""),
-                "heat": atmosphere.get("heat", ""),
-                "last_summary": atmosphere.get("summary", ""),
+                "pace": atmosphere.get("pace", ""),
+                "heat": atmosphere.get("heat") or atmosphere.get("pace", ""),
+                "last_summary": atmosphere.get("summary") or atmosphere.get("last_summary", ""),
+                "recent_count": atmosphere.get("recent_count", 0),
+                "active_speakers": atmosphere.get("active_speakers", 0),
+                "updated_at": atmosphere.get("updated_at", ""),
             },
         }
 
@@ -12547,6 +12554,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if key not in keys and key not in provider_keys:
                 keys.append(key)
         values = {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
+        for key in self._schema_bool_keys():
+            if key not in values:
+                continue
+            persisted = self._config_get_raw(key, None)
+            if persisted not in (None, ""):
+                values[key] = self._normalize_bool_value(persisted)
         busy_reply_defaults = {
             "enable_busy_reply_gate": False,
             "busy_reply_min_delay_seconds": 60,
@@ -12559,6 +12572,32 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 values[key] = default
             elif values.get(key) in (None, ""):
                 values[key] = persisted
+        segmented_setting_keys = (
+            "enable_segmented_proactive_reply",
+            "segmented_proactive_scope",
+            "segmented_proactive_chat_scope",
+            "segmented_proactive_threshold",
+            "segmented_proactive_min_segment_chars",
+            "segmented_proactive_max_segments",
+            "segmented_proactive_send_as_forward",
+            "segmented_proactive_split_mode",
+            "segmented_proactive_regex",
+            "segmented_proactive_split_words",
+            "enable_segmented_proactive_content_cleanup",
+            "segmented_proactive_content_cleanup_scope",
+            "segmented_proactive_content_cleanup_rule",
+            "segmented_proactive_content_cleanup_words",
+            "enable_segmented_proactive_content_replacement",
+            "segmented_proactive_content_replacements",
+            "segmented_proactive_interval_method",
+            "segmented_proactive_interval_min",
+            "segmented_proactive_interval_max",
+            "segmented_proactive_log_base",
+        )
+        for key in segmented_setting_keys:
+            persisted = self._config_get_raw(key, None)
+            if persisted not in (None, ""):
+                values[key] = deepcopy(persisted)
         values["private_user_aliases"] = self._private_alias_config_text("private_user_aliases")
         values["private_user_delivery_aliases"] = self._private_alias_config_text("private_user_delivery_aliases")
         values.update(

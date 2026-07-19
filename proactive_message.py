@@ -3845,6 +3845,8 @@ class ProactiveMessageMixin:
         if str(reason or "").strip() in source_reasons:
             return True
         context = str(action_context or "")
+        if str(reason or "").strip() == "group_share" and "群聊分享线索" in context:
+            return True
         if re.search(r"(?:真实图片文件|图片路径|真实动作结果|工具结果|来源链接|https?://)", context, re.I):
             return True
         return str(action or "message").strip() not in {"", "message", "photo_text"} and bool(_single_line(context, 240))
@@ -5660,6 +5662,18 @@ Output:
         extra_components = list(payload.get("extra_components") or []) if isinstance(payload.get("extra_components"), list) else []
         if image_path and os.path.exists(image_path):
             extra_components.extend(self._build_outbound_chain("", image_path))
+        snapshot = payload.get("photo_snapshot") if isinstance(payload.get("photo_snapshot"), dict) else {}
+        if success and image_path and os.path.exists(image_path) and snapshot:
+            remember = getattr(self, "_remember_recent_photo_share_snapshot", None)
+            if callable(remember):
+                remember(
+                    user,
+                    caption=_single_line(snapshot.get("caption"), 260),
+                    topic=_single_line(snapshot.get("topic"), 100),
+                    motive=_single_line(snapshot.get("motive"), 180),
+                    reason=_single_line(snapshot.get("reason"), 40) or name,
+                    subject_owner=_single_line(snapshot.get("subject_owner"), 20),
+                )
         memory = _single_line(payload.get("memory"), 500)
         if memory:
             user.setdefault("external_proactive_memory", [])
