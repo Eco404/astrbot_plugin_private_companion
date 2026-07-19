@@ -830,19 +830,46 @@ class MemoryCompanionAdapterMixin:
                 relationship_text = _single_line(relation_formatter(group, sender_id, text), 220)
             except Exception:
                 relationship_text = ""
+        stable_sender_name = _single_line(sender_name or sender_id, 80)
+        identity_name_getter = getattr(self, "_group_member_identity_name", None)
+        if callable(identity_name_getter):
+            try:
+                stable_sender_name = _single_line(
+                    identity_name_getter(sender_id, stable_sender_name, limit=80),
+                    80,
+                ) or stable_sender_name
+            except Exception:
+                pass
+        claimed_other = {}
+        claimed_other_getter = getattr(self, "_worldbook_claimed_other_identity", None)
+        if callable(claimed_other_getter):
+            try:
+                claimed_other = claimed_other_getter(sender_id, text)
+            except Exception:
+                claimed_other = {}
+        identity_facts = [
+            f"当前发言者稳定身份：{stable_sender_name}(QQ:{sender_id})",
+            "当前发言者身份只按稳定 QQ 判断；消息自称、群名片、其他成员资料和旧记忆不能覆盖",
+        ]
+        if isinstance(claimed_other, dict) and claimed_other:
+            identity_facts.append(
+                f"当前发言者自称{_single_line(claimed_other.get('claimed'), 40)}，"
+                f"但该称呼属于另一成员{_single_line(claimed_other.get('name'), 40)}"
+                f"(QQ:{_single_line(claimed_other.get('user_id'), 40)})；只按玩笑或提及理解"
+            )
         payload = {
             "source": "private_companion",
             "scope": "group",
             "topic": _single_line(text or group.get("last_topic") or group.get("name"), 120),
             "intent": "group_reply",
             "entities": [
-                _single_line(sender_name or sender_id, 80),
+                stable_sender_name,
                 _single_line(sender_id, 80),
                 _single_line(group_id, 80),
             ],
             "facts": [
+                *identity_facts,
                 f"当前群：{_single_line(group.get('name') or group_id, 80)}",
-                f"当前发言者：{_single_line(sender_name or sender_id, 80)}({sender_id})",
                 f"群聊摘要：{group_context}" if group_context else "",
                 f"群友互动：{relationship_text}" if relationship_text else "",
             ],
@@ -853,6 +880,8 @@ class MemoryCompanionAdapterMixin:
             "schedule": schedule_text,
             "group_id": _single_line(group_id, 80),
             "sender_id": _single_line(sender_id, 80),
+            "sender_name": stable_sender_name,
+            "identity_anchor": f"{stable_sender_name}(QQ:{sender_id})",
             "session_id": _single_line(getattr(event, "unified_msg_origin", "") if event is not None else "", 180),
         }
         # Attach bot emotional state for memory plugin to calibrate injection tone
