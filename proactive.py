@@ -455,27 +455,60 @@ class ProactiveMixin:
         cycle_text = _single_line(state.get("body_cycle"), 100)
         if not cycle_text or cycle_text in {"无明显周期影响", "不处于生理期", "生理期模拟未开启"}:
             return neutral
-        if "后" in cycle_text or "恢复" in cycle_text:
+        phase = ""
+        conditions = state.get("conditions")
+        if isinstance(conditions, list):
+            phase = next(
+                (
+                    str(item.get("phase") or "")
+                    for item in conditions
+                    if isinstance(item, dict) and str(item.get("kind") or "") == "body_cycle"
+                ),
+                "",
+            )
+        upper_cycle_text = cycle_text.upper()
+        if not phase:
+            if "PMS" in upper_cycle_text or "经前综合征" in cycle_text:
+                phase = "pms"
+            elif "排卵前期" in cycle_text:
+                phase = "pre_ovulation"
+            elif "月经期" in cycle_text:
+                phase = "menstrual"
+            elif "卵泡期" in cycle_text:
+                phase = "follicular"
+            elif "排卵期" in cycle_text:
+                phase = "ovulation"
+            elif "黄体期" in cycle_text:
+                phase = "luteal"
+            elif "后" in cycle_text or "恢复" in cycle_text:
+                phase = "recovery"
+            elif "前" in cycle_text:
+                phase = "pre"
+            elif "生理期" in cycle_text:
+                phase = "period"
+        if phase == "recovery":
             return {
                 "phase": "recovery",
                 "private_interval_multiplier": 1.05,
                 "group_interval_multiplier": 1.08,
                 "group_probability_multiplier": 0.92,
             }
-        if "前" in cycle_text:
+        if phase in {"pre", "pms"}:
             return {
-                "phase": "pre",
+                "phase": phase,
                 "private_interval_multiplier": 1.08,
                 "group_interval_multiplier": 1.12,
                 "group_probability_multiplier": 0.88,
             }
-        if "生理期" in cycle_text:
+        if phase in {"period", "menstrual"}:
             return {
-                "phase": "period",
+                "phase": phase,
                 "private_interval_multiplier": 1.18,
                 "group_interval_multiplier": 1.25,
                 "group_probability_multiplier": 0.76,
             }
+        if phase in {"follicular", "pre_ovulation", "ovulation", "luteal"}:
+            return {**neutral, "phase": phase}
         return neutral
 
     def _cycle_group_interject_probability(self, probability: float) -> float:

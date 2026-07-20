@@ -1193,46 +1193,46 @@ class PrivateCompanionPlugin(
         self.enable_health_state = self._cfg_bool(c, "enable_health_state", True)
         self.enable_hunger_state = self._cfg_bool(c, "enable_hunger_state", True)
         self.enable_cycle_state = self._cfg_bool(c, "enable_cycle_state", True)
+        self.humanized_state_intensity = self._cfg_int(c, "humanized_state_intensity", 50, 0, 100)
         self.enable_advanced_cycle_strategy = self._cfg_bool(c, "enable_advanced_cycle_strategy", False)
+        self.advanced_cycle_link_intensity = self._cfg_bool(c, "advanced_cycle_link_intensity", False)
+        self.advanced_cycle_start_offset = self._cfg_int(c, "advanced_cycle_start_offset", 0, 0, 180)
         self.advanced_cycle_menstrual_days = self._cfg_int(c, "advanced_cycle_menstrual_days", 5, 1, 30)
         self.advanced_cycle_menstrual_prompt = self._cfg_str(
-            c, "advanced_cycle_menstrual_prompt", "处于月经期,容易疲倦、情绪敏感,回复更慵懒简短"
-        )
-        self.advanced_cycle_follicular_days = self._cfg_int(c, "advanced_cycle_follicular_days", 8, 1, 30)
-        self.advanced_cycle_follicular_prompt = self._cfg_str(
-            c, "advanced_cycle_follicular_prompt", "处于卵泡期,精力回升、心情平稳,对事物有兴趣"
-        )
-        self.advanced_cycle_ovulation_days = self._cfg_int(c, "advanced_cycle_ovulation_days", 3, 1, 30)
-        self.advanced_cycle_ovulation_prompt = self._cfg_str(
-            c, "advanced_cycle_ovulation_prompt", "处于排卵期,身体轻盈、精力充沛,社交意愿增强"
-        )
-        self.advanced_cycle_luteal_days = self._cfg_int(c, "advanced_cycle_luteal_days", 13, 1, 30)
-        self.advanced_cycle_luteal_prompt = self._cfg_str(
-            c, "advanced_cycle_luteal_prompt", "处于黄体期,保持默认人格,不额外放大情绪变化"
+            c, "advanced_cycle_menstrual_prompt", "处于月经期，身体更容易疲倦，情绪感受稍敏锐"
         )
         self.advanced_cycle_menstrual_mood = self._cfg_str(c, "advanced_cycle_menstrual_mood", "疲惫")
-        self.advanced_cycle_menstrual_energy = self._cfg_int(c, "advanced_cycle_menstrual_energy", -24, -50, 0)
+        self.advanced_cycle_menstrual_energy = self._cfg_int(c, "advanced_cycle_menstrual_energy", -12, -50, 30)
+        self.advanced_cycle_follicular_days = self._cfg_int(c, "advanced_cycle_follicular_days", 5, 1, 30)
+        self.advanced_cycle_follicular_prompt = self._cfg_str(
+            c, "advanced_cycle_follicular_prompt", "处于卵泡期早，精力平稳回升，心情逐渐轻快"
+        )
         self.advanced_cycle_follicular_mood = self._cfg_str(c, "advanced_cycle_follicular_mood", "轻快")
-        self.advanced_cycle_follicular_energy = self._cfg_int(c, "advanced_cycle_follicular_energy", 8, -10, 30)
-        self.advanced_cycle_ovulation_mood = self._cfg_str(c, "advanced_cycle_ovulation_mood", "明朗")
-        self.advanced_cycle_ovulation_energy = self._cfg_int(c, "advanced_cycle_ovulation_energy", 12, -10, 30)
-        self.advanced_cycle_luteal_mood = self._cfg_str(c, "advanced_cycle_luteal_mood", "平稳")
-        self.advanced_cycle_luteal_energy = self._cfg_int(c, "advanced_cycle_luteal_energy", 5, -30, 10)
+        self.advanced_cycle_follicular_energy = self._cfg_int(c, "advanced_cycle_follicular_energy", 0, -50, 30)
         self.advanced_cycle_pre_ovulation_days = self._cfg_int(c, "advanced_cycle_pre_ovulation_days", 3, 1, 30)
         self.advanced_cycle_pre_ovulation_prompt = self._cfg_str(
-            c, "advanced_cycle_pre_ovulation_prompt", "处于排卵前期,身体开始轻盈,精力进一步上升"
+            c, "advanced_cycle_pre_ovulation_prompt", "处于排卵前期，身体逐渐轻盈，精力有所上升"
         )
         self.advanced_cycle_pre_ovulation_mood = self._cfg_str(c, "advanced_cycle_pre_ovulation_mood", "期待")
-        self.advanced_cycle_pre_ovulation_energy = self._cfg_int(c, "advanced_cycle_pre_ovulation_energy", 8, -10, 30)
+        self.advanced_cycle_pre_ovulation_energy = self._cfg_int(c, "advanced_cycle_pre_ovulation_energy", 8, -50, 30)
+        self.advanced_cycle_ovulation_days = self._cfg_int(c, "advanced_cycle_ovulation_days", 1, 1, 30)
+        self.advanced_cycle_ovulation_prompt = self._cfg_str(
+            c, "advanced_cycle_ovulation_prompt", "处于排卵期，精力较充足，社交意愿稍有增强"
+        )
+        self.advanced_cycle_ovulation_mood = self._cfg_str(c, "advanced_cycle_ovulation_mood", "明朗")
+        self.advanced_cycle_ovulation_energy = self._cfg_int(c, "advanced_cycle_ovulation_energy", 9, -50, 30)
+        self.advanced_cycle_luteal_days = self._cfg_int(c, "advanced_cycle_luteal_days", 8, 1, 30)
+        self.advanced_cycle_luteal_prompt = self._cfg_str(
+            c, "advanced_cycle_luteal_prompt", "处于黄体期早，精力尚可，情绪整体平稳"
+        )
+        self.advanced_cycle_luteal_mood = self._cfg_str(c, "advanced_cycle_luteal_mood", "平稳")
+        self.advanced_cycle_luteal_energy = self._cfg_int(c, "advanced_cycle_luteal_energy", 5, -50, 30)
         self.advanced_cycle_pms_days = self._cfg_int(c, "advanced_cycle_pms_days", 6, 1, 30)
         self.advanced_cycle_pms_prompt = self._cfg_str(
-            c, "advanced_cycle_pms_prompt", "处于PMS期,情绪波动加大,易怒或低落,精力下降"
+            c, "advanced_cycle_pms_prompt", "处于 PMS 期，精力有所下降，情绪波动稍明显"
         )
-        self.advanced_cycle_pms_mood = self._cfg_str(c, "advanced_cycle_pms_mood", "烦躁")
-        self.advanced_cycle_pms_energy = self._cfg_int(c, "advanced_cycle_pms_energy", -8, -50, 10)
-        self.advanced_cycle_link_intensity = self._cfg_bool(c, "advanced_cycle_link_intensity", False)
-        self.advanced_cycle_start_offset = self._cfg_int(c, "advanced_cycle_start_offset", 0, 0, 28)
-        self.humanized_state_intensity = self._cfg_int(c, "humanized_state_intensity", 50, 0, 100)
+        self.advanced_cycle_pms_mood = self._cfg_str(c, "advanced_cycle_pms_mood", "敏感")
+        self.advanced_cycle_pms_energy = self._cfg_int(c, "advanced_cycle_pms_energy", -8, -50, 30)
         self.enable_rest_reply_simulation = self._cfg_bool(c, "enable_rest_reply_simulation", False)
         self.rest_reply_mode = self._cfg_str(c, "rest_reply_mode", "probability", "probability").strip().lower()
         if self.rest_reply_mode in {"model", "模型", "llm_judge", "llm-judge"}:

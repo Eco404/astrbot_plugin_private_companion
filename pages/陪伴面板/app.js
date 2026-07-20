@@ -908,8 +908,7 @@ const featureMeta = {
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
-  enable_cycle_state: ["生理期模拟", "开启后即视为适用，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
-  enable_advanced_cycle_strategy: ["激进真实化模拟策略", "开启后按真实月经周期细分为月经期、卵泡期、排卵期、黄体期四个阶段，各阶段持续天数和提示词可自定义；不开启则维持三段式模拟。"],
+  enable_cycle_state: ["生理期模拟", "开启后允许周期状态轻度影响 Bot 的精力、语气和节奏；可选启用连续六阶段模拟。"],
   enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到学习页的技能成长区域管理。"],
   enable_personal_goals: ["个人目标", "明确创建非创作型长期目标，并按真实完成的日程推进。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
@@ -1123,7 +1122,6 @@ const embeddedFeatureParentByKey = {
   enable_health_state: "enable_humanized_states",
   enable_hunger_state: "enable_humanized_states",
   enable_cycle_state: "enable_humanized_states",
-enable_advanced_cycle_strategy: "enable_cycle_state",
   enable_rest_reply_simulation: "enable_humanized_states",
   enable_busy_reply_gate: "enable_humanized_states",
   enable_daily_plan: "enable_humanized_states",
@@ -1520,33 +1518,33 @@ const configLabels = {
   busy_reply_max_delay_seconds: "私聊最长延迟（秒）",
   busy_reply_proactive_resume_buffer_minutes: "忙完后主动缓冲（分钟）",
   enable_cycle_state: "生理期模拟",
-  enable_advanced_cycle_strategy: "激进真实化模拟策略",
-  advanced_cycle_menstrual_days: "月经期持续天数",
-  advanced_cycle_menstrual_prompt: "月经期状态提示词",
-  advanced_cycle_follicular_days: "卵泡期持续天数",
-  advanced_cycle_follicular_prompt: "卵泡期状态提示词",
-  advanced_cycle_ovulation_days: "排卵期持续天数",
-  advanced_cycle_ovulation_prompt: "排卵期状态提示词",
-  advanced_cycle_luteal_days: "黄体期持续天数",
-  advanced_cycle_luteal_prompt: "黄体期状态提示词",
-  advanced_cycle_menstrual_mood: "月经期情绪标签",
+  enable_advanced_cycle_strategy: "连续六阶段周期",
+  advanced_cycle_link_intensity: "精力联动拟人状态强度",
+  advanced_cycle_start_offset: "当前周期第几天",
+  advanced_cycle_menstrual_days: "月经期天数",
+  advanced_cycle_menstrual_prompt: "月经期状态描述",
+  advanced_cycle_menstrual_mood: "月经期情绪底色",
   advanced_cycle_menstrual_energy: "月经期精力变化",
-  advanced_cycle_follicular_mood: "卵泡期情绪标签",
-  advanced_cycle_follicular_energy: "卵泡期精力变化",
-  advanced_cycle_ovulation_mood: "排卵期情绪标签",
-  advanced_cycle_ovulation_energy: "排卵期精力变化",
-  advanced_cycle_luteal_mood: "黄体期早情绪标签",
-  advanced_cycle_luteal_energy: "黄体期早精力变化",
-  advanced_cycle_link_intensity: "与拟人状态强度挂钩",
-  advanced_cycle_pre_ovulation_days: "排卵前期持续天数",
-  advanced_cycle_pre_ovulation_prompt: "排卵前期状态提示词",
-  advanced_cycle_pre_ovulation_mood: "排卵前期情绪标签",
+  advanced_cycle_follicular_days: "卵泡期早天数",
+  advanced_cycle_follicular_prompt: "卵泡期早状态描述",
+  advanced_cycle_follicular_mood: "卵泡期早情绪底色",
+  advanced_cycle_follicular_energy: "卵泡期早精力变化",
+  advanced_cycle_pre_ovulation_days: "排卵前期天数",
+  advanced_cycle_pre_ovulation_prompt: "排卵前期状态描述",
+  advanced_cycle_pre_ovulation_mood: "排卵前期情绪底色",
   advanced_cycle_pre_ovulation_energy: "排卵前期精力变化",
-  advanced_cycle_pms_days: "PMS期持续天数",
-  advanced_cycle_pms_prompt: "PMS期状态提示词",
-  advanced_cycle_pms_mood: "PMS期情绪标签",
-  advanced_cycle_pms_energy: "PMS期精力变化",
-  advanced_cycle_start_offset: "周期起始偏移天数",
+  advanced_cycle_ovulation_days: "排卵期天数",
+  advanced_cycle_ovulation_prompt: "排卵期状态描述",
+  advanced_cycle_ovulation_mood: "排卵期情绪底色",
+  advanced_cycle_ovulation_energy: "排卵期精力变化",
+  advanced_cycle_luteal_days: "黄体期早天数",
+  advanced_cycle_luteal_prompt: "黄体期早状态描述",
+  advanced_cycle_luteal_mood: "黄体期早情绪底色",
+  advanced_cycle_luteal_energy: "黄体期早精力变化",
+  advanced_cycle_pms_days: "PMS 期天数",
+  advanced_cycle_pms_prompt: "PMS 期状态描述",
+  advanced_cycle_pms_mood: "PMS 期情绪底色",
+  advanced_cycle_pms_energy: "PMS 期精力变化",
   worldview_adaptation_mode: "世界观适配模式",
   worldview_adaptation_prompt: "自定义世界观适配",
   enable_worldview_perception: "世界观适配感知",
@@ -1903,34 +1901,34 @@ const configDescriptions = {
   busy_reply_min_delay_seconds: "繁忙日程中普通私聊的最短等待时间。群聊不使用完整私聊范围，会自动限制在 12 秒内。",
   busy_reply_max_delay_seconds: "繁忙日程中普通私聊的最长等待时间，默认 5 分钟、最多 15 分钟。若小于最短值，运行时会自动交换两者。",
   busy_reply_proactive_resume_buffer_minutes: "普通主动消息顺延到当前忙碌片段结束后，再额外等待这段时间，避免刚忙完就立即开口。",
-  enable_cycle_state: "开启后即视为适用，可能在“当前扮演状态”里出现生理期前、处于生理期或生理期后的相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。",
-  enable_advanced_cycle_strategy: "开启后，生理期模拟按真实月经周期细分为月经期、卵泡期、排卵期、黄体期四个阶段，各阶段持续天数和提示词可自定义；不开启则维持原有三段式模拟。",
-  advanced_cycle_menstrual_days: "月经期（第1~5天）：容易疲倦、情绪敏感、回复更慵懒简短。",
-  advanced_cycle_menstrual_prompt: "月经期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
-  advanced_cycle_follicular_days: "卵泡期（第6~13天）：精力回升、心情平稳、对事物有兴趣。",
-  advanced_cycle_follicular_prompt: "卵泡期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
-  advanced_cycle_ovulation_days: "排卵期（第13~15天）：身体轻盈、精力充沛、社交意愿增强。",
-  advanced_cycle_ovulation_prompt: "排卵期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
-  advanced_cycle_luteal_days: "黄体期（第16~28天）：保持默认人格，不额外放大情绪变化。",
-  advanced_cycle_luteal_prompt: "黄体期注入到当前扮演状态的文案，保持默认人格，只影响语气、长短和节奏。",
-  advanced_cycle_menstrual_mood: "月经期的情绪底色关键词，如“疲惫”、“敏感”、“烦躁”等，用于状态生成时的 mood 字段。",
-  advanced_cycle_menstrual_energy: "月经期的精力增减值，负数表示精力下降。范围 -50 ~ 0，绝对值越大越疲惫。",
-  advanced_cycle_follicular_mood: "卵泡期的情绪底色关键词，如“轻快”、“平稳”、“好奇”等。",
-  advanced_cycle_follicular_energy: "卵泡期的精力增减值，正数表示精力回升。范围 -10 ~ +30。",
-  advanced_cycle_ovulation_mood: "排卵期的情绪底色关键词，如“明朗”、“活跃”、“自信”等。",
-  advanced_cycle_ovulation_energy: "排卵期的精力增减值，正数表示精力充沛。范围 -10 ~ +30。",
-  advanced_cycle_luteal_mood: "黄体期早的情绪底色关键词，如“平稳”、“倦怠”等。",
-  advanced_cycle_luteal_energy: "黄体期早的精力增减值。接近 0 表示无明显变化，负数表示略有疲倦。开启“与拟人状态强度挂钩”后此项自动计算。",
-  advanced_cycle_link_intensity: "开启后，六个阶段的精力变化值不再手动填写，而是以拟人状态强度=50时的中位数为基准，随强度线性缩放：强度越高，精力波动越大；强度越低越趋近于0。",
-  advanced_cycle_pre_ovulation_days: "排卵前期（第11~13天）：身体开始轻盈，精力进一步上升。",
-  advanced_cycle_pre_ovulation_prompt: "排卵前期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
-  advanced_cycle_pre_ovulation_mood: "排卵前期的情绪底色关键词，如“期待”、“活跃”等。",
-  advanced_cycle_pre_ovulation_energy: "排卵前期的精力增减值，正数表示精力上升。开启“与拟人状态强度挂钩”后此项自动计算。",
-  advanced_cycle_pms_days: "PMS期（第23~28天）：情绪波动加大，易怒或低落，精力下降。",
-  advanced_cycle_pms_prompt: "PMS期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
-  advanced_cycle_pms_mood: "PMS期的情绪底色关键词，如“烦躁”、“易怒”、“低落”等。",
-  advanced_cycle_pms_energy: "PMS期的精力增减值，负数表示精力下降。开启“与拟人状态强度挂钩”后此项自动计算。",
-  advanced_cycle_start_offset: "设定当前处于周期中的第几天（0 表示新周期从月经期第1天开始）。设为 0 则由系统随机判定开始时机；设为大于 0 的值则立即从对应阶段开始模拟。",
+  enable_cycle_state: "开启后即视为适用，周期只作为 Bot 的模拟身体底色，轻度影响精力、语气和回复节奏；它不是用户事实、医学记录或真实日期追踪。",
+  enable_advanced_cycle_strategy: "关闭时保留原有的生理期前、经期与恢复期随机模拟；开启后按月经期、卵泡期早、排卵前期、排卵期、黄体期早、PMS 连续推进。",
+  advanced_cycle_link_intensity: "开启后，各阶段精力变化按拟人状态强度线性缩放：0 为无精力增减，50 为阶段基准，100 约为基准两倍；下方手动精力值暂不使用。",
+  advanced_cycle_start_offset: "用于首次对齐当前周期。0 表示沿现有状态自然推进；填写 1 及以上表示当前处于配置周期的第几天，超过总天数会循环折算。仅在数值或阶段天数变化时重新应用。",
+  advanced_cycle_menstrual_days: "月经期持续天数，结束后自然进入卵泡期早。",
+  advanced_cycle_menstrual_prompt: "作为 Bot 当前月经期模拟状态的柔性描述，只影响自然语气和节奏，不要求主动汇报。",
+  advanced_cycle_menstrual_mood: "月经期可轻度参考的情绪底色，不会覆盖当前话题和明确情绪。",
+  advanced_cycle_menstrual_energy: "未开启强度联动时使用的精力增减值，负数表示更容易疲倦。",
+  advanced_cycle_follicular_days: "卵泡期早持续天数，结束后自然进入排卵前期。",
+  advanced_cycle_follicular_prompt: "作为 Bot 当前卵泡期早模拟状态的柔性描述，不会据此强行增加主动消息。",
+  advanced_cycle_follicular_mood: "卵泡期早可轻度参考的情绪底色。",
+  advanced_cycle_follicular_energy: "未开启强度联动时使用的精力增减值；可设为 0 保持中性。",
+  advanced_cycle_pre_ovulation_days: "排卵前期持续天数，结束后自然进入排卵期。",
+  advanced_cycle_pre_ovulation_prompt: "作为 Bot 当前排卵前期模拟状态的柔性描述，不写成医学判断。",
+  advanced_cycle_pre_ovulation_mood: "排卵前期可轻度参考的情绪底色。",
+  advanced_cycle_pre_ovulation_energy: "未开启强度联动时使用的精力增减值。",
+  advanced_cycle_ovulation_days: "排卵期持续天数，结束后自然进入黄体期早。",
+  advanced_cycle_ovulation_prompt: "作为 Bot 当前排卵期模拟状态的柔性描述，不会硬性提高亲密程度或主动频率。",
+  advanced_cycle_ovulation_mood: "排卵期可轻度参考的情绪底色。",
+  advanced_cycle_ovulation_energy: "未开启强度联动时使用的精力增减值。",
+  advanced_cycle_luteal_days: "黄体期早持续天数，结束后自然进入 PMS 期。",
+  advanced_cycle_luteal_prompt: "作为 Bot 当前黄体期早模拟状态的柔性描述，整体仍以当前对话为主。",
+  advanced_cycle_luteal_mood: "黄体期早可轻度参考的情绪底色。",
+  advanced_cycle_luteal_energy: "未开启强度联动时使用的精力增减值。",
+  advanced_cycle_pms_days: "PMS 期持续天数，结束后自然进入下一轮月经期。",
+  advanced_cycle_pms_prompt: "作为 Bot 当前 PMS 模拟状态的柔性描述，可稍微收住语气，但不要变得刻薄或反复提及。",
+  advanced_cycle_pms_mood: "PMS 期可轻度参考的情绪底色，不覆盖用户当下需求。",
+  advanced_cycle_pms_energy: "未开启强度联动时使用的精力增减值，负数表示精力稍低。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
   enable_weather_context: "开启后优先使用本插件的 OpenWeatherMap 配置；未配置独立天气时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
@@ -2328,6 +2326,36 @@ const configDescriptions = {
   voice_action_max_chars: "限制单条主动语音实际说话长度，越短越接近自然私聊语音。",
 };
 
+const advancedCycleSettingKeys = [
+  "enable_advanced_cycle_strategy",
+  "advanced_cycle_link_intensity",
+  "advanced_cycle_start_offset",
+  "advanced_cycle_menstrual_days",
+  "advanced_cycle_menstrual_prompt",
+  "advanced_cycle_menstrual_mood",
+  "advanced_cycle_menstrual_energy",
+  "advanced_cycle_follicular_days",
+  "advanced_cycle_follicular_prompt",
+  "advanced_cycle_follicular_mood",
+  "advanced_cycle_follicular_energy",
+  "advanced_cycle_pre_ovulation_days",
+  "advanced_cycle_pre_ovulation_prompt",
+  "advanced_cycle_pre_ovulation_mood",
+  "advanced_cycle_pre_ovulation_energy",
+  "advanced_cycle_ovulation_days",
+  "advanced_cycle_ovulation_prompt",
+  "advanced_cycle_ovulation_mood",
+  "advanced_cycle_ovulation_energy",
+  "advanced_cycle_luteal_days",
+  "advanced_cycle_luteal_prompt",
+  "advanced_cycle_luteal_mood",
+  "advanced_cycle_luteal_energy",
+  "advanced_cycle_pms_days",
+  "advanced_cycle_pms_prompt",
+  "advanced_cycle_pms_mood",
+  "advanced_cycle_pms_energy",
+];
+
 const featureSettingGroups = {
   enable_mai_style_integration: [
     "default_style",
@@ -2356,7 +2384,7 @@ const featureSettingGroups = {
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
-  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity", "advanced_cycle_menstrual_days", "advanced_cycle_menstrual_prompt", "advanced_cycle_menstrual_mood", "advanced_cycle_menstrual_energy", "advanced_cycle_follicular_days", "advanced_cycle_follicular_prompt", "advanced_cycle_follicular_mood", "advanced_cycle_follicular_energy", "advanced_cycle_pre_ovulation_days", "advanced_cycle_pre_ovulation_prompt", "advanced_cycle_pre_ovulation_mood", "advanced_cycle_pre_ovulation_energy", "advanced_cycle_ovulation_days", "advanced_cycle_ovulation_prompt", "advanced_cycle_ovulation_mood", "advanced_cycle_ovulation_energy", "advanced_cycle_luteal_days", "advanced_cycle_luteal_prompt", "advanced_cycle_luteal_mood", "advanced_cycle_luteal_energy", "advanced_cycle_pms_days", "advanced_cycle_pms_prompt", "advanced_cycle_pms_mood", "advanced_cycle_pms_energy", "advanced_cycle_start_offset", "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
+  enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", ...advancedCycleSettingKeys, "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
   enable_daily_plan: ["daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "daily_plan_prompt"],
   enable_detail_enhancement: ["detail_enhancement_lead_minutes"],
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
@@ -2366,8 +2394,7 @@ const featureSettingGroups = {
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
   enable_health_state: ["humanized_state_intensity"],
   enable_hunger_state: ["humanized_state_intensity"],
-  enable_cycle_state: ["humanized_state_intensity", "enable_advanced_cycle_strategy", "advanced_cycle_menstrual_days", "advanced_cycle_menstrual_prompt", "advanced_cycle_menstrual_mood", "advanced_cycle_menstrual_energy", "advanced_cycle_follicular_days", "advanced_cycle_follicular_prompt", "advanced_cycle_follicular_mood", "advanced_cycle_follicular_energy", "advanced_cycle_ovulation_days", "advanced_cycle_ovulation_prompt", "advanced_cycle_ovulation_mood", "advanced_cycle_ovulation_energy", "advanced_cycle_luteal_days", "advanced_cycle_luteal_prompt", "advanced_cycle_luteal_mood", "advanced_cycle_luteal_energy", "advanced_cycle_start_offset"],
-  enable_advanced_cycle_strategy: ["advanced_cycle_link_intensity", "advanced_cycle_menstrual_days", "advanced_cycle_menstrual_prompt", "advanced_cycle_menstrual_mood", "advanced_cycle_menstrual_energy", "advanced_cycle_follicular_days", "advanced_cycle_follicular_prompt", "advanced_cycle_follicular_mood", "advanced_cycle_follicular_energy", "advanced_cycle_pre_ovulation_days", "advanced_cycle_pre_ovulation_prompt", "advanced_cycle_pre_ovulation_mood", "advanced_cycle_pre_ovulation_energy", "advanced_cycle_ovulation_days", "advanced_cycle_ovulation_prompt", "advanced_cycle_ovulation_mood", "advanced_cycle_ovulation_energy", "advanced_cycle_luteal_days", "advanced_cycle_luteal_prompt", "advanced_cycle_luteal_mood", "advanced_cycle_luteal_energy", "advanced_cycle_pms_days", "advanced_cycle_pms_prompt", "advanced_cycle_pms_mood", "advanced_cycle_pms_energy", "advanced_cycle_start_offset"],
+  enable_cycle_state: ["humanized_state_intensity", ...advancedCycleSettingKeys],
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_personal_goals: ["enable_personal_goal_auto_progress", "personal_goal_share_cooldown_hours", "personal_goal_stall_days"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
@@ -2552,7 +2579,42 @@ const featureSettingSections = {
     {
       title: "状态生成",
       note: "控制身体余波和强度，只作为扮演状态，不当成真实用户事实。",
-      keys: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity", "advanced_cycle_menstrual_days", "advanced_cycle_menstrual_prompt", "advanced_cycle_menstrual_mood", "advanced_cycle_menstrual_energy", "advanced_cycle_follicular_days", "advanced_cycle_follicular_prompt", "advanced_cycle_follicular_mood", "advanced_cycle_follicular_energy", "advanced_cycle_pre_ovulation_days", "advanced_cycle_pre_ovulation_prompt", "advanced_cycle_pre_ovulation_mood", "advanced_cycle_pre_ovulation_energy", "advanced_cycle_ovulation_days", "advanced_cycle_ovulation_prompt", "advanced_cycle_ovulation_mood", "advanced_cycle_ovulation_energy", "advanced_cycle_luteal_days", "advanced_cycle_luteal_prompt", "advanced_cycle_luteal_mood", "advanced_cycle_luteal_energy", "advanced_cycle_pms_days", "advanced_cycle_pms_prompt", "advanced_cycle_pms_mood", "advanced_cycle_pms_energy", "advanced_cycle_start_offset"],
+      keys: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_cycle_state"],
+    },
+    {
+      title: "周期策略",
+      note: "默认沿用原有三阶段随机模拟；六阶段开启后连续推进。起始日只在配置变化时重新对齐。",
+      keys: ["enable_advanced_cycle_strategy", "advanced_cycle_link_intensity", "advanced_cycle_start_offset"],
+    },
+    {
+      title: "月经期",
+      note: "阶段描述只作为柔性状态底色，不要求 Bot 主动汇报。",
+      keys: ["advanced_cycle_menstrual_days", "advanced_cycle_menstrual_prompt", "advanced_cycle_menstrual_mood", "advanced_cycle_menstrual_energy"],
+    },
+    {
+      title: "卵泡期早",
+      note: "精力可以平稳回升，但不会据此硬性增加主动消息。",
+      keys: ["advanced_cycle_follicular_days", "advanced_cycle_follicular_prompt", "advanced_cycle_follicular_mood", "advanced_cycle_follicular_energy"],
+    },
+    {
+      title: "排卵前期",
+      note: "允许语气稍微松快，仍以当前话题和人格边界为主。",
+      keys: ["advanced_cycle_pre_ovulation_days", "advanced_cycle_pre_ovulation_prompt", "advanced_cycle_pre_ovulation_mood", "advanced_cycle_pre_ovulation_energy"],
+    },
+    {
+      title: "排卵期",
+      note: "只轻度影响精力与表达，不强行提高亲密程度或主动频率。",
+      keys: ["advanced_cycle_ovulation_days", "advanced_cycle_ovulation_prompt", "advanced_cycle_ovulation_mood", "advanced_cycle_ovulation_energy"],
+    },
+    {
+      title: "黄体期早",
+      note: "整体保持自然平稳，不额外放大情绪。",
+      keys: ["advanced_cycle_luteal_days", "advanced_cycle_luteal_prompt", "advanced_cycle_luteal_mood", "advanced_cycle_luteal_energy"],
+    },
+    {
+      title: "PMS 期",
+      note: "可以稍微收住语气，但不会变得刻薄或反复提及周期。",
+      keys: ["advanced_cycle_pms_days", "advanced_cycle_pms_prompt", "advanced_cycle_pms_mood", "advanced_cycle_pms_energy"],
     },
     {
       title: "QQ 状态同步",
@@ -3067,6 +3129,27 @@ const featureSettingTypes = {
   max_diary_entries: { type: "number", min: 1, max: 60, step: 1 },
   important_date_lookahead_days: { type: "number", min: 0, max: 60, step: 1 },
   daily_plan_prompt: { type: "textarea" },
+  enable_advanced_cycle_strategy: { type: "checkbox" },
+  advanced_cycle_link_intensity: { type: "checkbox" },
+  advanced_cycle_start_offset: { type: "number", min: 0, max: 180, step: 1 },
+  advanced_cycle_menstrual_days: { type: "number", min: 1, max: 30, step: 1 },
+  advanced_cycle_menstrual_prompt: { type: "textarea" },
+  advanced_cycle_menstrual_energy: { type: "number", min: -50, max: 30, step: 1 },
+  advanced_cycle_follicular_days: { type: "number", min: 1, max: 30, step: 1 },
+  advanced_cycle_follicular_prompt: { type: "textarea" },
+  advanced_cycle_follicular_energy: { type: "number", min: -50, max: 30, step: 1 },
+  advanced_cycle_pre_ovulation_days: { type: "number", min: 1, max: 30, step: 1 },
+  advanced_cycle_pre_ovulation_prompt: { type: "textarea" },
+  advanced_cycle_pre_ovulation_energy: { type: "number", min: -50, max: 30, step: 1 },
+  advanced_cycle_ovulation_days: { type: "number", min: 1, max: 30, step: 1 },
+  advanced_cycle_ovulation_prompt: { type: "textarea" },
+  advanced_cycle_ovulation_energy: { type: "number", min: -50, max: 30, step: 1 },
+  advanced_cycle_luteal_days: { type: "number", min: 1, max: 30, step: 1 },
+  advanced_cycle_luteal_prompt: { type: "textarea" },
+  advanced_cycle_luteal_energy: { type: "number", min: -50, max: 30, step: 1 },
+  advanced_cycle_pms_days: { type: "number", min: 1, max: 30, step: 1 },
+  advanced_cycle_pms_prompt: { type: "textarea" },
+  advanced_cycle_pms_energy: { type: "number", min: -50, max: 30, step: 1 },
   proactive_reply_context_hours: { type: "number", min: 1, max: 72, step: 1 },
   max_proactive_plan_lag_minutes: { type: "number", min: 5, max: 1440, step: 5 },
   greeting_idle_minutes: { type: "number", min: 0, max: 240, step: 5 },
@@ -19671,6 +19754,15 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     if (dreamChildren.has(settingKey) && !boolSetting("enable_enhanced_dreams")) return false;
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
     const busyChildren = new Set(["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"]);
+    const advancedCycleChildren = new Set(advancedCycleSettingKeys.filter((key) => key !== "enable_advanced_cycle_strategy"));
+    const manualCycleEnergyKeys = new Set([
+      "advanced_cycle_menstrual_energy",
+      "advanced_cycle_follicular_energy",
+      "advanced_cycle_pre_ovulation_energy",
+      "advanced_cycle_ovulation_energy",
+      "advanced_cycle_luteal_energy",
+      "advanced_cycle_pms_energy",
+    ]);
     if (settingKey === "enable_qq_custom_presence_sync") {
       return boolSetting("enable_qq_presence_sync");
     }
@@ -19683,46 +19775,10 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       return true;
     }
     if (busyChildren.has(settingKey)) return boolSetting("enable_busy_reply_gate");
-    const advancedCycleChildren = new Set([
-      "advanced_cycle_menstrual_days",
-      "advanced_cycle_menstrual_prompt",
-      "advanced_cycle_menstrual_mood",
-      "advanced_cycle_menstrual_energy",
-      "advanced_cycle_follicular_days",
-      "advanced_cycle_follicular_prompt",
-      "advanced_cycle_follicular_mood",
-      "advanced_cycle_follicular_energy",
-      "advanced_cycle_pre_ovulation_days",
-      "advanced_cycle_pre_ovulation_prompt",
-      "advanced_cycle_pre_ovulation_mood",
-      "advanced_cycle_pre_ovulation_energy",
-      "advanced_cycle_ovulation_days",
-      "advanced_cycle_ovulation_prompt",
-      "advanced_cycle_ovulation_mood",
-      "advanced_cycle_ovulation_energy",
-      "advanced_cycle_luteal_days",
-      "advanced_cycle_luteal_prompt",
-      "advanced_cycle_luteal_mood",
-      "advanced_cycle_luteal_energy",
-      "advanced_cycle_link_intensity",
-      "advanced_cycle_pms_days",
-      "advanced_cycle_pms_prompt",
-      "advanced_cycle_pms_mood",
-      "advanced_cycle_pms_energy",
-      "advanced_cycle_start_offset",
-    ]);
+    if (settingKey === "enable_advanced_cycle_strategy") return boolSetting("enable_cycle_state");
     if (advancedCycleChildren.has(settingKey)) {
-      if (!boolSetting("enable_advanced_cycle_strategy")) return false;
-      const energyKeys = new Set([
-        "advanced_cycle_menstrual_energy",
-        "advanced_cycle_follicular_energy",
-        "advanced_cycle_pre_ovulation_energy",
-        "advanced_cycle_ovulation_energy",
-        "advanced_cycle_luteal_energy",
-        "advanced_cycle_pms_energy",
-      ]);
-      if (energyKeys.has(settingKey) && boolSetting("advanced_cycle_link_intensity")) return false;
-      return true;
+      if (!boolSetting("enable_cycle_state") || !boolSetting("enable_advanced_cycle_strategy")) return false;
+      if (manualCycleEnergyKeys.has(settingKey) && boolSetting("advanced_cycle_link_intensity")) return false;
     }
     return true;
   }
@@ -19835,40 +19891,6 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   if (featureKey === "enable_emotion_simulation") {
     if (settingKey === "emotion_judgement_mode") return boolSetting("enable_llm_emotion_judgement");
     if (settingKey === "EMOTION_JUDGEMENT_PROVIDER_ID") return boolSetting("enable_llm_emotion_judgement") && String(valueSetting("emotion_judgement_mode", "suspicious")) !== "off";
-    return true;
-  }
-  if (featureKey === "enable_cycle_state") {
-    const advancedCycleChildren = new Set([
-      "advanced_cycle_menstrual_days",
-      "advanced_cycle_menstrual_prompt",
-      "advanced_cycle_menstrual_mood",
-      "advanced_cycle_menstrual_energy",
-      "advanced_cycle_follicular_days",
-      "advanced_cycle_follicular_prompt",
-      "advanced_cycle_follicular_mood",
-      "advanced_cycle_follicular_energy",
-      "advanced_cycle_pre_ovulation_days",
-      "advanced_cycle_pre_ovulation_prompt",
-      "advanced_cycle_pre_ovulation_mood",
-      "advanced_cycle_pre_ovulation_energy",
-      "advanced_cycle_ovulation_days",
-      "advanced_cycle_ovulation_prompt",
-      "advanced_cycle_ovulation_mood",
-      "advanced_cycle_ovulation_energy",
-      "advanced_cycle_luteal_days",
-      "advanced_cycle_luteal_prompt",
-      "advanced_cycle_luteal_mood",
-      "advanced_cycle_luteal_energy",
-      "advanced_cycle_link_intensity",
-      "advanced_cycle_pms_days",
-      "advanced_cycle_pms_prompt",
-      "advanced_cycle_pms_mood",
-      "advanced_cycle_pms_energy",
-      "advanced_cycle_start_offset",
-    ]);
-    if (advancedCycleChildren.has(settingKey)) {
-      return boolSetting("enable_advanced_cycle_strategy");
-    }
     return true;
   }
   if (featureKey !== "enable_tts_enhancement") return true;
@@ -20359,16 +20381,10 @@ const featureDetailGuides = {
     disabled: "不影响被动状态总开关，只决定注入位置。",
   },
   enable_cycle_state: {
-    summary: "作为拟人身体状态的一部分，偶尔生成生理期前、处于生理期或生理期后的状态底色。",
+    summary: "作为拟人身体状态的一部分，可沿用原有三阶段随机模拟，也可按六个阶段连续推进。",
     trigger: "拟人身体状态刷新时，且生理期模拟开关已开启。",
-    enabled: "当前扮演状态可能出现生理期相关描述，并轻微影响精力、语气、长短和节奏；不会当成真实日期或医学记录追踪。",
-    disabled: "不会新增生理期状态；已有状态会按持续时间自然结束，之后回到“不处于生理期”。",
-  },
-  enable_advanced_cycle_strategy: {
-    summary: "在生理期模拟基础上，按真实月经周期细分为月经期、卵泡期、排卵期、黄体期四个阶段。",
-    trigger: "生理期模拟开关已开启，且激进真实化模拟策略已开启。",
-    enabled: "四阶段按月经期 → 卵泡期 → 排卵期 → 黄体期顺序自然推进，各阶段独立影响精力、情绪底色和语气节奏；各阶段持续天数和提示词可自定义。",
-    disabled: "维持原有三段式模拟（生理期前/处于生理期/生理期后），不会出现四阶段相关状态。",
+    enabled: "当前扮演状态可能出现周期相关描述，并轻微影响精力、语气、长短和节奏；不会当成用户事实、真实日期或医学记录追踪。",
+    disabled: "不会新增周期状态，并会在状态维护时清理已有周期阶段；其他拟人状态不受影响。",
   },
   enable_skill_growth_simulation: {
     summary: "为 Bot 模拟能力状态和成长过程，并让能力边界影响日程表现。",
@@ -20783,7 +20799,7 @@ function featureImpactLines(key) {
   const lines = [];
   const group = featureGroupForKey(key);
   lines.push(["模块", group]);
-  if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_advanced_cycle_strategy", "enable_skill_growth_simulation"].includes(key)) {
+  if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
     lines.push(["场景", "日程 / 状态 / 私聊 / 群聊"]);
   } else if (key === "enable_segmented_proactive_reply") {
     lines.push(["场景", "主动消息 / LLM 纯文本回复"]);
@@ -21024,7 +21040,16 @@ function bindFeatureDetailActions() {
           }
           if (
             state.selectedFeatureKey === "enable_humanized_states"
-            && ["enable_daily_plan", "enable_detail_enhancement", "enable_daily_diary", "enable_daily_greetings", "enable_enhanced_dreams", "enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity"].includes(input.dataset.featureParam)
+            && [
+              "enable_daily_plan",
+              "enable_detail_enhancement",
+              "enable_daily_diary",
+              "enable_daily_greetings",
+              "enable_enhanced_dreams",
+              "enable_cycle_state",
+              "enable_advanced_cycle_strategy",
+              "advanced_cycle_link_intensity",
+            ].includes(input.dataset.featureParam)
           ) {
             syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
