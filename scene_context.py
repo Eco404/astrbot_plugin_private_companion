@@ -1,0 +1,384 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .helpers import _now_ts, _safe_int, _single_line
+
+
+SCENE_CONTEXT_VERSION = 1
+
+
+def infer_companion_scene_category(schedule_text: Any = "", location_text: Any = "") -> tuple[str, str]:
+    """Infer a coarse visual scene without inventing a location when context is ambiguous."""
+    location = _single_line(location_text, 120).lower().replace(" ", "")
+    schedule = _single_line(schedule_text, 360).lower().replace(" ", "")
+    home_markers = (
+        "在家", "家里", "家中", "回到家", "已经到家", "居家", "宅家",
+        "宿舍", "公寓", "租房", "房间", "卧室", "客厅", "书桌", "床上", "被窝", "室内日常",
+    )
+    outdoor_markers = (
+        "外出", "通勤", "路上", "外面", "出门", "上班", "上学", "逛街", "旅行",
+        "商场", "公司", "办公室", "工作地点", "教室", "学校", "图书馆", "咖啡店", "食堂", "街头",
+    )
+
+    if location in {"家", "家里", "家中"} or any(marker in location for marker in home_markers):
+        return "home", "居家室内"
+    if any(marker in location for marker in outdoor_markers):
+        return "outdoor", "外出"
+    if any(marker in schedule for marker in home_markers):
+        return "home", "居家室内"
+    if any(marker in schedule for marker in outdoor_markers):
+        return "outdoor", "外出"
+    return "", ""
+
+
+class SceneContextMixin:
+    """Build a read-only life-context snapshot shared by visual integrations."""
+
+    @staticmethod
+    def _scene_context_daypart(hour: int) -> str:
+        if hour < 5:
+            return "深夜"
+        if hour < 9:
+            return "早晨"
+        if hour < 12:
+            return "上午"
+        if hour < 14:
+            return "中午"
+        if hour < 18:
+            return "下午"
+        if hour < 22:
+            return "晚上"
+        return "夜间"
+
+    @staticmethod
+    def _scene_context_energy_label(energy: int) -> str:
+        if energy < 35:
+            return "很低"
+        if energy < 55:
+            return "偏低"
+        if energy >= 85:
+            return "充足"
+        return "平稳"
+
+    def _scene_context_now(self) -> datetime:
+        getter = getattr(self, "_environment_now", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if isinstance(value, datetime):
+                    return value
+            except Exception:
+                pass
+        return datetime.now().astimezone()
+
+    def _scene_context_current_schedule(
+        self,
+        plan: dict[str, Any],
+    ) -> tuple[dict[str, Any], str, str]:
+        current_item: dict[str, Any] = {}
+        getter = getattr(self, "_get_current_plan_item", None)
+        if callable(getter):
+            try:
+                value = getter(plan)
+                if isinstance(value, dict):
+                    current_item = value
+            except Exception:
+                current_item = {}
+
+        schedule_text = ""
+        formatter = getattr(self, "_format_plan_item_for_prompt", None)
+        if current_item and callable(formatter):
+            try:
+                schedule_text = _single_line(formatter(current_item), 320)
+            except Exception:
+                schedule_text = ""
+        if not schedule_text and current_item:
+            window = "-".join(
+                part
+                for part in (
+                    _single_line(current_item.get("time"), 12),
+                    _single_line(current_item.get("end"), 12),
+                )
+                if part
+            )
+            activity = _single_line(current_item.get("activity"), 160)
+            schedule_text = _single_line(" ".join(part for part in (window, activity) if part), 320)
+
+        runtime_status = ""
+        status_getter = getattr(self, "_plan_item_runtime_status", None)
+        if current_item and callable(status_getter):
+            try:
+                items = plan.get("items") if isinstance(plan.get("items"), list) else []
+                index = next(
+                    (idx for idx, item in enumerate(items) if item is current_item),
+                    -1,
+                )
+                runtime_status = _single_line(
+                    status_getter(plan, current_item, index),
+                    32,
+                )
+            except Exception:
+                runtime_status = ""
+        return current_item, schedule_text, runtime_status
+
+    @staticmethod
+    def _scene_context_condition_labels(state: dict[str, Any]) -> list[str]:
+        raw = state.get("conditions")
+        if not isinstance(raw, list):
+            return []
+        labels: list[str] = []
+        for item in raw[:8]:
+            if isinstance(item, dict):
+                label = _single_line(
+                    item.get("label")
+                    or item.get("name")
+                    or item.get("effect")
+                    or item.get("text"),
+                    36,
+                )
+            else:
+                label = _single_line(item, 36)
+            if label and label not in labels:
+                labels.append(label)
+            if len(labels) >= 4:
+                break
+        return labels
+
+    @staticmethod
+    def _scene_context_outfit_description(profile: dict[str, Any]) -> str:
+        fields = (
+            ("top", "上装"),
+            ("outer", "外搭"),
+            ("bottom", "下装"),
+            ("accessory", "配饰"),
+            ("palette", "配色"),
+            ("silhouette", "轮廓"),
+        )
+        parts = [
+            f"{label}:{value}"
+            for key, label in fields
+            if (value := _single_line(profile.get(key), 100))
+        ]
+        return _single_line("；".join(parts), 360)
+
+    def _build_companion_scene_snapshot(
+        self,
+        user: dict[str, Any] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        captured = now if isinstance(now, datetime) else self._scene_context_now()
+        data = getattr(self, "data", {})
+        data = data if isinstance(data, dict) else {}
+        state = data.get("daily_state")
+        state = state if isinstance(state, dict) else {}
+        plan = data.get("daily_plan")
+        plan = plan if isinstance(plan, dict) else {}
+        current_item, schedule_text, runtime_status = self._scene_context_current_schedule(plan)
+
+        location = ""
+        location_getter = getattr(self, "_current_location_state_text", None)
+        if callable(location_getter):
+            try:
+                location = _single_line(location_getter(state), 80)
+            except Exception:
+                location = ""
+        if not location:
+            location = _single_line(state.get("location"), 80)
+        coarse_location = ""
+        coarse_getter = getattr(self, "_coarse_roleplay_location_text", None)
+        if location and callable(coarse_getter):
+            try:
+                coarse_location = _single_line(coarse_getter(location), 40)
+            except Exception:
+                coarse_location = ""
+        scene_category, scene_category_label = infer_companion_scene_category(
+            schedule_text,
+            coarse_location or location,
+        )
+
+        weather_data = data.get("daily_weather")
+        weather_data = weather_data if isinstance(weather_data, dict) else {}
+        weather = ""
+        weather_getter = getattr(self, "_weather_summary_text", None)
+        if callable(weather_getter):
+            try:
+                weather = _single_line(weather_getter(weather_data), 220)
+            except Exception:
+                weather = ""
+        if not weather:
+            weather = _single_line(
+                weather_data.get("prompt") or weather_data.get("summary"),
+                220,
+            )
+        if weather == "暂无天气信息":
+            weather = ""
+
+        today = captured.strftime("%Y-%m-%d")
+        outfit_item = data.get("daily_outfit_photo")
+        outfit_item = outfit_item if isinstance(outfit_item, dict) else {}
+        outfit_profile = outfit_item.get("outfit_profile")
+        outfit_profile = outfit_profile if isinstance(outfit_profile, dict) else {}
+        outfit_path = _single_line(outfit_item.get("path"), 500)
+        outfit_is_today = _single_line(outfit_item.get("date"), 20) == today
+        outfit_available = False
+        if outfit_is_today and outfit_path:
+            try:
+                outfit_available = Path(outfit_path).is_file()
+            except (OSError, ValueError):
+                outfit_available = False
+
+        current_user = user if isinstance(user, dict) else {}
+        user_id = _single_line(current_user.get("user_id"), 80)
+        role = _single_line(current_user.get("relationship_role"), 24)
+        role_getter = getattr(self, "_private_user_role", None)
+        if callable(role_getter) and current_user:
+            try:
+                role = _single_line(role_getter(current_user, user_id), 24)
+            except TypeError:
+                role = _single_line(role_getter(current_user), 24)
+            except Exception:
+                pass
+        role_label = role
+        role_labeler = getattr(self, "_private_user_role_label", None)
+        if role and callable(role_labeler):
+            try:
+                role_label = _single_line(role_labeler(role), 32) or role
+            except Exception:
+                role_label = role
+
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        mood = _single_line(
+            current_item.get("mood") or state.get("mood_bias"),
+            32,
+        ) or "平稳"
+        topic = _single_line(current_user.get("planned_proactive_topic"), 80)
+        motive = _single_line(current_user.get("planned_proactive_motive"), 140)
+        visual_parts = [
+            schedule_text,
+            coarse_location or location,
+            weather,
+            self._scene_context_outfit_description(outfit_profile),
+            topic,
+        ]
+        visual_anchor = _single_line("；".join(part for part in visual_parts if part), 620)
+        visual_signal_count = sum(bool(part) for part in visual_parts)
+
+        return {
+            "version": SCENE_CONTEXT_VERSION,
+            "captured_at": captured.isoformat(timespec="seconds"),
+            "captured_ts": captured.timestamp() if captured.tzinfo else _now_ts(),
+            "date": today,
+            "time": captured.strftime("%H:%M"),
+            "daypart": self._scene_context_daypart(captured.hour),
+            "state": {
+                "date": _single_line(state.get("date"), 20),
+                "energy": energy,
+                "energy_label": self._scene_context_energy_label(energy),
+                "mood": mood,
+                "conditions": self._scene_context_condition_labels(state),
+            },
+            "schedule": {
+                "date": _single_line(plan.get("date"), 20),
+                "is_current_date": _single_line(plan.get("date"), 20) in {"", today},
+                "active": bool(current_item),
+                "status": runtime_status,
+                "time": _single_line(current_item.get("time"), 12),
+                "end": _single_line(current_item.get("end"), 12),
+                "activity": _single_line(current_item.get("activity"), 160),
+                "mood": _single_line(current_item.get("mood"), 32),
+                "message_seed": _single_line(current_item.get("message_seed"), 160),
+                "text": schedule_text,
+            },
+            "location": {
+                "raw": location,
+                "coarse": coarse_location,
+                "text": coarse_location or location,
+                "source": _single_line(state.get("location_source"), 40),
+                "category": scene_category,
+                "category_label": scene_category_label,
+            },
+            "weather": {
+                "text": weather,
+                "source": _single_line(weather_data.get("source"), 60),
+            },
+            "outfit": {
+                "date": _single_line(outfit_item.get("date"), 20),
+                "available": outfit_available,
+                "reference_path": outfit_path if outfit_available else "",
+                "description": self._scene_context_outfit_description(outfit_profile),
+                "profile": {
+                    str(key): _single_line(value, 160)
+                    for key, value in outfit_profile.items()
+                    if _single_line(value, 160)
+                },
+            },
+            "relationship": {
+                "user_id": user_id,
+                "name": _single_line(
+                    current_user.get("nickname")
+                    or current_user.get("display_name"),
+                    60,
+                ),
+                "role": role,
+                "role_label": role_label,
+                "style": _single_line(current_user.get("style"), 40),
+            },
+            "visual": {
+                "anchor": visual_anchor,
+                "signal_count": visual_signal_count,
+                "shareable": visual_signal_count >= 2,
+                "topic": topic,
+                "motive": motive,
+            },
+        }
+
+    def _format_companion_scene_snapshot(
+        self,
+        snapshot: dict[str, Any] | None = None,
+        *,
+        user: dict[str, Any] | None = None,
+        purpose: str = "prompt",
+    ) -> str:
+        scene = snapshot if isinstance(snapshot, dict) else self._build_companion_scene_snapshot(user)
+        state = scene.get("state") if isinstance(scene.get("state"), dict) else {}
+        schedule = scene.get("schedule") if isinstance(scene.get("schedule"), dict) else {}
+        location = scene.get("location") if isinstance(scene.get("location"), dict) else {}
+        weather = scene.get("weather") if isinstance(scene.get("weather"), dict) else {}
+        outfit = scene.get("outfit") if isinstance(scene.get("outfit"), dict) else {}
+        relationship = scene.get("relationship") if isinstance(scene.get("relationship"), dict) else {}
+        visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+
+        parts = [
+            f"时间：{_single_line(scene.get('date'), 20)} {_single_line(scene.get('time'), 12)}（{_single_line(scene.get('daypart'), 12)}）",
+            f"状态：精力{_single_line(state.get('energy_label'), 16)}，情绪{_single_line(state.get('mood'), 32)}",
+        ]
+        conditions = state.get("conditions") if isinstance(state.get("conditions"), list) else []
+        if conditions and purpose not in {"image_search"}:
+            parts.append(f"状态余波：{'、'.join(_single_line(item, 32) for item in conditions[:4] if _single_line(item, 32))}")
+        if _single_line(schedule.get("text"), 320):
+            parts.append(f"当前日程：{_single_line(schedule.get('text'), 320)}")
+        if _single_line(location.get("text"), 80):
+            parts.append(f"当前位置：{_single_line(location.get('text'), 80)}")
+        if _single_line(location.get("category_label"), 24):
+            parts.append(f"当前场景：{_single_line(location.get('category_label'), 24)}")
+        if _single_line(weather.get("text"), 220):
+            parts.append(f"天气背景：{_single_line(weather.get('text'), 220)}")
+        if bool(outfit.get("available")):
+            description = _single_line(outfit.get("description"), 360)
+            parts.append(f"今日穿搭：{description or '已有可复用的今日穿搭参考图'}")
+        if purpose not in {"selfie_scene", "image_search"}:
+            relation_name = _single_line(relationship.get("name"), 60)
+            relation_role = _single_line(relationship.get("role_label"), 32)
+            if relation_name or relation_role:
+                parts.append(
+                    f"分享对象：{relation_name or '当前用户'}"
+                    + (f"（{relation_role}）" if relation_role else "")
+                )
+        if _single_line(visual.get("topic"), 80):
+            parts.append(f"视觉话题：{_single_line(visual.get('topic'), 80)}")
+        return _single_line("；".join(part for part in parts if part), 1200)

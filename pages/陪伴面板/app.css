@@ -17038,6 +17038,123 @@ textarea {
   margin-top: 12px;
 }
 
+.feature-config-article {
+  padding-right: 190px;
+}
+
+.feature-save-actions {
+  position: fixed;
+  top: 50%;
+  right: max(18px, env(safe-area-inset-right));
+  z-index: 48;
+  display: grid;
+  width: 164px;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+  transform: translateY(-50%);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line-soft));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 14px 36px rgba(15, 42, 74, 0.16);
+  backdrop-filter: blur(12px);
+}
+
+.feature-save-actions[hidden],
+.feature-save-actions .feature-back-button[hidden] {
+  display: none !important;
+}
+
+.feature-save-actions button {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 8px;
+  white-space: normal;
+}
+
+.feature-save-actions .feature-back-button {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.feature-save-actions #saveFeaturesBtn:disabled {
+  border-color: var(--line-soft);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: default;
+  box-shadow: none;
+}
+
+.feature-save-state {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.feature-save-actions.has-unsaved .feature-save-state {
+  color: var(--warn);
+}
+
+@media (max-width: 1180px) {
+  .feature-config-article {
+    padding-right: 0;
+    padding-bottom: 82px;
+  }
+
+  .feature-save-actions {
+    top: auto;
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: max(12px, env(safe-area-inset-left));
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    width: auto;
+    align-items: center;
+    transform: none;
+  }
+
+  .feature-save-actions:not(.in-detail) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .feature-save-actions button {
+    width: auto;
+    min-width: 112px;
+  }
+
+  .feature-save-state {
+    text-align: left;
+  }
+}
+
+@media (max-width: 620px) {
+  .feature-config-article {
+    padding-bottom: 132px;
+  }
+
+  .feature-save-actions,
+  .feature-save-actions:not(.in-detail) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .feature-save-actions .feature-save-state {
+    grid-column: 1 / -1;
+    text-align: center;
+  }
+
+  .feature-save-actions:not(.in-detail) #saveFeaturesBtn {
+    grid-column: 1 / -1;
+  }
+
+  .feature-save-actions button {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 .feature-switch-group {
   border: 1px solid var(--line-soft);
   border-radius: 8px;

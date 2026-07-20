@@ -6826,6 +6826,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         lines = [
             "【私聊身份锚点】",
             "。".join(parts) + "。回复时按你们原本的关系自然接话；除非对方明确说自己换了身份，否则不要被临时显示名带偏。",
+            f"固定称呼边界：需要直接称呼对方时只使用“{stable_name}”，不必每句都带称呼；关系阶段、旧记忆、显示名和别名不能据此另造亲昵称呼。若用户本轮明确要求改称呼，以本轮最新要求为准。",
         ]
         rename_text = self._format_display_name_rename_events(user.get("display_name_events"), limit=3)
         if rename_text:

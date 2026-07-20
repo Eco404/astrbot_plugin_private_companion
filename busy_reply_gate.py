@@ -322,13 +322,16 @@ class BusyReplyGateMixin:
         reason: Any = "",
         source: Any = "",
     ) -> float:
-        if not bool(getattr(self, "enable_busy_reply_gate", False)):
-            return 0.0
         normalized_reason = _single_line(reason, 48).lower()
         normalized_source = _single_line(source, 48).lower()
         if normalized_source in self._BUSY_PROACTIVE_EXEMPT_SOURCES:
             return 0.0
         if normalized_reason in self._BUSY_PROACTIVE_EXEMPT_REASONS:
+            return 0.0
+        external_until = self._external_realtime_activity_block_until(user, now=now)
+        if external_until > now:
+            return external_until
+        if not bool(getattr(self, "enable_busy_reply_gate", False)):
             return 0.0
         context = self._busy_reply_context()
         if not bool(context.get("busy")):
@@ -342,6 +345,34 @@ class BusyReplyGateMixin:
             0,
         )
         return until + min(120, buffer_minutes) * 60
+
+    def _external_realtime_activity_block_until(
+        self,
+        user: dict[str, Any] | None,
+        *,
+        now: float,
+    ) -> float:
+        """Pause unrelated proactive messages while another companion surface is live."""
+        registry = getattr(self, "_external_realtime_activities", None)
+        if not isinstance(registry, dict):
+            return 0.0
+        expired = [
+            key
+            for key, item in registry.items()
+            if not isinstance(item, dict) or _safe_float(item.get("expires_at"), 0.0) <= now
+        ]
+        for key in expired:
+            registry.pop(key, None)
+        user_id = _single_line((user or {}).get("user_id"), 80) if isinstance(user, dict) else ""
+        active_until = 0.0
+        for item in registry.values():
+            if not isinstance(item, dict):
+                continue
+            activity_user_id = _single_line(item.get("user_id"), 80)
+            if user_id and activity_user_id and activity_user_id != user_id:
+                continue
+            active_until = max(active_until, _safe_float(item.get("expires_at"), 0.0))
+        return active_until
 
     def _defer_proactive_for_busy(self, user: dict[str, Any], *, now: float, until: float) -> bool:
         if not isinstance(user, dict) or until <= now:

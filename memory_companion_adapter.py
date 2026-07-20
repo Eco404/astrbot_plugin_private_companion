@@ -334,12 +334,15 @@ class MemoryCompanionAdapterMixin:
             (user.get("nickname") or user.get("display_name") or user_id) if isinstance(user, dict) else user_id,
             80,
         )
+        preferred_address = _single_line(user.get("nickname"), 24) if isinstance(user, dict) else ""
         return {
             "session_id": umo or f"private_companion:schedule:{user_id or 'bot_self'}",
             "scope": "private" if user_id else "unknown",
             "platform": platform,
             "user_id": user_id,
             "user_name": user_name,
+            "preferred_address": preferred_address,
+            "preferred_address_locked": bool(preferred_address),
             "bot_id": self._memory_companion_bridge_bot_id(),
             "message_text": _single_line(message_text, 1200),
         }
@@ -493,12 +496,15 @@ class MemoryCompanionAdapterMixin:
                 user_name = _single_line(self._sender_display_name(event), 80)
             except Exception:
                 user_name = ""
+            preferred_address = _single_line(user.get("nickname"), 24) if isinstance(user, dict) else ""
             session_context = {
                 "session_id": session_id,
                 "scope": scope,
                 "platform": session_id.split(":", 1)[0] if ":" in session_id else "",
                 "user_id": user_id,
                 "user_name": user_name,
+                "preferred_address": preferred_address,
+                "preferred_address_locked": bool(preferred_address),
                 "bot_id": self._memory_companion_bridge_bot_id(event),
                 "message_text": clean_query,
                 "strict_session_only": bool(strict_session_only),
@@ -506,12 +512,15 @@ class MemoryCompanionAdapterMixin:
             }
         elif isinstance(user, dict):
             umo = _single_line(user.get("umo"), 200)
+            preferred_address = _single_line(user.get("nickname"), 24)
             session_context = {
                 "session_id": umo or f"private_companion:{kind}:{user_id or 'unknown'}",
                 "scope": "private" if user_id else "unknown",
                 "platform": umo.split(":", 1)[0] if ":" in umo else "",
                 "user_id": user_id,
                 "user_name": _single_line(user.get("nickname") or user.get("display_name") or user_id, 80),
+                "preferred_address": preferred_address,
+                "preferred_address_locked": bool(preferred_address),
                 "bot_id": self._memory_companion_bridge_bot_id(),
                 "message_text": clean_query,
                 "strict_session_only": bool(strict_session_only),

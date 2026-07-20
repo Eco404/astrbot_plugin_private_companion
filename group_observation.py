@@ -765,6 +765,162 @@ class GroupObservationMixin:
             self._update_group_interjection_feedback(group, sender_id=sender_id, text=cleaned)
         self._update_group_atmosphere(group)
 
+    def _group_observation_event_text(self, event: Any, *, limit: int = 260) -> str:
+        text = _single_line(getattr(event, "message_str", ""), limit)
+        if text:
+            return text
+        labels: list[str] = []
+        component_aliases = (
+            (("image", "photo", "picture"), "[图片]"),
+            (("record", "audio", "voice"), "[语音]"),
+            (("video",), "[视频]"),
+            (("forward", "node"), "[合并转发]"),
+            (("json", "xml", "share", "card"), "[分享卡片]"),
+            (("file",), "[文件]"),
+        )
+        component_getter = getattr(self, "_event_components", None)
+        components = component_getter(event) if callable(component_getter) else []
+        for component in components if isinstance(components, list) else []:
+            component_name = type(component).__name__.lower()
+            for aliases, label in component_aliases:
+                if any(alias in component_name for alias in aliases):
+                    if label not in labels:
+                        labels.append(label)
+                    break
+        return _single_line(" ".join(labels), limit)
+
+    @staticmethod
+    def _group_observation_marker_matches(
+        marker: Any,
+        *,
+        group_id: str,
+        sender_id: str,
+        text: str,
+        message_id: str,
+    ) -> bool:
+        if not isinstance(marker, dict):
+            return False
+        if _single_line(marker.get("group_id"), 80) != _single_line(group_id, 80):
+            return False
+        marker_message_id = _single_line(marker.get("message_id"), 120)
+        if message_id and marker_message_id:
+            return marker_message_id == message_id
+        return (
+            _single_line(marker.get("sender_id"), 80) == _single_line(sender_id, 80)
+            and _single_line(marker.get("text"), 260) == _single_line(text, 260)
+        )
+
+    def _merge_group_observation_scene(
+        self,
+        group: dict[str, Any],
+        *,
+        sender_id: str,
+        text: str,
+        message_id: str,
+        scene: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(scene, dict) or not scene:
+            return
+        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+        target = None
+        for item in reversed(recent[-8:]):
+            if not isinstance(item, dict):
+                continue
+            item_message_id = _single_line(item.get("message_id"), 120)
+            if message_id and item_message_id == message_id:
+                target = item
+                break
+            if (
+                not message_id
+                and _single_line(item.get("sender_id"), 80) == _single_line(sender_id, 80)
+                and _single_line(item.get("text"), 260) == _single_line(text, 260)
+            ):
+                target = item
+                break
+        if not isinstance(target, dict):
+            return
+        target.update(
+            {
+                "talking_to": _single_line(scene.get("talking_to"), 40) or target.get("talking_to") or "group",
+                "talking_to_name": _single_line(scene.get("talking_to_name"), 80) or target.get("talking_to_name") or "",
+                "scene_trigger": _single_line(scene.get("trigger"), 40) or target.get("scene_trigger") or "",
+                "scene_reason": _single_line(scene.get("reason"), 60) or target.get("scene_reason") or "",
+                "wakeup_word": _single_line(scene.get("wakeup_word"), 60) or target.get("wakeup_word") or "",
+                "wakeup_strength": _single_line(scene.get("wakeup_strength"), 24) or target.get("wakeup_strength") or "",
+                "wakeup_strength_label": _single_line(scene.get("wakeup_strength_label"), 24) or target.get("wakeup_strength_label") or "",
+                "wakeup_note": _single_line(scene.get("wakeup_note") or scene.get("wakeup_instruction"), 180) or target.get("wakeup_note") or "",
+                "wakeup_topic_weight": scene.get("wakeup_topic_weight") if isinstance(scene.get("wakeup_topic_weight"), dict) else target.get("wakeup_topic_weight") or {},
+                "reply_to_id": _single_line(scene.get("reply_to_id"), 40) or target.get("reply_to_id") or "",
+                "at_targets": scene.get("at_targets") if isinstance(scene.get("at_targets"), list) else target.get("at_targets") or [],
+            }
+        )
+
+    def _capture_group_observation_once(
+        self,
+        group: dict[str, Any],
+        *,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        group_id: str,
+        scene: dict[str, Any] | None = None,
+        message_id: str = "",
+        event: Any = None,
+    ) -> bool:
+        cleaned = _single_line(text, 260)
+        clean_message_id = _single_line(message_id, 120)
+        if not cleaned:
+            return False
+        marker = getattr(event, "private_companion_group_observation_capture", None) if event is not None else None
+        already_captured = self._group_observation_marker_matches(
+            marker,
+            group_id=group_id,
+            sender_id=sender_id,
+            text=cleaned,
+            message_id=clean_message_id,
+        )
+        if not already_captured and clean_message_id:
+            recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+            already_captured = any(
+                isinstance(item, dict) and _single_line(item.get("message_id"), 120) == clean_message_id
+                for item in recent[-12:]
+            )
+        if already_captured:
+            self._merge_group_observation_scene(
+                group,
+                sender_id=sender_id,
+                text=cleaned,
+                message_id=clean_message_id,
+                scene=scene,
+            )
+            return False
+        self._update_group_observation(
+            group,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            text=cleaned,
+            group_id=group_id,
+            scene=scene,
+            message_id=clean_message_id,
+            event=event,
+        )
+        if event is not None:
+            try:
+                setattr(
+                    event,
+                    "private_companion_group_observation_capture",
+                    {
+                        "group_id": _single_line(group_id, 80),
+                        "sender_id": _single_line(sender_id, 80),
+                        "text": cleaned,
+                        "message_id": clean_message_id,
+                        "ts": _now_ts(),
+                    },
+                )
+            except Exception:
+                pass
+        return True
+
     def _group_private_share_candidate(self, group_id: str, group: dict[str, Any], *, trigger_sender_id: str = "") -> dict[str, Any] | None:
         recent = self._filtered_group_recent_messages(group)
         if not recent:

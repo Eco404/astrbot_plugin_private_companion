@@ -12,6 +12,7 @@ import hashlib
 import mimetypes
 import secrets
 import sqlite3
+import sys
 import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -273,6 +274,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 if isinstance(group, dict) and not self._looks_like_member_shadow_group(str(group_id), group)
             }
             enabled_groups = sum(1 for item in visible_groups.values() if isinstance(item, dict) and item.get("enabled", True))
+            group_access_mode = str(getattr(self.plugin, "group_access_mode", "whitelist") or "whitelist")
+            group_whitelist = list(self.plugin._configured_group_ids())
+            group_blacklist = list(self.plugin._configured_group_blacklist_ids())
+            effective_group_count = sum(
+                1
+                for group_id, item in visible_groups.items()
+                if isinstance(item, dict)
+                and item.get("enabled", True)
+                and self.plugin._group_allowed_by_access_mode(str(group_id))
+            )
+            group_access_warning = ""
+            if bool(getattr(self.plugin, "enable_group_companion", False)) and group_access_mode == "whitelist" and not group_whitelist:
+                group_access_warning = "群聊观察已开启，但白名单为空，当前不会接收任何群聊观察。"
             payload = {
                 "plugin": {
                     "enabled": bool(getattr(self.plugin, "enabled", False)),
@@ -304,10 +318,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "enabled": bool(getattr(self.plugin, "enable_group_companion", False)),
                     "group_count": len(visible_groups),
                     "enabled_group_count": enabled_groups,
+                    "effective_group_count": effective_group_count,
                     "shadow_group_count": max(0, len(groups) - len(visible_groups)),
-                    "access_mode": getattr(self.plugin, "group_access_mode", "whitelist"),
-                    "whitelist": self.plugin._configured_group_ids(),
-                    "blacklist": self.plugin._configured_group_blacklist_ids(),
+                    "access_mode": group_access_mode,
+                    "access_warning": group_access_warning,
+                    "whitelist": group_whitelist,
+                    "blacklist": group_blacklist,
                     "interjection_enabled": bool(getattr(self.plugin, "enable_group_interjection", False)),
                     "repeat_follow_enabled": bool(getattr(self.plugin, "enable_group_repeat_follow", False)),
                 },
@@ -418,6 +434,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "budget": budget,
             "balance": self._balance_status_payload(balance_state),
             "memory_plugin": self._token_memory_plugin_payload(self._memory_plugin_token_usage_raw()),
+            "together_plugin": self._token_memory_plugin_payload(self._together_plugin_token_usage_raw()),
             "partial": True,
         }
 
@@ -10442,6 +10459,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "name": group_name,
             "group_name": group_name,
             "display_name": group_name or "未命名群聊",
+            "global_enabled": bool(getattr(self.plugin, "enable_group_companion", False)),
             "enabled": bool(group.get("enabled", True)),
             "allowed_by_mode": self.plugin._group_allowed_by_access_mode(group_id_text),
             "message_count": group.get("message_count", 0),
@@ -18974,6 +18992,45 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         usage.setdefault("counted_in_private_companion_budget", False)
         return usage
 
+    def _together_plugin_token_usage_raw(self) -> dict[str, Any]:
+        modules = [
+            sys.modules.get("data.plugins.astrbot_plugin_together_companion.main"),
+            sys.modules.get("astrbot_plugin_together_companion.main"),
+        ]
+        modules.extend(
+            module
+            for module in tuple(sys.modules.values())
+            if getattr(module, "PLUGIN_NAME", "") == "astrbot_plugin_together_companion"
+            and module not in modules
+        )
+        for module in modules:
+            getter = getattr(module, "get_together_companion_bridge", None) if module is not None else None
+            if not callable(getter):
+                continue
+            try:
+                bridge = getter()
+                summary_getter = getattr(bridge, "get_token_usage_summary", None) if bridge is not None else None
+                usage = summary_getter() if callable(summary_getter) else None
+            except Exception as exc:
+                return {
+                    "available": False,
+                    "installed": True,
+                    "display_name": "我会和你在一起",
+                    "reason": self._single_line(exc, 160),
+                }
+            if isinstance(usage, dict):
+                usage.setdefault("available", True)
+                usage.setdefault("installed", True)
+                usage.setdefault("display_name", "我会和你在一起")
+                usage.setdefault("counted_in_private_companion_budget", False)
+                return usage
+        return {
+            "available": False,
+            "installed": False,
+            "display_name": "我会和你在一起",
+            "reason": "未检测到运行中的一起插件",
+        }
+
     def _balance_status_payload(self, state: Any = None) -> dict[str, Any]:
         raw = state if isinstance(state, dict) else {}
 
@@ -19030,6 +19087,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             usage = {}
         external_usage = usage.get("external") if isinstance(usage.get("external"), dict) else {}
         memory_plugin_usage = self._memory_plugin_token_usage_raw()
+        together_plugin_usage = self._together_plugin_token_usage_raw()
         totals = self._token_bucket(usage.get("totals"))
         by_provider = self._token_ranked_map(usage.get("by_provider"))
         by_task = self._token_ranked_map(usage.get("by_task"))
@@ -19136,6 +19194,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "recent": recent,
             "external": self._token_external_payload(external_usage),
             "memory_plugin": self._token_memory_plugin_payload(memory_plugin_usage),
+            "together_plugin": self._token_memory_plugin_payload(together_plugin_usage),
         }
 
     def _token_external_payload(self, usage: Any) -> dict[str, Any]:
@@ -19243,6 +19302,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 )
         return {
             "available": available,
+            "installed": bool(usage.get("installed", available)),
             "display_name": self._single_line(usage.get("display_name") or "我会牢牢记住你", 80),
             "plugin_name": self._single_line(usage.get("plugin_name") or "astrbot_plugin_memory_companion", 80),
             "reason": self._single_line(usage.get("reason"), 160),
