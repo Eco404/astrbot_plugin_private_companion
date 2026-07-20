@@ -1487,7 +1487,7 @@ class ProactiveEngineMixin:
             kind = "greeting"
         elif normalized_reason in {"meal_care", "meal_care_followup"}:
             kind = "care"
-        elif normalized_reason in {"quiet_care", "state_share"}:
+        elif normalized_reason in {"quiet_care", "state_share", "post_goodnight_group_activity"}:
             kind = "care"
         elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share", "personal_goal_progress"}:
             kind = "self_share"
@@ -1508,7 +1508,7 @@ class ProactiveEngineMixin:
         anchor_score = 0.28
         if normalized_source in {"pending_followup", "followup"} or has_trigger or has_chain or "前面提过" in evidence_text:
             anchor_type, anchor_score = "recent_context", 0.78
-        elif normalized_reason in {"group_share"} or "群" in evidence_text:
+        elif normalized_reason in {"group_share", "post_goodnight_group_activity"} or "群" in evidence_text:
             anchor_type, anchor_score = "group_context", 0.72
         elif normalized_reason in {"diary_share", "creative_share"} or any(token in evidence_text for token in ("日记", "写到", "作品", "片段")):
             anchor_type, anchor_score = "inner_life", 0.68
@@ -3368,7 +3368,13 @@ class ProactiveEngineMixin:
                     planned_source or "unknown",
                 )
             return False, "Bot 当前日程忙碌，主动消息已顺延"
-        if not is_troubleshooting and self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
+        post_goodnight_active = self._post_goodnight_group_activity_is_fresh(user, now=now)
+        if (
+            not is_troubleshooting
+            and self._is_quiet_time()
+            and not self._can_send_insomnia_night_message(user)
+            and not post_goodnight_active
+        ):
             return False, "免打扰时段"
         pre_gate_next_at = _safe_float(user.get("next_proactive_at"), 0)
         if not is_troubleshooting and not due_timer_active:
@@ -3567,6 +3573,7 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and not due_timer_active
             and not self._is_initial_wakeup_greeting(user)
+            and not self._post_goodnight_group_activity_is_fresh(user, now=now)
             and now - recent_activity_at < idle_minutes * 60
         ):
             idle_limit = (
@@ -4028,7 +4035,11 @@ class ProactiveEngineMixin:
             blocker=busy_blocked,
         )
 
-        quiet_blocked = self._is_quiet_time() and not self._can_send_insomnia_night_message(user)
+        quiet_blocked = (
+            self._is_quiet_time()
+            and not self._can_send_insomnia_night_message(user)
+            and not self._post_goodnight_group_activity_is_fresh(user, now=now)
+        )
         add(
             "quiet_hours",
             "免打扰",
@@ -8039,6 +8050,7 @@ class ProactiveEngineMixin:
             return [self._morning_greeting_window()]
         return {
             "insomnia_night": [(23 * 60, 24 * 60), (0, 6 * 60)],
+            "post_goodnight_group_activity": [(20 * 60, 24 * 60), (0, 2 * 60)],
             "group_share": [(9 * 60, 23 * 60)],
             "bili_video_share": [(10 * 60, 23 * 60)],
             "news_share": [(8 * 60, 23 * 60)],
@@ -8065,6 +8077,25 @@ class ProactiveEngineMixin:
             "meal_care": [(7 * 60 + 50, 20 * 60 + 35)],
             "meal_care_followup": [(8 * 60 + 5, 22 * 60)],
         }.get(reason, [(9 * 60, 22 * 60)])
+
+    def _post_goodnight_group_activity_is_fresh(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        if self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) != "post_goodnight_group_activity":
+            return False
+        context = user.get("post_goodnight_group_activity_context")
+        if not isinstance(context, dict):
+            return False
+        check_now = _now_ts() if now is None else now
+        activity_at = _safe_float(context.get("group_activity_at"), 0)
+        rest_set_at = _safe_float(context.get("rest_set_at"), 0)
+        return bool(
+            activity_at > rest_set_at > 0
+            and 0 <= check_now - activity_at <= 50 * 60
+        )
 
     def _is_reason_allowed_now(self, reason: str) -> bool:
         reason = self._normalize_legacy_proactive_text(reason, limit=40)

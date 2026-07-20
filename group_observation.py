@@ -1328,6 +1328,109 @@ class GroupObservationMixin:
         user["last_group_ignore_complaint_text"] = _single_line(text, 80)
         return True
 
+    def _maybe_schedule_post_goodnight_group_activity(
+        self,
+        group_id: str,
+        group: dict[str, Any],
+        *,
+        sender_id: str = "",
+        sender_name: str = "",
+        text: str = "",
+        now: float | None = None,
+    ) -> bool:
+        """Sometimes react when the owner keeps chatting after both sides said goodnight."""
+        if not sender_id or not self.enable_group_companion:
+            return False
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return False
+        user = users.get(str(sender_id))
+        if not isinstance(user, dict) or not user.get("enabled", True) or not user.get("umo"):
+            return False
+        if self._private_user_role(user, str(sender_id)) != "owner":
+            return False
+
+        now = _now_ts() if now is None else now
+        rest_set_at = _safe_float(user.get("user_rest_set_at"), 0)
+        rest_kind = _single_line(user.get("user_rest_kind"), 24).lower()
+        rest_reason = _single_line(user.get("user_rest_reason"), 120)
+        if rest_kind != "sleep" or rest_set_at <= 0 or not re.search(r"晚安|睡|补觉|好梦", rest_reason):
+            return False
+        if re.search(r"(?:别|不要|先别|暂时别|今晚别|今天别).{0,10}(?:打扰|主动|发消息|找我|回(?:复)?|理我)", rest_reason):
+            return False
+        if now <= rest_set_at or now - rest_set_at > 4 * 3600:
+            return False
+
+        companion_at = _safe_float(user.get("last_companion_message_at"), 0)
+        companion_text = _single_line(user.get("last_companion_message"), 180)
+        if companion_at < rest_set_at or companion_at > now:
+            return False
+        if not re.search(r"晚安|睡|休息|好梦|明天", companion_text):
+            return False
+
+        episode_key = f"{int(rest_set_at)}:{str(sender_id)}"
+        if _single_line(user.get("last_post_goodnight_group_activity_attempt_key"), 80) == episode_key:
+            return False
+        # One probability draw per goodnight episode, not once per group message.
+        user["last_post_goodnight_group_activity_attempt_key"] = episode_key
+        user["last_post_goodnight_group_activity_attempt_at"] = now
+
+        profile = self._persona_action_profile()
+        chance = 0.10
+        if profile.get("playful"):
+            chance += 0.12
+        if profile.get("clingy"):
+            chance += 0.08
+        if profile.get("observant"):
+            chance += 0.04
+        if not (profile.get("playful") or profile.get("clingy") or profile.get("observant")):
+            chance *= 0.6
+        chance = min(0.34, chance)
+        if random.random() > chance:
+            return False
+
+        delay_minutes = random.randint(3, 14)
+        scheduled = now + delay_minutes * 60
+        group_name = _single_line(group.get("name") or group.get("group_name"), 40) or str(group_id)
+        display_name = self._group_member_identity_name(str(sender_id), sender_name or str(sender_id), limit=24)
+        context = {
+            "group_id": str(group_id),
+            "group_name": group_name,
+            "group_activity_at": now,
+            "rest_set_at": rest_set_at,
+            "companion_goodnight_at": companion_at,
+            "activity_preview": _single_line(text, 80),
+            "chance": round(chance, 3),
+        }
+        accepted = self._offer_proactive_candidate(
+            str(sender_id),
+            user,
+            {
+                "source": "post_goodnight_group_activity",
+                "reason": "post_goodnight_group_activity",
+                "action": "message",
+                "scheduled_ts": scheduled,
+                "window_start_at": scheduled,
+                "preferred_ts": scheduled,
+                "best_until_at": scheduled + 16 * 60,
+                "expire_at": scheduled + 38 * 60,
+                "topic": "互道晚安后又在群里活跃",
+                "score": 72,
+                "motive": (
+                    f"刚和 {display_name} 互道晚安，却又偶然看见对方还在群里活跃。"
+                    "结合人格决定要不要轻轻调侃、关心一句，或干脆不点破；"
+                    "不要质问、查岗、复述群聊内容或群名，也不要表现成持续监视。"
+                ),
+                "context_key": "post_goodnight_group_activity_context",
+                "context": context,
+            },
+        )
+        if not accepted:
+            return False
+        user["last_post_goodnight_group_activity_at"] = now
+        user["last_post_goodnight_group_activity_group_id"] = str(group_id)
+        return True
+
     @staticmethod
     def _is_group_slang_transport_metadata_term(term: Any) -> bool:
         normalized = unicodedata.normalize("NFKC", str(term or "")).strip().lower()

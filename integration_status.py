@@ -419,16 +419,75 @@ class IntegrationStatusMixin:
                 return path
         return candidates[0]
 
-    def _livingmemory_available(self) -> bool:
+    def _livingmemory_tool_available(self) -> bool | None:
+        """Return tool availability when AstrBot exposes its runtime tool registry.
+
+        ``None`` means the host is too old to expose a tool manager. A tool is
+        usable only when it is active and its handler belongs to LivingMemory;
+        a directory on disk is not evidence that the plugin is loaded.
+        """
+        tool_name = _single_line(getattr(self, "livingmemory_tool_name", ""), 60) or "recall_long_term_memory"
+        context = getattr(self, "context", None)
+        manager = None
+        getter = getattr(context, "get_llm_tool_manager", None)
+        if callable(getter):
+            try:
+                manager = getter()
+            except Exception:
+                manager = None
+        if manager is None:
+            provider_manager = getattr(context, "provider_manager", None)
+            manager = getattr(provider_manager, "llm_tools", None)
+        if manager is None:
+            return None
+
+        candidates: list[Any] = []
+        get_func = getattr(manager, "get_func", None)
+        if callable(get_func):
+            try:
+                tool = get_func(tool_name)
+                if tool is not None:
+                    candidates.append(tool)
+            except Exception:
+                pass
         try:
-            plugin_dir = self._livingmemory_plugin_dir()
-            return (
-                plugin_dir.exists()
-                and (plugin_dir / "main.py").exists()
-                and (plugin_dir / "core" / "tools" / "memory_search_tool.py").exists()
+            candidates.extend(
+                tool
+                for tool in list(getattr(manager, "func_list", []) or [])
+                if str(getattr(tool, "name", "") or "") == tool_name
             )
         except Exception:
-            return False
+            pass
+
+        for tool in candidates:
+            if not bool(getattr(tool, "active", True)):
+                continue
+            module_path = str(getattr(tool, "handler_module_path", "") or "")
+            if not module_path:
+                handler = getattr(tool, "handler", None)
+                module_path = str(getattr(handler, "__module__", "") or "")
+            if "livingmemory" in module_path.lower():
+                return True
+        return False
+
+    @staticmethod
+    def _livingmemory_module_loaded() -> bool:
+        prefixes = (
+            "astrbot_plugin_livingmemory",
+            "data.plugins.astrbot_plugin_livingmemory",
+        )
+        return any(
+            module is not None
+            and any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+            for name, module in sys.modules.items()
+        )
+
+    def _livingmemory_available(self) -> bool:
+        runtime_available = self._livingmemory_tool_available()
+        if runtime_available is not None:
+            return runtime_available
+        # Compatibility fallback for old AstrBot versions without a tool manager.
+        return self._livingmemory_module_loaded()
 
     def _format_livingmemory_guidance(self, *, scope: str = "private") -> str:
         if not self.enable_livingmemory_integration or not self._livingmemory_available():
@@ -440,7 +499,7 @@ class IntegrationStatusMixin:
             boundary = "私聊可查当前用户相关的旧约定、偏好和共同经历。"
         return (
             "【长期记忆检索】\n"
-            f"上下文不够时可用 `{tool_name}` 查记忆。{boundary}结果只作接话背景。\n"
+            f"上下文不够时可用 `{tool_name}` 查记忆。只有当前工具列表确实提供该工具时才调用；工具未出现时不要猜测、重试或输出工具调用。{boundary}结果只作接话背景。\n"
             "召回结果里出现人名、昵称、QQ 或群成员别名时,不要直接当作稳定身份；能查关系网时先用关系网确认,不能确认就按召回文本里的具体说话人原样转述。\n"
             "如果召回到 Bot 曾说自己在吃饭、整理、犯困、路上、创作等状态/日程，只能理解为当时 Bot 的拟人化表达或历史自称；不要写成用户事实、现实证据或持续状态。"
         )
@@ -481,6 +540,14 @@ class IntegrationStatusMixin:
                     version = match.group(1).strip()
             except Exception:
                 version = ""
+        if not self._livingmemory_available():
+            return (
+                "记忆插件协同：检测到 LivingMemory 文件，但插件未加载或召回工具未启用。\n"
+                f"路径：{plugin_dir}\n"
+                f"版本：{version or '未知'}\n"
+                f"协同开关：{'开启' if self.enable_livingmemory_integration else '关闭'}\n"
+                "当前不会注入 LivingMemory 召回提示；启用插件及其召回工具后会自动恢复。"
+            )
         return (
             "记忆插件协同：已检测到 LivingMemory。\n"
             f"路径：{plugin_dir}\n"

@@ -16832,6 +16832,7 @@ function proactiveCandidateSourceLabel(source) {
     environment_change: "环境突变",
     meal_care: "饭点关心",
     group_ignore_complaint: "群内冒泡关心",
+    post_goodnight_group_activity: "晚安后群聊活跃",
     jm_cosmos: "私密阅读",
     personal_goal: "个人目标",
     candidate: "主动候选",

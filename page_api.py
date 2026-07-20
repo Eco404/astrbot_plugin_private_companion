@@ -2357,16 +2357,39 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "prompt": self._single_line(prompt_text, 220),
             "workflow_kind": self._single_line(workflow_kind, 20),
             "reference_image": self._single_line(reference_image_path, 260),
-            "used_reference": bool(
-                reference_image_path
-                and workflow_kind in {"selfie", "portrait", "自拍", "人像"}
-                and "已使用" in str(note or "")
+            "used_reference": self._image_generation_result_used_reference(
+                workflow_kind=workflow_kind,
+                image_path=image_path,
+                image_exists=exists,
+                note=note,
             ),
             "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
             "elapsed_ms": elapsed_ms,
             "error": "" if image_path and exists else (self._single_line(note, 220) or "图片生成未返回有效文件"),
             **diagnostics,
         }
+
+    @staticmethod
+    def _image_generation_result_used_reference(
+        *,
+        workflow_kind: str,
+        image_path: str,
+        image_exists: bool,
+        note: Any,
+    ) -> bool:
+        if not image_path or not image_exists:
+            return False
+        if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
+            return False
+        note_text = str(note or "")
+        return bool(
+            re.search(
+                r"(?:已使用|已提交|成功提交|已带入)[^；。]{0,16}参考图|参考图[^；。]{0,16}(?:已使用|已提交|成功提交|已带入)",
+                note_text,
+                flags=re.I,
+            )
+            or "已使用本地人设参考图" in note_text
+        )
 
     def _image_generation_timeout_diagnostics(
         self,
@@ -17449,6 +17472,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "group_ignore_complaint": {
                 "label": "群内冒泡关心",
                 "note": "对方暂未回复私聊、但刚在群内出现后形成的低压力关心。",
+            },
+            "post_goodnight_group_activity": {
+                "label": "晚安后群聊活跃",
+                "note": "和主要用户互道晚安后，对方仍在群里活跃时按人格低概率形成的轻调侃或关心。",
             },
             "jm_cosmos": {"label": "私密阅读", "note": ""},
             "personal_goal": {"label": "个人目标", "note": "非创作型长期目标在真实推进、停滞或完成后形成的主动。"},

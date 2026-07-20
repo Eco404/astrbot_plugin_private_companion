@@ -263,6 +263,7 @@ _REASON_TEXT = {
     "birthday_afterglow": "接住生日之后的一点余温",
     "background_schedule": "提一句当前日程",
     "insomnia_night": "睡不着，想跟{name}说说话",
+    "post_goodnight_group_activity": "互道晚安后发现{name}还在群里活跃",
     "group_share": "跟{name}分享群里的有趣片段",
     "bili_video_share": "跟{name}分享一个 B 站视频",
     "creative_share": "跟{name}分享小说片段",

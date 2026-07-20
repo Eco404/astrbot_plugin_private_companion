@@ -2508,13 +2508,13 @@ Provider 规则：{emotion_rule}
                 except Exception:
                     pass
         get_using = getattr(self.context, "get_using_provider", None)
-        if callable(get_using) and event is not None:
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if callable(get_using):
+            umo = str(getattr(event, "unified_msg_origin", "") or "") if event is not None else ""
             try:
-                return get_using(umo=umo)
+                return get_using(umo=umo) if event is not None else get_using()
             except TypeError:
                 try:
-                    return get_using(umo)
+                    return get_using(umo) if event is not None else get_using(umo="")
                 except Exception:
                     return None
             except Exception:
@@ -3222,7 +3222,7 @@ Provider 规则：{emotion_rule}
         )
 
     async def _convert_text_to_spoken_language(self, text: str, event: Any, *, provider_kind: str) -> str:
-        provider = await self._get_tts_conversion_provider(event) if event is not None else None
+        provider = await self._get_tts_conversion_provider(event)
         lang = self._tts_language_label()
         persona_context = await self._format_tts_persona_voice_context(event)
         fish_rule = ""
@@ -3259,6 +3259,122 @@ Provider 规则：{emotion_rule}
         except Exception:
             pass
         return text
+
+    @staticmethod
+    def _tts_browser_language(voice_language: str) -> str:
+        return {"ja": "ja-JP", "en": "en-US", "zh": "zh-CN"}.get(voice_language, "zh-CN")
+
+    def _realtime_voice_config(self) -> dict[str, Any]:
+        voice_language = self._normalize_tts_voice_language_value(
+            getattr(self, "tts_voice_language", "ja")
+        ) or "ja"
+        return {
+            "available": True,
+            "voice_language": voice_language,
+            "browser_language": self._tts_browser_language(voice_language),
+        }
+
+    async def _synthesize_realtime_voice(
+        self,
+        text: str,
+        *,
+        tts_provider: Any = None,
+        provider_settings: dict[str, Any] | None = None,
+        source: str = "external_realtime",
+    ) -> dict[str, Any]:
+        settings = dict(provider_settings or {})
+        voice_config = self._realtime_voice_config()
+        voice_language = str(voice_config["voice_language"])
+        target_language = str(voice_config["browser_language"])
+        source_text = str(text or "").strip()
+        provider_kind = self._tts_provider_kind(tts_provider, settings)
+        spoken = self._normalize_tts_spoken_text(source_text, provider_kind=provider_kind)
+        result = {
+            **voice_config,
+            "audio_path": "",
+            "spoken_text": spoken,
+            "fallback_text": source_text,
+            "language": target_language,
+            "reason": "",
+        }
+        if not spoken:
+            result["reason"] = "empty_text"
+            return result
+        if tts_provider is None:
+            result["available"] = False
+            if self._tts_text_needs_language_conversion(spoken, provider_kind=provider_kind):
+                result["language"] = "zh-CN"
+            result["reason"] = "tts_provider_unavailable"
+            return result
+
+        if self._tts_text_needs_language_conversion(spoken, provider_kind=provider_kind):
+            converted = await self._convert_text_to_spoken_language(
+                spoken,
+                None,
+                provider_kind=provider_kind,
+            )
+            converted = self._normalize_tts_spoken_text(converted, provider_kind=provider_kind)
+            if not converted or self._tts_text_needs_language_conversion(
+                converted,
+                provider_kind=provider_kind,
+            ):
+                result["language"] = "zh-CN"
+                result["reason"] = "language_conversion_failed"
+                logger.warning(
+                    "[PrivateCompanion] 外部实时 TTS 语种转换失败,已阻止原文送入%s声线: text=%s",
+                    self._tts_language_label(),
+                    _single_line(source_text, 120),
+                )
+                return result
+            spoken = converted
+
+        if provider_kind.startswith("fishaudio"):
+            self._prepare_fishaudio_provider_model(tts_provider, settings)
+        sanitized = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
+        if provider_kind.startswith("fishaudio"):
+            sanitized, _ = self._apply_fishaudio_emotion_control(
+                sanitized,
+                provider_kind=provider_kind,
+                source_text=source_text,
+            )
+        if not sanitized:
+            result["reason"] = "empty_spoken_text"
+            return result
+        result["spoken_text"] = sanitized
+        result["fallback_text"] = sanitized
+
+        try:
+            audio_path = await self._tts_generate_audio_path(tts_provider, sanitized)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 外部实时 TTS 合成失败: provider=%s error=%s",
+                provider_kind,
+                _single_line(exc, 120),
+            )
+            result["reason"] = "synthesis_failed"
+            return result
+        if not audio_path:
+            result["reason"] = "empty_audio_path"
+            return result
+        try:
+            audio_file = Path(audio_path).resolve()
+            expected_dir = Path(get_astrbot_data_path()).resolve()
+            if not audio_file.is_file() or not audio_file.is_relative_to(expected_dir):
+                result["reason"] = "invalid_audio_path"
+                return result
+        except Exception:
+            result["reason"] = "invalid_audio_path"
+            return result
+
+        result["audio_path"] = str(audio_file)
+        asyncio.create_task(
+            self._after_tts_audio_generated(
+                str(audio_file),
+                sanitized,
+                source=source or "external_realtime",
+            )
+        )
+        return result
 
     def _prepare_fishaudio_provider_model(
         self,

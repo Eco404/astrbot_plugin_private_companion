@@ -246,6 +246,26 @@ class PrivateCompanionExtensionAPI:
     def list_proactive_abilities(self) -> list[dict[str, Any]]:
         return self._plugin.external_proactive_abilities()
 
+    def get_realtime_voice_config(self) -> dict[str, Any]:
+        """Expose the active companion voice language to realtime plugins."""
+        return self._plugin._realtime_voice_config()
+
+    async def synthesize_realtime_voice(
+        self,
+        text: str,
+        *,
+        tts_provider: Any = None,
+        provider_settings: dict[str, Any] | None = None,
+        source: str = "external_realtime",
+    ) -> dict[str, Any]:
+        """Synthesize external realtime speech through companion TTS rules."""
+        return await self._plugin._synthesize_realtime_voice(
+            text,
+            tts_provider=tts_provider,
+            provider_settings=provider_settings,
+            source=source,
+        )
+
     def get_bot_identity(self) -> dict[str, Any]:
         """Return a stable Bot identity without guessing between multiple accounts."""
         plugin = self._plugin
@@ -11620,6 +11640,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         logger.info("[PrivateCompanion] 目标用户已在群内交流,已取消冲突问候候选: group=%s user=%s", group_id, sender_id)
                         if not self._simulation_active(target_user) and _safe_float(target_user.get("next_proactive_at"), 0) <= 0:
                             self._schedule_next_proactive(target_user, now=received_ts)
+                    self._maybe_schedule_post_goodnight_group_activity(
+                        group_id,
+                        group,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        text=text,
+                        now=received_ts,
+                    )
                     self._maybe_schedule_group_ignore_complaint(
                         group_id,
                         group,

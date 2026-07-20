@@ -7949,6 +7949,7 @@ Output:
         workflow_kind: str,
         *,
         allow_daily_outfit_reference: bool = True,
+        reference_image_path: str = "",
     ) -> tuple[str, str]:
         prompt = str(prompt_text or "").strip()
         normalized = str(workflow_kind or "").strip().lower()
@@ -7956,7 +7957,7 @@ Output:
             return _single_line(prompt, 1800), ""
         if not allow_daily_outfit_reference:
             return _single_line(prompt, 1800), ""
-        if "【自拍当前场景约束】" in prompt:
+        if "【自拍当前场景约束】" in prompt or "Current selfie scene constraint:" in prompt:
             return _single_line(prompt, 1800), ""
         if any(token in prompt for token in ("基于用户提供或引用的参考图进行改图", "保留用户未要求修改的主体", "只改变明确要求的部分")):
             return _single_line(prompt, 1800), ""
@@ -7964,12 +7965,38 @@ Output:
         scene_hint = self._photo_generation_selfie_schedule_scene_hint()
         if not scene_hint:
             return _single_line(prompt, 1800), ""
-        outfit_reference = self._daily_outfit_reference_image_path()
-        outfit_hint = (
-            "use today's outfit reference image; keep the clothes, accessories, and overall outfit consistent"
-            if outfit_reference
-            else "keep the character face, hairstyle, outfit, and accessories consistent with the available reference image"
-        )
+        selected_reference = _single_line(reference_image_path, 260)
+        outfit_reference = self._daily_outfit_reference_image_path() if allow_daily_outfit_reference else ""
+        selected_daily_outfit = self._photo_reference_paths_equal(selected_reference, outfit_reference)
+        changes_daily_outfit = self._photo_generation_prompt_changes_daily_outfit(prompt)
+        if changes_daily_outfit and not selected_daily_outfit:
+            scene_hint = self._photo_generation_scene_hint_without_daily_outfit_details(scene_hint)
+        if selected_daily_outfit:
+            outfit_hint = (
+                "the selected reference is today's outfit reference; use it as the visual basis for identity and outfit continuity, "
+                "but let an explicit clothing request in this prompt change the outfit when requested"
+            )
+        elif selected_reference and changes_daily_outfit:
+            outfit_hint = (
+                "an explicit clothing request in this prompt has highest priority; use the selected reference image for identity and "
+                "compatible wardrobe or scene details; any today's-outfit text in schedule context is background continuity only and "
+                "must not restore the daily outfit unless this prompt explicitly asks for it"
+            )
+        elif selected_reference:
+            outfit_hint = (
+                "use the selected reference image as the visual basis for identity and compatible visible details; today's outfit may "
+                "inform continuity only where it does not conflict with that selected reference or this prompt"
+            )
+        elif changes_daily_outfit:
+            outfit_hint = (
+                "follow the explicit clothing request in this prompt; do not restore today's outfit merely because it appears in "
+                "schedule context, and do not assume that an unavailable reference image was supplied"
+            )
+        else:
+            outfit_hint = (
+                "today's outfit is fallback continuity because this prompt does not request a clothing change; do not assume that an "
+                "unavailable reference image was supplied"
+            )
         extra = (
             "Current selfie scene constraint: "
             f"{outfit_hint}; "
@@ -7978,7 +8005,60 @@ Output:
             "unless the request explicitly asks for a mirror, avoid mirror selfies, full-length mirror shots, dressing-room mirrors, "
             "and phone-covering-face compositions; prefer a handheld selfie or natural environmental portrait with upper-body to three-quarter framing."
         )
-        return _single_line(f"{prompt}\n\n{extra}".strip(), 1800), scene_hint
+        return _single_line(f"{extra}\n\n{prompt}".strip(), 1800), scene_hint
+
+    @staticmethod
+    def _photo_reference_paths_equal(left: str, right: str) -> bool:
+        left_text = str(left or "").strip()
+        right_text = str(right or "").strip()
+        if not left_text or not right_text:
+            return False
+        try:
+            left_text = str(Path(left_text).expanduser().resolve())
+            right_text = str(Path(right_text).expanduser().resolve())
+        except (OSError, ValueError):
+            pass
+        return os.path.normcase(left_text) == os.path.normcase(right_text)
+
+    @staticmethod
+    def _photo_generation_prompt_changes_daily_outfit(prompt_text: str) -> bool:
+        text = _single_line(prompt_text, 1800).lower()
+        return any(
+            token in text
+            for token in (
+                "睡衣",
+                "睡裙",
+                "睡袍",
+                "居家服",
+                "礼服",
+                "泳装",
+                "运动服",
+                "换装",
+                "cosplay",
+                "costume",
+                "pajama",
+                "pyjama",
+                "sleepwear",
+                "nightgown",
+                "loungewear",
+                "evening gown",
+                "swimsuit",
+                "sportswear",
+            )
+        )
+
+    @staticmethod
+    def _photo_generation_scene_hint_without_daily_outfit_details(scene_hint: str) -> str:
+        text = _single_line(scene_hint, 1200)
+        if not text or "今日穿搭：" not in text:
+            return text
+        cleaned = re.sub(
+            r"(?:^|；)今日穿搭：.*?(?=；视觉话题：|$)",
+            "",
+            text,
+            flags=re.S,
+        ).strip("； ")
+        return _single_line(cleaned, 1200)
 
     @staticmethod
     def _photo_generation_explicit_mirror_request(text: str) -> bool:
@@ -8119,6 +8199,11 @@ Output:
                 "upper-body to three-quarter framing, visible face, clear clothing layers and color palette, "
                 "location-appropriate background, no phone covering face, not body-only"
             ),
+            "居家睡衣": (
+                "sleepwear or bedtime loungewear portrait matching the explicit clothing request and selected reference, "
+                "exactly one coherent sleepwear outfit, preserve the character identity, natural home or bedtime context, "
+                "do not restore a daytime outfit, coat, school uniform, or commuter layers unless explicitly requested"
+            ),
             "镜前穿搭": (
                 "explicitly requested mirror outfit photo, half-body to three-quarter mirror composition, "
                 "clear clothes, jacket, accessories and color palette, complete visible face, no phone covering face, "
@@ -8192,6 +8277,21 @@ Output:
                 names.append("COS自拍")
             elif self._photo_generation_explicit_mirror_request(text):
                 names.append("镜前穿搭")
+            elif any(
+                token in text
+                for token in (
+                    "睡衣",
+                    "睡裙",
+                    "睡袍",
+                    "pajama",
+                    "pyjama",
+                    "sleepwear",
+                    "nightgown",
+                    "loungewear",
+                    "bedtime outfit",
+                )
+            ):
+                names.append("居家睡衣")
             elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "outfit", "clothes", "jacket", "uniform", "skirt")):
                 names.append("日常穿搭")
             elif any(token in text for token in ("头像", "特写", "大头", "avatar", "close-up", "closeup", "profile picture")):
@@ -8228,6 +8328,7 @@ Output:
             "角色自拍": "casual character selfie",
             "COS自拍": "cosplay selfie",
             "日常穿搭": "daily outfit portrait",
+            "居家睡衣": "home sleepwear portrait",
             "镜前穿搭": "mirror outfit photo",
             "头像特写": "avatar close-up",
             "房间日常": "indoor slice-of-life",
@@ -8249,20 +8350,30 @@ Output:
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
         prompt_text = self._apply_photo_generation_prompt_format(prompt_text)
         prompt_text, preset_names = self._apply_photo_generation_scene_presets(prompt_text, workflow_kind)
-        prompt_text, selfie_scene_hint = self._apply_photo_generation_selfie_schedule_scene_prompt(
-            prompt_text,
-            workflow_kind,
-            allow_daily_outfit_reference=allow_daily_outfit_reference,
-        )
-        prompt_text = self._apply_photo_generation_selfie_composition_guard(prompt_text, workflow_kind)
         prompt_text = self._apply_photo_generation_fixed_prompt(prompt_text)
         reference_image_path = _single_line(reference_image_path, 260)
+        selection_context = prompt_text
+        normalized_kind = str(workflow_kind or "").strip().lower()
+        if normalized_kind in {"selfie", "portrait", "自拍", "人像"} and allow_daily_outfit_reference:
+            preliminary_scene_hint = self._photo_generation_selfie_schedule_scene_hint()
+            if preliminary_scene_hint:
+                selection_context = _single_line(
+                    f"Current schedule/location context: {preliminary_scene_hint}\n\nFinal image prompt: {prompt_text}",
+                    1800,
+                )
         if not reference_image_path:
             reference_image_path = await self._photo_persona_reference_image_for_kind_async(
                 workflow_kind,
                 allow_daily_outfit=allow_daily_outfit_reference,
-                selection_context=prompt_text,
+                selection_context=selection_context,
             )
+        prompt_text, selfie_scene_hint = self._apply_photo_generation_selfie_schedule_scene_prompt(
+            prompt_text,
+            workflow_kind,
+            allow_daily_outfit_reference=allow_daily_outfit_reference,
+            reference_image_path=reference_image_path,
+        )
+        prompt_text = self._apply_photo_generation_selfie_composition_guard(prompt_text, workflow_kind)
         if selfie_scene_hint:
             logger.info(
                 "[PrivateCompanion] 自拍生图已加入当前日程地点约束: trace=%s session=%s hint=%s reference=%s",
@@ -8508,7 +8619,7 @@ Output:
 
 【当前统一情境快照】
 {scene_context}
-使用方式：这是当前事实和连续性参考。优先保持时间、地点、日程、情绪和今日穿搭互相一致；它只帮助选择自然画面，不要求把所有字段都画出来或写进配文。
+使用方式：这是当前事实和连续性参考。优先保持时间、地点、日程和情绪互相一致；今日穿搭只在本次没有新的服装请求时用于连续性。若话题、动机或画面需求明确要求睡衣、居家服、礼服、COS 等服装变化，以本次明确请求为准，不要被今日穿搭覆盖。它只帮助选择自然画面，不要求把所有字段都画出来或写进配文。
 
 【这次想分享的画面钩子】
 话题：{topic_hint or '（未指定）'}
@@ -8547,6 +8658,7 @@ Output:
 7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
 8. 不要默认生成全身镜/对镜自拍/手机挡脸自拍；只有话题、动机或当前日程明确出现“镜前/对镜/镜子/全身镜/mirror”时才允许。普通穿搭图用当前地点里的手持自拍、半身或四分之三身环境人像。
 9. `use_persona_reference` 仅表示画面中是否出现 Bot 本人：自拍、人物生活照、人物穿搭图填 true；纯风景、食物、桌面物品、动物、手机屏幕或生日卡填 false。
+10. 服装语义优先级为：本次明确服装需求优先；具体场景服装参考用于落实该需求；今日穿搭仅在没有新服装意图时作为连续性补充。不要同时写入彼此冲突的两套服装。
 """.strip()
         text = await self._llm_call(
             prompt,
