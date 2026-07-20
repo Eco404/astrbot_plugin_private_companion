@@ -2841,6 +2841,9 @@ class DailyStateMixin:
         if persona_profile.get("allow_hunger", True):
             specs.append(("hunger", "饥饿", *hunger_pick))
         if persona_profile.get("allow_cycle", False):
+            if getattr(self, "enable_advanced_cycle_strategy", False):
+                specs.append(("body_cycle", "周期", *self._pick_advanced_cycle_spec(intensity)))
+            else:
             specs.append(("body_cycle", "周期", *self._pick_body_cycle_spec(cycle_pool, intensity)))
         else:
             specs.append(("body_cycle", "周期", *cycle_pool[0]))
@@ -2891,6 +2894,18 @@ class DailyStateMixin:
                     extras["transition_options"] = [{"to": "body_period", "base_weight": 0.72}, {"to": "stable", "base_weight": 0.28}]
                 elif extras["phase"] == "period":
                     extras["transition_options"] = [{"to": "body_recovery", "base_weight": 0.65}, {"to": "stable", "base_weight": 0.35}]
+                elif extras["phase"] == "menstrual":
+                    extras["transition_options"] = [{"to": "body_follicular", "base_weight": 1.0}]
+                elif extras["phase"] == "follicular":
+                    extras["transition_options"] = [{"to": "body_pre_ovulation", "base_weight": 1.0}]
+                elif extras["phase"] == "pre_ovulation":
+                    extras["transition_options"] = [{"to": "body_ovulation", "base_weight": 1.0}]
+                elif extras["phase"] == "ovulation":
+                    extras["transition_options"] = [{"to": "body_luteal", "base_weight": 1.0}]
+                elif extras["phase"] == "luteal":
+                    extras["transition_options"] = [{"to": "body_pms", "base_weight": 1.0}]
+                elif extras["phase"] == "pms":
+                    extras["transition_options"] = [{"to": "body_menstrual", "base_weight": 0.8}, {"to": "stable", "base_weight": 0.2}]
             extras["transition_options"] = self._build_transition_options(
                 kind=kind,
                 energy_delta=int(energy_delta * max(0.4, intensity)),
@@ -3012,6 +3027,16 @@ class DailyStateMixin:
 
     def _infer_body_cycle_phase(self, label: str) -> str:
         text = str(label or "")
+        # 激进真实化策略阶段
+        if "月经期" in text:
+            return "menstrual"
+        if "卵泡期" in text:
+            return "follicular"
+        if "排卵期" in text:
+            return "ovulation"
+        if "黄体期" in text:
+            return "luteal"
+        # 原三段式阶段
         if "前" in text:
             return "pre"
         if "恢复" in text:
@@ -3022,14 +3047,33 @@ class DailyStateMixin:
 
     def _body_cycle_max_hours(self, phase: str, label: str = "") -> int:
         phase = str(phase or self._infer_body_cycle_phase(label))
+        # 激进真实化策略阶段
+        advanced_hours = self._advanced_cycle_phase_hours(phase)
+        if advanced_hours is not None:
+            return advanced_hours
+        # 原三段式阶段
         if phase == "period":
             return 72
         if phase in {"pre", "recovery"}:
             return 24
         return 48
 
+    def _body_cycle_total_days(self) -> int:
+        """返回一个完整周期的总天数，激进策略下为六阶段配置天数之和。"""
+        if getattr(self, "enable_advanced_cycle_strategy", False):
+            return (
+                max(1, _safe_int(getattr(self, "advanced_cycle_menstrual_days", 5), 5, 1, 30))
+                + max(1, _safe_int(getattr(self, "advanced_cycle_follicular_days", 5), 5, 1, 30))
+                + max(1, _safe_int(getattr(self, "advanced_cycle_pre_ovulation_days", 3), 3, 1, 30))
+                + max(1, _safe_int(getattr(self, "advanced_cycle_ovulation_days", 1), 1, 1, 30))
+                + max(1, _safe_int(getattr(self, "advanced_cycle_luteal_days", 8), 8, 1, 30))
+                + max(1, _safe_int(getattr(self, "advanced_cycle_pms_days", 6), 6, 1, 30))
+            )
+        return 28
+
     def _body_cycle_interval_seconds(self) -> int:
-        return random.randint(25, 34) * 86400
+        base_days = self._body_cycle_total_days()
+        return base_days * 86400 + random.randint(-2, 2) * 86400
 
     def _body_cycle_generation_blocked(self, now: float | None = None) -> bool:
         now = _now_ts() if now is None else now
@@ -3052,6 +3096,136 @@ class DailyStateMixin:
             if end_ts > now or max(start_ts, end_ts) >= recent_floor:
                 return True
         return False
+
+    def _advanced_cycle_phase_hours(self, phase: str) -> int | None:
+        """返回激进策略下指定阶段的持续小时数，非激进阶段返回 None。"""
+        days_map = {
+            "menstrual": _safe_int(getattr(self, "advanced_cycle_menstrual_days", 5), 5, 1, 30),
+            "follicular": _safe_int(getattr(self, "advanced_cycle_follicular_days", 5), 5, 1, 30),
+            "pre_ovulation": _safe_int(getattr(self, "advanced_cycle_pre_ovulation_days", 3), 3, 1, 30),
+            "ovulation": _safe_int(getattr(self, "advanced_cycle_ovulation_days", 1), 1, 1, 30),
+            "luteal": _safe_int(getattr(self, "advanced_cycle_luteal_days", 8), 8, 1, 30),
+            "pms": _safe_int(getattr(self, "advanced_cycle_pms_days", 6), 6, 1, 30),
+        }
+        if phase in days_map:
+            return max(1, days_map[phase]) * 24
+        return None
+
+    _ADVANCED_CYCLE_INTENSITY_MEDIANS: dict[str, float] = {
+        "menstrual": -12.0,
+        "follicular": 0.0,
+        "pre_ovulation": 7.5,
+        "ovulation": 9.0,
+        "luteal": 4.5,
+        "pms": -7.5,
+    }
+
+    def _advanced_cycle_linked_energy(self, phase: str) -> int:
+        """当 link_intensity 开启时，根据拟人状态强度线性计算 energy_delta。
+
+        以 intensity=50 时的中位数为基准，公式: median * (intensity / 50)。
+        intensity=0 → 0, intensity=50 → median, intensity=100 → 2*median。
+        """
+        median = self._ADVANCED_CYCLE_INTENSITY_MEDIANS.get(phase, 0.0)
+        intensity = _safe_int(getattr(self, "humanized_state_intensity", 50), 50, 0, 100)
+        return int(round(median * (intensity / 50.0)))
+
+    def _advanced_cycle_phase_spec(self, phase: str) -> tuple[str, str, int, int]:
+        """返回激进策略下指定阶段的 (label, mood, energy_delta, duration_hours)。"""
+        configs = {
+            "menstrual": {
+                "prompt": getattr(self, "advanced_cycle_menstrual_prompt", "处于月经期,容易疲倦、情绪敏感,回复更慵懒简短"),
+                "mood": _single_line(getattr(self, "advanced_cycle_menstrual_mood", "疲惫"), 20) or "疲惫",
+                "energy_delta": _safe_int(getattr(self, "advanced_cycle_menstrual_energy", -12), -12, -50, 0),
+            },
+            "follicular": {
+                "prompt": getattr(self, "advanced_cycle_follicular_prompt", "处于卵泡期早,精力平稳回升,心情逐渐开朗"),
+                "mood": _single_line(getattr(self, "advanced_cycle_follicular_mood", "轻快"), 20) or "轻快",
+                "energy_delta": _safe_int(getattr(self, "advanced_cycle_follicular_energy", 0), 0, -10, 30),
+            },
+            "pre_ovulation": {
+                "prompt": getattr(self, "advanced_cycle_pre_ovulation_prompt", "处于排卵前期,身体开始轻盈,精力进一步上升"),
+                "mood": _single_line(getattr(self, "advanced_cycle_pre_ovulation_mood", "期待"), 20) or "期待",
+                "energy_delta": _safe_int(getattr(self, "advanced_cycle_pre_ovulation_energy", 8), 8, -10, 30),
+            },
+            "ovulation": {
+                "prompt": getattr(self, "advanced_cycle_ovulation_prompt", "处于排卵期,身体轻盈、精力充沛,社交意愿增强"),
+                "mood": _single_line(getattr(self, "advanced_cycle_ovulation_mood", "明朗"), 20) or "明朗",
+                "energy_delta": _safe_int(getattr(self, "advanced_cycle_ovulation_energy", 9), 9, -10, 30),
+            },
+            "luteal": {
+                "prompt": getattr(self, "advanced_cycle_luteal_prompt", "处于黄体期早,精力尚可,情绪基本平稳"),
+                "mood": _single_line(getattr(self, "advanced_cycle_luteal_mood", "平稳"), 20) or "平稳",
+                "energy_delta": _safe_int(getattr(self, "advanced_cycle_luteal_energy", 5), 5, -30, 10),
+            },
+            "pms": {
+                "prompt": getattr(self, "advanced_cycle_pms_prompt", "处于PMS期,情绪波动加大,易怒或低落,精力下降"),
+                "mood": _single_line(getattr(self, "advanced_cycle_pms_mood", "烦躁"), 20) or "烦躁",
+                "energy_delta": _safe_int(getattr(self, "advanced_cycle_pms_energy", -8), -8, -50, 10),
+            },
+        }
+        config = configs.get(phase, configs["menstrual"])
+        label = _single_line(config["prompt"], 120)
+        mood = config["mood"]
+        if getattr(self, "advanced_cycle_link_intensity", False):
+            energy_delta = self._advanced_cycle_linked_energy(phase)
+        else:
+            energy_delta = config["energy_delta"]
+        duration_hours = self._advanced_cycle_phase_hours(phase) or 120
+        return (label, mood, energy_delta, duration_hours)
+
+    def _pick_advanced_cycle_spec(
+        self,
+        intensity: float,
+    ) -> tuple[str, str, int, int]:
+        """激进真实化策略：从四阶段池中选择，只负责开始新周期（月经期）。
+
+        阶段间的推进由 ``transition_options`` / ``_build_transition_condition`` 负责。
+        如果用户设置了 ``advanced_cycle_start_offset`` > 0，则根据偏移天数直接从对应阶段开始，
+        无需等待随机概率触发。偏移在每次插件配置变更后仅生效一次（通过 ``_cycle_offset_consumed`` 标志位控制）。
+        """
+        neutral = ("不处于生理期", "平稳", 0, 24)
+        if self._body_cycle_generation_blocked():
+            return neutral
+        # 用户自定义起始偏移：立即从指定阶段开始
+        start_offset = _safe_int(getattr(self, "advanced_cycle_start_offset", 0), 0, 0, 28)
+        if start_offset > 0:
+            offset_key = "_advanced_cycle_offset_applied"
+            if not getattr(self, offset_key, False):
+                phase = self._advanced_cycle_phase_from_offset(start_offset)
+                setattr(self, offset_key, True)
+                return self._advanced_cycle_phase_spec(phase)
+        now = _now_ts()
+        meta = self.data.get("body_cycle_state", {})
+        expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0) if isinstance(meta, dict) else 0
+        if expected_ts > 0:
+            days_late = max(0.0, (now - expected_ts) / 86400)
+            chance = min(0.75, 0.22 + days_late * 0.14) * max(0.35, min(1.15, intensity))
+        else:
+            chance = 0.10 * max(0.35, min(1.2, intensity))
+        if random.random() > chance:
+            return neutral
+        # 从月经期开始新周期
+        return self._advanced_cycle_phase_spec("menstrual")
+
+    def _advanced_cycle_phase_from_offset(self, offset: int) -> str:
+        """根据偏移天数返回对应的阶段名称。"""
+        m_days = _safe_int(getattr(self, "advanced_cycle_menstrual_days", 5), 5, 1, 30)
+        f_days = _safe_int(getattr(self, "advanced_cycle_follicular_days", 5), 5, 1, 30)
+        pre_o_days = _safe_int(getattr(self, "advanced_cycle_pre_ovulation_days", 3), 3, 1, 30)
+        o_days = _safe_int(getattr(self, "advanced_cycle_ovulation_days", 1), 1, 1, 30)
+        if offset <= m_days:
+            return "menstrual"
+        if offset <= m_days + f_days:
+            return "follicular"
+        if offset <= m_days + f_days + pre_o_days:
+            return "pre_ovulation"
+        if offset <= m_days + f_days + pre_o_days + o_days:
+            return "ovulation"
+        l_days = _safe_int(getattr(self, "advanced_cycle_luteal_days", 8), 8, 1, 30)
+        if offset <= m_days + f_days + pre_o_days + o_days + l_days:
+            return "luteal"
+        return "pms"
 
     def _pick_body_cycle_spec(
         self,
@@ -5823,6 +5997,33 @@ class DailyStateMixin:
                 self.data.pop("body_cycle_state", None)
                 logger.info("[PrivateCompanion] 生理期模拟已关闭，清理旧周期状态: removed=%s", removed_count)
         else:
+            advanced_enabled = bool(getattr(self, "enable_advanced_cycle_strategy", False))
+            advanced_phases = {"menstrual", "follicular", "ovulation", "luteal"}
+            legacy_phases = {"pre", "period", "recovery"}
+            if advanced_enabled:
+                before_count = len(conditions)
+                conditions = [
+                    cond for cond in conditions
+                    if not (isinstance(cond, dict)
+                            and str(cond.get("kind") or "") == "body_cycle"
+                            and str(cond.get("phase") or "") in legacy_phases)
+                ]
+                removed_count = before_count - len(conditions)
+                if removed_count:
+                    self.data.pop("body_cycle_state", None)
+                    logger.info("[PrivateCompanion] 激进真实化策略已开启，清理旧三段式周期状态: removed=%s", removed_count)
+            else:
+                before_count = len(conditions)
+                conditions = [
+                    cond for cond in conditions
+                    if not (isinstance(cond, dict)
+                            and str(cond.get("kind") or "") == "body_cycle"
+                            and str(cond.get("phase") or "") in advanced_phases)
+                ]
+                removed_count = before_count - len(conditions)
+                if removed_count:
+                    self.data.pop("body_cycle_state", None)
+                    logger.info("[PrivateCompanion] 激进真实化策略已关闭，清理旧四阶段周期状态: removed=%s", removed_count)
             conditions = self._repair_body_cycle_conditions(conditions, now)
         active = []
         expired = []
@@ -5909,7 +6110,7 @@ class DailyStateMixin:
                 base_start = _safe_float(meta.get("last_start_ts"), 0)
                 if base_start <= 0:
                     base_start = max(0.0, last_cycle_end - 4 * 86400)
-                expected_ts = base_start + 28 * 86400
+                expected_ts = base_start + self._body_cycle_total_days() * 86400
             expected_ts = max(expected_ts, last_cycle_end + 18 * 86400)
             meta.update(
                 {
@@ -6070,6 +6271,99 @@ class DailyStateMixin:
                 phase="recovery",
                 episode_key=_single_line(cond.get("episode_key"), 40),
                 transition_options=[{"to": "stable", "base_weight": 1.0}],
+            )
+        if target == "body_menstrual":
+            label, mood, energy_delta, duration_hours = self._advanced_cycle_phase_spec("menstrual")
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label=label,
+                mood=mood,
+                energy_delta=energy_delta,
+                duration_hours=duration_hours,
+                intensity=64,
+                cause="周期阶段自然推进",
+                phase="menstrual",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "body_follicular", "base_weight": 1.0}],
+            )
+        if target == "body_follicular":
+            label, mood, energy_delta, duration_hours = self._advanced_cycle_phase_spec("follicular")
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label=label,
+                mood=mood,
+                energy_delta=energy_delta,
+                duration_hours=duration_hours,
+                intensity=52,
+                cause="周期阶段自然推进",
+                phase="follicular",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "body_pre_ovulation", "base_weight": 1.0}],
+            )
+        if target == "body_pre_ovulation":
+            label, mood, energy_delta, duration_hours = self._advanced_cycle_phase_spec("pre_ovulation")
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label=label,
+                mood=mood,
+                energy_delta=energy_delta,
+                duration_hours=duration_hours,
+                intensity=56,
+                cause="周期阶段自然推进",
+                phase="pre_ovulation",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "body_ovulation", "base_weight": 1.0}],
+            )
+        if target == "body_ovulation":
+            label, mood, energy_delta, duration_hours = self._advanced_cycle_phase_spec("ovulation")
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label=label,
+                mood=mood,
+                energy_delta=energy_delta,
+                duration_hours=duration_hours,
+                intensity=58,
+                cause="周期阶段自然推进",
+                phase="ovulation",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "body_luteal", "base_weight": 1.0}],
+            )
+        if target == "body_luteal":
+            label, mood, energy_delta, duration_hours = self._advanced_cycle_phase_spec("luteal")
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label=label,
+                mood=mood,
+                energy_delta=energy_delta,
+                duration_hours=duration_hours,
+                intensity=40,
+                cause="周期阶段自然推进",
+                phase="luteal",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "body_pms", "base_weight": 1.0}],
+            )
+        if target == "body_pms":
+            label, mood, energy_delta, duration_hours = self._advanced_cycle_phase_spec("pms")
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label=label,
+                mood=mood,
+                energy_delta=energy_delta,
+                duration_hours=duration_hours,
+                intensity=48,
+                cause="周期阶段自然推进",
+                phase="pms",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[
+                    {"to": "body_menstrual", "base_weight": 0.8},
+                    {"to": "stable", "base_weight": 0.2},
+                ],
             )
         return None
 
@@ -8300,6 +8594,12 @@ class DailyStateMixin:
                 "soft_afterglow": "可能留一点被关心后的余温",
                 "body_period": "可能自然进入生理期阶段",
                 "body_recovery": "可能自然进入恢复期",
+                "body_menstrual": "更可能进入卵泡期早",
+                "body_follicular": "更可能进入排卵前期",
+                "body_pre_ovulation": "更可能进入排卵期",
+                "body_ovulation": "更可能进入黄体期早",
+                "body_luteal": "更可能进入 PMS 期",
+                "body_pms": "可能回到月经期或回稳",
                 "stable": "也可能直接回稳",
             }.get(target, target)
             labels.append(mapped)
@@ -8332,6 +8632,12 @@ class DailyStateMixin:
             "soft_afterglow": "还留着被关心后的余温",
             "body_period": "身体感会自然往更敏感的阶段走",
             "body_recovery": "身体感会自然往恢复期走",
+            "body_menstrual": "身体感会自然往卵泡期早走,精力慢慢回升",
+            "body_follicular": "身体感会自然往排卵前期走,精力进一步上升",
+            "body_pre_ovulation": "身体感会自然往排卵期走,更轻盈一些",
+            "body_ovulation": "身体感会自然往黄体期早走,回到平稳",
+            "body_luteal": "身体感会自然往 PMS 期走,情绪可能开始波动",
+            "body_pms": "身体感会自然进入下一个月经期",
             "stable": "慢慢回到平稳",
         }
         for cond in conditions[:4]:

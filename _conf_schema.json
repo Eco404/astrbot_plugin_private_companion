@@ -2701,6 +2701,90 @@
     "default": true,
     "invisible": true
   },
+  "enable_advanced_cycle_strategy": {
+    "description": "Legacy flat config: 激进真实化模拟策略",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "advanced_cycle_menstrual_days": {
+    "description": "Legacy flat config: 月经期持续天数",
+    "type": "int",
+    "default": 5,
+    "invisible": true
+  },
+  "advanced_cycle_menstrual_prompt": {
+    "description": "Legacy flat config: 月经期状态提示词",
+    "type": "string",
+    "default": "处于月经期,容易疲倦、情绪敏感,回复更慵懒简短",
+    "invisible": true
+  },
+  "advanced_cycle_follicular_days": {
+    "description": "Legacy flat config: 卵泡期持续天数",
+    "type": "int",
+    "default": 8,
+    "invisible": true
+  },
+  "advanced_cycle_follicular_prompt": {
+    "description": "Legacy flat config: 卵泡期状态提示词",
+    "type": "string",
+    "default": "处于卵泡期,精力回升、心情平稳,对事物有兴趣",
+    "invisible": true
+  },
+  "advanced_cycle_ovulation_days": {
+    "description": "Legacy flat config: 排卵期持续天数",
+    "type": "int",
+    "default": 3,
+    "invisible": true
+  },
+  "advanced_cycle_ovulation_prompt": {
+    "description": "Legacy flat config: 排卵期状态提示词",
+    "type": "string",
+    "default": "处于排卵期,身体轻盈、精力充沛,社交意愿增强",
+    "invisible": true
+  },
+  "advanced_cycle_luteal_days": {
+    "description": "Legacy flat config: 黄体期持续天数",
+    "type": "int",
+    "default": 13,
+    "invisible": true
+  },
+  "advanced_cycle_luteal_prompt": {
+    "description": "Legacy flat config: 黄体期状态提示词",
+    "type": "string",
+    "default": "处于黄体期,保持默认人格,不额外放大情绪变化",
+    "invisible": true
+  },
+  "advanced_cycle_pre_ovulation_days": {
+    "description": "Legacy flat config: 排卵前期持续天数",
+    "type": "int",
+    "default": 3,
+    "invisible": true
+  },
+  "advanced_cycle_pre_ovulation_prompt": {
+    "description": "Legacy flat config: 排卵前期状态提示词",
+    "type": "string",
+    "default": "处于排卵前期,身体开始轻盈,精力进一步上升",
+    "invisible": true
+  },
+  "advanced_cycle_pms_days": {
+    "description": "Legacy flat config: PMS期持续天数",
+    "type": "int",
+    "default": 6,
+    "invisible": true
+  },
+  "advanced_cycle_pms_prompt": {
+    "description": "Legacy flat config: PMS期状态提示词",
+    "type": "string",
+    "default": "处于PMS期,情绪波动加大,易怒或低落,精力下降",
+    "invisible": true
+  },
+  "advanced_cycle_link_intensity": {
+    "description": "Legacy flat config: 精力值与拟人状态强度挂钩",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "humanized_state_intensity": {
     "description": "Legacy flat config: 拟人状态强度",
     "type": "int",
@@ -8137,6 +8221,262 @@
         "default": true,
         "condition": {
           "enable_humanized_states": true
+        }
+      },
+      "enable_advanced_cycle_strategy": {
+        "description": "激进真实化模拟策略（加入卵泡期，排卵期，黄体期等）",
+        "type": "bool",
+        "hint": "开启后，生理期模拟按真实月经周期细分为月经期、卵泡期、排卵期、黄体期四个阶段，各阶段持续天数和提示词可自定义；不开启则维持原有的“生理期前/处于生理期/生理期后”三段式模拟。它只影响语气、精力和节奏，不是医学记录或真实日期追踪。",
+        "default": false,
+        "condition": {
+          "enable_cycle_state": true
+        }
+      },
+      "advanced_cycle_menstrual_days": {
+        "description": "月经期持续天数",
+        "type": "int",
+        "hint": "月经期（第1~5天）：容易疲倦、情绪敏感、回复更慵懒简短。",
+        "default": 5,
+        "slider": { "min": 1, "max": 10, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_menstrual_prompt": {
+        "description": "月经期状态提示词",
+        "type": "string",
+        "hint": "月经期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
+        "default": "处于月经期,容易疲倦、情绪敏感,回复更慵懒简短",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_follicular_days": {
+        "description": "卵泡期早持续天数",
+        "type": "int",
+        "hint": "卵泡期早（第6~10天）：精力平稳回升、心情逐渐开朗。",
+        "default": 5,
+        "slider": { "min": 1, "max": 14, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_follicular_prompt": {
+        "description": "卵泡期早状态提示词",
+        "type": "string",
+        "hint": "卵泡期早注入到当前扮演状态的文案，只影响语气、长短和节奏。",
+        "default": "处于卵泡期早,精力平稳回升,心情逐渐开朗",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_ovulation_days": {
+        "description": "排卵期持续天数",
+        "type": "int",
+        "hint": "排卵期（第14天）：身体轻盈、精力充沛、社交意愿增强。",
+        "default": 1,
+        "slider": { "min": 1, "max": 7, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_ovulation_prompt": {
+        "description": "排卵期状态提示词",
+        "type": "string",
+        "hint": "排卵期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
+        "default": "处于排卵期,身体轻盈、精力充沛,社交意愿增强",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_luteal_days": {
+        "description": "黄体期早持续天数",
+        "type": "int",
+        "hint": "黄体期早（第15~22天）：精力尚可，情绪基本平稳。",
+        "default": 8,
+        "slider": { "min": 1, "max": 20, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_luteal_prompt": {
+        "description": "黄体期早状态提示词",
+        "type": "string",
+        "hint": "黄体期早注入到当前扮演状态的文案，保持默认人格，只影响语气、长短和节奏。",
+        "default": "处于黄体期早,精力尚可,情绪基本平稳",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_menstrual_mood": {
+        "description": "月经期情绪标签",
+        "type": "string",
+        "hint": "月经期的情绪底色关键词，如“疲惫”、“敏感”、“烦躁”等，用于状态生成时的 mood 字段。",
+        "default": "疲惫",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_menstrual_energy": {
+        "description": "月经期精力变化",
+        "type": "int",
+        "hint": "月经期的精力增减值，负数表示精力下降。范围 -50 ~ 0，绝对值越大越疲惫。开启“与拟人状态强度挂钩”后此项自动计算。",
+        "default": -12,
+        "slider": { "min": -50, "max": 0, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_follicular_mood": {
+        "description": "卵泡期早情绪标签",
+        "type": "string",
+        "hint": "卵泡期早的情绪底色关键词，如“轻快”、“平稳”、“好奇”等。",
+        "default": "轻快",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_follicular_energy": {
+        "description": "卵泡期早精力变化",
+        "type": "int",
+        "hint": "卵泡期早的精力增减值，正数表示精力回升。范围 -10 ~ +30。开启“与拟人状态强度挂钩”后此项自动计算。",
+        "default": 0,
+        "slider": { "min": -10, "max": 30, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_ovulation_mood": {
+        "description": "排卵期情绪标签",
+        "type": "string",
+        "hint": "排卵期的情绪底色关键词，如“明朗”、“活跃”、“自信”等。",
+        "default": "明朗",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_ovulation_energy": {
+        "description": "排卵期精力变化",
+        "type": "int",
+        "hint": "排卵期的精力增减值，正数表示精力充沛。范围 -10 ~ +30。开启“与拟人状态强度挂钩”后此项自动计算。",
+        "default": 9,
+        "slider": { "min": -10, "max": 30, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_luteal_mood": {
+        "description": "黄体期早情绪标签",
+        "type": "string",
+        "hint": "黄体期早的情绪底色关键词，如“平稳”、“倦怠”等。",
+        "default": "平稳",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_luteal_energy": {
+        "description": "黄体期早精力变化",
+        "type": "int",
+        "hint": "黄体期早的精力增减值。接近 0 表示无明显变化，负数表示略有疲倦。开启“与拟人状态强度挂钩”后此项自动计算。",
+        "default": 5,
+        "slider": { "min": -30, "max": 10, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_link_intensity": {
+        "description": "与拟人状态强度挂钩",
+        "type": "bool",
+        "hint": "开启后，六个阶段的精力变化值不再手动填写，而是以拟人状态强度=50时的中位数为基准，随强度线性缩放：强度越高，精力波动越大；强度越低越趋近于0。",
+        "default": false,
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pre_ovulation_days": {
+        "description": "排卵前期持续天数",
+        "type": "int",
+        "hint": "排卵前期（第11~13天）：身体开始轻盈，精力进一步上升。",
+        "default": 3,
+        "slider": { "min": 1, "max": 10, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pre_ovulation_prompt": {
+        "description": "排卵前期状态提示词",
+        "type": "string",
+        "hint": "排卵前期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
+        "default": "处于排卵前期,身体开始轻盈,精力进一步上升",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pre_ovulation_mood": {
+        "description": "排卵前期情绪标签",
+        "type": "string",
+        "hint": "排卵前期的情绪底色关键词，如“期待”、“活跃”等。",
+        "default": "期待",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pre_ovulation_energy": {
+        "description": "排卵前期精力变化",
+        "type": "int",
+        "hint": "排卵前期的精力增减值，正数表示精力上升。开启“与拟人状态强度挂钩”后此项自动计算。",
+        "default": 8,
+        "slider": { "min": -10, "max": 30, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pms_days": {
+        "description": "PMS期持续天数",
+        "type": "int",
+        "hint": "PMS期（第23~28天）：情绪波动加大，易怒或低落，精力下降。",
+        "default": 6,
+        "slider": { "min": 1, "max": 14, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pms_prompt": {
+        "description": "PMS期状态提示词",
+        "type": "string",
+        "hint": "PMS期注入到当前扮演状态的文案，只影响语气、长短和节奏。",
+        "default": "处于PMS期,情绪波动加大,易怒或低落,精力下降",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pms_mood": {
+        "description": "PMS期情绪标签",
+        "type": "string",
+        "hint": "PMS期的情绪底色关键词，如“烦躁”、“易怒”、“低落”等。",
+        "default": "烦躁",
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_pms_energy": {
+        "description": "PMS期精力变化",
+        "type": "int",
+        "hint": "PMS期的精力增减值，负数表示精力下降。开启“与拟人状态强度挂钩”后此项自动计算。",
+        "default": -8,
+        "slider": { "min": -50, "max": 10, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
+      },
+      "advanced_cycle_start_offset": {
+        "description": "周期起始偏移天数",
+        "type": "int",
+        "hint": "设定当前处于周期中的第几天（0 表示新周期从月经期第1天开始）。设为 0 则由系统随机判定开始时机；设为大于 0 的值则立即从对应阶段开始模拟。",
+        "default": 0,
+        "slider": { "min": 0, "max": 28, "step": 1 },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
         }
       },
       "humanized_state_intensity": {
