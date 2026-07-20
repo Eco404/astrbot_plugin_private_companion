@@ -162,6 +162,7 @@ from .proactive_engine import ProactiveEngineMixin
 from .proactive_message import ProactiveMessageMixin
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .daily_state import DailyStateMixin
+from .scene_context import SceneContextMixin
 from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
 from .llm_tool_actions import LlmToolActionsMixin
@@ -244,6 +245,187 @@ class PrivateCompanionExtensionAPI:
 
     def list_proactive_abilities(self) -> list[dict[str, Any]]:
         return self._plugin.external_proactive_abilities()
+
+    def get_bot_identity(self) -> dict[str, Any]:
+        """Return a stable Bot identity without guessing between multiple accounts."""
+        plugin = self._plugin
+        self_ids = sorted(
+            {
+                _single_line(item, 80)
+                for item in getattr(plugin, "_known_bot_self_ids", lambda: set())()
+                if _single_line(item, 80)
+            }
+        )
+        qq_ids = [item for item in self_ids if re.fullmatch(r"[1-9]\d{4,14}", item)]
+        selected_id = self_ids[0] if len(self_ids) == 1 else ""
+        qq_id = qq_ids[0] if len(qq_ids) == 1 else ""
+        bot_name = _single_line(getattr(plugin, "bot_name", ""), 80)
+        return {
+            "available": True,
+            "name": bot_name,
+            "aliases": [bot_name] if bot_name else [],
+            "platform": _single_line(getattr(plugin, "target_platform", ""), 80),
+            "self_ids": self_ids,
+            "selected_id": selected_id,
+            "qq_id": qq_id,
+            "ambiguous": len(self_ids) > 1 or len(qq_ids) > 1,
+            "avatar": {
+                "kind": "qq" if qq_id else "fallback",
+                "qq_id": qq_id,
+                "remote_url": f"https://q1.qlogo.cn/g?b=qq&nk={qq_id}&s=640" if qq_id else "",
+            },
+        }
+
+    def get_scene_context(self, user_id: str = "") -> dict[str, Any]:
+        """Return the current structured Bot-life context for plugin integrations."""
+        plugin = self._plugin
+        users = plugin.data.get("users") if isinstance(plugin.data.get("users"), dict) else {}
+        normalized_user_id = _single_line(user_id, 80)
+        user = users.get(normalized_user_id) if normalized_user_id else None
+        if not isinstance(user, dict):
+            user = None
+        else:
+            user = dict(user)
+            user.setdefault("user_id", normalized_user_id)
+        return plugin._build_companion_scene_snapshot(user)
+
+    def get_realtime_context(self, user_id: str = "", purpose: str = "together") -> dict[str, Any]:
+        """Return the full structured scene and its canonical prompt representation."""
+        snapshot = self.get_scene_context(user_id)
+        normalized_purpose = _single_line(purpose, 40) or "together"
+        prompt = self._plugin._format_companion_scene_snapshot(
+            snapshot,
+            purpose=normalized_purpose,
+        )
+        activity = self.get_external_activity(user_id=user_id)
+        if activity:
+            label = _single_line(activity.get("label"), 100) or {
+                "shared_call": "正在和主要用户通话",
+                "shared_watch": "正在和主要用户一起看视频",
+            }.get(_single_line(activity.get("kind"), 40), "正在进行共同活动")
+            prompt = f"{prompt}；当前共同活动：{label}" if prompt else f"当前共同活动：{label}"
+        return {
+            "snapshot": snapshot,
+            "prompt": prompt,
+            "purpose": normalized_purpose,
+            "bot": self.get_bot_identity(),
+            "external_activity": activity,
+        }
+
+    def notify_external_activity_started(
+        self,
+        activity_id: str,
+        *,
+        user_id: str = "",
+        kind: str = "external",
+        label: str = "",
+        source_plugin: str = "external",
+        ttl_seconds: int = 240,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._upsert_external_activity(
+            activity_id,
+            user_id=user_id,
+            kind=kind,
+            label=label,
+            source_plugin=source_plugin,
+            ttl_seconds=ttl_seconds,
+            metadata=metadata,
+            preserve_started_at=False,
+        )
+
+    def notify_external_activity_updated(
+        self,
+        activity_id: str,
+        *,
+        user_id: str = "",
+        kind: str = "",
+        label: str = "",
+        source_plugin: str = "",
+        ttl_seconds: int = 240,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._upsert_external_activity(
+            activity_id,
+            user_id=user_id,
+            kind=kind,
+            label=label,
+            source_plugin=source_plugin,
+            ttl_seconds=ttl_seconds,
+            metadata=metadata,
+            preserve_started_at=True,
+        )
+
+    def notify_external_activity_ended(self, activity_id: str) -> bool:
+        activity_key = _single_line(activity_id, 120)
+        registry = getattr(self._plugin, "_external_realtime_activities", None)
+        return bool(activity_key and isinstance(registry, dict) and registry.pop(activity_key, None))
+
+    def get_external_activity(self, *, user_id: str = "", activity_id: str = "") -> dict[str, Any]:
+        registry = getattr(self._plugin, "_external_realtime_activities", None)
+        if not isinstance(registry, dict):
+            return {}
+        now = time.time()
+        expired = [
+            key
+            for key, item in registry.items()
+            if not isinstance(item, dict) or _safe_float(item.get("expires_at"), 0.0) <= now
+        ]
+        for key in expired:
+            registry.pop(key, None)
+        activity_key = _single_line(activity_id, 120)
+        if activity_key:
+            item = registry.get(activity_key)
+            return dict(item) if isinstance(item, dict) else {}
+        normalized_user_id = _single_line(user_id, 80)
+        matches = [
+            item
+            for item in registry.values()
+            if isinstance(item, dict)
+            and (not normalized_user_id or not item.get("user_id") or item.get("user_id") == normalized_user_id)
+        ]
+        if not matches:
+            return {}
+        return dict(max(matches, key=lambda item: _safe_float(item.get("updated_at"), 0.0)))
+
+    def _upsert_external_activity(
+        self,
+        activity_id: str,
+        *,
+        user_id: str,
+        kind: str,
+        label: str,
+        source_plugin: str,
+        ttl_seconds: int,
+        metadata: dict[str, Any] | None,
+        preserve_started_at: bool,
+    ) -> dict[str, Any]:
+        activity_key = _single_line(activity_id, 120)
+        if not activity_key:
+            return {}
+        registry = getattr(self._plugin, "_external_realtime_activities", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._plugin._external_realtime_activities = registry
+        existing = registry.get(activity_key) if preserve_started_at else None
+        existing = existing if isinstance(existing, dict) else {}
+        now = time.time()
+        ttl = _safe_int(ttl_seconds, 240, 30, 3600)
+        item = {
+            "activity_id": activity_key,
+            "user_id": _single_line(user_id, 80) or _single_line(existing.get("user_id"), 80),
+            "kind": _single_line(kind, 40) or _single_line(existing.get("kind"), 40) or "external",
+            "label": _single_line(label, 100) or _single_line(existing.get("label"), 100),
+            "source_plugin": _single_line(source_plugin, 100)
+            or _single_line(existing.get("source_plugin"), 100)
+            or "external",
+            "started_at": _safe_float(existing.get("started_at"), now) if existing else now,
+            "updated_at": now,
+            "expires_at": now + ttl,
+            "metadata": dict(metadata) if isinstance(metadata, dict) else dict(existing.get("metadata") or {}),
+        }
+        registry[activity_key] = item
+        return dict(item)
 
     async def prepare_proactive_chat(
         self,
@@ -334,15 +516,16 @@ class PrivateCompanionExtensionAPI:
                     "name": _single_line(raw.get("nickname") or raw.get("display_name") or user_id, 80),
                 }
             )
-        bot_name = _single_line(getattr(plugin, "bot_name", ""), 80)
-        bot_aliases = [bot_name] if bot_name else []
+        bot_identity = self.get_bot_identity()
         return {
             "available": True,
             "matches": matches,
             "bot": {
-                "name": bot_name,
-                "aliases": bot_aliases,
-                "self_ids": sorted(getattr(plugin, "_known_bot_self_ids", lambda: set())()),
+                "name": bot_identity.get("name", ""),
+                "aliases": bot_identity.get("aliases", []),
+                "self_ids": bot_identity.get("self_ids", []),
+                "selected_id": bot_identity.get("selected_id", ""),
+                "qq_id": bot_identity.get("qq_id", ""),
             },
             "target_users": target_users[:30],
         }
@@ -682,7 +865,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.10.2",
+    "5.10.3",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -702,6 +885,7 @@ class PrivateCompanionPlugin(
     CreativeMixin,
     ProactiveMixin,
     ProactiveEngineMixin,
+    SceneContextMixin,
     ProactiveMessageMixin,
     DailyStateMixin,
     StateViewsMixin,
@@ -771,6 +955,7 @@ class PrivateCompanionPlugin(
         _private_companion_plugin = self
         self.extension_api = PrivateCompanionExtensionAPI(self)
         self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
+        self._external_realtime_activities: dict[str, dict[str, Any]] = {}
         self.config = config
         c = config
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
@@ -8226,6 +8411,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 and self._is_target_private_user(private_user_id, private_user)
                 and bool(private_user.get("enabled", True))
             )
+            if private_user_active:
+                preferred_address = _single_line(
+                    private_user.get("nickname") or getattr(self, "default_nickname", "你"),
+                    24,
+                )
+                if preferred_address:
+                    # MemoryCompanion consumes these request-scoped fields after this hook.
+                    setattr(req, "_private_companion_preferred_address", preferred_address)
+                    setattr(req, "_private_companion_preferred_address_locked", True)
             if not private_user_active:
                 reason = "private_user_missing" if not isinstance(private_user, dict) else "private_user_disabled"
                 log_bookshelf_secret_skip(reason, private_user if isinstance(private_user, dict) else None)
@@ -11220,6 +11414,68 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             asyncio.create_task(self._maybe_refresh_companion_memory(user_id, user_snapshot))
             asyncio.create_task(self._maybe_refresh_dialogue_episode(user_id, user_snapshot))
 
+    async def _capture_group_observation_event(
+        self,
+        event: AstrMessageEvent,
+        *,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        scene: dict[str, Any] | None = None,
+    ) -> bool:
+        async with self._data_lock:
+            group = self._get_group(group_id)
+            group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
+            effective_scene = scene or self._infer_group_scene(
+                event,
+                group,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=text,
+            )
+            captured = self._capture_group_observation_once(
+                group,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=text,
+                group_id=group_id,
+                scene=effective_scene,
+                message_id=self._event_message_id(event),
+                event=event,
+            )
+            if captured:
+                self._schedule_data_save()
+            return captured
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=200000)
+    async def capture_group_observation_early(self, event: AstrMessageEvent, *args, **kwargs):
+        """Record allowed group messages before reply plugins can stop propagation."""
+        if self is None or not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id or not self._group_enabled_for_event(group_id):
+            return
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        self_id = self._event_self_id(event)
+        if sender_id and self_id and sender_id == self_id:
+            return
+        text = self._group_observation_event_text(event)
+        if not text or text.startswith(("陪伴群", "/陪伴群", "群陪伴", "群聊陪伴")):
+            return
+        if self._message_debounce_command_text(event, text):
+            return
+        await self._capture_group_observation_event(
+            event,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=self._sender_display_name(event),
+            text=text,
+        )
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
@@ -11246,18 +11502,25 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             event.stop_event()
             return
         received_ts = _now_ts()
-        text = _single_line(event.message_str, 260)
+        text = self._group_observation_event_text(event)
         if not text:
             return
         if text.startswith(("陪伴群", "/陪伴群", "群陪伴", "群聊陪伴")):
             return
         if self._message_debounce_command_text(event, text):
             return
+        sender_name = self._sender_display_name(event)
+        await self._capture_group_observation_event(
+            event,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            text=text,
+        )
         existing_reply_preview = self._event_existing_reply_result_preview(event)
         if self._proactive_only_blocks_passive_event(event, "group_event_pipeline"):
-            logger.debug("[PrivateCompanion] 主动消息专用模式已跳过群聊被动观察")
+            logger.debug("[PrivateCompanion] 主动消息专用模式已保留群聊观察,跳过回复增强")
             return
-        sender_name = self._sender_display_name(event)
         if existing_reply_preview:
             async with self._data_lock:
                 if self._is_duplicate_inbound_message(event, scope=f"group:{group_id}", sender_id=sender_id, text=text):
@@ -11266,7 +11529,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 group = self._get_group(group_id)
                 group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
                 scene = self._infer_group_scene(event, group, sender_id=sender_id, sender_name=sender_name, text=text)
-                self._update_group_observation(
+                self._capture_group_observation_once(
                     group,
                     sender_id=sender_id,
                     sender_name=sender_name,
@@ -11290,7 +11553,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if self._group_llm_reply_blocked(group_id):
             logger.debug(
-                "[PrivateCompanion] 本群 LLM 回复已关闭,跳过群聊被动增强入口: group=%s text=%s",
+                "[PrivateCompanion] 本群 LLM 回复已关闭,已保留观察并跳过回复增强: group=%s text=%s",
                 group_id,
                 _single_line(text, 80),
             )
@@ -11649,7 +11912,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     force=True,
                     kind="group_high_intensity",
                 ):
-                    self._update_group_observation(
+                    self._capture_group_observation_once(
                         group,
                         sender_id=sender_id,
                         sender_name=sender_name,
@@ -11682,7 +11945,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     scene=scene,
                 )
                 if isinstance(air_guard, dict) and air_guard.get("block"):
-                    self._update_group_observation(
+                    self._capture_group_observation_once(
                         group,
                         sender_id=sender_id,
                         sender_name=sender_name,
@@ -11756,7 +12019,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._save_data_sync()
                 event.stop_event()
                 return
-            self._update_group_observation(
+            self._capture_group_observation_once(
                 group,
                 sender_id=sender_id,
                 sender_name=sender_name,

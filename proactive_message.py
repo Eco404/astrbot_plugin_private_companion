@@ -132,6 +132,7 @@ from .planning import (
     normalize_story_plan,
     pick_detail_segment,
 )
+from .scene_context import infer_companion_scene_category
 
 DEFAULT_NEWS_SOURCES = "\n".join(
     [
@@ -4045,19 +4046,34 @@ class ProactiveMessageMixin:
         review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
         review_mode = self._effective_proactive_review_mode()
         if not review_enabled or review_mode == "local_only":
+            local_mode_label = "仅本地检查模式" if review_enabled and review_mode == "local_only" else "主动模型终审未启用"
             if local_decision in {"drop", "defer"}:
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if local_decision == "rewrite":
+                local_rewrite_text = str(local.get("text") or "").strip()
+                if local_rewrite_text:
+                    local_result = self._normalize_proactive_review_decision_policy(
+                        user,
+                        local,
+                        strength=strength,
+                        source="local",
+                    )
+                    local_result["reason"] = _single_line(
+                        f"{local_mode_label}，已采用本地确定性改写："
+                        + (_single_line(local.get("reason"), 80) or "轻量清理"),
+                        120,
+                    )
+                    return local_result
                 return {
                     "decision": "drop",
                     "text": "",
-                    "reason": "主动模型终审未启用，候选需要改写才能安全发送，已取消本轮发送",
+                    "reason": f"{local_mode_label}，本地检查仅能提供参考意图，无法形成确定正文，已取消本轮发送",
                     "hard": True,
                 }
             return {
                 "decision": "send",
                 "text": "",
-                "reason": "主动模型终审未启用，本地检查允许原文发送",
+                "reason": f"{local_mode_label}，本地检查允许原文发送",
             }
         if local_decision in {"drop", "defer"} and local_hard_block:
             return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
@@ -6749,6 +6765,7 @@ Output:
         async with self._data_lock:
             self._note_photo_generation_attempt(str(user.get("user_id") or ""), image_path=image_path)
             self._save_data_sync()
+        scene_context_line = _single_line(scene.get("scene_context"), 500)
         return (
             f"photo_text：已通过 {backend_name} 生成真实图片\n"
             f"图片类型：{workflow_kind}\n"
@@ -6757,7 +6774,8 @@ Output:
             f"画面：{scene['caption']}\n"
             f"图片主体归属：{subject_owner}\n"
             f"人物参考图：{'已使用' if reference_image_path else '未使用'}\n"
-            f"生图提示：{_single_line(scene['prompt'], 240)}"
+            + (f"统一情境：{scene_context_line}\n" if scene_context_line else "")
+            + f"生图提示：{_single_line(scene['prompt'], 240)}"
         )
 
     def _photo_generation_failure_counts_as_attempt(self, note: str) -> bool:
@@ -7863,6 +7881,24 @@ Output:
         return _single_line(formatted, 1800)
 
     def _photo_generation_selfie_schedule_scene_hint(self) -> str:
+        snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
+        snapshot_formatter = getattr(self, "_format_companion_scene_snapshot", None)
+        if callable(snapshot_builder) and callable(snapshot_formatter):
+            try:
+                snapshot_text = _single_line(
+                    snapshot_formatter(
+                        snapshot_builder(),
+                        purpose="selfie_scene",
+                    ),
+                    700,
+                )
+                if snapshot_text:
+                    return snapshot_text
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 自拍场景读取统一情境快照失败，已回退旧路径: %s",
+                    _single_line(exc, 160),
+                )
         plan = self.data.get("daily_plan", {}) if isinstance(getattr(self, "data", {}), dict) else {}
         plan = plan if isinstance(plan, dict) else {}
         state = self.data.get("daily_state", {}) if isinstance(getattr(self, "data", {}), dict) else {}
@@ -7902,6 +7938,9 @@ Output:
             parts.append(f"当前日程：{current_schedule}")
         if location_text:
             parts.append(f"当前位置：{location_text}")
+        _, scene_category_label = infer_companion_scene_category(current_schedule, location_text)
+        if scene_category_label:
+            parts.append(f"当前场景：{scene_category_label}")
         return _single_line("；".join(parts), 460)
 
     def _apply_photo_generation_selfie_schedule_scene_prompt(
@@ -8419,6 +8458,45 @@ Output:
         delayed_scene = bool(self._deferred_immediate_share_tense_hint(user, "photo_text"))
         if delayed_scene:
             schedule_context = "本次画面对应较早的生活片段；日程只用于保持人物与场景连续，不可作为发送当下的事实依据。"
+        scene_snapshot: dict[str, Any] = {}
+        scene_context = ""
+        snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
+        snapshot_formatter = getattr(self, "_format_companion_scene_snapshot", None)
+        if callable(snapshot_builder) and callable(snapshot_formatter):
+            try:
+                scene_snapshot = snapshot_builder(user)
+                scene_context = _single_line(
+                    snapshot_formatter(
+                        scene_snapshot,
+                        purpose="proactive_photo",
+                    ),
+                    1200,
+                )
+                snapshot_schedule = scene_snapshot.get("schedule")
+                if not delayed_scene and isinstance(snapshot_schedule, dict):
+                    schedule_context = (
+                        _single_line(snapshot_schedule.get("text"), 320)
+                        or schedule_context
+                    )
+            except Exception as exc:
+                scene_snapshot = {}
+                scene_context = ""
+                logger.debug(
+                    "[PrivateCompanion] 主动照片读取统一情境快照失败，已回退旧路径: %s",
+                    _single_line(exc, 160),
+                )
+        if not scene_context:
+            scene_context = _single_line(
+                "；".join(
+                    part
+                    for part in (
+                        self._format_state_for_prompt(state if isinstance(state, dict) else {}),
+                        schedule_context,
+                    )
+                    if part
+                ),
+                1200,
+            )
         prompt = f"""
 请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
 
@@ -8428,11 +8506,9 @@ Output:
 【收信人】
 {name}
 
-【当前拟人状态】
-{self._format_state_for_prompt(state if isinstance(state, dict) else {})}
-
-【当前日程背景】
-{schedule_context}
+【当前统一情境快照】
+{scene_context}
+使用方式：这是当前事实和连续性参考。优先保持时间、地点、日程、情绪和今日穿搭互相一致；它只帮助选择自然画面，不要求把所有字段都画出来或写进配文。
 
 【这次想分享的画面钩子】
 话题：{topic_hint or '（未指定）'}
@@ -8557,6 +8633,7 @@ Output:
             "caption": caption,
             "use_persona_reference": use_persona_reference,
             "subject_owner": subject_owner,
+            "scene_context": scene_context,
         }
 
     def _get_photo_style_instruction(self) -> tuple[str, str]:
@@ -8755,7 +8832,7 @@ Output:
         note = re.sub(r"\s+", "", str(candidate.get("note") or "")).lower()
         score = 2.0 if candidate.get("kind") == "persona" else 1.0
         categories = (
-            ("home", ("在家", "居家", "卧室", "房间", "客厅", "宅家", "室内日常")),
+            ("home", ("在家", "家里", "居家", "宿舍", "公寓", "卧室", "房间", "客厅", "宅家", "居家室内", "室内日常")),
             ("sleep", ("睡衣", "睡前", "起床", "刚醒", "床上", "夜晚休息")),
             ("outdoor", ("外出", "通勤", "上学", "上班", "逛街", "商场", "街头", "旅行")),
             ("sport", ("运动", "健身", "跑步", "瑜伽", "泳装", "游泳")),
@@ -8788,7 +8865,15 @@ Output:
         candidates = await self._photo_reference_candidates_async(allow_daily_outfit=allow_daily_outfit)
         if not candidates:
             return ""
-        selected = max(candidates, key=lambda item: self._photo_reference_candidate_score(item, selection_context))
+        scored_candidates = [
+            (item, self._photo_reference_candidate_score(item, selection_context))
+            for item in candidates
+        ]
+        fallback, _ = max(scored_candidates, key=lambda pair: pair[1])
+        selected = fallback
+        selection_source = "rule_fallback"
+        selection_reason = "model_not_attempted"
+        model_reply = ""
         provider_selector = getattr(self, "_task_provider", None)
         provider_id = ""
         if callable(provider_selector):
@@ -8800,13 +8885,16 @@ Output:
             )
         llm_call = getattr(self, "_llm_call", None)
         if selection_context and len(candidates) > 1 and callable(llm_call):
+            selection_reason = "model_invalid_response"
             options = "\n".join(
                 f"{index}. id={item['id']}；注释={_single_line(item.get('note'), 360)}"
                 for index, item in enumerate(candidates, start=1)
             )
             prompt = f"""
-你在为角色生图选择一张人物参考图。只依据画面需求与管理员给每张图的用途注释选择，不要总是选今日穿搭。
-如果画面在家、卧室、睡前或刚起床，应优先匹配居家服/睡衣；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
+你在为角色生图选择一张人物参考图。结合最终画面需求中的日程、位置、当前场景和服装需求，按管理员给每张图的用途注释判断。
+优先选择用途更具体且与当前场景兼容的参考图；只有没有更具体的场景或服装参考时，才选择基础人物身份图。
+明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
+不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
 只输出候选编号，不要解释。
 
 【最终画面需求】
@@ -8814,18 +8902,53 @@ Output:
 
 【候选参考图】
 {options}
-""".strip()
+            """.strip()
             try:
                 raw = await llm_call(prompt, max_tokens=12, provider_id=provider_id or None, task="photo_reference_selection")
-                match = re.search(r"\b(\d{1,2})\b", str(raw or ""))
+                model_reply = _single_line(raw, 80)
+                match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", model_reply)
                 if match and 1 <= int(match.group(1)) <= len(candidates):
                     selected = candidates[int(match.group(1)) - 1]
+                    selection_source = "model"
+                    selection_reason = "valid_candidate_number"
+                elif not model_reply:
+                    selection_reason = "model_empty_response"
+                elif match:
+                    selection_reason = "model_candidate_out_of_range"
             except Exception as exc:
-                logger.info("[PrivateCompanion] 参考图库模型选图失败，使用场景匹配结果: %s", _single_line(exc, 120))
+                selection_reason = f"model_error:{type(exc).__name__}"
+                logger.info(
+                    "[PrivateCompanion] 参考图库模型选图失败，使用规则兜底: error=%s",
+                    _single_line(exc, 120),
+                )
+        elif len(candidates) == 1:
+            selection_source = "single_candidate"
+            selection_reason = "only_one_candidate"
+        elif not selection_context:
+            selection_reason = "empty_selection_context"
+        elif not callable(llm_call):
+            selection_reason = "model_unavailable"
+
+        score_summary = ",".join(
+            f"{_single_line(item.get('id'), 40)}={score:g}"
+            for item, score in scored_candidates
+        )
         logger.info(
-            "[PrivateCompanion] 参考图库已选图: id=%s kind=%s note=%s candidates=%s",
+            "[PrivateCompanion] 参考图库候选评分: fallback=%s scores=%s context=%s",
+            fallback.get("id"),
+            score_summary,
+            _single_line(selection_context, 240),
+        )
+        logger.info(
+            "[PrivateCompanion] 参考图库已选图: source=%s reason=%s id=%s kind=%s fallback=%s "
+            "model_reply=%s path=%s note=%s candidates=%s",
+            selection_source,
+            selection_reason,
             selected.get("id"),
             selected.get("kind"),
+            fallback.get("id"),
+            model_reply or "-",
+            _single_line(selected.get("path"), 260),
             _single_line(selected.get("note"), 160),
             len(candidates),
         )

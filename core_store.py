@@ -1341,10 +1341,17 @@ class CoreStoreMixin:
                     ids.add(value)
         platform_manager = getattr(getattr(self, "context", None), "platform_manager", None)
         for inst in list(getattr(platform_manager, "platform_insts", []) or []):
-            for attr in ("client_self_id", "self_id", "bot_self_id", "bot_user_id"):
+            for attr in ("self_id", "bot_self_id", "bot_user_id"):
                 value = self._normalize_private_identity_id(getattr(inst, attr, ""))
                 if value:
                     ids.add(value)
+            bot = getattr(inst, "bot", None)
+            api_clients = getattr(bot, "_wsr_api_clients", None)
+            if isinstance(api_clients, dict):
+                for item in api_clients:
+                    value = self._normalize_private_identity_id(item)
+                    if value and re.fullmatch(r"[1-9]\d{4,14}", value):
+                        ids.add(value)
         return ids
 
     def _get_group(self, group_id: str) -> dict[str, Any]:
@@ -1420,6 +1427,16 @@ class CoreStoreMixin:
                 return False
         else:
             configured = self._configured_group_ids()
+            if not configured:
+                if not bool(getattr(self, "_empty_group_whitelist_warning_logged", False)):
+                    self._empty_group_whitelist_warning_logged = True
+                    logger.warning(
+                        "[PrivateCompanion] 群聊观察已开启但白名单为空,当前不会观察任何群；"
+                        "请在群聊观测页把目标群加入白名单,或改用黑名单模式: first_group=%s",
+                        _single_line(group_id, 80) or "-",
+                    )
+                return False
+            self._empty_group_whitelist_warning_logged = False
             if group_id not in configured:
                 return False
         return True

@@ -6,21 +6,6 @@ let cachedPageBridge = null;
 let cachedPageEndpointStyle = "";
 let pageBridgeProbePromise = null;
 let loadAllRequestSeq = 0;
-const DASHBOARD_LAYOUT_STORAGE_KEY = "pc_dashboard_layout";
-
-function normalizeDashboardLayout(value) {
-  return String(value || "").trim().toLowerCase() === "life" ? "life" : "standard";
-}
-
-function initialDashboardLayout() {
-  const documentValue = document.documentElement.dataset.dashboardLayout;
-  if (documentValue) return normalizeDashboardLayout(documentValue);
-  try {
-    return normalizeDashboardLayout(window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY));
-  } catch (_error) {
-    return "standard";
-  }
-}
 
 const state = {
   overview: null,
@@ -64,6 +49,11 @@ const state = {
   expressionScopeOpen: false,
   selectedGroupId: "",
   featureDraft: {},
+  featureDraftBaseline: "[]",
+  featureAuxiliaryDraft: {},
+  featureAuxiliaryDirty: false,
+  featureDetailDirty: false,
+  featureDetailBaseline: null,
   selectedFeatureKey: "",
   imageApiEndpointDraft: null,
   imageApiEndpointSavedFingerprints: [],
@@ -139,7 +129,6 @@ const state = {
   dailyOutfitHydrateKey: "",
   pageFontFamily: "original",
   pageTheme: "classic",
-  dashboardLayout: initialDashboardLayout(),
   overviewRefreshedAt: 0,
   uxReviewShowAll: false,
   selectedFoodMenuIds: new Set(),
@@ -473,6 +462,95 @@ function featureDraftFromOverview(overview = {}) {
     }
   });
   return draft;
+}
+
+function featureDraftSignature(draft = {}) {
+  return JSON.stringify(
+    Object.entries(draft || {})
+      .map(([key, value]) => [String(key), toBool(value)])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function cloneFeatureStateValue(value) {
+  if (value === undefined) return undefined;
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(value);
+    } catch (_error) {}
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+
+function syncFeatureDraftFromOverview(overview = {}) {
+  state.featureDraft = featureDraftFromOverview(overview);
+  state.featureDraftBaseline = featureDraftSignature(state.featureDraft);
+  state.featureAuxiliaryDraft = {
+    proactive_intensity_preset: String(overview?.settings?.proactive_intensity_preset || "off"),
+  };
+  state.featureAuxiliaryDirty = false;
+  state.featureDetailDirty = false;
+  state.featureDetailBaseline = null;
+}
+
+function beginFeatureDetailSession(featureKey) {
+  const key = String(featureKey || "").trim();
+  if (!key || state.featureDetailBaseline?.key === key) return;
+  state.featureDetailBaseline = {
+    key,
+    featureDraft: cloneFeatureStateValue(state.featureDraft || {}),
+    settings: cloneFeatureStateValue(state.overview?.settings || {}),
+    providers: cloneFeatureStateValue(state.overview?.providers || {}),
+    providerDraft: cloneFeatureStateValue(state.providerDraft || {}),
+    imageApiEndpointDraft: cloneFeatureStateValue(state.imageApiEndpointDraft),
+  };
+  state.featureDetailDirty = false;
+}
+
+function restoreFeatureDetailSession() {
+  const baseline = state.featureDetailBaseline;
+  if (!baseline) return;
+  state.featureDraft = cloneFeatureStateValue(baseline.featureDraft || {});
+  if (state.overview) {
+    state.overview.settings = cloneFeatureStateValue(baseline.settings || {});
+    state.overview.providers = cloneFeatureStateValue(baseline.providers || {});
+  }
+  state.providerDraft = cloneFeatureStateValue(baseline.providerDraft || {});
+  state.imageApiEndpointDraft = cloneFeatureStateValue(baseline.imageApiEndpointDraft);
+}
+
+function hasUnsavedFeatureChanges() {
+  return state.featureAuxiliaryDirty
+    || state.featureDetailDirty
+    || featureDraftSignature(state.featureDraft || {}) !== String(state.featureDraftBaseline || "");
+}
+
+function markFeatureDetailDirty() {
+  state.featureDetailDirty = true;
+  syncFeatureFooterAction();
+}
+
+function leaveFeatureDetail() {
+  if (state.featureDetailDirty) {
+    const confirmed = window.confirm("当前功能还有未保存的更改。返回将放弃这些更改，确定返回吗？");
+    if (!confirmed) return false;
+    restoreFeatureDetailSession();
+  }
+  state.featureDetailDirty = false;
+  state.featureDetailBaseline = null;
+  state.selectedFeatureKey = "";
+  renderFeatureSwitches();
+  return true;
+}
+
+function discardAllFeatureChanges() {
+  restoreFeatureDetailSession();
+  state.featureAuxiliaryDirty = false;
+  state.featureDetailDirty = false;
+  state.featureDetailBaseline = null;
+  state.selectedFeatureKey = "";
+  syncFeatureDraftFromOverview(state.overview || {});
+  syncFeatureFooterAction();
 }
 
 const pluginIntegrationAvailabilityRules = {
@@ -3642,6 +3720,12 @@ const tokenTaskLabels = {
   memory_rerank: "记忆重排",
   memory_embedding: "记忆向量索引",
   memory_embedding_query: "记忆向量查询",
+  together_realtime_reply: "实时通话回复",
+  together_frame_question: "观影画面问答",
+  together_watch_comment: "自然观影评论",
+  together_watch_knowledge: "观前背景整理",
+  together_watch_memory: "临时剧情记忆",
+  together_shared_experience: "共同经历摘要",
   astrbot_private_reply: "非插件私聊主回复",
   astrbot_group_reply: "非插件群聊主回复",
   astrbot_reply: "非插件主回复",
@@ -4408,7 +4492,7 @@ async function loadTroubleshooting(options = {}) {
   state.troubleshooting = data || null;
   if (overview) {
     state.overview = overview;
-    state.featureDraft = featureDraftFromOverview(overview);
+    syncFeatureDraftFromOverview(overview);
   }
   if (!silent) renderTroubleshooting();
   if (state.activeTab === "experimental" && !skipExperimentalRender) renderExperimentalPage();
@@ -4418,7 +4502,7 @@ async function loadTroubleshooting(options = {}) {
 function applyOverviewData(overview) {
   state.overview = overview;
   hydrateTokenStatsFromOverview(overview);
-  state.featureDraft = featureDraftFromOverview(overview);
+  syncFeatureDraftFromOverview(overview);
   state.imageApiEndpointDraft = null;
   state.imageApiEndpointSavedFingerprints = photoApiEndpointInitialList(overview?.settings || {})
     .map((endpoint, index) => photoApiEndpointFingerprint(endpoint, index));
@@ -4657,6 +4741,7 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
   } else if (tabName === "experimental") {
     renderExperimentalPage();
   }
+  syncFeatureFooterAction();
 }
 
 async function loadDiagnostics(force = false, options = {}) {
@@ -6380,7 +6465,7 @@ async function saveSetupGuideAdvancedBlock(control = null) {
     );
     if (result) {
       state.overview = result;
-      state.featureDraft = featureDraftFromOverview(result);
+      syncFeatureDraftFromOverview(result);
       state.providerConfigMode = result.settings?.provider_config_mode || state.providerConfigMode;
       showToast(result.config_saved === false ? "已写入运行态，但配置持久化可能失败" : `已保存${block.title}`);
       return true;
@@ -7752,7 +7837,7 @@ async function applySetupGuide({ close = true, advanced = false, control = null,
     const overview = result && result.plugin ? result : result?.overview;
     if (overview && overview.plugin) {
       state.overview = overview;
-      state.featureDraft = featureDraftFromOverview(overview);
+      syncFeatureDraftFromOverview(overview);
       state.providerDraft = { ...(state.providerDraft || {}), ...(overview.providers || {}) };
       state.providerConfigMode = overview.settings?.provider_config_mode || state.providerConfigMode;
     } else {
@@ -7907,300 +7992,6 @@ function updateSetupGuideBadge(overview) {
 
 function statCard(value, label, jumpTab = "") {
   return `<article class="stat ${jumpTab ? "is-link" : ""}" ${jumpTab ? `data-jump-tab="${escapeHtml(jumpTab)}"` : ""}><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></article>`;
-}
-
-function applyDashboardLayout(value, options = {}) {
-  const { persist = true, focus = false } = options;
-  const layout = normalizeDashboardLayout(value);
-  state.dashboardLayout = layout;
-  document.documentElement.dataset.dashboardLayout = layout;
-  document.querySelectorAll("[data-dashboard-layout-option]").forEach((button) => {
-    const selected = button.dataset.dashboardLayoutOption === layout;
-    button.classList.toggle("is-active", selected);
-    button.setAttribute("aria-selected", selected ? "true" : "false");
-    button.tabIndex = selected ? 0 : -1;
-    if (focus && selected) button.focus();
-  });
-  document.querySelectorAll("[data-dashboard-view]").forEach((view) => {
-    const selected = view.dataset.dashboardView === layout;
-    view.hidden = !selected;
-    view.setAttribute("aria-hidden", selected ? "false" : "true");
-  });
-  const description = $("#dashboardOverviewDescription");
-  if (description) {
-    description.textContent = layout === "life"
-      ? "日程、状态、主动与记忆集中在这里；配置和诊断按需展开。"
-      : "运行状态、覆盖范围与近期安排集中在这里；详细观察按需展开。";
-  }
-  if (persist) {
-    try {
-      window.localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, layout);
-    } catch (_error) {
-      // WebView 禁用 localStorage 时，仍保留本次页面内切换。
-    }
-  }
-  if (layout === "standard") renderConventionalDashboard(state.overview || {});
-  return layout;
-}
-
-function bindDashboardLayoutSwitch() {
-  const buttons = [...document.querySelectorAll("[data-dashboard-layout-option]")];
-  buttons.forEach((button) => {
-    button.addEventListener("click", () => applyDashboardLayout(button.dataset.dashboardLayoutOption));
-    button.addEventListener("keydown", (event) => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-      event.preventDefault();
-      const currentIndex = Math.max(0, buttons.indexOf(button));
-      let nextIndex = currentIndex;
-      if (event.key === "Home") nextIndex = 0;
-      if (event.key === "End") nextIndex = buttons.length - 1;
-      if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
-      if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % buttons.length;
-      const next = buttons[nextIndex];
-      if (next) applyDashboardLayout(next.dataset.dashboardLayoutOption, { focus: true });
-    });
-  });
-  applyDashboardLayout(state.dashboardLayout, { persist: false });
-}
-
-function dashboardStandardMetricRows(rows = []) {
-  return `<dl class="dashboard-standard-metrics">${rows.map(([label, value, tone = ""]) => `
-    <div class="${tone ? `is-${escapeHtml(tone)}` : ""}">
-      <dt>${escapeHtml(label)}</dt>
-      <dd>${escapeHtml(dashboardLifeText(value, "暂无"))}</dd>
-    </div>
-  `).join("")}</dl>`;
-}
-
-function renderConventionalDashboard(overview = {}) {
-  const plugin = overview.plugin || {};
-  const privateInfo = overview.private || {};
-  const groupInfo = overview.group || {};
-  const daily = overview.daily_state || {};
-  const life = overview.life_observation || {};
-  const current = life.current_plan || {};
-  const timeline = overview.daily_timeline || {};
-  const proactive = overview.proactive_candidates || {};
-  const proactiveCounts = proactive.counts || {};
-  const intensity = overview.proactive_intensity || {};
-  const worldbook = overview.worldbook || {};
-  const livingmemory = overview.livingmemory || {};
-  const providers = overview.providers || {};
-  const settings = overview.settings || {};
-  const features = overview.features || {};
-  const budget = state.tokenStats?.budget || overview.token_stats?.budget || {};
-  const dailyUsed = Number(budget.used || 0);
-  const dailyLimit = Number(budget.limit || 0);
-  const energy = daily.energy === undefined || daily.energy === ""
-    ? null
-    : Math.max(0, Math.min(100, Number(daily.energy || 0)));
-  const pluginReady = Boolean(plugin.enabled);
-  const enabledPrivate = Number(privateInfo.enabled_user_count || 0);
-  const enabledGroups = Number(groupInfo.enabled_group_count || 0);
-
-  const kpiRoot = $("#dashboardStandardKpis");
-  if (kpiRoot) {
-    const kpis = [
-      {
-        label: "插件状态",
-        value: pluginReady ? "运行中" : "当前停用",
-        note: `${plugin.bot_name || "Private Companion"} · ${plugin.storage_backend || "存储待确认"}`,
-        tone: pluginReady ? "ok" : "attention",
-        tab: "troubleshooting",
-      },
-      {
-        label: "陪伴范围",
-        value: `${enabledPrivate} 私聊 · ${enabledGroups} 群聊`,
-        note: `记录对象 ${privateInfo.user_count || 0} 个 · 群聊 ${groupInfo.group_count || 0} 个`,
-        tone: enabledPrivate || enabledGroups ? "ok" : "quiet",
-        tab: "private",
-      },
-      {
-        label: "今日 Token",
-        value: dailyLimit > 0
-          ? `${formatCompactNumber(dailyUsed)} / ${formatCompactNumber(dailyLimit)}`
-          : `${formatCompactNumber(dailyUsed)} / 不限`,
-        note: budget.soft_active ? "已进入节省模式" : (budget.deferred_calls ? `${budget.deferred_calls} 次调用已延后` : "预算状态平稳"),
-        tone: budget.exceeded ? "attention" : "info",
-        tab: "tokens",
-      },
-      {
-        label: "当前能量",
-        value: energy === null ? "等待状态" : `${Math.round(energy)} / 100`,
-        note: normalizeRoleplayStateText(daily.mood_bias) || daily.note || daily.health || "暂无状态补充",
-        tone: energy !== null && energy < 30 ? "attention" : "warm",
-        tab: "memory",
-      },
-    ];
-    kpiRoot.innerHTML = kpis.map((item) => `
-      <button type="button" class="dashboard-standard-kpi is-${escapeHtml(item.tone)}" data-jump-tab="${escapeHtml(item.tab)}">
-        <span><i aria-hidden="true"></i>${escapeHtml(item.label)}</span>
-        <b>${escapeHtml(item.value)}</b>
-        <small title="${escapeHtml(item.note)}">${escapeHtml(item.note)}</small>
-      </button>
-    `).join("");
-  }
-
-  const refreshRoot = $("#dashboardStandardRefresh");
-  if (refreshRoot) refreshRoot.textContent = dashboardRefreshLabel();
-
-  const currentRoot = $("#dashboardStandardCurrent");
-  if (currentRoot) {
-    const currentWindow = current.end
-      ? `${current.time || "--:--"}-${current.end}`
-      : (current.time || "当前时段");
-    const energyLabel = energy === null ? "状态待更新" : `${roleplayEnergyLabel(energy) || "能量"} · ${Math.round(energy)}/100`;
-    currentRoot.innerHTML = `
-      <div class="dashboard-standard-focus">
-        <span>${escapeHtml([currentWindow, scheduleLifecycleLabel(current.lifecycle)].filter(Boolean).join(" · ") || "当前日程")}</span>
-        <b>${escapeHtml(dashboardLifeText(current.activity, "暂无当前日程"))}</b>
-        <p>${escapeHtml(dashboardLifeText(current.message_seed || daily.note, "暂无状态补充"))}</p>
-      </div>
-      <div class="dashboard-standard-energy">
-        <div><span>心理能量</span><b>${escapeHtml(energyLabel)}</b></div>
-        <div class="dashboard-standard-track" role="meter" aria-label="当前心理能量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${energy === null ? 0 : Math.round(energy)}"><i style="width:${energy === null ? 0 : energy}%"></i></div>
-      </div>
-      ${dashboardStandardMetricRows([
-        ["情绪", normalizeRoleplayStateText(daily.mood_bias) || daily.note],
-        ["健康", daily.health],
-        ["位置", daily.location],
-        ["睡眠", daily.sleep_phase || daily.sleep],
-      ])}
-    `;
-  }
-
-  const scheduleRoot = $("#dashboardStandardSchedule");
-  if (scheduleRoot) {
-    const segments = Array.isArray(timeline.segments) ? timeline.segments : [];
-    const isCurrent = (segment) => {
-      const lifecycle = String(segment?.lifecycle || "").toLowerCase();
-      return lifecycle === "active" || Boolean(current.time && String(segment?.window || "").startsWith(String(current.time)));
-    };
-    const currentIndex = segments.findIndex(isCurrent);
-    const pendingIndex = segments.findIndex((segment) => !["completed", "done", "cancelled"].includes(String(segment?.lifecycle || "").toLowerCase()));
-    const startIndex = currentIndex >= 0 ? currentIndex : (pendingIndex >= 0 ? pendingIndex : Math.max(0, segments.length - 4));
-    const visibleSegments = segments.slice(startIndex, startIndex + 4);
-    scheduleRoot.innerHTML = visibleSegments.length ? `
-      <ol class="dashboard-standard-schedule-list">
-        ${visibleSegments.map((segment) => {
-          const active = isCurrent(segment);
-          const lifecycle = String(segment.lifecycle || "planned").toLowerCase();
-          return `
-            <li class="${active ? "is-current" : ""}">
-              <time>${escapeHtml(segment.window || "未定")}</time>
-              <span><b>${escapeHtml(segment.summary || segment.activity || "这一段尚未细化")}</b><small>${escapeHtml(active ? "当前进行" : (scheduleLifecycleLabel(lifecycle) || "计划中"))}</small></span>
-            </li>
-          `;
-        }).join("")}
-      </ol>
-    ` : `<div class="dashboard-standard-empty">暂无近期日程</div>`;
-  }
-
-  const proactiveRoot = $("#dashboardStandardProactive");
-  if (proactiveRoot) {
-    const nextUser = state.users
-      .filter((item) => Number(item.next_proactive_ts || 0) > 0)
-      .sort((a, b) => Number(a.next_proactive_ts || 0) - Number(b.next_proactive_ts || 0))[0];
-    const proactiveLimit = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
-    proactiveRoot.innerHTML = `
-      <div class="dashboard-standard-focus is-compact">
-        <span>下一次主动</span>
-        <b>${escapeHtml(nextUser ? (nextUser.nickname || nextUser.user_id) : "暂无待发送计划")}</b>
-        <p>${escapeHtml(nextUser ? `${nextUser.next_proactive || "时间待定"} · ${proactiveActionLabel(nextUser.planned_action || "message")}` : "有新候选时会在这里显示")}</p>
-      </div>
-      ${dashboardStandardMetricRows([
-        ["候选", `${proactiveCounts.accepted || proactiveCounts.pending || 0} 个`],
-        ["每日上限", Number(proactiveLimit || 0) > 0 ? `${proactiveLimit} 条` : "按需启用"],
-        ["私聊间隔", privateInfo.min_interval_minutes ? `${privateInfo.min_interval_minutes} 分钟` : "自动"],
-      ])}
-    `;
-  }
-
-  const memoryRoot = $("#dashboardStandardMemory");
-  if (memoryRoot) {
-    const memoryPlugin = livingmemory.selected_plugin_name
-      || livingmemory.memory_companion_display_name
-      || (livingmemory.compatible_available ? "长期记忆已接入" : "暂未接入长期记忆");
-    memoryRoot.innerHTML = `
-      ${dashboardStandardMetricRows([
-        ["关系成员", `${worldbook.enabled_member_count || 0}/${worldbook.member_count || 0} 个已启用`],
-        ["待整理观察", `${worldbook.pending_observation_total || 0} 条`],
-        ["生活日记", `${Array.isArray(life.diaries) ? life.diaries.length : 0} 篇`],
-        ["长期记忆", memoryPlugin, livingmemory.compatible_available ? "ok" : "quiet"],
-      ])}
-      ${livingmemory.conflict ? `<p class="dashboard-standard-note is-attention">${escapeHtml(livingmemory.conflict_warning || "检测到多个长期记忆来源，建议确认当前主用项。")}</p>` : ""}
-    `;
-  }
-
-  const readinessRoot = $("#dashboardStandardReadiness");
-  if (readinessRoot) {
-    const targetUsers = Array.isArray(settings.target_user_ids)
-      ? settings.target_user_ids.filter(Boolean)
-      : (Array.isArray(privateInfo.target_user_ids) ? privateInfo.target_user_ids.filter(Boolean) : []);
-    const checks = [
-      ["页面与插件", pluginReady, pluginReady ? "已连接" : "建议确认启用状态"],
-      ["陪伴对象", Boolean(targetUsers.length || enabledPrivate), targetUsers.length || enabledPrivate ? "已有目标" : "建议添加目标"],
-      ["模型分流", Boolean(String(providers.FAST_RESPONSE_PROVIDER_ID || "").trim() && String(providers.COMPLEX_REASONING_PROVIDER_ID || "").trim()), "快速与复杂模型"],
-      ["数据存储", Boolean(plugin.storage_backend), plugin.storage_backend || "建议确认存储方式"],
-    ];
-    const readyCount = checks.filter((item) => item[1]).length;
-    readinessRoot.innerHTML = `
-      <div class="dashboard-standard-readiness-score"><b>${readyCount}/${checks.length}</b><span>${readyCount === checks.length ? "核心项已就绪" : "还有可补充项"}</span></div>
-      <ul class="dashboard-standard-checks">${checks.map(([label, ready, value]) => `
-        <li class="${ready ? "is-ready" : "is-suggested"}"><i aria-hidden="true"></i><span><b>${escapeHtml(label)}</b><small>${escapeHtml(value)}</small></span></li>
-      `).join("")}</ul>
-    `;
-  }
-
-  const contentRoot = $("#dashboardStandardContent");
-  if (contentRoot) {
-    const creative = overview.creative || {};
-    const news = overview.news || {};
-    const exploration = overview.web_exploration || {};
-    const contentItems = [
-      {
-        label: "长线创作",
-        title: creative.latest_title || "暂无新创作",
-        meta: `${creative.active_projects || 0} 个项目进行中`,
-        tab: "bookshelf",
-      },
-      {
-        label: "新闻见闻",
-        title: news.last_digest?.headline || news.last_digest?.topic || "暂无新闻记录",
-        meta: news.last_read_at || "尚未标记时间",
-        scroll: "dashboardNewsCard",
-      },
-      {
-        label: "主动搜索",
-        title: exploration.last_digest?.topic || exploration.last_query?.query || "暂无搜索记录",
-        meta: exploration.last_explore_at || "尚未标记时间",
-        scroll: "dashboardWebExplorationCard",
-      },
-    ];
-    contentRoot.innerHTML = `<div class="dashboard-standard-content-list">${contentItems.map((item) => `
-      <button type="button" ${item.tab ? `data-jump-tab="${escapeHtml(item.tab)}"` : `data-scroll-target="${escapeHtml(item.scroll)}"`}>
-        <span>${escapeHtml(item.label)}</span>
-        <b title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</b>
-        <small>${escapeHtml(item.meta)}</small>
-      </button>
-    `).join("")}</div>`;
-  }
-
-  const capabilityRoot = $("#dashboardStandardCapabilities");
-  if (capabilityRoot) {
-    const featureKeys = visibleTopLevelFeatureKeys(features);
-    const enabledFeatures = featureKeys.filter((key) => features[key]).length;
-    const externalAbilities = Number(overview.external_abilities?.enabled_count || 0);
-    const qzoneEnabled = Boolean(features.enable_qzone_integration || settings.enable_qzone_integration);
-    const platformProfiles = Array.isArray(overview.platform_adaptation?.profiles) ? overview.platform_adaptation.profiles : [];
-    capabilityRoot.innerHTML = dashboardStandardMetricRows([
-      ["主功能", `${enabledFeatures}/${featureKeys.length} 项开启`],
-      ["外部能力", `${externalAbilities} 项可用`],
-      ["QQ 空间", qzoneEnabled ? "已启用" : "按需启用", qzoneEnabled ? "ok" : "quiet"],
-      ["私聊阅读", overview.private_reading?.available ? "已接入" : "暂不可用", overview.private_reading?.available ? "ok" : "quiet"],
-      ["平台适配", platformProfiles[0]?.label || (overview.platform_adaptation?.auto_detect ? "自动识别" : "等待识别")],
-    ]);
-  }
 }
 
 function renderDashboard() {
@@ -8476,7 +8267,6 @@ function renderDashboardLifeDesk(overview = {}) {
 function renderDashboardPulse() {
   const overview = state.overview || {};
   renderDashboardLifeDesk(overview);
-  renderConventionalDashboard(overview);
   const proactive = overview.proactive_candidates || {};
   const proactiveCounts = proactive.counts || {};
   const creative = overview.creative || {};
@@ -10509,10 +10299,12 @@ function renderTokens() {
   renderTokenRecentTable(source.recent || [], source.source);
   renderTokenExternalSessionTable(source.sessions || []);
   renderTokenExternalRecentTable(source.recent || []);
-  renderTokenMemoryPluginSummary(source.source === "memory" ? scope : { available: false }, stats.memory_plugin || {});
-  renderTokenMemoryPluginTaskTable(source.source === "memory" ? (source.tasks || []) : [], source.source === "memory" && source.available !== false);
-  renderTokenMemoryPluginProviderTable(source.source === "memory" ? (source.providers || []) : [], source.source === "memory" && source.available !== false);
-  renderTokenMemoryPluginRecentTable(source.source === "memory" ? (source.recent || []) : [], source.source === "memory" && source.available !== false);
+  const pluginSourceSelected = ["memory", "together"].includes(source.source);
+  const selectedPlugin = source.source === "together" ? (stats.together_plugin || {}) : (stats.memory_plugin || {});
+  renderTokenMemoryPluginSummary(pluginSourceSelected ? scope : { available: false }, selectedPlugin);
+  renderTokenMemoryPluginTaskTable(pluginSourceSelected ? (source.tasks || []) : [], pluginSourceSelected && source.available !== false, source.shortLabel);
+  renderTokenMemoryPluginProviderTable(pluginSourceSelected ? (source.providers || []) : [], pluginSourceSelected && source.available !== false);
+  renderTokenMemoryPluginRecentTable(pluginSourceSelected ? (source.recent || []) : [], pluginSourceSelected && source.available !== false, source.shortLabel);
 }
 
 function renderTokenBalanceStatus(balance = {}) {
@@ -10560,7 +10352,7 @@ function renderTokenBalanceStatus(balance = {}) {
 
 function normalizedTokenSource(value = state.tokenSource) {
   const source = String(value || "companion").trim().toLowerCase();
-  return ["companion", "memory", "main"].includes(source) ? source : "companion";
+  return ["companion", "memory", "together", "main"].includes(source) ? source : "companion";
 }
 
 function ensureTokenDateForRows(rows, today) {
@@ -10572,11 +10364,13 @@ function ensureTokenDateForRows(rows, today) {
 }
 
 function tokenSelectedScope(stats) {
-  const source = normalizedTokenSource();
+  let source = normalizedTokenSource();
+  if (source === "together" && stats.together_plugin?.installed !== true) source = "companion";
   state.tokenSource = source;
   const view = state.tokenView || "today";
   const today = stats.budget?.day || todayKeyLocal();
   if (source === "memory") return tokenMemorySourceScope(stats, view, today);
+  if (source === "together") return tokenTogetherSourceScope(stats, view, today);
   if (source === "main") return tokenMainSourceScope(stats, view, today);
   return tokenCompanionSourceScope(stats, view, today);
 }
@@ -10655,6 +10449,48 @@ function tokenMemorySourceScope(stats, view, today) {
   };
 }
 
+function tokenTogetherSourceScope(stats, view, today) {
+  const plugin = stats.together_plugin || {};
+  const displayName = plugin.display_name || "一起房间";
+  const dayRows = plugin.by_day_detail || plugin.by_day || [];
+  ensureTokenDateForRows(dayRows, today);
+  const available = plugin.available !== false;
+  if (view === "total") {
+    return {
+      source: "together",
+      shortLabel: displayName,
+      title: `${displayName} Token`,
+      description: "展示实时通话、画面理解和观影整理消耗，不计入陪伴插件每日限额。",
+      scope: { mode: "total", label: `${displayName}累计`, displayName, available, totals: plugin.totals || {} },
+      totals: plugin.totals || {},
+      providers: plugin.by_provider || [],
+      tasks: plugin.by_task || [],
+      dateRows: dayRows,
+      hours: plugin.by_hour || [],
+      recent: plugin.recent || [],
+      available,
+      unavailableReason: plugin.reason || "",
+    };
+  }
+  const selectedDay = view === "date" ? state.tokenDate : today;
+  const day = dayRows.find((item) => String(item.key || "") === selectedDay) || { key: selectedDay };
+  return {
+    source: "together",
+    shortLabel: displayName,
+    title: selectedDay === today ? `${displayName}今日 Token` : `${displayName} ${selectedDay}`,
+    description: "展示实时通话、画面理解和观影整理消耗，不计入陪伴插件每日限额。",
+    scope: { mode: view, label: selectedDay === today ? `${displayName}今日` : `${displayName}同日`, displayName, available, totals: day },
+    totals: day,
+    providers: day.providers || [],
+    tasks: day.tasks || [],
+    dateRows: dayRows,
+    hours: (plugin.by_hour || []).filter((item) => String(item.key || "").startsWith(`${selectedDay}T`)),
+    recent: (plugin.recent || []).filter((item) => recentItemDayKey(item) === selectedDay),
+    available,
+    unavailableReason: plugin.reason || "",
+  };
+}
+
 function tokenMainSourceScope(stats, view, today) {
   const external = stats.external || {};
   const dayRows = external.by_day_detail || external.by_day || [];
@@ -10703,6 +10539,7 @@ function tokenMainSourceScope(stats, view, today) {
 
 function tokenSourceComparison(stats, currentSource = {}) {
   const memory = stats.memory_plugin || {};
+  const together = stats.together_plugin || {};
   const main = stats.external || {};
   const view = state.tokenView || "today";
   const today = stats.budget?.day || todayKeyLocal();
@@ -10712,15 +10549,21 @@ function tokenSourceComparison(stats, currentSource = {}) {
     const rows = Array.isArray(dayRows) ? dayRows : [];
     return rows.find((item) => String(item.key || "") === selectedDay) || { key: selectedDay };
   };
-  return [
+  const sources = [
     ["陪伴插件", pickTotals(stats, stats.by_day_detail || stats.by_day || [])],
     [memory.display_name || "记忆插件", memory.available === false ? null : pickTotals(memory, memory.by_day_detail || memory.by_day || [])],
-    ["LLM 主链", pickTotals(main, main.by_day_detail || main.by_day || [])],
-  ].map(([label, totals]) => ({
+  ];
+  if (together.installed === true) {
+    sources.push([together.display_name || "一起房间", together.available === false ? null : pickTotals(together, together.by_day_detail || together.by_day || [])]);
+  }
+  sources.push(["LLM 主链", pickTotals(main, main.by_day_detail || main.by_day || [])]);
+  return sources.map(([label, totals]) => ({
     label: currentSource.source === "companion" && label === "陪伴插件"
       ? "当前来源"
       : currentSource.source === "memory" && label === (memory.display_name || "记忆插件")
         ? "当前来源"
+        : currentSource.source === "together" && label === (together.display_name || "一起房间")
+          ? "当前来源"
         : currentSource.source === "main" && label === "LLM 主链"
           ? "当前来源"
           : label,
@@ -10745,14 +10588,17 @@ function renderTokenSourceVisibility(source) {
   setText("#tokenTaskTableTitle", sourceKey === "main" ? "主链任务明细" : `${source.shortLabel}任务明细`);
   setText("#tokenRecentTableTitle", `${source.shortLabel}最近调用`);
   const showMain = sourceKey === "main";
-  const showMemory = sourceKey === "memory";
+  const showPlugin = ["memory", "together"].includes(sourceKey);
+  const resetButton = $("#resetTokenStatsBtn");
+  if (resetButton) resetButton.hidden = sourceKey !== "companion";
   $("#tokenTaskTableCard").hidden = false;
   $("#tokenRecentTableCard").hidden = showMain;
   $("#tokenExternalSessionCard").hidden = !showMain;
   $("#tokenExternalRecentCard").hidden = !showMain;
-  $("#tokenMemoryPluginSummaryCard").hidden = !showMemory;
+  $("#tokenMemoryPluginSummaryCard").hidden = !showPlugin;
   $("#tokenMemoryPluginDetailCard").hidden = true;
   $("#tokenMemoryPluginRecentCard").hidden = true;
+  setText("#tokenMemoryPluginSummaryCard h2", `${source.shortLabel}消耗`);
 }
 
 function tokenSummaryBoard({
@@ -10815,7 +10661,13 @@ function tokenSummaryBoard({
             softEnabled && softLimit > 0,
             softActive ? "warn" : "",
           )}
-        </div>` : `<p class="token-source-note">${escapeHtml(source?.source === "memory" ? "记忆插件统计来自桥接接口，仅用于观察记忆整理、检索和索引成本。" : "LLM 主链统计来自 AstrBot 普通回复请求，不参与陪伴插件内部任务排行。")}</p>`}
+        </div>` : `<p class="token-source-note">${escapeHtml(
+          source?.source === "memory"
+            ? "记忆插件统计来自桥接接口，仅用于观察记忆整理、检索和索引成本。"
+            : source?.source === "together"
+              ? "一起插件统计来自运行时桥接接口，用于观察通话、视觉和观影整理成本。"
+              : "LLM 主链统计来自 AstrBot 普通回复请求，不参与陪伴插件内部任务排行。"
+        )}</p>`}
       </article>
       <div class="token-metric-grid">
         ${(comparison || []).map((item) => tokenMetricCard(item.label, item.value == null ? "未接入" : formatNumber(item.value))).join("")}
@@ -10957,6 +10809,9 @@ function renderTokenToolbar(stats, sourceDateRows = null) {
     button.classList.toggle("is-active", button.dataset.tokenView === state.tokenView);
   });
   document.querySelectorAll("[data-token-source]").forEach((button) => {
+    if (button.dataset.tokenSource === "together") {
+      button.hidden = stats.together_plugin?.installed !== true;
+    }
     button.classList.toggle("is-active", button.dataset.tokenSource === normalizedTokenSource());
   });
 }
@@ -11333,15 +11188,15 @@ function renderTokenMemoryPluginSummary(scope, plugin) {
   `;
 }
 
-function renderTokenMemoryPluginTaskTable(rows, available) {
+function renderTokenMemoryPluginTaskTable(rows, available, displayName = "记忆插件") {
   const box = $("#tokenMemoryPluginTaskTable");
   if (!box) return;
   if (!available) {
-    box.innerHTML = `<div class="empty small">记忆插件 Token 统计未接入</div>`;
+    box.innerHTML = `<div class="empty small">${escapeHtml(displayName)} Token 统计未接入</div>`;
     return;
   }
   box.innerHTML = tokenTable(
-    ["记忆任务", "总 Token", "输入", "输出", "调用", "失败"],
+    [`${displayName}任务`, "总 Token", "输入", "输出", "调用", "失败"],
     rows,
     (item) => [
       tokenTaskLabel(item.key),
@@ -11377,15 +11232,15 @@ function renderTokenMemoryPluginProviderTable(rows, available) {
   );
 }
 
-function renderTokenMemoryPluginRecentTable(rows, available) {
+function renderTokenMemoryPluginRecentTable(rows, available, displayName = "记忆插件") {
   const box = $("#tokenMemoryPluginRecentTable");
   if (!box) return;
   if (!available) {
-    box.innerHTML = `<div class="empty small">记忆插件 Token 统计未接入</div>`;
+    box.innerHTML = `<div class="empty small">${escapeHtml(displayName)} Token 统计未接入</div>`;
     return;
   }
   box.innerHTML = tokenTable(
-    ["时间", "记忆任务", "Provider", "Token", "缓存", "延迟", "状态"],
+    ["时间", `${displayName}任务`, "Provider", "Token", "缓存", "延迟", "状态"],
     rows,
     (item) => [
       formatRecentTime(item.ts, item.time),
@@ -13098,15 +12953,19 @@ function renderGroups() {
   if (count) {
     count.textContent = `${rows.length}/${state.groups.length} 个群`;
   }
-  $("#groupRows").innerHTML = rows.length
+  const accessWarning = String(state.overview?.group?.access_warning || "").trim();
+  const accessWarningMarkup = accessWarning
+    ? `<div class="empty small warn-text">${escapeHtml(accessWarning)}</div>`
+    : "";
+  $("#groupRows").innerHTML = accessWarningMarkup + (rows.length
     ? rows.map((group) => `
-      <button type="button" data-group-id="${escapeHtml(group.group_id)}" class="group-card ${String(group.group_id) === String(state.selectedGroupId) ? "is-selected" : ""} ${group.enabled ? "" : "is-off"} ${group.allowed_by_mode ? "" : "is-blocked"}">
+      <button type="button" data-group-id="${escapeHtml(group.group_id)}" class="group-card ${String(group.group_id) === String(state.selectedGroupId) ? "is-selected" : ""} ${groupEffectiveEnabled(group) ? "" : "is-off"} ${group.allowed_by_mode ? "" : "is-blocked"}">
         <header>
           <span class="group-card-title">
             <b>${escapeHtml(groupDisplayName(group))}</b>
             <small>${escapeHtml(groupIdText(group))}</small>
           </span>
-          <span class="badge ${group.enabled ? "" : "off"}">${escapeHtml(group.enabled ? "观测中" : "停用")}</span>
+          <span class="badge ${groupEffectiveEnabled(group) ? "" : "off"}">${escapeHtml(groupEffectiveStatus(group))}</span>
         </header>
         <p class="group-card-summary">${escapeHtml(group.atmosphere?.last_summary || group.atmosphere?.mood || "暂无群聊氛围摘要")}</p>
         <div class="group-card-metrics">
@@ -13122,7 +12981,7 @@ function renderGroups() {
         </footer>
       </button>
     `).join("")
-    : `<div class="empty small">暂无群聊观测数据</div>`;
+    : `<div class="empty small">暂无群聊观测数据</div>`);
   document.querySelectorAll("[data-group-id]").forEach((row) => {
     row.addEventListener("click", async () => {
       state.selectedGroupId = row.dataset.groupId;
@@ -13138,6 +12997,21 @@ function groupDisplayName(group) {
   const name = String(group?.display_name || group?.name || group?.group_name || "").trim();
   if (name && name !== id && name !== `群 ${id}`) return name;
   return "未命名群聊";
+}
+
+function groupGlobalEnabled(group) {
+  return group?.global_enabled !== false;
+}
+
+function groupEffectiveEnabled(group) {
+  return groupGlobalEnabled(group) && Boolean(group?.enabled) && Boolean(group?.allowed_by_mode);
+}
+
+function groupEffectiveStatus(group) {
+  if (!groupGlobalEnabled(group)) return "总开关关闭";
+  if (!group?.enabled) return "本群已停用";
+  if (!group?.allowed_by_mode) return "名单未放行";
+  return "观测中";
 }
 
 function groupIdText(group) {
@@ -13184,7 +13058,7 @@ async function renderGroupDetail(forceFetch = false) {
         <h2>${escapeHtml(groupName)}</h2>
         <div class="group-detail-status">
           <span>${escapeHtml(groupIdText(detail))}</span>
-          <span class="${detail.enabled ? "ok-text" : "warn-text"}">${escapeHtml(detail.enabled ? "观测中" : "已停用")}</span>
+          <span class="${groupEffectiveEnabled(detail) ? "ok-text" : "warn-text"}">${escapeHtml(groupEffectiveStatus(detail))}</span>
           <span class="${detail.allowed_by_mode ? "ok-text" : "warn-text"}">${escapeHtml(detail.allowed_by_mode ? "名单允许" : "名单拦截")}</span>
           <span>最近 ${escapeHtml(detail.last_seen || "暂无")}</span>
         </div>
@@ -13237,7 +13111,8 @@ function groupDetailPanel(title, content, options = {}) {
 function groupStateOverview(detail) {
   const atmosphere = detail.atmosphere || {};
   const chips = [
-    ["群陪伴", detail.enabled ? "开启" : "停用", detail.enabled ? "ok" : "warn"],
+    ["总开关", groupGlobalEnabled(detail) ? "开启" : "关闭", groupGlobalEnabled(detail) ? "ok" : "warn"],
+    ["本群", detail.enabled ? "开启" : "停用", detail.enabled ? "ok" : "warn"],
     ["名单", detail.allowed_by_mode ? "允许" : "拦截", detail.allowed_by_mode ? "ok" : "warn"],
     ["气氛", atmosphere.mood || "暂无", ""],
     ["节奏", atmosphere.heat || atmosphere.pace || "暂无", ""],
@@ -19240,7 +19115,7 @@ function renderAccessManager(group) {
   const allowedCount = knownGroups.filter((item) => groupAllowedByDraft(item.group_id, draft)).length;
   const blockedCount = Math.max(0, knownGroups.length - allowedCount);
   const warning = mode === "whitelist" && draft.whitelist.size === 0
-    ? "白名单为空"
+    ? "未观察任何群"
     : mode === "blacklist" && draft.blacklist.size === 0
       ? "未拦截群"
       : "已配置";
@@ -19355,6 +19230,9 @@ function renderFeatureSwitches() {
   if (state.selectedFeatureKey && state.selectedFeatureKey !== "enable_proactive_only_mode" && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
     state.selectedFeatureKey = "";
   }
+  if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey)) {
+    beginFeatureDetailSession(state.selectedFeatureKey);
+  }
   syncFeatureFooterAction();
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft, state.selectedFeatureKey)) {
     $("#featureFlags").innerHTML = featureDetailPage(state.selectedFeatureKey);
@@ -19408,7 +19286,7 @@ function renderFeatureSwitches() {
 }
 
 function proactiveIntensityCommonSettingCard(settings = {}, intensity = {}) {
-  const current = String(settings.proactive_intensity_preset || intensity.preset || "off");
+  const current = String(state.featureAuxiliaryDraft?.proactive_intensity_preset || settings.proactive_intensity_preset || intensity.preset || "off");
   const enabled = Boolean(intensity?.enabled);
   const effective = intensity?.effective || {};
   const interestProbability = Math.round(Number(effective.group_wakeup_interest_probability || 0) * 100);
@@ -19448,6 +19326,11 @@ function proactiveIntensityCommonSettingCard(settings = {}, intensity = {}) {
 
 function bindProactiveIntensityCommonSetting() {
   document.querySelectorAll("[data-proactive-intensity-form]").forEach((form) => {
+    form.querySelector('[name="proactive_intensity_preset"]')?.addEventListener("change", () => {
+      state.featureAuxiliaryDraft.proactive_intensity_preset = form.querySelector('[name="proactive_intensity_preset"]')?.value || "off";
+      state.featureAuxiliaryDirty = true;
+      syncFeatureFooterAction();
+    });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const value = form.querySelector('[name="proactive_intensity_preset"]')?.value || "off";
@@ -19461,11 +19344,22 @@ function bindProactiveIntensityCommonSetting() {
 }
 
 function syncFeatureFooterAction() {
+  const actions = $("#featureSaveActions");
   const button = $("#saveFeaturesBtn");
-  if (!button) return;
+  const backButton = $("#featureBackBtn");
+  const status = $("#featureSaveState");
+  if (!actions || !button) return;
+  const onConfigPage = state.activeTab === "config";
+  actions.hidden = !onConfigPage;
+  if (!onConfigPage) return;
   const inDetail = Boolean(state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey));
-  button.textContent = inDetail ? "返回功能列表" : "保存功能开关";
-  button.dataset.action = inDetail ? "back" : "save";
+  const dirty = hasUnsavedFeatureChanges();
+  actions.classList.toggle("in-detail", inDetail);
+  actions.classList.toggle("has-unsaved", dirty);
+  if (backButton) backButton.hidden = !inDetail;
+  if (status) status.textContent = dirty ? "有未保存更改" : "更改已保存";
+  button.textContent = inDetail ? "保存更改" : "保存功能开关";
+  button.disabled = !dirty;
 }
 
 function renderProactiveOnlyModeCard() {
@@ -20187,19 +20081,58 @@ function collectFeatureDetailPayload(featureKey, root = document) {
   return { features, settings, providers };
 }
 
-async function saveCurrentFeatureDetail(control = null, successMessage = "已保存功能参数") {
+function collectFeatureSwitchPayload() {
+  const overviewSettings = state.overview?.settings || {};
+  const features = {};
+  const settings = {};
+  const providers = {};
+  Object.entries(state.featureDraft || {}).forEach(([key, value]) => {
+    if (!visibleConfigKey(key)) return;
+    if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
+      settings[key] = toBool(value);
+    } else {
+      features[key] = toBool(value);
+    }
+  });
+  const proactiveIntensitySelect = document.querySelector('[data-proactive-intensity-form] [name="proactive_intensity_preset"]');
+  if (proactiveIntensitySelect || state.featureAuxiliaryDirty) {
+    settings.proactive_intensity_preset = proactiveIntensitySelect?.value
+      || state.featureAuxiliaryDraft?.proactive_intensity_preset
+      || "off";
+  }
   const featureKey = state.selectedFeatureKey || "";
-  if (!featureKey) return true;
-  const form = Array.from(document.querySelectorAll("[data-feature-param-form]"))
-    .find((item) => item.dataset.featureParamForm === featureKey);
-  if (!form) return true;
-  const payload = collectFeatureDetailPayload(featureKey, form);
+  const form = featureKey
+    ? Array.from(document.querySelectorAll("[data-feature-param-form]"))
+      .find((item) => item.dataset.featureParamForm === featureKey)
+    : null;
+  if (featureKey) {
+    const detailPayload = collectFeatureDetailPayload(featureKey, form || $("#featureFlags") || document);
+    Object.assign(features, detailPayload.features || {});
+    Object.assign(settings, detailPayload.settings || {});
+    Object.assign(providers, detailPayload.providers || {});
+  }
+  return { features, settings, providers };
+}
+
+async function saveFeatureSwitchChanges(control = null, successMessage = "已保存功能开关") {
   const result = await runAction(
-    () => postJson("/settings/update", payload),
+    () => postJson("/settings/update", collectFeatureSwitchPayload()),
     successMessage,
-    control || form.querySelector(".feature-param-save"),
+    control || $("#saveFeaturesBtn"),
   );
+  if (result) {
+    state.featureAuxiliaryDirty = false;
+    state.featureDetailDirty = false;
+    state.featureDraftBaseline = featureDraftSignature(state.featureDraft || {});
+    state.featureDetailBaseline = null;
+    if (state.selectedFeatureKey) beginFeatureDetailSession(state.selectedFeatureKey);
+    syncFeatureFooterAction();
+  }
   return Boolean(result);
+}
+
+async function saveCurrentFeatureDetail(control = null, successMessage = "已保存功能参数") {
+  return saveFeatureSwitchChanges(control, successMessage);
 }
 
 function featureDependencyLines(key) {
@@ -21032,15 +20965,14 @@ function featureDetailPage(key) {
 
 function bindFeatureDetailActions() {
   document.querySelectorAll("[data-feature-back]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const saved = await saveCurrentFeatureDetail(button, "已保存并返回功能列表");
-      if (!saved) return;
-      state.selectedFeatureKey = "";
-      renderFeatureSwitches();
-    });
+    button.addEventListener("click", () => leaveFeatureDetail());
   });
+  const detailPage = document.querySelector(".feature-detail-page");
+  detailPage?.addEventListener("input", markFeatureDetailDirty, true);
+  detailPage?.addEventListener("change", markFeatureDetailDirty, true);
   document.querySelectorAll("[data-feature-detail-toggle]").forEach((input) => {
     input.addEventListener("change", () => {
+      markFeatureDetailDirty();
       state.featureDraft[input.dataset.featureDetailToggle] = input.checked;
       renderFeatureSwitches();
     });
@@ -21240,13 +21172,7 @@ function bindFeatureDetailActions() {
     });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const featureKey = form.dataset.featureParamForm || state.selectedFeatureKey;
-      const payload = collectFeatureDetailPayload(featureKey, form);
-      await runAction(
-        () => postJson("/settings/update", payload),
-        "已保存功能参数",
-        form.querySelector(".feature-param-save"),
-      );
+      await saveCurrentFeatureDetail(form.querySelector(".feature-param-save"), "已保存功能参数");
     });
   });
   if (state.selectedFeatureKey === "enable_segmented_proactive_reply") {
@@ -22017,7 +21943,7 @@ async function runAction(action, successMessage = "", control = null, options = 
       if (result && typeof result === "object" && result.plugin && result.features) {
         const requestSeq = ++loadAllRequestSeq;
         state.overview = result;
-        state.featureDraft = featureDraftFromOverview(result);
+        syncFeatureDraftFromOverview(result);
         state.lazyLoaded.userGroupLists = false;
         state.userGroupListPromise = null;
         renderAll();
@@ -22028,7 +21954,7 @@ async function runAction(action, successMessage = "", control = null, options = 
       }
     } else if (result && typeof result === "object" && result.plugin && result.features) {
       state.overview = result;
-      state.featureDraft = featureDraftFromOverview(result);
+      syncFeatureDraftFromOverview(result);
     }
     if (result && result.config_saved === false) {
       showToast("已应用到运行态，但配置持久化失败；重启或刷新后可能恢复旧值，请查看日志", "error");
@@ -25157,6 +25083,11 @@ function switchTab(tabName) {
   const opensSocialLearning = tabName === "worldbook";
   tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (tabName || "dashboard"));
   if (opensSocialLearning) state.learningSection = "social";
+  if (state.activeTab === "config" && tabName !== "config" && hasUnsavedFeatureChanges()) {
+    const confirmed = window.confirm("功能开关还有未保存的更改。离开此页面将放弃这些更改，确定继续吗？");
+    if (!confirmed) return;
+    discardAllFeatureChanges();
+  }
   if (tabName === state.activeTab) {
     if (opensSocialLearning) switchLearningSection("social", { focus: true });
     return;
@@ -25316,7 +25247,7 @@ document.addEventListener("click", async (event) => {
     );
     if (result?.plugin) {
       state.setupGuideDraft = null;
-      state.featureDraft = featureDraftFromOverview(result);
+      syncFeatureDraftFromOverview(result);
       renderSetupGuideOverlay();
     }
     return;
@@ -26475,7 +26406,9 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
       });
     }
     return result;
-  }, "已添加群聊观测", event.submitter);
+  }, listMode === "none" && (state.overview?.group?.access_mode || "whitelist") === "whitelist"
+    ? "已创建群资料，但未加入白名单，当前不会观察该群"
+    : "已添加群聊观测", event.submitter);
   if (saved) event.currentTarget.reset();
 });
 
@@ -26600,31 +26533,13 @@ $("#accessQuickGroups").addEventListener("click", async (event) => {
 });
 
 $("#saveFeaturesBtn").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  if (button?.dataset?.action === "back" || (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey))) {
-    const saved = await saveCurrentFeatureDetail(button, "已保存并返回功能列表");
-    if (!saved) return;
-    state.selectedFeatureKey = "";
-    renderFeatureSwitches();
-    return;
-  }
-  const overviewSettings = state.overview?.settings || {};
-  const features = {};
-  const settings = {};
-  Object.entries(state.featureDraft).forEach(([key, value]) => {
-    if (!visibleConfigKey(key)) return;
-    if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
-      settings[key] = toBool(value);
-    } else {
-      features[key] = toBool(value);
-    }
-  });
-  const proactiveIntensitySelect = document.querySelector('[data-proactive-intensity-form] [name="proactive_intensity_preset"]');
-  if (proactiveIntensitySelect) {
-    settings.proactive_intensity_preset = proactiveIntensitySelect.value || "off";
-  }
-  await runAction(() => postJson("/settings/update", { features, settings }), "已保存功能开关", button);
+  await saveFeatureSwitchChanges(
+    event.currentTarget,
+    state.selectedFeatureKey ? "已保存功能更改" : "已保存功能开关",
+  );
 });
+
+$("#featureBackBtn").addEventListener("click", () => leaveFeatureDetail());
 
 $("#enableSafeFeaturesBtn").addEventListener("click", () => {
   safeFeatureKeys.forEach((key) => {
@@ -26633,6 +26548,12 @@ $("#enableSafeFeaturesBtn").addEventListener("click", () => {
     }
   });
   renderFeatureSwitches();
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedFeatureChanges()) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 $("#saveProvidersBtn").addEventListener("click", async () => {
@@ -26710,5 +26631,4 @@ $("#testAllProvidersBtn").addEventListener("click", async () => {
   }
 });
 
-bindDashboardLayoutSwitch();
 loadAll();

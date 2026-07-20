@@ -4680,7 +4680,14 @@ class CommandHandlersMixin:
             yield event.plain_result(response)
             event.stop_event()
             return
-        if not self.enable_group_companion or not self._group_allowed_by_access_mode(group_id):
+        if not self.enable_group_companion:
+            yield event.plain_result(
+                "群聊陪伴总开关当前关闭。\n"
+                "这个群的名单和本群开关配置仍会保留，但暂时不会观察或参与群聊。\n"
+                "请先在插件配置的群聊功能中开启“群聊陪伴”。"
+            )
+            return
+        if not self._group_allowed_by_access_mode(group_id):
             if self.group_access_mode == "blacklist" and group_id in self._configured_group_blacklist_ids():
                 yield event.plain_result("这个群在群聊陪伴黑名单中，暂时不启用。")
             elif self.group_access_mode == "whitelist":

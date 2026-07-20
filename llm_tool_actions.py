@@ -246,7 +246,7 @@ class LlmToolActionsMixin:
             [
                 "- 默认 `send=true`；如果只想拿路径再决定，可传 `send=false`。",
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
-                "- 只有工具返回 `sent=true` 时才表示图片已经发出。成功后不要再发送可见的承接句、重复 caption 或额外表情，避免同一轮重复回复。",
+                "- `caption` 会和图片一起作为可见消息发送。只有工具返回 `sent=true` 时才表示图片已经发出；成功后本轮最终回复必须留空，不要再发送可见的承接句、重复 caption 或额外表情，避免同一轮重复回复。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
             ]
         )
@@ -262,10 +262,10 @@ class LlmToolActionsMixin:
 
         caption = compact(sent_caption)
         followup = compact(followup_text)
+        if caption and caption == followup:
+            return True
         if len(caption) < 6 or len(followup) < 6:
             return False
-        if caption == followup:
-            return True
         shorter, longer = sorted((caption, followup), key=len)
         return shorter in longer and len(shorter) / max(1, len(longer)) >= 0.45
 
@@ -2044,6 +2044,37 @@ class LlmToolActionsMixin:
         if send_image:
             self._mark_smart_imagechat_skip_proactive_emoji(event)
 
+        lookup_context = _single_line(context, 1000)
+        snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
+        snapshot_formatter = getattr(self, "_format_companion_scene_snapshot", None)
+        if callable(snapshot_builder) and callable(snapshot_formatter):
+            try:
+                sender_getter = getattr(event, "get_sender_id", None)
+                sender_id = _single_line(sender_getter() if callable(sender_getter) else "", 80)
+                users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) and isinstance(self.data.get("users"), dict) else {}
+                current_user = users.get(sender_id) if sender_id else None
+                if isinstance(current_user, dict):
+                    current_user = dict(current_user)
+                    current_user.setdefault("user_id", sender_id)
+                scene_text = _single_line(
+                    snapshot_formatter(
+                        snapshot_builder(current_user if isinstance(current_user, dict) else None),
+                        purpose="image_search",
+                    ),
+                    620,
+                )
+                if scene_text:
+                    scene_note = f"Bot当前情境（仅辅助判断回应情绪，不覆盖用户的明确需求）：{scene_text}"
+                    lookup_context = _single_line(
+                        "；".join(part for part in (lookup_context, scene_note) if part),
+                        1000,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 图库检索读取统一情境快照失败，已忽略: %s",
+                    _single_line(exc, 160),
+                )
+
         api = self._smart_imagechat_api()
         if api is None or not callable(getattr(api, "find_image", None)):
             return json.dumps(
@@ -2062,7 +2093,7 @@ class LlmToolActionsMixin:
             lookup = await api.find_image(
                 event,
                 query_text,
-                context=_single_line(context, 1000),
+                context=lookup_context,
                 meme_only=meme_filter,
             )
         except Exception as exc:
