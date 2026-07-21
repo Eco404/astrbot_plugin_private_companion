@@ -33,6 +33,9 @@ from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_me
 from .qzone_selection import parse_qzone_post_selection
 
 
+PHOTO_TOOL_SILENT_SENTINEL = "[[PC_PHOTO_SENT_NO_FOLLOWUP]]"
+
+
 class LlmToolActionsMixin:
     """Implementation bodies for LLM tools registered in main.py."""
 
@@ -246,7 +249,7 @@ class LlmToolActionsMixin:
             [
                 "- 默认 `send=true`；如果只想拿路径再决定，可传 `send=false`。",
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
-                "- `caption` 会和图片一起作为可见消息发送。只有工具返回 `sent=true` 时才表示图片已经发出；成功后本轮最终回复必须留空，不要再发送可见的承接句、重复 caption 或额外表情，避免同一轮重复回复。",
+                f"- `caption` 会和图片一起作为可见消息发送。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
             ]
         )
@@ -1992,6 +1995,11 @@ class LlmToolActionsMixin:
             "safety_review": _single_line(delivery.get("review_label"), 30),
             "note": _single_line(note, 220),
             "must_not_claim_sent": not sent,
+            "final_response_instruction": (
+                f"图片和 caption 已作为本轮唯一可见回复发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                if sent
+                else ""
+            ),
         }
         if ok and send_image and not sent:
             delivery_error = _single_line(delivery.get("message"), 360) or "图片发送失败"
@@ -2243,6 +2251,11 @@ class LlmToolActionsMixin:
                 "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
                 "delivery": _single_line(delivery.get("destination"), 40),
                 "must_not_claim_sent": not sent,
+                "final_response_instruction": (
+                    f"图片和 caption 已作为本轮唯一可见回复发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                    if sent
+                    else ""
+                ),
             },
             ensure_ascii=False,
         )

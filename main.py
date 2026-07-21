@@ -165,7 +165,7 @@ from .daily_state import DailyStateMixin
 from .scene_context import SceneContextMixin
 from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
-from .llm_tool_actions import LlmToolActionsMixin
+from .llm_tool_actions import LlmToolActionsMixin, PHOTO_TOOL_SILENT_SENTINEL
 from .command_handlers import CommandHandlersMixin
 from .tts_enhancement import TtsEnhancementMixin
 from .tts_tool_sanitizer import TtsToolSanitizerMixin
@@ -885,7 +885,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.10.3",
+    "5.10.4",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -9476,6 +9476,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         sent_photo_caption = str(
             getattr(event, "_private_companion_photo_tool_sent_caption", "") or ""
         ).strip()
+        if (
+            bool(getattr(event, "_private_companion_photo_tool_sent", False))
+            and PHOTO_TOOL_SILENT_SENTINEL in recovered_text
+        ):
+            try:
+                resp.result_chain = None
+            except Exception:
+                pass
+            resp.completion_text = ""
+            original_text = ""
+            recovered_text = ""
+            logger.info(
+                "[PrivateCompanion] 已清除图片工具成功发送后的内部静默标记: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
         if (
             bool(getattr(event, "_private_companion_photo_tool_sent", False))
             and self._photo_tool_followup_is_redundant(sent_photo_caption, recovered_text)
