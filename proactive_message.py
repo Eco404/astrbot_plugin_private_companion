@@ -2069,6 +2069,17 @@ class ProactiveMessageMixin:
             "过程中的执行状态只供系统判断，不需要写进正文。"
         )
 
+    def _proactive_troubleshooting_request_hint(self, user: dict[str, Any] | None) -> str:
+        if not isinstance(user, dict) or _single_line(user.get("planned_proactive_source"), 40).lower() != "troubleshooting":
+            return ""
+        return (
+            "【本轮真实开口由头】\n"
+            "用户刚刚在控制面板明确发起了一次主动消息链路测试，这个请求本身就是当前、可核验的开口由头。"
+            "请仍像角色平时私聊那样自然来找对方一次，不要提测试、控制面板、系统、调度或链路。"
+            "不需要另编“刚刷到、刚看到、翻书、收到消息”等生活小剧场；如果当前较晚或普通主动间隔较近，"
+            "只把语气收轻、句子缩短，不追问、不催回复。"
+        )
+
     def _deferred_immediate_share_tense_hint(self, user: dict[str, Any], action: str) -> str:
         freshness_getter = getattr(self, "_planned_proactive_freshness_class", None)
         if not callable(freshness_getter):
@@ -2114,6 +2125,7 @@ class ProactiveMessageMixin:
         relationship_fact = self._format_proactive_relationship_fact(user)
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
+        troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
         source_focused_reasons = {
             "bili_video_share",
             "news_share",
@@ -2122,7 +2134,9 @@ class ProactiveMessageMixin:
             "jm_cosmos_share",
             "jm_cosmos_recommendation_request",
         }
-        if reason in source_focused_reasons:
+        if troubleshooting_hint:
+            current_schedule = "（本轮不使用生活片段；只按用户刚发起的测试请求自然开口，不补写虚构见闻）"
+        elif reason in source_focused_reasons:
             current_schedule = "（本轮不取生活片段，只围绕主动来源本身）"
         elif reason in {"meal_care", "meal_care_followup"}:
             current_schedule = (
@@ -2283,6 +2297,8 @@ class ProactiveMessageMixin:
             prompt = f"{prompt.rstrip()}\n\n{tool_boundary_hint}"
         if "时间锚定" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{temporal_grounding_hint}"
+        if troubleshooting_hint and "本轮真实开口由头" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{troubleshooting_hint}"
         if recent_history_hint and "最近私聊实况" not in prompt:
             prompt = (
                 f"{prompt.rstrip()}\n\n"
@@ -2407,6 +2423,9 @@ class ProactiveMessageMixin:
         motivation = readiness.get("motivation") if isinstance(readiness.get("motivation"), dict) else {}
 
         lines = ["【这次主动的内在约束】"]
+        troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
+        if troubleshooting_hint:
+            lines.append(troubleshooting_hint)
         if kind or anchor_type:
             lines.append(
                 f"候选语义：{kind or 'check_in'}/{anchor_type or 'vague'}；"
@@ -4176,6 +4195,7 @@ class ProactiveMessageMixin:
             _single_line(user.get("nickname"), 40),
         )
         runtime_context = self._format_proactive_review_runtime_context(user)
+        troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
         has_verified_fact_source = self._proactive_has_verified_recent_fact_source(
             reason=reason,
             action=action,
@@ -4214,12 +4234,16 @@ Rules:
 - Preserve real media context. Do not claim an image exists when none is attached.
 - A rewrite must be shorter or similarly sized and must not add new factual claims.
 - If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
+- When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.
 
 [Recent conversation]
 {history or "(none)"}
 
 [Runtime state]
 {runtime_context}
+
+[Current request context]
+{troubleshooting_hint or "(ordinary proactive message; no explicit user-requested test)"}
 
 [Verified fact boundary]
 {fact_source_context}

@@ -2861,6 +2861,7 @@ Provider 规则：{emotion_rule}
         *,
         source: str = "",
         subtitle_text: str = "",
+        allow_local_playback: bool = True,
     ) -> None:
         is_live_reply = source == "bili_live_auto_reply"
         visible_text = subtitle_text or spoken_text
@@ -2871,7 +2872,11 @@ Provider 规则：{emotion_rule}
         )
         local_playback_enabled = bool(getattr(self, "enable_tts_local_playback", False))
         live_only = bool(getattr(self, "enable_tts_local_playback_live_only", False))
-        should_play_local = local_playback_enabled and (is_live_reply or not live_only)
+        should_play_local = (
+            allow_local_playback
+            and local_playback_enabled
+            and (is_live_reply or not live_only)
+        )
         if should_play_local:
             interval = max(0.0, float(getattr(self, "tts_local_playback_min_interval_seconds", 0.0) or 0.0))
             now = time.time()
@@ -3318,6 +3323,7 @@ Provider 规则：{emotion_rule}
         tts_provider: Any = None,
         provider_settings: dict[str, Any] | None = None,
         source: str = "external_realtime",
+        play_local: bool = True,
     ) -> dict[str, Any]:
         settings = dict(provider_settings or {})
         voice_config = self._realtime_voice_config()
@@ -3337,28 +3343,33 @@ Provider 规则：{emotion_rule}
         if not spoken:
             result["reason"] = "empty_text"
             return result
-        if tts_provider is None:
-            result["available"] = False
-            if self._tts_text_needs_language_conversion(spoken, provider_kind=provider_kind):
-                result["language"] = "zh-CN"
-            result["reason"] = "tts_provider_unavailable"
-            return result
-
         if self._tts_text_needs_language_conversion(spoken, provider_kind=provider_kind):
-            converted = await self._convert_text_to_spoken_language(
-                spoken,
-                None,
-                provider_kind=provider_kind,
-            )
-            converted = self._normalize_tts_spoken_text(converted, provider_kind=provider_kind)
+            converted = ""
+            for attempt in range(2):
+                converted = await self._convert_text_to_spoken_language(
+                    spoken,
+                    None,
+                    provider_kind=provider_kind,
+                )
+                converted = self._normalize_tts_spoken_text(converted, provider_kind=provider_kind)
+                if converted and not self._tts_text_needs_language_conversion(
+                    converted,
+                    provider_kind=provider_kind,
+                ):
+                    break
+                if attempt == 0:
+                    logger.info(
+                        "[PrivateCompanion] 外部实时 TTS 语种转换结果不合格,正在重试: target=%s",
+                        self._tts_language_label(),
+                    )
             if not converted or self._tts_text_needs_language_conversion(
                 converted,
                 provider_kind=provider_kind,
             ):
-                result["language"] = "zh-CN"
+                result["fallback_text"] = ""
                 result["reason"] = "language_conversion_failed"
                 logger.warning(
-                    "[PrivateCompanion] 外部实时 TTS 语种转换失败,已阻止原文送入%s声线: text=%s",
+                    "[PrivateCompanion] 外部实时 TTS 语种转换失败,已阻止原文送入%s声线或浏览器朗读: text=%s",
                     self._tts_language_label(),
                     _single_line(source_text, 120),
                 )
@@ -3379,6 +3390,11 @@ Provider 规则：{emotion_rule}
             return result
         result["spoken_text"] = sanitized
         result["fallback_text"] = sanitized
+
+        if tts_provider is None:
+            result["available"] = False
+            result["reason"] = "tts_provider_unavailable"
+            return result
 
         try:
             audio_path = await self._tts_generate_audio_path(tts_provider, sanitized)
@@ -3409,6 +3425,7 @@ Provider 规则：{emotion_rule}
                 str(audio_file),
                 sanitized,
                 source=source or "external_realtime",
+                allow_local_playback=play_local,
             )
         )
         return result

@@ -13288,6 +13288,8 @@ class DailyStateMixin:
         reason: str = "check_in",
         extra_count: int = 0,
         diagnostic_detail: str = "",
+        pending: bool = False,
+        outcome_type: str = "",
     ) -> None:
         raw = self.data.setdefault("troubleshooting_test_results", {})
         if not isinstance(raw, dict):
@@ -13301,10 +13303,28 @@ class DailyStateMixin:
             if diagnostic_detail and callable(diagnostic_sanitizer)
             else _single_line(diagnostic_detail, 2400)
         )
+        outcome = _single_line(outcome_type, 40).lower()
+        if not outcome:
+            combined = f"{detail} {error}".lower()
+            if pending:
+                outcome = "running"
+            elif ok:
+                outcome = "completed"
+            elif "发送失败" in combined or "投递失败" in combined:
+                outcome = "delivery_failed"
+            elif "final content gate" in combined or "复核" in combined or "校验" in combined:
+                outcome = "content_rejected"
+            elif "生成" in combined or "llm" in combined:
+                outcome = "generation_failed"
+            elif "超时" in combined or "到点" in combined or "未启用" in combined:
+                outcome = "scheduler_blocked"
+            else:
+                outcome = "interrupted"
         raw["proactive_message"] = {
             "type": "proactive_message",
             "ok": bool(ok),
-            "pending": False,
+            "pending": bool(pending),
+            "outcome_type": outcome,
             "title": "主动消息链路测试",
             "umo": _single_line(user.get("umo"), 180),
             "detail": _single_line(detail, 220),
@@ -13775,6 +13795,8 @@ class DailyStateMixin:
                         current_for_mark,
                         ok=True,
                         detail="主动循环已接手，正在生成主动消息",
+                        pending=True,
+                        outcome_type="generating",
                         action=str(current_for_mark.get("planned_proactive_action") or "message"),
                         reason=normalize_legacy_tag_text(current_for_mark.get("planned_proactive_reason")) or "check_in",
                     )
@@ -13940,6 +13962,8 @@ class DailyStateMixin:
                         current_after_render_ok,
                         ok=True,
                         detail="主动消息已生成，准备发送前复核",
+                        pending=True,
+                        outcome_type="reviewing",
                         text=text,
                         action=effective_action_for_send or planned_action_for_send or "message",
                         reason=reason or "check_in",
@@ -14083,6 +14107,8 @@ class DailyStateMixin:
                                     current_for_review_rewrite,
                                     ok=True,
                                     detail="主动消息已通过发送前价值复核，复核模型建议轻改写",
+                                    pending=True,
+                                    outcome_type="reviewing",
                                     text=text or review_candidate_text,
                                     original_text=original_text_before_rewrite,
                                     final_text=text,
@@ -14104,6 +14130,7 @@ class DailyStateMixin:
                                 current_for_review,
                                 ok=False,
                                 detail="Generated proactive message was rejected by the final content gate",
+                                outcome_type="content_rejected",
                                 error=note,
                                 text=text or review_candidate_text,
                                 action=effective_action_for_send or planned_action_for_send or "message",
@@ -14380,6 +14407,8 @@ class DailyStateMixin:
                         current_after_time_guard,
                         ok=True,
                         detail="发送前复核通过，准备发送",
+                        pending=True,
+                        outcome_type="sending",
                         text=text,
                         action=effective_action_for_send or planned_action_for_send or "message",
                         reason=reason or "check_in",
@@ -14411,6 +14440,8 @@ class DailyStateMixin:
                             current_for_warn,
                             ok=True,
                             detail="生成期间检测到新消息；排障测试继续发送以验证链路",
+                            pending=True,
+                            outcome_type="sending",
                             text=text,
                             action=effective_action_for_send or planned_action_for_send or "message",
                             reason=reason or "check_in",
@@ -14649,6 +14680,8 @@ class DailyStateMixin:
                             current_after_send,
                             ok=True,
                             detail="主动消息已发送，准备写入会话历史",
+                            pending=True,
+                            outcome_type="archiving",
                             text=text,
                             action=effective_action_for_send or planned_action_for_send or "message",
                             reason=reason or "check_in",
@@ -14686,6 +14719,8 @@ class DailyStateMixin:
                             current_after_archive,
                             ok=True,
                             detail="已完成排障临时主动消息发送与归档调用",
+                            pending=True,
+                            outcome_type="finalizing",
                             text=text,
                             action=effective_action_for_send or planned_action_for_send or "message",
                             reason=reason or "check_in",
@@ -14709,6 +14744,7 @@ class DailyStateMixin:
                             current_after_failure,
                             ok=False,
                             detail="主动消息已生成，但发送失败",
+                            outcome_type="delivery_failed",
                             error=f"发送失败: {_single_line(error_text, 160)}",
                             text=text,
                             action=effective_action_for_send or planned_action_for_send or "message",
@@ -14848,6 +14884,7 @@ class DailyStateMixin:
                         current,
                         ok=True,
                         detail="已完成排障临时主动消息发送与归档调用，原主动计划已恢复",
+                        outcome_type="completed",
                         text=visible_text or text,
                         action=current["last_proactive_action"],
                         reason=reason or "check_in",

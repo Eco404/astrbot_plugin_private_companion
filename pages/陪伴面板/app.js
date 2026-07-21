@@ -7346,8 +7346,24 @@ function setupGuideProactiveTestHtml() {
   const status = testState.status || (result.ran_at_text ? (result.pending ? "pending" : result.ok ? "ok" : "error") : "idle");
   const passed = Boolean(result.ok && !result.pending);
   const applying = Boolean(state.setupGuideApplying);
+  const outcomeLabels = {
+    waiting_schedule: "等待调度",
+    running: "运行中",
+    generating: "生成中",
+    reviewing: "内容复核",
+    sending: "准备发送",
+    archiving: "历史归档",
+    finalizing: "收尾中",
+    completed: "链路完成",
+    content_rejected: "内容复核放弃",
+    delivery_failed: "投递失败",
+    generation_failed: "生成失败",
+    scheduler_blocked: "调度未通过",
+    interrupted: "任务中断",
+  };
   const meta = [
     result.umo ? `会话 ${result.umo}` : "",
+    outcomeLabels[result.outcome_type] || "",
     result.ran_at_text || "",
     result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
   ].filter(Boolean).join(" · ");
@@ -9528,8 +9544,24 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
     const pending = Boolean(result.pending);
     const hasResult = Boolean(result.ran_at || result.ran_at_text || result.error || result.detail);
     const status = hasResult ? (pending ? "info" : ok ? "ok" : "error") : "info";
+    const outcomeLabels = {
+      waiting_schedule: "等待调度",
+      running: "运行中",
+      generating: "生成中",
+      reviewing: "内容复核",
+      sending: "准备发送",
+      archiving: "历史归档",
+      finalizing: "收尾中",
+      completed: "链路完成",
+      content_rejected: "内容复核放弃",
+      delivery_failed: "投递失败",
+      generation_failed: "生成失败",
+      scheduler_blocked: "调度未通过",
+      interrupted: "任务中断",
+    };
     const meta = [
       result.backend || result.provider || "",
+      outcomeLabels[result.outcome_type] || "",
       result.image_model ? `模型 ${result.image_model}` : "",
       result.workflow_kind ? `类型 ${result.workflow_kind}` : "",
       result.used_reference ? "已带参考图" : "",
@@ -12747,6 +12779,63 @@ function expressionRuleComponent(rule, kind, groupSituation) {
   `;
 }
 
+function expressionRuleEditorComponent(rule, kind) {
+  if (!rule) return "";
+  const isGrammar = kind === "grammar";
+  return `
+    <fieldset class="expression-rule-editor-component is-${kind}">
+      <legend>${isGrammar ? "语法习惯" : "情境表达"}</legend>
+      <label>
+        <span>${isGrammar ? "句法结构" : "可复用表达"}</span>
+        <textarea name="${kind}_pattern" rows="2" maxlength="${isGrammar ? 80 : 64}" required>${escapeHtml(rule?.pattern || "")}</textarea>
+      </label>
+      <label>
+        <span>使用指令</span>
+        <textarea name="${kind}_instruction" rows="2" maxlength="160" required>${escapeHtml(rule?.instruction || "")}</textarea>
+      </label>
+    </fieldset>
+  `;
+}
+
+function expressionRuleGroupEditor(group, pending = false) {
+  const familyId = group?.family_id || group?.id || "";
+  const signals = Array.isArray(group?.signals) ? group.signals.filter(Boolean) : [];
+  return `
+    <details class="expression-rule-editor">
+      <summary>编辑规则内容</summary>
+      <form data-expression-rule-editor data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" data-expression-rule-storage="${pending ? "pending" : "learned"}">
+        <div class="expression-rule-editor-basics">
+          <label>
+            <span>规则名称</span>
+            <input name="label" type="text" maxlength="100" value="${escapeHtml(group?.label || "")}" placeholder="例如：轻松安慰" />
+          </label>
+          <label>
+            <span>适用情境</span>
+            <input name="situation" type="text" maxlength="100" value="${escapeHtml(group?.situation || "")}" required />
+          </label>
+        </div>
+        <div class="expression-rule-editor-components">
+          ${expressionRuleEditorComponent(group?.style_rule, "style")}
+          ${expressionRuleEditorComponent(group?.grammar_rule, "grammar")}
+        </div>
+        <label class="expression-rule-editor-wide">
+          <span>召回标签</span>
+          <input name="signals" type="text" maxlength="240" value="${escapeHtml(signals.join("，"))}" placeholder="用逗号分隔，最多 8 个" />
+        </label>
+        <label class="expression-rule-editor-wide">
+          <span>适用边界</span>
+          <textarea name="avoid" rows="2" maxlength="160">${escapeHtml(group?.avoid || "")}</textarea>
+        </label>
+        <p class="expression-rule-editor-note">支持片段、来源、证据数量和反馈统计保持只读，不会因编辑而改写。</p>
+        <div class="expression-rule-editor-actions">
+          <button type="reset" class="secondary">恢复当前值</button>
+          <button type="submit">保存修改</button>
+        </div>
+      </form>
+    </details>
+  `;
+}
+
 function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = false) {
   const group = normalizeExpressionRuleGroup(ruleGroup);
   const needsReview = pending && group?.review_status === "needs_review";
@@ -12783,6 +12872,7 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
         ${signalTags}
         ${expressionRuleContext(group)}
         ${evidenceDetails}
+        ${expressionRuleGroupEditor(group, true)}
         <div class="expression-rule-actions">
           <button type="button" data-expression-action="approve_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">${needsReview ? "重新通过整组" : "通过并启用整组"}</button>
           <button type="button" class="danger-outline" data-expression-action="reject_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">拒绝整组</button>
@@ -12794,6 +12884,7 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
             ${signalTags}
             ${expressionRuleContext(group)}
             ${evidenceDetails}
+            ${expressionRuleGroupEditor(group, false)}
             ${deleteAction}
           </div>
         </details>
@@ -12914,6 +13005,26 @@ function expressionSampleItem(item, index, pending) {
   `;
 }
 
+async function applyExpressionLibraryMutation(payload, button, successMessage = "") {
+  const updatedLibrary = await runAction(
+    () => postJson("/expression-library/update", payload),
+    successMessage,
+    button,
+    { reload: false },
+  );
+  if (!updatedLibrary) return false;
+  state.expressionLibrary = updatedLibrary;
+  try {
+    const overview = await fetchJson("/overview");
+    applyOverviewData(overview);
+  } catch (error) {
+    console.warn("[PrivateCompanionPage] 表达画像操作后刷新总览失败", error);
+  }
+  renderExpressionScopeManager();
+  renderExpressionLibraryView();
+  return true;
+}
+
 function bindExpressionLibraryActions(library, root) {
   if (!root) return;
   root.querySelector("[data-expression-sample-archive]")?.addEventListener("toggle", (event) => {
@@ -12929,8 +13040,8 @@ function bindExpressionLibraryActions(library, root) {
       if (action === "delete_sample" && !requireSecondClick(button, `expression-delete:${sourceType}:${sourceId}:${button.dataset.expressionSampleId || button.dataset.expressionSampleIndex || ""}`, "再次点击删除这条观察素材", "再次点击删除")) return;
       if (action === "delete_rule" && !requireSecondClick(button, `expression-rule-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleId || ""}`, "再次点击删除这条表达规则", "再次点击删除")) return;
       if (action === "delete_rule_group" && !requireSecondClick(button, `expression-rule-group-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleFamilyId || ""}`, "再次点击删除整个规则组", "再次点击删除整组")) return;
-      const updatedLibrary = await runAction(
-        () => postJson("/expression-library/update", {
+      await applyExpressionLibraryMutation(
+        {
           source_type: sourceType,
           source_id: sourceId,
           expression_action: action,
@@ -12938,23 +13049,45 @@ function bindExpressionLibraryActions(library, root) {
           rule_id: button.dataset.expressionRuleId || "",
           rule_family_id: button.dataset.expressionRuleFamilyId || "",
           sample_index: Number(button.dataset.expressionSampleIndex || -1),
-        }),
+        },
+        button,
         action === "approve" ? "已保留观察素材" : (
           action === "approve_rule" ? "已通过表达规则" : (action === "approve_rule_group" ? "已通过并启用整个规则组" : "")
         ),
-        button,
-        { reload: false },
       );
-      if (!updatedLibrary) return;
-      state.expressionLibrary = updatedLibrary;
-      try {
-        const overview = await fetchJson("/overview");
-        applyOverviewData(overview);
-      } catch (error) {
-        console.warn("[PrivateCompanionPage] 表达画像操作后刷新总览失败", error);
-      }
-      renderExpressionScopeManager();
-      renderExpressionLibraryView();
+    });
+  });
+  root.querySelectorAll("[data-expression-rule-editor]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const component = (kind) => form.querySelector(`[name="${kind}_pattern"]`) ? {
+        pattern: String(data.get(`${kind}_pattern`) || "").trim(),
+        instruction: String(data.get(`${kind}_instruction`) || "").trim(),
+      } : null;
+      const signals = String(data.get("signals") || "")
+        .split(/[,，/、|\s]+/)
+        .map((item) => item.trim())
+        .filter((item, index, items) => item && items.indexOf(item) === index)
+        .slice(0, 8);
+      const submitButton = form.querySelector('button[type="submit"]');
+      await applyExpressionLibraryMutation(
+        {
+          source_type: form.dataset.expressionSourceType || "",
+          source_id: form.dataset.expressionSourceId || "",
+          expression_action: "update_rule_group",
+          rule_family_id: form.dataset.expressionRuleFamilyId || "",
+          rule_storage: form.dataset.expressionRuleStorage || "",
+          label: String(data.get("label") || "").trim(),
+          situation: String(data.get("situation") || "").trim(),
+          signals,
+          avoid: String(data.get("avoid") || "").trim(),
+          style_rule: component("style"),
+          grammar_rule: component("grammar"),
+        },
+        submitButton,
+        "已保存表达规则组",
+      );
     });
   });
 }

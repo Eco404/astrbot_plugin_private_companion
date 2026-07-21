@@ -257,6 +257,7 @@ class PrivateCompanionExtensionAPI:
         tts_provider: Any = None,
         provider_settings: dict[str, Any] | None = None,
         source: str = "external_realtime",
+        play_local: bool = True,
     ) -> dict[str, Any]:
         """Synthesize external realtime speech through companion TTS rules."""
         return await self._plugin._synthesize_realtime_voice(
@@ -264,6 +265,7 @@ class PrivateCompanionExtensionAPI:
             tts_provider=tts_provider,
             provider_settings=provider_settings,
             source=source,
+            play_local=play_local,
         )
 
     def get_bot_identity(self) -> dict[str, Any]:
@@ -2442,6 +2444,10 @@ class PrivateCompanionPlugin(
         for label, task in startup_background_tasks:
             await cancel_task(task, f"startup_{label}")
         self._startup_background_tasks.clear()
+        troubleshooting_wakeup_tasks = list(getattr(self, "_troubleshooting_proactive_wakeup_tasks", {}).items())
+        for user_id, task in troubleshooting_wakeup_tasks:
+            await cancel_task(task, f"troubleshooting_proactive_{_single_line(user_id, 40)}")
+        self._troubleshooting_proactive_wakeup_tasks = {}
         try:
             await self._flush_scheduled_data_save()
         except asyncio.CancelledError:

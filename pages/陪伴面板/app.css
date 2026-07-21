@@ -5611,6 +5611,92 @@ body.daily-outfit-preview-open {
   overflow-wrap: anywhere;
 }
 
+.expression-rule-editor {
+  margin-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 4px;
+}
+
+.expression-rule-editor > summary {
+  width: fit-content;
+  min-height: 30px;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 30px;
+}
+
+.expression-rule-editor form {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 10px 0 2px;
+}
+
+.expression-rule-editor-basics,
+.expression-rule-editor-components {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.expression-rule-editor label,
+.expression-rule-editor-component {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.expression-rule-editor label > span,
+.expression-rule-editor-component legend {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.expression-rule-editor input,
+.expression-rule-editor textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.expression-rule-editor textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.expression-rule-editor-component {
+  margin: 0;
+  border: 0;
+  border-left: 3px solid var(--blue);
+  padding: 2px 0 2px 10px;
+}
+
+.expression-rule-editor-component.is-grammar {
+  border-left-color: var(--green);
+}
+
+.expression-rule-editor-wide {
+  grid-column: 1 / -1;
+}
+
+.expression-rule-editor-note {
+  margin: 0 !important;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.expression-rule-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.expression-rule-editor-actions button {
+  min-height: 36px;
+}
+
 .expression-rule-actions {
   display: flex;
   align-items: center;
@@ -5767,12 +5853,14 @@ body.daily-outfit-preview-open {
   }
 
   .expression-rule-actions,
+  .expression-rule-editor-actions,
   .expression-observation-actions {
     display: grid;
     grid-template-columns: 1fr;
   }
 
   .expression-rule-actions button,
+  .expression-rule-editor-actions button,
   .expression-observation-actions button {
     width: 100%;
     min-height: 40px;
@@ -5783,6 +5871,11 @@ body.daily-outfit-preview-open {
   }
 
   .expression-observation-list {
+    grid-template-columns: 1fr;
+  }
+
+  .expression-rule-editor-basics,
+  .expression-rule-editor-components {
     grid-template-columns: 1fr;
   }
 

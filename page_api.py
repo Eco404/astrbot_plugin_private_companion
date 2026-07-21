@@ -110,10 +110,65 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         "proactive_persona_judge_send_threshold",
         "proactive_review_strength",
     }
+    PERSONALITY_AUTO_TUNE_RECOVERY_STREAK = 3
+    PERSONALITY_AUTO_TUNE_RECOVERY_MIN_SECONDS = 5 * 60
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
+
+    def _troubleshooting_proactive_wakeup_tasks(self) -> dict[str, asyncio.Task[Any]]:
+        tasks = getattr(self.plugin, "_troubleshooting_proactive_wakeup_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self.plugin._troubleshooting_proactive_wakeup_tasks = tasks
+        return tasks
+
+    def _cancel_troubleshooting_proactive_wakeup(self, user_id: str) -> bool:
+        tasks = self._troubleshooting_proactive_wakeup_tasks()
+        task = tasks.pop(str(user_id or ""), None)
+        if not isinstance(task, asyncio.Task) or task.done():
+            return False
+        task.cancel()
+        return True
+
+    def _schedule_troubleshooting_proactive_wakeup(
+        self,
+        user_id: str,
+        scheduled_ts: float,
+    ) -> asyncio.Task[Any] | None:
+        user_key = str(user_id or "").strip()
+        kicker = getattr(self.plugin, "_kick_proactive_loop_once", None)
+        if not user_key or not callable(kicker):
+            return None
+        tasks = self._troubleshooting_proactive_wakeup_tasks()
+        existing = tasks.get(user_key)
+        if isinstance(existing, asyncio.Task) and not existing.done():
+            return existing
+
+        async def wake_when_due() -> None:
+            try:
+                await asyncio.sleep(max(0.0, float(scheduled_ts) - time.time()))
+                await kicker()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanionPage] 主动消息链路测试到点唤醒失败: user=%s error=%s",
+                    self._single_line(user_key, 80),
+                    self._single_line(exc, 160),
+                )
+            finally:
+                current = tasks.get(user_key)
+                if current is asyncio.current_task():
+                    tasks.pop(user_key, None)
+
+        task = asyncio.create_task(
+            wake_when_due(),
+            name=f"private_companion_troubleshooting_proactive_{user_key[:40]}",
+        )
+        tasks[user_key] = task
+        return task
 
     def _image_api_runtime_lock(self) -> asyncio.Lock:
         lock = getattr(self.plugin, "_external_image_api_runtime_lock", None)
@@ -1804,6 +1859,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 user["proactive_sending"] = False
                 user["proactive_sending_started_at"] = 0
                 self.plugin._restore_troubleshooting_proactive_plan(user)
+                self._cancel_troubleshooting_proactive_wakeup(str(user_id))
                 recovered += 1
             if recovered:
                 self.plugin._save_data_sync()
@@ -2885,7 +2941,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "steps": steps,
                 "error": "没有找到可用于测试的私聊对象",
             }
-        umo = self._single_line(target_user.get("umo"), 180)
+        stored_umo = self._single_line(target_user.get("umo"), 180)
+        route_resolver = getattr(self.plugin, "_private_delivery_umo_for_user_id", None)
+        try:
+            resolved_umo = self._single_line(route_resolver(target_user_id), 180) if callable(route_resolver) else ""
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 主动消息链路测试解析当前投递会话失败: user=%s error=%s",
+                self._single_line(target_user_id, 80),
+                self._single_line(exc, 160),
+            )
+            resolved_umo = ""
+        umo = resolved_umo or stored_umo
         if not umo:
             add_step("目标会话", "error", "目标用户缺少 umo")
             return {
@@ -2895,7 +2962,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "steps": steps,
                 "error": "目标用户缺少私聊会话",
             }
-        add_step("目标会话", "ok", f"用户 {target_user.get('nickname') or target_user_id} / {umo}")
+        route_note = ""
+        if stored_umo and resolved_umo and stored_umo != resolved_umo:
+            route_note = "（已切换到当前有效投递会话）"
+        add_step("目标会话", "ok", f"用户 {target_user.get('nickname') or target_user_id} / {umo}{route_note}")
 
         now = time.time()
         delay_seconds = self._int(payload.get("delay_seconds"), 60, 5, 300)
@@ -3006,7 +3076,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             current["troubleshooting_proactive_test_id"] = test_id
             current["troubleshooting_proactive_started_at"] = now
             current["troubleshooting_proactive_steps"] = [
-                {"name": "目标会话", "status": "ok", "detail": f"用户 {current.get('nickname') or target_user_id} / {umo}"},
+                {
+                    "name": "目标会话",
+                    "status": "ok",
+                    "detail": f"用户 {current.get('nickname') or target_user_id} / {umo}{route_note}",
+                },
                 {"name": "临时任务", "status": "ok", "detail": f"已预约 {delay_seconds} 秒后由主动循环执行"},
             ]
             current["user_id"] = str(current.get("user_id") or target_user_id)
@@ -3040,6 +3114,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             result = {
                 "ok": True,
                 "pending": True,
+                "outcome_type": "waiting_schedule",
                 "title": "主动消息链路测试",
                 "user_id": target_user_id,
                 "umo": umo,
@@ -3055,6 +3130,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 self.plugin.data["troubleshooting_test_results"] = raw
             raw["proactive_message"] = self._sanitize_troubleshooting_test_result(result)
             self.plugin._save_data_sync()
+        wakeup_task = self._schedule_troubleshooting_proactive_wakeup(target_user_id, scheduled_ts)
+        if wakeup_task is None:
+            logger.info(
+                "[PrivateCompanionPage] 主动消息链路测试未建立单独唤醒任务，将继续等待常驻主动循环: user=%s",
+                self._single_line(target_user_id, 80),
+            )
         add_step("临时任务", "ok", f"已预约 {delay_seconds} 秒后由主动循环执行")
         return result
 
@@ -4024,6 +4105,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "test_key": self._single_line(result.get("test_key"), 80),
             "ok": bool(result.get("ok")),
             "pending": bool(result.get("pending")),
+            "outcome_type": self._single_line(result.get("outcome_type"), 40),
             "title": self._single_line(result.get("title"), 60),
             "backend": self._single_line(result.get("backend"), 80),
             "image_model": self._single_line(result.get("image_model"), 80),
@@ -9606,7 +9688,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "family_id": self._single_line(raw_rule.get("family_id"), 100),
                 "family_key": self._single_line(raw_rule.get("family_key"), 80),
                 "scene": self._single_line(raw_rule.get("kind"), 24),
-                "label": situation or "语义表达规则",
+                "label": self._single_line(raw_rule.get("label"), 100) or situation or "语义表达规则",
                 "situation": situation,
                 "pattern": pattern,
                 "instruction": instruction,
@@ -10002,7 +10084,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._error("缺少有效的表达样本来源")
         if action not in {
             "approve", "reject", "approve_rule", "reject_rule", "delete_sample", "delete_rule",
-            "approve_rule_group", "reject_rule_group", "delete_rule_group",
+            "approve_rule_group", "reject_rule_group", "delete_rule_group", "update_rule_group",
         }:
             return self._error("不支持的表达样本操作")
         try:
@@ -10021,6 +10103,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 action_message = self._apply_expression_profile_action(item, payload)
                 if action in {
                     "approve", "approve_rule", "approve_rule_group", "delete_sample", "delete_rule", "delete_rule_group",
+                    "update_rule_group",
                 }:
                     voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(voice_refresher):
@@ -10030,6 +10113,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             result = self._expression_library_summary(snapshot)
             result["message"] = action_message
             return self._ok(result)
+        except ValueError as exc:
+            return self._error(str(exc))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新统一表达学习库失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -10137,6 +10222,78 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 profile["learned_rules"] = learned_rules[: max(12, int(getattr(self.plugin, "max_learned_expression_items", 60) or 60))]
             profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             return "已通过表达规则，后续匹配情境时可以使用"
+        if action == "update_rule_group":
+            if not rule_family_id:
+                raise ValueError("缺少规则组标识")
+            rule_storage = self._single_line(payload.get("rule_storage"), 16).lower()
+            if rule_storage not in {"pending", "learned"}:
+                raise ValueError("缺少有效的规则组状态")
+            storage_key = "pending_rules" if rule_storage == "pending" else "learned_rules"
+            stored_rules = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+            matched_indexes = [
+                idx
+                for idx, item in enumerate(stored_rules)
+                if isinstance(item, dict) and self._single_line(item.get("family_id"), 100) == rule_family_id
+            ]
+            if not matched_indexes:
+                raise ValueError("没有找到要编辑的表达规则组，可能已在其他页面中被处理，请刷新后重试")
+
+            situation = self._single_line(payload.get("situation"), 100)
+            label = self._single_line(payload.get("label"), 100) or situation
+            avoid = self._single_line(payload.get("avoid"), 160) or "事实、工具结果、安全边界或人格发生冲突时不用"
+            if not situation:
+                raise ValueError("适用情境不能为空")
+
+            raw_signals = payload.get("signals")
+            if isinstance(raw_signals, str):
+                raw_signals = re.split(r"[,，/、|\s]+", raw_signals)
+            signals: list[str] = []
+            for raw_signal in raw_signals if isinstance(raw_signals, list) else []:
+                signal = self._single_line(raw_signal, 24)
+                if signal and signal not in signals:
+                    signals.append(signal)
+                if len(signals) >= 8:
+                    break
+
+            component_payloads = {
+                "style": payload.get("style_rule") if isinstance(payload.get("style_rule"), dict) else None,
+                "grammar": payload.get("grammar_rule") if isinstance(payload.get("grammar_rule"), dict) else None,
+            }
+            validator = getattr(self.plugin, "_expression_rule_definition_is_valid", None)
+            updated_rules: list[tuple[int, dict[str, Any]]] = []
+            edited_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+            for idx in matched_indexes:
+                current = stored_rules[idx]
+                kind = self._single_line(current.get("kind"), 16).lower()
+                component = component_payloads.get(kind)
+                if kind not in {"style", "grammar"} or not isinstance(component, dict):
+                    raise ValueError("规则组组件不完整，请刷新页面后重试")
+                pattern = self._single_line(component.get("pattern"), 100)
+                instruction = self._single_line(component.get("instruction"), 160)
+                candidate = dict(current)
+                candidate.update(
+                    {
+                        "label": label,
+                        "situation": situation,
+                        "pattern": pattern,
+                        "instruction": instruction,
+                        "keywords": list(signals),
+                        "tags": list(signals),
+                        "avoid": avoid,
+                        "manually_edited": True,
+                        "edited_at": edited_at,
+                    }
+                )
+                if callable(validator) and not validator(candidate):
+                    kind_label = "可复用表达" if kind == "style" else "句法结构"
+                    raise ValueError(f"{kind_label}不符合可复用规则要求，请补全具体结构和使用指令")
+                updated_rules.append((idx, candidate))
+
+            for idx, candidate in updated_rules:
+                stored_rules[idx] = candidate
+            profile[storage_key] = stored_rules
+            profile["updated_at"] = edited_at
+            return f"已保存表达规则组，共更新 {len(updated_rules)} 条互补规则"
         if action in {"approve_rule_group", "reject_rule_group"}:
             if not rule_family_id:
                 return "缺少规则组标识"
@@ -12852,7 +13009,50 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
         if not plan:
             if applied_snapshot:
-                return await self._restore_personality_iteration_auto_tune("当前没有需要自主调节的角色贴合问题")
+                now = time.time()
+                async with self.plugin._data_lock:
+                    state = self.plugin.data.setdefault("personality_iteration_auto_tune", {})
+                    if not isinstance(state, dict):
+                        state = {}
+                        self.plugin.data["personality_iteration_auto_tune"] = state
+                    no_suggestion_since = self._float(state.get("no_suggestion_since"))
+                    if no_suggestion_since <= 0:
+                        no_suggestion_since = now
+                    no_suggestion_streak = self._int(state.get("no_suggestion_streak"), 0, 0) + 1
+                    state["no_suggestion_since"] = no_suggestion_since
+                    state["no_suggestion_streak"] = no_suggestion_streak
+                    state["last_suggestion_count"] = len(suggestions)
+                    state["last_clear_observed_at"] = now
+                    self.plugin._save_data_sync()
+                stable_seconds = max(0.0, now - no_suggestion_since)
+                ready_to_restore = (
+                    no_suggestion_streak >= max(1, int(self.PERSONALITY_AUTO_TUNE_RECOVERY_STREAK))
+                    and stable_seconds >= max(0.0, float(self.PERSONALITY_AUTO_TUNE_RECOVERY_MIN_SECONDS))
+                )
+                if not ready_to_restore:
+                    result = {
+                        "changed": False,
+                        "pending_restore": True,
+                        "reason": "角色贴合问题暂未再次出现，先保留当前自动值观察，避免参数来回切换",
+                        "suggestion_count": len(suggestions),
+                        "recovery_streak": no_suggestion_streak,
+                        "recovery_required": max(1, int(self.PERSONALITY_AUTO_TUNE_RECOVERY_STREAK)),
+                        "recovery_stable_seconds": int(stable_seconds),
+                    }
+                    await self._remember_personality_auto_tune_status(result)
+                    return result
+                return await self._restore_personality_iteration_auto_tune(
+                    "角色贴合问题已连续消失并经过稳定观察，恢复用户手动参数"
+                )
+            async with self.plugin._data_lock:
+                state = self.plugin.data.get("personality_iteration_auto_tune")
+                if isinstance(state, dict) and (
+                    self._int(state.get("no_suggestion_streak"), 0, 0) > 0
+                    or self._float(state.get("no_suggestion_since")) > 0
+                ):
+                    state["no_suggestion_streak"] = 0
+                    state["no_suggestion_since"] = 0
+                    self.plugin._save_data_sync()
             await self._remember_personality_auto_tune_status(
                 {
                     "changed": False,
@@ -12862,15 +13062,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 }
             )
             return {"changed": False, "reason": "暂无需要自主调节的角色贴合问题", "suggestion_count": len(suggestions)}
-
-        restore_keys = [key for key in applied_snapshot if key in self.PERSONALITY_AUTO_TUNE_KEYS and key not in plan]
-        restored_result: dict[str, Any] = {}
-        if restore_keys:
-            restored_result = await self._restore_personality_iteration_auto_tune(
-                "对应角色贴合问题已消失",
-                keys=restore_keys,
-                keep_state=True,
-            )
 
         changes: list[dict[str, Any]] = []
         async with self.plugin._data_lock:
@@ -12921,6 +13112,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             state["enabled"] = True
             state["last_suggestion_count"] = len(suggestions)
             state["last_tuned_at"] = time.time()
+            state["last_suggestion_at"] = state["last_tuned_at"]
+            state["no_suggestion_streak"] = 0
+            state["no_suggestion_since"] = 0
             if changes:
                 state["last_changes"] = deepcopy(changes)
             self.plugin._save_data_sync()
@@ -12931,7 +13125,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         result = {
             "changed": bool(changes),
             "changes": changes,
-            "restored_changes": restored_result.get("changes", []) if isinstance(restored_result, dict) else [],
+            "restored_changes": [],
             "config_saved": config_saved,
             "suggestion_count": len(suggestions),
             "reason": "已按角色贴合诊断临时覆盖参数" if changes else "当前自动覆盖值已经符合目标",
