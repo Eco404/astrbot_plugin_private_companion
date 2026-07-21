@@ -189,6 +189,15 @@ class SceneContextMixin:
                 location = ""
         if not location:
             location = _single_line(state.get("location"), 80)
+        location_source = _single_line(state.get("location_source"), 40)
+        detail_location_getter = getattr(self, "_current_detail_model_location", None)
+        if callable(detail_location_getter):
+            try:
+                detail_location = _single_line(detail_location_getter(), 80)
+            except Exception:
+                detail_location = ""
+            if detail_location and detail_location == location:
+                location_source = "detail_model"
         coarse_location = ""
         coarse_getter = getattr(self, "_coarse_roleplay_location_text", None)
         if location and callable(coarse_getter):
@@ -298,7 +307,8 @@ class SceneContextMixin:
                 "raw": location,
                 "coarse": coarse_location,
                 "text": coarse_location or location,
-                "source": _single_line(state.get("location_source"), 40),
+                "source": location_source,
+                "confidence": state.get("location_confidence") if location_source == "detail_model" else None,
                 "category": scene_category,
                 "category_label": scene_category_label,
             },

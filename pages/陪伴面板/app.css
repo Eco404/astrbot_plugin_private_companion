@@ -14729,6 +14729,136 @@ html[data-bookshelf-cover-preview="open"] {
   overflow-wrap: anywhere;
 }
 
+.proactive-audit-lines {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.proactive-audit-line {
+  display: grid;
+  grid-template-columns: minmax(72px, 96px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.proactive-audit-line b {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.proactive-audit-line span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+
+.proactive-audit-line.result.error span {
+  color: var(--danger);
+}
+
+.proactive-diagnostic {
+  min-width: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.proactive-diagnostic summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0 0;
+  cursor: pointer;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.proactive-diagnostic summary::-webkit-details-marker {
+  display: none;
+}
+
+.proactive-diagnostic summary::before {
+  content: "+";
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 50%;
+  color: var(--blue);
+  line-height: 1;
+}
+
+.proactive-diagnostic[open] summary::before {
+  content: "-";
+}
+
+.proactive-diagnostic summary span {
+  margin-right: auto;
+}
+
+.proactive-diagnostic summary small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.proactive-diagnostic summary:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 4px;
+}
+
+.proactive-diagnostic dl {
+  display: grid;
+  gap: 0;
+  margin: 10px 0 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.proactive-diagnostic dl > div {
+  display: grid;
+  grid-template-columns: minmax(104px, 144px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.proactive-diagnostic dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.proactive-diagnostic dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.proactive-task p.proactive-diagnostic-legacy {
+  margin: 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 680px) {
+  .proactive-audit-line,
+  .proactive-diagnostic dl > div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
 .proactive-semantic-chip,
 .proactive-window-chip {
   border-radius: 999px;

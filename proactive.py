@@ -620,8 +620,232 @@ class ProactiveMixin:
             return target
         return canonical
 
+    def _private_delivery_alias_target(self, user_id: str) -> str:
+        canonical = self._canonical_private_user_id(str(user_id or "").strip())
+        aliases = getattr(self, "private_user_delivery_aliases", {}) or {}
+        return _single_line(aliases.get(canonical), 240)
+
+    def _private_umo_session_id(self, umo: str) -> str:
+        clean_umo = _single_line(umo, 240)
+        if not clean_umo or ":FriendMessage:" not in clean_umo:
+            return ""
+        parser = getattr(self, "_parse_message_session", None)
+        if callable(parser):
+            try:
+                session = parser(clean_umo)
+            except Exception:
+                session = None
+            if session is not None:
+                return _single_line(getattr(session, "session_id", ""), 128)
+        return _single_line(clean_umo.rsplit(":FriendMessage:", 1)[-1], 128)
+
+    @staticmethod
+    def _private_delivery_route_store(user: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        raw = user.setdefault("private_delivery_routes", {})
+        if not isinstance(raw, dict):
+            raw = {}
+            user["private_delivery_routes"] = raw
+        return raw
+
+    def _remember_private_delivery_route(
+        self,
+        user: dict[str, Any] | None,
+        umo: str,
+        *,
+        outcome: str,
+        error: str = "",
+    ) -> None:
+        if not isinstance(user, dict):
+            return
+        clean_umo = _single_line(umo, 240)
+        session_id = self._private_umo_session_id(clean_umo)
+        if not clean_umo or not session_id:
+            return
+        routes = self._private_delivery_route_store(user)
+        item = routes.get(clean_umo)
+        if not isinstance(item, dict):
+            item = {}
+            routes[clean_umo] = item
+        now = _now_ts()
+        item["umo"] = clean_umo
+        item["session_id"] = session_id
+        kind_getter = getattr(self, "_platform_kind_for_umo", None)
+        item["platform_kind"] = _single_line(kind_getter(clean_umo) if callable(kind_getter) else "", 40)
+        if outcome == "success":
+            item["last_success_at"] = now
+            item["failure_count"] = 0
+            item["last_error"] = ""
+            user["preferred_delivery_umo"] = clean_umo
+        elif outcome == "failure":
+            item["last_failure_at"] = now
+            item["failure_count"] = _safe_int(item.get("failure_count"), 0, 0) + 1
+            item["last_error"] = _single_line(error, 240)
+        else:
+            item["last_seen_at"] = now
+            if _safe_float(item.get("last_failure_at"), 0) <= _safe_float(item.get("last_seen_at"), 0):
+                item["failure_count"] = 0
+        if len(routes) > 12:
+            ordered = sorted(
+                routes.items(),
+                key=lambda pair: max(
+                    _safe_float(pair[1].get("last_success_at"), 0) if isinstance(pair[1], dict) else 0,
+                    _safe_float(pair[1].get("last_seen_at"), 0) if isinstance(pair[1], dict) else 0,
+                    _safe_float(pair[1].get("last_failure_at"), 0) if isinstance(pair[1], dict) else 0,
+                ),
+                reverse=True,
+            )
+            routes.clear()
+            routes.update(ordered[:12])
+
+    def _private_delivery_umo_is_verified(self, user_id: str, user: dict[str, Any], umo: str) -> bool:
+        clean_umo = _single_line(umo, 240)
+        if not clean_umo:
+            return False
+        explicit = self._private_delivery_alias_target(user_id)
+        if explicit and ":FriendMessage:" in explicit and explicit == clean_umo:
+            return True
+        if clean_umo in {
+            _single_line(user.get("last_inbound_umo"), 240),
+            _single_line(user.get("preferred_delivery_umo"), 240),
+            _single_line(user.get("last_proactive_delivery_umo"), 240),
+        }:
+            return True
+        routes = user.get("private_delivery_routes")
+        item = routes.get(clean_umo) if isinstance(routes, dict) else None
+        return bool(
+            isinstance(item, dict)
+            and (
+                _safe_float(item.get("last_success_at"), 0) > 0
+                or _safe_float(item.get("last_seen_at"), 0) > 0
+            )
+        )
+
+    def _private_delivery_umo_candidates(self, user_id: str) -> list[str]:
+        canonical = self._canonical_private_user_id(str(user_id or "").strip())
+        delivery_id = self._private_delivery_user_id_for(canonical)
+        if not delivery_id:
+            return []
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        user = users.get(canonical) if isinstance(users, dict) and isinstance(users.get(canonical), dict) else {}
+        candidates: list[str] = []
+
+        def add(value: Any) -> None:
+            umo = _single_line(value, 240)
+            if umo and umo not in candidates and self._private_umo_matches_user_id(umo, delivery_id):
+                candidates.append(umo)
+
+        explicit = self._private_delivery_alias_target(canonical)
+        if ":FriendMessage:" in explicit:
+            add(explicit)
+
+        routes = user.get("private_delivery_routes") if isinstance(user, dict) else {}
+        ranked_routes: list[tuple[tuple[int, int, float], str]] = []
+        if isinstance(routes, dict):
+            for route_umo, raw in routes.items():
+                if not isinstance(raw, dict) or not self._private_umo_matches_user_id(route_umo, delivery_id):
+                    continue
+                success_at = _safe_float(raw.get("last_success_at"), 0)
+                seen_at = _safe_float(raw.get("last_seen_at"), 0)
+                failure_at = _safe_float(raw.get("last_failure_at"), 0)
+                failed_latest = int(
+                    _safe_int(raw.get("failure_count"), 0, 0) > 0
+                    and failure_at >= max(success_at, seen_at)
+                )
+                ranked_routes.append(((1 - failed_latest, int(success_at > 0), max(success_at, seen_at)), route_umo))
+        for _, route_umo in sorted(ranked_routes, key=lambda pair: pair[0], reverse=True):
+            add(route_umo)
+
+        if isinstance(user, dict):
+            add(user.get("preferred_delivery_umo"))
+            add(user.get("last_inbound_umo"))
+            add(user.get("last_proactive_delivery_umo"))
+            add(user.get("umo"))
+        add(self._default_private_umo_for_user_id(delivery_id))
+        return candidates
+
     def _private_delivery_umo_for_user_id(self, user_id: str) -> str:
-        return self._default_private_umo_for_user_id(self._private_delivery_user_id_for(user_id))
+        candidates = self._private_delivery_umo_candidates(user_id)
+        return candidates[0] if candidates else ""
+
+    def _private_delivery_route_status(
+        self,
+        user_id: str,
+        user: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return a read-only explanation of the active private delivery route."""
+        canonical = self._canonical_private_user_id(str(user_id or "").strip())
+        if not isinstance(user, dict):
+            users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+            user = users.get(canonical) if isinstance(users, dict) and isinstance(users.get(canonical), dict) else {}
+        selected = self._private_delivery_umo_for_user_id(canonical)
+        explicit = self._private_delivery_alias_target(canonical)
+        routes = user.get("private_delivery_routes") if isinstance(user.get("private_delivery_routes"), dict) else {}
+        selected_item = routes.get(selected) if isinstance(routes.get(selected), dict) else {}
+        success_at = _safe_float(selected_item.get("last_success_at"), 0)
+        seen_at = _safe_float(selected_item.get("last_seen_at"), 0)
+        failure_at = _safe_float(selected_item.get("last_failure_at"), 0)
+        failure_count = _safe_int(selected_item.get("failure_count"), 0, 0)
+        selected_recovered = max(success_at, seen_at) > failure_at
+
+        source = "fallback"
+        source_label = "平台兜底"
+        if explicit and ":FriendMessage:" in explicit and selected == explicit:
+            source = "explicit"
+            source_label = "管理员指定完整会话"
+        elif success_at > 0 and (failure_count <= 0 or selected_recovered):
+            source = "success"
+            source_label = "最近发送成功会话"
+        elif (
+            selected
+            and (
+                selected == _single_line(user.get("last_inbound_umo"), 240)
+                or seen_at > 0
+            )
+            and (failure_count <= 0 or selected_recovered)
+        ):
+            source = "inbound"
+            source_label = "最近实际入站会话"
+        elif selected and selected in {
+            _single_line(user.get("preferred_delivery_umo"), 240),
+            _single_line(user.get("last_proactive_delivery_umo"), 240),
+            _single_line(user.get("umo"), 240),
+        }:
+            source = "stored"
+            source_label = "用户已保存会话"
+        elif explicit:
+            source = "mapped_id"
+            source_label = "管理员指定目标 ID（平台兜底）"
+
+        recent_failure_umo = ""
+        recent_failure_item: dict[str, Any] = {}
+        recent_failure_at = 0.0
+        verified_count = 0
+        for route_umo, raw in routes.items():
+            if not isinstance(raw, dict):
+                continue
+            if _safe_float(raw.get("last_success_at"), 0) > 0 or _safe_float(raw.get("last_seen_at"), 0) > 0:
+                verified_count += 1
+            route_failure_at = _safe_float(raw.get("last_failure_at"), 0)
+            if route_failure_at > recent_failure_at:
+                recent_failure_at = route_failure_at
+                recent_failure_umo = _single_line(route_umo, 240)
+                recent_failure_item = raw
+        recent_recovered_at = max(
+            _safe_float(recent_failure_item.get("last_success_at"), 0),
+            _safe_float(recent_failure_item.get("last_seen_at"), 0),
+        )
+        return {
+            "umo": selected,
+            "source": source,
+            "source_label": source_label,
+            "route_count": len(routes),
+            "verified_route_count": verified_count,
+            "explicit_target": explicit,
+            "recent_error": _single_line(recent_failure_item.get("last_error"), 240),
+            "recent_error_at": recent_failure_at,
+            "recent_error_umo": recent_failure_umo,
+            "recent_error_recovered": bool(recent_failure_at and recent_recovered_at > recent_failure_at),
+        }
 
     def _private_umo_matches_user_id(self, umo: str, user_id: str) -> bool:
         clean_umo = _single_line(umo, 180)
@@ -646,13 +870,41 @@ class ProactiveMixin:
             return
         user_id = self._canonical_private_user_id(str(user_id or user.get("user_id") or "").strip())
         user["last_inbound_umo"] = clean_umo
+        self._remember_private_delivery_route(user, clean_umo, outcome="observed")
         delivery_id = self._private_delivery_user_id_for(user_id)
+        inbound_session_id = self._private_umo_session_id(clean_umo)
         if delivery_id and delivery_id != user_id:
+            if inbound_session_id == delivery_id:
+                user["umo"] = clean_umo
+                return
             delivery_umo = self._private_delivery_umo_for_user_id(user_id)
-            user["umo"] = delivery_umo
+            if delivery_umo:
+                user["umo"] = delivery_umo
             return
         if self._private_umo_matches_user_id(clean_umo, user_id):
             user["umo"] = clean_umo
+
+    def _note_private_delivery_success(self, user_id: str, user: dict[str, Any] | None, umo: str) -> None:
+        if not isinstance(user, dict):
+            return
+        self._remember_private_delivery_route(user, umo, outcome="success")
+        delivery_id = self._private_delivery_user_id_for(user_id)
+        if delivery_id and self._private_umo_matches_user_id(umo, delivery_id):
+            user["umo"] = _single_line(umo, 240)
+
+    def _note_private_delivery_failure(
+        self,
+        user_id: str,
+        user: dict[str, Any] | None,
+        umo: str,
+        error: str = "",
+    ) -> None:
+        if not isinstance(user, dict):
+            return
+        self._remember_private_delivery_route(user, umo, outcome="failure", error=error)
+        preferred = self._private_delivery_umo_for_user_id(user_id)
+        if preferred and preferred != _single_line(umo, 240) and self._private_delivery_umo_is_verified(user_id, user, preferred):
+            user["umo"] = preferred
 
     def _ensure_private_user_umo(self, user_id: str, user: dict[str, Any] | None) -> bool:
         if not isinstance(user, dict):
@@ -664,6 +916,13 @@ class ProactiveMixin:
         current = _single_line(user.get("umo"), 180)
         delivery_id = self._private_delivery_user_id_for(user_id)
         canonical_id = self._canonical_private_user_id(user_id)
+        if (
+            current
+            and fallback != current
+            and self._private_delivery_umo_is_verified(canonical_id, user, fallback)
+        ):
+            user["umo"] = fallback
+            return True
         if delivery_id and delivery_id != canonical_id:
             expected_suffix = f":FriendMessage:{delivery_id}"
             if not current.endswith(expected_suffix):

@@ -1726,6 +1726,7 @@ const configLabels = {
   daily_outfit_rotation_days: "穿搭轮换冷却天数",
   enable_natural_language_photo_generation: "允许规则快判生图/改图",
   natural_language_photo_generation_mode: "非指令生图处理方式",
+  command_photo_generation_max_daily: "用户请求生图每日上限",
   natural_language_photo_generation_max_daily: "规则快判生图上限",
   natural_language_photo_extra_prompt: "规则快判附加提示词",
   comfyui_photo_wait_seconds: "本地生图等待秒数",
@@ -1849,7 +1850,7 @@ const configDescriptions = {
   persona_proactive_voice_prompt: "用于把主动动机变成最终开口。重点是具体由头、低压力、短句和可接话，不写成回复空气或任务汇报。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于世界知识，它会影响私聊被动回复、群聊人格和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主用户 ID。每行一个映射，例如：临时ID=主用户ID。",
-  private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射，例如：主用户ID=投递用户ID。",
+  private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射；多 Bot 或 QQ 官方场景请优先粘贴 /sid 返回的完整 UMO，例如 主用户ID=Bot实例ID:FriendMessage:openid。插件会优先复用实际收到或成功发送过的会话。",
   external_image_api_endpoints: "按顺序尝试的在线生图 API 队列。第一条优先使用，失败/超时后继续下一条；保存队列时会同步旧的主用/备选字段。",
   schedule_persona_prompt: "给陪伴插件的日程、状态、主动行为、识图、生图和创作提供角色资料补充；不会覆盖 AstrBot 主人格或群聊人格。",
   schedule_worldview_prompt: "给陪伴插件判断生活背景和世界规则，适合写所在世界、日常规则、居住/学校/城市环境和与用户的生活关系。",
@@ -2202,6 +2203,7 @@ const configDescriptions = {
   daily_outfit_rotation_days: "保留最近成功生成的穿搭档案，并优先避开相同主色、外层和轮廓。每次至少换掉最近一套的两个可见维度，手动重生也会轮换。",
   enable_natural_language_photo_generation: "只控制“规则快判”模式是否允许插件在主链前直接接管生图。默认建议用工具优先，让主链模型调用 pc_generate_photo；工具不稳定时再切到规则快判。",
   natural_language_photo_generation_mode: "tool_first：普通聊天先进主链，由模型调用 pc_generate_photo；rule_fast：插件在主链前用规则直接接管高置信生图请求；off：不做非指令生图前置处理。",
+  command_photo_generation_max_daily: "按陪伴用户分别计数，同时作用于“陪伴 生图/自拍/改图”显式指令和主链 pc_generate_photo 工具调用。独立于主动带图、规则快判和每日穿搭额度；0 表示不限量。",
   natural_language_photo_generation_max_daily: "只作用于 rule_fast 规则快判入口，独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭规则快判生图/改图。",
   natural_language_photo_extra_prompt: "只作用于 rule_fast 规则快判入口，会作为英文 positive prompt 的附加短语接入。建议写英文画面短语，留空则不追加；全局固定附加提示词仍在所有生图最后追加。",
   custom_photo_tool_name: "生图后端选择 tool_call 时必填。填写其他插件通过 @filter.llm_tool 注册的函数工具名，例如 generate_selfie。插件会在生图时调用该工具并把结果解析为图片路径或图片数据。",
@@ -2452,7 +2454,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -2989,6 +2991,11 @@ const featureSettingSections = {
       keys: ["photo_generation_backend", "natural_language_photo_generation_mode", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt"],
     },
     {
+      title: "用户请求生图",
+      note: "控制显式陪伴生图指令与主链生图工具的共同额度。0 表示不限量，不会借用主动带图或规则快判上限。",
+      keys: ["command_photo_generation_max_daily"],
+    },
+    {
       title: "主动发送频率",
       note: "只控制插件主动消息升级为带图的频率，不限制用户明确要求的生图。",
       keys: ["proactive_photo_text_probability", "photo_action_max_daily"],
@@ -3223,6 +3230,7 @@ const featureSettingTypes = {
   memory_companion_context_top_k: { type: "number", min: 1, max: 10, step: 1 },
   memory_companion_context_max_chars: { type: "number", min: 240, max: 1800, step: 60 },
   natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
+  command_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   private_image_vision_provider_priority: { type: "select", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]] },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
@@ -5653,6 +5661,7 @@ const setupGuideAdvancedItems = {
       settings: [
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
+        { key: "command_photo_generation_max_daily", type: "number", label: "用户请求每日上限", placeholder: "0（不限量）", min: 0, max: 100, description: "显式陪伴生图指令与主链 pc_generate_photo 工具共用；0 表示不限量。" },
         { key: "enable_natural_language_photo_generation", type: "bool", kind: "setting", label: "允许规则快判生图/改图", description: "开启后，插件会在主链前直接接管高置信图片请求。", showWhen: (draft) => photoSettingVisibleForValues("enable_natural_language_photo_generation", draft) },
         { key: "natural_language_photo_generation_max_daily", type: "number", label: "规则快判每日上限", placeholder: "3", min: 0, showWhen: (draft) => photoSettingVisibleForValues("natural_language_photo_generation_max_daily", draft) },
         { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "keep character identity consistent, clean composition, no text, no watermark", showWhen: (draft) => photoSettingVisibleForValues("natural_language_photo_extra_prompt", draft) },
@@ -9533,6 +9542,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
     ].filter(Boolean).join(" · ");
     const stepsMarkup = troubleshootingChainStepsMarkup(result.steps);
     const previewMarkup = troubleshootingChainPreviewMarkup(test.type, result);
+    const diagnosticMarkup = proactiveDiagnosticDetailsMarkup(result.diagnostic_detail);
     const detailText = troubleshootingChainDetailText(test, result, hasResult);
     return `
       <section class="troubleshooting-chain-test ${escapeHtml(status)}">
@@ -9542,6 +9552,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
           ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
           ${previewMarkup}
+          ${diagnosticMarkup}
           ${stepsMarkup}
         </div>
         <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}" ${test.workflowKind ? `data-troubleshooting-workflow-kind="${escapeHtml(test.workflowKind)}"` : ""}>${escapeHtml(test.button)}</button>
@@ -11875,6 +11886,7 @@ async function renderUserDetail(forceFetch = false) {
     </div>
     <div class="detail-grid">
       ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
+      ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
       ${userWorldbookBlock(detail.worldbook_member)}
@@ -11886,6 +11898,25 @@ async function renderUserDetail(forceFetch = false) {
     </div>
   `;
   bindUserActions(detail);
+}
+
+function renderPrivateDeliveryRoute(detail) {
+  const route = detail?.delivery_route && typeof detail.delivery_route === "object" ? detail.delivery_route : {};
+  const recentError = String(route.recent_error || "").trim();
+  const errorLabel = route.recent_error_recovered ? "最近错误（已恢复）" : "最近错误";
+  const routeCount = Number(route.route_count || 0);
+  const verifiedCount = Number(route.verified_route_count || 0);
+  const note = String(route.umo || detail?.umo || "").trim() || "尚未形成可投递会话";
+  const pairs = [
+    ["路线来源", route.source_label || "用户已保存会话"],
+    ["已观察路线", `${routeCount} 条（可验证 ${verifiedCount} 条）`],
+  ];
+  if (route.explicit_target) pairs.push(["管理员映射", route.explicit_target]);
+  if (recentError) {
+    pairs.push([errorLabel, recentError]);
+    if (route.recent_error_umo) pairs.push(["错误会话", route.recent_error_umo]);
+  }
+  return detailBlock("主动投递会话", note, pairs);
 }
 
 function renderPrivateDialogueEpisodes(detail) {
@@ -16733,6 +16764,52 @@ function proactiveRuntimeHtml(runtime) {
   `;
 }
 
+function proactiveDiagnosticRows(rawDetail) {
+  const detail = String(rawDetail || "").trim();
+  if (!detail) return [];
+  const markerPattern = /;\s*(precise|fallback|direct)=/g;
+  const markers = [...detail.matchAll(markerPattern)];
+  if (!markers.length) return [{ label: "完整错误", value: detail }];
+  const labels = {
+    precise: "精确会话发送",
+    fallback: "AstrBot 核心发送",
+    direct: "OneBot 兜底发送",
+  };
+  const target = detail
+    .slice(0, markers[0].index)
+    .replace(/^[A-Za-z]+Error:\s*/, "")
+    .replace(/^主动消息发送失败:\s*/, "")
+    .trim();
+  const rows = target ? [{ label: "发送目标", value: target }] : [];
+  markers.forEach((marker, index) => {
+    const start = Number(marker.index || 0) + marker[0].length;
+    const end = index + 1 < markers.length ? Number(markers[index + 1].index || detail.length) : detail.length;
+    rows.push({
+      label: labels[marker[1]] || marker[1],
+      value: detail.slice(start, end).trim(),
+    });
+  });
+  return rows.filter((row) => row.value);
+}
+
+function proactiveDiagnosticDetailsMarkup(rawDetail) {
+  const rows = proactiveDiagnosticRows(rawDetail);
+  if (!rows.length) return "";
+  return `
+    <details class="proactive-diagnostic">
+      <summary><span>查看完整发送诊断</span><small>${rows.length} 项</small></summary>
+      <dl>
+        ${rows.map((row) => `
+          <div>
+            <dt>${escapeHtml(row.label)}</dt>
+            <dd>${escapeHtml(row.value)}</dd>
+          </div>
+        `).join("")}
+      </dl>
+    </details>
+  `;
+}
+
 function proactiveAuditHtml(items) {
   const visibleItems = (Array.isArray(items) ? items : []).filter((item) => item?.status !== "obsolete");
   if (!visibleItems.length) {
@@ -16748,8 +16825,6 @@ function proactiveAuditHtml(items) {
       `来源：${sourceLabel}`,
       `动作：${item.action || "message"}`,
       item.reason_label ? `原因：${item.reason_label}` : (item.reason ? `原因：${item.reason}` : ""),
-      item.reason_detail ? `为什么：${item.reason_detail}` : "",
-      item.note ? `结果：${item.note}` : "",
       item.original_text_preview ? `原候选：${item.original_text_preview}` : "",
       item.final_text_preview ? `最终发送：${item.final_text_preview}` : "",
       item.text_preview && !item.final_text_preview ? `消息：${item.text_preview}` : "",
@@ -16760,6 +16835,22 @@ function proactiveAuditHtml(items) {
       item.created_ts ? `开始：${item.created || "-"}` : "",
       item.updated_ts ? `更新：${item.updated || "-"}` : "",
     ].filter(Boolean);
+    const reasonMarkup = item.reason_detail ? `
+      <div class="proactive-audit-line">
+        <b>触发依据</b>
+        <span>${escapeHtml(item.reason_detail)}</span>
+      </div>
+    ` : "";
+    const resultMarkup = item.note ? `
+      <div class="proactive-audit-line result ${item.status === "failed" ? "error" : ""}">
+        <b>执行结果</b>
+        <span>${escapeHtml(item.note)}</span>
+      </div>
+    ` : "";
+    const diagnosticMarkup = proactiveDiagnosticDetailsMarkup(item.diagnostic_detail);
+    const legacyDiagnosticMarkup = item.status === "failed" && !diagnosticMarkup ? `
+      <p class="proactive-diagnostic-legacy">这条旧记录只保存了错误摘要；重新运行对应测试后可查看完整发送诊断。</p>
+    ` : "";
     return `
       <section class="proactive-task audit ${escapeHtml(item.status || "unknown")}">
         <div class="proactive-task-head">
@@ -16769,11 +16860,17 @@ function proactiveAuditHtml(items) {
           </div>
           <span class="badge">${escapeHtml(status)}</span>
         </div>
-        <p>${escapeHtml(item.motive || item.note || "暂无动机记录")}</p>
+        ${item.motive ? `<p class="proactive-audit-motive">${escapeHtml(item.motive)}</p>` : ""}
         <div class="proactive-meta">
           ${semanticMeta.map((value) => `<span class="proactive-semantic-chip">${escapeHtml(value)}</span>`).join("")}
           ${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
         </div>
+        <div class="proactive-audit-lines">
+          ${reasonMarkup}
+          ${resultMarkup}
+        </div>
+        ${diagnosticMarkup}
+        ${legacyDiagnosticMarkup}
       </section>
     `;
   }).join("");

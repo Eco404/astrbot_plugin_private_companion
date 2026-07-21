@@ -103,7 +103,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .helpers import _date_key, _now_ts, _redact_outbound_secrets, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -4340,7 +4340,8 @@ class ProactiveEngineMixin:
         return _single_line(_strip_internal_message_blocks(text), limit)
 
     def _proactive_audit_safe_note(self, note: Any, *, limit: int = 180) -> str:
-        text = _single_line(note, limit)
+        limit = max(1, int(limit or 1))
+        text = _single_line(_redact_outbound_secrets(note, self), max(4096, limit + 1))
         if not text:
             return ""
         meta_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
@@ -4350,6 +4351,8 @@ class ProactiveEngineMixin:
                     return "模型/供应商返回内部错误，原文已隐藏"
             except Exception:
                 pass
+        if len(text) > limit:
+            return text[: max(1, limit - 1)].rstrip() + "…"
         return text
 
     def _proactive_audit_signature(self, item: dict[str, Any], *, bucket_seconds: int = 300) -> str:
@@ -4391,6 +4394,7 @@ class ProactiveEngineMixin:
             if self._proactive_audit_note_is_obsolete_fixed_error(item.get("note")):
                 item["status"] = "obsolete"
                 item["note"] = "旧版本主动发送变量错误，当前版本已修复"
+                item.pop("diagnostic_detail", None)
             signature = self._proactive_audit_signature(item)
             previous = seen.get(signature)
             if previous is None:
@@ -4402,7 +4406,7 @@ class ProactiveEngineMixin:
                 _safe_float(item.get("updated_ts"), 0),
             )
             previous["duplicate_count"] = _safe_int(previous.get("duplicate_count"), 1, 1) + 1
-            for key in ("text_preview", "original_text_preview", "final_text_preview", "image_path"):
+            for key in ("text_preview", "original_text_preview", "final_text_preview", "image_path", "diagnostic_detail"):
                 if item.get(key):
                     previous[key] = item.get(key)
             if item.get("extra_count") is not None:
@@ -4425,6 +4429,7 @@ class ProactiveEngineMixin:
         text: str = "",
         original_text: str = "",
         final_text: str = "",
+        diagnostic_detail: str = "",
     ) -> str:
         now = _now_ts()
         audit_id = uuid.uuid4().hex[:12]
@@ -4456,6 +4461,7 @@ class ProactiveEngineMixin:
             "text_preview": self._proactive_visible_text_preview(text) if text else "",
             "original_text_preview": self._proactive_visible_text_preview(original_text) if original_text else "",
             "final_text_preview": self._proactive_visible_text_preview(final_text) if final_text else "",
+            "diagnostic_detail": self._proactive_audit_safe_note(diagnostic_detail, limit=2400) if diagnostic_detail else "",
         }
         log = self._proactive_audit_log()
         signature = self._proactive_audit_signature(item)
@@ -4466,7 +4472,7 @@ class ProactiveEngineMixin:
                 continue
             existing["updated_ts"] = now
             existing["duplicate_count"] = _safe_int(existing.get("duplicate_count"), 1, 1) + 1
-            for key in ("text_preview", "original_text_preview", "final_text_preview"):
+            for key in ("text_preview", "original_text_preview", "final_text_preview", "diagnostic_detail"):
                 if item.get(key):
                     existing[key] = item.get(key)
             return _single_line(existing.get("id"), 40) or audit_id
@@ -4488,6 +4494,7 @@ class ProactiveEngineMixin:
         reason: str = "",
         original_text: str = "",
         final_text: str = "",
+        diagnostic_detail: str = "",
     ) -> None:
         if not audit_id:
             return
@@ -4505,6 +4512,8 @@ class ProactiveEngineMixin:
                 item["original_text_preview"] = self._proactive_visible_text_preview(original_text)
             if final_text:
                 item["final_text_preview"] = self._proactive_visible_text_preview(final_text)
+            if diagnostic_detail:
+                item["diagnostic_detail"] = self._proactive_audit_safe_note(diagnostic_detail, limit=2400)
             if image_path:
                 item["image_path"] = _single_line(image_path, 260)
             if extra_count is not None:

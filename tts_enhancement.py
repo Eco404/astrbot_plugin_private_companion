@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from astrbot.api import logger
 try:
@@ -611,21 +612,57 @@ class TtsEnhancementMixin:
         source = source.lstrip(" \t\r\n。！？!?，,、；;：:~～…")
         return source.strip()
 
-    def _tts_record_refs(self, component: Any) -> list[str]:
-        refs: list[str] = []
-        for attr in ("file", "url", "path"):
-            value = str(getattr(component, attr, "") or "").strip()
-            if value and value not in refs:
-                refs.append(value)
+    @staticmethod
+    def _tts_record_ref_aliases(value: Any) -> list[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        aliases = [raw]
+        decoded = unquote(raw).strip()
+        normalized = decoded.replace("\\", "/")
+        if normalized:
+            aliases.append(f"normalized:{normalized.casefold()}")
         try:
-            data = getattr(component, "data", None)
-            if isinstance(data, dict):
-                for key in ("file", "url", "path"):
-                    value = str(data.get(key) or "").strip()
-                    if value and value not in refs:
-                        refs.append(value)
+            parsed = urlparse(decoded)
         except Exception:
-            pass
+            parsed = None
+        path_text = unquote(parsed.path).replace("\\", "/") if parsed and parsed.scheme else normalized
+        basename = path_text.rsplit("/", 1)[-1].strip()
+        stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+        # Generated TTS names are normally random/unique. Avoid broad aliases such as voice.wav.
+        if basename and len(stem) >= 8:
+            aliases.append(f"basename:{basename.casefold()}")
+        return list(dict.fromkeys(alias for alias in aliases if alias))
+
+    def _tts_record_refs(self, component: Any) -> list[str]:
+        raw_refs: list[Any] = []
+
+        def add_source(source: Any) -> None:
+            if isinstance(source, dict):
+                for key in ("file", "url", "path"):
+                    if source.get(key):
+                        raw_refs.append(source.get(key))
+                data = source.get("data")
+                if isinstance(data, dict) and data is not source:
+                    add_source(data)
+                return
+            for attr in ("file", "url", "path"):
+                value = getattr(source, attr, "")
+                if value:
+                    raw_refs.append(value)
+            try:
+                data = getattr(source, "data", None)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                add_source(data)
+
+        add_source(component)
+        refs: list[str] = []
+        for raw_ref in raw_refs:
+            for alias in self._tts_record_ref_aliases(raw_ref):
+                if alias not in refs:
+                    refs.append(alias)
         return refs
 
     def _remember_tts_record_text(self, component: Any, spoken: str, source: str) -> None:
@@ -655,8 +692,8 @@ class TtsEnhancementMixin:
             item = index.get(ref)
             if isinstance(item, dict):
                 return (
-                    _single_line(item.get("spoken"), 180),
-                    _single_line(item.get("source"), 180),
+                    _single_line(item.get("spoken"), 500),
+                    _single_line(item.get("source"), 500),
                 )
         return "", ""
 

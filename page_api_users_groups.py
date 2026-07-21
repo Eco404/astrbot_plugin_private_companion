@@ -43,6 +43,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             if not isinstance(user, dict):
                 return self._error("用户不存在")
             detail = self._user_summary(user_id, user)
+            route_status_getter = getattr(self.plugin, "_private_delivery_route_status", None)
+            delivery_route = route_status_getter(user_id, user) if callable(route_status_getter) else {}
             detail.update(
                 {
                     "memory": user.get("companion_memory") if isinstance(user.get("companion_memory"), dict) else {},
@@ -55,6 +57,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "recent_reply_topics": self._limited_list(user.get("recent_reply_topics"), 16),
                     "last_user_message": self._display_message_text(user.get("last_user_message"), 500),
                     "last_companion_message": self._display_message_text(user.get("last_companion_message"), 500),
+                    "delivery_route": delivery_route if isinstance(delivery_route, dict) else {},
                     "worldbook_member": worldbook_member,
                     "formatted": {
                         "relationship": self.plugin._format_relationship_summary(user),

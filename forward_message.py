@@ -1261,6 +1261,246 @@ class ForwardMessageMixin:
                     return value
         return message_obj
 
+    def _message_obj_sender_info(
+        self,
+        message_obj: Any,
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        """Read original-message author metadata without inspecting message content."""
+        sources: list[Any] = []
+        if isinstance(message_obj, dict):
+            sources.append(message_obj)
+            for key in ("data", "result"):
+                nested = message_obj.get(key)
+                if isinstance(nested, dict):
+                    sources.append(nested)
+        elif message_obj is not None:
+            sources.append(message_obj)
+        if isinstance(snapshot, dict):
+            sources.append(snapshot)
+
+        sender_id = ""
+        sender_name = ""
+        for source in sources:
+            if isinstance(source, dict):
+                sender = source.get("sender")
+                if isinstance(sender, dict):
+                    sender_id = sender_id or _single_line(
+                        sender.get("user_id") or sender.get("sender_id") or sender.get("uin") or sender.get("id"),
+                        80,
+                    )
+                    sender_name = sender_name or _single_line(
+                        sender.get("card") or sender.get("nickname") or sender.get("name"),
+                        60,
+                    )
+                elif sender is not None and not isinstance(sender, (list, tuple, set)):
+                    sender_id = sender_id or _single_line(sender, 80)
+                sender_id = sender_id or _single_line(
+                    source.get("sender_id") or source.get("user_id") or source.get("sender_uin") or source.get("uin"),
+                    80,
+                )
+                sender_name = sender_name or _single_line(
+                    source.get("sender_name") or source.get("sender_nickname") or source.get("nickname") or source.get("card"),
+                    60,
+                )
+            else:
+                sender = getattr(source, "sender", None)
+                if sender is not None:
+                    sender_id = sender_id or _single_line(
+                        getattr(sender, "user_id", "")
+                        or getattr(sender, "sender_id", "")
+                        or getattr(sender, "uin", "")
+                        or getattr(sender, "id", ""),
+                        80,
+                    )
+                    sender_name = sender_name or _single_line(
+                        getattr(sender, "card", "")
+                        or getattr(sender, "nickname", "")
+                        or getattr(sender, "name", ""),
+                        60,
+                    )
+                sender_id = sender_id or _single_line(
+                    getattr(source, "sender_id", "") or getattr(source, "user_id", "") or getattr(source, "uin", ""),
+                    80,
+                )
+                sender_name = sender_name or _single_line(
+                    getattr(source, "sender_name", "")
+                    or getattr(source, "sender_nickname", "")
+                    or getattr(source, "nickname", ""),
+                    60,
+                )
+            if sender_id and sender_name:
+                break
+        return sender_id, sender_name
+
+    def _message_obj_media_types(self, message_obj: Any) -> list[str]:
+        media_types: list[str] = []
+
+        def add(label: str) -> None:
+            if label and label not in media_types:
+                media_types.append(label)
+
+        def add_type(type_name: str) -> None:
+            normalized = str(type_name or "").strip().lower()
+            if normalized in {"record", "audio", "voice", "voice_message"}:
+                add("语音")
+            elif normalized in {"image", "photo", "picture"}:
+                add("图片")
+            elif normalized in {"video", "short_video"}:
+                add("视频")
+            elif normalized == "file":
+                add("文件")
+            elif normalized in {"json", "xml", "share", "app"}:
+                add("卡片")
+
+        def visit(value: Any, *, depth: int = 0) -> None:
+            if value is None or depth > 7:
+                return
+            if isinstance(value, str):
+                lowered = value.lower()
+                if "[cq:record" in lowered or "[语音]" in value:
+                    add("语音")
+                if "[cq:image" in lowered or "[图片]" in value:
+                    add("图片")
+                if "[cq:video" in lowered or "[视频]" in value:
+                    add("视频")
+                parsed = self._decode_possible_json_text(value)
+                if parsed is not None:
+                    visit(parsed, depth=depth + 1)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item, depth=depth + 1)
+                return
+            add_type(self._component_type_name(value))
+            if isinstance(value, dict):
+                for key in ("message", "raw_message", "content", "messages", "data"):
+                    nested = value.get(key)
+                    if nested is not value:
+                        visit(nested, depth=depth + 1)
+                return
+            data = self._component_data(value)
+            if data:
+                visit(data, depth=depth + 1)
+
+        visit(message_obj)
+        return media_types
+
+    def _message_obj_known_tts_voice_text(
+        self,
+        message_obj: Any,
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        if isinstance(snapshot, dict):
+            cached_spoken = _single_line(snapshot.get("tts_spoken_text"), 500)
+            cached_source = _single_line(snapshot.get("tts_source_text"), 500)
+            if cached_spoken:
+                return cached_spoken, cached_source
+
+        lookup = getattr(self, "_lookup_tts_record_text", None)
+        matches: list[tuple[str, str]] = []
+
+        def add_component(component: Any) -> None:
+            spoken = _single_line(getattr(component, "_private_companion_tts_spoken_text", ""), 500)
+            source = _single_line(getattr(component, "_private_companion_tts_source_text", ""), 500)
+            if not spoken and callable(lookup):
+                try:
+                    spoken, source = lookup(component)
+                except Exception:
+                    spoken, source = "", ""
+            if spoken and (spoken, source) not in matches:
+                matches.append((spoken, source))
+
+        def visit(value: Any, *, depth: int = 0) -> None:
+            if value is None or depth > 7 or matches:
+                return
+            if isinstance(value, str):
+                for match in re.finditer(r"\[CQ:record,([^\]]+)\]", value, flags=re.I):
+                    data: dict[str, str] = {}
+                    for part in match.group(1).split(","):
+                        if "=" not in part:
+                            continue
+                        key, raw_value = part.split("=", 1)
+                        data[key.strip()] = html.unescape(raw_value.strip())
+                    add_component({"type": "record", "data": data})
+                    if matches:
+                        return
+                parsed = self._decode_possible_json_text(value)
+                if parsed is not None:
+                    visit(parsed, depth=depth + 1)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item, depth=depth + 1)
+                    if matches:
+                        return
+                return
+            type_name = self._component_type_name(value)
+            if type_name in {"record", "voice", "audio", "voice_message"}:
+                add_component(value)
+                if matches:
+                    return
+            if isinstance(value, dict):
+                for key in ("message", "raw_message", "content", "messages", "data"):
+                    nested = value.get(key)
+                    if nested is not value:
+                        visit(nested, depth=depth + 1)
+                    if matches:
+                        return
+                return
+            data = self._component_data(value)
+            if data:
+                visit(data, depth=depth + 1)
+
+        visit(message_obj)
+        return matches[0] if matches else ("", "")
+
+    def _reply_message_author_role(self, event: AstrMessageEvent, sender_id: str) -> str:
+        normalized_sender_id = _single_line(sender_id, 80)
+        if not normalized_sender_id:
+            return "unknown"
+        self_id = ""
+        self_id_getter = getattr(self, "_event_self_id", None)
+        if callable(self_id_getter):
+            try:
+                self_id = _single_line(self_id_getter(event), 80)
+            except Exception:
+                self_id = ""
+        if not self_id:
+            try:
+                self_id = _single_line(event.get_self_id(), 80)
+            except Exception:
+                self_id = ""
+        current_sender_id = ""
+        try:
+            current_sender_id = _single_line(event.get_sender_id(), 80)
+        except Exception:
+            current_sender_id = ""
+        if self_id and normalized_sender_id == self_id:
+            return "bot_self"
+        if current_sender_id and normalized_sender_id == current_sender_id:
+            return "current_user"
+        return "other"
+
+    @staticmethod
+    def _reply_message_author_label(role: str, sender_id: str, sender_name: str) -> str:
+        role_label = {
+            "bot_self": "Bot 自己",
+            "current_user": "当前用户",
+            "other": "其他人",
+            "unknown": "未知（平台未返回发送者）",
+        }.get(role, "未知（平台未返回发送者）")
+        details: list[str] = []
+        normalized_name = _single_line(sender_name, 60)
+        normalized_id = _single_line(sender_id, 80)
+        if normalized_name and normalized_name != normalized_id:
+            details.append(f"显示名：{normalized_name}")
+        if normalized_id:
+            details.append(f"ID：{normalized_id}")
+        return role_label + (f"（{'；'.join(details)}）" if details else "")
+
     async def _reply_message_chain_for_event(self, event: AstrMessageEvent, *, max_depth: int = 3) -> list[dict[str, Any]]:
         cached = getattr(event, "_private_companion_reply_message_chain", None)
         if isinstance(cached, list):
@@ -1298,7 +1538,30 @@ class ForwardMessageMixin:
                     continue
             raw_message = self._raw_message_from_message_obj(message_obj)
             text = self._message_obj_text_preview(raw_message, limit=280)
-            rows.append({"message_id": message_id, "depth": depth, "raw_message": raw_message, "text": text})
+            sender_id, sender_name = self._message_obj_sender_info(message_obj, snapshot=snapshot)
+            author_role = self._reply_message_author_role(event, sender_id)
+            media_types = self._message_obj_media_types(raw_message)
+            voice_spoken_text = ""
+            voice_source_text = ""
+            if author_role == "bot_self" and "语音" in media_types:
+                voice_spoken_text, voice_source_text = self._message_obj_known_tts_voice_text(
+                    raw_message,
+                    snapshot=snapshot,
+                )
+            rows.append(
+                {
+                    "message_id": message_id,
+                    "depth": depth,
+                    "raw_message": raw_message,
+                    "text": text,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "author_role": author_role,
+                    "media_types": media_types,
+                    "voice_spoken_text": voice_spoken_text,
+                    "voice_source_text": voice_source_text,
+                }
+            )
             next_ids = self._message_obj_reply_message_ids(raw_message)
             if not next_ids and isinstance(snapshot, dict) and isinstance(snapshot.get("reply_message_ids"), list):
                 next_ids = [_single_line(item, 120) for item in snapshot.get("reply_message_ids") if _single_line(item, 120)]
@@ -1314,11 +1577,15 @@ class ForwardMessageMixin:
 
     async def _format_reply_chain_context_for_prompt(self, event: AstrMessageEvent) -> str:
         chain = await self._reply_message_chain_for_event(event, max_depth=3)
-        if len(chain) <= 1:
+        if not chain:
             return ""
         lines = [
             "【引用链上下文】",
-            "用户这轮回复/引用了一条消息；被引用消息本身还引用了更早的消息。下面按距离当前消息由近到远列出，请优先理解最深层原始消息和用户当前文字之间的关系。",
+            (
+                "用户这轮回复/引用了一条消息；被引用消息本身还引用了更早的消息。下面按距离当前消息由近到远列出，请结合最深层原始消息和用户当前文字理解关系。"
+                if len(chain) > 1
+                else "用户这轮回复/引用了一条消息。下面的原消息作者和内容类型来自平台消息数据，请据此理解归属，不要根据语气猜测。"
+            ),
         ]
         lines.extend(self._reply_actor_binding_prompt_lines())
         for row in chain:
@@ -1326,7 +1593,52 @@ class ForwardMessageMixin:
             message_id = _single_line(row.get("message_id"), 80)
             text = _single_line(row.get("text"), 280) or "[无可读文字]"
             label = "直接被引用" if depth == 1 else f"第 {depth} 层原始引用"
-            lines.append(f"- {label}（{message_id or '无ID'}）：{text}")
+            author_role = _single_line(row.get("author_role"), 30) or "unknown"
+            author = self._reply_message_author_label(
+                author_role,
+                _single_line(row.get("sender_id"), 80),
+                _single_line(row.get("sender_name"), 60),
+            )
+            media_types = row.get("media_types") if isinstance(row.get("media_types"), list) else []
+            media_label = "、".join(_single_line(item, 20) for item in media_types if _single_line(item, 20)) or "普通消息"
+            lines.append(
+                f"- {label}（消息ID：{message_id or '无'}；原消息发送者：{author}；内容类型：{media_label}）：{text}"
+            )
+            voice_spoken_text = _single_line(row.get("voice_spoken_text"), 500)
+            voice_source_text = _single_line(row.get("voice_source_text"), 500)
+            if author_role == "bot_self" and voice_spoken_text:
+                lines.append(f"  - 插件生成语音实际朗读：{voice_spoken_text}")
+                if voice_source_text and voice_source_text != voice_spoken_text:
+                    lines.append(f"  - 生成语音对应原回复：{voice_source_text}")
+
+        direct = next((row for row in chain if _safe_int(row.get("depth"), 1, 1) == 1), chain[0])
+        direct_media = direct.get("media_types") if isinstance(direct.get("media_types"), list) else []
+        if "语音" in direct_media:
+            direct_role = _single_line(direct.get("author_role"), 30) or "unknown"
+            if direct_role == "bot_self":
+                direct_spoken = _single_line(direct.get("voice_spoken_text"), 500)
+                if direct_spoken:
+                    lines.append(
+                        "语音归属锚点：这条被引用语音是你自己/Bot 此前发送的，且上方朗读文本是插件生成时保留的原始记录，可以直接据此理解语音内容。"
+                        "当前用户只是引用或评价它；不要说成用户自己配的，也不要声称听不到或不知道语音说了什么。"
+                    )
+                else:
+                    lines.append(
+                        "语音归属锚点：这条被引用语音是你自己/Bot 此前发送的，当前用户只是引用或评价它。"
+                        "不要把它说成当前用户自己配的、制作的或刚刚发送的；除非用户当前文字明确补充了其参与制作。"
+                    )
+            elif direct_role == "current_user":
+                lines.append(
+                    "语音归属锚点：这条被引用语音此前由当前用户发送；“发送者”本身不足以证明是用户亲自配音或制作，不要额外编造创作归属。"
+                )
+            elif direct_role == "other":
+                lines.append(
+                    "语音归属锚点：这条被引用语音此前由其他人发送，当前用户只是引用或评价它；不要把发送、配音或制作动作归给当前用户。"
+                )
+            else:
+                lines.append(
+                    "语音归属锚点：平台没有返回这条被引用语音的发送者，归属未知；不要默认说成当前用户发送、配音或制作。"
+                )
         return "\n".join(lines)
 
     async def _reply_raw_message_for_event(self, event: AstrMessageEvent) -> tuple[str, Any]:

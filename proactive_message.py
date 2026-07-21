@@ -3235,8 +3235,21 @@ class ProactiveMessageMixin:
         cleaned = _single_line(text, 500)
         if not cleaned:
             return {"decision": "drop", "reason": "主动消息为空", "hard": True}
+        external_info_reasons = {"bili_video_share", "news_share", "web_exploration_share"}
+        external_share_active = reason in external_info_reasons
         link_platform_mismatch = self._proactive_link_platform_mismatch_reason(cleaned)
         if link_platform_mismatch:
+            if external_share_active:
+                external_fix = self._external_share_source_consistency_decision(
+                    user,
+                    cleaned,
+                    reason=reason,
+                    topic=topic,
+                    motive=motive,
+                    action_context=action_context,
+                )
+                if external_fix:
+                    return external_fix
             return {
                 "decision": "drop",
                 "reason": link_platform_mismatch,
@@ -3317,8 +3330,6 @@ class ProactiveMessageMixin:
         semantic_score = _safe_float(semantics.get("score"), 0.5)
         semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
         semantic_risk = _safe_float(semantics.get("risk"), 0.0)
-        external_info_reasons = {"bili_video_share", "news_share", "web_exploration_share"}
-        external_share_active = reason in external_info_reasons
         default_hard_risk = 0.70 if strength == "lenient" else 0.45
         hard_risk_threshold = max(
             0.0,
@@ -8000,7 +8011,8 @@ Output:
         extra = (
             "Current selfie scene constraint: "
             f"{outfit_hint}; "
-            f"place the selfie in the current schedule/location context: {scene_hint}; "
+            "an explicit scene or location requested in this prompt has highest priority; use the current schedule/location only to fill missing scene details and never restore a conflicting place; "
+            f"when the prompt does not specify a place, place the selfie in the current schedule/location context: {scene_hint}; "
             "avoid studio backdrops, unrelated bedrooms, default empty rooms, or locations that conflict with the current schedule; "
             "unless the request explicitly asks for a mirror, avoid mirror selfies, full-length mirror shots, dressing-room mirrors, "
             "and phone-covering-face compositions; prefer a handheld selfie or natural environmental portrait with upper-body to three-quarter framing."

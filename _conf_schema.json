@@ -89,7 +89,7 @@
       "private_user_delivery_aliases": {
         "description": "私聊主动发送目标映射",
         "type": "text",
-        "hint": "只改变主动消息/主动测试的发送出口,不改变记忆归属。每行一个映射,例如：主用户ID=投递用户ID。配合“私聊身份别名归并”里的 投递用户ID=主用户ID 使用,即可让另一个平台用户 ID 收消息、主用户 ID 保留记忆。",
+        "hint": "只改变主动消息/主动测试的发送出口,不改变记忆归属。每行一个映射,可填写 主用户ID=投递用户ID；多 Bot 或 QQ 官方场景请优先粘贴 /sid 返回的完整 UMO,例如 主用户ID=Bot实例ID:FriendMessage:openid。配合“私聊身份别名归并”里的 openid=主用户ID 使用,即可让官方 Bot 收消息、主用户 ID 保留记忆。插件会优先复用实际收到或成功发送过的会话。",
         "default": ""
       },
       "target_platform": {
@@ -8794,6 +8794,20 @@
           "rule_fast",
           "off"
         ],
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "command_photo_generation_max_daily": {
+        "description": "用户请求生图/改图每日上限",
+        "type": "int",
+        "hint": "按陪伴用户分别计数，统一限制“陪伴 生图/自拍/改图”显式指令与主链 pc_generate_photo 工具调用。独立于主动生图和 rule_fast 规则快判额度；0 表示不限量。",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "default": 0,
         "condition": {
           "enable_photo_text_action": true
         }

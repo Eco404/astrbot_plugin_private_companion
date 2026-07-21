@@ -1511,6 +1511,7 @@ class PrivateCompanionPlugin(
         ).strip().lower()
         if self.natural_language_photo_generation_mode not in {"tool_first", "rule_fast", "off"}:
             self.natural_language_photo_generation_mode = "tool_first"
+        self.command_photo_generation_max_daily = self._cfg_int(c, "command_photo_generation_max_daily", 0, 0, 100)
         self.natural_language_photo_generation_max_daily = self._cfg_int(c, "natural_language_photo_generation_max_daily", 2, 0, 100)
         raw_natural_photo_extra = _flat_get(c, "natural_language_photo_extra_prompt", None)
         self.natural_language_photo_extra_prompt = (

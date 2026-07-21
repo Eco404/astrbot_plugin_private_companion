@@ -1371,6 +1371,53 @@ class EventDispatchMixin:
         if has_image and not image_items:
             image_items = [{"source": "", "tier": "placeholder"}]
         image_sources = [item.get("source", "") for item in image_items if isinstance(item, dict) and item.get("source")]
+        is_message_sent_event = str(raw.get("post_type") or "").strip().lower() == "message_sent"
+        snapshot_sender_id = self._event_self_id(event) if is_message_sent_event else self._event_sender_id(event)
+        snapshot_sender_name = _single_line(self._sender_display_name(event), 60)
+        if is_message_sent_event:
+            snapshot_sender_name = _single_line(getattr(self, "bot_name", ""), 60) or snapshot_sender_name
+        tts_spoken_text = ""
+        tts_source_text = ""
+        is_self_message = bool(
+            is_message_sent_event
+            or (
+                self._event_sender_id(event)
+                and self._event_self_id(event)
+                and self._event_sender_id(event) == self._event_self_id(event)
+            )
+        )
+        if is_self_message:
+            tts_lookup = getattr(self, "_lookup_tts_record_text", None)
+            for comp in self._event_components(event):
+                class_name = comp.__class__.__name__.lower()
+                if isinstance(comp, dict):
+                    class_name = str(comp.get("type") or "").strip().lower()
+                if class_name not in {"record", "voice", "audio", "voice_message"}:
+                    continue
+                tts_spoken_text = _single_line(
+                    getattr(comp, "_private_companion_tts_spoken_text", ""),
+                    500,
+                )
+                tts_source_text = _single_line(
+                    getattr(comp, "_private_companion_tts_source_text", ""),
+                    500,
+                )
+                if not tts_spoken_text and callable(tts_lookup):
+                    try:
+                        tts_spoken_text, tts_source_text = tts_lookup(comp)
+                    except Exception:
+                        tts_spoken_text, tts_source_text = "", ""
+                if tts_spoken_text:
+                    break
+            if not tts_spoken_text:
+                voice_text_getter = getattr(self, "_message_obj_known_tts_voice_text", None)
+                if callable(voice_text_getter):
+                    try:
+                        tts_spoken_text, tts_source_text = voice_text_getter(
+                            raw.get("message") if raw.get("message") is not None else raw.get("raw_message")
+                        )
+                    except Exception:
+                        tts_spoken_text, tts_source_text = "", ""
         cache = getattr(self, "_recall_message_cache", None)
         if not isinstance(cache, dict):
             cache = {}
@@ -1382,14 +1429,16 @@ class EventDispatchMixin:
             "message_id_aliases": message_ids,
             "ts": _now_ts(),
             "scope": self._event_scope_key(event),
-            "sender_id": self._event_sender_id(event),
-            "sender_name": _single_line(self._sender_display_name(event), 60),
+            "sender_id": snapshot_sender_id,
+            "sender_name": snapshot_sender_name,
             "text": text,
             "raw_message": raw.get("message") if raw.get("message") is not None else raw.get("raw_message"),
             "reply_message_ids": reply_message_ids,
             "images": image_sources,
             "image_items": image_items,
             "image_count": len(image_items),
+            "tts_spoken_text": tts_spoken_text,
+            "tts_source_text": tts_source_text,
         }
         for candidate in message_ids:
             cache[candidate] = snapshot

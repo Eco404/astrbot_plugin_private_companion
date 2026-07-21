@@ -111,6 +111,12 @@ async def generate_detail_enhancement(
         default=["coarse_plan"],
     )
     normalized["summary_confidence"] = min(1.0, _safe_float(payload.get("summary_confidence"), 0.75))
+    normalized["location"] = normalize_detail_location(payload.get("location"))
+    normalized["location_basis"] = plugin._normalize_schedule_basis(
+        payload.get("location_basis"),
+        default=["coarse_plan"],
+    )
+    normalized["location_confidence"] = min(1.0, _safe_float(payload.get("location_confidence"), 0.72))
     social_fact_sanitizer = getattr(plugin, "_sanitize_daily_plan_social_fact_text", None)
     if callable(social_fact_sanitizer):
         normalized["summary"] = social_fact_sanitizer(
@@ -262,6 +268,20 @@ def normalize_state_variables(raw_items: Any) -> list[dict[str, str]]:
     return items[:8]
 
 
+def normalize_detail_location(raw: Any) -> str:
+    if isinstance(raw, dict):
+        raw = (
+            raw.get("name")
+            or raw.get("text")
+            or raw.get("location")
+            or raw.get("place")
+            or raw.get("地点")
+        )
+    text = _single_line(raw, 80)
+    text = re.sub(r"^(?:当前位置|地点|位置|场景)\s*[:：]\s*", "", text).strip()
+    return _single_line(text, 60)
+
+
 def normalize_presence_status(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {"mode": "unchanged", "reason": "", "duration_minutes": "", "custom_text": ""}
@@ -395,6 +415,9 @@ def normalize_story_plan(plugin, payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "date": _today_key(),
         "summary": summary,
+        "location": normalize_detail_location(payload.get("location")),
+        "location_basis": plugin._normalize_schedule_basis(payload.get("location_basis"), default=["coarse_plan"]),
+        "location_confidence": min(1.0, _safe_float(payload.get("location_confidence"), 0.72)),
         "state_variables": state_variables,
         "presence_status": normalize_presence_status(payload.get("presence_status")),
         "today_events": today_events[:8],
@@ -1203,6 +1226,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 · 严格遵守人格、日程类型、宏观日程和当前时段,不出戏。
 · 细化指令只输出本次输入指定的当前最新时间区间。不要重新输出全天日程,不要细化上一段或下一段,不要生成多个时间区间；上下节点只用于承接和过渡。
 · 当前段必须和上下节点有连续性：today_events 里至少一条体现“从上一段过来”的余味,至少一条为下一段留下自然过渡；不要复述粗日程原句。
+· 由你判断并输出当前段结束时的主要地点 location，同时输出 location_basis 和 location_confidence。location 要是简短、可直接用于场景约束的自然地点，如“宿舍卧室”“办公室工位”“回家路上”，不要写分析过程。地点必须与 summary、today_events、presence_status 和当前事项一致；若这一段发生地点切换，today_events 要写清移动过程，location 填段末实际所在处。当前状态中的地点、用户介入和粗日程冲突时，先按来源优先级判断，不要把“床头”和“工作场所”同时保留成当前现场。
 · summary 概括的是本次完整时间区间,不能拿只占前十几分钟的吃饭、洗澡、取物等短动作代表后面几个小时。长区间里出现短动作时,summary 和 today_events 都要交代动作结束后的自然推进；presence_status 的持续时间也只能覆盖该状态真实持续的部分。
 · 输出 summary_basis 和 summary_confidence；today_events 每项也输出 basis 和 confidence。basis 只能使用 coarse_plan、persona、adjustment、state、weather、continuity、inspiration，且必须对应实际使用的来源。仅靠旧记忆或软灵感推断的内容不得给高置信度。
 · today_events 是真正的细化正文，本段目标至少 {target_event_count} 条，全部落在本次输入指定的时间段内，并按时长分布到开头、中段和收尾。它要像完整细化叙述的拆分版本：包含动作、环境细节、身体感受和简短心理活动。短段保持紧凑，长段允许换事和停顿；睡眠等稳定活动可以降低密度但仍要覆盖区间。不要只写“发呆、休息、继续做事”。
@@ -1252,6 +1276,9 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
   "summary": "这一段的生活氛围一句话",
   "summary_basis": ["coarse_plan", "state"],
   "summary_confidence": 0.86,
+  "location": "宿舍卧室",
+  "location_basis": ["coarse_plan", "state"],
+  "location_confidence": 0.9,
   "state_variables": [
     {{"name": "情绪", "value": "平淡->微微放松", "note": "无用户干预时自然回稳"}},
     {{"name": "体力", "value": "58/100", "note": "这一段消耗不大"}},

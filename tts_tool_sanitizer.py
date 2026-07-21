@@ -15,6 +15,51 @@ class TtsToolSanitizerMixin:
     """Handle TTS tags in send_message_to_user tool calls."""
 
     @staticmethod
+    def _event_requires_direct_same_session_tool_delivery(event: Any) -> bool:
+        """Return whether tool text must be sent before the agent loop ends."""
+        if event is None:
+            return False
+
+        event_type = type(event)
+        type_name = str(getattr(event_type, "__name__", "") or "").strip().lower()
+        type_module = str(getattr(event_type, "__module__", "") or "").strip().lower()
+        if type_name == "cronmessageevent" or (
+            type_name.endswith("cronmessageevent") and ".cron." in type_module
+        ):
+            return True
+
+        platform_name = ""
+        getter = getattr(event, "get_platform_name", None)
+        if callable(getter):
+            try:
+                platform_name = str(getter() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        if platform_name == "cron":
+            return True
+
+        platform_meta = getattr(event, "platform_meta", None) or getattr(event, "platform", None)
+        if platform_meta is not None:
+            meta_name = str(getattr(platform_meta, "name", "") or "").strip().lower()
+            meta_description = str(getattr(platform_meta, "description", "") or "").strip().lower()
+            if meta_name == "cron" or meta_description == "cronjob":
+                return True
+
+        # Compatibility fallback for AstrBot versions that do not expose the
+        # synthetic cron platform marker to plugins.
+        sender_name = ""
+        sender_getter = getattr(event, "get_sender_name", None)
+        if callable(sender_getter):
+            try:
+                sender_name = str(sender_getter() or "").strip().lower()
+            except Exception:
+                sender_name = ""
+        if not sender_name:
+            sender = getattr(getattr(event, "message_obj", None), "sender", None)
+            sender_name = str(getattr(sender, "nickname", "") or "").strip().lower()
+        return sender_name == "scheduler"
+
+    @staticmethod
     def _tool_response_names_and_args(resp: Any) -> tuple[list[str], list[Any]]:
         names = getattr(resp, "tools_call_name", None)
         if isinstance(names, str):
@@ -56,6 +101,8 @@ class TtsToolSanitizerMixin:
         return "\n".join(visible_parts).strip()
 
     def _prepare_same_session_send_tool_response(self, event: Any, resp: Any) -> tuple[bool, str]:
+        if self._event_requires_direct_same_session_tool_delivery(event):
+            return False, ""
         names, args = self._tool_response_names_and_args(resp)
         for index, name in enumerate(names):
             if name != "send_message_to_user":
@@ -73,6 +120,8 @@ class TtsToolSanitizerMixin:
         return False, ""
 
     def _defer_same_session_send_tool(self, event: Any, kwargs: dict[str, Any]) -> str:
+        if self._event_requires_direct_same_session_tool_delivery(event):
+            return ""
         text = self._same_session_tool_text(event, kwargs)
         if not text:
             return ""

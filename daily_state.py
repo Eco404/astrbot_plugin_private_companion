@@ -519,6 +519,9 @@ class DailyStateMixin:
                     "summary": _single_line(detail.get("summary"), 120),
                     "summary_basis": self._normalize_schedule_basis(detail.get("summary_basis"), default=["coarse_plan"]),
                     "summary_confidence": min(1.0, _safe_float(detail.get("summary_confidence"), 0.75)),
+                    "location": _single_line(detail.get("location"), 60),
+                    "location_basis": self._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"]),
+                    "location_confidence": min(1.0, _safe_float(detail.get("location_confidence"), 0.72)),
                     "today_events": detail.get("today_events", []),
                     "proactive_events": detail.get("proactive_events", []),
                     "state_variables": detail.get("state_variables", []),
@@ -1101,6 +1104,9 @@ class DailyStateMixin:
                     "summary": _single_line(detail.get("summary"), 120),
                     "summary_basis": self._normalize_schedule_basis(detail.get("summary_basis"), default=["coarse_plan"]),
                     "summary_confidence": min(1.0, _safe_float(detail.get("summary_confidence"), 0.75)),
+                    "location": _single_line(detail.get("location"), 60),
+                    "location_basis": self._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"]),
+                    "location_confidence": min(1.0, _safe_float(detail.get("location_confidence"), 0.72)),
                     "today_events": detail.get("today_events", []),
                     "proactive_events": detail.get("proactive_events", []),
                     "state_variables": detail.get("state_variables", []),
@@ -8317,6 +8323,9 @@ class DailyStateMixin:
     ) -> str:
         candidates: list[str] = []
         if isinstance(detail, dict):
+            model_location = _single_line(detail.get("location"), 60)
+            if model_location:
+                return model_location
             for key in ("summary", "scene", "event", "topic"):
                 text = _single_line(detail.get(key), 160)
                 if text:
@@ -8384,16 +8393,39 @@ class DailyStateMixin:
         if not isinstance(state, dict) or state.get("date") != _today_key():
             return False
         override_ts = _safe_float(state.get("location_override_ts"), 0)
-        if override_ts > 0 and _now_ts() - override_ts < 4 * 3600:
+        model_location = _single_line(detail.get("location"), 60) if isinstance(detail, dict) else ""
+        if override_ts > 0 and _now_ts() - override_ts < 4 * 3600 and not model_location:
             return False
-        location = self._infer_location_from_plan_context(plan=plan, detail=detail)
+        location = model_location or self._infer_location_from_plan_context(plan=plan, detail=detail)
         if not location:
             return False
         current = _single_line(state.get("location"), 40)
         if current == location:
-            return False
+            if not model_location:
+                return False
+            metadata_changed = False
+            if _single_line(state.get("location_source"), 40) != "detail_model":
+                state["location_source"] = "detail_model"
+                metadata_changed = True
+            confidence = min(1.0, _safe_float(detail.get("location_confidence"), 0.72))
+            basis = self._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"])
+            if _safe_float(state.get("location_confidence"), -1) != confidence:
+                state["location_confidence"] = confidence
+                metadata_changed = True
+            if state.get("location_basis") != basis:
+                state["location_basis"] = basis
+                metadata_changed = True
+            if override_ts > 0:
+                state["location_override_ts"] = 0.0
+                metadata_changed = True
+            if metadata_changed:
+                state["location_updated_at"] = self._environment_now().strftime("%H:%M")
+            return metadata_changed
         state["location"] = location
-        state["location_source"] = "detail" if isinstance(detail, dict) else "daily_plan"
+        state["location_source"] = "detail_model" if model_location else ("detail" if isinstance(detail, dict) else "daily_plan")
+        if model_location:
+            state["location_confidence"] = min(1.0, _safe_float(detail.get("location_confidence"), 0.72))
+            state["location_basis"] = self._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"])
         state["location_updated_at"] = self._environment_now().strftime("%H:%M")
         if override_ts > 0:
             state["location_override_ts"] = 0.0
@@ -8413,7 +8445,20 @@ class DailyStateMixin:
         state["location_override_ts"] = _now_ts()
         self._save_data_sync()
 
+    def _current_detail_model_location(self) -> str:
+        segment = self._current_detail_segment_for_update()
+        if not isinstance(segment, dict):
+            return ""
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        snapshot = enhanced.get(str(segment.get("key") or "")) if isinstance(enhanced, dict) else None
+        if not isinstance(snapshot, dict) or _single_line(snapshot.get("status"), 24) != "done":
+            return ""
+        return _single_line(snapshot.get("location"), 60)
+
     def _current_location_state_text(self, state: dict[str, Any] | None = None) -> str:
+        model_location = self._current_detail_model_location()
+        if model_location:
+            return model_location
         if isinstance(state, dict):
             override_ts = _safe_float(state.get("location_override_ts"), 0)
             if override_ts > 0:
@@ -11993,12 +12038,12 @@ class DailyStateMixin:
                             removed_counts[count_key] = removed_counts.get(count_key, 0) + 1
                             changed = True
 
-        filter_list(data, "proactive_audit_log", ("text_preview", "original_text_preview", "final_text_preview", "text", "note", "topic", "motive"), limit=120)
+        filter_list(data, "proactive_audit_log", ("text_preview", "original_text_preview", "final_text_preview", "text", "note", "topic", "motive", "diagnostic_detail"), limit=120)
 
         troubleshooting = data.get("troubleshooting_test_results")
         if isinstance(troubleshooting, dict):
             for key, result in list(troubleshooting.items()):
-                if list_item_has_meta(result, ("text_preview", "original_text_preview", "final_text_preview", "detail", "error")):
+                if list_item_has_meta(result, ("text_preview", "original_text_preview", "final_text_preview", "detail", "error", "diagnostic_detail")):
                     troubleshooting.pop(key, None)
                     removed_counts["troubleshooting_test_results"] = removed_counts.get("troubleshooting_test_results", 0) + 1
                     changed = True
@@ -13242,6 +13287,7 @@ class DailyStateMixin:
         action: str = "message",
         reason: str = "check_in",
         extra_count: int = 0,
+        diagnostic_detail: str = "",
     ) -> None:
         raw = self.data.setdefault("troubleshooting_test_results", {})
         if not isinstance(raw, dict):
@@ -13249,6 +13295,12 @@ class DailyStateMixin:
             self.data["troubleshooting_test_results"] = raw
         started = _safe_float(user.get("troubleshooting_proactive_started_at"), 0)
         now = _now_ts()
+        diagnostic_sanitizer = getattr(self, "_proactive_audit_safe_note", None)
+        safe_diagnostic_detail = (
+            diagnostic_sanitizer(diagnostic_detail, limit=2400)
+            if diagnostic_detail and callable(diagnostic_sanitizer)
+            else _single_line(diagnostic_detail, 2400)
+        )
         raw["proactive_message"] = {
             "type": "proactive_message",
             "ok": bool(ok),
@@ -13257,6 +13309,7 @@ class DailyStateMixin:
             "umo": _single_line(user.get("umo"), 180),
             "detail": _single_line(detail, 220),
             "error": _single_line(error, 220),
+            "diagnostic_detail": safe_diagnostic_detail,
             "text_preview": self._proactive_visible_text_preview(text) if text else "",
             "original_text_preview": self._proactive_visible_text_preview(original_text) if original_text else "",
             "final_text_preview": self._proactive_visible_text_preview(final_text) if final_text else "",
@@ -14560,6 +14613,9 @@ class DailyStateMixin:
                     current_after_send["last_proactive_message"] = _single_line(delivered_text, 500)
                     current_after_send["last_proactive_sent_at"] = sent_at
                     current_after_send["last_proactive_delivery_umo"] = _single_line(send_umo_for_send, 180)
+                    delivery_success_recorder = getattr(self, "_note_private_delivery_success", None)
+                    if callable(delivery_success_recorder):
+                        delivery_success_recorder(user_id, current_after_send, send_umo_for_send)
                     current_after_send["last_proactive_delivery_inbound_count"] = _safe_int(
                         current_after_send.get("inbound_count"),
                         0,
@@ -14639,9 +14695,13 @@ class DailyStateMixin:
             except Exception as e:
                 formatter = getattr(self, "_format_send_exception", None)
                 error_text = formatter(e) if callable(formatter) else (_single_line(str(e), 180) or repr(e))
+                diagnostic_detail = f"{e.__class__.__name__}: {_single_line(str(e) or repr(e), 2300)}"
                 logger.warning("[PrivateCompanion] 发送给 %s 失败: %s", user_id, error_text)
                 async with self._data_lock:
                     current_after_failure = self._get_user(user_id)
+                    delivery_failure_recorder = getattr(self, "_note_private_delivery_failure", None)
+                    if callable(delivery_failure_recorder):
+                        delivery_failure_recorder(user_id, current_after_failure, send_umo_for_send, error_text)
                     if is_troubleshooting_for_send:
                         self._append_troubleshooting_proactive_step(current_after_failure, "主动发送", "error", f"发送失败: {_single_line(error_text, 120)}")
                         self._record_troubleshooting_proactive_result(
@@ -14654,6 +14714,7 @@ class DailyStateMixin:
                             action=effective_action_for_send or planned_action_for_send or "message",
                             reason=reason or "check_in",
                             extra_count=len(extra_components),
+                            diagnostic_detail=diagnostic_detail,
                         )
                         self._restore_troubleshooting_proactive_plan(current_after_failure)
                     else:
@@ -14678,7 +14739,12 @@ class DailyStateMixin:
                                 retry_note,
                                 planned_snapshot=planned_snapshot,
                             )
-                    self._update_proactive_audit(audit_id, status="failed", note=f"发送失败: {_single_line(error_text, 140)}")
+                    self._update_proactive_audit(
+                        audit_id,
+                        status="failed",
+                        note=f"发送失败: {_single_line(error_text, 140)}",
+                        diagnostic_detail=diagnostic_detail,
+                    )
                     self._save_data_sync()
                 continue
             finally:

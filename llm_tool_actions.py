@@ -237,7 +237,7 @@ class LlmToolActionsMixin:
                 [
                     "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
                     '- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
-                    '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写”；普通穿搭优先日常穿搭，只有明确“镜前/对镜/镜子”时才用镜前穿搭；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
+                    '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；明确睡衣、睡裙、睡袍或睡前卧室自拍时优先“居家睡衣”，普通穿搭才用“日常穿搭”，只有明确“镜前/对镜/镜子”时才用镜前穿搭；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
                     '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。',
                 ]
@@ -1669,6 +1669,33 @@ class LlmToolActionsMixin:
         ):
             workflow_kind = "selfie"
             intent_kind = "selfie"
+
+        try:
+            requester_id = str(event.get_sender_id())
+        except Exception:
+            requester_id = ""
+        quota_getter = getattr(self, "_command_photo_quota_left", None)
+        if requester_id and callable(quota_getter):
+            async with self._data_lock:
+                requester = self._get_user(requester_id)
+                quota_left = (
+                    quota_getter(requester)
+                    if self._is_target_private_user(requester_id, requester) and bool(requester.get("enabled", True))
+                    else None
+                )
+            if quota_left is not None and quota_left <= 0:
+                return json.dumps(
+                    {
+                        "status": "quota_exhausted",
+                        "success": False,
+                        "generated": False,
+                        "sent": False,
+                        "message": "今天用户请求生图/改图额度用完了。管理员可调整“用户请求生图每日上限”，0 表示不限量。",
+                        "must_not_claim_sent": True,
+                        "retryable": False,
+                    },
+                    ensure_ascii=False,
+                )
 
         def bool_arg(value: Any, default: bool = True) -> bool:
             if isinstance(value, bool):

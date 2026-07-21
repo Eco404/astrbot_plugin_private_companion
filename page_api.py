@@ -4044,6 +4044,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "file_size": self._int(result.get("file_size")),
             "detail": self._single_line(result.get("detail"), 220),
             "error": self._single_line(result.get("error"), 220),
+            "diagnostic_detail": self._single_line(result.get("diagnostic_detail"), 2400),
             "prompt": self._single_line(result.get("prompt"), 500),
             "timeout_seconds": self._int(result.get("timeout_seconds")),
             "test_timeout_seconds": self._int(result.get("test_timeout_seconds")),
@@ -7298,6 +7299,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "summary": self._single_line(detail.get("summary"), 120),
                     "summary_basis": self.plugin._normalize_schedule_basis(detail.get("summary_basis"), default=["coarse_plan"]),
                     "summary_confidence": min(1.0, self._float(detail.get("summary_confidence"), 0.75)),
+                    "location": self._single_line(detail.get("location"), 60),
+                    "location_basis": self.plugin._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"]),
+                    "location_confidence": min(1.0, self._float(detail.get("location_confidence"), 0.72)),
                     "today_events": detail.get("today_events", []),
                     "proactive_events": detail.get("proactive_events", []),
                     "state_variables": detail.get("state_variables", []),
@@ -12344,6 +12348,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "daily_outfit_rotation_days",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_mode",
+            "command_photo_generation_max_daily",
             "natural_language_photo_generation_max_daily",
             "natural_language_photo_extra_prompt",
             "comfyui_photo_wait_seconds",
@@ -14811,6 +14816,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "daily_outfit_rotation_days",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_mode",
+            "command_photo_generation_max_daily",
             "natural_language_photo_generation_max_daily",
             "natural_language_photo_extra_prompt",
             "comfyui_photo_wait_seconds",
@@ -15516,6 +15522,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(0, min(100, int(value)))
             except (TypeError, ValueError):
                 return 2
+        if key == "command_photo_generation_max_daily":
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 0
         if key in self.PERCENT_PROBABILITY_KEYS:
             try:
                 raw = float(value)
@@ -18180,6 +18191,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 or meta_leak_checker(str(raw.get("final_text_preview") or ""))
                 or meta_leak_checker(str(raw.get("text") or ""))
                 or meta_leak_checker(str(raw.get("note") or ""))
+                or meta_leak_checker(str(raw.get("diagnostic_detail") or ""))
             ):
                 continue
             user_id = str(raw.get("user_id") or "")
@@ -18187,6 +18199,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             user_summary = self._user_summary(user_id, user) if user_id else {}
             status = self._single_line(raw.get("status"), 32) or "unknown"
             note = self._single_line(raw.get("note"), 180)
+            diagnostic_detail = self._single_line(raw.get("diagnostic_detail"), 2400)
             obsolete_checker = getattr(self.plugin, "_proactive_audit_note_is_obsolete_fixed_error", None)
             if callable(obsolete_checker) and obsolete_checker(note):
                 status = "obsolete"
@@ -18242,6 +18255,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         existing["original_text_preview"] = original_text_preview
                     if final_text_preview:
                         existing["final_text_preview"] = final_text_preview
+                    if diagnostic_detail:
+                        existing["diagnostic_detail"] = diagnostic_detail
                 continue
             audit_status_counts[status] = audit_status_counts.get(status, 0) + 1
             item = {
@@ -18261,7 +18276,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     source=raw.get("source"),
                     topic=audit_topic,
                     motive=audit_motive,
-                    note=note,
+                    note="",
                     target_name=user_summary.get("display_name") or user_id,
                 ),
                 "action": audit_action,
@@ -18280,6 +18295,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "need_score_bias": raw.get("need_score_bias", raw.get("semantic_need_score_bias")),
                 "need_pressure_bias": raw.get("need_pressure_bias", raw.get("semantic_need_pressure_bias")),
                 "note": note,
+                "diagnostic_detail": diagnostic_detail,
                 "text_preview": text_preview,
                 "original_text_preview": original_text_preview,
                 "final_text_preview": final_text_preview,
@@ -18760,6 +18776,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return {}
         keys = ["date", "sleep", "dream", "health", "hunger", "body_cycle", "location", "weather", "mood_bias", "energy", "note"]
         summary = {key: state.get(key, "") for key in keys}
+        location_getter = getattr(self.plugin, "_current_location_state_text", None)
+        if callable(location_getter):
+            try:
+                effective_location = self._single_line(location_getter(state), 60)
+            except Exception:
+                effective_location = ""
+            if effective_location:
+                summary["location"] = effective_location
+        summary["location_source"] = self._single_line(state.get("location_source"), 40)
+        summary["location_confidence"] = self._float(state.get("location_confidence"), 0.0)
         runtime = state.get("sleep_runtime") if isinstance(state.get("sleep_runtime"), dict) else {}
         if runtime:
             summary["sleep_phase"] = self._single_line(runtime.get("label") or runtime.get("phase"), 40)
