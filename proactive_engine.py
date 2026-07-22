@@ -775,6 +775,28 @@ class ProactiveEngineMixin:
                 now=now,
             )
         time_exempt = source in {"timer", "troubleshooting", "simulation"}
+        if (
+            reason == "morning_greeting"
+            and source in {"daily_greeting", "story", "daily_story", "state"}
+            and _single_line(prepared.get("window"), 40)
+        ):
+            current = self._environment_fromtimestamp(now)
+            morning_start, morning_end = self._morning_greeting_window()
+            day_start = datetime.combine(current.date(), datetime.min.time(), tzinfo=current.tzinfo)
+            canonical_start = (day_start + timedelta(minutes=morning_start)).timestamp()
+            canonical_end = (day_start + timedelta(minutes=morning_end)).timestamp()
+            if best_until_at < canonical_start or window_start_at > canonical_end:
+                window_start_at = canonical_start
+                preferred_ts = min(max(preferred_ts, canonical_start), canonical_end)
+                best_until_at = canonical_end
+            else:
+                window_start_at = max(window_start_at, canonical_start)
+                preferred_ts = min(max(preferred_ts, window_start_at), canonical_end)
+                best_until_at = min(max(best_until_at, preferred_ts), canonical_end)
+            expire_at = min(
+                max(expire_at, best_until_at + 5 * 60),
+                canonical_end + 35 * 60,
+            )
         if not time_exempt and expire_at <= now:
             candidate["lifecycle_status"] = "expired"
             candidate["expired_at"] = now
@@ -971,7 +993,9 @@ class ProactiveEngineMixin:
         priority = priorities.get(source, 48)
         if reason in {"birthday_celebration", "birthday_eve_hint", "birthday_makeup", "important_date_share"}:
             priority = max(priority, 86)
-        elif reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+        elif reason == "morning_greeting":
+            priority = max(priority, 82)
+        elif reason in {"noon_greeting", "evening_greeting"}:
             priority = max(priority, 72)
         elif reason == "quiet_care":
             priority = max(priority, 74)
@@ -1272,6 +1296,12 @@ class ProactiveEngineMixin:
             score -= min(0.7, (check_now - best_until_at) / 3600.0 * 0.25)
         if str(impulse.get("source") or "") in {"pending_followup", "followup"} or str(impulse.get("reason") or "") == "quiet_care":
             score += 0.05
+        if (
+            str(impulse.get("reason") or "") == "morning_greeting"
+            and preferred_ts > 0
+            and check_now <= max(preferred_ts, best_until_at)
+        ):
+            score += 0.10
         persona_fit = _safe_float(impulse.get("persona_fit"), -1.0)
         if persona_fit < 0:
             persona_alignment = self._proactive_persona_alignment(
@@ -1965,8 +1995,9 @@ class ProactiveEngineMixin:
             return "\n".join(
                 [
                     "【来源专项改写：日常招呼】",
-                    "这类来源的价值在“当天这个时段的第一句主动开口”，不是在任何空档里补一声问候。",
-                    "如果今天已经发过别的主动，就别再硬写 morning_greeting；用户先自然来聊不等于 Bot 已经醒来，不能因此取消首次起床问候。",
+                    "这类来源的价值在“当天这个时段自然出现的一次招呼”，不是机械签到，也不是在任何空档里补一句模板问候。",
+                    "不要因为今天先发过其他话题就默认 morning_greeting 已经完成；应判断此前正文里是否真的自然说过早安或明确打过晨间招呼。已经说过就不重复，尚未说过且仍在合适窗口内则可以顺着当前生活片段自然开口。",
+                    "用户先自然来聊不等于 Bot 已经醒来，也不必因此取消首次起床问候；但若双方已经在早晨连续聊了一阵，就避免突兀地补正式早安。",
                     "noon_greeting/evening_greeting 仍要避开刚刚发生的来回互动。",
                     "rewrite 后必须落在当前时段的一个小片段上：早晨刚醒/洗漱/出门前，中午刚吃完/发懒/准备午休，晚上收尾/回家/窝下来。",
                     "最终效果要像这个时段第一次顺手冒头，不像模板化签到，也不像聊到一半又补来的礼貌问候。",
@@ -3547,18 +3578,17 @@ class ProactiveEngineMixin:
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 5))
             return False, "用户在该问候窗口内已经活跃过"
         self._reset_daily_counter_if_needed(user)
-        sent_today = _safe_int(user.get("sent_today"), 0)
         if (
             not is_troubleshooting
             and planned_reason == "morning_greeting"
             and planned_source != "timer"
             and not due_timer_active
-            and sent_today > 0
+            and self._greeting_was_sent_today(user, planned_reason)
         ):
-            self._mark_planned_candidate_status(user, "blocked", "早安只适合作为当天第一句主动消息")
+            self._mark_planned_candidate_status(user, "blocked", "今天已经自然说过早安")
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 5))
-            return False, "早安只适合作为当天第一句主动消息"
+            return False, "今天已经自然说过早安"
         if (
             not is_troubleshooting
             and not self._proactive_daily_limit_is_unlimited(daily_limit)
@@ -5897,12 +5927,10 @@ class ProactiveEngineMixin:
         today = now_dt.date()
         candidates = []
         for reason, window, why, topic in anchors:
-            if reason in sent or (reason != "morning_greeting" and reason in suppressed):
+            if self._greeting_was_sent_today(user, reason) or (reason != "morning_greeting" and reason in suppressed):
                 continue
             start, end = self._parse_window_minutes(window)
             if start is None or end is None:
-                continue
-            if reason == "morning_greeting" and _safe_int(user.get("sent_today"), 0) > 0:
                 continue
             if self._private_user_role(user) == "friend":
                 bucket = self._proactive_daypart_bucket_for_minute(start)
@@ -5924,7 +5952,14 @@ class ProactiveEngineMixin:
             if earliest >= end_dt:
                 continue
             if reason == "morning_greeting":
-                scheduled = random.uniform(earliest.timestamp(), end_dt.timestamp())
+                early_window_end = min(
+                    end_dt.timestamp(),
+                    (earliest + timedelta(minutes=18)).timestamp(),
+                )
+                scheduled = random.uniform(
+                    earliest.timestamp(),
+                    max(earliest.timestamp() + 60, early_window_end),
+                )
             elif reason == "evening_greeting":
                 tighten_end = min(end_dt.timestamp(), (earliest + timedelta(minutes=48)).timestamp())
                 scheduled = random.uniform(earliest.timestamp(), max(earliest.timestamp() + 60, tighten_end))
@@ -6702,13 +6737,20 @@ class ProactiveEngineMixin:
         if not isinstance(suppressed, list):
             suppressed = []
             user["greetings_suppressed_by_inbound"] = suppressed
-        if reason in sent:
+        if self._greeting_was_sent_today(user, reason):
             return "该问候时段今天已经主动问候过"
         if reason in suppressed:
             return "该问候时段已被用户自然互动占掉"
-        if reason == "morning_greeting" and _safe_int(user.get("sent_today"), 0, 0) > 0:
-            return "早安只适合作为当天第一句主动消息"
         return ""
+
+    def _greeting_was_sent_today(self, user: dict[str, Any], reason: str) -> bool:
+        if not self._is_greeting_reason(reason):
+            return False
+        self._reset_daily_counter_if_needed(user)
+        sent = user.get("greetings_sent", [])
+        if isinstance(sent, list) and reason in sent:
+            return True
+        return reason == "morning_greeting" and _safe_float(user.get("morning_greeting_sent_at"), 0) > 0
 
     def _mark_textual_greeting_sent(
         self,
@@ -6725,10 +6767,15 @@ class ProactiveEngineMixin:
         if not isinstance(sent, list):
             sent = []
             user["greetings_sent"] = sent
-        if reason in sent:
-            return False
-        sent.append(reason)
-        return True
+        changed = False
+        if reason not in sent:
+            sent.append(reason)
+            changed = True
+        if reason == "morning_greeting" and _safe_float(user.get("morning_greeting_sent_at"), 0) <= 0:
+            user["morning_greeting_sent_at"] = _safe_float(sent_at, 0) or _now_ts()
+            user["morning_greeting_reply_at"] = 0
+            changed = True
+        return changed
 
     def _mark_greeting_satisfied_by_inbound(self, user: dict[str, Any], reason: str) -> bool:
         if not self._is_greeting_reason(reason):
@@ -7499,12 +7546,24 @@ class ProactiveEngineMixin:
             except Exception:
                 return False
         provider_settings = dict(config.get("provider_tts_settings", {}) or {})
-        if not provider_settings.get("enable", False):
-            return False
+        astrbot_provider = None
         try:
-            return bool(self.context.get_using_tts_provider(target))
+            astrbot_provider = self.context.get_using_tts_provider(target)
         except Exception:
+            astrbot_provider = None
+        resolver = getattr(self, "_resolve_tts_synthesis_provider", None)
+        if callable(resolver):
+            try:
+                resolved_provider = resolver(SimpleNamespace(unified_msg_origin=target), astrbot_provider)
+            except Exception:
+                resolved_provider = astrbot_provider
+        else:
+            resolved_provider = astrbot_provider
+        if resolved_provider is None:
             return False
+        if resolved_provider is astrbot_provider:
+            return bool(provider_settings.get("enable", False))
+        return True
 
     def _action_is_available(self, action: str, user: dict[str, Any] | None = None) -> bool:
         normalized = str(action or "message").strip()

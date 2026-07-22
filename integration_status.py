@@ -878,6 +878,12 @@ class IntegrationStatusMixin:
                 except Exception:
                     provider = None
                     break
+        synthesis_resolver = getattr(self, "_resolve_tts_synthesis_provider", None)
+        if callable(synthesis_resolver):
+            try:
+                provider = synthesis_resolver(event, provider)
+            except Exception:
+                pass
 
         enhancement_enabled = bool(getattr(self, "enable_tts_enhancement", False))
         if provider is None:

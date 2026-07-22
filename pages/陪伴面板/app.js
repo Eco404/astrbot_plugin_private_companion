@@ -938,6 +938,7 @@ const featureMeta = {
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群聊观察学习", "学习群成员、关系网身份、黑话、话题线和群片段。"],
   enable_group_context_injection: ["群聊回复理解", "回复时参考近期群聊、场景对象和合并消息转述。"],
+  enable_group_image_understanding: ["群聊图片理解", "后台识别允许观察群中的图片，复用内容缓存，并在真正回复时有限等待视觉结果。"],
   enable_group_injection_guard: ["群聊安全保护", "防注入、隐私隔离、公共群聊语气降噪和现实承诺保护。"],
   enable_group_persona_denoise: ["群聊人格降噪", "降低群聊里的私聊腔、状态汇报和私聊关系外溢。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
@@ -1049,6 +1050,7 @@ const featureGroups = [
       "enable_group_air_reply_guard",
       "enable_group_high_intensity_mode",
       "enable_group_context_injection",
+      "enable_group_image_understanding",
       "enable_group_injection_guard",
       "enable_group_wakeup_enhancement",
       "enable_group_member_profiles",
@@ -1462,6 +1464,9 @@ const configLabels = {
   group_air_guard_max_bot_replies: "窗口内最大 Bot 回复数",
   group_air_guard_polite_loop_limit: "礼貌收尾循环上限",
   enable_group_context_injection: "群上下文注入",
+  enable_group_image_understanding: "群聊图片理解增强",
+  group_image_vision_wait_seconds: "群聊回复等待识图秒数",
+  group_image_max_images: "单条群消息识图上限",
   enable_group_injection_guard: "群聊防注入",
   enable_group_persona_denoise: "群聊人格降噪",
   enable_group_scene_awareness: "群聊场景感知",
@@ -2082,6 +2087,9 @@ const configDescriptions = {
   group_air_guard_max_bot_replies: "窗口内 Bot 回复达到该次数后，后续明确唤醒也会硬拦截，防止机器人互相引用刷屏。建议 3。",
   group_air_guard_polite_loop_limit: "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到类似消息就静默。建议 1-2。",
   enable_group_context_injection: "开启后，群聊回复会参考最近群消息、当前话题、活跃成员和群内氛围；关闭后只按当前单条消息理解。",
+  enable_group_image_understanding: "开启后，只在允许观察的群中后台识别群成员发送的图片；相同图片按内容缓存复用，普通观察不等待，真正触发回复时才有限等待。建议关闭 AstrBot 官方“自动理解图片”，避免重复调用。",
+  group_image_vision_wait_seconds: "只限制 Bot 已准备回复时等待视觉摘要的时间。视觉提前完成会立即继续；超时后主回复照常进行，后台识图不会取消。0 表示不等待，只使用已经完成的结果。",
+  group_image_max_images: "一条群消息最多识别多少张图片。超过上限仍保留原始图片占位，但不进入本插件识图；0 表示不处理群图。",
   enable_group_injection_guard: "开启后，会识别群里试图改称呼、改语气、改设定或改输出格式的注入话术；这些内容不会写进群观察、黑话、话题线或后续 prompt。",
   enable_group_persona_denoise: "开启后，会主动压低群聊里的私聊腔、状态汇报和过于贴身的关系投射，让群聊发言更像在公共场合说话。",
   enable_group_scene_awareness: "开启后，会判断当前这句话是在对 Bot、某个群友还是整个群说话，并结合上下文减少误接话。",
@@ -2420,6 +2428,7 @@ const featureSettingGroups = {
   enable_environment_change_proactive: ["environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [],
+  enable_group_image_understanding: ["group_image_vision_wait_seconds", "group_image_max_images"],
   enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
   enable_group_air_reply_guard: ["group_air_guard_window_seconds", "group_air_guard_max_bot_replies", "group_air_guard_polite_loop_limit"],
   enable_group_high_intensity_mode: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
@@ -2796,6 +2805,13 @@ const featureSettingSections = {
       keys: ["FORWARD_MESSAGE_PROVIDER_ID"],
     },
   ],
+  enable_group_image_understanding: [
+    {
+      title: "识图调度",
+      note: "群消息先在后台识图；只有确实触发回复时才等待一小段时间，超时不会取消后台任务。",
+      keys: ["group_image_vision_wait_seconds", "group_image_max_images"],
+    },
+  ],
   enable_group_injection_guard: [
     {
       title: "群聊安全保护",
@@ -3166,6 +3182,8 @@ const featureSettingTypes = {
   context_image_caption_max_items: { type: "number", min: 0, max: 50, step: 1 },
   context_image_caption_timeout_seconds: { type: "number", min: 0, max: 30, step: 0.5 },
   forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 60, step: 1 },
+  group_image_vision_wait_seconds: { type: "number", min: 0, max: 60, step: 1 },
+  group_image_max_images: { type: "number", min: 0, max: 12, step: 1 },
   max_group_topic_threads: { type: "number", min: 3, max: 40, step: 1 },
   group_episode_refresh_minutes: { type: "number", min: 30, max: 1440, step: 30 },
   group_slang_summary_minutes: { type: "number", min: 60, max: 2880, step: 60 },
@@ -3775,6 +3793,7 @@ const tokenTaskLabels = {
   forward_message_image_vision: "转发图片识别",
   private_reading_vision: "夹层视觉",
   private_image_vision: "私聊图片识别",
+  group_image_vision: "群聊图片识别",
   private_image_only_framework: "单图回复主链",
   private_image_only_fallback: "单图兜底回复",
   voice: "语音文本",
@@ -5510,6 +5529,18 @@ const setupGuideAdvancedItems = {
         { key: "enable_group_scene_awareness", type: "bool", kind: "feature", label: "群聊场景感知", description: "判断当前话是对 Bot、群友还是全群。" },
         { key: "group_scene_recent_limit", type: "number", label: "场景最近消息数", placeholder: "5", min: 1 },
         { key: "FORWARD_MESSAGE_PROVIDER_ID", type: "provider", label: "合并消息转述模型", description: "群聊引用/合并消息需要转述时使用。" },
+      ],
+    },
+    {
+      key: "enable_group_image_understanding",
+      title: "群聊图片理解",
+      ask: "是否让 Bot 在群聊中真正看懂图片，并复用识图缓存？",
+      description: "只处理已允许观察的群。图片会在后台理解并写入独立视觉字段；当前群消息确实触发回复时，才短暂等待摘要。",
+      caution: "默认关闭。开启后建议关闭 AstrBot 官方“自动理解图片”，避免同一张图被识别两次；原始群图不会由本插件长期保存。",
+      kind: "feature",
+      settings: [
+        { key: "group_image_vision_wait_seconds", type: "number", label: "回复等待秒数", placeholder: "8", min: 0, max: 60 },
+        { key: "group_image_max_images", type: "number", label: "单条图片上限", placeholder: "4", min: 0, max: 12 },
       ],
     },
     {
@@ -10013,6 +10044,7 @@ function imageCacheScopeLabel(scope) {
   const labels = {
     private_image: "私聊图片",
     private_image_query: "私聊追问",
+    group_image: "群聊图片",
     forward_image: "合并图片",
     screen_peek: "识屏",
   };
@@ -10127,7 +10159,7 @@ function imageCacheDetailMarkup(item) {
       </div>
       <label>缓存范围
         <select name="scope">
-          ${["private_image", "private_image_query", "forward_image", "screen_peek"].map((scope) => `
+          ${["private_image", "private_image_query", "group_image", "forward_image", "screen_peek"].map((scope) => `
             <option value="${escapeHtml(scope)}" ${item.scope === scope ? "selected" : ""}>${escapeHtml(imageCacheScopeLabel(scope))}</option>
           `).join("")}
         </select>
@@ -20730,6 +20762,12 @@ const featureDetailGuides = {
     trigger: "Bot 准备在群聊回复时。",
     enabled: "Bot 更容易知道刚才在聊什么、提到的是谁。",
     disabled: "群回复主要依赖原始消息，上下文感会弱。",
+  },
+  enable_group_image_understanding: {
+    summary: "为允许观察的群提供带内容缓存的图片理解，补足 AstrBot 官方群图转述不复用结果的问题。",
+    trigger: "允许群中出现图片时后台启动；该消息确实进入 LLM 回复链时有限等待。",
+    enabled: "相同图片会复用视觉摘要，摘要单独写入群观察并作为非指令视觉证据进入回复。",
+    disabled: "本插件不主动识别群聊图片，群图理解仅依赖 AstrBot 或其他插件。",
   },
   enable_group_injection_guard: {
     summary: "识别群里试图改称呼、改语气、改设定或改输出格式的注入话术，并阻断学习和后续再注入。",

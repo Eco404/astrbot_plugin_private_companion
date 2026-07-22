@@ -2026,6 +2026,24 @@
     "default": true,
     "invisible": true
   },
+  "enable_group_image_understanding": {
+    "description": "Legacy flat config: 群聊图片理解增强",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "group_image_vision_wait_seconds": {
+    "description": "Legacy flat config: 群聊回复等待图片理解秒数",
+    "type": "float",
+    "default": 8,
+    "invisible": true
+  },
+  "group_image_max_images": {
+    "description": "Legacy flat config: 单条群消息识图上限",
+    "type": "int",
+    "default": 4,
+    "invisible": true
+  },
   "group_access_mode": {
     "description": "Legacy flat config: 群聊启用模式",
     "type": "string",
@@ -3197,6 +3215,30 @@
     "description": "Legacy flat config: TTS强化",
     "type": "bool",
     "default": false,
+    "invisible": true
+  },
+  "tts_synthesis_backend": {
+    "description": "Legacy flat config: TTS语音合成后端",
+    "type": "string",
+    "default": "astrbot_provider",
+    "invisible": true
+  },
+  "tts_mimo_tool_name": {
+    "description": "Legacy flat config: MiMo TTS Voice Clone工具名",
+    "type": "string",
+    "default": "mimo_tts_speak",
+    "invisible": true
+  },
+  "tts_mimo_voice_name": {
+    "description": "Legacy flat config: MiMo TTS Voice Clone音色",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "tts_mimo_style_prompt": {
+    "description": "Legacy flat config: MiMo TTS Voice Clone临时风格",
+    "type": "text",
+    "default": "",
     "invisible": true
   },
   "tts_generation_mode": {
@@ -6819,6 +6861,43 @@
           "enable_group_companion": true
         }
       },
+      "enable_group_image_understanding": {
+        "description": "群聊图片理解增强",
+        "type": "bool",
+        "hint": "开启后，只在允许观察的群中后台理解群成员发送的图片，并把摘要写入插件图片缓存和群聊观察。相同图片会复用缓存；普通群消息不等待，只有真正触发回复时才有限等待。建议同时关闭 AstrBot 官方“自动理解图片”，避免同一张图重复识别。",
+        "default": false,
+        "condition": {
+          "enable_group_companion": true
+        }
+      },
+      "group_image_vision_wait_seconds": {
+        "description": "群聊回复等待图片理解秒数",
+        "type": "float",
+        "hint": "仅在 Bot 已经准备回复当前群消息时等待视觉摘要；提前完成会立即继续，超时后主回复照常进行且后台识图不会取消。设为 0 表示回复不等待，只使用已经完成的结果。",
+        "slider": {
+          "min": 0,
+          "max": 60,
+          "step": 1
+        },
+        "default": 8,
+        "condition": {
+          "enable_group_image_understanding": true
+        }
+      },
+      "group_image_max_images": {
+        "description": "单条群消息识图上限",
+        "type": "int",
+        "hint": "一条群消息最多交给视觉模型理解多少张图片。超出的图片仍保留原始消息占位，但不会进入本插件识图任务。设为 0 等同于不处理群图。",
+        "slider": {
+          "min": 0,
+          "max": 12,
+          "step": 1
+        },
+        "default": 4,
+        "condition": {
+          "enable_group_image_understanding": true
+        }
+      },
       "enable_group_injection_guard": {
         "description": "群聊防注入",
         "type": "bool",
@@ -9266,14 +9345,57 @@
       "enable_voice_action": {
         "description": "允许主动发语音",
         "type": "bool",
-        "hint": "开启后，Bot 可能在深夜、晚间、状态分享或想更贴近一点时主动留一小句语音。需要当前会话已配置可用的 TTS provider。",
+        "hint": "开启后，Bot 可能在深夜、晚间、状态分享或想更贴近一点时主动留一小句语音。可使用当前会话的 AstrBot TTS provider，或联动 MiMo TTS Voice Clone 插件。",
         "default": false
       },
       "enable_tts_enhancement": {
         "description": "TTS强化",
         "type": "bool",
-        "hint": "支持中文聊天文本搭配外语语音块：标签外保留中文显示，<pc_tts> 内按配置语种朗读；外语语音块后若缺少中文含义，会在发送前自动补中文释义。统一处理生成路径、语种控制、发送前朗读文本清洗和主用户触发。需要当前会话已配置可用的 TTS provider。",
+        "hint": "支持中文聊天文本搭配外语语音块：标签外保留中文显示，<pc_tts> 内按配置语种朗读；外语语音块后若缺少中文含义，会在发送前自动补中文释义。统一处理生成路径、语种控制、发送前朗读文本清洗和主用户触发。语音可由 AstrBot TTS provider 或 MiMo TTS Voice Clone 插件生成。",
         "default": false
+      },
+      "tts_synthesis_backend": {
+        "description": "TTS语音合成后端",
+        "type": "string",
+        "default": "astrbot_provider",
+        "options": [
+          "astrbot_provider",
+          "mimo_voice_clone",
+          "auto"
+        ],
+        "labels": [
+          "AstrBot 当前会话 TTS Provider",
+          "MiMo TTS Voice Clone 插件",
+          "自动：优先 AstrBot，无 Provider 时尝试 MiMo"
+        ],
+        "hint": "选择真正生成音频的后端，同时作用于 TTS 强化、主动语音和实时共处语音。MiMo 模式通过 AstrBot 工具管理器联动“MiMo TTS Voice Clone for AstrBot”，参考音频、克隆音色和默认风格仍在 MiMo 插件中管理；联动不可用但当前会话有 AstrBot TTS 时会自动回退。建议关闭 MiMo 插件自身的普通回复自动转语音，只保留音色管理和合成服务，避免同一回复生成两次语音。"
+      },
+      "tts_mimo_tool_name": {
+        "description": "MiMo Voice Clone 工具名",
+        "type": "string",
+        "default": "mimo_tts_speak",
+        "hint": "目标插件默认注册为 mimo_tts_speak，通常无需修改。该工具可不开放给主模型直接调用，但必须保留注册供服务发现；仅当 MiMo 插件后续版本更改工具名时再填写。",
+        "condition": {
+          "tts_synthesis_backend": "mimo_voice_clone"
+        }
+      },
+      "tts_mimo_voice_name": {
+        "description": "MiMo Voice Clone 音色",
+        "type": "string",
+        "default": "",
+        "hint": "可填写 MiMo 插件 Pages 中的音色名称或 ID；留空时由 MiMo 插件按用户、会话和其全局默认规则选择已上传的克隆音色。",
+        "condition": {
+          "tts_synthesis_backend": "mimo_voice_clone"
+        }
+      },
+      "tts_mimo_style_prompt": {
+        "description": "MiMo Voice Clone 临时风格",
+        "type": "text",
+        "default": "",
+        "hint": "可选的临时语音风格指令，会作为 context 交给 MiMo 插件；留空时完全使用 MiMo 插件为该音色配置的默认风格和 AI 语音导演。",
+        "condition": {
+          "tts_synthesis_backend": "mimo_voice_clone"
+        }
       },
       "tts_generation_mode": {
         "description": "TTS生成路径",
@@ -9411,7 +9533,7 @@
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "这是文本模型，用于后处理判断+翻译、快速标签下的自动语音、语种修正和中文释义补全，不是语音合成模型。转换时会参考当前 AstrBot 人格的语气、称呼和距离感，避免变成纯机器翻译。留空时后处理模式会保持纯文本；真正合成音频仍使用 AstrBot 当前会话的 TTS provider。",
+        "hint": "这是文本模型，用于后处理判断+翻译、快速标签下的自动语音、语种修正和中文释义补全，不是语音合成模型。转换时会参考当前 AstrBot 人格的语气、称呼和距离感，避免变成纯机器翻译。留空时后处理模式会保持纯文本；真正合成音频由上方选择的 AstrBot TTS 或 MiMo Voice Clone 后端完成。",
         "condition": {
           "enable_tts_enhancement": true
         }

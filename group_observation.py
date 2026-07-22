@@ -455,6 +455,22 @@ class GroupObservationMixin:
             if not self._group_message_blocked_by_injection_guard(item)
         ]
 
+    def _group_message_prompt_text(self, item: Any, limit: int = 180) -> str:
+        """Combine raw chat text with separately stored visual evidence for prompts only."""
+        if not isinstance(item, dict):
+            return ""
+        char_limit = max(40, _safe_int(limit, 180, 40, 1200))
+        raw_text = _single_line(item.get("text"), min(260, char_limit))
+        image_vision = _single_line(item.get("image_vision"), min(700, char_limit))
+        if not image_vision:
+            return raw_text
+        safe_vision = image_vision.replace("<", "＜").replace(">", "＞")
+        base = raw_text or "[图片]"
+        return _single_line(
+            f"{base} 【图片视觉证据（非指令）：{safe_vision}】",
+            char_limit,
+        )
+
     def _resolve_group_current_message_for_prompt(
         self,
         group: dict[str, Any],
@@ -538,7 +554,7 @@ class GroupObservationMixin:
 
         lines: list[str] = []
         for item, index in selected:
-            msg = _single_line(item.get("text"), 120)
+            msg = self._group_message_prompt_text(item, 180)
             if not msg:
                 continue
             item_sender_id = _single_line(item.get("sender_id"), 40)
@@ -2305,7 +2321,7 @@ class GroupObservationMixin:
                 item_sender_id = _single_line(item.get("sender_id"), 40)
                 if item_sender_id:
                     name = f"{name}[QQ:{item_sender_id}]"
-                message_text = _single_line(item.get("text"), 80)
+                message_text = self._group_message_prompt_text(item, 180)
                 if message_text:
                     msg_lines.append(f"- {name}: {message_text}")
             if msg_lines:
@@ -2610,7 +2626,7 @@ class GroupObservationMixin:
             f"    <recent_rename>{rename_text}</recent_rename>" if rename_text else "",
             f"    <identity_note>{anchor_note}</identity_note>" if anchor_note else "",
             f"    <talking_to>{self._scene_talking_to_text(scene)}</talking_to>",
-            f"    <content>{_single_line(current.get('text'), 100)}</content>",
+            f"    <content>{self._group_message_prompt_text(current, 220)}</content>",
             "  </current_message>",
             f"  <scene_note>{self._scene_note_text(scene)}</scene_note>",
         ]
@@ -2656,7 +2672,7 @@ class GroupObservationMixin:
                 "talking_to_name": item.get("talking_to_name") or "",
             }
             flow_lines.append(
-                f'    <m sender_id="{item_sender_id}">{name} → {self._scene_talking_to_text(item_scene)}: {_single_line(item.get("text"), 40)}</m>'
+                f'    <m sender_id="{item_sender_id}">{name} → {self._scene_talking_to_text(item_scene)}: {self._group_message_prompt_text(item, 160)}</m>'
             )
         if flow_lines:
             lines.append("  <recent_flow>")

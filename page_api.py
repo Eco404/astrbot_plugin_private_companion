@@ -17,6 +17,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -816,6 +817,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "items": image_cache_count,
                 "max_items": int(getattr(self.plugin, "private_image_vision_cache_max_items", 0) or 0),
                 "private": metric_row("image_vision:private_image"),
+                "group": metric_row("image_vision:group_image"),
                 "forward": metric_row("image_vision:forward_image"),
                 "provider_runtime": provider_runtime,
             },
@@ -2854,12 +2856,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 tts_provider = provider_getter(umo) if umo else provider_getter()
             except Exception:
                 tts_provider = None
+        resolver = getattr(self.plugin, "_resolve_tts_synthesis_provider", None)
+        if callable(resolver):
+            try:
+                tts_provider = resolver(SimpleNamespace(unified_msg_origin=umo), tts_provider)
+            except Exception:
+                pass
         if tts_provider is None:
             return {
                 "ok": False,
                 "title": "TTS 生成链路测试",
                 "umo": umo,
-                "error": "当前会话没有可用 TTS provider",
+                "error": "当前没有可用的 AstrBot TTS Provider 或 MiMo Voice Clone 联动",
             }
         provider_settings = dict((config or {}).get("provider_tts_settings", {}) or {})
         spoken = self._single_line(payload.get("text"), 240) or "这是一条排障测试语音，用来确认 TTS 生成链路可以跑通。"
@@ -4241,6 +4249,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "forward_message_image_vision": "转发图片识别",
             "private_reading_vision": "夹层视觉",
             "private_image_vision": "私聊图片识别",
+            "group_image_vision": "群聊图片识别",
             "private_image_only_framework": "单图回复主链",
             "private_image_only_fallback": "单图兜底回复",
             "voice": "语音文本",
@@ -4755,9 +4764,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
         if bool(tts.get("enhancement_enabled")):
             if bool(tts.get("provider_available")):
-                add("ok", "TTS provider 可用", f"模式 {tts.get('mode')}，语种 {tts.get('language')}，provider {tts.get('provider_label') or '-'}。", "", "modules")
+                add("ok", "TTS 合成后端可用", f"模式 {tts.get('mode')}，语种 {tts.get('language')}，后端 {tts.get('provider_label') or '-'}。", "", "modules")
             else:
-                add("warn", "TTS 强化开启但合成 provider 不可用", "插件能处理 TTS 标签，但真实语音合成需要 AstrBot 当前会话启用 TTS provider。", "到 AstrBot 会话 TTS 配置启用 provider", "modules", "tts.provider_unavailable")
+                add("warn", "TTS 强化开启但合成后端不可用", "插件能处理 TTS 标签，但当前选择的 AstrBot TTS Provider 或 MiMo Voice Clone 联动不可用。", "检查 TTS 合成后端；MiMo 模式需启用目标插件并保留 mimo_tts_speak 工具", "modules", "tts.provider_unavailable")
         else:
             add("info", "TTS 强化未开启", "模型不应被要求生成 TTS 标签；如仍出现标签，发送前会清理。", "", "modules")
 
@@ -11118,6 +11127,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",
+            "enable_group_image_understanding",
             "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_forward_message_adaptation",
@@ -12397,6 +12407,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_review_pressure_threshold",
             "response_review_max_chars",
             "passive_topic_memory_hours",
+            "tts_synthesis_backend",
+            "tts_mimo_tool_name",
+            "tts_mimo_voice_name",
+            "tts_mimo_style_prompt",
             "tts_generation_mode",
             "tts_voice_language",
             "tts_fishaudio_model",
@@ -12548,6 +12562,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "private_image_self_recognition_hint",
             "enable_private_image_vision_cache",
             "private_image_vision_cache_max_items",
+            "enable_group_image_understanding",
+            "group_image_vision_wait_seconds",
+            "group_image_max_images",
             "screen_diary_context_max_chars",
             "enable_segmented_proactive_reply",
             "segmented_proactive_scope",
@@ -13441,22 +13458,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 add(
                     "ok",
                     "TTS 语音链路可用",
-                    f"模式 {tts_summary.get('mode')}，语种 {tts_summary.get('language')}，真实 TTS provider：{tts_summary.get('provider_label')}",
+                    f"模式 {tts_summary.get('mode')}，语种 {tts_summary.get('language')}，真实合成后端：{tts_summary.get('provider_label')}",
                 )
             elif tts_summary.get("settings_enabled"):
                 add(
                     "warn",
-                    "TTS 配置已开但 provider 不可用",
-                    f"会话 {tts_summary.get('umo') or '-'} 已启用 TTS 设置，但当前取不到可用 TTS provider",
-                    "在 AstrBot 会话 TTS 配置里选择并启用真实语音合成 provider",
+                    "TTS 配置已开但合成后端不可用",
+                    f"会话 {tts_summary.get('umo') or '-'} 已启用 TTS 设置，但当前取不到 AstrBot TTS Provider 或 MiMo Voice Clone 服务",
+                    "检查 TTS 合成后端；MiMo 模式需启用目标插件并保留 mimo_tts_speak 工具",
                     "tts.provider_unavailable",
                 )
             else:
                 add(
                     "warn",
-                    "TTS 强化已开但会话 TTS 未启用",
-                    "本插件只能处理 <tts> 标签和文本转换；真正合成音频需要 AstrBot 当前会话启用 TTS provider",
-                    "到 AstrBot 配置中为目标会话启用 TTS provider",
+                    "TTS 强化已开但没有可用合成后端",
+                    "本插件能处理 <tts> 标签和文本转换；真正合成音频需要 AstrBot 会话 TTS Provider 或 MiMo Voice Clone 插件",
+                    "在 TTS 配置中选择并启用一种真实语音合成后端",
                     "tts.provider_unavailable",
                 )
         else:
@@ -13904,12 +13921,37 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     provider = provider_getter(umo) if umo else provider_getter()
                 except Exception:
                     provider = None
+        synthesis_backend = self._single_line(
+            getattr(self.plugin, "tts_synthesis_backend", ""),
+            32,
+        ) or "astrbot_provider"
+        synthesis_resolver = getattr(self.plugin, "_resolve_tts_synthesis_provider", None)
+        effective_provider = provider
+        if callable(synthesis_resolver):
+            try:
+                effective_provider = synthesis_resolver(None, provider)
+            except Exception:
+                effective_provider = provider
+        mimo_adapter = (
+            effective_provider
+            if effective_provider is not None
+            and effective_provider.__class__.__name__ == "_MimoVoiceCloneTtsAdapter"
+            else None
+        )
         provider_label = ""
-        if provider is not None:
-            provider_id = self._provider_id(provider)
-            provider_label = self._provider_name(provider, provider_id) if provider_id else getattr(provider, "__class__", type(provider)).__name__
+        if mimo_adapter is not None:
+            provider_label = "MiMo TTS Voice Clone 插件"
+        elif effective_provider is not None:
+            provider_id = self._provider_id(effective_provider)
+            provider_label = self._provider_name(effective_provider, provider_id) if provider_id else getattr(effective_provider, "__class__", type(effective_provider)).__name__
         return {
             "enhancement_enabled": bool(getattr(self.plugin, "enable_tts_enhancement", False)),
+            "synthesis_backend": synthesis_backend,
+            "mimo_voice_clone_available": mimo_adapter is not None,
+            "mimo_tool_name": self._single_line(
+                getattr(self.plugin, "tts_mimo_tool_name", ""),
+                120,
+            ) or "mimo_tts_speak",
             "mode": self._single_line(getattr(self.plugin, "tts_generation_mode", ""), 24) or "fast_tag",
             "language": self.plugin._tts_language_label() if hasattr(self.plugin, "_tts_language_label") else "",
             "fishaudio_model": self._single_line(getattr(self.plugin, "tts_fishaudio_model", ""), 32) or "auto",
@@ -13921,8 +13963,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "foreign_text_mode": self._single_line(getattr(self.plugin, "tts_foreign_text_mode", ""), 32) or "translation",
             "conversion_scope": self._single_line(getattr(self.plugin, "tts_conversion_scope", ""), 24) or "partial",
             "umo": umo,
-            "settings_enabled": bool(provider_settings.get("enable", False)),
-            "provider_available": provider is not None,
+            "settings_enabled": bool(provider_settings.get("enable", False)) or synthesis_backend == "mimo_voice_clone",
+            "provider_available": effective_provider is not None,
             "provider_label": self._single_line(provider_label, 80) or "未知 provider",
         }
 
@@ -14303,6 +14345,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             setattr(self.plugin, key, max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw)))
             return
         tts_runtime_keys = {
+            "tts_synthesis_backend",
+            "tts_mimo_tool_name",
+            "tts_mimo_voice_name",
+            "tts_mimo_style_prompt",
             "tts_generation_mode",
             "tts_voice_language",
             "tts_fishaudio_model",
@@ -14724,6 +14770,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",
+            "enable_group_image_understanding",
             "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_forward_message_adaptation",
@@ -14914,6 +14961,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "memory_companion_context_top_k",
             "memory_companion_context_max_chars",
             "passive_topic_memory_hours",
+            "tts_synthesis_backend",
+            "tts_mimo_tool_name",
+            "tts_mimo_voice_name",
+            "tts_mimo_style_prompt",
             "tts_generation_mode",
             "tts_voice_language",
             "tts_fishaudio_model",
@@ -15053,6 +15104,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "private_image_self_recognition_hint",
             "enable_private_image_vision_cache",
             "private_image_vision_cache_max_items",
+            "enable_group_image_understanding",
+            "group_image_vision_wait_seconds",
+            "group_image_max_images",
             "enable_segmented_proactive_reply",
             "segmented_proactive_scope",
             "segmented_proactive_chat_scope",
@@ -15426,6 +15480,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return mode if mode in {"probability", "llm"} else "probability"
         if key == "REST_WAKEUP_PROVIDER_ID":
             return str(value or "").strip()[:160]
+        if key == "tts_synthesis_backend":
+            mode = str(value or "astrbot_provider").strip().lower()
+            aliases = {
+                "astrbot": "astrbot_provider",
+                "provider": "astrbot_provider",
+                "official": "astrbot_provider",
+                "官方": "astrbot_provider",
+                "mimo": "mimo_voice_clone",
+                "mimotts": "mimo_voice_clone",
+                "mimo_plugin": "mimo_voice_clone",
+                "插件": "mimo_voice_clone",
+                "自动": "auto",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"astrbot_provider", "mimo_voice_clone", "auto"} else "astrbot_provider"
         if key == "tts_generation_mode":
             mode = str(value or "fast_tag").strip().lower()
             aliases = {
@@ -15936,6 +16005,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "atrelay_multi_target_limit",
             "private_image_vision_cache_max_items",
             "context_image_caption_max_items",
+            "group_image_max_images",
             "group_slang_web_search_terms",
             "group_slang_web_search_results",
             "auto_voice_max_chars",
@@ -15944,6 +16014,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             try:
                 if key == "group_high_intensity_max_merge_messages":
                     return max(0, min(50, int(value)))
+                if key == "group_image_max_images":
+                    return max(0, min(12, int(value)))
                 parsed = max(0, int(value))
                 return parsed
             except (TypeError, ValueError):
@@ -16022,6 +16094,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(0.0, min(90.0, float(value)))
             except (TypeError, ValueError):
                 return 30.0
+        if key == "group_image_vision_wait_seconds":
+            try:
+                return max(0.0, min(60.0, float(value)))
+            except (TypeError, ValueError):
+                return 8.0
         if key == "private_image_provider_timeout_seconds":
             try:
                 return max(3.0, min(60.0, float(value)))
@@ -16149,6 +16226,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_context_image_captioning",
             "enable_private_image_gif_enhancement",
             "enable_private_image_vision_cache",
+            "enable_group_image_understanding",
             "enable_segmented_proactive_reply",
             "segmented_proactive_send_as_forward",
             "enable_segmented_proactive_content_cleanup",

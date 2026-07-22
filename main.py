@@ -1112,6 +1112,9 @@ class PrivateCompanionPlugin(
         self.enable_private_image_self_recognition = self._cfg_bool(c, "enable_private_image_self_recognition", True)
         self.enable_private_image_vision_cache = self._cfg_bool(c, "enable_private_image_vision_cache", True)
         self.private_image_vision_cache_max_items = self._cfg_int(c, "private_image_vision_cache_max_items", 300, 0, 3000)
+        self.enable_group_image_understanding = self._cfg_bool(c, "enable_group_image_understanding", False)
+        self.group_image_vision_wait_seconds = self._cfg_float(c, "group_image_vision_wait_seconds", 8.0, 0.0, 60.0)
+        self.group_image_max_images = self._cfg_int(c, "group_image_max_images", 4, 0, 12)
         self.enable_context_image_captioning = self._cfg_bool(c, "enable_context_image_captioning", True)
         self.context_image_caption_max_items = self._cfg_int(c, "context_image_caption_max_items", 12, 0, 50)
         self.context_image_caption_timeout_seconds = self._cfg_float(c, "context_image_caption_timeout_seconds", 8.0, 0.0)
@@ -2052,6 +2055,7 @@ class PrivateCompanionPlugin(
         self._recent_outfit_command_sends: dict[str, float] = {}
         self._startup_maintenance_task: asyncio.Task | None = None
         self._startup_background_tasks: dict[str, asyncio.Task] = {}
+        self._group_image_understanding_tasks: dict[str, dict[str, Any]] = {}
         self._qzone_last_bot = None
         startup_load_started = time.perf_counter()
         self.data = self._load_data_sync()
@@ -2444,6 +2448,11 @@ class PrivateCompanionPlugin(
         for label, task in startup_background_tasks:
             await cancel_task(task, f"startup_{label}")
         self._startup_background_tasks.clear()
+        group_image_tasks = list(getattr(self, "_group_image_understanding_tasks", {}).items())
+        for task_key, entry in group_image_tasks:
+            task = entry.get("task") if isinstance(entry, dict) else None
+            await cancel_task(task, f"group_image_{_single_line(task_key, 80)}")
+        self._group_image_understanding_tasks.clear()
         troubleshooting_wakeup_tasks = list(getattr(self, "_troubleshooting_proactive_wakeup_tasks", {}).items())
         for user_id, task in troubleshooting_wakeup_tasks:
             await cancel_task(task, f"troubleshooting_proactive_{_single_line(user_id, 40)}")
@@ -8478,6 +8487,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
         await self._enrich_request_context_image_placeholders(event, req)
+        if not is_private_chat:
+            await self._append_group_image_understanding_to_request(event, req)
         if (
             bool(getattr(event, "private_companion_deferred_private_image_only", False))
             and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False))
@@ -11517,6 +11528,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             sender_name=self._sender_display_name(event),
             text=text,
         )
+        self._start_group_image_understanding(
+            event,
+            group_id=group_id,
+            sender_id=sender_id,
+            text=text,
+        )
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
@@ -11557,6 +11574,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             group_id=group_id,
             sender_id=sender_id,
             sender_name=sender_name,
+            text=text,
+        )
+        self._start_group_image_understanding(
+            event,
+            group_id=group_id,
+            sender_id=sender_id,
             text=text,
         )
         existing_reply_preview = self._event_existing_reply_result_preview(event)

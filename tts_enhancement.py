@@ -118,6 +118,152 @@ TTS_EMOTION_PLACEHOLDER_PREFIX = "PCTTSEMOTION"
 TTS_VISIBLE_LABEL_PATTERN = re.compile(
     r"^(?:[\s:：|｜-]*(?:中文含义|中文释义|对应文本|原中文文本|显示文本|可见文本|文本|翻译|释义)[\s:：|｜-]*)+"
 )
+TTS_MARKDOWN_LINK_PATTERN = re.compile(
+    r"\[([^\]\r\n]{1,120})\]\(((?:https?://|www\.)[^\s<>()]+)\)",
+    re.IGNORECASE,
+)
+TTS_SPOKEN_URL_PATTERN = re.compile(
+    r"(?:https?://|www\.)[^\s<>\[\]{}\"'“”‘’]+",
+    re.IGNORECASE,
+)
+DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME = "mimo_tts_speak"
+
+
+class _MimoVoiceCloneTtsAdapter:
+    """Expose MiMo TTS Voice Clone's public service as an AstrBot-like TTS provider."""
+
+    name = "MiMo TTS Voice Clone plugin"
+    provider_type = "tts"
+    model_name = "mimo-v2.5-tts-voiceclone"
+
+    def __init__(
+        self,
+        plugin: Any,
+        event: Any,
+        *,
+        voice_name: str = "",
+        style: str = "",
+        tool_name: str = DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME,
+    ) -> None:
+        self.plugin = plugin
+        self.event = event
+        self.voice_name = str(voice_name or "").strip()
+        self.style = str(style or "").strip()
+        self.tool_name = str(tool_name or DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME).strip()
+
+    def get_model(self) -> str:
+        return self.model_name
+
+    def readiness(self) -> tuple[bool, str]:
+        plugin_config = getattr(self.plugin, "plugin_config", None)
+        if plugin_config is not None:
+            api_key = str(getattr(plugin_config, "api_key", "") or "").strip()
+            if not api_key:
+                return False, "missing_api_key"
+
+        voice_getter = getattr(self.plugin, "list_available_voices", None)
+        if callable(voice_getter):
+            try:
+                voices = list(voice_getter() or [])
+            except Exception:
+                voices = []
+            if not voices:
+                return False, "missing_voice"
+            if self.voice_name:
+                matched = any(
+                    self.voice_name
+                    in {
+                        str(item.get("id", "") or "").strip(),
+                        str(item.get("name", "") or "").strip(),
+                    }
+                    for item in voices
+                    if isinstance(item, dict)
+                )
+                if not matched:
+                    return False, "voice_not_found"
+        return True, "ready"
+
+    @staticmethod
+    def _supported_kwargs(method: Any, values: dict[str, Any]) -> dict[str, Any]:
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return values
+        accepts_extra = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if accepts_extra:
+            return values
+        return {key: value for key, value in values.items() if key in signature.parameters}
+
+    def _event_user_id(self) -> str:
+        getter = getattr(self.event, "get_sender_id", None)
+        if callable(getter):
+            try:
+                return str(getter() or "").strip()
+            except Exception:
+                pass
+        session_id = self._event_session_id()
+        if ":" in session_id:
+            return session_id.rsplit(":", 1)[-1].strip()
+        return ""
+
+    def _event_session_id(self) -> str:
+        return str(getattr(self.event, "unified_msg_origin", "") or "").strip()
+
+    @staticmethod
+    async def _await_result(result: Any) -> Any:
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    @staticmethod
+    def _audio_path_from_result(result: Any) -> str:
+        if isinstance(result, (list, tuple)):
+            result = result[0] if result else ""
+        if isinstance(result, os.PathLike):
+            return os.fspath(result)
+        if isinstance(result, str):
+            return result.strip()
+        for attr in ("audio_path", "output_path", "path", "file", "url"):
+            value = getattr(result, attr, "")
+            if isinstance(value, os.PathLike):
+                return os.fspath(value)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    async def get_audio(self, text: str) -> str:
+        synthesize = getattr(self.plugin, "synthesize_text", None)
+        if callable(synthesize):
+            kwargs = self._supported_kwargs(
+                synthesize,
+                {
+                    "voice_name": self.voice_name or None,
+                    "context": self.style,
+                    "user_id": self._event_user_id(),
+                    "group_id": self._event_session_id(),
+                    "split": False,
+                },
+            )
+            result = await self._await_result(synthesize(str(text or ""), **kwargs))
+            return self._audio_path_from_result(result)
+
+        compatibility = getattr(self.plugin, "text_to_speech", None)
+        if callable(compatibility):
+            kwargs = self._supported_kwargs(
+                compatibility,
+                {
+                    "voice_name": self.voice_name,
+                    "context": self.style,
+                    "target_umo": self._event_session_id(),
+                    "session_id": self._event_session_id(),
+                },
+            )
+            result = await self._await_result(compatibility(str(text or ""), **kwargs))
+            return self._audio_path_from_result(result)
+        return ""
 
 
 class TtsEnhancementMixin:
@@ -129,6 +275,35 @@ class TtsEnhancementMixin:
 
     def _load_tts_enhancement_config(self, config: Any) -> None:
         self.enable_tts_enhancement = self._cfg_bool(config, "enable_tts_enhancement", False)
+        raw_synthesis_backend = self._cfg_str(
+            config,
+            "tts_synthesis_backend",
+            "auto",
+            "auto",
+        ).lower()
+        synthesis_backend_aliases = {
+            "astrbot": "astrbot_provider",
+            "provider": "astrbot_provider",
+            "official": "astrbot_provider",
+            "mimo": "mimo_voice_clone",
+            "mimotts": "mimo_voice_clone",
+            "mimo_plugin": "mimo_voice_clone",
+            "plugin": "mimo_voice_clone",
+        }
+        self.tts_synthesis_backend = synthesis_backend_aliases.get(
+            raw_synthesis_backend,
+            raw_synthesis_backend,
+        )
+        if self.tts_synthesis_backend not in {"astrbot_provider", "mimo_voice_clone", "auto"}:
+            self.tts_synthesis_backend = "auto"
+        self.tts_mimo_tool_name = self._cfg_str(
+            config,
+            "tts_mimo_tool_name",
+            DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME,
+            DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME,
+        )
+        self.tts_mimo_voice_name = self._cfg_str(config, "tts_mimo_voice_name", "")
+        self.tts_mimo_style_prompt = self._cfg_str(config, "tts_mimo_style_prompt", "")
         raw_mode = self._cfg_str(config, "tts_generation_mode", "fast_tag", "fast_tag").lower()
         mode_aliases = {
             "hybrid": "fast_tag",
@@ -255,6 +430,127 @@ class TtsEnhancementMixin:
             self._tts_session_last_at: dict[str, float] = {}
         self._apply_tts_runtime_overrides()
 
+    @staticmethod
+    def _mimo_voice_clone_plugin_from_handler(handler: Any) -> Any | None:
+        pending = [handler]
+        visited: set[int] = set()
+        while pending:
+            current = pending.pop(0)
+            if current is None or id(current) in visited:
+                continue
+            visited.add(id(current))
+            owner = getattr(current, "__self__", None)
+            if owner is not None:
+                pending.append(owner)
+            pending.extend(list(getattr(current, "args", ()) or ()))
+            wrapped = getattr(current, "func", None)
+            if wrapped is not None and wrapped is not current:
+                pending.append(wrapped)
+            if callable(getattr(current, "synthesize_text", None)) or callable(
+                getattr(current, "text_to_speech", None)
+            ):
+                return current
+        return None
+
+    def _find_mimo_voice_clone_tts_adapter(self, event: Any) -> Any | None:
+        tool_name = _single_line(
+            getattr(self, "tts_mimo_tool_name", DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME),
+            120,
+        ) or DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME
+        try:
+            manager = self.context.get_llm_tool_manager()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 读取 MiMo TTS 工具管理器失败: %s", _single_line(exc, 120))
+            return None
+        if manager is None:
+            return None
+
+        tool = None
+        get_tool = getattr(manager, "get_tool", None)
+        if callable(get_tool):
+            try:
+                tool = get_tool(tool_name)
+            except Exception:
+                tool = None
+        if tool is None:
+            get_func = getattr(manager, "get_func", None)
+            if callable(get_func):
+                try:
+                    tool = get_func(tool_name)
+                except Exception:
+                    tool = None
+        if tool is None:
+            return None
+
+        handler = getattr(tool, "handler", None)
+        plugin = self._mimo_voice_clone_plugin_from_handler(handler)
+        if plugin is None:
+            warning_key = f"{tool_name}:{id(handler)}"
+            if getattr(self, "_tts_mimo_bridge_handler_warning_key", "") != warning_key:
+                self._tts_mimo_bridge_handler_warning_key = warning_key
+                logger.warning(
+                    "[PrivateCompanion] 已找到 MiMo TTS 工具但无法取得插件公开合成服务: tool=%s",
+                    tool_name,
+                )
+            return None
+        bridge_key = f"{tool_name}:{id(plugin)}"
+        if getattr(self, "_tts_mimo_bridge_key", "") != bridge_key:
+            self._tts_mimo_bridge_key = bridge_key
+            logger.info(
+                "[PrivateCompanion] 已发现 MiMo TTS Voice Clone: tool=%s service=%s",
+                tool_name,
+                plugin.__class__.__name__,
+            )
+        return _MimoVoiceCloneTtsAdapter(
+            plugin,
+            event,
+            voice_name=getattr(self, "tts_mimo_voice_name", ""),
+            style=getattr(self, "tts_mimo_style_prompt", ""),
+            tool_name=tool_name,
+        )
+
+    def _resolve_tts_synthesis_provider(self, event: Any, astrbot_provider: Any = None) -> Any:
+        mode = str(getattr(self, "tts_synthesis_backend", "auto") or "auto").lower()
+        if mode == "astrbot_provider":
+            return astrbot_provider
+
+        mimo_adapter = self._find_mimo_voice_clone_tts_adapter(event)
+        if mimo_adapter is not None:
+            if mode == "auto":
+                ready, reason = mimo_adapter.readiness()
+                if not ready:
+                    state_key = f"{mimo_adapter.tool_name}:{reason}"
+                    if getattr(self, "_tts_mimo_auto_readiness_log_key", "") != state_key:
+                        self._tts_mimo_auto_readiness_log_key = state_key
+                        reason_label = {
+                            "missing_api_key": "尚未配置 API Key",
+                            "missing_voice": "尚未上传可用克隆音色",
+                            "voice_not_found": "指定音色不存在或已停用",
+                        }.get(reason, reason)
+                        logger.info(
+                            "[PrivateCompanion] 自动识别到 MiMo TTS Voice Clone,但暂不接管合成: reason=%s fallback=%s",
+                            reason_label,
+                            "AstrBot TTS provider" if astrbot_provider is not None else "文字/浏览器朗读",
+                        )
+                    return astrbot_provider
+                ready_key = f"{mimo_adapter.tool_name}:ready:{id(mimo_adapter.plugin)}"
+                if getattr(self, "_tts_mimo_auto_ready_log_key", "") != ready_key:
+                    self._tts_mimo_auto_ready_log_key = ready_key
+                    logger.info(
+                        "[PrivateCompanion] MiMo TTS Voice Clone 已自动识别并接管语音合成: tool=%s",
+                        mimo_adapter.tool_name,
+                    )
+            return mimo_adapter
+        if mode == "mimo_voice_clone" and astrbot_provider is not None:
+            fallback_key = _single_line(getattr(self, "tts_mimo_tool_name", ""), 120) or DEFAULT_MIMO_VOICE_CLONE_TOOL_NAME
+            if getattr(self, "_tts_mimo_bridge_fallback_warning_key", "") != fallback_key:
+                self._tts_mimo_bridge_fallback_warning_key = fallback_key
+                logger.warning(
+                    "[PrivateCompanion] MiMo TTS Voice Clone 联动不可用,本次回退 AstrBot TTS provider: tool=%s",
+                    fallback_key,
+                )
+        return astrbot_provider
+
     def _tts_fishaudio_model_for_provider(
         self,
         tts_provider: Any = None,
@@ -337,6 +633,7 @@ class TtsEnhancementMixin:
                 tts_provider = self.context.get_using_tts_provider(str(getattr(event, "unified_msg_origin", "") or ""))
         except Exception:
             tts_provider = None
+        tts_provider = self._resolve_tts_synthesis_provider(event, tts_provider)
         return self._tts_provider_kind(tts_provider, provider_settings)
 
     def _tts_provider_allows_emotion_tags(self, kind: str) -> bool:
@@ -938,7 +1235,19 @@ class TtsEnhancementMixin:
         """Clean text immediately before get_audio, scoped to TTS强化 only."""
         if not text:
             return ""
-        source = self._strip_or_keep_emotion_tags(str(text), provider_kind=provider_kind)
+        source = str(text)
+        source = TTS_MARKDOWN_LINK_PATTERN.sub(lambda match: match.group(1).strip(), source)
+
+        def _remove_spoken_url(match: re.Match[str]) -> str:
+            value = match.group(0)
+            trailing = ""
+            while value and value[-1] in ".,!?;:，。！？；：":
+                trailing = value[-1] + trailing
+                value = value[:-1]
+            return trailing
+
+        source = TTS_SPOKEN_URL_PATTERN.sub(_remove_spoken_url, source)
+        source = self._strip_or_keep_emotion_tags(source, provider_kind=provider_kind)
         protected: dict[str, str] = {}
         if self._tts_provider_allows_emotion_tags(provider_kind):
             def _protect_emotion(match: re.Match[str]) -> str:
@@ -971,6 +1280,7 @@ class TtsEnhancementMixin:
         source = re.sub(r"[''\u2018\u2019]\s*[''\u2018\u2019]", "", source)
         source = re.sub(r"[「」『』【】\[\]]\s*[「」『』【】\[\]]", "", source)
         source = re.sub(r"[,，、;；]\s*(?=[,，、;；\s])", "", source)
+        source = re.sub(r"[:：]\s*(?=$|[。！？!?])", "", source)
         source = re.sub(r"[,，、;；]\s*$", "", source)
         source = re.sub(r"^\s*[,，、;；]\s*", "", source)
         source = re.sub(r"\s+", " ", source).strip()
@@ -1416,6 +1726,7 @@ TTS 朗读文本：
             "【语音消息规则】",
             first_rule,
             scope_rule,
+            "URL、域名、邮箱、命令、文件路径、长编号和邀请码不适合朗读：不要放进 <pc_tts>；必须在语音块外保留原文供用户点击或复制。语音里需要承接时，只自然说“链接在文字里”或“我把链接发给你了”，不要念出协议、域名、路径或参数。",
         ]
         if emotion_rule:
             rules.append(emotion_rule)
@@ -2370,9 +2681,9 @@ TTS 朗读文本：
             display_rule = "不要只输出 <pc_tts>...</pc_tts>；最终格式建议为：<pc_tts>日本語の朗読文</pc_tts>\\n我会在这里。中文句子必须完整收口，不要写“中文含义：”“对应文本：”这类标题。"
             language_rule = "语音块内必须完全使用自然日语，不要夹中文评价、中文语气词或中文说明；除极短语气词外必须包含假名，不要只输出汉字词。"
         scope_rule = (
-            "把原回复的全部有效内容转换成一个完整语音块，不要只截取一句；不要遗漏信息。"
+            "把原回复中适合朗读的全部自然语言转换成一个完整语音块，不要只截取一句；URL、域名、邮箱、命令、文件路径、长编号和邀请码必须保留在语音块外的可见文字中，不得朗读。"
             if full
-            else "只选择最适合朗读的一小段转换成语音，其余信息保留为可见文字；不要把整条长回复都塞进语音。"
+            else "只选择最适合朗读的一小段转换成语音，其余信息保留为可见文字；不要把整条长回复都塞进语音，尤其不要朗读 URL、域名、邮箱、命令、文件路径、长编号或邀请码。"
         )
         prompt = f"""
 请把下面这条回复转换成适合 TTS 朗读的最终输出。
@@ -2464,6 +2775,7 @@ Provider 规则：{emotion_rule}
 - {scope_rule}
 - {visible_rule}
 - voice_text 是送入 TTS 的朗读文本。{language_rule}
+- URL、域名、邮箱、命令、文件路径、长编号和邀请码不得写入 voice_text；它们必须原样保留在 visible_text，语音只需自然说明链接或信息已放在文字里。
 - {emotion_rule}
 - voice_text 和 visible_text 都要保持当前人格的说话方式、称呼和距离感。
 - 不要添加原回复没有的新信息。
@@ -3063,6 +3375,7 @@ Provider 规则：{emotion_rule}
             tts_provider = event_or_provider
             config = config or getattr(self, "config", {}) or {}
             provider_settings = provider_settings or dict((config or {}).get("provider_tts_settings", {}) or {})
+        tts_provider = self._resolve_tts_synthesis_provider(event, tts_provider)
         normalized = self._normalize_tts_tags(text)
         hard_block = self._tts_hard_block_reason(event)
         if hard_block:
@@ -3082,7 +3395,8 @@ Provider 规则：{emotion_rule}
                 fallback_text = "我这边暂时没有可用的语音通道，先用文字陪你说。"
             if fallback_text:
                 logger.warning(
-                    "[PrivateCompanion] TTS强化检测到标签但当前会话没有可用 TTS provider,已隐藏朗读文本并按普通文本发送: %s",
+                    "[PrivateCompanion] TTS强化检测到标签但当前没有可用合成后端,已隐藏朗读文本并按普通文本发送: backend=%s text=%s",
+                    _single_line(getattr(self, "tts_synthesis_backend", "astrbot_provider"), 40),
                     _single_line(fallback_text, 160),
                 )
                 return [Plain(fallback_text)]
@@ -3101,6 +3415,10 @@ Provider 规则：{emotion_rule}
                 pos = match.end()
                 continue
             source_spoken = spoken
+            spoken = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
+            if not spoken:
+                pos = match.end()
+                continue
             remaining = self._tts_session_interval_remaining(event)
             if remaining > 0:
                 logger.info(
@@ -3326,6 +3644,7 @@ Provider 规则：{emotion_rule}
         play_local: bool = True,
     ) -> dict[str, Any]:
         settings = dict(provider_settings or {})
+        tts_provider = self._resolve_tts_synthesis_provider(None, tts_provider)
         voice_config = self._realtime_voice_config()
         voice_language = str(voice_config["voice_language"])
         target_language = str(voice_config["browser_language"])

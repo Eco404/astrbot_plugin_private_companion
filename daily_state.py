@@ -1780,11 +1780,28 @@ class DailyStateMixin:
         conditions = state.get("conditions", [])
         if not isinstance(conditions, list):
             conditions = []
+
+        morning_start, morning_end = 8 * 60 + 20, 9 * 60 + 50
+        window_getter = getattr(self, "_morning_greeting_window", None)
+        if callable(window_getter):
+            try:
+                candidate_start, candidate_end = window_getter()
+                if 0 <= candidate_start < candidate_end <= 24 * 60:
+                    morning_start, morning_end = candidate_start, candidate_end
+            except Exception:
+                pass
+
+        def morning_window(*, delay_minutes: int, span_minutes: int) -> str:
+            latest_start = max(morning_start, morning_end - 8)
+            start = min(morning_start + max(0, delay_minutes), latest_start)
+            end = min(morning_end, max(start + 8, start + max(8, span_minutes)))
+            return f"{start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d}"
+
         events: list[dict[str, Any]] = []
         if any(token in sleep_text for token in ("赖床", "闹钟", "起得有点迟", "还没完全开机", "懵懵", "有点懵")):
             events.append(
                 {
-                    "window": "08:20-09:50",
+                    "window": morning_window(delay_minutes=8, span_minutes=30),
                     "reason": "morning_greeting",
                     "action": "message",
                     "why": "迷迷糊糊醒来，虽然还想再睡，但先轻轻说声早安",
@@ -1804,7 +1821,7 @@ class DailyStateMixin:
         elif any(token in sleep_text for token in ("睡得很浅", "半夜醒", "一晚上都在做梦", "失眠")):
             events.append(
                 {
-                    "window": "08:30-09:45",
+                    "window": morning_window(delay_minutes=6, span_minutes=28),
                     "reason": "morning_greeting",
                     "action": "message",
                     "why": "醒来还带着一点睡意时,迷迷糊糊先发一声早安。",
@@ -1825,7 +1842,7 @@ class DailyStateMixin:
         if energy >= 62 and random.random() < 0.45:
             events.append(
                 {
-                    "window": "08:10-09:20",
+                    "window": morning_window(delay_minutes=3, span_minutes=24),
                     "reason": "morning_greeting",
                     "action": "message",
                     "why": "睡得很好,习惯性地想去打个招呼。",
@@ -1850,7 +1867,7 @@ class DailyStateMixin:
             if "睡眠延续" in title and random.random() < 0.55:
                 events.append(
                     {
-                        "window": "08:40-10:00",
+                        "window": morning_window(delay_minutes=10, span_minutes=30),
                         "reason": "morning_greeting",
                         "action": "message",
                         "why": "睡意延续到白天,有种半梦半醒的感觉",
@@ -1866,7 +1883,7 @@ class DailyStateMixin:
             if any(token in label for token in ("赖床", "闹钟", "起得有点迟")):
                 events.append(
                     {
-                        "window": "08:15-09:40",
+                        "window": morning_window(delay_minutes=6, span_minutes=32),
                         "reason": "morning_greeting",
                         "action": "message",
                         "why": "早晨发生了一点生活小插曲，和用户抱怨一句或打个招呼。",

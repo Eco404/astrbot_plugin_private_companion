@@ -531,6 +531,7 @@ class TokenBudgetMixin:
             "proactive_framework",
             "voice_framework",
             "private_image_vision",
+            "group_image_vision",
             "private_image_only_framework",
             "private_image_only_fallback",
             "roleplay_draft_from_persona",

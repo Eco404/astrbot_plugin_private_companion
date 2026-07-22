@@ -6519,14 +6519,23 @@ Output:
             except Exception as e:
                 return [], f"读取配置失败：{e}"
         provider_settings = dict(config.get("provider_tts_settings", {}) or {})
-        if not provider_settings.get("enable", False):
-            return [], "当前会话未启用 TTS"
+        astrbot_provider = None
         try:
-            tts_provider = self.context.get_using_tts_provider(target)
+            astrbot_provider = self.context.get_using_tts_provider(target)
         except Exception as e:
-            return [], f"读取 TTS provider 失败：{e}"
+            logger.debug("[PrivateCompanion] 主动语音读取 AstrBot TTS provider 失败: %s", _single_line(e, 120))
+        resolver = getattr(self, "_resolve_tts_synthesis_provider", None)
+        if callable(resolver):
+            try:
+                tts_provider = resolver(SimpleNamespace(unified_msg_origin=target), astrbot_provider)
+            except Exception:
+                tts_provider = astrbot_provider
+        else:
+            tts_provider = astrbot_provider
         if not tts_provider:
-            return [], "当前会话没有可用的 TTS provider"
+            return [], "当前没有可用的 AstrBot TTS Provider 或 MiMo Voice Clone 联动"
+        if tts_provider is astrbot_provider and not provider_settings.get("enable", False):
+            return [], "当前会话未启用 AstrBot TTS"
         if "<tts>" in spoken_text and "</tts>" in spoken_text:
             components, note = await self._build_tts_modify_components(
                 spoken_text,
