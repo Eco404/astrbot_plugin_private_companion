@@ -100,6 +100,12 @@ const state = {
   imageCacheFilter: "",
   imageCacheScope: "all",
   imageCacheLoaded: false,
+  imageCachePage: 1,
+  imageCachePageSize: 36,
+  imageCacheRequestSeq: 0,
+  imageCacheBatchMode: false,
+  selectedImageCacheKeys: new Set(),
+  imageCacheImageData: new Map(),
   selectedImageCacheKey: "",
   troubleshootingFilter: "all",
   troubleshootingCategory: "all",
@@ -4650,16 +4656,26 @@ async function restoreConfigBackup(id) {
   showToast("已从备份恢复");
 }
 
-async function loadImageCache() {
+async function loadImageCache({ clampPage = true } = {}) {
   const params = new URLSearchParams();
-  params.set("limit", "300");
+  const pageSize = Math.max(1, Number(state.imageCachePageSize || 36));
+  const page = Math.max(1, Number(state.imageCachePage || 1));
+  params.set("limit", String(pageSize));
+  params.set("offset", String((page - 1) * pageSize));
   if (state.imageCacheFilter) params.set("q", state.imageCacheFilter);
   if (state.imageCacheScope && state.imageCacheScope !== "all") params.set("scope", state.imageCacheScope);
+  const requestSeq = ++state.imageCacheRequestSeq;
   const data = await fetchJson(`/image_cache/list?${params.toString()}`);
+  if (requestSeq !== state.imageCacheRequestSeq) return data;
   state.imageCacheItems = Array.isArray(data.items) ? data.items : [];
   state.imageCacheTotal = Number(data.total || 0);
   state.imageCacheScopes = Array.isArray(data.scopes) ? data.scopes : [];
   state.imageCacheLoaded = true;
+  const totalPages = Math.max(1, Math.ceil(state.imageCacheTotal / pageSize));
+  if (clampPage && state.imageCachePage > totalPages) {
+    state.imageCachePage = totalPages;
+    return loadImageCache({ clampPage: false });
+  }
   if (state.selectedImageCacheKey && !state.imageCacheItems.some((item) => item.key === state.selectedImageCacheKey)) {
     state.selectedImageCacheKey = "";
   }
@@ -4668,6 +4684,16 @@ async function loadImageCache() {
   }
   renderImageCache();
   return data;
+}
+
+async function goToImageCachePage(targetPage) {
+  const pageSize = Math.max(1, Number(state.imageCachePageSize || 36));
+  const pages = Math.max(1, Math.ceil(Number(state.imageCacheTotal || 0) / pageSize));
+  const nextPage = Math.min(pages, Math.max(1, Number(targetPage) || 1));
+  if (nextPage === state.imageCachePage) return;
+  state.imageCachePage = nextPage;
+  await loadImageCache();
+  $("#imageCacheList")?.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 async function loadTroubleshooting(options = {}) {
@@ -10178,18 +10204,129 @@ function renderImageCache() {
       <span>左侧点击图片/表情包缓存后，可以编辑摘要或删除。</span>
     </div>
   `;
+  renderImageCacheBatchControls();
+  renderImageCachePager();
+  void hydrateImageCacheImages(listEl);
+  void hydrateImageCacheImages(detailEl);
+}
+
+function renderImageCacheBatchControls() {
+  const toggle = $("#imageCacheBatchModeBtn");
+  const bar = $("#imageCacheBatchBar");
+  const count = $("#imageCacheSelectionCount");
+  const selectedCount = state.selectedImageCacheKeys.size;
+  const pageSelectedCount = (state.imageCacheItems || [])
+    .filter((item) => state.selectedImageCacheKeys.has(item.key)).length;
+  if (toggle) {
+    toggle.textContent = state.imageCacheBatchMode
+      ? `退出批量（${selectedCount}）`
+      : selectedCount
+        ? `批量编辑（${selectedCount}）`
+        : "批量编辑";
+    toggle.setAttribute("aria-pressed", state.imageCacheBatchMode ? "true" : "false");
+    toggle.classList.toggle("is-active", state.imageCacheBatchMode);
+  }
+  if (!bar) return;
+  bar.hidden = !state.imageCacheBatchMode;
+  if (count) count.textContent = `已选 ${selectedCount} 条 · 本页 ${pageSelectedCount} 条`;
+  const hasPageItems = Boolean(state.imageCacheItems?.length);
+  const selectPage = $("#imageCacheSelectPageBtn");
+  const invertPage = $("#imageCacheInvertPageBtn");
+  const clear = $("#imageCacheClearSelectionBtn");
+  const remove = $("#imageCacheBulkDeleteBtn");
+  if (selectPage) selectPage.disabled = !hasPageItems;
+  if (invertPage) invertPage.disabled = !hasPageItems;
+  if (clear) clear.disabled = selectedCount === 0;
+  if (remove) remove.disabled = selectedCount === 0;
+}
+
+function imageCachePageSequence(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_value, index) => index + 1);
+  const keep = new Set([1, current - 1, current, current + 1, total]);
+  const pages = [...keep].filter((page) => page >= 1 && page <= total).sort((a, b) => a - b);
+  const result = [];
+  let previous = 0;
+  pages.forEach((page) => {
+    if (page - previous > 1) result.push("…");
+    result.push(page);
+    previous = page;
+  });
+  return result;
+}
+
+function renderImageCachePager() {
+  const pager = $("#imageCachePager");
+  if (!pager) return;
+  const total = Math.max(0, Number(state.imageCacheTotal || 0));
+  const pageSize = Math.max(1, Number(state.imageCachePageSize || 36));
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(pages, Math.max(1, Number(state.imageCachePage || 1)));
+  const start = total ? (page - 1) * pageSize + 1 : 0;
+  const end = Math.min(total, page * pageSize);
+  pager.hidden = !state.imageCacheLoaded || total <= pageSize;
+  pager.innerHTML = `
+    <button type="button" data-image-cache-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button>
+    <span class="image-cache-page-numbers">
+      ${imageCachePageSequence(page, pages).map((value) => value === "…"
+        ? `<i aria-hidden="true">…</i>`
+        : `<button type="button" data-image-cache-page="${value}" class="${value === page ? "is-active" : ""}" aria-current="${value === page ? "page" : "false"}">${value}</button>`).join("")}
+    </span>
+    <span class="image-cache-page-status">${start}-${end} / ${total}</span>
+    <button type="button" data-image-cache-page="${page + 1}" ${page >= pages ? "disabled" : ""}>下一页</button>
+  `;
+}
+
+async function hydrateImageCacheImages(root = document) {
+  const images = [...root.querySelectorAll("img[data-image-cache-src]")]
+    .filter((image) => image.dataset.loaded !== "1" && image.dataset.loading !== "1");
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < images.length) {
+      const image = images[cursor];
+      cursor += 1;
+      const endpoint = image.dataset.imageCacheSrc || "";
+      if (!endpoint) continue;
+      image.dataset.loading = "1";
+      try {
+        let dataUrl = state.imageCacheImageData.get(endpoint) || "";
+        if (!dataUrl) {
+          const result = await fetchJson(endpoint);
+          dataUrl = result?.data_url || "";
+          if (dataUrl) state.imageCacheImageData.set(endpoint, dataUrl);
+        }
+        if (!dataUrl) throw new Error("图片接口未返回数据");
+        image.src = dataUrl;
+        image.dataset.loaded = "1";
+        image.classList.remove("is-load-error");
+        image.closest(".image-cache-thumb, .image-cache-preview")?.classList.remove("is-load-error");
+      } catch (error) {
+        image.alt = "图片加载失败";
+        image.classList.add("is-load-error");
+        image.closest(".image-cache-thumb, .image-cache-preview")?.classList.add("is-load-error");
+      } finally {
+        delete image.dataset.loading;
+      }
+    }
+  };
+  const concurrency = Math.min(6, images.length);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 }
 
 function imageCacheListItemMarkup(item) {
   const selected = item.key === state.selectedImageCacheKey;
+  const checked = state.selectedImageCacheKeys.has(item.key);
   const title = item.image_type || imageCacheScopeLabel(item.scope);
   const preview = item.visible || item.intent || item.text || "无摘要";
-  const ownership = item.ownership ? `<span>${escapeHtml(item.ownership)}</span>` : "";
-  const thumb = item.preview_url
-    ? `<span class="image-cache-thumb has-image"><img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(title)}" loading="lazy" /></span>`
+  const ownership = item.ownership ? `<span class="image-cache-ownership">${escapeHtml(item.ownership)}</span>` : "";
+  const thumbnailEndpoint = item.thumbnail_endpoint || item.preview_endpoint || "";
+  const thumb = thumbnailEndpoint
+    ? `<span class="image-cache-thumb has-image"><img src="${TRANSPARENT_IMAGE}" data-image-cache-src="${escapeHtml(thumbnailEndpoint)}" alt="${escapeHtml(title)}" loading="lazy" /></span>`
     : `<span class="image-cache-thumb">${escapeHtml((item.image_type || "图").slice(0, 2))}</span>`;
   return `
-    <button type="button" class="image-cache-row ${selected ? "is-active" : ""}" data-image-cache-key="${escapeHtml(item.key)}">
+    <article class="image-cache-row ${selected ? "is-active" : ""} ${checked ? "is-selected" : ""} ${state.imageCacheBatchMode ? "is-batch-mode" : ""}" data-image-cache-key="${escapeHtml(item.key)}" role="button" tabindex="0" aria-label="${escapeHtml(state.imageCacheBatchMode ? `选择 ${title}` : `打开 ${title}`)}" aria-pressed="${checked ? "true" : "false"}">
+      <label class="image-cache-select-control" data-image-cache-select-control title="选择缓存">
+        <input type="checkbox" data-image-cache-select="${escapeHtml(item.key)}" ${checked ? "checked" : ""} aria-label="选择 ${escapeHtml(title)}" />
+      </label>
       ${thumb}
       <span class="image-cache-row-main">
         <b>${escapeHtml(title)}</b>
@@ -10197,14 +10334,15 @@ function imageCacheListItemMarkup(item) {
         <i>${escapeHtml(imageCacheScopeLabel(item.scope))} · 命中 ${escapeHtml(item.hits || 0)} · ${escapeHtml(item.last_hit || item.created || "未知时间")}</i>
       </span>
       ${ownership}
-    </button>
+    </article>
   `;
 }
 
 function imageCacheDetailMarkup(item) {
   const aliases = Array.isArray(item.image_aliases) ? item.image_aliases : [];
   const keys = Array.isArray(item.image_keys) ? item.image_keys : [];
-  const previewMeta = item.preview_url
+  const previewEndpoint = item.preview_endpoint || item.thumbnail_endpoint || "";
+  const previewMeta = previewEndpoint
     ? [
         item.preview_width && item.preview_height ? `${item.preview_width}x${item.preview_height}` : "",
         item.preview_size ? formatBytes(item.preview_size) : "",
@@ -10220,9 +10358,9 @@ function imageCacheDetailMarkup(item) {
         </div>
         <button type="button" class="danger" data-image-cache-delete="${escapeHtml(item.key)}">删除缓存</button>
       </header>
-      ${item.preview_url ? `
+      ${previewEndpoint ? `
         <figure class="image-cache-preview">
-          <img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(item.image_type || "图片缓存预览")}" />
+          <img src="${TRANSPARENT_IMAGE}" data-image-cache-src="${escapeHtml(previewEndpoint)}" alt="${escapeHtml(item.image_type || "图片缓存预览")}" />
           ${previewMeta ? `<figcaption>${escapeHtml(previewMeta)} · 压缩预览</figcaption>` : `<figcaption>压缩预览</figcaption>`}
         </figure>
       ` : ""}
@@ -25936,9 +26074,77 @@ document.addEventListener("click", async (event) => {
     void copyTextToClipboard(copyButton.dataset.copyText || "", "已复制摘要");
     return;
   }
+  const imageCacheBatchModeButton = element?.closest("#imageCacheBatchModeBtn");
+  if (imageCacheBatchModeButton) {
+    state.imageCacheBatchMode = !state.imageCacheBatchMode;
+    renderImageCache();
+    return;
+  }
+  const imageCachePageButton = element?.closest("[data-image-cache-page]");
+  if (imageCachePageButton) {
+    await goToImageCachePage(imageCachePageButton.dataset.imageCachePage);
+    return;
+  }
+  const imageCacheSelectPageButton = element?.closest("#imageCacheSelectPageBtn");
+  if (imageCacheSelectPageButton) {
+    (state.imageCacheItems || []).forEach((item) => {
+      if (item.key) state.selectedImageCacheKeys.add(item.key);
+    });
+    renderImageCache();
+    return;
+  }
+  const imageCacheInvertPageButton = element?.closest("#imageCacheInvertPageBtn");
+  if (imageCacheInvertPageButton) {
+    (state.imageCacheItems || []).forEach((item) => {
+      if (state.selectedImageCacheKeys.has(item.key)) state.selectedImageCacheKeys.delete(item.key);
+      else state.selectedImageCacheKeys.add(item.key);
+    });
+    renderImageCache();
+    return;
+  }
+  const imageCacheClearSelectionButton = element?.closest("#imageCacheClearSelectionBtn");
+  if (imageCacheClearSelectionButton) {
+    state.selectedImageCacheKeys.clear();
+    renderImageCache();
+    return;
+  }
+  const imageCacheBulkDeleteButton = element?.closest("#imageCacheBulkDeleteBtn");
+  if (imageCacheBulkDeleteButton) {
+    const keys = [...state.selectedImageCacheKeys];
+    if (!keys.length) return;
+    if (!requireSecondClick(
+      imageCacheBulkDeleteButton,
+      `image-cache-bulk:${keys.slice().sort().join("|")}`,
+      `再次点击会删除已选的 ${keys.length} 条图片缓存`,
+      `再次点击删除 ${keys.length} 条`,
+    )) return;
+    setActionBusy(imageCacheBulkDeleteButton, true);
+    try {
+      const result = await postJson("/image_cache/bulk_delete", { keys, confirm: true });
+      state.selectedImageCacheKeys.clear();
+      if (keys.includes(state.selectedImageCacheKey)) state.selectedImageCacheKey = "";
+      state.imageCacheImageData.clear();
+      await loadImageCache();
+      showToast(`已批量删除 ${Number(result?.removed || 0)} 条图片缓存`);
+    } catch (error) {
+      showToast(`批量删除失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(imageCacheBulkDeleteButton, false);
+    }
+    return;
+  }
+  const imageCacheSelectControl = element?.closest("[data-image-cache-select-control]");
+  if (imageCacheSelectControl) return;
   const row = element?.closest("[data-image-cache-key]");
   if (row) {
-    state.selectedImageCacheKey = row.dataset.imageCacheKey || "";
+    const key = row.dataset.imageCacheKey || "";
+    if (!key) return;
+    if (state.imageCacheBatchMode) {
+      if (state.selectedImageCacheKeys.has(key)) state.selectedImageCacheKeys.delete(key);
+      else state.selectedImageCacheKeys.add(key);
+    } else {
+      state.selectedImageCacheKey = key;
+    }
     renderImageCache();
     return;
   }
@@ -25950,7 +26156,9 @@ document.addEventListener("click", async (event) => {
     setActionBusy(deleteButton, true);
     try {
       await postJson("/image_cache/delete", { key });
+      state.selectedImageCacheKeys.delete(key);
       state.selectedImageCacheKey = "";
+      state.imageCacheImageData.clear();
       await loadImageCache();
       showToast("图片缓存已删除");
     } catch (error) {
@@ -26420,6 +26628,17 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const imageCacheCheckbox = event.target instanceof HTMLInputElement && event.target.matches("[data-image-cache-select]")
+    ? event.target
+    : null;
+  if (imageCacheCheckbox) {
+    const key = imageCacheCheckbox.dataset.imageCacheSelect || "";
+    if (!key) return;
+    if (imageCacheCheckbox.checked) state.selectedImageCacheKeys.add(key);
+    else state.selectedImageCacheKeys.delete(key);
+    renderImageCache();
+    return;
+  }
   const target = event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !target.matches("[data-diary-date]")) return;
   state.selectedDiaryDate = target.value;
@@ -26468,6 +26687,7 @@ document.getElementById("appearanceThemeGrid")?.addEventListener("keydown", (eve
 });
 
 $("#refreshImageCacheBtn")?.addEventListener("click", () => {
+  state.imageCacheImageData.clear();
   loadImageCache().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });
 $("#refreshTroubleshootingBtn")?.addEventListener("click", () => {
@@ -26477,6 +26697,7 @@ $("#refreshTroubleshootingBtn")?.addEventListener("click", () => {
 });
 $("#imageCacheFilter")?.addEventListener("input", (event) => {
   state.imageCacheFilter = event.target.value || "";
+  state.imageCachePage = 1;
   window.clearTimeout(state._imageCacheFilterTimer);
   state._imageCacheFilterTimer = window.setTimeout(() => {
     loadImageCache().catch((error) => showToast(`筛选失败：${error.message}`, "error"));
@@ -26484,7 +26705,15 @@ $("#imageCacheFilter")?.addEventListener("input", (event) => {
 });
 $("#imageCacheScope")?.addEventListener("change", (event) => {
   state.imageCacheScope = event.target.value || "all";
+  state.imageCachePage = 1;
   loadImageCache().catch((error) => showToast(`筛选失败：${error.message}`, "error"));
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = event.target instanceof Element ? event.target.closest("[data-image-cache-key]") : null;
+  if (!row || event.target !== row) return;
+  event.preventDefault();
+  row.click();
 });
 $("#bookshelfUnlockForm").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -526,8 +526,10 @@ class PrivateImageMixin:
         try:
             path = Path(preview_path).resolve()
             base = self._private_image_cache_preview_dir().resolve()
-            if path.is_file() and path.is_relative_to(base):
-                path.unlink(missing_ok=True)
+            if not path.is_relative_to(base):
+                return
+            path.unlink(missing_ok=True)
+            (base / ".thumbnails" / f"{path.stem}.webp").unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -830,7 +832,11 @@ class PrivateImageMixin:
             cached_keys = {str(value) for value in item.get("image_keys", []) if str(value or "").strip()}
             cached_aliases = {str(value).strip() for value in item.get("image_aliases", []) if str(value or "").strip()}
             if (cached_keys & targets) or (cached_aliases & alias_targets):
-                cache.pop(key, None)
+                removed_item = cache.pop(key, None)
+                if isinstance(removed_item, dict):
+                    self._remove_private_image_cache_preview_file(
+                        _single_line(removed_item.get("preview_path"), 260)
+                    )
                 removed += 1
         if removed:
             logger.info("[PrivateCompanion] 私聊图片视觉缓存已因负反馈失效: removed=%s reason=%s", removed, _single_line(reason, 120))

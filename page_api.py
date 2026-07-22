@@ -40,6 +40,15 @@ from .memo_notes import (
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
+IMAGE_CACHE_THUMBNAIL_MAX_EDGE = 160
+IMAGE_CACHE_THUMBNAIL_QUALITY = 78
+
+try:
+    from PIL import Image as PILImage
+    from PIL import ImageOps as PILImageOps
+except Exception:  # pragma: no cover - Pillow 缺失时回退压缩预览原图
+    PILImage = None
+    PILImageOps = None
 
 
 class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanionPageApiUsersGroupsMixin):
@@ -213,8 +222,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/token/reset", self.reset_token_stats, ["POST"], "Private Companion Page reset token stats"),
             ("/image_cache/list", self.list_image_cache, ["GET"], "Private Companion Page image cache list"),
             ("/image_cache/preview", self.get_image_cache_preview, ["GET"], "Private Companion Page image cache preview"),
+            ("/image_cache/preview_data", self.get_image_cache_preview_data, ["GET"], "Private Companion Page image cache preview data"),
+            ("/image_cache/thumbnail_data", self.get_image_cache_thumbnail_data, ["GET"], "Private Companion Page image cache thumbnail data"),
             ("/image_cache/update", self.update_image_cache_item, ["POST"], "Private Companion Page update image cache item"),
             ("/image_cache/delete", self.delete_image_cache_item, ["POST"], "Private Companion Page delete image cache item"),
+            ("/image_cache/bulk_delete", self.bulk_delete_image_cache_items, ["POST"], "Private Companion Page bulk delete image cache items"),
             ("/daily_outfit/image", self.get_daily_outfit_image, ["GET"], "Private Companion Page daily outfit image"),
             ("/daily_outfit/image_data", self.get_daily_outfit_image_data, ["GET"], "Private Companion Page daily outfit image data"),
             ("/bookshelf/unlock", self.unlock_bookshelf, ["POST"], "Private Companion Page unlock bookshelf"),
@@ -925,11 +937,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             logger.error(f"[PrivateCompanionPage] 更新图片缓存失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    def _image_cache_preview_dir(self) -> Path:
+        return (Path(getattr(self.plugin, "data_dir", "")) / "private_image_cache_previews").resolve()
+
+    @staticmethod
+    def _image_cache_clean_key(key: str) -> str:
+        return re.sub(r"[^0-9A-Za-z_.-]+", "_", str(key or ""))[:80]
+
     def _image_cache_preview_file(self, key: str, raw: dict[str, Any] | None = None) -> Path | None:
-        clean_key = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(key or ""))[:80]
+        clean_key = self._image_cache_clean_key(key)
         if not clean_key:
             return None
-        base = (Path(getattr(self.plugin, "data_dir", "")) / "private_image_cache_previews").resolve()
+        base = self._image_cache_preview_dir()
         candidates: list[Path] = []
         preview_path = self._single_line((raw or {}).get("preview_path"), 260) if isinstance(raw, dict) else ""
         if preview_path:
@@ -945,6 +964,67 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             except Exception:
                 continue
         return None
+
+    def _image_cache_thumbnail_file(self, key: str) -> Path | None:
+        clean_key = self._image_cache_clean_key(key)
+        if not clean_key:
+            return None
+        return self._image_cache_preview_dir() / ".thumbnails" / f"{clean_key}.webp"
+
+    async def _get_or_create_image_cache_thumbnail(self, key: str, source: Path) -> Path | None:
+        return await asyncio.to_thread(self._build_image_cache_thumbnail_sync, key, source)
+
+    def _build_image_cache_thumbnail_sync(self, key: str, source: Path) -> Path | None:
+        if PILImage is None:
+            return None
+        target = self._image_cache_thumbnail_file(key)
+        if target is None:
+            return None
+        try:
+            if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
+                return target
+        except OSError:
+            pass
+
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with PILImage.open(source) as image:
+                if PILImageOps is not None:
+                    image = PILImageOps.exif_transpose(image)
+                image.seek(0)
+                if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+                    rgba = image.convert("RGBA")
+                    background = PILImage.new("RGBA", rgba.size, (255, 255, 255, 255))
+                    background.alpha_composite(rgba)
+                    image = background.convert("RGB")
+                else:
+                    image = image.convert("RGB")
+                resampling = getattr(PILImage, "Resampling", PILImage)
+                image.thumbnail(
+                    (IMAGE_CACHE_THUMBNAIL_MAX_EDGE, IMAGE_CACHE_THUMBNAIL_MAX_EDGE),
+                    resampling.LANCZOS,
+                )
+                image.save(
+                    temporary,
+                    format="WEBP",
+                    quality=IMAGE_CACHE_THUMBNAIL_QUALITY,
+                    method=6,
+                )
+            temporary.replace(target)
+            return target
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 生成图片缓存缩略图失败: key=%s error=%s",
+                self._single_line(key, 80),
+                self._single_line(exc, 160),
+            )
+            return None
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _restore_image_cache_preview_metadata(self, key: str, raw: dict[str, Any]) -> bool:
         preview = self._image_cache_preview_file(key, raw)
@@ -963,26 +1043,67 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             changed = True
         return changed
 
-    async def get_image_cache_preview(self) -> Any:
+    async def _resolve_image_cache_preview_for_request(self) -> tuple[str, Path] | dict[str, Any]:
         key = self._single_line(request.args.get("key"), 120)
         if not key:
             return self._error("缺少缓存 key")
+        async with self.plugin._data_lock:
+            cache = self.plugin.data.get("private_image_vision_cache")
+            item = cache.get(key) if isinstance(cache, dict) else None
+            if not isinstance(item, dict):
+                return self._error("缓存条目不存在")
+            path = self._image_cache_preview_file(key, item)
+            if path is None:
+                return self._error("缓存预览文件不存在")
+            if self._restore_image_cache_preview_metadata(key, item):
+                self.plugin._save_data_sync()
+        return key, path
+
+    @staticmethod
+    async def _encode_image_cache_file_data_url(path: Path, mime: str = "") -> dict[str, str]:
+        raw = await asyncio.to_thread(path.read_bytes)
+        content_type = mime or mimetypes.guess_type(str(path))[0] or "image/jpeg"
+        encoded = base64.b64encode(raw).decode("ascii")
+        return {"data_url": f"data:{content_type};base64,{encoded}", "mime": content_type}
+
+    async def get_image_cache_preview(self) -> Any:
         try:
-            async with self.plugin._data_lock:
-                cache = self.plugin.data.get("private_image_vision_cache")
-                item = cache.get(key) if isinstance(cache, dict) else None
-                if not isinstance(item, dict):
-                    return self._error("缓存条目不存在")
-                path = self._image_cache_preview_file(key, item)
-                if path is None:
-                    return self._error("缓存预览文件不存在")
-                if self._restore_image_cache_preview_metadata(key, item):
-                    self.plugin._save_data_sync()
+            resolved = await self._resolve_image_cache_preview_for_request()
+            if isinstance(resolved, dict):
+                return resolved
+            _key, path = resolved
             response = await send_file(str(path))
             response.headers["Cache-Control"] = "no-store, max-age=0"
             return response
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取图片缓存预览失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def get_image_cache_preview_data(self) -> dict[str, Any]:
+        try:
+            resolved = await self._resolve_image_cache_preview_for_request()
+            if isinstance(resolved, dict):
+                return resolved
+            _key, path = resolved
+            return self._ok(await self._encode_image_cache_file_data_url(path))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取图片缓存预览数据失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def get_image_cache_thumbnail_data(self) -> dict[str, Any]:
+        try:
+            resolved = await self._resolve_image_cache_preview_for_request()
+            if isinstance(resolved, dict):
+                return resolved
+            key, source = resolved
+            thumbnail = await self._get_or_create_image_cache_thumbnail(key, source)
+            if thumbnail is not None:
+                return self._ok(
+                    await self._encode_image_cache_file_data_url(thumbnail, "image/webp")
+                )
+            return self._ok(await self._encode_image_cache_file_data_url(source))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取图片缓存缩略图失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def delete_image_cache_item(self) -> dict[str, Any]:
@@ -1001,20 +1122,79 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     preview_path = self._single_line(removed.get("preview_path"), 260)
                 self.plugin._save_data_sync()
                 remaining = len(cache)
-            self._remove_image_cache_preview_file(preview_path)
+            self._remove_image_cache_preview_file(preview_path, key)
             return self._ok({"key": key, "remaining": remaining})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 删除图片缓存失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
-    def _remove_image_cache_preview_file(self, preview_path: str) -> None:
-        if not preview_path:
+    async def bulk_delete_image_cache_items(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        raw_keys = payload.get("keys")
+        if not isinstance(raw_keys, list):
+            return self._error("keys 必须是缓存 key 数组")
+        if payload.get("confirm") is not True:
+            return self._error("批量删除需要 confirm=true")
+        keys: list[str] = []
+        for value in raw_keys[:500]:
+            key = self._single_line(value, 120)
+            if key and key not in keys:
+                keys.append(key)
+        if not keys:
+            return self._error("没有选择缓存条目")
+        try:
+            removed_items: list[tuple[str, str]] = []
+            missing_keys: list[str] = []
+            async with self.plugin._data_lock:
+                cache = self.plugin.data.get("private_image_vision_cache")
+                if not isinstance(cache, dict):
+                    return self._error("图片缓存不存在")
+                for key in keys:
+                    if key not in cache:
+                        missing_keys.append(key)
+                        continue
+                    removed = cache.pop(key, None)
+                    removed_items.append(
+                        (
+                            key,
+                            self._single_line(removed.get("preview_path"), 260)
+                            if isinstance(removed, dict)
+                            else "",
+                        )
+                    )
+                if removed_items:
+                    self.plugin._save_data_sync()
+                remaining = len(cache)
+            for key, preview_path in removed_items:
+                self._remove_image_cache_preview_file(preview_path, key)
+            return self._ok(
+                {
+                    "removed": len(removed_items),
+                    "removed_keys": [key for key, _path in removed_items],
+                    "missing_keys": missing_keys,
+                    "remaining": remaining,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 批量删除图片缓存失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    def _remove_image_cache_preview_file(self, preview_path: str, key: str = "") -> None:
+        path: Path | None = None
+        try:
+            base = self._image_cache_preview_dir()
+            if preview_path:
+                path = Path(preview_path).resolve()
+            if path is not None and path.is_file() and path.is_relative_to(base):
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        thumbnail = self._image_cache_thumbnail_file(key or (path.stem if path is not None else ""))
+        if thumbnail is None:
             return
         try:
-            path = Path(preview_path).resolve()
-            base = (Path(getattr(self.plugin, "data_dir", "")) / "private_image_cache_previews").resolve()
-            if path.is_file() and path.is_relative_to(base):
-                path.unlink(missing_ok=True)
+            if thumbnail.is_relative_to(self._image_cache_preview_dir()):
+                thumbnail.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -1040,6 +1220,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "image_aliases_text": " ".join(image_aliases[:12]),
             "image_count": _safe_int(raw.get("image_count"), len(image_keys), 0),
             "preview_url": f"{PAGE_API_PREFIX}/image_cache/preview?key={quote(key, safe='')}" if preview_exists else "",
+            "preview_endpoint": f"/image_cache/preview_data?key={quote(key, safe='')}" if preview_exists else "",
+            "thumbnail_endpoint": f"/image_cache/thumbnail_data?key={quote(key, safe='')}" if preview_exists else "",
             "preview_size": _safe_int(raw.get("preview_size"), 0, 0),
             "preview_width": _safe_int(raw.get("preview_width"), 0, 0),
             "preview_height": _safe_int(raw.get("preview_height"), 0, 0),
