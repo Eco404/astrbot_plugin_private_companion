@@ -19318,18 +19318,46 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return usage
 
     def _together_plugin_token_usage_raw(self) -> dict[str, Any]:
-        modules = [
-            sys.modules.get("data.plugins.astrbot_plugin_together_companion.main"),
-            sys.modules.get("astrbot_plugin_together_companion.main"),
-        ]
-        modules.extend(
-            module
-            for module in tuple(sys.modules.values())
-            if getattr(module, "PLUGIN_NAME", "") == "astrbot_plugin_together_companion"
-            and module not in modules
-        )
+        target_plugin_name = "astrbot_plugin_together_companion"
+
+        def static_namespace(module: Any) -> dict[str, Any]:
+            if module is None:
+                return {}
+            try:
+                namespace = object.__getattribute__(module, "__dict__")
+            except (AttributeError, TypeError):
+                return {}
+            return namespace if isinstance(namespace, dict) else {}
+
+        def is_target_module_name(value: Any) -> bool:
+            name = str(value or "").strip()
+            target_main = f"{target_plugin_name}.main"
+            return name == target_main or name.endswith(f".{target_main}")
+
+        modules: list[Any] = []
+        seen_module_ids: set[int] = set()
+
+        def append_module(module: Any) -> None:
+            if module is None or id(module) in seen_module_ids:
+                return
+            seen_module_ids.add(id(module))
+            modules.append(module)
+
+        append_module(sys.modules.get("data.plugins.astrbot_plugin_together_companion.main"))
+        append_module(sys.modules.get("astrbot_plugin_together_companion.main"))
+        for loaded_name, module in tuple(sys.modules.items()):
+            namespace = static_namespace(module)
+            module_name = namespace.get("__name__", loaded_name)
+            if (
+                namespace.get("PLUGIN_NAME") == target_plugin_name
+                or is_target_module_name(loaded_name)
+                or is_target_module_name(module_name)
+            ):
+                append_module(module)
         for module in modules:
-            getter = getattr(module, "get_together_companion_bridge", None) if module is not None else None
+            # transformers 等懒加载模块会在 getattr() 时导入 torch/torchvision。
+            # 集成发现只读取模块已注册的静态符号，不能触发任意第三方模块加载。
+            getter = static_namespace(module).get("get_together_companion_bridge")
             if not callable(getter):
                 continue
             try:

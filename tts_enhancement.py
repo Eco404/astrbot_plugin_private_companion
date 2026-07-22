@@ -1389,6 +1389,37 @@ class TtsEnhancementMixin:
     def _event_explicitly_requests_tts(self, event: Any) -> bool:
         return self._event_tts_request_signal(event)[0] == "positive"
 
+    def _tts_functional_command_reason(self, event: Any) -> str:
+        """Identify command turns whose functional output should stay readable by default."""
+        if event is None:
+            return ""
+        if bool(getattr(event, "is_command", False)):
+            return "event_command"
+        if bool(getattr(event, "is_admin_command", False)):
+            return "admin_command"
+
+        raw_text = str(getattr(event, "message_str", "") or "").strip()
+        if not raw_text:
+            return ""
+        command_checker = getattr(self, "_message_debounce_command_text", None)
+        if callable(command_checker):
+            try:
+                if command_checker(event, raw_text):
+                    return "command_text"
+            except Exception:
+                pass
+
+        cleaned = re.sub(r"^(?:\s*\[At:\d+\]\s*)+", "", raw_text, flags=re.IGNORECASE).lstrip()
+        cleaned = re.sub(r"^@\S+\s+", "", cleaned).lstrip()
+        if cleaned.startswith(("/", "／", "!", "！", "#")) and re.search(
+            r"[\w\u4e00-\u9fff]",
+            cleaned[1:],
+        ):
+            return "command_prefix"
+        if cleaned.startswith(("陪伴", "私聊陪伴", "主动陪伴", "陪伴群", "群陪伴", "群聊陪伴")):
+            return "companion_command"
+        return ""
+
     def _event_tts_request_signal(self, event: Any) -> tuple[str, str, str]:
         raw_text = str(getattr(event, "message_str", "") or "").strip()
         text = raw_text.lower()
@@ -1726,6 +1757,7 @@ TTS 朗读文本：
             "【语音消息规则】",
             first_rule,
             scope_rule,
+            "自动语音概率命中只表示本轮可以考虑语音，不表示必须使用语音。功能性回复默认保持纯文字，包括指令执行结果、帮助或菜单、配置或状态、查询结果、报错或权限说明、清单、教程、代码以及主要由卡片或图片承载的结果；只有用户明确要求语音或朗读，或回复本身主要是适合听见的自然角色表达时，才考虑语音。",
             "URL、域名、邮箱、命令、文件路径、长编号和邀请码不适合朗读：不要放进 <pc_tts>；必须在语音块外保留原文供用户点击或复制。语音里需要承接时，只自然说“链接在文字里”或“我把链接发给你了”，不要念出协议、域名、路径或参数。",
         ]
         if emotion_rule:
@@ -1878,6 +1910,27 @@ TTS 朗读文本：
         except Exception:
             pass
         user_requested_tts = self._event_explicitly_requests_tts(event)
+        functional_command_reason = self._tts_functional_command_reason(event)
+        if functional_command_reason and not user_requested_tts:
+            functional_prompt = (
+                "【功能性回复的语音取舍】\n"
+                "用户本轮发来的是指令或功能操作。请优先把执行结果、帮助、菜单、状态、配置、查询信息、错误说明和卡片说明保留为普通文字，"
+                "不要仅因自动语音概率命中就添加 <pc_tts>、<tts> 或等价语音标签。"
+                "只有用户在本轮明确要求语音或朗读时，才把确实适合听见的自然表达交给语音。"
+            )
+            placement = append_dynamic_tts_fragment(
+                "<!-- private_companion_tts_functional_reply_v1 -->",
+                functional_prompt,
+                priority=56,
+            )
+            await record_tts_fragment(
+                "TTS 功能性回复取舍注入",
+                "tts.functional_reply",
+                functional_prompt,
+                mode=functional_command_reason,
+                placement=placement,
+            )
+            return
         strong_block_reason = ""
         mode = getattr(self, "tts_generation_mode", "fast_tag")
         full_scope = getattr(self, "tts_conversion_scope", "partial") == "full"
@@ -1954,6 +2007,8 @@ TTS 朗读文本：
     async def protect_tts_enhancement_response_blocks(self, event: Any, resp: Any) -> None:
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
+        if not bool(getattr(event, "_private_companion_tts_request_applied", False)):
+            return
         if not tts_enabled:
             text = str(getattr(resp, "completion_text", "") or "")
             if re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
@@ -1995,6 +2050,12 @@ TTS 朗读文本：
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
         if not getattr(self, "enabled", False) or not tts_enabled:
+            return
+        if not bool(getattr(event, "_private_companion_tts_request_applied", False)):
+            logger.debug(
+                "[PrivateCompanion] TTS 强化跳过未经过主回复链的发送结果: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
             return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
@@ -2099,6 +2160,8 @@ TTS 朗读文本：
     async def finalize_outbound_tts_markup_guard(self, event: Any) -> None:
         """Last-resort guard so raw <tts> tags never reach the chat surface."""
         if not getattr(self, "enabled", False):
+            return
+        if not bool(getattr(event, "_private_companion_tts_request_applied", False)):
             return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
@@ -2470,9 +2533,10 @@ TTS 朗读文本：
                 _single_line(text, 100),
             )
             return []
+        user_requested_tts = self._event_explicitly_requests_tts(event)
         strong_block_reason = self._tts_strong_constraint_block_reason(
             event,
-            user_requested_tts=self._event_explicitly_requests_tts(event),
+            user_requested_tts=user_requested_tts,
             check_probability=False,
             reason="auto_convert_cooldown",
         )
@@ -2486,7 +2550,6 @@ TTS 朗读文本：
             should_convert = ok
         if not should_convert:
             return []
-        user_requested_tts = self._event_explicitly_requests_tts(event)
         if mode == "postprocess":
             probability_allowed = user_requested_tts or self._tts_trigger_probability_allows(event, reason=reason or mode)
             try:
@@ -2771,7 +2834,8 @@ Provider 规则：{emotion_rule}
 - 如果用户明确要求语音、想听声音或要求朗读，可以更积极使用语音。
 - 如果规则线索为 negative，通常不要使用语音；除非原话里有更强的相反语境，否则 use_tts=false。
 - 如果用户没有明确要求，只有在非常适合被听见、情绪很贴近、短句更有表现力时才使用语音。
-- 不要为了展示功能而使用语音；普通说明、长解释、信息密集回复应保持纯文字。
+- 自动语音概率命中只表示本轮允许考虑语音，不表示必须使用语音。
+- 不要为了展示功能而使用语音；指令执行结果、帮助或菜单、配置或状态、查询结果、报错或权限说明、清单、教程、代码，以及主要由卡片或图片承载的结果，都应默认保持纯文字。
 - {scope_rule}
 - {visible_rule}
 - voice_text 是送入 TTS 的朗读文本。{language_rule}

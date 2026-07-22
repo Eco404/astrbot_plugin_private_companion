@@ -227,16 +227,33 @@ _OPTIONAL_MODEL_DEPENDENCIES = {
 
 
 def _missing_optional_model_dependency(exc: BaseException) -> str:
-    if isinstance(exc, ModuleNotFoundError):
-        name = str(getattr(exc, "name", "") or "").strip()
-        if name in _OPTIONAL_MODEL_DEPENDENCIES:
-            return name
-    text = str(exc or "")
-    match = re.search(r"No module named ['\"]([^'\"]+)['\"]", text)
-    if not match:
+    def optional_root(name: Any) -> str:
+        normalized = str(name or "").strip()
+        for dependency in _OPTIONAL_MODEL_DEPENDENCIES:
+            if normalized == dependency or normalized.startswith(f"{dependency}."):
+                return dependency
         return ""
-    name = match.group(1).strip()
-    return name if name in _OPTIONAL_MODEL_DEPENDENCIES else ""
+
+    pending: list[BaseException] = [exc]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, ModuleNotFoundError):
+            dependency = optional_root(getattr(current, "name", ""))
+            if dependency:
+                return dependency
+        match = re.search(r"No module named ['\"]([^'\"]+)['\"]", str(current or ""))
+        if match:
+            dependency = optional_root(match.group(1))
+            if dependency:
+                return dependency
+        for linked in (getattr(current, "__cause__", None), getattr(current, "__context__", None)):
+            if isinstance(linked, BaseException) and id(linked) not in visited:
+                pending.append(linked)
+    return ""
 
 
 _GARBLED_TEXT_MARKERS = ("Ã", "â", "鈥", "銆", "鏉", "锟", "Ð", "Ê", "¤", "\ufffd")
