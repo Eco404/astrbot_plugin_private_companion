@@ -6,6 +6,7 @@ let cachedPageBridge = null;
 let cachedPageEndpointStyle = "";
 let pageBridgeProbePromise = null;
 let loadAllRequestSeq = 0;
+let featureDetailDirtyRefreshScheduled = false;
 
 const state = {
   overview: null,
@@ -53,6 +54,7 @@ const state = {
   featureAuxiliaryDraft: {},
   featureAuxiliaryDirty: false,
   featureDetailDirty: false,
+  featureSaveInProgress: false,
   featureDetailBaseline: null,
   selectedFeatureKey: "",
   imageApiEndpointDraft: null,
@@ -503,8 +505,51 @@ function beginFeatureDetailSession(featureKey) {
     providers: cloneFeatureStateValue(state.overview?.providers || {}),
     providerDraft: cloneFeatureStateValue(state.providerDraft || {}),
     imageApiEndpointDraft: cloneFeatureStateValue(state.imageApiEndpointDraft),
+    formSignature: "",
   };
   state.featureDetailDirty = false;
+}
+
+function featureDetailFormSignature(root = document) {
+  const key = String(state.selectedFeatureKey || state.featureDetailBaseline?.key || "").trim();
+  if (!key) return null;
+  const page = root?.querySelector?.(".feature-detail-page");
+  if (!page) return null;
+  const toggle = page.querySelector("[data-feature-detail-toggle]");
+  const params = {};
+  page.querySelectorAll("[data-feature-param]").forEach((input) => {
+    const paramKey = String(input.dataset.featureParam || "").trim();
+    if (!paramKey) return;
+    params[paramKey] = collectSettingValue(paramKey, input);
+  });
+  return JSON.stringify({
+    key,
+    enabled: toggle ? Boolean(toggle.checked) : toBool(state.featureDraft?.[key]),
+    params,
+  });
+}
+
+function captureFeatureDetailBaselineFromDom(root = document) {
+  const baseline = state.featureDetailBaseline;
+  if (!baseline || baseline.formSignature) return;
+  const signature = featureDetailFormSignature(root);
+  if (signature === null) return;
+  baseline.formSignature = signature;
+  state.featureDetailDirty = false;
+}
+
+function refreshFeatureDetailDirty() {
+  const baseline = state.featureDetailBaseline;
+  if (!baseline || !state.selectedFeatureKey) {
+    state.featureDetailDirty = false;
+    return false;
+  }
+  const current = featureDetailFormSignature();
+  if (current === null || !baseline.formSignature) {
+    return Boolean(state.featureDetailDirty);
+  }
+  state.featureDetailDirty = current !== baseline.formSignature;
+  return state.featureDetailDirty;
 }
 
 function restoreFeatureDetailSession() {
@@ -520,6 +565,7 @@ function restoreFeatureDetailSession() {
 }
 
 function hasUnsavedFeatureChanges() {
+  refreshFeatureDetailDirty();
   return state.featureAuxiliaryDirty
     || state.featureDetailDirty
     || featureDraftSignature(state.featureDraft || {}) !== String(state.featureDraftBaseline || "");
@@ -528,12 +574,31 @@ function hasUnsavedFeatureChanges() {
 function markFeatureDetailDirty() {
   state.featureDetailDirty = true;
   syncFeatureFooterAction();
+  if (featureDetailDirtyRefreshScheduled) return;
+  featureDetailDirtyRefreshScheduled = true;
+  const refresh = () => {
+    featureDetailDirtyRefreshScheduled = false;
+    refreshFeatureDetailDirty();
+    syncFeatureFooterAction();
+  };
+  if (typeof queueMicrotask === "function") queueMicrotask(refresh);
+  else Promise.resolve().then(refresh);
 }
 
-function leaveFeatureDetail() {
-  if (state.featureDetailDirty) {
-    const confirmed = window.confirm("当前功能还有未保存的更改。返回将放弃这些更改，确定返回吗？");
-    if (!confirmed) return false;
+function leaveFeatureDetail(control = null) {
+  if (refreshFeatureDetailDirty()) {
+    if (control instanceof HTMLButtonElement) {
+      const confirmed = requireSecondClick(
+        control,
+        "discard-feature-detail",
+        "当前功能还有未保存的更改，再次点击放弃",
+        "再次点击放弃更改",
+      );
+      if (!confirmed) return false;
+    } else {
+      const confirmed = window.confirm("当前功能还有未保存的更改。返回将放弃这些更改，确定返回吗？");
+      if (!confirmed) return false;
+    }
     restoreFeatureDetailSession();
   }
   state.featureDetailDirty = false;
@@ -4283,6 +4348,18 @@ function isRouteMissingError(error) {
 
 function postJson(path, body) {
   return fetchJson(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+function promiseWithTimeout(promise, timeoutMs, message = "请求超时") {
+  const limit = Number(timeoutMs);
+  if (!Number.isFinite(limit) || limit <= 0) return promise;
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), limit);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => {
+    if (timer !== null) window.clearTimeout(timer);
+  });
 }
 
 function downloadJson(filename, data) {
@@ -19582,7 +19659,9 @@ function renderFeatureSwitches() {
   syncFeatureFooterAction();
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft, state.selectedFeatureKey)) {
     $("#featureFlags").innerHTML = featureDetailPage(state.selectedFeatureKey);
+    captureFeatureDetailBaselineFromDom($("#featureFlags"));
     bindFeatureDetailActions();
+    syncFeatureFooterAction();
     return;
   }
 
@@ -19700,12 +19779,14 @@ function syncFeatureFooterAction() {
   if (!onConfigPage) return;
   const inDetail = Boolean(state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey));
   const dirty = hasUnsavedFeatureChanges();
+  const busy = Boolean(state.featureSaveInProgress);
   actions.classList.toggle("in-detail", inDetail);
   actions.classList.toggle("has-unsaved", dirty);
   if (backButton) backButton.hidden = !inDetail;
-  if (status) status.textContent = dirty ? "有未保存更改" : "更改已保存";
-  button.textContent = inDetail ? "保存更改" : "保存功能开关";
-  button.disabled = !dirty;
+  if (backButton) backButton.disabled = busy;
+  if (status) status.textContent = busy ? "正在保存更改" : dirty ? "有未保存更改" : "更改已保存";
+  button.textContent = busy ? "处理中..." : inDetail ? "保存更改" : "保存功能开关";
+  button.disabled = busy || !dirty;
 }
 
 function renderProactiveOnlyModeCard() {
@@ -20400,20 +20481,41 @@ function collectFeatureSwitchPayload() {
 }
 
 async function saveFeatureSwitchChanges(control = null, successMessage = "已保存功能开关") {
-  const result = await runAction(
-    () => postJson("/settings/update", collectFeatureSwitchPayload()),
-    successMessage,
-    control || $("#saveFeaturesBtn"),
-  );
-  if (result) {
-    state.featureAuxiliaryDirty = false;
-    state.featureDetailDirty = false;
-    state.featureDraftBaseline = featureDraftSignature(state.featureDraft || {});
-    state.featureDetailBaseline = null;
-    if (state.selectedFeatureKey) beginFeatureDetailSession(state.selectedFeatureKey);
+  refreshFeatureDetailDirty();
+  if (state.featureSaveInProgress) return false;
+  if (!hasUnsavedFeatureChanges()) {
+    syncFeatureFooterAction();
+    return false;
+  }
+  state.featureSaveInProgress = true;
+  syncFeatureFooterAction();
+  try {
+    const payload = collectFeatureSwitchPayload();
+    const result = await runAction(
+      () => promiseWithTimeout(
+        postJson("/settings/update", payload),
+        30000,
+        "保存响应超时，请刷新页面确认配置是否已生效",
+      ),
+      successMessage,
+      control || $("#saveFeaturesBtn"),
+    );
+    if (result) {
+      state.featureAuxiliaryDirty = false;
+      state.featureDetailDirty = false;
+      state.featureDraftBaseline = featureDraftSignature(state.featureDraft || {});
+      state.featureDetailBaseline = null;
+      if (state.selectedFeatureKey) {
+        beginFeatureDetailSession(state.selectedFeatureKey);
+        captureFeatureDetailBaselineFromDom($("#featureFlags"));
+      }
+    }
+    return Boolean(result);
+  } finally {
+    state.featureSaveInProgress = false;
+    refreshFeatureDetailDirty();
     syncFeatureFooterAction();
   }
-  return Boolean(result);
 }
 
 async function saveCurrentFeatureDetail(control = null, successMessage = "已保存功能参数") {
@@ -21250,7 +21352,7 @@ function featureDetailPage(key) {
 
 function bindFeatureDetailActions() {
   document.querySelectorAll("[data-feature-back]").forEach((button) => {
-    button.addEventListener("click", () => leaveFeatureDetail());
+    button.addEventListener("click", () => leaveFeatureDetail(button));
   });
   const detailPage = document.querySelector(".feature-detail-page");
   detailPage?.addEventListener("input", markFeatureDetailDirty, true);
@@ -26833,7 +26935,7 @@ $("#saveFeaturesBtn").addEventListener("click", async (event) => {
   );
 });
 
-$("#featureBackBtn").addEventListener("click", () => leaveFeatureDetail());
+$("#featureBackBtn").addEventListener("click", (event) => leaveFeatureDetail(event.currentTarget));
 
 $("#enableSafeFeaturesBtn").addEventListener("click", () => {
   safeFeatureKeys.forEach((key) => {

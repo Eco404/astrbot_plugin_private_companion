@@ -1999,6 +1999,8 @@ class CreativeMixin:
             break
 
     def _maybe_schedule_creative_share(self) -> bool:
+        if not bool(getattr(self, "enable_creative_writing", True)):
+            return False
         candidate = self._latest_creative_share_candidate()
         if not isinstance(candidate, dict):
             return False

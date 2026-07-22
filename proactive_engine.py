@@ -3285,6 +3285,7 @@ class ProactiveEngineMixin:
         self._recover_stale_proactive_sending(user)
         user_id = str(user.get("user_id") or user.get("id") or "")
         planned_source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40)
+        planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
         is_troubleshooting = planned_source == "troubleshooting"
         if not self._user_enabled_for_proactive(user_id, user):
             self._clear_pending_proactive_plan(user)
@@ -3322,6 +3323,19 @@ class ProactiveEngineMixin:
             return self._should_send_simulation(user)
         now = _now_ts()
         due_timer_active = self._has_due_llm_timer(user, now=now)
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and (planned_source == "creative_writing" or planned_reason == "creative_share")
+            and not bool(getattr(self, "enable_creative_writing", True))
+        ):
+            self._mark_planned_candidate_status(user, "blocked", "创作功能未开启，已清理旧的创作分享候选")
+            user["creative_share_context"] = {}
+            self._clear_pending_proactive_plan(user)
+            schedule_save = getattr(self, "_schedule_data_save", None)
+            if callable(schedule_save):
+                schedule_save()
+            return False, "创作功能未开启"
         if not is_troubleshooting and planned_source == "timer" and not due_timer_active:
             self._clear_llm_timer_internal_plan_fields(user)
             if _safe_float(user.get("next_proactive_at"), 0) <= 0:
@@ -3369,8 +3383,25 @@ class ProactiveEngineMixin:
         ):
             return False, "用户明确休息中"
         busy_until = 0.0
+        busy_block_kind = ""
+        busy_block_note = ""
+        busy_context_getter = getattr(self, "_busy_reply_proactive_block_context", None)
         busy_gate = getattr(self, "_busy_reply_proactive_block_until", None)
-        if not is_troubleshooting and not due_timer_active and callable(busy_gate):
+        if not is_troubleshooting and not due_timer_active and callable(busy_context_getter):
+            try:
+                busy_context = busy_context_getter(
+                    user,
+                    now=now,
+                    reason=user.get("planned_proactive_reason"),
+                    source=planned_source,
+                )
+                if isinstance(busy_context, dict):
+                    busy_until = _safe_float(busy_context.get("until"), 0.0)
+                    busy_block_kind = _single_line(busy_context.get("kind"), 40)
+                    busy_block_note = _single_line(busy_context.get("note"), 160)
+            except Exception:
+                busy_until = 0.0
+        elif not is_troubleshooting and not due_timer_active and callable(busy_gate):
             try:
                 busy_until = _safe_float(
                     busy_gate(
@@ -3387,17 +3418,27 @@ class ProactiveEngineMixin:
             defer_busy = getattr(self, "_defer_proactive_for_busy", None)
             changed = bool(defer_busy(user, now=now, until=busy_until)) if callable(defer_busy) else False
             if changed:
-                self._mark_planned_candidate_status(user, "deferred", "Bot 当前日程忙碌，已顺延到忙完后")
+                external_realtime = busy_block_kind == "external_realtime"
+                defer_note = (
+                    "Bot 正在与用户实时共处，已顺延到共同活动结束后"
+                    if external_realtime
+                    else "Bot 当前日程忙碌，已顺延到忙完后"
+                )
+                self._mark_planned_candidate_status(user, "deferred", defer_note)
                 schedule_save = getattr(self, "_schedule_data_save", None)
                 if callable(schedule_save):
                     schedule_save()
                 logger.info(
-                    "[PrivateCompanion] 繁忙回复闸门已顺延主动消息: user=%s until=%s reason=%s source=%s",
+                    "[PrivateCompanion] %s已顺延主动消息: user=%s until=%s reason=%s source=%s detail=%s",
+                    "实时共处期间" if external_realtime else "繁忙回复闸门",
                     _single_line(user.get("user_id") or user.get("umo") or user.get("nickname"), 80),
                     int(busy_until),
                     _single_line(user.get("planned_proactive_reason"), 48) or "check_in",
                     planned_source or "unknown",
+                    busy_block_note or "-",
                 )
+            if busy_block_kind == "external_realtime":
+                return False, "正在实时共处，普通主动消息已顺延"
             return False, "Bot 当前日程忙碌，主动消息已顺延"
         post_goodnight_active = self._post_goodnight_group_activity_is_fresh(user, now=now)
         if (
