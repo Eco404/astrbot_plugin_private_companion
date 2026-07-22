@@ -4707,7 +4707,6 @@
         "hint": "这不是图片防抖时间；只在确认用户没有补充文字后生效。防抖结束后最多等待识图模型完成的时间，识图完成会立刻进入主链，不会等满该秒数。默认 30 秒；调低则更快进入兜底回复。",
         "slider": {
           "min": 0,
-          "max": 90,
           "step": 1
         },
         "default": 30,
@@ -4716,10 +4715,9 @@
       "private_image_provider_timeout_seconds": {
         "description": "单个识图模型超时秒数",
         "type": "float",
-        "hint": "每个视觉 provider 单次最多等待多久；超时会临时降权并切换下一个可用视觉模型，避免某个上游 503 或重试过久拖慢整条私聊单图回复。默认 12 秒。",
+        "hint": "每个视觉 provider 单次最多等待多久；超时会切换下一个可用视觉模型，避免某个上游 503 或重试过久拖慢整条私聊单图回复。默认 12 秒。",
         "slider": {
           "min": 3,
-          "max": 60,
           "step": 1
         },
         "default": 12,
@@ -4728,12 +4726,11 @@
       "private_image_vision_provider_priority": {
         "description": "识图增强模型优先级",
         "type": "string",
-        "hint": "astrbot_first：优先使用 AstrBot 当前会话的默认图片转文字模型；plugin_first：优先使用模型配置里的插件识图模型及其备用模型；recent_success_first：优先复用同会话近期成功且仍在当前配置中的视觉模型。失败、超时或不支持图片时都会继续尝试后续候选。",
+        "hint": "astrbot_first：优先使用 AstrBot 当前会话的默认图片转文字模型；plugin_first：优先使用模型配置里的插件识图模型及其备用模型。失败、超时或不支持图片时都会继续尝试后续候选。",
         "default": "astrbot_first",
         "options": [
           "astrbot_first",
-          "plugin_first",
-          "recent_success_first"
+          "plugin_first"
         ],
         "condition": "enable_private_image_self_recognition"
       },
@@ -4761,7 +4758,6 @@
         "hint": "历史上下文图片补全的单次等待预算。命中缓存通常很快；缓存未命中且视觉模型超时会放弃本次补全，不阻塞整轮回复太久。",
         "slider": {
           "min": 0,
-          "max": 30,
           "step": 0.5
         },
         "default": 8,
