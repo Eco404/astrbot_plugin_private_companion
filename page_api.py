@@ -490,7 +490,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "budget": budget,
             "balance": self._balance_status_payload(balance_state),
             "memory_plugin": self._token_memory_plugin_payload(self._memory_plugin_token_usage_raw()),
-            "together_plugin": self._token_memory_plugin_payload(self._together_plugin_token_usage_raw()),
+            "together_plugin": self._token_memory_plugin_payload(self._safe_together_plugin_token_usage_raw()),
             "partial": True,
         }
 
@@ -19384,6 +19384,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "reason": "未检测到运行中的一起插件",
         }
 
+    def _safe_together_plugin_token_usage_raw(self) -> dict[str, Any]:
+        try:
+            return self._together_plugin_token_usage_raw()
+        except Exception as exc:
+            reason = self._single_line(exc, 160) or "联动状态读取失败"
+            warning_key = f"{type(exc).__name__}:{reason}"
+            if getattr(self, "_together_token_usage_warning_key", "") != warning_key:
+                self._together_token_usage_warning_key = warning_key
+                logger.warning(
+                    "[PrivateCompanionPage] 一起插件 Token 统计暂不可用，已跳过该可选来源: %s",
+                    reason,
+                )
+            return {
+                "available": False,
+                "installed": False,
+                "display_name": "我会和你在一起",
+                "reason": "一起插件统计暂不可用，不影响陪伴面板其他功能",
+            }
+
     def _balance_status_payload(self, state: Any = None) -> dict[str, Any]:
         raw = state if isinstance(state, dict) else {}
 
@@ -19440,7 +19459,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             usage = {}
         external_usage = usage.get("external") if isinstance(usage.get("external"), dict) else {}
         memory_plugin_usage = self._memory_plugin_token_usage_raw()
-        together_plugin_usage = self._together_plugin_token_usage_raw()
+        together_plugin_usage = self._safe_together_plugin_token_usage_raw()
         totals = self._token_bucket(usage.get("totals"))
         by_provider = self._token_ranked_map(usage.get("by_provider"))
         by_task = self._token_ranked_map(usage.get("by_task"))
