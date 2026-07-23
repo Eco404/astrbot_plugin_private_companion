@@ -954,13 +954,10 @@ class PrivateImageMixin:
             "官方优先": "astrbot_first",
             "plugin": "plugin_first",
             "插件优先": "plugin_first",
-            "recent": "recent_success_first",
-            "adaptive": "recent_success_first",
-            "动态": "recent_success_first",
-            "近期成功优先": "recent_success_first",
         }
+        # 旧的“近期成功优先”配置一律回退到 astrbot_first。
         normalized = aliases.get(text, text)
-        return normalized if normalized in {"astrbot_first", "plugin_first", "recent_success_first"} else "astrbot_first"
+        return normalized if normalized in {"astrbot_first", "plugin_first"} else "astrbot_first"
 
     @staticmethod
     def _private_image_visual_provider_source_allowed(provider_source: str) -> bool:
@@ -1006,6 +1003,7 @@ class PrivateImageMixin:
         scope: str = "private_image",
         chars: int = 0,
     ) -> None:
+        # 记录成功 provider 供诊断面板展示;candidates 不再据此路由(见其注释)。
         provider_id = _single_line(provider_id, 160)
         if not provider_id:
             return
@@ -1058,23 +1056,8 @@ class PrivateImageMixin:
             logger.debug("[PrivateCompanion] 私聊图片视觉成功 provider 状态保存失败: %s", exc)
 
     def _private_image_visual_provider_candidates(self, umo: str = "") -> list[tuple[str, str, str]]:
+        # 只返回配置中明确指定的识图模型;不再用历史成功记录路由,避免调用用户未指定的模型。
         base = self._private_image_base_visual_provider_candidates(umo)
-        by_provider: dict[str, tuple[str, str, str]] = {}
-        fallback_prompt = ""
-        for provider_id, provider_source, prompt in base:
-            clean_id = _single_line(provider_id, 160)
-            if not fallback_prompt and prompt:
-                fallback_prompt = prompt
-            if clean_id and clean_id not in by_provider:
-                by_provider[clean_id] = (clean_id, provider_source, prompt)
-        if not by_provider:
-            return []
-        state = self._private_image_visual_provider_state_store()
-        recent = state.get("recent_successes") if isinstance(state, dict) else []
-        clean_umo = _single_line(umo, 160)
-        now = _now_ts()
-        ordered: list[tuple[str, str, str]] = []
-        used: set[str] = set()
         priority = self._normalize_private_image_vision_provider_priority(
             getattr(self, "private_image_vision_provider_priority", "astrbot_first")
         )
@@ -1091,49 +1074,14 @@ class PrivateImageMixin:
             )
             base_ordered = [item for _index, item in base_ordered]
 
-        recent_rows: list[tuple[int, dict[str, Any]]] = []
-        if isinstance(recent, list):
-            recent_rows = [(index, item) for index, item in enumerate(recent) if isinstance(item, dict)]
-
-            def recent_provider_sort_key(pair: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
-                item = pair[1]
-                same_session_rank = 0 if clean_umo and _single_line(item.get("umo"), 160) == clean_umo else 1
-                return same_session_rank, -_safe_float(item.get("ts"), 0), pair[0]
-
-            recent_rows.sort(**{"key": recent_provider_sort_key})
-
-        if priority == "recent_success_first":
-            for _index, item in recent_rows:
-                provider_id = _single_line(item.get("provider_id"), 160)
-                if not provider_id or provider_id in used or provider_id not in by_provider:
-                    continue
-                if now - _safe_float(item.get("ts"), 0) > 7 * 86400:
-                    continue
-                ordered.append(by_provider[provider_id])
-                used.add(provider_id)
-
+        ordered: list[tuple[str, str, str]] = []
+        used: set[str] = set()
         for provider_id, provider_source, prompt in base_ordered:
             clean_id = _single_line(provider_id, 160)
             if not clean_id or clean_id in used:
                 continue
             ordered.append((clean_id, provider_source, prompt))
             used.add(clean_id)
-
-        if recent_rows:
-            for _index, item in recent_rows:
-                provider_id = _single_line(item.get("provider_id"), 160)
-                item_source = _single_line(item.get("source"), 80)
-                if not provider_id or provider_id in used:
-                    continue
-                if not self._private_image_visual_provider_source_allowed(item_source):
-                    continue
-                if now - _safe_float(item.get("ts"), 0) > 7 * 86400:
-                    continue
-                candidate = by_provider.get(provider_id)
-                if candidate is None:
-                    candidate = (provider_id, "recent_success", fallback_prompt)
-                ordered.append(candidate)
-                used.add(provider_id)
         return ordered
 
     def _select_private_image_visual_provider(self, umo: str = "") -> tuple[str, str, str, Any]:
@@ -1143,8 +1091,6 @@ class PrivateImageMixin:
             if not provider_id or provider_id in seen:
                 continue
             seen.add(provider_id)
-            if self._private_image_provider_in_failure_cooldown(provider_id, provider_source):
-                continue
             provider = self._private_image_provider_by_id(provider_id)
             if provider is not None and self._provider_supports_image(provider):
                 return provider_id, provider_source, prompt, provider
@@ -1167,33 +1113,21 @@ class PrivateImageMixin:
     def _private_image_provider_failure_key(self, provider_id: str, provider_source: str = "") -> str:
         return f"{_single_line(provider_source, 80)}:{_single_line(provider_id, 160)}"
 
-    def _private_image_provider_in_failure_cooldown(self, provider_id: str, provider_source: str = "") -> bool:
-        key = self._private_image_provider_failure_key(provider_id, provider_source)
-        item = self._private_image_provider_failure_cache().get(key)
-        if not isinstance(item, dict):
-            return False
-        until = _safe_float(item.get("until"), 0)
-        if until <= _now_ts():
-            self._private_image_provider_failure_cache().pop(key, None)
-            return False
-        return True
-
     def _mark_private_image_provider_failure(self, provider_id: str, provider_source: str, exc: Exception | str, *, task: str) -> None:
+        # 记录本次失败供诊断面板/日志排障。
         key = self._private_image_provider_failure_key(provider_id, provider_source)
-        cooldown = 300.0
         self._private_image_provider_failure_cache()[key] = {
-            "until": _now_ts() + cooldown,
+            "ts": _now_ts(),
             "provider_id": _single_line(provider_id, 160),
             "source": _single_line(provider_source, 80),
             "task": _single_line(task, 80),
             "error": _single_line(exc, 180),
         }
         logger.info(
-            "[PrivateCompanion] 图片视觉 provider 临时降权: provider=%s source=%s task=%s cooldown=%ss error=%s",
+            "[PrivateCompanion] 图片视觉 provider 本轮识图失败: provider=%s source=%s task=%s error=%s",
             provider_id,
             provider_source,
             task,
-            int(cooldown),
             _single_line(exc, 160),
         )
 
@@ -1241,16 +1175,15 @@ class PrivateImageMixin:
                     "source": _single_line(provider_source, 80),
                     "available": provider is not None,
                     "supports_image": bool(provider is not None and self._provider_supports_image(provider)),
-                    "cooldown": bool(self._private_image_provider_in_failure_cooldown(clean_id, provider_source)),
                 }
             )
         last_success = state.get("last_success") if isinstance(state.get("last_success"), dict) else {}
         failures = list(self._private_image_provider_failure_cache().values())
         failures = [item for item in failures if isinstance(item, dict)]
-        def failure_until_sort_key(item: dict[str, Any]) -> float:
-            return _safe_float(item.get("until"), 0)
+        def failure_ts_sort_key(item: dict[str, Any]) -> float:
+            return _safe_float(item.get("ts"), 0)
 
-        failures.sort(**{"key": failure_until_sort_key, "reverse": True})
+        failures.sort(**{"key": failure_ts_sort_key, "reverse": True})
         return {
             "priority": self._normalize_private_image_vision_provider_priority(
                 getattr(self, "private_image_vision_provider_priority", "astrbot_first")
@@ -1263,12 +1196,12 @@ class PrivateImageMixin:
                 "chars": _safe_int(last_success.get("chars"), 0, 0),
             } if last_success else {},
             "candidates": candidates[:8],
-            "cooldowns": [
+            "recent_failures": [
                 {
                     "provider_id": _single_line(item.get("provider_id"), 160),
                     "source": _single_line(item.get("source"), 80),
                     "error": _single_line(item.get("error"), 180),
-                    "until": self._format_timestamp_elapsed(item.get("until", 0)) if hasattr(self, "_format_timestamp_elapsed") else "",
+                    "time": self._format_timestamp_elapsed(item.get("ts", 0)) if hasattr(self, "_format_timestamp_elapsed") else "",
                 }
                 for item in failures[:6]
             ],
@@ -1319,7 +1252,7 @@ class PrivateImageMixin:
         saw_uncertain = False
         for provider_id, provider_source, _configured_prompt in self._private_image_visual_provider_candidates(umo):
             provider_id = _single_line(provider_id, 160)
-            if not provider_id or self._private_image_provider_in_failure_cooldown(provider_id, provider_source):
+            if not provider_id:
                 continue
             provider = self._private_image_provider_by_id(provider_id)
             if provider is None or not self._provider_supports_image(provider):
@@ -2386,8 +2319,6 @@ class PrivateImageMixin:
             if not provider_id or provider_id in seen:
                 continue
             seen.add(provider_id)
-            if self._private_image_provider_in_failure_cooldown(provider_id, provider_source):
-                continue
             provider = self._private_image_provider_by_id(provider_id)
             if provider is None or not self._provider_supports_image(provider):
                 continue
@@ -2442,7 +2373,7 @@ class PrivateImageMixin:
                 start = time.time()
                 attempt_timeout = self._private_image_provider_timeout_seconds()
                 result = await asyncio.wait_for(
-                    provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=min(520, 220 + image_count * 50)),
+                    provider.text_chat(prompt=prompt, image_urls=image_urls),
                     timeout=attempt_timeout,
                 )
                 text = str(getattr(result, "completion_text", result) or "").strip()
@@ -4407,39 +4338,7 @@ class PrivateImageMixin:
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
                     reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
-            if not vision_text and not direct_image_mode:
-                reply = self._private_image_no_vision_fallback_reply(user_id)
-                logger.info(
-                    "[PrivateCompanion] 私聊单图无可靠视觉摘要,跳过主链防止旧上下文猜图: user=%s images=%s reply_preview=%s",
-                    user_id,
-                    len(images),
-                    _single_line(reply, 180),
-                )
-                self._record_llm_usage(
-                    provider_id="framework",
-                    task="private_image_only_framework",
-                    prompt=prompt,
-                    completion=reply,
-                    elapsed_ms=0,
-                    success=True,
-                    budget_exempt=True,
-                )
-                await self._record_private_image_vision_feedback_target(
-                    user_id=user_id,
-                    image_sources=raw_image_sources,
-                    vision_text="",
-                    reply=reply,
-                )
-                sent_reply = await self._send_private_image_reply_text(event, reply)
-                if sent_reply:
-                    await self._archive_private_image_turn_context(
-                        event,
-                        user_id=user_id,
-                        vision_text="",
-                        reply=sent_reply,
-                        image_count=len(images),
-                    )
-                return
+            # 无视觉摘要时仍走主链，由模型自然回复，不发罐头兜底。
             if has_dynamic_gif_sources and request_image_refs:
                 logger.info(
                     "[PrivateCompanion] 私聊单图检测到动态 GIF,已改用抽帧视觉摘要链路: user=%s has_vision=%s",
@@ -4662,14 +4561,7 @@ class PrivateImageMixin:
                         _single_line(reply, 180),
                     )
                     reply = ""
-            if reply and not vision_text and not direct_image_mode:
-                logger.info(
-                    "[PrivateCompanion] 私聊单图无可靠视觉摘要,已丢弃主链看图式回复以避免猜图: user=%s reply_preview=%s",
-                    user_id,
-                    _single_line(reply, 180),
-                )
-                reply = ""
-                reply_source = "no_vision_guard_fallback"
+            # 缺视觉摘要也保留主链回复，不清空转罐头兜底。
             if reply:
                 reply_preview = reply
                 preview_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)

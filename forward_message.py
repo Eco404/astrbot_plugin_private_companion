@@ -977,9 +977,6 @@ class ForwardMessageMixin:
             if provider_id in seen_providers:
                 continue
             seen_providers.add(provider_id)
-            if self._private_image_provider_in_failure_cooldown(provider_id, provider_source):
-                skipped_providers.append(f"{provider_source}:cooldown")
-                continue
             provider = self._private_image_provider_by_id(provider_id)
             if provider is None or not self._provider_supports_image(provider):
                 skipped_providers.append(f"{provider_source}:no_image_provider")

@@ -1557,7 +1557,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "主动循环心跳不新鲜": "proactive.loop_stale",
             "私聊图片识别调度状态读取失败": "vision.runtime_unreadable",
             "私聊图片识别暂无可用模型": "vision.no_available_provider",
-            "有识图模型被临时降权": "vision.provider_cooldown",
+            "识图模型最近调用失败": "vision.provider_recent_failure",
             "配置诊断仍有待处理项": "diagnostic.pending",
         }
         return aliases.get(normalized, "")
@@ -4792,15 +4792,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         provider_candidates = provider_runtime.get("candidates") if isinstance(provider_runtime.get("candidates"), list) else []
         usable_vision = [
             item for item in provider_candidates
-            if isinstance(item, dict) and item.get("available") and item.get("supports_image") and not item.get("cooldown")
+            if isinstance(item, dict) and item.get("available") and item.get("supports_image")
         ]
-        provider_cooldowns = provider_runtime.get("cooldowns") if isinstance(provider_runtime.get("cooldowns"), list) else []
+        provider_failures = provider_runtime.get("recent_failures") if isinstance(provider_runtime.get("recent_failures"), list) else []
         last_success = provider_runtime.get("last_success") if isinstance(provider_runtime.get("last_success"), dict) else {}
         vision_priority = self._single_line(provider_runtime.get("priority"), 40) or "astrbot_first"
         vision_priority_label = {
             "astrbot_first": "AstrBot 图片转文字优先",
             "plugin_first": "插件识图模型优先",
-            "recent_success_first": "近期成功模型优先",
         }.get(vision_priority, "AstrBot 图片转文字优先")
         if provider_runtime.get("error"):
             add("warn", "私聊图片识别调度状态读取失败", provider_runtime.get("error") or "无法读取当前视觉模型状态。", "刷新排障页或查看日志", "troubleshooting", "vision.runtime_unreadable")
@@ -4808,8 +4807,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add(
                 "warn",
                 "私聊图片识别暂无可用模型",
-                f"候选 {len(provider_candidates)} 个，但没有同时满足可用、支持图片且不在冷却的模型。",
-                "检查快速配置/精准配置里的插件识图模型，或等待临时降权结束",
+                f"候选 {len(provider_candidates)} 个，但没有同时满足可用且支持图片的模型。",
+                "检查快速配置/精准配置里的插件识图模型",
                 "config",
                 "vision.no_available_provider",
             )
@@ -4824,15 +4823,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         else:
             first_provider = usable_vision[0].get("provider_id") if usable_vision and isinstance(usable_vision[0], dict) else "-"
             add("info", "私聊图片识别候选模型可用", f"当前可用 {len(usable_vision)} 个，首选 {first_provider}；成功一次后会记录为视觉恢复候选。", "", "troubleshooting")
-        if provider_cooldowns:
-            first_cooldown = provider_cooldowns[0] if isinstance(provider_cooldowns[0], dict) else {}
+        if provider_failures:
+            first_failure = provider_failures[0] if isinstance(provider_failures[0], dict) else {}
             add(
                 "warn",
-                "有识图模型被临时降权",
-                f"{first_cooldown.get('provider_id') or '-'}：{first_cooldown.get('error') or '最近调用失败'}；到期 {first_cooldown.get('until') or '-'}。",
+                "识图模型最近调用失败",
+                f"{first_failure.get('provider_id') or '-'}：{first_failure.get('error') or '最近调用失败'}；最近 {first_failure.get('time') or '-'} 失败。",
                 "如果反复出现，换掉插件识图模型或调高单次超时",
                 "config",
-                "vision.provider_cooldown",
+                "vision.provider_recent_failure",
             )
 
         diag_warns = [item for item in diagnostics if item.get("level") in {"warn", "error"}]
@@ -16091,7 +16090,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return 1.2
         if key == "private_image_vision_wait_seconds":
             try:
-                return max(0.0, min(90.0, float(value)))
+                # 只保留与后端 _cfg_float 一致的下界,不设上限(对齐后端:后端不夹上限)。
+                return max(0.0, float(value))
             except (TypeError, ValueError):
                 return 30.0
         if key == "group_image_vision_wait_seconds":
@@ -16101,7 +16101,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return 8.0
         if key == "private_image_provider_timeout_seconds":
             try:
-                return max(3.0, min(60.0, float(value)))
+                # 只保留与后端一致的下界 3s,不设上限(对齐后端;推理识图模型需要更长超时)。
+                return max(3.0, float(value))
             except (TypeError, ValueError):
                 return 12.0
         if key == "private_image_vision_provider_priority":
@@ -16109,10 +16110,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if callable(normalizer):
                 return normalizer(value)
             normalized = str(value or "astrbot_first").strip().lower()
-            return normalized if normalized in {"astrbot_first", "plugin_first", "recent_success_first"} else "astrbot_first"
+            return normalized if normalized in {"astrbot_first", "plugin_first"} else "astrbot_first"
         if key == "context_image_caption_timeout_seconds":
             try:
-                return max(0.0, min(30.0, float(value)))
+                # 只保留下界,不设上限(对齐后端:后端不夹上限)。
+                return max(0.0, float(value))
             except (TypeError, ValueError):
                 return 8.0
         if key == "private_image_gif_max_frames":
