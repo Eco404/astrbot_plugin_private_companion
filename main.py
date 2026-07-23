@@ -1101,9 +1101,18 @@ class PrivateCompanionPlugin(
         self.semantic_message_debounce_seconds = self.text_message_debounce_seconds
         self.private_image_vision_wait_seconds = self._cfg_float(c, "private_image_vision_wait_seconds", 30.0, 0.0, 600.0)
         self.private_image_provider_timeout_seconds = self._cfg_float(c, "private_image_provider_timeout_seconds", 12.0, 0.0, 600.0)
+        self.private_image_provider_failure_cooldown_seconds = self._cfg_float(
+            c,
+            "private_image_provider_failure_cooldown_seconds",
+            0.0,
+            0.0,
+            3600.0,
+        )
         self.private_image_vision_provider_priority = self._normalize_private_image_vision_provider_priority(
             self._cfg_str(c, "private_image_vision_provider_priority", "astrbot_first")
         )
+        self.private_image_vision_custom_prompt = self._cfg_str(c, "private_image_vision_custom_prompt", "")[:12000]
+        self.private_image_vision_max_chars = self._cfg_int(c, "private_image_vision_max_chars", 2400, 300, 12000)
         self.enable_private_image_self_recognition = self._cfg_bool(c, "enable_private_image_self_recognition", True)
         self.enable_private_image_vision_cache = self._cfg_bool(c, "enable_private_image_vision_cache", True)
         self.private_image_vision_cache_max_items = self._cfg_int(c, "private_image_vision_cache_max_items", 300, 0, 3000)

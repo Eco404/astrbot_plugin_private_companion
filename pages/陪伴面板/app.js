@@ -1557,7 +1557,10 @@ const configLabels = {
   quote_target_strategy: "引用目标策略",
   private_image_vision_wait_seconds: "单图等待识图秒数",
   private_image_provider_timeout_seconds: "单个识图模型超时秒数",
+  private_image_provider_failure_cooldown_seconds: "识图失败冷却秒数",
   private_image_vision_provider_priority: "识图增强优先级",
+  private_image_vision_custom_prompt: "自定义视觉转述提示词",
+  private_image_vision_max_chars: "视觉转述最大字符数",
   enable_private_image_gif_enhancement: "GIF 动图强化",
   private_image_gif_max_frames: "GIF 抽帧数",
   enable_private_image_self_recognition: "图片转述增强",
@@ -2180,7 +2183,10 @@ const configDescriptions = {
   quote_target_strategy: "current 引用用户当前这条触发消息；quoted/auto 在用户引用 Bot 旧消息追问时优先引用那条旧消息。",
   private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片收口时间；视觉提前完成会立刻进入主链。",
   private_image_provider_timeout_seconds: "每个视觉 provider 单次最多等待多久；超时只影响本轮并切换下一个模型，不会禁用后续图片调用。设为 0 时不额外施加插件超时。",
+  private_image_provider_failure_cooldown_seconds: "默认 0，不会因一次空摘要、依赖缺失或调用异常跳过后续图片。仅在故障模型持续报错时按需设置跨轮冷却秒数。",
   private_image_vision_provider_priority: "AstrBot 优先会先用当前会话的默认图片转文字模型；插件优先会先用模型配置中的插件识图模型及其备用；近期成功优先只提升仍在当前配置中的近期成功模型，不会让已删除的旧模型重新成为首选。所有模式都会在失败或超时后继续尝试后续候选。",
+  private_image_vision_custom_prompt: "留空时使用插件默认短摘要，并自动追加 AstrBot 当前会话的图片转文字提示词。填写后会替换默认内容要求；可用 {astrbot_prompt} 插入 AstrBot 提示词，{image_count} 表示图片数，{scope} 表示 private 或 group。适合完整 OCR、日志截图和聊天记录转述。",
+  private_image_vision_max_chars: "单次视觉转述最多保留多少字符。默认 2400；详细 OCR 或长日志可适当调高，但也会增加后续聊天模型的上下文与 token 占用。",
   enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
   private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
   private_image_self_recognition_hint: "只补充当前角色自己的外观、头像、名字、表情包特征或聊天截图昵称，让视觉转述更容易判断图里是不是当前角色。不要写用户资料。",
@@ -2539,7 +2545,7 @@ const featureSettingGroups = {
   enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "recall_message_image_cache_max_mb"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "quote_group_reply_once_per_target", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
-  enable_private_image_self_recognition: ["private_image_vision_provider_priority", "private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_private_image_self_recognition: ["private_image_vision_provider_priority", "private_image_vision_custom_prompt", "private_image_vision_max_chars", "private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "private_image_provider_failure_cooldown_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit", "forward_message_image_vision_timeout_seconds"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
   enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
@@ -2839,6 +2845,11 @@ const featureSettingSections = {
   ],
   enable_private_image_self_recognition: [
     {
+      title: "视觉转述提示词",
+      note: "默认会沿用插件短摘要并追加 AstrBot 视觉提示词；需要完整 OCR 时可填写自定义模板并提高字符上限。",
+      keys: ["private_image_vision_custom_prompt", "private_image_vision_max_chars"],
+    },
+    {
       title: "识图模型优先级",
       note: "选择首选视觉模型来源；首选失败、超时或不支持图片时仍会自动切换后续候选。",
       keys: ["private_image_vision_provider_priority"],
@@ -2846,7 +2857,7 @@ const featureSettingSections = {
     {
       title: "视觉等待",
       note: "收口结束后等待图片转述结果；视觉提前完成会直接进入主链。",
-      keys: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds"],
+      keys: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "private_image_provider_failure_cooldown_seconds"],
     },
     {
       title: "历史图片摘要补全",
@@ -3305,6 +3316,9 @@ const featureSettingTypes = {
   dream_afterglow_mode: { type: "select", options: [["auto", "自动"], ["轻", "轻"], ["标准", "标准"], ["明显", "明显"]] },
   dream_theme_candidates: { type: "textarea" },
   recall_message_cache_text_chars: { type: "number", min: 80, max: 2000, step: 20 },
+  private_image_vision_wait_seconds: { type: "number", min: 0, max: 600, step: 1 },
+  private_image_provider_timeout_seconds: { type: "number", min: 0, max: 600, step: 1 },
+  private_image_provider_failure_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 1 },
   context_image_caption_max_items: { type: "number", min: 0, max: 50, step: 1 },
   context_image_caption_timeout_seconds: { type: "number", min: 0, max: 600, step: 0.5 },
   forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 60, step: 1 },
@@ -3376,6 +3390,8 @@ const featureSettingTypes = {
   natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   command_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   private_image_vision_provider_priority: { type: "select", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]] },
+  private_image_vision_custom_prompt: { type: "textarea", rows: 8, maxLength: 12000 },
+  private_image_vision_max_chars: { type: "number", min: 300, max: 12000, step: 100 },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
@@ -20585,7 +20601,9 @@ function featureSettingInput(key, value) {
     return featureProviderSelect(key, value);
   }
   if (spec.type === "textarea") {
-    return `<textarea data-feature-param="${safeKey}" rows="3"${disabledAttr}>${escapeHtml(featureTextareaValue(key, value))}</textarea>`;
+    const rows = Number(spec.rows) > 0 ? Number(spec.rows) : 3;
+    const maxLengthAttr = Number(spec.maxLength) > 0 ? ` maxlength="${Number(spec.maxLength)}"` : "";
+    return `<textarea data-feature-param="${safeKey}" rows="${rows}"${maxLengthAttr}${disabledAttr}>${escapeHtml(featureTextareaValue(key, value))}</textarea>`;
   }
   const password = spec.type === "password";
   const numeric = spec.type === "number" || typeof value === "number";

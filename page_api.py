@@ -13021,7 +13021,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_scene_presets",
             "private_image_vision_wait_seconds",
             "private_image_provider_timeout_seconds",
+            "private_image_provider_failure_cooldown_seconds",
             "private_image_vision_provider_priority",
+            "private_image_vision_custom_prompt",
+            "private_image_vision_max_chars",
             "enable_context_image_captioning",
             "context_image_caption_max_items",
             "context_image_caption_timeout_seconds",
@@ -15567,7 +15570,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_scene_presets",
             "private_image_vision_wait_seconds",
             "private_image_provider_timeout_seconds",
+            "private_image_provider_failure_cooldown_seconds",
             "private_image_vision_provider_priority",
+            "private_image_vision_custom_prompt",
+            "private_image_vision_max_chars",
             "enable_context_image_captioning",
             "context_image_caption_max_items",
             "context_image_caption_timeout_seconds",
@@ -15934,6 +15940,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return scope if scope in {"bot_only", "group_only", "bot_and_group"} else "bot_and_group"
         if key == "private_image_self_recognition_hint":
             return str(value or "").strip()[:1200]
+        if key == "private_image_vision_custom_prompt":
+            return str(value or "").strip()[:12000]
+        if key == "private_image_vision_max_chars":
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = 2400
+            return max(300, min(12000, parsed))
         if key == "worldview_adaptation_mode":
             mode = str(value or "auto").strip()
             return mode if mode in {"auto", "modern", "fantasy", "sci_fi", "custom", "off"} else "auto"
@@ -16647,6 +16661,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(0.0, min(600.0, float(value)))
             except (TypeError, ValueError):
                 return 12.0
+        if key == "private_image_provider_failure_cooldown_seconds":
+            try:
+                return max(0.0, min(3600.0, float(value)))
+            except (TypeError, ValueError):
+                return 0.0
         if key == "private_image_vision_provider_priority":
             normalizer = getattr(self.plugin, "_normalize_private_image_vision_provider_priority", None)
             if callable(normalizer):

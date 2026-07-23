@@ -813,10 +813,28 @@
     "default": 12,
     "invisible": true
   },
+  "private_image_provider_failure_cooldown_seconds": {
+    "description": "Legacy flat config: 识图模型失败后跨轮冷却秒数",
+    "type": "float",
+    "default": 0,
+    "invisible": true
+  },
   "private_image_vision_provider_priority": {
     "description": "Legacy flat config: 识图增强模型优先级",
     "type": "string",
     "default": "astrbot_first",
+    "invisible": true
+  },
+  "private_image_vision_custom_prompt": {
+    "description": "Legacy flat config: 自定义视觉转述提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "private_image_vision_max_chars": {
+    "description": "Legacy flat config: 视觉转述最大字符数",
+    "type": "int",
+    "default": 2400,
     "invisible": true
   },
   "enable_context_image_captioning": {
@@ -4725,6 +4743,18 @@
         "default": 12,
         "condition": "enable_private_image_self_recognition"
       },
+      "private_image_provider_failure_cooldown_seconds": {
+        "description": "识图模型失败后冷却秒数",
+        "type": "float",
+        "hint": "默认 0，不因一次空摘要、缺少依赖或调用异常而影响后续图片。仅在明确需要避免持续请求故障模型时设置；冷却只跨后续图片跳过该候选，本轮仍会继续尝试备用模型。",
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 1
+        },
+        "default": 0,
+        "condition": "enable_private_image_self_recognition"
+      },
       "private_image_vision_provider_priority": {
         "description": "识图增强模型优先级",
         "type": "string",
@@ -4735,6 +4765,25 @@
           "plugin_first",
           "recent_success_first"
         ],
+        "condition": "enable_private_image_self_recognition"
+      },
+      "private_image_vision_custom_prompt": {
+        "description": "自定义视觉转述提示词",
+        "type": "string",
+        "hint": "留空时使用插件默认短摘要，并自动追加 AstrBot 当前会话的图片转文字提示词。填写后将替换默认内容要求；支持 {astrbot_prompt}、{image_count}、{scope} 占位符。适合 OCR、日志截图、聊天记录逐字转述等场景。",
+        "default": "",
+        "condition": "enable_private_image_self_recognition"
+      },
+      "private_image_vision_max_chars": {
+        "description": "视觉转述最大字符数",
+        "type": "int",
+        "hint": "控制单次视觉转述保留的最大字符数。详细 OCR 或日志截图可适当调高，但会增加后续聊天模型的上下文占用。",
+        "slider": {
+          "min": 300,
+          "max": 12000,
+          "step": 100
+        },
+        "default": 2400,
         "condition": "enable_private_image_self_recognition"
       },
       "enable_context_image_captioning": {
