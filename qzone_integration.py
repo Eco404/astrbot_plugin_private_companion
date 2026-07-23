@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-from .helpers import _now_ts, _safe_float, _safe_int, _single_line
+from .helpers import _now_ts, _path_text, _safe_float, _safe_int, _single_line
 from .qzone_media import QzoneIntegrationError, QzoneMediaMixin
 
 
@@ -2753,13 +2753,13 @@ class QzoneMixin(QzoneMediaMixin):
         state[f"last_{prefix}_generated_image_note"] = _single_line(note, 180)
         state[f"last_{prefix}_generated_image_checked_at"] = _now_ts()
         if path:
-            state[f"last_{prefix}_generated_image_path"] = _single_line(path, 260)
+            state[f"last_{prefix}_generated_image_path"] = _path_text(path, 1000)
         if backend:
             state[f"last_{prefix}_generated_image_backend"] = _single_line(backend, 40)
         if caption:
             state[f"last_{prefix}_generated_image_caption"] = _single_line(caption, 180)
         if reference_image:
-            state[f"last_{prefix}_generated_image_reference"] = _single_line(reference_image, 260)
+            state[f"last_{prefix}_generated_image_reference"] = _path_text(reference_image, 1000)
         if reference_exists is not None:
             state[f"last_{prefix}_generated_image_reference_exists"] = bool(reference_exists)
         if visual_anchor:
@@ -3035,7 +3035,7 @@ class QzoneMixin(QzoneMediaMixin):
             return []
         if isinstance(state, dict):
             prefix = self._qzone_reason_prefix(reason)
-            state["last_generated_image_path"] = _single_line(image_path, 260)
+            state["last_generated_image_path"] = _path_text(image_path, 1000)
             state["last_generated_image_at"] = _now_ts()
             state["last_generated_image_reason"] = reason
             state["last_generated_image_caption"] = _single_line(caption, 180)
@@ -3045,9 +3045,9 @@ class QzoneMixin(QzoneMediaMixin):
             if composition:
                 state["last_generated_image_composition"] = _single_line(composition, 120)
             if reference_image_path:
-                state["last_generated_image_reference"] = _single_line(reference_image_path, 260)
+                state["last_generated_image_reference"] = _path_text(reference_image_path, 1000)
             state["last_generated_image_reference_exists"] = bool(reference_exists)
-            state[f"last_{prefix}_generated_image_path"] = _single_line(image_path, 260)
+            state[f"last_{prefix}_generated_image_path"] = _path_text(image_path, 1000)
             state[f"last_{prefix}_generated_image_at"] = _now_ts()
             state[f"last_{prefix}_generated_image_text"] = _single_line(post_text, 300)
             state[f"last_{prefix}_generated_image_caption"] = _single_line(caption, 180)

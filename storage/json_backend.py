@@ -38,11 +38,14 @@ class JsonStoreBackend(StoreBackendBase):
             with self.data_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
-                return self.new_store()
+                raise ValueError("JSON store root must be an object")
             return self.ensure_defaults(data)
         except Exception as exc:
-            logger.warning(f"[PrivateCompanion] 读取 JSON 数据失败,将使用空数据: {exc}")
-            return self.new_store()
+            logger.warning(
+                "[PrivateCompanion] 读取 JSON 数据失败,已保留原文件并中止加载: %s",
+                exc,
+            )
+            raise
 
     def save_store(self, data: dict[str, Any]) -> None:
         self._atomic_write_data_file_sync(data)

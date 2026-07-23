@@ -5,12 +5,13 @@ from __future__ import annotations
 import sys
 import uuid
 import asyncio
+import re
 import time
 from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _missing_optional_model_dependency, _safe_float, _safe_int, _single_line
+from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -983,7 +984,7 @@ class MemoryCompanionAdapterMixin:
             "action": _single_line(action, 80),
             "motive": _single_line(motive, 180),
             "action_summary": _single_line(action_summary, 240),
-            "image_path": _single_line(image_path, 300),
+            "image_path": _path_text(image_path, 1000),
             "extra_count": int(extra_count or 0),
             "clean_visible_text": content,
         }
@@ -1110,6 +1111,7 @@ class MemoryCompanionAdapterMixin:
         trigger: str = "",
         scene_preset: str = "",
         reference_image_path: str = "",
+        reference_used: bool | None = None,
     ) -> None:
         prompt_text = _single_line(prompt, 900)
         if not prompt_text and not image_path:
@@ -1142,15 +1144,29 @@ class MemoryCompanionAdapterMixin:
         kind_text = _single_line(intent_kind or kind, 40) or "图片"
         backend_text = _single_line(backend, 80)
         scene_text = _single_line(scene_preset, 80)
-        ref_text = _single_line(reference_image_path, 260)
+        ref_text = _path_text(reference_image_path, 1000)
+        legacy_reference_used = bool(
+            ref_text
+            and re.search(
+                r"(?:已使用|已提交|成功提交|已带入)[^；。]{0,16}参考图"
+                r"|参考图[^；。]{0,16}(?:已使用|已提交|成功提交|已带入)",
+                str(note or ""),
+                flags=re.I,
+            )
+        )
+        effective_reference_used = (
+            bool(reference_used)
+            if reference_used is not None
+            else legacy_reference_used
+        )
         status = "生成并发送" if sent else "生成"
         content = (
             f"Bot 通过生图能力{status}了一张{kind_text}。"
             f"画面要求：{prompt_text or '未记录'}。"
             f"{' 场景预设：' + scene_text + '。' if scene_text else ''}"
             f"{' 后端：' + backend_text + '。' if backend_text else ''}"
-            f"{' 使用了参考图。' if ref_text and '已使用' in str(note or '') else ''}"
-            f"{' 图片路径：' + _single_line(image_path, 260) + '。' if image_path else ''}"
+            f"{' 使用了参考图。' if effective_reference_used else ''}"
+            f"{' 图片路径：' + _path_text(image_path, 1000) + '。' if image_path else ''}"
         )
         memory_key = uuid.uuid4().hex[:12]
         try:
@@ -1188,12 +1204,12 @@ class MemoryCompanionAdapterMixin:
                     "intent_kind": _single_line(intent_kind, 40),
                     "backend": backend_text,
                     "prompt": prompt_text,
-                    "image_path": _single_line(image_path, 260),
+                    "image_path": _path_text(image_path, 1000),
                     "note": _single_line(note, 220),
                     "sent": bool(sent),
                     "scene_preset": scene_text,
                     "reference_image_path": ref_text,
-                    "used_reference": bool(ref_text and "已使用" in str(note or "")),
+                    "used_reference": effective_reference_used,
                     "query_anchors": [
                         "刚才生成了什么图",
                         "刚才发了什么图",
@@ -1311,7 +1327,7 @@ class MemoryCompanionAdapterMixin:
             logger.debug("[PrivateCompanion] MemoryCompanion 用户习惯写入失败: %s", _single_line(exc, 120))
 
     async def _memory_companion_record_daily_outfit(self, item: dict[str, Any]) -> None:
-        if not isinstance(item, dict) or not _single_line(item.get("path"), 300):
+        if not isinstance(item, dict) or not _path_text(item.get("path"), 1000):
             return
         bridge = self._memory_companion_bridge()
         recorder = getattr(bridge, "record_persona_life", None) if bridge is not None else None
@@ -1320,7 +1336,7 @@ class MemoryCompanionAdapterMixin:
         date_text = _single_line(item.get("date"), 20)
         prompt = _single_line(item.get("prompt"), 600)
         note = _single_line(item.get("note"), 160)
-        path = _single_line(item.get("path"), 300)
+        path = _path_text(item.get("path"), 1000)
         schedule_hint = ""
         try:
             schedule_hint = _single_line(self._daily_outfit_schedule_text(), 280)

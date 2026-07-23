@@ -18,6 +18,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line
+from .qzone_recent_parser import parse_qzone_h5_index_html
 
 
 QZONE_IMAGE_UPLOAD_URL = "https://up.qzone.qq.com/cgi-bin/upload/cgi_upload_image"
@@ -199,26 +200,32 @@ class QzoneMediaMixin:
         self._qzone_clear_auth_failure(state)
         return ""
 
-    async def _qzone_ensure_qzonetoken(
+    async def _qzone_h5_index_snapshot(
         self,
         event: AstrMessageEvent | None,
         *,
         cookie_header: str,
         ctx: dict[str, Any],
-    ) -> str:
-        token = str(ctx.get("qzonetoken") or "").strip()
-        if token:
-            return token
+        max_cache_age: float = 0.0,
+    ) -> dict[str, Any]:
         cache = getattr(self, "_qzone_qzonetoken_cache", None)
         if not isinstance(cache, dict):
             cache = {}
             self._qzone_qzonetoken_cache = cache
         cache_key = str(ctx.get("uin") or "")
         cached = cache.get(cache_key)
-        if isinstance(cached, dict) and _now_ts() - _safe_float(cached.get("at"), 0) < 1800:
-            token = str(cached.get("token") or "").strip()
-            if token:
-                return token
+        if (
+            max_cache_age > 0
+            and isinstance(cached, dict)
+            and _now_ts() - _safe_float(cached.get("at"), 0) < max_cache_age
+            and isinstance(cached.get("payload"), dict)
+        ):
+            return {
+                "token": str(cached.get("token") or "").strip(),
+                "payload": dict(cached.get("payload") or {}),
+                "cached": True,
+                "http_status": _safe_int(cached.get("http_status"), 200, 0),
+            }
 
         import aiohttp
 
@@ -236,19 +243,59 @@ class QzoneMediaMixin:
                     text = await response.text()
                     if response.status >= 400:
                         logger.info("[PrivateCompanion] QQ 空间 qzonetoken 获取失败: HTTP %s", response.status)
-                        return ""
+                        return {"token": "", "payload": {}, "cached": False, "http_status": response.status}
         except Exception as exc:
             logger.info("[PrivateCompanion] QQ 空间 qzonetoken 获取失败: %s", _single_line(exc, 120))
-            return ""
-        match = re.search(r'window\.shine0callback.*?return\s+"([0-9a-f]+?)";', text, flags=re.S)
-        if not match:
+            return {"token": "", "payload": {}, "cached": False, "http_status": 0}
+        parsed = parse_qzone_h5_index_html(text)
+        parsed_token = str(parsed.get("token") or "").strip()
+        token = str(
+            parsed_token
+            or ctx.get("qzonetoken")
+            or (cached.get("token") if isinstance(cached, dict) else "")
+            or ""
+        ).strip()
+        payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
+        cache[cache_key] = {
+            "token": token,
+            "payload": payload,
+            "at": _now_ts(),
+            "http_status": response.status,
+        }
+        if not parsed_token:
             logger.info("[PrivateCompanion] QQ 空间 qzonetoken 未在 H5 首页中找到")
-            return ""
-        token = match.group(1).strip()
-        if token:
-            cache[cache_key] = {"token": token, "at": _now_ts()}
+        else:
             logger.info("[PrivateCompanion] QQ 空间 qzonetoken 已自动获取: uin=%s", ctx.get("uin"))
-        return token
+        return {
+            "token": token,
+            "payload": payload,
+            "cached": False,
+            "http_status": response.status,
+        }
+
+    async def _qzone_ensure_qzonetoken(
+        self,
+        event: AstrMessageEvent | None,
+        *,
+        cookie_header: str,
+        ctx: dict[str, Any],
+    ) -> str:
+        token = str(ctx.get("qzonetoken") or "").strip()
+        if token:
+            return token
+        cache = getattr(self, "_qzone_qzonetoken_cache", None)
+        cached = cache.get(str(ctx.get("uin") or "")) if isinstance(cache, dict) else None
+        if isinstance(cached, dict) and _now_ts() - _safe_float(cached.get("at"), 0) < 1800:
+            token = str(cached.get("token") or "").strip()
+            if token:
+                return token
+        snapshot = await self._qzone_h5_index_snapshot(
+            event,
+            cookie_header=cookie_header,
+            ctx=ctx,
+            max_cache_age=1800,
+        )
+        return str(snapshot.get("token") or "").strip()
 
     @staticmethod
     def _qzone_find_first(payload: Any, keys: tuple[str, ...], *, _depth: int = 0, _seen: set[int] | None = None) -> Any:

@@ -977,6 +977,9 @@ class ForwardMessageMixin:
             if provider_id in seen_providers:
                 continue
             seen_providers.add(provider_id)
+            if self._private_image_provider_in_failure_cooldown(provider_id, provider_source):
+                skipped_providers.append(f"{provider_source}:cooldown")
+                continue
             provider = self._private_image_provider_by_id(provider_id)
             if provider is None or not self._provider_supports_image(provider):
                 skipped_providers.append(f"{provider_source}:no_image_provider")
@@ -1107,7 +1110,12 @@ class ForwardMessageMixin:
                     error=f"timeout after {timeout:.1f}s",
                     budget_exempt=True,
                 )
-                self._mark_private_image_provider_failure(provider_id, provider_source, exc, task="forward_message_image_vision")
+                logger.info(
+                    "[PrivateCompanion] 合并消息图片视觉超时,本轮尝试下一个 provider；不会禁用后续图片调用: provider=%s source=%s timeout=%.1fs",
+                    provider_id,
+                    provider_source,
+                    timeout,
+                )
                 continue
             except Exception as exc:
                 self._record_llm_usage(

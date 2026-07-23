@@ -326,6 +326,21 @@ class EventDispatchMixin:
         raw = getattr(message_obj, "raw_message", None) if message_obj is not None else None
         return raw if isinstance(raw, dict) else {}
 
+    def _is_onebot_poke_notice_event(self, event: AstrMessageEvent) -> bool:
+        """Return whether *event* is an inbound OneBot poke notification.
+
+        OneBot exposes a poke as a ``notice/notify/poke`` event while AstrBot
+        also maps it to a private or group message event.  It is therefore not
+        an empty chat message: dedicated poke plugins must receive it before
+        companion message guards make any decision.
+        """
+        raw = self._event_raw_payload(event)
+        return (
+            str(raw.get("post_type") or "").strip().lower() == "notice"
+            and str(raw.get("notice_type") or "").strip().lower() == "notify"
+            and str(raw.get("sub_type") or "").strip().lower() == "poke"
+        )
+
     def _event_message_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
         for attr in ("message_id", "id", "seq", "message_seq", "real_id"):
@@ -3914,7 +3929,7 @@ Bot 近期回复：
             return True
         return False
 
-    def _is_proactive_delivery_receipt_text(self, text: str) -> bool:
+    def _legacy_event_dispatch_proactive_delivery_receipt_text(self, text: str) -> bool:
         cleaned = _single_line(text, 240)
         if not cleaned:
             return True

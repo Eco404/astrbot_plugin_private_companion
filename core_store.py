@@ -271,7 +271,7 @@ class CoreStoreMixin:
         if reload_data:
             self.data = self.store_manager.load_initial_store()
 
-    def _save_config_if_possible(self) -> None:
+    async def _save_config_if_possible(self) -> bool:
         for method_name in ("save_config", "save", "save_conf"):
             save = getattr(self.config, method_name, None)
             if not callable(save):
@@ -280,11 +280,8 @@ class CoreStoreMixin:
                 _ensure_config_parent_dir(self.config, logger=logger)
                 result = save()
                 if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                    close = getattr(result, "close", None)
-                    if callable(close):
-                        close()
-                    logger.debug("[PrivateCompanion] 自动保存配置返回异步对象，已跳过同步等待: %s", method_name)
-                return
+                    await result
+                return True
             except TypeError:
                 continue
             except FileNotFoundError as exc:
@@ -292,18 +289,18 @@ class CoreStoreMixin:
                     try:
                         result = save()
                         if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                            close = getattr(result, "close", None)
-                            if callable(close):
-                                close()
-                        return
+                            await result
+                        return True
                     except Exception as retry_exc:
-                        logger.debug("[PrivateCompanion] 自动保存配置重试失败: %s", _single_line(retry_exc, 120))
-                        return
-                logger.debug("[PrivateCompanion] 自动保存配置失败: %s", _single_line(exc, 120))
-                return
+                        logger.warning("[PrivateCompanion] 自动保存配置重试失败: %s", _single_line(retry_exc, 120))
+                        return False
+                logger.warning("[PrivateCompanion] 自动保存配置失败: %s", _single_line(exc, 120))
+                return False
             except Exception as exc:
-                logger.debug("[PrivateCompanion] 自动保存配置失败: %s", _single_line(exc, 120))
-                return
+                logger.warning("[PrivateCompanion] 自动保存配置失败: %s", _single_line(exc, 120))
+                return False
+        logger.warning("[PrivateCompanion] 当前配置对象没有可用保存方法，本次修改未落盘")
+        return False
 
     def _set_runtime_bool_config(self, key: str, value: bool) -> None:
         setattr(self, key, bool(value))
@@ -357,6 +354,7 @@ class CoreStoreMixin:
             "daily_outfit_photo": {},
             "daily_outfit_history": [],
             "recent_photo_generations": [],
+            "recent_photo_continuity": {},
             "daily_story_plan": {},
             "daily_story_plan_history": [],
             "skill_growth": {},
@@ -418,6 +416,7 @@ class CoreStoreMixin:
         data.setdefault("daily_outfit_photo", {})
         data.setdefault("daily_outfit_history", [])
         data.setdefault("recent_photo_generations", [])
+        data.setdefault("recent_photo_continuity", {})
         data.setdefault("daily_story_plan", {})
         data.setdefault("daily_story_plan_history", [])
         data.setdefault("skill_growth", {})
@@ -769,14 +768,18 @@ class CoreStoreMixin:
                     logger.info("[PrivateCompanion] 启动读取数据时压缩历史存储: %s", compacted)
                 return data
             except Exception as exc:
-                logger.warning("[PrivateCompanion] StoreManager 读取失败,回退 JSON: %s", _single_line(exc, 160))
+                logger.error(
+                    "[PrivateCompanion] StoreManager 读取失败，为避免用空数据覆盖原存储，已中止加载: %s",
+                    _single_line(exc, 200),
+                )
+                raise
         if not os.path.exists(self.data_file):
             return self._new_store()
         try:
             with open(self.data_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
-                return self._new_store()
+                raise ValueError("数据文件根节点必须是 JSON 对象")
             data = self._ensure_store_defaults(data)
             changed = self._sanitize_store_control_tags_inplace(data)
             repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
@@ -788,9 +791,12 @@ class CoreStoreMixin:
             if compacted:
                 logger.info("[PrivateCompanion] 启动读取 JSON 时压缩历史存储: %s", compacted)
             return data
-        except Exception as e:
-            logger.warning(f"[PrivateCompanion] 读取数据失败,将使用空数据: {e}")
-            return self._new_store()
+        except Exception as exc:
+            logger.error(
+                "[PrivateCompanion] 读取已有 JSON 数据失败，为避免覆盖原文件，已中止加载: %s",
+                _single_line(exc, 200),
+            )
+            raise
 
     def _save_data_sync(self):
         compacted = self._compact_store_history_inplace(self.data)
@@ -885,6 +891,9 @@ class CoreStoreMixin:
 
     def _schedule_data_save(self, delay: float = 1.5) -> None:
         self._data_save_dirty = True
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            return
         task = getattr(self, "_data_save_task", None)
         if isinstance(task, asyncio.Task) and not task.done():
             return
@@ -910,7 +919,13 @@ class CoreStoreMixin:
                 logger.warning("[PrivateCompanion] 延迟保存数据失败: %s", exc)
             finally:
                 self._data_save_task = None
-                if should_retry and bool(getattr(self, "_data_save_dirty", False)):
+                stop_event = getattr(self, "_stop_event", None)
+                stopping = bool(
+                    stop_event is not None
+                    and callable(getattr(stop_event, "is_set", None))
+                    and stop_event.is_set()
+                )
+                if should_retry and not stopping and bool(getattr(self, "_data_save_dirty", False)):
                     retry_delay = max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
                     try:
                         self._schedule_data_save(delay=retry_delay)
@@ -930,6 +945,13 @@ class CoreStoreMixin:
                 await asyncio.shield(task)
                 continue
             if bool(getattr(self, "_data_save_dirty", False)):
+                stop_event = getattr(self, "_stop_event", None)
+                if (
+                    stop_event is not None
+                    and callable(getattr(stop_event, "is_set", None))
+                    and stop_event.is_set()
+                ):
+                    return
                 self._schedule_data_save(delay=0.0)
                 continue
             return

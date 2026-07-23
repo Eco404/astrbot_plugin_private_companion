@@ -103,7 +103,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _redact_outbound_secrets, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .helpers import _date_key, _now_ts, _path_text, _redact_outbound_secrets, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -4586,7 +4586,7 @@ class ProactiveEngineMixin:
             if diagnostic_detail:
                 item["diagnostic_detail"] = self._proactive_audit_safe_note(diagnostic_detail, limit=2400)
             if image_path:
-                item["image_path"] = _single_line(image_path, 260)
+                item["image_path"] = _path_text(image_path, 1000)
             if extra_count is not None:
                 item["extra_count"] = max(0, int(extra_count))
             if action:
@@ -6362,7 +6362,7 @@ class ProactiveEngineMixin:
             user["proactive_daypart_counts"] = raw
         raw[bucket] = _safe_int(raw.get(bucket), 0, 0) + 1
 
-    def _note_action_sent(self, user: dict[str, Any], action: str) -> None:
+    def _note_action_affinity_sent(self, user: dict[str, Any], action: str) -> None:
         raw = user.setdefault("action_reply_affinity", {})
         if not isinstance(raw, dict):
             raw = {}
@@ -6371,9 +6371,10 @@ class ProactiveEngineMixin:
         for part in [item.strip() for item in str(action or "message").split("+") if item.strip()]:
             if part == "message":
                 continue
-            stats = raw.setdefault(part, {"sent": 0, "replied": 0})
+            stats = raw.get(part)
             if not isinstance(stats, dict):
-                stats = {"sent": 0, "replied": 0}
+                legacy_replied = _safe_int(stats, 0, 0)
+                stats = {"sent": legacy_replied, "replied": legacy_replied}
                 raw[part] = stats
             stats["sent"] = _safe_int(stats.get("sent"), 0, 0) + 1
             if part == "photo_text":
@@ -6395,7 +6396,7 @@ class ProactiveEngineMixin:
             user["photo_generated_day"] = today
             user["photo_generated_today"] = 0
         user["photo_generated_today"] = _safe_int(user.get("photo_generated_today"), 0) + 1
-        user["last_generated_photo_path"] = _single_line(image_path, 260)
+        user["last_generated_photo_path"] = _path_text(image_path, 1000)
         user["last_generated_photo_at"] = _now_ts()
 
     def _note_screen_peek_attempt(self, user_id: str, reason: str = "", *, count_daily: bool = True) -> None:
@@ -6431,7 +6432,7 @@ class ProactiveEngineMixin:
         except Exception:
             pass
 
-    def _note_action_reply_feedback(self, user: dict[str, Any], action: str) -> None:
+    def _note_action_affinity_reply_feedback(self, user: dict[str, Any], action: str) -> None:
         raw = user.setdefault("action_reply_affinity", {})
         if not isinstance(raw, dict):
             raw = {}
@@ -6439,11 +6440,18 @@ class ProactiveEngineMixin:
         for part in [item.strip() for item in str(action or "message").split("+") if item.strip()]:
             if part == "message":
                 continue
-            stats = raw.setdefault(part, {"sent": 0, "replied": 0})
+            stats = raw.get(part)
             if not isinstance(stats, dict):
-                stats = {"sent": 0, "replied": 0}
+                legacy_replied = _safe_int(stats, 0, 0)
+                # A reply can arrive after upgrading from the old integer-only
+                # format, while the matching send was never counted as sent.
+                stats = {"sent": legacy_replied + 1, "replied": legacy_replied}
                 raw[part] = stats
             stats["replied"] = _safe_int(stats.get("replied"), 0, 0) + 1
+            stats["sent"] = max(
+                _safe_int(stats.get("sent"), 0, 0),
+                _safe_int(stats.get("replied"), 0, 0),
+            )
 
     def _maybe_make_followup_event(self, user: dict[str, Any], reason: str, action: str) -> dict[str, Any] | None:
         daily_limit = self._effective_user_daily_limit(user)

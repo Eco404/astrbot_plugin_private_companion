@@ -94,6 +94,14 @@ def _single_line(text: Any, limit: int = 80) -> str:
     return normalized[:limit]
 
 
+def _path_text(value: Any, limit: int = 1000) -> str:
+    """Normalize a configured path without changing legal internal whitespace."""
+    normalized = str(value or "").replace("\r", "").replace("\n", "").strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
+        normalized = normalized[1:-1].strip()
+    return normalized[:limit] if limit > 0 else normalized
+
+
 def _normalize_photo_subject_owner(value: Any) -> str:
     normalized = _single_line(value, 40).strip().lower().replace("-", "_")
     if normalized in {"bot", "self", "persona", "character", "当前人格", "机器人", "角色本人"}:

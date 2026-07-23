@@ -12,6 +12,10 @@ from astrbot.api import logger
 from .backend_base import StoreBackendBase
 
 
+class SqliteStoreNotInitializedError(RuntimeError):
+    """The database exists, but no store snapshot has been committed yet."""
+
+
 class SqliteStoreBackend(StoreBackendBase):
     def __init__(
         self,
@@ -56,17 +60,26 @@ class SqliteStoreBackend(StoreBackendBase):
             finally:
                 conn.close()
             if not rows:
-                return self.new_store()
+                raise SqliteStoreNotInitializedError(
+                    f"SQLite store is not initialized: {self.db_path}"
+                )
             data: dict[str, Any] = self.new_store()
             for section_name, payload_json in rows:
                 try:
                     data[str(section_name)] = json.loads(payload_json)
-                except Exception:
-                    logger.warning("[PrivateCompanion] SQLite section 读取失败: %s", section_name)
+                except Exception as exc:
+                    raise ValueError(
+                        f"SQLite section payload is invalid: {section_name}"
+                    ) from exc
             return self.ensure_defaults(data)
+        except SqliteStoreNotInitializedError:
+            raise
         except Exception as exc:
-            logger.warning(f"[PrivateCompanion] 读取 SQLite 数据失败,将使用空数据: {exc}")
-            return self.new_store()
+            logger.warning(
+                "[PrivateCompanion] 读取 SQLite 数据失败,已保留原数据库并中止加载: %s",
+                exc,
+            )
+            raise
 
     def save_store(self, data: dict[str, Any]) -> None:
         conn = self._connect()

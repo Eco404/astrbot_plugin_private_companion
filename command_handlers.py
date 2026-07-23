@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import base64
+import hashlib
 import re
 import shutil
 import uuid
@@ -14,7 +15,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
-from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
+from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _path_text, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
 
 
 _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -149,7 +150,7 @@ class CommandHandlersMixin:
             saved = _set_into_config(config, key, value)
         return bool(saved)
 
-    def _swap_external_image_api_command_text(self, *, force: bool = False) -> str:
+    async def _swap_external_image_api_command_text(self, *, force: bool = False) -> str:
         endpoints = self._image_api_endpoint_queue_for_command()
         if endpoints:
             if len(endpoints) < 2:
@@ -177,7 +178,11 @@ class CommandHandlersMixin:
             self.external_image_api_endpoints = changed
             self._set_image_api_config_value("external_image_api_endpoints", changed)
             self._sync_legacy_image_api_config_from_command_endpoints(changed)
-            self._save_config_if_possible()
+            if not await self._save_config_if_possible():
+                self.external_image_api_endpoints = endpoints
+                self._set_image_api_config_value("external_image_api_endpoints", endpoints)
+                self._sync_legacy_image_api_config_from_command_endpoints(endpoints)
+                return "在线生图 API 优先级交换失败：配置未能保存，已恢复原顺序。"
             return "已交换在线生图 API 队列前两项。\n" + self._image_api_command_status_text()
 
         pairs = (
@@ -230,9 +235,18 @@ class CommandHandlersMixin:
             self._set_image_api_config_value(primary_key, backup_value)
             self._set_image_api_config_value(backup_key, primary_value)
 
+        old_backup_enabled = bool(getattr(self, "enable_backup_external_image_api", False))
         self.enable_backup_external_image_api = old_primary_complete
         self._set_image_api_config_value("enable_backup_external_image_api", old_primary_complete)
-        self._save_config_if_possible()
+        if not await self._save_config_if_possible():
+            for primary_attr, backup_attr, primary_key, backup_key in pairs:
+                setattr(self, primary_attr, current.get(primary_attr))
+                setattr(self, backup_attr, current.get(backup_attr))
+                self._set_image_api_config_value(primary_key, current.get(primary_attr))
+                self._set_image_api_config_value(backup_key, current.get(backup_attr))
+            self.enable_backup_external_image_api = old_backup_enabled
+            self._set_image_api_config_value("enable_backup_external_image_api", old_backup_enabled)
+            return "主/备在线生图 API 交换失败：配置未能保存，已恢复原配置。"
         return "已交换主/备在线生图 API。\n" + self._image_api_command_status_text()
 
     def _companion_manual_clean_multiline(self, value: Any, limit: int = 1800) -> str:
@@ -2176,11 +2190,13 @@ class CommandHandlersMixin:
             return None
         return pending
 
-    def _companion_manual_apply_config_value(self, key: str, value: Any) -> tuple[bool, str, Any, Any]:
+    async def _companion_manual_apply_config_value(self, key: str, value: Any) -> tuple[bool, str, Any, Any]:
         ok, normalized, error = self._companion_manual_normalize_config_value(key, value)
         if not ok:
             return False, error, None, None
         old = self._companion_manual_current_config_value(key)
+        old_semantic_debounce = getattr(self, "enable_semantic_message_debounce", None)
+        old_semantic_seconds = getattr(self, "semantic_message_debounce_seconds", None)
         setattr(self, key, normalized)
         extra_config_updates: dict[str, Any] = {}
         if key == "enable_message_debounce":
@@ -2206,12 +2222,30 @@ class CommandHandlersMixin:
                     _set_into_config(config, extra_key, extra_value, allow_flat_fallback=False)
                 except TypeError:
                     _set_into_config(config, extra_key, extra_value)
-            self._save_config_if_possible()
+            if saved and not await self._save_config_if_possible():
+                setattr(self, key, old)
+                old_config_value = old
+                if key == "rest_reply_probability":
+                    old_config_value = max(0, min(100, int(round(_safe_float(old, 0.0, 0.0) * 100))))
+                _set_into_config(config, key, old_config_value)
+                if key == "enable_message_debounce":
+                    self.enable_semantic_message_debounce = old_semantic_debounce
+                    _set_into_config(config, "enable_semantic_message_debounce", old_semantic_debounce)
+                if key == "text_message_debounce_seconds":
+                    self.semantic_message_debounce_seconds = old_semantic_seconds
+                    _set_into_config(config, "semantic_message_debounce_seconds", old_semantic_seconds)
+                return False, "配置保存失败，已恢复修改前的运行配置。", old, old
         if not saved:
             logger.debug("[PrivateCompanion] 答疑设置只更新运行态,未找到可写配置项: key=%s", key)
+            setattr(self, key, old)
+            if key == "enable_message_debounce":
+                self.enable_semantic_message_debounce = old_semantic_debounce
+            if key == "text_message_debounce_seconds":
+                self.semantic_message_debounce_seconds = old_semantic_seconds
+            return False, "配置项无法写入，已恢复修改前的运行配置。", old, old
         return True, "", old, normalized
 
-    def _companion_manual_apply_pending_config(self, event: AstrMessageEvent) -> str:
+    async def _companion_manual_apply_pending_config(self, event: AstrMessageEvent) -> str:
         if not self._companion_manual_can_apply_config(event):
             return self._management_denied_text()
         pending = self._companion_manual_get_pending_config(event)
@@ -2226,7 +2260,7 @@ class CommandHandlersMixin:
             if not isinstance(item, dict):
                 continue
             key = str(item.get("key") or "").strip()
-            ok, error, old, new = self._companion_manual_apply_config_value(key, item.get("value"))
+            ok, error, old, new = await self._companion_manual_apply_config_value(key, item.get("value"))
             if not ok:
                 lines.append(f"- {key}：跳过，{error}")
                 continue
@@ -2278,7 +2312,7 @@ class CommandHandlersMixin:
             return key, parts[1].strip()
         return "", ""
 
-    def _companion_manual_apply_setting_command(self, event: AstrMessageEvent, text: str) -> str:
+    async def _companion_manual_apply_setting_command(self, event: AstrMessageEvent, text: str) -> str:
         if not self._companion_manual_can_apply_config(event):
             return self._management_denied_text()
         key, value = self._companion_manual_parse_setting_text(text)
@@ -2290,7 +2324,7 @@ class CommandHandlersMixin:
                 "也可以：陪伴 答疑设置 高强度阈值 5\n"
                 f"可改配置很多，前几个是：{allowed} ..."
             )
-        ok, error, old, new = self._companion_manual_apply_config_value(key, value)
+        ok, error, old, new = await self._companion_manual_apply_config_value(key, value)
         if not ok:
             return error
         self._companion_manual_pending_store().pop(self._companion_manual_pending_key(event), None)
@@ -3238,7 +3272,7 @@ class CommandHandlersMixin:
             if error:
                 suffix += f"\n上次失败原因：{error}"
             return "今天还没有新的每日穿搭图。" + suffix + "\n管理员可以手动用：陪伴 生成穿搭。", ""
-        path_text = _single_line(item.get("path"), 500).strip().strip('"').strip("'")
+        path_text = _path_text(item.get("path"), 1000)
         if not path_text:
             reason = error or note or "没有可用图片路径"
             retry_count = int(item.get("retry_count", 0) or 0)
@@ -3470,16 +3504,51 @@ class CommandHandlersMixin:
     ) -> tuple[list[tuple[str, str]], bool]:
         images: list[tuple[str, str]] = []
         saw_image = False
+        seen_sources: set[str] = set()
+        seen_fingerprints: set[str] = set()
+
+        def file_fingerprint(path_text: str) -> str:
+            try:
+                path = Path(path_text).resolve()
+                if not path.is_file():
+                    return ""
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+                return f"{path.stat().st_size}:{digest.hexdigest()}"
+            except (OSError, ValueError):
+                return ""
+
+        def remove_duplicate_copy(path_text: str) -> None:
+            try:
+                path = Path(path_text).resolve()
+                base = self._photo_reference_image_dir().resolve()
+                if path.is_file() and path.is_relative_to(base):
+                    path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
 
         async def collect(sources: list[str], label: str, stem: str) -> None:
             nonlocal saw_image
             for source in sources:
                 saw_image = True
+                source_key = str(source or "").strip()
+                if not source_key or source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
                 if len(images) >= max(1, limit):
                     return
                 path = await self._photo_reference_source_to_stable_path(source, stem=stem, event=event)
-                if path and all(existing_path != path for existing_path, _ in images):
-                    images.append((path, label))
+                if not path or any(existing_path == path for existing_path, _ in images):
+                    continue
+                fingerprint = file_fingerprint(path)
+                if fingerprint and fingerprint in seen_fingerprints:
+                    remove_duplicate_copy(path)
+                    continue
+                if fingerprint:
+                    seen_fingerprints.add(fingerprint)
+                images.append((path, label))
 
         await collect(await self._photo_reference_sources_from_current_event(event, user_id), "随消息发送的图片", "message_library")
         if len(images) < max(1, limit):
@@ -3489,7 +3558,7 @@ class CommandHandlersMixin:
         return images, saw_image
 
     def _resolve_photo_reference_command_path(self, value: str) -> tuple[str, str]:
-        raw = _single_line(value, 1000).strip().strip('"').strip("'")
+        raw = _path_text(value, 1000)
         if not raw:
             return "", "请这样设置：陪伴 参考图 <本地图片路径或图片URL>"
         if re.match(r"^https?://", raw, flags=re.I):
@@ -3510,30 +3579,56 @@ class CommandHandlersMixin:
             return str(resolved), ""
         return "", "没有找到这张本地图片。请确认路径存在，并且 Bot 所在机器能访问；也可以直接填写 http(s) 图片 URL。"
 
-    def _set_photo_reference_config_path(self, path: str) -> bool:
-        clean = _single_line(path, 260)
+    async def _set_photo_reference_config_path(self, path: str) -> bool:
+        clean = _path_text(path, 1000)
+        previous = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
         self.photo_persona_reference_image_path = clean
         try:
             saved = _set_into_config(self.config, "photo_persona_reference_image_path", clean)
-            if saved:
-                self._save_config_if_possible()
+            if saved and not await self._save_config_if_possible():
+                self.photo_persona_reference_image_path = previous
+                _set_into_config(self.config, "photo_persona_reference_image_path", previous)
+                return False
             return bool(saved)
         except Exception:
+            self.photo_persona_reference_image_path = previous
+            try:
+                _set_into_config(self.config, "photo_persona_reference_image_path", previous)
+            except Exception:
+                pass
             return False
 
-    def _set_photo_reference_library_config(self, items: list[Any]) -> bool:
-        normalized: list[str] = []
+    async def _set_photo_reference_library_config(self, items: list[Any]) -> bool:
+        normalized: list[Any] = []
+        seen_sources: set[str] = set()
         for raw_item in items[:24]:
+            if isinstance(raw_item, dict):
+                source = _path_text(raw_item.get("source") or raw_item.get("path") or raw_item.get("url"), 1000)
+                if not source or source in seen_sources:
+                    continue
+                seen_sources.add(source)
+                normalized.append(dict(raw_item))
+                continue
             text = str(raw_item or "").strip()
-            if text and text not in normalized:
-                normalized.append(text[:1600])
+            source = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)[0].strip() if text else ""
+            if text and source not in seen_sources:
+                seen_sources.add(source)
+                normalized.append(text[:3000])
+        previous = list(getattr(self, "photo_reference_library", []) or [])
         self.photo_reference_library = normalized
         try:
             saved = _set_into_config(self.config, "photo_reference_library", normalized)
-            if saved:
-                self._save_config_if_possible()
+            if saved and not await self._save_config_if_possible():
+                self.photo_reference_library = previous
+                _set_into_config(self.config, "photo_reference_library", previous)
+                return False
             return bool(saved)
         except Exception:
+            self.photo_reference_library = previous
+            try:
+                _set_into_config(self.config, "photo_reference_library", previous)
+            except Exception:
+                pass
             return False
 
     async def _photo_reference_library_command_payload(
@@ -3580,13 +3675,13 @@ class CommandHandlersMixin:
                 for item_index, item in enumerate(entries)
                 if item_index != index
             ]
-            saved = self._set_photo_reference_library_config(kept)
+            saved = await self._set_photo_reference_library_config(kept)
             return (
                 f"已从参考图库删除第 {index + 1} 张：{_single_line(removed.get('note'), 160)}"
                 + ("" if saved else "\n但配置保存可能失败，请到面板确认。")
             ), ""
         if action in {"清空", "全部清空", "clear", "clear all"}:
-            saved = self._set_photo_reference_library_config([])
+            saved = await self._set_photo_reference_library_config([])
             return "已清空参考图库。" + ("" if saved else "\n但配置保存可能失败，请到面板确认。"), ""
 
         add_match = re.match(r"^(?:添加|上传|新增|add|upload)(?:\s+([\s\S]*))?$", action, flags=re.I)
@@ -3603,7 +3698,7 @@ class CommandHandlersMixin:
             if not added:
                 return "参考图库已达到 24 张上限，请先删除不用的图片。", ""
             current.extend(f"{path} || {note}" for path, _label in added)
-            saved = self._set_photo_reference_library_config(current)
+            saved = await self._set_photo_reference_library_config(current)
             return (
                 f"已向参考图库添加 {len(added)} 张图片。\n用途注释：{note}\n"
                 "生成时会结合地点、服装和画面要求自动选择其中一张；今日穿搭图不再无条件优先。"
@@ -3625,7 +3720,7 @@ class CommandHandlersMixin:
     async def _photo_reference_command_payload(self, event: AstrMessageEvent, user_id: str, value: str = "") -> tuple[str, str]:
         action = _single_line(value, 1000)
         if action in {"清空", "删除", "移除", "clear", "none", "空"}:
-            saved = self._set_photo_reference_config_path("")
+            saved = await self._set_photo_reference_config_path("")
             return "已清空主动自拍人设参考图。" + ("" if saved else "\n但配置保存可能失败，请稍后在配置页确认。"), ""
         force_image = action in {"图片", "这张", "这张图", "引用", "引用图", "引用图片", "设置", "更换", "更新", "添加", "上传", "用这张", "使用这张"}
         preview_actions = {"查看", "状态", "当前", "预览", "检查", "发出来", "发图", "看看", "current", "show", "preview"}
@@ -3634,7 +3729,7 @@ class CommandHandlersMixin:
         if not action or force_image:
             image_path, image_label, saw_image = await self._photo_reference_image_from_command_context(event, user_id)
             if image_path:
-                saved = self._set_photo_reference_config_path(image_path)
+                saved = await self._set_photo_reference_config_path(image_path)
                 enabled_note = (
                     "参考图一致性已开启，会在 selfie/人像/头像/角色表情包自动生图里使用。"
                     if getattr(self, "enable_photo_reference_image", False)
@@ -3652,7 +3747,7 @@ class CommandHandlersMixin:
                     return "找到了图片，但没能保存成参考图。参考图只支持 png、jpg、jpeg、webp；也可能是平台只给了图片 file id，拿不到原图。", ""
                 return "没有在这条消息或引用消息里找到图片。可以发送图片并附上“陪伴 参考图”，或回复一条近期图片消息发送“陪伴 参考图”。", ""
         if not action or action in preview_actions:
-            configured = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 260)
+            configured = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
             resolved = self._photo_persona_reference_image_path() if callable(getattr(self, "_photo_persona_reference_image_path", None)) else ""
             enabled = bool(getattr(self, "enable_photo_reference_image", False))
             if not configured:
@@ -3665,7 +3760,7 @@ class CommandHandlersMixin:
                 async_resolver = getattr(self, "_photo_persona_reference_image_path_async", None)
                 if enabled and callable(async_resolver):
                     try:
-                        resolved = _single_line(await async_resolver(), 260)
+                        resolved = _path_text(await async_resolver(), 1000)
                     except Exception as exc:
                         logger.info("[PrivateCompanion] 参考图查看时 URL 下载失败: %s", _single_line(exc, 120))
                         resolved = ""
@@ -3682,7 +3777,7 @@ class CommandHandlersMixin:
         if error:
             return error, ""
         stable_path = await self._photo_reference_source_to_stable_path(path, stem="manual") or path
-        saved = self._set_photo_reference_config_path(stable_path)
+        saved = await self._set_photo_reference_config_path(stable_path)
         enabled_note = (
             "参考图一致性已开启，会在 selfie/人像/头像/角色表情包自动生图里使用。"
             if getattr(self, "enable_photo_reference_image", False)
@@ -3893,7 +3988,7 @@ class CommandHandlersMixin:
             user["natural_photo_generated_day"] = today
             user["natural_photo_generated_today"] = 0
         user["natural_photo_generated_today"] = _safe_int(user.get("natural_photo_generated_today"), 0) + 1
-        user["last_natural_photo_path"] = _single_line(image_path, 260)
+        user["last_natural_photo_path"] = _path_text(image_path, 1000)
         user["last_natural_photo_at"] = _now_ts()
 
     def _command_photo_quota_left(self, user: dict[str, Any]) -> int | None:
@@ -3916,8 +4011,49 @@ class CommandHandlersMixin:
             user["command_photo_generated_day"] = today
             user["command_photo_generated_today"] = 0
         user["command_photo_generated_today"] = _safe_int(user.get("command_photo_generated_today"), 0) + 1
-        user["last_command_photo_path"] = _single_line(image_path, 260)
+        user["last_command_photo_path"] = _path_text(image_path, 1000)
         user["last_command_photo_at"] = _now_ts()
+
+    @staticmethod
+    def _natural_photo_prompt_has_explicit_wardrobe_request(prompt: Any) -> bool:
+        text = _single_line(prompt, 1200).lower()
+        if not text:
+            return False
+        chinese_markers = (
+            "睡衣",
+            "睡裙",
+            "睡袍",
+            "居家服",
+            "家居服",
+            "角色扮演",
+            "扮成",
+            "换装",
+            "换衣",
+            "校服",
+            "制服",
+            "礼服",
+            "泳装",
+            "泳衣",
+            "比基尼",
+            "运动服",
+            "健身服",
+            "瑜伽服",
+            "女仆装",
+            "巫女服",
+        )
+        if any(marker in text for marker in chinese_markers):
+            return True
+        return bool(
+            re.search(
+                r"(?<![a-z0-9])(?:cos|cosplay)(?![a-z0-9])|"
+                r"\b(?:costume|pajamas?|pyjamas?|sleepwear|nightgown|nightdress|loungewear|homewear|"
+                r"swimsuits?|swimwear|bikini|sportswear|activewear|tuxedo)\b|"
+                r"\b(?:school\s+uniform|formal\s+dress|evening\s+gown|gym\s+wear|workout\s+(?:clothes|outfit)|"
+                r"home\s+wear|lounge\s+wear)\b",
+                text,
+                flags=re.I,
+            )
+        )
 
     def _build_natural_language_photo_prompt(
         self,
@@ -3941,9 +4077,12 @@ class CommandHandlersMixin:
         if kind == "edit" and has_reference:
             positive = [
                 "image edit based on the provided reference image",
+                "the provided image is the sole visual reference and source canvas",
+                "this is an image editing task, not a selfie or new portrait generation request",
                 f"user request: {_single_line(prompt, 420) or 'edit the reference image'}",
                 "preserve unchanged subjects, composition, identity, clothing, and important details",
                 "only modify the parts explicitly requested by the user",
+                "do not replace any person with the assistant persona or today's outfit",
                 style_prompt,
             ]
             negative = [
@@ -3957,6 +4096,21 @@ class CommandHandlersMixin:
                 "nsfw",
             ]
         elif kind == "selfie":
+            explicit_wardrobe_request = self._natural_photo_prompt_has_explicit_wardrobe_request(prompt)
+            if explicit_wardrobe_request:
+                wardrobe_continuity = (
+                    "the user's explicit clothing or outfit request in this turn has highest priority; follow that requested "
+                    "wardrobe and ignore any conflicting details from today's outfit or older wardrobe continuity; preserve the "
+                    "character identity and stable appearance"
+                )
+                if has_reference:
+                    wardrobe_continuity += (
+                        "; use the reference image for identity and compatible visual details, not to restore conflicting clothes"
+                    )
+            elif has_reference:
+                wardrobe_continuity = "keep today's outfit and character appearance consistent with the reference image"
+            else:
+                wardrobe_continuity = "keep today's outfit and character appearance consistent with available visual continuity"
             positive = [
                 "single character selfie",
                 "solo",
@@ -3966,7 +4120,6 @@ class CommandHandlersMixin:
                 "clear eyes",
                 "natural expression",
                 "upper body or outfit visible",
-                "keep today's outfit and character appearance consistent with the reference image",
                 "natural phone snapshot",
                 "centered composition",
                 "soft natural light",
@@ -4008,10 +4161,14 @@ class CommandHandlersMixin:
                 "logo",
                 "nsfw",
             ]
-        if visual_memory:
+        if visual_memory and kind != "edit":
             positive.append(f"visual continuity reference: {_single_line(visual_memory, 360)}")
         if extra_prompt:
             positive.append(f"additional generation preference: {_single_line(extra_prompt, 420)}")
+        if kind == "selfie":
+            # Keep the current-turn wardrobe decision after inherited visual
+            # context so stale outfit details cannot become the last instruction.
+            positive.append(wardrobe_continuity)
         return _single_line(
             "Positive prompt: "
             + ", ".join(part for part in positive if _single_line(part, 520))
@@ -4020,6 +4177,15 @@ class CommandHandlersMixin:
             + ".",
             6500,
         )
+
+    @staticmethod
+    def _photo_generation_workflow_kind(intent_kind: str) -> str:
+        normalized = str(intent_kind or "").strip().lower()
+        if normalized in {"edit", "改图", "修图", "重绘", "p图"}:
+            return "edit"
+        if normalized in {"selfie", "portrait", "自拍", "人像", "sticker", "emoji", "meme", "表情包", "贴纸"}:
+            return "selfie"
+        return "text2img"
 
     def _visual_photo_memory_context(self, memory_context: str, *, limit: int = 520) -> str:
         raw = str(memory_context or "").strip()
@@ -4337,7 +4503,7 @@ class CommandHandlersMixin:
             memory_context=memory_context,
         )
         intent_kind = str(intent.get("kind") or "text2img")
-        workflow_kind = "selfie" if reference_path or intent_kind == "selfie" else "text2img"
+        workflow_kind = self._photo_generation_workflow_kind(intent_kind)
         ack_text = await self._natural_language_photo_ack_reply_text(
             event,
             user,
@@ -4345,11 +4511,19 @@ class CommandHandlersMixin:
             has_reference=bool(reference_path),
         )
         await self._reply(event, ack_text)
+        generation_session_key = f"natural_photo_{user_id}"
+        continuity_composer = getattr(self, "_compose_photo_continuity_key", None)
+        continuity_key = (
+            continuity_composer(getattr(event, "unified_msg_origin", ""), user_id)
+            if callable(continuity_composer)
+            else ""
+        )
         try:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
-                session_key=f"natural_photo_{user_id}",
+                session_key=generation_session_key,
+                continuity_key=continuity_key,
                 reference_image_path=reference_path,
             )
         except Exception as exc:
@@ -4399,6 +4573,17 @@ class CommandHandlersMixin:
             image_path=image_path,
             caption=caption,
         )
+        annotator = getattr(self, "_annotate_recent_photo_generation", None)
+        if callable(annotator):
+            annotator(
+                image_path=image_path,
+                session_key=generation_session_key,
+                trigger="natural_photo_rule",
+                intent_kind=intent_kind,
+                sent=bool(delivery.get("sent")),
+                caption=caption,
+                tool_name="natural_photo_rule",
+            )
         if not delivery.get("sent"):
             await self._reply(event, _single_line(delivery.get("message"), 180) or "图片未能发送。")
         elif delivery.get("destination") == "private":
@@ -4550,7 +4735,7 @@ class CommandHandlersMixin:
             has_reference=bool(reference_path),
             memory_context=memory_context,
         )
-        workflow_kind = "selfie" if reference_path or forced_kind == "selfie" else "text2img"
+        workflow_kind = self._photo_generation_workflow_kind(forced_kind)
         async with self._data_lock:
             user = self._get_user(user_id)
             user_snapshot = dict(user)
@@ -4561,11 +4746,19 @@ class CommandHandlersMixin:
             has_reference=bool(reference_path),
         )
         await self._reply(event, ack_text)
+        generation_session_key = f"command_photo_{user_id}"
+        continuity_composer = getattr(self, "_compose_photo_continuity_key", None)
+        continuity_key = (
+            continuity_composer(getattr(event, "unified_msg_origin", ""), user_id)
+            if callable(continuity_composer)
+            else ""
+        )
         try:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
-                session_key=f"command_photo_{user_id}",
+                session_key=generation_session_key,
+                continuity_key=continuity_key,
                 reference_image_path=reference_path,
             )
         except Exception as exc:
@@ -4616,6 +4809,17 @@ class CommandHandlersMixin:
             image_path=image_path,
             caption=caption,
         )
+        annotator = getattr(self, "_annotate_recent_photo_generation", None)
+        if callable(annotator):
+            annotator(
+                image_path=image_path,
+                session_key=generation_session_key,
+                trigger="command_photo",
+                intent_kind=forced_kind,
+                sent=bool(delivery.get("sent")),
+                caption=caption,
+                tool_name="companion_photo_command",
+            )
         if not delivery.get("sent"):
             await self._reply(event, _single_line(delivery.get("message"), 180) or "图片未能发送。")
         elif delivery.get("destination") == "private":

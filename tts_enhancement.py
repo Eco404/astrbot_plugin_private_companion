@@ -2147,13 +2147,16 @@ TTS 朗读文本：
                 else:
                     remainder_started_at = time.time()
             event.set_result(self._build_result_from_chain(ordered_chunks[0]))
-            asyncio.create_task(
-                self._send_tts_chain_chunks_after_first(
-                    event,
-                    ordered_chunks[1:],
-                    started_at=remainder_started_at,
-                )
+            remainder = self._send_tts_chain_chunks_after_first(
+                event,
+                ordered_chunks[1:],
+                started_at=remainder_started_at,
             )
+            task_creator = getattr(self, "_create_lifecycle_background_task", None)
+            if callable(task_creator):
+                task_creator(remainder, label="tts_reply_remainder")
+            else:
+                asyncio.create_task(remainder)
             return
         event.set_result(self._build_result_from_chain(ordered_chunks[0] if ordered_chunks else new_chain))
 

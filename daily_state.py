@@ -105,7 +105,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize_photo_subject_owner, _now_ts, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize_photo_subject_owner, _now_ts, _path_text, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
 from .planning import (
     build_daily_plan_prompt,
@@ -246,6 +246,13 @@ _PLATFORM_DISPLAY_NAMES = {
 class DailyStateMixin:
     """日程、状态、天气、日记、技能成长和计时器"""
 
+    def _daily_generation_lock(self, attribute: str) -> asyncio.Lock:
+        lock = getattr(self, attribute, None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            setattr(self, attribute, lock)
+        return lock
+
     def _next_detail_due_in_seconds(self, now: float | None = None) -> float | None:
         if not self.enable_detail_enhancement:
             return None
@@ -324,16 +331,32 @@ class DailyStateMixin:
         return plan
 
     async def _ensure_daily_diary(self, force: bool = False) -> dict[str, Any] | None:
+        request_started = time.monotonic()
+        lock = self._daily_generation_lock("_daily_diary_generation_lock")
+        async with lock:
+            if (
+                force
+                and _safe_float(getattr(self, "_daily_diary_force_completed_at", 0), 0) >= request_started
+            ):
+                completed = getattr(self, "_daily_diary_force_last_result", None)
+                if isinstance(completed, dict):
+                    return completed
+            diary = await self._ensure_daily_diary_once(force=force)
+            if force and isinstance(diary, dict):
+                self._daily_diary_force_last_result = diary
+                self._daily_diary_force_completed_at = time.monotonic()
+            return diary
+
+    async def _ensure_daily_diary_once(self, force: bool = False) -> dict[str, Any] | None:
         if not self.enable_daily_diary and not force:
             return None
-        today = _today_key()
-        now_ts = _now_ts()
+        request_day = _today_key()
         async with self._data_lock:
-            if not force and self.data.get("diary_generated_day") == today:
+            if not force and self.data.get("diary_generated_day") == request_day:
                 return None
-            if not force and self.data.get("daily_diary_failed_day") == today:
+            if not force and self.data.get("daily_diary_failed_day") == request_day:
                 failed_at = _safe_float(self.data.get("daily_diary_failed_at"), 0, 0)
-                if failed_at > 0 and now_ts - failed_at < 30 * 60:
+                if failed_at > 0 and _now_ts() - failed_at < 30 * 60:
                     return None
             if not force and not self._is_daily_diary_due():
                 return None
@@ -342,8 +365,8 @@ class DailyStateMixin:
             diary = await self._generate_daily_diary()
         except Exception as exc:
             async with self._data_lock:
-                self.data["daily_diary_failed_day"] = today
-                self.data["daily_diary_failed_at"] = now_ts
+                self.data["daily_diary_failed_day"] = request_day
+                self.data["daily_diary_failed_at"] = _now_ts()
                 self.data["daily_diary_last_error"] = _single_line(exc, 180)
                 self._save_data_sync()
             if force:
@@ -354,16 +377,46 @@ class DailyStateMixin:
             )
             return None
 
+        diary_day = _single_line(diary.get("date"), 16) if isinstance(diary, dict) else ""
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", diary_day):
+            diary_day = _today_key()
+            if isinstance(diary, dict):
+                diary["date"] = diary_day
+        memory_payload: dict[str, str] | None = None
         async with self._data_lock:
             diaries = self.data.setdefault("bot_diaries", [])
             if not isinstance(diaries, list):
                 diaries = []
                 self.data["bot_diaries"] = diaries
-            diaries.append(diary)
+            if not force and self.data.get("diary_generated_day") == diary_day:
+                return next(
+                    (
+                        item
+                        for item in reversed(diaries)
+                        if isinstance(item, dict) and _single_line(item.get("date"), 16) == diary_day
+                    ),
+                    None,
+                )
+            if force:
+                refreshed: list[Any] = []
+                replaced = False
+                for item in diaries:
+                    if isinstance(item, dict) and _single_line(item.get("date"), 16) == diary_day:
+                        if not replaced:
+                            refreshed.append(diary)
+                            replaced = True
+                        continue
+                    refreshed.append(item)
+                if not replaced:
+                    refreshed.append(diary)
+                diaries[:] = refreshed
+            else:
+                diaries.append(diary)
             del diaries[:-self.max_diary_entries]
             # Mark the diary as generated before optional enrichment so a post-process
             # bug cannot make the scheduler call the LLM again and again.
-            self.data["diary_generated_day"] = today
+            previous_generated_day = _single_line(self.data.get("diary_generated_day"), 16)
+            self.data["diary_generated_day"] = max(previous_generated_day, diary_day)
             self.data["daily_diary_failed_day"] = ""
             self.data["daily_diary_failed_at"] = 0
             self.data["daily_diary_last_error"] = ""
@@ -378,24 +431,25 @@ class DailyStateMixin:
                     "[PrivateCompanion] 今日日记已保存,但梦境碎片合并失败: %s",
                     _single_line(exc, 180),
                 )
-            # Record dream fragments to memory plugin for cross-session continuity
-            try:
-                dream_fragments = diary.get("dream_fragments", []) if isinstance(diary, dict) else []
-                if isinstance(dream_fragments, list) and dream_fragments:
-                    fragment = dream_fragments[0] if isinstance(dream_fragments[0], dict) else {}
-                    content = _single_line(fragment.get("content") or fragment.get("text") or fragment.get("dream"), 600)
-                    if content:
-                        await self._memory_companion_record_dream_fragment(
-                            content=content,
-                            mood=_single_line(fragment.get("mood") or fragment.get("emotion"), 40),
-                            dream_type=_single_line(fragment.get("type") or fragment.get("theme"), 40),
-                        )
-            except Exception:
-                pass
+            dream_fragments = diary.get("dream_fragments", []) if isinstance(diary, dict) else []
+            if isinstance(dream_fragments, list) and dream_fragments:
+                fragment = dream_fragments[0] if isinstance(dream_fragments[0], dict) else {}
+                content = _single_line(fragment.get("content") or fragment.get("text") or fragment.get("dream"), 600)
+                if content:
+                    memory_payload = {
+                        "content": content,
+                        "mood": _single_line(fragment.get("mood") or fragment.get("emotion"), 40),
+                        "dream_type": _single_line(fragment.get("type") or fragment.get("theme"), 40),
+                    }
             story_plan = diary.get("story_plan") if isinstance(diary, dict) else None
             if isinstance(story_plan, dict):
                 self.data["daily_story_plan"] = story_plan
             self._save_data_sync()
+        if memory_payload:
+            try:
+                await self._memory_companion_record_dream_fragment(**memory_payload)
+            except Exception:
+                pass
         return diary
 
     async def _ensure_detail_enhancement(self, force: bool = False) -> dict[str, Any] | None:
@@ -2374,7 +2428,7 @@ class DailyStateMixin:
             )
             return "发送失败，包含复杂组件，未缓存待重发内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
         clean_text = _single_line(text, 1200)
-        clean_image = _single_line(image_path, 260)
+        clean_image = _path_text(image_path, 1000)
         if not clean_text and not clean_image:
             self._abandon_failed_proactive_retry_candidate(
                 user,
@@ -2749,6 +2803,33 @@ class DailyStateMixin:
         skip_conversation_summary: bool = False,
         passive_fast: bool = False,
     ) -> dict[str, Any]:
+        request_started = time.monotonic()
+        lock = self._daily_generation_lock("_daily_state_generation_lock")
+        async with lock:
+            if (
+                force
+                and _safe_float(getattr(self, "_daily_state_force_completed_at", 0), 0) >= request_started
+            ):
+                completed = getattr(self, "_daily_state_force_last_result", None)
+                if isinstance(completed, dict):
+                    return completed
+            state = await self._ensure_daily_state_once(
+                force=force,
+                skip_conversation_summary=skip_conversation_summary,
+                passive_fast=passive_fast,
+            )
+            if force and isinstance(state, dict):
+                self._daily_state_force_last_result = state
+                self._daily_state_force_completed_at = time.monotonic()
+            return state
+
+    async def _ensure_daily_state_once(
+        self,
+        force: bool = False,
+        *,
+        skip_conversation_summary: bool = False,
+        passive_fast: bool = False,
+    ) -> dict[str, Any]:
         today = _today_key()
         if passive_fast and not force:
             cached_state = self.data.get("daily_state", {})
@@ -2798,22 +2879,55 @@ class DailyStateMixin:
                 self._save_data_sync()
                 return state
 
-            self._cleanup_expired_conditions()
-            if force:
-                self.data["state_conditions"] = []
-                self.data["state_generated_day"] = ""
-            if force or self.data.get("state_generated_day") != today:
-                self.data.setdefault("state_conditions", []).extend(
-                    await self._generate_state_conditions(weather)
-                )
-                self.data["state_generated_day"] = today
+            needs_generation = force or self.data.get("state_generated_day") != today
+            if not needs_generation:
+                self._cleanup_expired_conditions()
+                self._ensure_time_based_hunger_condition()
+                state = self._compose_state_from_conditions(weather)
+                self.data["daily_state"] = state
+                self._save_data_sync()
+                return state
+
+        generation_day = _today_key()
+        deferred_updates: dict[str, Any] = {}
+        generated_conditions = await self._generate_state_conditions(
+            weather,
+            deferred_state_updates=deferred_updates,
+        )
+
+        async with self._data_lock:
+            if not force and self.data.get("state_generated_day") == generation_day:
+                self._cleanup_expired_conditions()
+            else:
+                self._cleanup_expired_conditions()
+                if force:
+                    self.data["state_conditions"] = []
+                dream_pick = deferred_updates.get("dream_pick")
+                if isinstance(dream_pick, tuple):
+                    self._remember_daily_dream_pick(dream_pick)
+                body_cycle_conditions = deferred_updates.get("body_cycle_conditions", [])
+                if isinstance(body_cycle_conditions, list):
+                    for condition in body_cycle_conditions:
+                        if isinstance(condition, dict):
+                            self._record_body_cycle_episode(condition)
+                conditions = self.data.setdefault("state_conditions", [])
+                if not isinstance(conditions, list):
+                    conditions = []
+                    self.data["state_conditions"] = conditions
+                conditions.extend(generated_conditions)
+                self.data["state_generated_day"] = generation_day
             self._ensure_time_based_hunger_condition()
             state = self._compose_state_from_conditions(weather)
             self.data["daily_state"] = state
             self._save_data_sync()
             return state
 
-    async def _generate_state_conditions(self, weather: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    async def _generate_state_conditions(
+        self,
+        weather: dict[str, Any] | None = None,
+        *,
+        deferred_state_updates: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         intensity = self.humanized_state_intensity / 100
         persona_profile = self._persona_state_profile()
         now_dt = self._environment_now()
@@ -2855,7 +2969,10 @@ class DailyStateMixin:
         if bool(getattr(self, "enable_enhanced_dreams", False)):
             enhanced_dream = await self._generate_enhanced_dream_pick(weather)
         dream_pick = enhanced_dream or pick(dream_pool, 0.55)
-        self._remember_daily_dream_pick(dream_pick)
+        if deferred_state_updates is None:
+            self._remember_daily_dream_pick(dream_pick)
+        else:
+            deferred_state_updates["dream_pick"] = dream_pick
         hunger_pick = pick(hunger_pool, 0.22)
         specs = [
             ("sleep", "睡眠", *sleep_pick),
@@ -2945,7 +3062,10 @@ class DailyStateMixin:
                 **extras,
             )
             if kind == "body_cycle" and cycle_phase != "cycle":
-                self._record_body_cycle_episode(condition)
+                if deferred_state_updates is None:
+                    self._record_body_cycle_episode(condition)
+                else:
+                    deferred_state_updates.setdefault("body_cycle_conditions", []).append(condition)
             conditions.append(condition)
         dream_aftertaste = self._build_dream_aftertaste_condition(dream_pick)
         if dream_aftertaste is not None:
@@ -6841,7 +6961,7 @@ class DailyStateMixin:
         return [item for item in loaded if isinstance(item, dict)]
 
     @staticmethod
-    def _proactive_archive_context_text(text: str) -> bool:
+    def _daily_proactive_archive_context_text(text: str) -> bool:
         if not text:
             return False
         raw = str(text)
@@ -6887,7 +7007,7 @@ class DailyStateMixin:
         content = self._history_item_content_text(item)
         if not content:
             return ""
-        if self._proactive_archive_context_text(content):
+        if self._daily_proactive_archive_context_text(content):
             return ""
         ts = self._history_item_timestamp(item)
         time_prefix = self._environment_fromtimestamp(ts).strftime("%m-%d %H:%M") + " " if ts else ""
@@ -10441,12 +10561,21 @@ class DailyStateMixin:
         if _single_line(raw.get("backend"), 40) != "astrbot_cron":
             return None
         status = _single_line(raw.get("status"), 40)
-        if status not in {"pending", "scheduled"}:
+        if status not in {"pending", "registering", "replacing", "scheduled"}:
             return None
         scheduled_ts = _safe_float(raw.get("scheduled_ts"), 0)
         if scheduled_ts <= 0:
             return None
         return raw
+
+    def _due_internal_llm_timer_id(self, user: dict[str, Any], *, now: float | None = None) -> str:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict) or not self._llm_timer_can_use_internal_scheduler(event):
+            return ""
+        check_now = _now_ts() if now is None else now
+        if check_now < _safe_float(event.get("scheduled_ts"), 0):
+            return ""
+        return _single_line(event.get("id"), 40)
 
     def _has_due_llm_timer(self, user: dict[str, Any], now: float | None = None) -> bool:
         event = self._get_active_llm_timer(user)
@@ -10588,6 +10717,199 @@ class DailyStateMixin:
         nested = getattr(context, "context", None)
         return getattr(nested, "cron_manager", None)
 
+    def _llm_timer_operation_lock(self, user_id: str) -> asyncio.Lock:
+        locks = getattr(self, "_llm_timer_operation_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            setattr(self, "_llm_timer_operation_locks", locks)
+        key = _single_line(user_id, 120) or "_unknown"
+        lock = locks.get(key)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            locks[key] = lock
+        return lock
+
+    async def _official_llm_timer_job_runtime(self, job_id: str) -> tuple[bool, str]:
+        """Return whether runtime lookup is supported and the current official status."""
+        normalized_job_id = _single_line(job_id, 80)
+        if not normalized_job_id:
+            return True, "missing"
+        cron_mgr = self._official_cron_manager()
+        if cron_mgr is None:
+            return False, ""
+        getter = getattr(cron_mgr, "get_job", None)
+        if not callable(getter):
+            getter = getattr(getattr(cron_mgr, "db", None), "get_cron_job", None)
+        if not callable(getter):
+            return False, ""
+        try:
+            job = await getter(normalized_job_id)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 查询官方定时任务状态失败: job=%s error=%s",
+                normalized_job_id,
+                _single_line(exc, 160),
+            )
+            return False, ""
+        if job is None:
+            return True, "missing"
+        return True, _single_line(getattr(job, "status", ""), 40).lower() or "scheduled"
+
+    @staticmethod
+    def _official_llm_timer_event_metadata(event: Any) -> dict[str, str]:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return {}
+        try:
+            payload = getter("cron_payload", {})
+            cron_job = getter("cron_job", {})
+        except Exception:
+            return {}
+        if not isinstance(payload, dict) or payload.get("origin") != "private_companion_timer":
+            return {}
+        private_payload = payload.get("private_companion")
+        if not isinstance(private_payload, dict):
+            return {}
+        timer_id = _single_line(private_payload.get("timer_id"), 40)
+        user_id = _single_line(payload.get("sender_id"), 120)
+        job_id = _single_line(cron_job.get("id"), 80) if isinstance(cron_job, dict) else ""
+        if not timer_id or not user_id:
+            return {}
+        return {"timer_id": timer_id, "user_id": user_id, "job_id": job_id}
+
+    @staticmethod
+    def _official_llm_timer_matches(current: Any, metadata: dict[str, str]) -> bool:
+        if not isinstance(current, dict) or not metadata:
+            return False
+        if _single_line(current.get("backend"), 40) != "astrbot_cron":
+            return False
+        if _single_line(current.get("id"), 40) != metadata.get("timer_id"):
+            return False
+        current_job_id = _single_line(current.get("job_id") or current.get("candidate_job_id"), 80)
+        event_job_id = metadata.get("job_id", "")
+        return not (current_job_id and event_job_id and current_job_id != event_job_id)
+
+    async def _acknowledge_official_llm_timer_trigger(self, event: Any) -> bool:
+        metadata = self._official_llm_timer_event_metadata(event)
+        if not metadata:
+            return False
+        user_id = metadata["user_id"]
+        async with self._llm_timer_operation_lock(user_id):
+            async with self._data_lock:
+                users = self.data.get("users")
+                current_user = users.get(user_id) if isinstance(users, dict) else None
+                current = current_user.get("llm_timer_event") if isinstance(current_user, dict) else None
+                if not self._official_llm_timer_matches(current, metadata):
+                    return False
+                current["status"] = "triggered"
+                current["triggered_at"] = _now_ts()
+                if metadata.get("job_id"):
+                    current["job_id"] = metadata["job_id"]
+                    current["cron_job_id"] = metadata["job_id"]
+                self._clear_llm_timer_internal_plan_fields(current_user)
+                self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 官方临时预约开始执行: user=%s timer=%s job=%s",
+            user_id,
+            metadata["timer_id"],
+            metadata.get("job_id") or "-",
+        )
+        return True
+
+    @staticmethod
+    def _official_llm_timer_tool_result_succeeded(tool_result: Any) -> bool:
+        if tool_result is None or bool(getattr(tool_result, "isError", False)):
+            return False
+        content = getattr(tool_result, "content", None)
+        if not isinstance(content, list):
+            return False
+        result_text = "\n".join(
+            str(getattr(item, "text", "") or "")
+            for item in content
+            if getattr(item, "text", None) is not None
+        ).strip()
+        return result_text.startswith("Message sent to session ")
+
+    async def _record_official_llm_timer_tool_result(
+        self,
+        event: Any,
+        tool: Any,
+        tool_result: Any,
+    ) -> bool:
+        if _single_line(getattr(tool, "name", ""), 80) != "send_message_to_user":
+            return False
+        metadata = self._official_llm_timer_event_metadata(event)
+        if not metadata:
+            return False
+        succeeded = self._official_llm_timer_tool_result_succeeded(tool_result)
+        user_id = metadata["user_id"]
+        async with self._llm_timer_operation_lock(user_id):
+            async with self._data_lock:
+                users = self.data.get("users")
+                current_user = users.get(user_id) if isinstance(users, dict) else None
+                current = current_user.get("llm_timer_event") if isinstance(current_user, dict) else None
+                if not self._official_llm_timer_matches(current, metadata):
+                    return False
+                current["status"] = "delivered" if succeeded else "delivery_failed"
+                current["delivery_at"] = _now_ts()
+                current["delivery_error"] = "" if succeeded else "send_message_to_user 未确认发送成功"
+                self._save_data_sync()
+        return True
+
+    async def _complete_official_llm_timer_event(self, event: Any) -> bool:
+        metadata = self._official_llm_timer_event_metadata(event)
+        if not metadata:
+            return False
+        user_id = metadata["user_id"]
+        async with self._llm_timer_operation_lock(user_id):
+            async with self._data_lock:
+                users = self.data.get("users")
+                current_user = users.get(user_id) if isinstance(users, dict) else None
+                current = current_user.get("llm_timer_event") if isinstance(current_user, dict) else None
+                if not self._official_llm_timer_matches(current, metadata):
+                    return False
+                status = _single_line(current.get("status"), 40)
+                if status == "delivered":
+                    current["status"] = "completed"
+                    current["delivery_status"] = "sent"
+                elif status == "triggered":
+                    current["status"] = "completed_without_delivery"
+                    current["delivery_status"] = "not_confirmed"
+                elif status == "delivery_failed":
+                    current["delivery_status"] = "failed"
+                else:
+                    return False
+                current["completed_at"] = _now_ts()
+                self._save_data_sync()
+        return True
+
+    def _expire_stale_official_llm_timers_locked(self, *, now: float | None = None) -> int:
+        check_now = _now_ts() if now is None else now
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return 0
+        changed = 0
+        for user in users.values():
+            if not isinstance(user, dict):
+                continue
+            timer = user.get("llm_timer_event")
+            if not isinstance(timer, dict) or _single_line(timer.get("backend"), 40) != "astrbot_cron":
+                continue
+            status = _single_line(timer.get("status"), 40)
+            scheduled_ts = _safe_float(timer.get("scheduled_ts"), 0)
+            triggered_at = _safe_float(timer.get("triggered_at"), 0)
+            if status in {"pending", "registering", "replacing", "scheduled"} and scheduled_ts > 0 and check_now - scheduled_ts > 30 * 60:
+                timer["status"] = "expired_unconfirmed"
+                timer["expired_at"] = check_now
+                timer["error"] = "官方任务已过期，但插件未收到执行回执"
+                changed += 1
+            elif status == "triggered" and triggered_at > 0 and check_now - triggered_at > 2 * 3600:
+                timer["status"] = "triggered_unconfirmed"
+                timer["expired_at"] = check_now
+                timer["error"] = "官方任务已开始，但插件未收到完成回执"
+                changed += 1
+        return changed
+
     async def _add_official_llm_timer_job(
         self,
         *,
@@ -10664,62 +10986,161 @@ class DailyStateMixin:
         source_origin: str,
         trigger_message_id: str = "",
         trigger_umo: str = "",
-    ) -> None:
-        now_ts = _now_ts()
-        async with self._data_lock:
-            user = self._get_user(user_id)
-            existing = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
-            expected_event_id = _single_line(payload.get("_expected_event_id"), 40)
-            if expected_event_id and _single_line(existing.get("id"), 40) != expected_event_id:
-                return
-            existing_active = (
-                isinstance(existing, dict)
-                and _single_line(existing.get("backend"), 40) == "astrbot_cron"
-                and _single_line(existing.get("status"), 40) in {"pending", "scheduled"}
-                and _safe_float(existing.get("scheduled_ts"), 0) > now_ts
-            )
-            existing_job_id = _single_line(existing.get("job_id"), 80) if existing_active else ""
-            existing_scheduled_ts = _safe_float(existing.get("scheduled_ts"), 0) or now_ts
-            cancel_event = {
-                "id": uuid.uuid4().hex,
-                "scheduled_ts": existing_scheduled_ts,
-                "raw_time": _single_line(existing.get("raw_time"), 32),
-                "reason": _single_line(existing.get("reason"), 40),
-                "action": "cancel",
-                "topic": _single_line(payload.get("topic") or existing.get("topic") or "取消临时约定", 60),
-                "motive": _single_line(source_text, 140),
-                "seed_text": _single_line(source_text, 80),
-                "origin": source_origin,
-                "created_at": now_ts,
-                "trigger_message_id": _single_line(trigger_message_id, 120),
-                "trigger_umo": _single_line(trigger_umo, 160),
-                "trigger_ts": now_ts if trigger_message_id else 0,
-                "backend": "astrbot_cron",
-                "job_id": existing_job_id,
-                "cancelled_job_id": existing_job_id,
-                "status": "cancel_pending" if existing_job_id else "cancel_skipped",
-                "error": "" if existing_job_id else "没有可取消的对话临时预约",
-            }
-            self._clear_llm_timer_internal_plan_fields(user)
-        ok = False
-        error = ""
-        if existing_job_id:
+    ) -> bool:
+        normalized_user_id = _single_line(user_id, 120)
+        async with self._llm_timer_operation_lock(normalized_user_id):
+            now_ts = _now_ts()
+            async with self._data_lock:
+                user = self._get_user(normalized_user_id)
+                existing_raw = user.get("llm_timer_event")
+                existing = deepcopy(existing_raw) if isinstance(existing_raw, dict) else {}
+                expected_event_id = _single_line(payload.get("_expected_event_id"), 40)
+                existing_event_id = _single_line(existing.get("id"), 40)
+                if expected_event_id and existing_event_id != expected_event_id:
+                    return False
+                existing_status = _single_line(existing.get("status"), 40)
+                existing_job_id = _single_line(
+                    existing.get("job_id") or existing.get("candidate_job_id"),
+                    80,
+                )
+                existing_active = (
+                    _single_line(existing.get("backend"), 40) == "astrbot_cron"
+                    and existing_status in {"pending", "registering", "replacing", "scheduled"}
+                    and bool(existing_job_id)
+                )
+                if not existing_active:
+                    if expected_event_id:
+                        return False
+                    user["llm_timer_event"] = {
+                        "id": uuid.uuid4().hex,
+                        "scheduled_ts": _safe_float(existing.get("scheduled_ts"), 0) or now_ts,
+                        "action": "cancel",
+                        "topic": _single_line(payload.get("topic") or "取消临时约定", 60),
+                        "motive": _single_line(source_text, 140),
+                        "origin": source_origin,
+                        "created_at": now_ts,
+                        "backend": "astrbot_cron",
+                        "status": "cancel_skipped",
+                        "error": "没有可取消的对话临时预约",
+                    }
+                    self._save_data_sync()
+                    return False
+
+            runtime_supported, runtime_status = await self._official_llm_timer_job_runtime(existing_job_id)
+            if runtime_supported and runtime_status in {"running", "completed", "failed", "missing"}:
+                async with self._data_lock:
+                    user = self._get_user(normalized_user_id)
+                    current = user.get("llm_timer_event")
+                    if not isinstance(current, dict) or _single_line(current.get("id"), 40) != existing_event_id:
+                        return False
+                    if _single_line(current.get("job_id") or current.get("candidate_job_id"), 80) != existing_job_id:
+                        return False
+                    if runtime_status == "running":
+                        current["status"] = "triggered"
+                        current["triggered_at"] = _safe_float(current.get("triggered_at"), 0) or now_ts
+                        current["cancel_status"] = "too_late"
+                        current["cancel_error"] = "官方任务已经开始执行，无法确认取消"
+                    else:
+                        current["status"] = "expired_unconfirmed"
+                        current["cancel_status"] = "not_found"
+                        current["cancel_error"] = "官方任务已结束或不存在，无法确认取消"
+                    current.pop("cancel_requested_at", None)
+                    self._save_data_sync()
+                return False
+
+            async with self._data_lock:
+                user = self._get_user(normalized_user_id)
+                current = user.get("llm_timer_event")
+                if not isinstance(current, dict) or _single_line(current.get("id"), 40) != existing_event_id:
+                    return False
+                if _single_line(current.get("job_id") or current.get("candidate_job_id"), 80) != existing_job_id:
+                    return False
+                current["status"] = "cancel_pending"
+                current["cancel_requested_at"] = now_ts
+                current["cancel_origin"] = source_origin
+                current["cancel_topic"] = _single_line(payload.get("topic") or "取消临时约定", 60)
+                current["cancel_source_text"] = _single_line(source_text, 140)
+                self._save_data_sync()
+
             ok, error = await self._delete_official_llm_timer_job(existing_job_id)
-        async with self._data_lock:
-            user = self._get_user(user_id)
-            if existing_job_id:
-                cancel_event["status"] = "cancelled" if ok else "cancel_failed"
-                cancel_event["error"] = "" if ok else error
-            user["llm_timer_event"] = cancel_event
-            self._clear_llm_timer_internal_plan_fields(user)
-            self._save_data_sync()
-        logger.info(
-            "[PrivateCompanion] 对话临时预约取消%s: user=%s job=%s error=%s",
-            "完成" if ok else "跳过/失败",
-            user_id,
-            existing_job_id or "-",
-            error or cancel_event.get("error") or "-",
+            async with self._data_lock:
+                user = self._get_user(normalized_user_id)
+                current = user.get("llm_timer_event")
+                if not isinstance(current, dict) or _single_line(current.get("id"), 40) != existing_event_id:
+                    return False
+                if _single_line(current.get("job_id") or current.get("candidate_job_id"), 80) != existing_job_id:
+                    return False
+                if ok:
+                    current["status"] = "cancelled"
+                    current["cancelled_at"] = _now_ts()
+                    current["cancelled_job_id"] = existing_job_id
+                    current["cancel_status"] = "cancelled"
+                    current["error"] = ""
+                    current.pop("cancel_requested_at", None)
+                    self._clear_llm_timer_internal_plan_fields(user)
+                else:
+                    restored = deepcopy(existing)
+                    restored["cancel_status"] = "failed"
+                    restored["cancel_error"] = error or "官方任务删除失败"
+                    restored["cancel_failed_at"] = _now_ts()
+                    restored.pop("cancel_requested_at", None)
+                    user["llm_timer_event"] = restored
+                self._save_data_sync()
+            logger.info(
+                "[PrivateCompanion] 对话临时预约取消%s: user=%s job=%s error=%s",
+                "完成" if ok else "失败",
+                normalized_user_id,
+                existing_job_id,
+                error or "-",
+            )
+            return ok
+
+    def _queue_official_llm_timer_cancel(
+        self,
+        user_id: str,
+        timer_event: dict[str, Any],
+        *,
+        source_text: str,
+        source_origin: str,
+        trigger_umo: str = "",
+    ) -> bool:
+        if not isinstance(timer_event, dict) or _single_line(timer_event.get("backend"), 40) != "astrbot_cron":
+            return False
+        if _single_line(timer_event.get("status"), 40) not in {"pending", "registering", "replacing", "scheduled"}:
+            return False
+        timer_id = _single_line(timer_event.get("id"), 40)
+        normalized_user_id = _single_line(user_id or timer_event.get("user_id"), 120)
+        if not timer_id or not normalized_user_id or _safe_float(timer_event.get("cancel_requested_at"), 0) > 0:
+            return False
+        timer_event["cancel_requested_at"] = _now_ts()
+        operation = self._cancel_llm_timer(
+            normalized_user_id,
+            {
+                "cancel": True,
+                "topic": "用户已在问候时段自然出现，取消冲突问候",
+                "_expected_event_id": timer_id,
+            },
+            source_text=source_text,
+            source_origin=source_origin,
+            trigger_umo=trigger_umo,
         )
+        creator = getattr(self, "_create_lifecycle_background_task", None)
+        try:
+            if callable(creator):
+                task = creator(operation, label=f"official_timer_cancel:{normalized_user_id}")
+            else:
+                task = asyncio.create_task(operation)
+        except Exception:
+            try:
+                operation.close()
+            except Exception:
+                pass
+            timer_event.pop("cancel_requested_at", None)
+            return False
+        if task is None:
+            timer_event.pop("cancel_requested_at", None)
+            return False
+        return True
 
     def _has_active_activity_followup_timer(
         self,
@@ -10788,6 +11209,26 @@ class DailyStateMixin:
                 trigger_umo=trigger_umo,
             )
             return
+        async with self._llm_timer_operation_lock(user_id):
+            await self._schedule_llm_timer_locked(
+                user_id,
+                payload,
+                source_text=source_text,
+                source_origin=source_origin,
+                trigger_message_id=trigger_message_id,
+                trigger_umo=trigger_umo,
+            )
+
+    async def _schedule_llm_timer_locked(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        source_text: str,
+        source_origin: str,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
+    ) -> None:
         scheduled_ts = max(_now_ts() + 30, _safe_float(payload.get("scheduled_ts"), 0))
         if scheduled_ts <= 0:
             return
@@ -10795,6 +11236,9 @@ class DailyStateMixin:
         note = ""
         user_snapshot: dict[str, Any] = {}
         replaced_job_id = ""
+        existing_snapshot: dict[str, Any] = {}
+        existing_event_id = ""
+        operation_id = uuid.uuid4().hex
         async with self._data_lock:
             user = self._get_user(user_id)
             if not self._user_enabled_for_proactive(user_id, user):
@@ -10828,8 +11272,8 @@ class DailyStateMixin:
             existing_active = (
                 isinstance(existing, dict)
                 and _single_line(existing.get("backend"), 40) == "astrbot_cron"
-                and _single_line(existing.get("status"), 40) in {"scheduled", "pending"}
-                and _safe_float(existing.get("scheduled_ts"), 0) > _now_ts()
+                and _single_line(existing.get("status"), 40) in {"scheduled", "pending", "registering", "replacing"}
+                and bool(_single_line(existing.get("job_id") or existing.get("candidate_job_id"), 80))
             )
             if (
                 reason == "activity_followup"
@@ -10846,7 +11290,9 @@ class DailyStateMixin:
             if (
                 existing_active
             ):
-                replaced_job_id = _single_line(existing.get("job_id"), 80)
+                replaced_job_id = _single_line(existing.get("job_id") or existing.get("candidate_job_id"), 80)
+            existing_snapshot = deepcopy(existing) if isinstance(existing, dict) else {}
+            existing_event_id = _single_line(existing_snapshot.get("id"), 40)
             activity = _single_line(payload.get("activity"), 60) if reason == "activity_followup" else ""
             estimated_minutes = (
                 _safe_int(payload.get("estimated_minutes"), 0, 0, 720)
@@ -10881,8 +11327,10 @@ class DailyStateMixin:
                 "chain": list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else [],
                 "silence_until_due": self._timer_source_implies_user_unavailable(source_text, payload),
                 "backend": "astrbot_cron",
-                "status": "pending",
+                "status": "replacing" if replaced_job_id else "registering",
+                "operation_id": operation_id,
                 "replaced_job_id": replaced_job_id,
+                "previous_timer_id": existing_event_id,
             }
             note = self._format_official_timer_note(
                 scheduled_ts=scheduled_ts,
@@ -10897,38 +11345,134 @@ class DailyStateMixin:
                 followup_intensity=followup_intensity,
             )
             user_snapshot = dict(user)
-        replace_error = ""
+            user["llm_timer_event"] = deepcopy(timer_event)
+            self._clear_llm_timer_internal_plan_fields(user)
+            self._save_data_sync()
+
+        previous_running_job_id = ""
         if replaced_job_id:
-            _, replace_error = await self._delete_official_llm_timer_job(replaced_job_id)
-        if replace_error:
-            job_id, error = "", f"旧官方任务删除失败: {replace_error}"
-        else:
-            job_id, error = await self._add_official_llm_timer_job(
-                user_id=user_id,
-                user=user_snapshot,
-                timer_event=timer_event,
-                note=note,
-                trigger_umo=trigger_umo,
+            runtime_supported, runtime_status = await self._official_llm_timer_job_runtime(replaced_job_id)
+            if runtime_supported and runtime_status == "running":
+                previous_running_job_id = replaced_job_id
+                replaced_job_id = ""
+            elif runtime_supported and runtime_status in {"completed", "failed", "missing"}:
+                replaced_job_id = ""
+
+        job_id, error = await self._add_official_llm_timer_job(
+            user_id=user_id,
+            user=user_snapshot,
+            timer_event=timer_event,
+            note=note,
+            trigger_umo=trigger_umo,
+        )
+        if not job_id:
+            async with self._data_lock:
+                user = self._get_user(user_id)
+                current = user.get("llm_timer_event")
+                if (
+                    isinstance(current, dict)
+                    and _single_line(current.get("id"), 40) == _single_line(timer_event.get("id"), 40)
+                    and _single_line(current.get("operation_id"), 40) == operation_id
+                ):
+                    if existing_snapshot:
+                        restored = deepcopy(existing_snapshot)
+                        restored["last_replace_error"] = error or "新官方任务登记失败"
+                        restored["last_replace_failed_at"] = _now_ts()
+                        user["llm_timer_event"] = restored
+                    else:
+                        timer_event["status"] = "failed"
+                        timer_event["error"] = error or "官方定时计划登记失败"
+                        timer_event.pop("operation_id", None)
+                        user["llm_timer_event"] = timer_event
+                    self._save_data_sync()
+            logger.warning(
+                "[PrivateCompanion] LLM 临时预约登记失败,已保留原任务: user=%s old_job=%s error=%s",
+                user_id,
+                replaced_job_id or previous_running_job_id or "-",
+                error or "官方定时计划登记失败",
             )
+            return
+
         async with self._data_lock:
             user = self._get_user(user_id)
-            if job_id:
+            current = user.get("llm_timer_event")
+            reservation_current = bool(
+                isinstance(current, dict)
+                and _single_line(current.get("id"), 40) == _single_line(timer_event.get("id"), 40)
+                and _single_line(current.get("operation_id"), 40) == operation_id
+            )
+            if reservation_current:
+                current["candidate_job_id"] = job_id
+                self._save_data_sync()
+        if not reservation_current:
+            await self._delete_official_llm_timer_job(job_id)
+            logger.warning(
+                "[PrivateCompanion] LLM 临时预约预留已失效,已回收新官方任务: user=%s job=%s",
+                user_id,
+                job_id,
+            )
+            return
+
+        replace_error = ""
+        rollback_error = ""
+        if replaced_job_id:
+            replaced_ok, replace_error = await self._delete_official_llm_timer_job(replaced_job_id)
+            if not replaced_ok:
+                rollback_ok, rollback_error = await self._delete_official_llm_timer_job(job_id)
+                async with self._data_lock:
+                    user = self._get_user(user_id)
+                    current = user.get("llm_timer_event")
+                    if (
+                        isinstance(current, dict)
+                        and _single_line(current.get("id"), 40) == _single_line(timer_event.get("id"), 40)
+                        and _single_line(current.get("operation_id"), 40) == operation_id
+                    ):
+                        if rollback_ok and existing_snapshot:
+                            restored = deepcopy(existing_snapshot)
+                            restored["last_replace_error"] = replace_error or "旧官方任务删除失败"
+                            restored["last_replace_failed_at"] = _now_ts()
+                            user["llm_timer_event"] = restored
+                        else:
+                            current["status"] = "replace_rollback_failed"
+                            current["job_id"] = replaced_job_id
+                            current["candidate_job_id"] = job_id
+                            current["replace_error"] = replace_error or "旧官方任务删除失败"
+                            current["rollback_error"] = rollback_error or "新官方任务回滚失败"
+                        self._save_data_sync()
+                logger.warning(
+                    "[PrivateCompanion] LLM 临时预约替换失败,新任务回滚%s: user=%s old_job=%s new_job=%s error=%s rollback_error=%s",
+                    "完成" if rollback_ok else "失败",
+                    user_id,
+                    replaced_job_id,
+                    job_id,
+                    replace_error or "-",
+                    rollback_error or "-",
+                )
+                return
+
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            current = user.get("llm_timer_event")
+            reservation_current = bool(
+                isinstance(current, dict)
+                and _single_line(current.get("id"), 40) == _single_line(timer_event.get("id"), 40)
+                and _single_line(current.get("operation_id"), 40) == operation_id
+            )
+            if reservation_current:
                 timer_event["job_id"] = job_id
                 timer_event["status"] = "scheduled"
                 timer_event["note"] = _single_line(note, 220)
-                if replace_error:
-                    timer_event["replace_error"] = replace_error
+                timer_event["replaced_job_id"] = replaced_job_id
+                if previous_running_job_id:
+                    timer_event["previous_running_job_id"] = previous_running_job_id
+                timer_event.pop("candidate_job_id", None)
+                timer_event.pop("operation_id", None)
                 user["llm_timer_event"] = timer_event
                 self._clear_llm_timer_internal_plan_fields(user)
                 self._save_data_sync()
-            else:
-                timer_event["status"] = "failed"
-                timer_event["error"] = error or "官方定时计划登记失败"
-                if replace_error:
-                    timer_event["replace_error"] = replace_error
-                user["llm_timer_event"] = timer_event
-                self._clear_llm_timer_internal_plan_fields(user)
-                self._save_data_sync()
+        if not reservation_current:
+            await self._delete_official_llm_timer_job(job_id)
+            return
         logger.info(
             "[PrivateCompanion] LLM 临时预约已转写到官方定时计划: user=%s time=%s reason=%s action=%s topic=%s job=%s replaced=%s error=%s replace_error=%s",
             user_id,
@@ -10938,7 +11482,7 @@ class DailyStateMixin:
             topic,
             job_id or "-",
             replaced_job_id or "-",
-            error or "-",
+            "-",
             replace_error or "-",
         )
 
@@ -13438,6 +13982,9 @@ class DailyStateMixin:
             if isinstance(runtime, dict):
                 runtime["last_tick_started_at"] = _now_ts()
                 runtime["last_tick_error"] = ""
+            stale_timer_count = self._expire_stale_official_llm_timers_locked()
+            if stale_timer_count:
+                self._save_data_sync()
             if self._proactive_generation_disabled():
                 changed = False
                 users_root = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
@@ -13491,12 +14038,7 @@ class DailyStateMixin:
                         self._save_data_sync()
                 continue
             now = _now_ts()
-            due_timer = self._get_active_llm_timer(user)
-            due_timer_id = (
-                str(due_timer.get("id") or "")
-                if isinstance(due_timer, dict) and now >= _safe_float(due_timer.get("scheduled_ts"), 0)
-                else ""
-            )
+            due_timer_id = self._due_internal_llm_timer_id(user, now=now)
             is_troubleshooting_for_send = self._is_troubleshooting_proactive_plan(user)
             should_send, reason = self._should_send(user)
             if not should_send:
@@ -13922,7 +14464,7 @@ class DailyStateMixin:
             if pending_send_retry:
                 reason = _single_line(pending_send_retry.get("reason"), 40) or normalize_legacy_tag_text(user.get("planned_proactive_reason")) or "check_in"
                 text = _single_line(pending_send_retry.get("text"), 1200)
-                image_path = _single_line(pending_send_retry.get("image_path"), 260)
+                image_path = _path_text(pending_send_retry.get("image_path"), 1000)
                 extra_components = []
                 action_summary = _single_line(pending_send_retry.get("action_summary"), 500)
                 photo_subject_owner_for_send = _normalize_photo_subject_owner(
@@ -14643,7 +15185,7 @@ class DailyStateMixin:
                     len(extra_components),
                     f" detail={reason_detail}" if reason_detail else "",
                 )
-                await self._send_proactive_message_chain(
+                delivered = await self._send_proactive_message_chain(
                     send_umo_for_send,
                     text,
                     image_path,
@@ -14654,6 +15196,113 @@ class DailyStateMixin:
                         friend_proactive=friend_proactive_for_send,
                     ),
                 )
+                if not delivered:
+                    outcome_note = _single_line(getattr(delivered, "note", ""), 180)
+                    cancel_note = "主动发送在实际投递前被取消或清空，未计入发送记录"
+                    if outcome_note:
+                        cancel_note = f"{cancel_note}：{outcome_note}"
+                    logger.info(
+                        "[PrivateCompanion] 主动消息未实际投递: user=%s reason=%s action=%s",
+                        user_id,
+                        reason,
+                        effective_action_for_send or planned_action_for_send or "message",
+                    )
+                    async with self._data_lock:
+                        current_cancelled = self._get_user(user_id)
+                        if is_troubleshooting_for_send:
+                            self._append_troubleshooting_proactive_step(
+                                current_cancelled,
+                                "主动发送",
+                                "error",
+                                cancel_note,
+                            )
+                            self._record_troubleshooting_proactive_result(
+                                user_id,
+                                current_cancelled,
+                                ok=False,
+                                detail=cancel_note,
+                                outcome_type="delivery_cancelled",
+                                error=cancel_note,
+                                text=text,
+                                action=effective_action_for_send or planned_action_for_send or "message",
+                                reason=reason or "check_in",
+                                extra_count=len(extra_components),
+                            )
+                            self._restore_troubleshooting_proactive_plan(current_cancelled)
+                        elif self._simulation_active(current_cancelled):
+                            self._consume_simulation_event(current_cancelled)
+                        else:
+                            self._mark_planned_candidate_status(current_cancelled, "dropped", cancel_note)
+                            self._clear_pending_proactive_send_retry(current_cancelled)
+                            self._clear_pending_proactive_plan(current_cancelled)
+                            materialized = self._materialize_best_proactive_impulse(
+                                current_cancelled,
+                                now=_now_ts(),
+                            )
+                            if not materialized:
+                                self._schedule_next_proactive(
+                                    current_cancelled,
+                                    now=_now_ts(),
+                                    delay_hours=(0.5, 2.0),
+                                )
+                        self._update_proactive_audit(
+                            audit_id,
+                            status="dropped",
+                            note=cancel_note,
+                            text=text,
+                        )
+                        self._save_data_sync()
+                    self._debug_tick_skip(user_id, cancel_note, prefix="取消")
+                    continue
+                delivery_complete = bool(getattr(delivered, "complete", True))
+                delivery_note = _single_line(getattr(delivered, "note", ""), 200)
+                if hasattr(delivered, "delivered_text"):
+                    requested_image_path = image_path
+                    requested_extra_components = list(extra_components)
+                    text = str(getattr(delivered, "delivered_text", "") or "")
+                    image_path = requested_image_path if bool(getattr(delivered, "image_delivered", False)) else ""
+                    delivered_extra_count = _safe_int(
+                        getattr(delivered, "extra_components_delivered", 0),
+                        0,
+                        0,
+                        len(requested_extra_components),
+                    )
+                    extra_components = requested_extra_components[:delivered_extra_count]
+                    action_for_delivery = effective_action_for_send or planned_action_for_send or "message"
+                    effective_action_for_send, action_summary, delivered_has_photo = self._reconcile_proactive_delivery_metadata(
+                        text=text,
+                        image_path=image_path,
+                        extra_components=extra_components,
+                        action=action_for_delivery,
+                        action_summary=action_summary,
+                        delivery_complete=delivery_complete,
+                    )
+                else:
+                    delivered_has_photo = bool(image_path) or self._proactive_components_contain_image(extra_components)
+                if not delivery_complete:
+                    logger.warning(
+                        "[PrivateCompanion] 主动消息仅部分投递，后续只按真实送达内容归档: user=%s reason=%s note=%s",
+                        user_id,
+                        reason,
+                        delivery_note or "部分组件被取消或发送失败",
+                    )
+                if image_path:
+                    annotator = getattr(self, "_annotate_recent_photo_generation", None)
+                    if callable(annotator):
+                        delivered_photo_caption = ""
+                        if "：" in str(action_summary or "") or ":" in str(action_summary or ""):
+                            delivered_photo_caption = _single_line(
+                                re.split(r"[:：]", str(action_summary), maxsplit=1)[-1],
+                                160,
+                            )
+                        annotator(
+                            image_path=image_path,
+                            session_key=send_umo_for_send,
+                            trigger="proactive",
+                            sent=True,
+                            caption=delivered_photo_caption,
+                            tool_name="proactive_photo",
+                        )
                 async with self._data_lock:
                     current_after_send = self._get_user(user_id)
                     sent_at = _now_ts()
@@ -14706,10 +15355,11 @@ class DailyStateMixin:
                         )
                         self._save_data_sync()
                 logger.info(
-                    "[PrivateCompanion] 主动发送完成: user=%s reason=%s action=%s",
+                    "[PrivateCompanion] 主动发送完成: user=%s reason=%s action=%s complete=%s",
                     user_id,
                     reason,
                     planned_action_for_send or "message",
+                    delivery_complete,
                 )
                 await self._archive_proactive_message_to_conversation(
                     user=user,
@@ -14843,7 +15493,7 @@ class DailyStateMixin:
                 current["last_proactive_action"] = effective_action_for_send or planned_action_for_send or "message"
                 current["last_proactive_behavior_summary"] = action_summary
                 current["last_proactive_motive"] = planned_motive_for_send
-                if not is_troubleshooting_for_send and image_path:
+                if not is_troubleshooting_for_send and delivered_has_photo:
                     photo_caption = ""
                     if "：" in str(action_summary or "") or ":" in str(action_summary or ""):
                         photo_caption = _single_line(re.split(r"[:：]", str(action_summary), maxsplit=1)[-1], 260)
@@ -14888,7 +15538,15 @@ class DailyStateMixin:
                 self._update_proactive_audit(
                     audit_id,
                     status="sent",
-                    note="排障临时主动消息已发送" if is_troubleshooting_for_send else "已真实发送",
+                    note=(
+                        "排障临时主动消息已发送"
+                        if is_troubleshooting_for_send and delivery_complete
+                        else "排障临时主动消息部分送达"
+                        if is_troubleshooting_for_send
+                        else "已真实发送"
+                        if delivery_complete
+                        else f"已部分送达：{delivery_note or '后续组件被取消或发送失败'}"
+                    ),
                     text=visible_text or text,
                     image_path=image_path,
                     extra_count=len(extra_components),

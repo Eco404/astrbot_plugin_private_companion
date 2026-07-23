@@ -3782,6 +3782,9 @@ class UserMemoryMixin:
         action_summary: str = "",
     ) -> None:
         action = _single_line(action, 40) or "message"
+        affinity_tracker = getattr(self, "_note_action_affinity_sent", None)
+        if callable(affinity_tracker):
+            affinity_tracker(user, action)
         items = self._action_consequence_items(user)
         items.append(
             {
@@ -3885,11 +3888,9 @@ class UserMemoryMixin:
 
     def _note_action_reply_feedback(self, user: dict[str, Any], action: str, text: str = "") -> None:
         action = _single_line(action, 40) or "message"
-        affinity = user.setdefault("action_reply_affinity", {})
-        if not isinstance(affinity, dict):
-            affinity = {}
-            user["action_reply_affinity"] = affinity
-        affinity[action] = _safe_int(affinity.get(action), 0, 0) + 1
+        affinity_tracker = getattr(self, "_note_action_affinity_reply_feedback", None)
+        if callable(affinity_tracker):
+            affinity_tracker(user, action)
 
         feedback = self._classify_action_reply_feedback(text)
         now = _now_ts()
@@ -6287,7 +6288,14 @@ Local classifier result:
         raw = user.get("simulation_mode")
         return isinstance(raw, dict) and bool(raw.get("active"))
 
-    def _cancel_inbound_conflicting_greeting(self, user: dict[str, Any], *, now: float | None = None) -> bool:
+    def _cancel_inbound_conflicting_greeting(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+        user_id: str = "",
+        trigger_umo: str = "",
+    ) -> bool:
         now = now or _now_ts()
         changed = False
         planned_reason = str(user.get("planned_proactive_reason") or "")
@@ -6313,19 +6321,35 @@ Local classifier result:
             if raw_followup.get("_cancel_on_inbound") or raw_followup.get("_chain_followup") or raw_followup.get("_opener_followup"):
                 user["pending_followup_event"] = {}
                 changed = True
-                return changed
-            follow_reason = str(raw_followup.get("reason") or "")
-            if self._inbound_satisfies_greeting(follow_reason, now=now):
-                changed = self._mark_greeting_satisfied_by_inbound(user, follow_reason) or changed
-                user["pending_followup_event"] = {}
-                changed = True
+            else:
+                follow_reason = str(raw_followup.get("reason") or "")
+                if self._inbound_satisfies_greeting(follow_reason, now=now):
+                    changed = self._mark_greeting_satisfied_by_inbound(user, follow_reason) or changed
+                    user["pending_followup_event"] = {}
+                    changed = True
         raw_timer = user.get("llm_timer_event")
         if isinstance(raw_timer, dict):
             timer_reason = str(raw_timer.get("reason") or "")
             if self._inbound_satisfies_greeting(timer_reason, now=now):
-                changed = self._mark_greeting_satisfied_by_inbound(user, timer_reason) or changed
-                user["llm_timer_event"] = {}
-                changed = True
+                if _single_line(raw_timer.get("backend"), 40) == "astrbot_cron":
+                    queue_cancel = getattr(self, "_queue_official_llm_timer_cancel", None)
+                    queued = bool(
+                        callable(queue_cancel)
+                        and queue_cancel(
+                            _single_line(user_id or user.get("user_id"), 120),
+                            raw_timer,
+                            source_text="用户已在问候时段自然出现",
+                            source_origin="inbound_satisfied_greeting",
+                            trigger_umo=trigger_umo,
+                        )
+                    )
+                    if queued:
+                        changed = self._mark_greeting_satisfied_by_inbound(user, timer_reason) or changed
+                        changed = True
+                else:
+                    changed = self._mark_greeting_satisfied_by_inbound(user, timer_reason) or changed
+                    user["llm_timer_event"] = {}
+                    changed = True
         return changed
 
     async def _format_proactive_reply_context(self, event: AstrMessageEvent) -> str:

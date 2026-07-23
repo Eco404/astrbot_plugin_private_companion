@@ -42,7 +42,7 @@ except ImportError:
         except ImportError:
             Reply = None
 from astrbot.api.provider import ProviderRequest
-from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.core import file_token_service
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.agent.message import AssistantMessageSegment, TextPart, UserMessageSegment
@@ -110,6 +110,7 @@ from .helpers import (
     _normalize_outbound_punctuation_flow,
     _now_ts,
     _normalize_timezone_name,
+    _path_text,
     _redact_outbound_secrets,
     _safe_float,
     _safe_int,
@@ -883,12 +884,6 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
 }
 
 
-@register(
-    PLUGIN_NAME,
-    "menglimi",
-    "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.10.4",
-)
 class PrivateCompanionPlugin(
     CoreStoreMixin,
     PlatformCompatibilityMixin,
@@ -1104,8 +1099,8 @@ class PrivateCompanionPlugin(
         self.text_message_debounce_max_wait_seconds = self._cfg_float(c, "text_message_debounce_max_wait_seconds", 12.0, 0.0)
         self.message_debounce_max_merge_messages = self._cfg_int(c, "message_debounce_max_merge_messages", 8, 0, 30)
         self.semantic_message_debounce_seconds = self.text_message_debounce_seconds
-        self.private_image_vision_wait_seconds = self._cfg_float(c, "private_image_vision_wait_seconds", 30.0, 0.0)
-        self.private_image_provider_timeout_seconds = self._cfg_float(c, "private_image_provider_timeout_seconds", 12.0, 3.0)
+        self.private_image_vision_wait_seconds = self._cfg_float(c, "private_image_vision_wait_seconds", 30.0, 0.0, 600.0)
+        self.private_image_provider_timeout_seconds = self._cfg_float(c, "private_image_provider_timeout_seconds", 12.0, 0.0, 600.0)
         self.private_image_vision_provider_priority = self._normalize_private_image_vision_provider_priority(
             self._cfg_str(c, "private_image_vision_provider_priority", "astrbot_first")
         )
@@ -1117,7 +1112,7 @@ class PrivateCompanionPlugin(
         self.group_image_max_images = self._cfg_int(c, "group_image_max_images", 4, 0, 12)
         self.enable_context_image_captioning = self._cfg_bool(c, "enable_context_image_captioning", True)
         self.context_image_caption_max_items = self._cfg_int(c, "context_image_caption_max_items", 12, 0, 50)
-        self.context_image_caption_timeout_seconds = self._cfg_float(c, "context_image_caption_timeout_seconds", 8.0, 0.0)
+        self.context_image_caption_timeout_seconds = self._cfg_float(c, "context_image_caption_timeout_seconds", 8.0, 0.0, 600.0)
         self.enable_private_image_gif_enhancement = self._cfg_bool(c, "enable_private_image_gif_enhancement", True)
         self.private_image_gif_max_frames = self._cfg_int(c, "private_image_gif_max_frames", 4, 1, 8)
         self.enable_group_conversation_followup = self._cfg_bool(c, "enable_group_conversation_followup", True)
@@ -1445,7 +1440,9 @@ class PrivateCompanionPlugin(
         raw_reference_library = self._cfg_raw(c, "photo_reference_library", [])
         if isinstance(raw_reference_library, list):
             self.photo_reference_library = [
-                str(item).strip() for item in raw_reference_library if str(item or "").strip()
+                (dict(item) if isinstance(item, dict) else str(item).strip())
+                for item in raw_reference_library
+                if (isinstance(item, dict) and bool(item)) or str(item or "").strip()
             ][:24]
         else:
             self.photo_reference_library = [
@@ -2031,6 +2028,8 @@ class PrivateCompanionPlugin(
         self._patch_livingmemory_processor_compat()
         self._report_integrated_feature_conflicts()
         self._data_lock = asyncio.Lock()
+        self._daily_state_generation_lock = asyncio.Lock()
+        self._daily_diary_generation_lock = asyncio.Lock()
         self._conversation_db_lock = asyncio.Lock()
         self._framework_agent_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
@@ -2055,6 +2054,7 @@ class PrivateCompanionPlugin(
         self._recent_outfit_command_sends: dict[str, float] = {}
         self._startup_maintenance_task: asyncio.Task | None = None
         self._startup_background_tasks: dict[str, asyncio.Task] = {}
+        self._lifecycle_background_tasks: dict[asyncio.Task, str] = {}
         self._group_image_understanding_tasks: dict[str, dict[str, Any]] = {}
         self._qzone_last_bot = None
         startup_load_started = time.perf_counter()
@@ -2309,6 +2309,97 @@ class PrivateCompanionPlugin(
         task.add_done_callback(discard_finished_task)
         return task
 
+    def _create_lifecycle_background_task(
+        self,
+        operation: Any,
+        *,
+        label: str,
+    ) -> asyncio.Task | None:
+        """Track delayed sends and short-lived jobs so plugin reload can cancel them."""
+        stop_event = getattr(self, "_stop_event", None)
+        if isinstance(stop_event, asyncio.Event) and stop_event.is_set():
+            closer = getattr(operation, "close", None)
+            if callable(closer):
+                closer()
+            logger.debug(
+                "[PrivateCompanion] 插件已进入终止流程，跳过创建后台任务: task=%s",
+                _single_line(label, 100) or "background",
+            )
+            return None
+        try:
+            task = asyncio.create_task(operation)
+        except RuntimeError:
+            closer = getattr(operation, "close", None)
+            if callable(closer):
+                closer()
+            logger.warning(
+                "[PrivateCompanion] 后台任务无法启动：当前没有运行中的事件循环 task=%s",
+                _single_line(label, 100) or "background",
+            )
+            return None
+        tasks = getattr(self, "_lifecycle_background_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._lifecycle_background_tasks = tasks
+        tasks[task] = _single_line(label, 100) or "background"
+
+        def discard_finished_task(finished: asyncio.Task) -> None:
+            registry = getattr(self, "_lifecycle_background_tasks", None)
+            task_label = label
+            if isinstance(registry, dict):
+                task_label = registry.pop(finished, task_label)
+            if finished.cancelled():
+                return
+            try:
+                error = finished.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                logger.warning(
+                    "[PrivateCompanion] 后台任务异常结束: task=%s error=%s",
+                    _single_line(task_label, 100) or "background",
+                    _single_line(error, 180),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(discard_finished_task)
+        return task
+
+    async def _cancel_lifecycle_background_tasks(self, timeout: float = 3.0) -> None:
+        registry = getattr(self, "_lifecycle_background_tasks", None)
+        if not isinstance(registry, dict) or not registry:
+            return
+        current = asyncio.current_task()
+        pending_tasks = {
+            task
+            for task in list(registry)
+            if isinstance(task, asyncio.Task) and task is not current and not task.done()
+        }
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            done, pending = await asyncio.wait(pending_tasks, timeout=max(0.0, float(timeout)))
+            for task in done:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    # The task completion callback logs the original exception.
+                    pass
+            if pending:
+                labels = sorted(
+                    {
+                        _single_line(registry.get(task), 100) or "background"
+                        for task in pending
+                    }
+                )
+                logger.warning(
+                    "[PrivateCompanion] 终止后台任务超时,继续卸载: tasks=%s",
+                    "，".join(labels),
+                )
+        registry.clear()
+
     def _log_registered_command_handlers(self) -> None:
         expected = {
             "companion_command": "/陪伴(alias: /私聊陪伴, /主动陪伴)",
@@ -2387,7 +2478,7 @@ class PrivateCompanionPlugin(
         try:
             if _safe_int(getattr(self, "_startup_config_migration_changes", 0), 0, 0) > 0:
                 config_started = time.perf_counter()
-                await asyncio.to_thread(self._save_config_if_possible)
+                await self._save_config_if_possible()
                 elapsed_ms = int((time.perf_counter() - config_started) * 1000)
                 if elapsed_ms > 1200:
                     logger.warning("[PrivateCompanion] 启动后台配置保存耗时较高: elapsed=%sms", elapsed_ms)
@@ -2409,6 +2500,7 @@ class PrivateCompanionPlugin(
     async def terminate(self):
         global _private_companion_plugin
         self._stop_event.set()
+        await self._cancel_lifecycle_background_tasks()
 
         runtime_bridge = getattr(self, "_proactive_chat_runtime_bridge", None)
         if runtime_bridge is not None:
@@ -2458,7 +2550,12 @@ class PrivateCompanionPlugin(
             await cancel_task(task, f"troubleshooting_proactive_{_single_line(user_id, 40)}")
         self._troubleshooting_proactive_wakeup_tasks = {}
         try:
-            await self._flush_scheduled_data_save()
+            await asyncio.wait_for(self._flush_scheduled_data_save(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("[PrivateCompanion] 等待后台合并保存超时，将改用最终快照保存")
+            save_task = getattr(self, "_data_save_task", None)
+            if isinstance(save_task, asyncio.Task) and not save_task.done():
+                save_task.cancel()
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -2487,6 +2584,11 @@ class PrivateCompanionPlugin(
     async def observe_recall_enhancement_events(self, event: AstrMessageEvent, *args, **kwargs):
         """记录普通消息和 QQ/OneBot 撤回事件，用于撤回增强。"""
         if self is None:
+            return
+        if self._is_onebot_poke_notice_event(event):
+            # OneBot 把戳一戳同时映射为消息事件。它由专用插件处理，不能参与
+            # 陪伴的活动、繁忙闸门或撤回缓存链路。
+            logger.debug("[PrivateCompanion] 放行 OneBot 戳一戳 notice 给专用插件")
             return
         self._qzone_note_event_bot(event)
         if not self.enabled:
@@ -3673,14 +3775,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event.set_result(self._build_result_from_chain(chunks[0]))
         activity_baseline = time.time()
         if len(chunks) > 1:
-            asyncio.create_task(
+            self._create_lifecycle_background_task(
                 self._send_segmented_llm_chain_remainder(
                     event,
                     chunks[1:],
                     previous_segment=self._segmented_chunk_log_text(chunks[0]),
                     source="decorating_result",
                     started_at=activity_baseline,
-                )
+                ),
+                label="segmented_llm_remainder",
             )
 
     @filter.on_decorating_result()
@@ -6352,6 +6455,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """AstrBot 会在请求钩子之后补内置工具，因此在 Agent 启动时做最终互斥。"""
         if self is None or event is None:
             return
+        await self._acknowledge_official_llm_timer_trigger(event)
         if self._finalize_memo_request_tool_boundary(event):
             logger.info(
                 "[PrivateCompanion] 明确便签请求已从最终工具集移除 future_task,避免重复提醒: session=%s",
@@ -6371,6 +6475,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """记录官方定时与创作读取工具的真实结果，供响应阶段可靠校验。"""
         if self is None or event is None:
             return
+        await self._record_official_llm_timer_tool_result(event, tool, tool_result)
         if self._record_future_task_result(event, tool, tool_args, tool_result):
             logger.info(
                 "[PrivateCompanion] 已记录本轮 future_task 成功: action=%s session=%s",
@@ -6385,6 +6490,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 bool(getattr(event, "private_companion_bookshelf_inventory_complete", False)),
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             )
+
+    @filter.on_agent_done()
+    async def complete_official_llm_timer_lifecycle(
+        self,
+        event: AstrMessageEvent,
+        run_context: Any,
+        response: Any,
+        *args,
+        **kwargs,
+    ):
+        """Only finalize timer state when the cron event matches this plugin's timer id/job id."""
+        if self is None or event is None:
+            return
+        await self._complete_official_llm_timer_event(event)
 
     def _is_lightweight_private_passive_inbound(self, text: str) -> bool:
         cleaned = _single_line(text, 80)
@@ -7859,15 +7978,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         recent[signature] = now
         try:
-            task = asyncio.create_task(self._send_reply_interception_forward(target, text))
-            tasks = getattr(self, "_reply_interception_forward_tasks", None)
-            if not isinstance(tasks, set):
-                tasks = set()
-                self._reply_interception_forward_tasks = tasks
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-        except RuntimeError:
-            logger.warning("[PrivateCompanion] 回复拦截转发无法启动：当前没有运行中的事件循环")
+            self._create_lifecycle_background_task(
+                self._send_reply_interception_forward(target, text),
+                label="reply_interception_forward",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 回复拦截转发无法启动: %s",
+                _single_line(exc, 160),
+            )
 
     async def _send_reply_interception_forward(self, target_umo: str, text: str) -> None:
         try:
@@ -8074,8 +8193,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._note_private_inbound_activity(user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts)
             self._note_morning_greeting_reply(user, now=received_ts)
-            if self._cancel_inbound_conflicting_greeting(user, now=received_ts):
-                logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
+            if self._cancel_inbound_conflicting_greeting(
+                user,
+                now=received_ts,
+                user_id=user_id,
+                trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+            ):
+                logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已请求取消冲突问候候选: %s", user_id)
                 if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                     self._schedule_next_proactive(user, now=received_ts)
             if text:
@@ -10356,11 +10480,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         tts_value = tts_parts[1].strip() if len(tts_parts) >= 2 else ""
                 response = self._set_tts_voice_language_from_command(tts_value)
             elif action in companion_manual_confirm_actions:
-                response = self._companion_manual_apply_pending_config(event)
+                response = await self._companion_manual_apply_pending_config(event)
             elif action in companion_manual_cancel_actions:
                 response = self._companion_manual_cancel_pending_config(event)
             elif action in companion_manual_setting_actions:
-                response = self._companion_manual_apply_setting_command(event, value)
+                response = await self._companion_manual_apply_setting_command(event, value)
             elif action in companion_manual_query_actions:
                 response = "正在结合说明书和当前运行状态做诊断。"
             elif action in {"参考图", "人设参考图", "自拍参考图"}:
@@ -10517,7 +10641,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if action in image_api_swap_actions:
             force_swap = bool(re.search(r"(?:强制|force|确认|直接)", value, flags=re.I))
-            await self._reply(event, self._swap_external_image_api_command_text(force=force_swap))
+            await self._reply(event, await self._swap_external_image_api_command_text(force=force_swap))
             event.stop_event()
             return
         if action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
@@ -10620,7 +10744,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     plan = await self._ensure_daily_plan(force=True)
                 outfit = await outfit_generator(force=True) if callable(outfit_generator) else None
             if isinstance(outfit, dict) and outfit.get("path"):
-                image_path = _single_line(outfit.get("path"), 300)
+                image_path = _path_text(outfit.get("path"), 1000)
                 if not os.path.exists(image_path):
                     await self._reply(event, f"每日穿搭照片未生成：图片文件不存在 {image_path}")
                     event.stop_event()
@@ -10689,7 +10813,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             state = await self._ensure_daily_state(force=False)
             if not state:
                 state = await self._ensure_daily_state(force=True)
-                await self._reply(event, self._format_dream_view(state or {}))
+            await self._reply(event, self._format_dream_view(state or {}))
         event.stop_event()
 
     @filter.command("陪伴群", alias={"群陪伴", "群聊陪伴"})
@@ -10705,6 +10829,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
         if self is None:
+            return
+        if self._is_onebot_poke_notice_event(event):
+            # 戳一戳会以私聊空文本事件进入 AstrBot；不要让空消息保护误拦截。
+            logger.debug("[PrivateCompanion] 私聊戳一戳 notice 已放行给专用插件")
             return
         self._qzone_note_event_bot(event)
         received_ts = _now_ts()
@@ -10927,8 +11055,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._note_private_inbound_activity(fast_user, received_ts, text=text)
             self._mark_greetings_satisfied_by_recent_activity(fast_user, activity_ts=received_ts)
             self._note_morning_greeting_reply(fast_user, now=received_ts)
-            if self._cancel_inbound_conflicting_greeting(fast_user, now=received_ts):
-                logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
+            if self._cancel_inbound_conflicting_greeting(
+                fast_user,
+                now=received_ts,
+                user_id=user_id,
+                trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+            ):
+                logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已请求取消冲突问候候选: %s", user_id)
                 if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
                     self._schedule_next_proactive(fast_user, now=received_ts)
             safe_text = self._sanitize_orphan_tts_placeholders(text)
@@ -11184,11 +11317,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                     buffers[key]["image_mode"] = image_mode
                     if persisted_images and image_mode == "caption":
-                        buffers[key]["vision_task"] = asyncio.create_task(
+                        buffers[key]["vision_task"] = self._create_lifecycle_background_task(
                             self._transcribe_private_inbound_images(
                                 persisted_images,
                                 umo=umo,
-                            )
+                            ),
+                            label="private_image_debounce_vision",
                         )
                     logger.info(
                         "[PrivateCompanion] 私聊单图已进入防抖缓冲: user=%s images=%s mode=%s vision=%s",
@@ -11197,7 +11331,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         image_mode,
                         bool(persisted_images) and image_mode == "caption",
                     )
-                    asyncio.create_task(self._finalize_private_image_buffer_after_wait(key, user_id, received_ts))
+                    self._create_lifecycle_background_task(
+                        self._finalize_private_image_buffer_after_wait(key, user_id, received_ts),
+                        label="private_image_debounce_finalize",
+                    )
                 self._schedule_data_save()
                 event.stop_event()
                 return
@@ -11371,8 +11508,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         asyncio.create_task(self._refine_inbound_emotion_with_model(user_id, text, deepcopy(intent_profile)))
                     else:
                         self._update_relationship_state_from_intent(user, intent_profile)
-                if is_target_user and self._cancel_inbound_conflicting_greeting(user, now=_now_ts()):
-                    logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
+                if is_target_user and self._cancel_inbound_conflicting_greeting(
+                    user,
+                    now=_now_ts(),
+                    user_id=user_id,
+                    trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                ):
+                    logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已请求取消冲突问候候选: %s", user_id)
                     if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                         self._schedule_next_proactive(user, now=_now_ts())
             user_is_owner = self._private_user_role(user, user_id) == "owner"
@@ -11504,7 +11646,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=200000)
     async def capture_group_observation_early(self, event: AstrMessageEvent, *args, **kwargs):
         """Record allowed group messages before reply plugins can stop propagation."""
-        if self is None or not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
+        if self is None or self._is_onebot_poke_notice_event(event):
+            return
+        if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
             return
         group_id = self._extract_group_id_from_event(event)
         if not group_id or not self._group_enabled_for_event(group_id):
@@ -11539,6 +11683,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
         if self is None:
+            return
+        if self._is_onebot_poke_notice_event(event):
+            # 同样避免群聊观察链将戳一戳误作空消息或普通上下文。
+            logger.debug("[PrivateCompanion] 群聊戳一戳 notice 已放行给专用插件")
             return
         self._qzone_note_event_bot(event)
         if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
@@ -11681,8 +11829,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     target_user = self._get_user(sender_id)
                     target_user["last_activity_at"] = received_ts
                     self._mark_greetings_satisfied_by_recent_activity(target_user, activity_ts=received_ts)
-                    if self._cancel_inbound_conflicting_greeting(target_user, now=received_ts):
-                        logger.info("[PrivateCompanion] 目标用户已在群内交流,已取消冲突问候候选: group=%s user=%s", group_id, sender_id)
+                    if self._cancel_inbound_conflicting_greeting(
+                        target_user,
+                        now=received_ts,
+                        user_id=sender_id,
+                        trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                    ):
+                        logger.info("[PrivateCompanion] 目标用户已在群内交流,已请求取消冲突问候候选: group=%s user=%s", group_id, sender_id)
                         if not self._simulation_active(target_user) and _safe_float(target_user.get("next_proactive_at"), 0) <= 0:
                             self._schedule_next_proactive(target_user, now=received_ts)
                     self._maybe_schedule_post_goodnight_group_activity(

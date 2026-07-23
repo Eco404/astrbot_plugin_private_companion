@@ -22,6 +22,7 @@ import unicodedata
 import uuid
 import zoneinfo
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
@@ -112,6 +113,7 @@ from .helpers import (
     _normalize_outbound_punctuation_flow,
     _normalize_photo_subject_owner,
     _now_ts,
+    _path_text,
     _photo_subject_owner_prompt_label,
     _redact_outbound_secrets,
     _safe_float,
@@ -248,6 +250,103 @@ _PLATFORM_DISPLAY_NAMES = {
     "wechat": "微信",
     "discord": "Discord",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _ProactiveSendOutcome:
+    delivered: bool
+    complete: bool
+    delivered_text: str = ""
+    image_delivered: bool = False
+    extra_components_delivered: int = 0
+    note: str = ""
+
+    def __bool__(self) -> bool:
+        return self.delivered
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoWardrobeIntent:
+    target_category: str = ""
+    target_text: str = ""
+    custom_outfit: bool = False
+    change_requested: bool = False
+    excluded_categories: tuple[str, ...] = ()
+    exclusion_text: str = ""
+    positive_text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoWardrobeDecision:
+    mode: str = "none"
+    source: str = "none"
+    category: str = ""
+    lock_outfit: bool = False
+    remove_daily_outfit_context: bool = False
+    preset_name: str = ""
+    reference_image_path: str = ""
+    reference_id: str = ""
+    reference_kind: str = ""
+    reference_roles: tuple[str, ...] = ()
+    effective_reference_roles: tuple[str, ...] = ()
+    positive_instruction: str = ""
+    negative_instruction: str = ""
+    reason: str = ""
+    excluded_categories: tuple[str, ...] = ()
+    requested_outfit_text: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "source": self.source,
+            "category": self.category,
+            "lock_outfit": self.lock_outfit,
+            "remove_daily_outfit_context": self.remove_daily_outfit_context,
+            "preset_name": self.preset_name,
+            "reference_image_path": self.reference_image_path,
+            "reference_id": self.reference_id,
+            "reference_kind": self.reference_kind,
+            "reference_roles": list(self.reference_roles),
+            "effective_reference_roles": list(self.effective_reference_roles),
+            "positive_instruction": self.positive_instruction,
+            "negative_instruction": self.negative_instruction,
+            "reason": self.reason,
+            "excluded_categories": list(self.excluded_categories),
+            "requested_outfit_text": self.requested_outfit_text,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PhotoGenerationResult:
+    backend: str = ""
+    image_path: str = ""
+    note: str = ""
+    trace_id: str = ""
+    reference_selected_path: str = ""
+    reference_used: bool = False
+    reference_id: str = ""
+    reference_kind: str = ""
+    reference_roles: tuple[str, ...] = ()
+    wardrobe_mode: str = ""
+    wardrobe_category: str = ""
+    outfit_locked: bool = False
+    daily_outfit_removed: bool = False
+    preset_names: tuple[str, ...] = ()
+    prompt_hash: str = ""
+    prompt_path: str = ""
+
+    @property
+    def success(self) -> bool:
+        path = _path_text(self.image_path, 1000)
+        if not path:
+            return False
+        try:
+            return Path(path).is_file()
+        except (OSError, ValueError):
+            return False
+
+    def as_legacy_tuple(self) -> tuple[str, str, str]:
+        return self.backend, self.image_path, self.note
 
 
 class SyntheticPrivateWakeEvent(AstrMessageEvent):
@@ -6113,11 +6212,49 @@ Output:
                     return False
         return True
 
+    def _delivery_outcome_is_uncertain(self, error: Any) -> bool:
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+            return True
+        text = _single_line(error, 500).lower()
+        return any(
+            token in text
+            for token in (
+                "timed out",
+                "timeout",
+                "deadline exceeded",
+                "read timeout",
+                "write timeout",
+                "connection reset",
+                "connection closed",
+                "server disconnected",
+                "remote disconnected",
+                "broken pipe",
+                "回执超时",
+                "响应超时",
+                "连接被重置",
+                "连接已关闭",
+            )
+        )
+
+    def _log_uncertain_onebot_submission(self, action: str, error: Any) -> None:
+        logger.warning(
+            "[PrivateCompanion] OneBot 动作回执不确定，为避免同一内容被别名立即重复提交，本次按已提交处理: action=%s error=%s",
+            action,
+            self._format_send_exception(error),
+        )
+
     async def _call_onebot_action(self, client: Any, action: str, **params: Any) -> bool:
         ok, _ = await self._call_onebot_action_with_error(client, action, **params)
         return ok
 
-    async def _call_onebot_action_with_error(self, client: Any, action: str, **params: Any) -> tuple[bool, str]:
+    async def _call_onebot_action_with_error(
+        self,
+        client: Any,
+        action: str,
+        *,
+        at_most_once: bool = False,
+        **params: Any,
+    ) -> tuple[bool, str]:
         candidates = (
             "call_action",
             "call_api",
@@ -6130,44 +6267,61 @@ Output:
                 continue
             try:
                 result = func(action, **params)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if self._onebot_action_result_ok(result):
-                    return True, ""
-                last_error = f"{attr} 返回失败: {_single_line(result, 180)}"
-                if self._is_onebot_event_checker_send_rejection(result):
-                    return False, self._onebot_event_checker_rejection_summary()
             except TypeError:
                 try:
                     result = func(action, params)
-                    if hasattr(result, "__await__"):
-                        result = await result
-                    if self._onebot_action_result_ok(result):
-                        return True, ""
-                    last_error = f"{attr} 返回失败: {_single_line(result, 180)}"
-                    if self._is_onebot_event_checker_send_rejection(result):
-                        return False, self._onebot_event_checker_rejection_summary()
                 except Exception as exc:
                     if self._is_onebot_event_checker_send_rejection(exc):
                         return False, self._onebot_event_checker_rejection_summary()
+                    if at_most_once and self._delivery_outcome_is_uncertain(exc):
+                        self._log_uncertain_onebot_submission(action, exc)
+                        return True, "回执不确定，已停止立即重试"
                     last_error = self._format_send_exception(exc)
                     continue
             except Exception as exc:
                 if self._is_onebot_event_checker_send_rejection(exc):
                     return False, self._onebot_event_checker_rejection_summary()
+                if at_most_once and self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True, "回执不确定，已停止立即重试"
                 last_error = self._format_send_exception(exc)
                 continue
+            try:
+                if hasattr(result, "__await__"):
+                    result = await result
+            except Exception as exc:
+                if self._is_onebot_event_checker_send_rejection(exc):
+                    return False, self._onebot_event_checker_rejection_summary()
+                if at_most_once and self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True, "回执不确定，已停止立即重试"
+                last_error = self._format_send_exception(exc)
+                continue
+            if self._onebot_action_result_ok(result):
+                return True, ""
+            last_error = f"{attr} 返回失败: {_single_line(result, 180)}"
+            if self._is_onebot_event_checker_send_rejection(result):
+                return False, self._onebot_event_checker_rejection_summary()
         func = getattr(client, action, None)
         if callable(func):
             try:
                 result = func(**params)
+            except Exception as exc:
+                if at_most_once and self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True, "回执不确定，已停止立即重试"
+                return False, self._format_send_exception(exc)
+            try:
                 if hasattr(result, "__await__"):
                     result = await result
-                if self._onebot_action_result_ok(result):
-                    return True, ""
-                return False, f"{action} 返回失败: {_single_line(result, 180)}"
             except Exception as exc:
+                if at_most_once and self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True, "回执不确定，已停止立即重试"
                 return False, self._format_send_exception(exc)
+            if self._onebot_action_result_ok(result):
+                return True, ""
+            return False, f"{action} 返回失败: {_single_line(result, 180)}"
         return False, last_error or f"OneBot 客户端不支持动作 {action}"
 
     def _input_status_user_id_from_umo(self, umo: str) -> str:
@@ -6779,6 +6933,7 @@ Output:
         if not subject_owner:
             subject_owner = "bot" if bool(scene.get("use_persona_reference")) or workflow_kind == "selfie" else "scene"
         session_key = str(user.get("umo") or user.get("user_id") or name)
+        continuity_key = self._compose_photo_continuity_key(session_key, user.get("user_id"))
         reference_image_path = ""
         if bool(scene.get("use_persona_reference")):
             # Character-bearing photo_text scenes need identity continuity even when
@@ -6787,11 +6942,13 @@ Output:
                 "selfie",
                 allow_daily_outfit=True,
                 selection_context=scene["prompt"],
+                continuity_key=continuity_key,
             )
         backend_name, image_path, workflow_note = await self._generate_photo_image(
             workflow_kind=workflow_kind,
             prompt_text=scene["prompt"],
             session_key=session_key,
+            continuity_key=continuity_key,
             reference_image_path=reference_image_path,
         )
         if not image_path:
@@ -6965,7 +7122,7 @@ Output:
     ) -> dict[str, Any]:
         item = {
             "date": _single_line(date_key, 20),
-            "path": _single_line(image_path, 300),
+            "path": _path_text(image_path, 1000),
             "error": _single_line(error, 240),
             "backend": _single_line(backend, 80),
             "prompt": _single_line(prompt, 500),
@@ -7048,7 +7205,7 @@ Output:
         for raw_item in candidates:
             if not isinstance(raw_item, dict):
                 continue
-            path = _single_line(raw_item.get("path"), 300)
+            path = _path_text(raw_item.get("path"), 1000)
             if not path:
                 continue
             profile = self._normalize_daily_outfit_profile(raw_item.get("outfit_profile"))
@@ -7684,7 +7841,7 @@ Output:
 
     def _choose_photo_workflow_name(self, kind: str) -> str:
         normalized = str(kind or "").strip().lower()
-        if normalized in {"selfie", "portrait", "自拍", "人像"}:
+        if normalized in {"selfie", "portrait", "自拍", "人像", "edit", "改图", "修图", "重绘", "p图"}:
             return self.comfyui_selfie_workflow_name or self.comfyui_text2img_workflow_name
         return self.comfyui_text2img_workflow_name or self.comfyui_selfie_workflow_name
 
@@ -7693,7 +7850,7 @@ Output:
         return hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()[:10]
 
     def _photo_generation_file_detail(self, image_path: str) -> str:
-        path_text = _single_line(image_path, 260)
+        path_text = _path_text(image_path, 1000)
         if not path_text:
             return "path=- exists=false size=0"
         if re.match(r"^(?:https?://|data:|base64://)", path_text, flags=re.I):
@@ -7769,6 +7926,7 @@ Output:
         *,
         trace_id: str,
         session_key: str,
+        continuity_key: str = "",
         workflow_kind: str,
         backend: str,
         ok: bool,
@@ -7779,34 +7937,314 @@ Output:
         image_size: str = "",
         elapsed_ms: int = 0,
         presets: list[str] | None = None,
+        reference_used: bool = False,
+        reference_candidate: dict[str, Any] | None = None,
+        wardrobe: PhotoWardrobeDecision | None = None,
+        prompt_hash: str = "",
+        prompt_path: str = "",
+        prompt_sections: dict[str, str] | None = None,
+        conflicts: list[str] | None = None,
+        removed_conflicts: list[str] | None = None,
     ) -> None:
         try:
+            reference_candidate = reference_candidate or {}
+            wardrobe = wardrobe or PhotoWardrobeDecision()
             item = {
                 "ts": _now_ts(),
                 "trace": _single_line(trace_id, 40),
-                "session": _single_line(session_key, 100),
+                "session": _single_line(session_key, 340),
+                "continuity_key": self._normalize_photo_continuity_key(continuity_key),
                 "kind": _single_line(workflow_kind, 30),
                 "backend": _single_line(backend, 80),
                 "ok": bool(ok),
                 "prompt_format": self._photo_generation_prompt_format_mode(),
                 "prompt": _single_line(prompt_text, 900),
-                "path": _single_line(image_path, 260),
+                "path": _path_text(image_path, 1000),
                 "note": _single_line(note, 240),
                 "reference": bool(reference_image_path),
-                "reference_path": _single_line(reference_image_path, 260),
+                "reference_used": bool(reference_used),
+                "reference_path": _path_text(reference_image_path, 1000),
+                "reference_id": _single_line(reference_candidate.get("id"), 60),
+                "reference_kind": _single_line(reference_candidate.get("kind"), 40),
+                "reference_roles": list(reference_candidate.get("reference_roles") or [])[:8],
+                "reference_outfit_category": _single_line(reference_candidate.get("outfit_category"), 40),
                 "image_size": _single_line(image_size, 40),
                 "elapsed_ms": int(max(0, elapsed_ms or 0)),
                 "presets": [_single_line(name, 40) for name in (presets or []) if _single_line(name, 40)][:6],
+                "wardrobe_mode": _single_line(wardrobe.mode, 40),
+                "wardrobe_source": _single_line(wardrobe.source, 40),
+                "wardrobe_category": _single_line(wardrobe.category, 40),
+                "outfit_locked": bool(wardrobe.lock_outfit),
+                "daily_outfit_removed": bool(wardrobe.remove_daily_outfit_context),
+                "wardrobe_reason": _single_line(wardrobe.reason, 240),
+                "prompt_hash": _single_line(prompt_hash, 80),
+                "prompt_path": _path_text(prompt_path, 1000),
+                "prompt_sections": {
+                    _single_line(key, 50): _single_line(value, 240)
+                    for key, value in (prompt_sections or {}).items()
+                    if _single_line(key, 50) and _single_line(value, 240)
+                },
+                "conflicts": [_single_line(value, 120) for value in (conflicts or []) if _single_line(value, 120)][:12],
+                "removed_conflicts": [
+                    _single_line(value, 120)
+                    for value in (removed_conflicts or [])
+                    if _single_line(value, 120)
+                ][:12],
             }
             raw = self.data.setdefault("recent_photo_generations", [])
             if not isinstance(raw, list):
                 raw = []
                 self.data["recent_photo_generations"] = raw
             raw.insert(0, item)
-            del raw[12:]
+            del raw[48:]
             self._save_data_sync()
         except Exception as exc:
             logger.debug("[PrivateCompanion] 记录最近生图提示词失败: %s", _single_line(exc, 120))
+
+    def _write_photo_prompt_debug_file(
+        self,
+        *,
+        trace_id: str,
+        session_key: str,
+        workflow_kind: str,
+        base_prompt: str,
+        scene_context_before: str,
+        scene_context_after: str,
+        reference: dict[str, Any] | None,
+        wardrobe: PhotoWardrobeDecision,
+        presets: list[str],
+        prompt_sections: dict[str, str],
+        final_prompt: str,
+        conflicts: list[str],
+        removed_conflicts: list[str],
+    ) -> tuple[str, str]:
+        prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
+        try:
+            root = Path(self.data_dir) / "photo_prompt_debug"
+            root.mkdir(parents=True, exist_ok=True)
+            now = datetime.now()
+            filename = f"{now.strftime('%Y%m%d_%H%M%S_%f')}_{_single_line(trace_id, 40) or 'photo'}.json"
+            path = root / filename
+
+            def redact(value: Any) -> Any:
+                if isinstance(value, str):
+                    return _redact_outbound_secrets(value, self)
+                if isinstance(value, dict):
+                    return {str(key): redact(item) for key, item in value.items()}
+                if isinstance(value, (list, tuple)):
+                    return [redact(item) for item in value]
+                return value
+
+            reference_payload = {
+                "id": _single_line((reference or {}).get("id"), 60),
+                "kind": _single_line((reference or {}).get("kind"), 40),
+                "path": _path_text((reference or {}).get("path"), 1000),
+                "roles": list((reference or {}).get("reference_roles") or []),
+                "outfit_category": _single_line((reference or {}).get("outfit_category"), 40),
+                "outfit_lock_default": bool((reference or {}).get("outfit_lock_default")),
+                "preferred_preset": _single_line((reference or {}).get("preferred_preset"), 60),
+                "metadata_source": _single_line((reference or {}).get("metadata_source"), 30),
+            }
+            payload = redact(
+                {
+                    "schema_version": 1,
+                    "created_at": now.isoformat(timespec="seconds"),
+                    "trace": _single_line(trace_id, 40),
+                    "session": _single_line(session_key, 340),
+                    "workflow_kind": _single_line(workflow_kind, 40),
+                    "prompt_format": self._photo_generation_prompt_format_mode(),
+                    "base_prompt": base_prompt,
+                    "scene_context_before": scene_context_before,
+                    "scene_context_after": scene_context_after,
+                    "reference": reference_payload,
+                    "wardrobe_decision": wardrobe.as_dict(),
+                    "presets": list(presets),
+                    "prompt_sections": prompt_sections,
+                    "conflicts": list(conflicts),
+                    "removed_conflicts": list(removed_conflicts),
+                    "final_prompt": final_prompt,
+                    "final_prompt_length": len(str(final_prompt or "")),
+                    "final_prompt_sha256": prompt_hash,
+                }
+            )
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            debug_files = sorted(
+                root.glob("*.json"),
+                key=lambda item: item.name,
+                reverse=True,
+            )
+            for stale in debug_files[40:]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            return str(path), prompt_hash
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 写入完整生图提示词调试文件失败: trace=%s error=%s",
+                _single_line(trace_id, 40),
+                _single_line(exc, 160),
+            )
+            return "", prompt_hash
+
+    def _photo_generation_result_metadata(
+        self,
+        *,
+        image_path: str = "",
+        session_key: str = "",
+    ) -> dict[str, Any]:
+        raw = self.data.get("recent_photo_generations") if isinstance(getattr(self, "data", None), dict) else []
+        if not isinstance(raw, list):
+            return {}
+        target_path = _path_text(image_path, 1000)
+        target_session = _single_line(session_key, 340)
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if target_path and _path_text(item.get("path"), 1000) != target_path:
+                continue
+            if not target_path and target_session and _single_line(item.get("session"), 340) != target_session:
+                continue
+            return dict(item)
+        return {}
+
+    @staticmethod
+    def _normalize_photo_continuity_key(value: Any) -> str:
+        key = _single_line(value, 340).strip()
+        if key.startswith("tool_photo_"):
+            key = key[len("tool_photo_") :]
+        return key
+
+    @classmethod
+    def _compose_photo_continuity_key(cls, session_key: Any, user_id: Any) -> str:
+        session = cls._normalize_photo_continuity_key(session_key)
+        sender = _single_line(user_id, 80).strip()
+        if not session or not sender:
+            return ""
+        return _single_line(f"{session}|sender={sender}", 340)
+
+    @classmethod
+    def _photo_continuity_store_key(cls, continuity_key: Any) -> str:
+        normalized = cls._normalize_photo_continuity_key(continuity_key)
+        if not normalized:
+            return ""
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+    def _remember_sent_photo_continuity_reference(self, item: dict[str, Any]) -> None:
+        if not isinstance(item, dict) or not bool(item.get("ok")) or not bool(item.get("sent")):
+            return
+        continuity_key = self._normalize_photo_continuity_key(item.get("continuity_key"))
+        store_key = self._photo_continuity_store_key(continuity_key)
+        image_path = _path_text(item.get("path"), 1000)
+        if not store_key or not image_path:
+            return
+        try:
+            path = Path(image_path).expanduser().resolve()
+            if (
+                not path.exists()
+                or not path.is_file()
+                or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}
+            ):
+                return
+        except (OSError, ValueError):
+            return
+
+        now = _now_ts()
+        raw_store = self.data.setdefault("recent_photo_continuity", {})
+        if not isinstance(raw_store, dict):
+            raw_store = {}
+            self.data["recent_photo_continuity"] = raw_store
+        raw_store[store_key] = {
+            "schema_version": 1,
+            "continuity_key": continuity_key,
+            "sent_at": now,
+            "generated_at": _safe_float(item.get("ts"), now),
+            "path": str(path),
+            "kind": _single_line(item.get("kind"), 30),
+            "intent_kind": _single_line(item.get("intent_kind"), 30),
+            "prompt": _single_line(item.get("prompt"), 900),
+            "caption": _single_line(item.get("caption"), 160),
+            "scene_preset": _single_line(item.get("scene_preset"), 80),
+            "reference_path": _path_text(item.get("reference_path"), 1000),
+            "wardrobe_mode": _single_line(item.get("wardrobe_mode"), 40),
+            "wardrobe_category": _single_line(item.get("wardrobe_category"), 40),
+            "reference_roles": list(item.get("reference_roles") or []),
+        }
+
+        keep_after = now - 24 * 3600
+        for key, record in list(raw_store.items()):
+            if not isinstance(record, dict) or _safe_float(record.get("sent_at"), 0) < keep_after:
+                raw_store.pop(key, None)
+        if len(raw_store) > 96:
+            ordered = sorted(
+                raw_store.items(),
+                key=lambda pair: _safe_float(pair[1].get("sent_at"), 0) if isinstance(pair[1], dict) else 0,
+                reverse=True,
+            )
+            self.data["recent_photo_continuity"] = dict(ordered[:96])
+
+    def _recent_sent_photo_continuity_candidate(
+        self,
+        continuity_key: Any,
+        *,
+        now: float | None = None,
+        max_age_seconds: float = 45 * 60,
+    ) -> dict[str, str]:
+        normalized = self._normalize_photo_continuity_key(continuity_key)
+        store_key = self._photo_continuity_store_key(normalized)
+        data = getattr(self, "data", {})
+        raw_store = data.get("recent_photo_continuity") if isinstance(data, dict) else {}
+        record = raw_store.get(store_key) if store_key and isinstance(raw_store, dict) else None
+        if not isinstance(record, dict):
+            return {}
+        if self._normalize_photo_continuity_key(record.get("continuity_key")) != normalized:
+            return {}
+        check_now = _now_ts() if now is None else float(now)
+        sent_at = _safe_float(record.get("sent_at"), 0)
+        age = check_now - sent_at
+        if sent_at <= 0 or age < -300 or age > max(60.0, float(max_age_seconds)):
+            return {}
+        image_path = _path_text(record.get("path"), 1000)
+        try:
+            path = Path(image_path).expanduser().resolve()
+            if (
+                not path.exists()
+                or not path.is_file()
+                or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}
+            ):
+                return {}
+        except (OSError, ValueError):
+            return {}
+        previous_prompt = _single_line(record.get("prompt"), 360)
+        previous_caption = _single_line(record.get("caption"), 120)
+        previous_scene = _single_line(record.get("scene_preset"), 80)
+        details = "；".join(
+            part
+            for part in (
+                f"上一张画面要求：{previous_prompt}" if previous_prompt else "",
+                f"上一张附言：{previous_caption}" if previous_caption else "",
+                f"上一张场景预设：{previous_scene}" if previous_scene else "",
+            )
+            if part
+        )
+        note = (
+            "同一会话刚刚已经实际发送的上一张成图；只有当前要求是在原画面上自然续拍，主要改变动作、表情、视线、机位或近似构图时使用；"
+            "若明确更换人物、服装、地点、时间、整体场景或另起主题则不要使用"
+        )
+        if details:
+            note = f"{note}；{details}"
+        return {
+            "id": "recent_sent_photo",
+            "path": str(path),
+            "source": str(path),
+            "kind": "recent_sent_photo",
+            "note": _single_line(note, 760),
+            "reference_roles": ["identity", "outfit", "scene", "continuity"],
+            "outfit_category": _single_line(record.get("wardrobe_category"), 40),
+            "outfit_lock_default": True,
+            "preferred_preset": _single_line(record.get("scene_preset"), 60),
+            "metadata_source": "runtime",
+        }
 
     def _annotate_recent_photo_generation(
         self,
@@ -7824,14 +8262,14 @@ Output:
             raw = self.data.get("recent_photo_generations")
             if not isinstance(raw, list):
                 return
-            target_path = _single_line(image_path, 260)
-            target_session = _single_line(session_key, 100)
+            target_path = _path_text(image_path, 1000)
+            target_session = _single_line(session_key, 340)
             for item in raw:
                 if not isinstance(item, dict):
                     continue
-                same_path = bool(target_path and _single_line(item.get("path"), 260) == target_path)
-                same_session = bool(target_session and _single_line(item.get("session"), 100) == target_session)
-                if not same_path and not same_session:
+                same_path = bool(target_path and _path_text(item.get("path"), 1000) == target_path)
+                same_session = bool(target_session and _single_line(item.get("session"), 340) == target_session)
+                if not (same_path if target_path else same_session):
                     continue
                 if trigger:
                     item["trigger"] = _single_line(trigger, 40)
@@ -7846,6 +8284,8 @@ Output:
                 if tool_name:
                     item["tool_name"] = _single_line(tool_name, 60)
                 item["annotated_at"] = _now_ts()
+                if sent is True:
+                    self._remember_sent_photo_continuity_reference(item)
                 self._save_data_sync()
                 return
         except Exception as exc:
@@ -7883,46 +8323,108 @@ Output:
             "使用 Positive prompt: ... Negative prompt: ... 结构，不要写解释性段落。"
         )
 
-    def _apply_photo_generation_prompt_format(self, prompt_text: str) -> str:
+    @staticmethod
+    def _photo_generation_negative_clause_content(clause: str) -> tuple[bool, str]:
+        text = re.sub(r"\s+", " ", str(clause or "")).strip(" ,.;；。，")
+        if not text:
+            return False, ""
+        text = re.sub(
+            r"^(?:user\s+request|requested\s+final\s+image|用户要求|画面要求)\s*[：:]\s*",
+            "",
+            text,
+            flags=re.I,
+        ).strip()
+        prefix = re.compile(
+            r"^(?:请)?(?:不要|别(?:再)?(?:穿|用|选)?|不想穿|不穿|不用|不是|无需|无须|避免|禁止|不许|不得|排除|拒绝|去掉|脱下|取消)\s*"
+            r"|^(?:do\s+not|don't|not|avoid|without|no|exclude|skip|remove)\s+",
+            flags=re.I,
+        )
+        match = prefix.match(text)
+        if match:
+            return True, text[match.end():].strip(" ,.;；。，")
+        postfix = re.compile(
+            r"\s*(?:不要(?:了)?|别穿|不穿|不用|算了|就算了|除外|排除|取消|not|no)\s*$",
+            flags=re.I,
+        )
+        match = postfix.search(text)
+        if match:
+            return True, text[:match.start()].strip(" ,.;；。，")
+        return False, text
+
+    @classmethod
+    def _photo_generation_semantic_prompt_parts(cls, prompt_text: str) -> tuple[str, str]:
+        """Separate positive request clauses from explicit exclusions without losing mixed requests."""
         prompt = str(prompt_text or "").strip()
-        if not prompt:
-            return ""
-        mode = self._photo_generation_prompt_format_mode()
         positive_match = re.search(
             r"positive\s+prompt\s*:\s*(.*?)(?=negative\s+prompt\s*:|$)",
             prompt,
             flags=re.I | re.S,
         )
-        negative_match = re.search(r"negative\s+prompt\s*:\s*(.*)$", prompt, flags=re.I | re.S)
-        if mode == "natural_language":
-            if not positive_match:
-                return _single_line(prompt, 1800)
-            positive = re.sub(r"\s+", " ", positive_match.group(1)).strip(" ,.;；。")
-            negative = re.sub(r"\s+", " ", negative_match.group(1) if negative_match else "").strip(" ,.;；。")
-            natural = f"Create a single coherent image showing {positive}."
-            if negative:
-                natural += f" Avoid {negative}."
-            return _single_line(natural, 1800)
         if positive_match:
-            return _single_line(prompt, 1800)
+            positive_raw = positive_match.group(1).strip()
+            negative_match = re.search(r"negative\s+prompt\s*:\s*(.*)$", prompt, flags=re.I | re.S)
+            negative_raw = negative_match.group(1).strip() if negative_match else ""
+        else:
+            positive_raw = prompt
+            negative_raw = ""
 
         positive_parts: list[str] = []
         negative_parts: list[str] = []
-        for part in re.split(r"(?:\r?\n+|[。；;]+|(?<=[.!?])\s+)", prompt):
-            cleaned = re.sub(r"\s+", " ", str(part or "")).strip(" ,.;；。")
+
+        def add_clause(raw_clause: str) -> None:
+            clause = re.sub(r"\s+", " ", str(raw_clause or "")).strip(" ,.;；。，")
+            if not clause:
+                return
+            is_negative, content = cls._photo_generation_negative_clause_content(clause)
+            if is_negative:
+                transition = re.search(
+                    r"(?:但|而|不过|可是)?(?:改穿|换成|换上|换为|改为|要穿|穿上|而要)"
+                    r"|\b(?:but|instead|and)\s+(?:wear|change\s+into|switch\s+to|put\s+on)\b",
+                    content,
+                    flags=re.I,
+                )
+                if transition and transition.start() > 0:
+                    excluded = content[:transition.start()].strip(" ,.;；。，")
+                    requested = content[transition.start():].strip(" ,.;；。，")
+                    if excluded:
+                        negative_parts.append(excluded)
+                    if requested:
+                        positive_parts.append(requested)
+                    return
+                if content:
+                    negative_parts.append(content)
+                return
+            if content:
+                positive_parts.append(content)
+
+        for clause in re.split(r"(?:\r?\n+|[。；;，,]+|(?<=[.!?])\s+)", positive_raw):
+            add_clause(clause)
+        for clause in re.split(r"(?:\r?\n+|[。；;，,]+|(?<=[.!?])\s+)", negative_raw):
+            cleaned = re.sub(r"\s+", " ", str(clause or "")).strip(" ,.;；。，")
             if not cleaned:
                 continue
-            if re.match(r"^(?:do\s+not|don't|avoid|without|no\b|不要|避免|禁止|不得)", cleaned, flags=re.I):
-                cleaned = re.sub(r"^(?:do\s+not|don't|avoid|without|no\b|不要|避免|禁止|不得)\s*", "", cleaned, flags=re.I)
-                if cleaned:
-                    negative_parts.append(cleaned)
-            else:
-                positive_parts.append(cleaned)
-        positive = ", ".join(positive_parts) or re.sub(r"\s+", " ", prompt)
+            _, content = cls._photo_generation_negative_clause_content(cleaned)
+            if content:
+                negative_parts.append(content)
+
+        return ", ".join(dict.fromkeys(positive_parts)), ", ".join(dict.fromkeys(negative_parts))
+
+    def _apply_photo_generation_prompt_format(self, prompt_text: str) -> str:
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            return ""
+        mode = self._photo_generation_prompt_format_mode()
+        positive, negative = self._photo_generation_semantic_prompt_parts(prompt)
+        positive = positive or "the requested image"
+        if mode == "natural_language":
+            natural = f"Create a single coherent image showing {positive}."
+            if negative:
+                natural += f" Avoid {negative}."
+            return self._photo_prompt_clip(natural, 2400, preserve_tail=True)
         formatted = f"Positive prompt: {positive}."
-        if negative_parts:
-            formatted += f" Negative prompt: {', '.join(negative_parts)}."
-        return _single_line(formatted, 1800)
+        if negative:
+            formatted += f" Negative prompt: {negative}."
+        return self._photo_prompt_clip(formatted, 2400, preserve_tail=True)
 
     def _photo_generation_selfie_schedule_scene_hint(self) -> str:
         snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
@@ -8009,7 +8511,7 @@ Output:
         scene_hint = self._photo_generation_selfie_schedule_scene_hint()
         if not scene_hint:
             return _single_line(prompt, 1800), ""
-        selected_reference = _single_line(reference_image_path, 260)
+        selected_reference = _path_text(reference_image_path, 1000)
         outfit_reference = self._daily_outfit_reference_image_path() if allow_daily_outfit_reference else ""
         selected_daily_outfit = self._photo_reference_paths_equal(selected_reference, outfit_reference)
         changes_daily_outfit = self._photo_generation_prompt_changes_daily_outfit(prompt)
@@ -8065,45 +8567,846 @@ Output:
             pass
         return os.path.normcase(left_text) == os.path.normcase(right_text)
 
+    def _apply_recent_photo_continuity_prompt(
+        self,
+        prompt_text: str,
+        workflow_kind: str,
+        *,
+        reference_image_path: str,
+        continuity_key: str,
+    ) -> tuple[str, bool]:
+        prompt = str(prompt_text or "").strip()
+        continuity_instruction, matched = self._photo_generation_recent_continuity_constraint(
+            workflow_kind,
+            reference_image_path=reference_image_path,
+            continuity_key=continuity_key,
+        )
+        if not matched:
+            return _single_line(prompt, 2200), False
+        return _single_line(f"{prompt}\n\n{continuity_instruction}".strip(), 2200), True
+
+    def _photo_generation_recent_continuity_constraint(
+        self,
+        workflow_kind: str,
+        *,
+        reference_image_path: str,
+        continuity_key: str,
+    ) -> tuple[str, bool]:
+        normalized_kind = str(workflow_kind or "").strip().lower()
+        if normalized_kind not in {"selfie", "portrait", "自拍", "人像"}:
+            return "", False
+        recent = self._recent_sent_photo_continuity_candidate(continuity_key)
+        if not recent or not self._photo_reference_paths_equal(reference_image_path, recent.get("path", "")):
+            return "", False
+        continuity_instruction = (
+            "Recent-photo continuity: this reference is the last image actually sent in the same conversation. "
+            "Unless the current request explicitly changes them, preserve identity, face, hairstyle, exact outfit and accessories, "
+            "room or location, lighting, and time of day. Change only the requested action, pose, expression, gaze, camera angle, or framing. "
+            "Any explicit new clothing, person, place, time, or scene request still has priority."
+        )
+        return continuity_instruction, True
+
+    @classmethod
+    def _photo_generation_prompt_changes_daily_outfit(cls, prompt_text: str) -> bool:
+        intent = cls._photo_generation_wardrobe_intent(prompt_text)
+        return bool(
+            intent.change_requested
+            or (intent.target_category and intent.target_category != "daily_outfit")
+            or "daily_outfit" in intent.excluded_categories
+        )
+
     @staticmethod
-    def _photo_generation_prompt_changes_daily_outfit(prompt_text: str) -> bool:
-        text = _single_line(prompt_text, 1800).lower()
-        return any(
-            token in text
-            for token in (
-                "睡衣",
-                "睡裙",
-                "睡袍",
-                "居家服",
-                "礼服",
-                "泳装",
-                "运动服",
-                "换装",
-                "cosplay",
-                "costume",
-                "pajama",
-                "pyjama",
-                "sleepwear",
-                "nightgown",
-                "loungewear",
-                "evening gown",
-                "swimsuit",
-                "sportswear",
+    def _photo_generation_has_daily_outfit_context(value: Any) -> bool:
+        return bool(
+            re.search(
+                r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)\s*[：:]",
+                str(value or ""),
+                flags=re.I,
             )
         )
 
     @staticmethod
     def _photo_generation_scene_hint_without_daily_outfit_details(scene_hint: str) -> str:
-        text = _single_line(scene_hint, 1200)
-        if not text or "今日穿搭：" not in text:
+        text = _single_line(scene_hint, 2400)
+        outfit_label = r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)"
+        if not text or not re.search(rf"{outfit_label}\s*[：:]", text, flags=re.I):
             return text
         cleaned = re.sub(
-            r"(?:^|；)今日穿搭：.*?(?=；视觉话题：|$)",
-            "",
+            rf"(^|[；;,，])\s*{outfit_label}\s*[：:].*?(?=[；;,，]\s*(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|当前场景|场景|天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格)[：:]|$)",
+            lambda match: match.group(1),
             text,
-            flags=re.S,
-        ).strip("； ")
-        return _single_line(cleaned, 1200)
+            flags=re.S | re.I,
+        )
+        cleaned = re.sub(r"[；;,，]{2,}", "；", cleaned).strip("；;,， ")
+        return _single_line(cleaned, 2400)
+
+    @classmethod
+    def _photo_generation_prompt_without_generated_daily_outfit_continuity(cls, prompt_text: str) -> str:
+        text = str(prompt_text or "")
+        replacements = (
+            (
+                r"keep today's outfit and character appearance consistent with the reference image",
+                "keep character identity and stable appearance consistent with the selected reference image",
+            ),
+            (
+                r"keep today's outfit and character appearance consistent with available visual continuity",
+                "keep character identity and stable appearance consistent with available visual continuity",
+            ),
+        )
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.I)
+        visual_memory_pattern = re.compile(
+            r"(visual continuity reference:\s*)(.*?)"
+            r"(?=,\s*(?:additional generation preference:|keep character identity|the user's explicit clothing)|\.\s*Negative prompt:|$)",
+            flags=re.I | re.S,
+        )
+
+        def clean_visual_memory(match: re.Match[str]) -> str:
+            cleaned = cls._photo_generation_scene_hint_without_daily_outfit_details(match.group(2))
+            return f"{match.group(1)}{cleaned}" if cleaned else ""
+
+        text = visual_memory_pattern.sub(clean_visual_memory, text)
+        text = re.sub(r",\s*,+", ",", text)
+        return text
+
+    @classmethod
+    def _photo_generation_current_user_request_parts(cls, prompt_text: str) -> tuple[str, str]:
+        """Return positive request text and explicit exclusions without generated scaffolding."""
+        raw = str(prompt_text or "")
+        positive_match = re.search(
+            r"positive\s+prompt\s*:\s*(.*?)(?=negative\s+prompt\s*:|$)",
+            raw,
+            flags=re.I | re.S,
+        )
+        if positive_match:
+            positive_raw = positive_match.group(1)
+            negative_match = re.search(r"negative\s+prompt\s*:\s*(.*)$", raw, flags=re.I | re.S)
+            negative_raw = negative_match.group(1) if negative_match else ""
+        else:
+            positive_raw = raw
+            negative_raw = ""
+
+        marker = re.search(
+            r"(?:\buser\s+request|\brequested\s+final\s+image|【最终画面需求】)\s*[：:]\s*",
+            positive_raw,
+            flags=re.I,
+        )
+        if marker:
+            positive_raw = positive_raw[marker.end():]
+            positive_raw = re.split(
+                r",\s*(?:visible face|preserve unchanged subjects|clear main subject)\b",
+                positive_raw,
+                maxsplit=1,
+                flags=re.I,
+            )[0]
+        exclusion_marker = re.search(
+            r"(?:explicit\s+(?:wardrobe\s+)?exclusions?|明确排除的服装)\s*[：:]\s*(.*)$",
+            positive_raw,
+            flags=re.I | re.S,
+        )
+        if exclusion_marker:
+            negative_raw = f"{negative_raw}, {exclusion_marker.group(1)}".strip(" ,")
+            positive_raw = positive_raw[:exclusion_marker.start()]
+
+        positive_text, embedded_negative = cls._photo_generation_semantic_prompt_parts(positive_raw)
+        _, explicit_negative = cls._photo_generation_semantic_prompt_parts(
+            f"Positive prompt: requested image. Negative prompt: {negative_raw}"
+            if negative_raw
+            else ""
+        )
+        negative_text = ", ".join(
+            part for part in (embedded_negative, explicit_negative) if str(part or "").strip()
+        )
+        return (
+            _single_line(positive_text.strip(" \t\r\n,.;；。\"'"), 1800),
+            _single_line(negative_text.strip(" \t\r\n,.;；。\"'"), 1200),
+        )
+
+    @classmethod
+    def _photo_generation_current_user_request_text(cls, prompt_text: str) -> str:
+        """Return the current user's positive image request without generated prompt scaffolding."""
+        positive, _ = cls._photo_generation_current_user_request_parts(prompt_text)
+        return positive
+
+    @staticmethod
+    def _photo_generation_contains_specific_outfit_text(value: Any) -> bool:
+        text = str(value or "")
+        return bool(
+            re.search(
+                r"连衣裙|裙子|短裙|长裙|吊带|衬衫|外套|夹克|西装|制服|汉服|旗袍|和服|洛丽塔|"
+                r"裤(?:子)?|毛衣|卫衣|T恤|背心|上衣|套装|袜(?:子)?|鞋(?:子)?|"
+                r"\b(?:dress|skirt|shirt|blouse|coat|jacket|suit|uniform|hoodie|sweater|pants|trousers|shorts|top)\b",
+                text,
+                flags=re.I,
+            )
+        )
+
+    @classmethod
+    def _photo_generation_wardrobe_intent(cls, prompt_text: str) -> PhotoWardrobeIntent:
+        positive_text, negative_text = cls._photo_generation_current_user_request_parts(prompt_text)
+        positive_matches = cls._photo_outfit_category_matches(positive_text)
+        negative_matches = cls._photo_outfit_category_matches(negative_text)
+        target_category = positive_matches[-1][0] if positive_matches else ""
+        excluded_categories = tuple(
+            dict.fromkeys(category for category, *_ in negative_matches if category != target_category)
+        )
+        change_requested = bool(
+            re.search(
+                r"换(?:装|衣|成|上|为|一套|一身|件)|改穿|改成|穿上|脱下.+(?:换|穿)|"
+                r"\b(?:change\s+into|switch\s+to|put\s+on|change\s+(?:the\s+)?outfit|wear\s+instead)\b",
+                positive_text,
+                flags=re.I,
+            )
+        )
+        custom_outfit = bool(
+            not target_category
+            and (
+                change_requested
+                or cls._photo_generation_contains_specific_outfit_text(positive_text)
+                or re.search(
+                    r"(?:穿|换|改).{0,12}(?:衣服|服装|衣着|穿搭|一套|一身|一件)"
+                    r"|\b(?:wear|wearing|change|switch).{0,24}(?:clothes|clothing|outfit|wardrobe)\b",
+                    positive_text,
+                    flags=re.I,
+                )
+            )
+        )
+        wardrobe_negative_parts = [
+            part.strip()
+            for part in re.split(r"[,，;；。]+", negative_text)
+            if part.strip()
+            and (
+                cls._photo_outfit_category_matches(part)
+                or cls._photo_generation_contains_specific_outfit_text(part)
+                or re.search(r"衣服|服装|衣着|穿搭|clothes|clothing|outfit|wardrobe", part, flags=re.I)
+            )
+        ]
+        return PhotoWardrobeIntent(
+            target_category=target_category or ("custom_outfit" if custom_outfit else ""),
+            target_text=_single_line(positive_text, 360) if target_category or custom_outfit else "",
+            custom_outfit=custom_outfit,
+            change_requested=change_requested,
+            excluded_categories=excluded_categories,
+            exclusion_text=_single_line(", ".join(dict.fromkeys(wardrobe_negative_parts)), 360),
+            positive_text=_single_line(positive_text, 1800),
+        )
+
+    @classmethod
+    def _photo_generation_explicit_outfit_scan_text(cls, prompt_text: str) -> str:
+        intent = cls._photo_generation_wardrobe_intent(prompt_text)
+        return re.split(
+            r"【指定生图场景预设】|Scene preset:",
+            intent.positive_text,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+
+    def _photo_generation_explicit_outfit_category(self, prompt_text: str) -> str:
+        return self._photo_generation_wardrobe_intent(prompt_text).target_category
+
+    @staticmethod
+    def _photo_outfit_category_label_en(category: str) -> str:
+        return {
+            "sleepwear": "sleepwear",
+            "homewear": "comfortable homewear",
+            "cosplay": "the explicitly requested cosplay costume",
+            "school_uniform": "school uniform",
+            "formalwear": "formalwear",
+            "swimwear": "swimwear",
+            "sportswear": "sportswear",
+            "daily_outfit": "today's daily outfit",
+            "reference_outfit": "the complete outfit shown in the selected reference",
+            "custom_outfit": "the outfit described in the current request",
+        }.get(str(category or "").strip().lower(), "the requested outfit")
+
+    def _resolve_photo_wardrobe_decision(
+        self,
+        *,
+        workflow_kind: str,
+        prompt_text: str,
+        reference: dict[str, Any] | None,
+        scene_snapshot: str = "",
+    ) -> PhotoWardrobeDecision:
+        normalized_kind = str(workflow_kind or "").strip().lower()
+        reference = self._normalize_photo_reference_candidate_metadata(reference or {}) if reference else {}
+        reference_path = _path_text(reference.get("path"), 1000)
+        reference_id = _single_line(reference.get("id"), 60)
+        reference_kind = _single_line(reference.get("kind"), 40)
+        roles = tuple(self._photo_reference_normalize_roles(reference.get("reference_roles")))
+        effective_roles = roles
+        if normalized_kind not in {"selfie", "portrait", "自拍", "人像"}:
+            return PhotoWardrobeDecision(
+                mode="source_edit" if normalized_kind in {"edit", "改图", "修图", "重绘", "p图"} and reference_path else "none",
+                source="explicit_reference" if reference_path else "none",
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=roles,
+                reason="non-selfie workflow keeps its own image-edit contract",
+            )
+
+        intent = self._photo_generation_wardrobe_intent(prompt_text)
+        explicit_category = intent.target_category
+        reference_category = _single_line(reference.get("outfit_category"), 40).lower()
+        reference_locks = bool(reference.get("outfit_lock_default")) and "outfit" in roles
+        exclusion_instruction = (
+            f"Respect the current request's explicit wardrobe exclusions: {intent.exclusion_text}."
+            if intent.exclusion_text
+            else ""
+        )
+        if explicit_category:
+            if explicit_category == "custom_outfit" or (reference_category and reference_category != explicit_category):
+                effective_roles = tuple(role for role in roles if role != "outfit")
+            category_label = self._photo_outfit_category_label_en(explicit_category)
+            return PhotoWardrobeDecision(
+                mode="explicit_prompt",
+                source="user_prompt",
+                category=explicit_category,
+                lock_outfit=True,
+                remove_daily_outfit_context=explicit_category != "daily_outfit",
+                preset_name=self._photo_reference_preset_for_category(explicit_category),
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=effective_roles,
+                positive_instruction=(
+                    "An explicit clothing request in this prompt has highest priority. "
+                    f"Render one coherent {category_label} outfit exactly as requested; "
+                    "use any incompatible selected reference only for identity and compatible visual details."
+                ),
+                negative_instruction=" ".join(part for part in ((
+                    "Do not restore clothing from today's outfit, schedule context, an older photo, or an incompatible reference."
+                    if explicit_category != "daily_outfit"
+                    else "Do not replace today's requested outfit with an unrelated costume or wardrobe."
+                ), exclusion_instruction) if part),
+                reason=(
+                    "explicit custom or generic clothing change in the current image prompt"
+                    if explicit_category == "custom_outfit"
+                    else "explicit clothing request in the current image prompt"
+                ),
+                excluded_categories=intent.excluded_categories,
+                requested_outfit_text=intent.target_text,
+            )
+
+        if reference_category and reference_category in set(intent.excluded_categories):
+            effective_roles = tuple(role for role in roles if role != "outfit")
+            return PhotoWardrobeDecision(
+                mode="explicit_exclusion",
+                source="user_prompt",
+                remove_daily_outfit_context=reference_category == "daily_outfit",
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=effective_roles,
+                positive_instruction=(
+                    "Use the selected reference for identity and other compatible responsibilities only; "
+                    "its outfit is explicitly excluded by the current request."
+                ),
+                negative_instruction=exclusion_instruction,
+                reason="selected reference outfit is explicitly excluded by the current request",
+                excluded_categories=intent.excluded_categories,
+            )
+
+        if reference_kind == "daily_outfit":
+            return PhotoWardrobeDecision(
+                mode="daily_outfit",
+                source="selected_reference",
+                category="daily_outfit",
+                lock_outfit=True,
+                preset_name="日常穿搭",
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=roles,
+                positive_instruction=(
+                    "Use the selected reference as the authoritative source for today's complete outfit and identity continuity. "
+                    "Preserve its coherent clothing layers, accessories, silhouette, and main color palette."
+                ),
+                negative_instruction=" ".join(
+                    part
+                    for part in (
+                        "Do not invent an alternative outfit or mix several wardrobe variants.",
+                        exclusion_instruction,
+                    )
+                    if part
+                ),
+                reason="selected reference is today's outfit reference",
+                excluded_categories=intent.excluded_categories,
+            )
+
+        if reference_kind == "recent_sent_photo" and reference_locks:
+            category = reference_category or "reference_outfit"
+            return PhotoWardrobeDecision(
+                mode="continuity",
+                source="selected_reference",
+                category=category,
+                lock_outfit=True,
+                remove_daily_outfit_context=category != "daily_outfit",
+                preset_name=_single_line(reference.get("preferred_preset"), 60)
+                or self._photo_reference_preset_for_category(category),
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=roles,
+                positive_instruction=(
+                    "This is the last image actually sent in the same conversation. Use it as the authoritative continuity source "
+                    "for identity, the complete outfit, room or location, lighting, and time of day unless the current request explicitly changes one of them. "
+                    "Use the current schedule only to fill details that are missing and non-conflicting."
+                ),
+                negative_instruction=" ".join(
+                    part
+                    for part in (
+                        "Do not relocate the scene, redesign the outfit, or replace continuity details merely because the schedule has advanced.",
+                        exclusion_instruction,
+                    )
+                    if part
+                ),
+                reason="selected reference is the last image sent in this conversation",
+                excluded_categories=intent.excluded_categories,
+            )
+
+        if reference_locks:
+            category = reference_category or "reference_outfit"
+            category_label = self._photo_outfit_category_label_en(category)
+            return PhotoWardrobeDecision(
+                mode="continuity" if reference_kind == "recent_sent_photo" else "reference_outfit",
+                source="selected_reference",
+                category=category,
+                lock_outfit=True,
+                remove_daily_outfit_context=category != "daily_outfit",
+                preset_name=_single_line(reference.get("preferred_preset"), 60)
+                or self._photo_reference_preset_for_category(category),
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=roles,
+                positive_instruction=(
+                    "Use the selected reference image as the authoritative source for identity and the complete visible outfit. "
+                    f"Preserve {category_label}, including its garment category, layers, silhouette, material impression, trim details, accessories, and main color palette. "
+                    "The schedule context controls only location, activity, mood, lighting, and time."
+                ),
+                negative_instruction=" ".join(part for part in ((
+                    "Do not replace the selected-reference outfit with today's daytime outfit, school or commuter layers, a coat, blazer, shirt, vest, tie, or another wardrobe unless the user explicitly requests it."
+                    if category in {"sleepwear", "homewear"}
+                    else "Do not restore a different outfit from schedule context or today's outfit."
+                ), exclusion_instruction) if part),
+                reason="selected reference is an outfit-bearing reference with outfit_lock_default=true",
+                excluded_categories=intent.excluded_categories,
+            )
+
+        if self._photo_generation_has_daily_outfit_context(scene_snapshot):
+            return PhotoWardrobeDecision(
+                mode="daily_outfit_context",
+                source="daily_outfit",
+                category="daily_outfit",
+                lock_outfit=False,
+                preset_name="日常穿搭",
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=roles,
+                positive_instruction=(
+                    "The selected reference, if present, controls identity only. Since the user did not request a clothing change, today's outfit context may provide wardrobe continuity."
+                ),
+                negative_instruction="Do not copy incidental clothing from an identity-only reference over today's outfit.",
+                reason="identity-only reference with available daily outfit context",
+                excluded_categories=intent.excluded_categories,
+            )
+
+        return PhotoWardrobeDecision(
+            mode="identity_only" if reference_path else "none",
+            source="selected_reference" if reference_path else "none",
+            reference_image_path=reference_path,
+            reference_id=reference_id,
+            reference_kind=reference_kind,
+            reference_roles=roles,
+            effective_reference_roles=roles,
+            positive_instruction=(
+                "Use the selected reference only for character identity and appearance traits; its incidental clothing is not an outfit lock."
+                if reference_path
+                else ""
+            ),
+            negative_instruction=exclusion_instruction,
+            reason="selected reference is identity-only" if reference_path else "no wardrobe source selected",
+            excluded_categories=intent.excluded_categories,
+        )
+
+    def _photo_generation_preset_names_for_decision(
+        self,
+        workflow_kind: str,
+        prompt_text: str,
+        wardrobe: PhotoWardrobeDecision,
+    ) -> list[str]:
+        presets = self._photo_generation_scene_presets()
+        if wardrobe.preset_name and wardrobe.preset_name in presets:
+            return [wardrobe.preset_name]
+        return self._photo_generation_preset_names_for_prompt(
+            workflow_kind,
+            prompt_text,
+            excluded_categories=wardrobe.excluded_categories,
+        )
+
+    @staticmethod
+    def _photo_prompt_clip(value: Any, limit: int, *, preserve_tail: bool = False) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if limit <= 0 or len(text) <= limit:
+            return text
+        marker = " ... [section compacted] ... "
+        if not preserve_tail or limit <= len(marker) + 40:
+            return text[:limit].rstrip()
+        available = limit - len(marker)
+        head_size = max(20, int(available * 0.62))
+        tail_size = max(20, available - head_size)
+        return f"{text[:head_size].rstrip()}{marker}{text[-tail_size:].lstrip()}"
+
+    @staticmethod
+    def _photo_prompt_split_formatted(prompt_text: str) -> tuple[str, str]:
+        prompt = str(prompt_text or "").strip()
+        positive_match = re.search(
+            r"positive\s+prompt\s*:\s*(.*?)(?=negative\s+prompt\s*:|$)",
+            prompt,
+            flags=re.I | re.S,
+        )
+        if not positive_match:
+            avoid_match = re.search(
+                r"(?:^|(?<=[.!?。！？]))\s*avoid\s+(.+?)\s*[.!?。！？]?\s*$",
+                prompt,
+                flags=re.I | re.S,
+            )
+            if avoid_match:
+                positive = prompt[:avoid_match.start()].rstrip(" \t\r\n.!?。！？")
+                negative = avoid_match.group(1).strip(" \t\r\n.!?。！？")
+                return positive, negative
+            return prompt, ""
+        negative_match = re.search(r"negative\s+prompt\s*:\s*(.*)$", prompt, flags=re.I | re.S)
+        return positive_match.group(1).strip(), (negative_match.group(1).strip() if negative_match else "")
+
+    @staticmethod
+    def _photo_generation_reference_wardrobe_section(
+        reference: dict[str, Any] | None,
+        wardrobe: PhotoWardrobeDecision,
+    ) -> tuple[str, str]:
+        reference = reference or {}
+        effective_roles = tuple(wardrobe.effective_reference_roles)
+        roles = ", ".join(effective_roles)
+        parts: list[str] = []
+        if reference:
+            active_outfit_category = (
+                _single_line(reference.get("outfit_category"), 40) or "unspecified"
+                if "outfit" in effective_roles
+                else "not active"
+            )
+            parts.append(
+                "Reference responsibility: "
+                f"effective roles={roles or 'none'}; "
+                f"outfit category={active_outfit_category}."
+            )
+        if wardrobe.positive_instruction:
+            parts.append(f"Wardrobe decision: {wardrobe.positive_instruction}")
+        return " ".join(parts), wardrobe.negative_instruction
+
+    @classmethod
+    def _photo_generation_compact_scene_hint(cls, scene_hint: str, *, limit: int = 420) -> str:
+        text = _single_line(scene_hint, 1600)
+        if not text or len(text) <= limit:
+            return text
+        parts = [part.strip() for part in re.split(r"[；;]+", text) if part.strip()]
+        if len(parts) <= 1:
+            return cls._photo_prompt_clip(text, min(limit, 260), preserve_tail=True)
+        priorities = (
+            (r"^(?:当前位置|地点|位置)[：:]", 90),
+            (r"^(?:当前场景|场景)[：:]", 60),
+            (r"^(?:时间|当前时间)[：:]", 60),
+            (r"^(?:当前日程|日程)[：:]", 130),
+            (r"^(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)[：:]", 120),
+            (r"^(?:天气背景|天气|当前天气)[：:]", 90),
+            (r"^(?:状态|状态余波|情绪)[：:]", 80),
+            (r"^(?:视觉话题|背景)[：:]", 80),
+        )
+        ordered: list[tuple[str, int]] = []
+        used: set[int] = set()
+        for pattern, field_limit in priorities:
+            for index, part in enumerate(parts):
+                if index not in used and re.search(pattern, part, flags=re.I):
+                    ordered.append((part, field_limit))
+                    used.add(index)
+        ordered.extend((part, 80) for index, part in enumerate(parts) if index not in used)
+        kept: list[str] = []
+        for part, field_limit in ordered:
+            compact = cls._photo_prompt_clip(part, field_limit, preserve_tail=True)
+            candidate = "；".join((*kept, compact))
+            if len(candidate) <= limit:
+                kept.append(compact)
+                continue
+            remaining = limit - len("；".join(kept)) - (1 if kept else 0)
+            if remaining >= 36:
+                kept.append(cls._photo_prompt_clip(compact, remaining, preserve_tail=True))
+            break
+        return "；".join(kept)
+
+    @staticmethod
+    def _photo_generation_selfie_scene_constraint(
+        workflow_kind: str,
+        scene_hint: str,
+        *,
+        has_reference: bool,
+    ) -> str:
+        normalized = str(workflow_kind or "").strip().lower()
+        if normalized not in {"selfie", "portrait", "自拍", "人像"} or not scene_hint:
+            return ""
+        reference_boundary = (
+            "The reference controls only the roles declared by the wardrobe ruling. "
+            if has_reference
+            else "Do not assume an unavailable reference was supplied. "
+        )
+        return (
+            "Resolved selfie scene facts: "
+            f"{scene_hint}. An explicit scene or location in the current request overrides conflicting facts; otherwise use these facts for time, location, activity, mood, weather, and light. "
+            f"{reference_boundary}"
+            "Do not restore a conflicting schedule location or wardrobe, and avoid unrelated rooms."
+        )
+
+    def _photo_generation_composition_sections(
+        self,
+        workflow_kind: str,
+        prompt_text: str,
+    ) -> tuple[str, str]:
+        normalized = str(workflow_kind or "").strip().lower()
+        if normalized not in {"selfie", "portrait", "自拍", "人像"}:
+            return "", ""
+        explicit_mirror = self._photo_generation_explicit_mirror_request(prompt_text)
+        if explicit_mirror:
+            positive = (
+                "Selfie composition: exactly one real character wearing one coherent outfit in one continuous scene; "
+                "one mirror reflection of that same outfit is allowed; keep the complete face visible and do not let the phone cover it."
+            )
+            negative = "duplicated subject, outfit alternatives, comparison panels, split screen, side-by-side panels, collage, character sheet, phone covering face"
+        else:
+            positive = (
+                "Selfie composition: exactly one character wearing one coherent outfit in one continuous scene; keep the face visible, "
+                "prefer a handheld selfie or natural environmental portrait with upper-body to three-quarter framing, and place the character naturally in the resolved scene."
+            )
+            negative = (
+                "duplicate character, twins, multiple people, multiple outfits, outfit comparison, before and after, split screen, "
+                "side-by-side panels, diptych, collage, character sheet, mirror selfie, full-length mirror selfie, dressing-room mirror, phone covering face"
+            )
+        return positive, negative
+
+    @staticmethod
+    def _photo_generation_edit_contract(workflow_kind: str) -> tuple[str, str]:
+        normalized = str(workflow_kind or "").strip().lower()
+        if normalized not in {"edit", "改图", "修图", "重绘", "p图"}:
+            return "", ""
+        return (
+            "Image edit contract: use the user-provided image as the sole source canvas and visual identity reference. "
+            "This is not a selfie or a new character portrait. Preserve every subject, face, body, outfit, pose, composition, camera angle, and background detail unless the user explicitly asks to change it. "
+            "Apply only the requested edit and keep unrelated pixels and details as close to the source as possible.",
+            "replacing the source person with the assistant persona, restoring today's outfit, unrelated redesigns",
+        )
+
+    def _build_final_photo_prompt(
+        self,
+        *,
+        base_prompt: str,
+        workflow_kind: str,
+        scene_hint: str,
+        reference: dict[str, Any] | None,
+        wardrobe: PhotoWardrobeDecision,
+        preset_section: str,
+        continuity_section: str = "",
+    ) -> tuple[str, dict[str, str]]:
+        user_positive, user_negative = self._photo_prompt_split_formatted(base_prompt)
+        wardrobe_positive, wardrobe_negative = self._photo_generation_reference_wardrobe_section(reference, wardrobe)
+        compact_scene_hint = self._photo_generation_compact_scene_hint(scene_hint)
+        scene_section = self._photo_generation_selfie_scene_constraint(
+            workflow_kind,
+            compact_scene_hint,
+            has_reference=bool(reference),
+        )
+        composition_positive, composition_negative = self._photo_generation_composition_sections(
+            workflow_kind,
+            user_positive,
+        )
+        edit_positive, edit_negative = self._photo_generation_edit_contract(workflow_kind)
+        fixed = str(getattr(self, "photo_generation_fixed_prompt", "") or "").strip()
+        continuity_budget = 460 if str(continuity_section or "").startswith("Recent-photo continuity:") else 280
+        continuity_for_prompt = self._photo_prompt_clip(
+            continuity_section,
+            continuity_budget,
+            preserve_tail=True,
+        )
+
+        section_a = self._photo_prompt_clip(user_positive, 620, preserve_tail=True)
+        section_b = self._photo_prompt_clip(wardrobe_positive, 420, preserve_tail=True)
+        section_c = "\n".join(
+            part
+            for part in (
+                self._photo_prompt_clip(scene_section, 700, preserve_tail=True),
+                self._photo_prompt_clip(preset_section, 140, preserve_tail=True),
+                self._photo_prompt_clip(
+                    f"Additional fixed prompt: {fixed}" if fixed else "",
+                    100,
+                    preserve_tail=True,
+                ),
+            )
+            if part
+        )
+        section_d = self._photo_prompt_clip(
+            "\n".join(
+                part
+                for part in (edit_positive, composition_positive, continuity_for_prompt)
+                if part
+            ),
+            680,
+            preserve_tail=True,
+        )
+        decision_negative = self._photo_prompt_clip(
+            ", ".join(
+                part.strip(" ,.;")
+                for part in (wardrobe_negative, edit_negative, composition_negative)
+                if str(part or "").strip(" ,.;")
+            ),
+            230,
+            preserve_tail=True,
+        )
+        user_negative = self._photo_prompt_clip(user_negative, 260, preserve_tail=True)
+        negative = ", ".join(part for part in (decision_negative, user_negative) if part)
+        sections = {
+            "user_request": section_a,
+            "reference_wardrobe": section_b,
+            "scene_style_preset": section_c,
+            "composition_continuity": section_d,
+            "negative": negative,
+        }
+        positive_blocks = [
+            f"[{label}]\n{text}"
+            for label, text in (
+                ("User image request", section_a),
+                ("Reference and wardrobe ruling", section_b),
+                ("Scene, style and final preset", section_c),
+                ("Composition and continuity", section_d),
+            )
+            if text
+        ]
+        if self._photo_generation_prompt_format_mode() == "natural_language":
+            final_prompt = "\n\n".join(positive_blocks)
+            if negative:
+                final_prompt = f"{final_prompt}\n\nAvoid {negative}."
+        else:
+            final_prompt = "Positive prompt:\n" + "\n\n".join(positive_blocks)
+            if negative:
+                final_prompt += f"\n\nNegative prompt:\n{negative}"
+        # Every section has its own budget, so a final whole-prompt truncation would
+        # only reintroduce the possibility of cutting a complete semantic section.
+        return final_prompt.strip(), sections
+
+    def _detect_photo_prompt_conflicts(
+        self,
+        final_prompt: str,
+        wardrobe: PhotoWardrobeDecision,
+    ) -> list[str]:
+        if not wardrobe.category and not wardrobe.excluded_categories:
+            return []
+        positive_text = str(final_prompt or "")
+        negative_matches = list(re.finditer(r"Negative prompt\s*:", positive_text, flags=re.I))
+        if negative_matches:
+            positive_text = positive_text[:negative_matches[-1].start()]
+        else:
+            avoid_matches = list(re.finditer(r"\n\s*\nAvoid\s+", positive_text, flags=re.I))
+            if avoid_matches:
+                positive_text = positive_text[:avoid_matches[-1].start()]
+        positive_text = re.sub(
+            r"(?:do not|don't|not|avoid|without|no|不要|别穿|不穿|不用|不是|避免|禁止)[^.;；。]*",
+            " ",
+            positive_text,
+            flags=re.I,
+        )
+        conflicts: list[str] = []
+        if wardrobe.remove_daily_outfit_context and self._photo_generation_has_daily_outfit_context(positive_text):
+            conflicts.append("daily_outfit_context_remained")
+        if wardrobe.lock_outfit and re.search(r"today'?s outfit may inform continuity", positive_text, flags=re.I):
+            conflicts.append("legacy_daily_outfit_soft_override")
+        category_markers = {
+            "sleepwear": r"sleepwear|nightgown|nightdress|pajama|pyjama|睡衣|睡裙|睡袍",
+            "homewear": r"homewear|loungewear|居家服|家居服",
+            "cosplay": r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演",
+            "school_uniform": r"school[\s_-]*uniform|校服|学院制服",
+            "formalwear": r"formalwear|formal attire|evening gown|tuxedo|\bsuit\b|礼服|正装|西装",
+            "swimwear": r"swimwear|swimsuit|bikini|泳装|泳衣|比基尼",
+            "sportswear": r"sportswear|activewear|gym wear|运动服|健身服|瑜伽服",
+            "daily_outfit": r"daily outfit portrait|today'?s outfit|daily outfit|今日穿搭|当天穿搭|日常穿搭",
+        }
+        active_categories = {
+            category
+            for category, pattern in category_markers.items()
+            if re.search(pattern, positive_text, flags=re.I)
+        }
+        compatible = {wardrobe.category} if wardrobe.category else set()
+        if wardrobe.category in {"sleepwear", "homewear"}:
+            # Natural-language presets often describe pajamas as loungewear and
+            # homewear as sleep-ready clothing. Treat the neighboring labels as
+            # compatible while the authoritative wardrobe decision stays intact.
+            compatible.update({"sleepwear", "homewear"})
+        if wardrobe.category == "cosplay":
+            compatible.update({"school_uniform", "formalwear", "sportswear"})
+        if wardrobe.category == "custom_outfit":
+            compatible.add("daily_outfit")
+        if wardrobe.category:
+            for category in sorted(active_categories - compatible):
+                conflicts.append(f"conflicting_wardrobe:{category}")
+        for category in sorted(active_categories & set(wardrobe.excluded_categories)):
+            conflicts.append(f"explicitly_excluded_wardrobe:{category}")
+        expected_preset = wardrobe.preset_name
+        preset_labels = {
+            name: self._photo_generation_scene_preset_label_en(name)
+            for name in self._photo_generation_scene_presets()
+        }
+        for name, label in preset_labels.items():
+            if expected_preset and name != expected_preset and f"Scene preset: {label}" in positive_text:
+                conflicts.append(f"conflicting_preset:{name}")
+        return list(dict.fromkeys(conflicts))
+
+    def _append_photo_prompt_conflict_resolution(
+        self,
+        final_prompt: str,
+        wardrobe: PhotoWardrobeDecision,
+        conflicts: list[str],
+    ) -> str:
+        if not conflicts:
+            return final_prompt
+        if wardrobe.category:
+            resolution = (
+                "Conflict resolution: the wardrobe ruling is authoritative. Ignore any residual incompatible wardrobe or preset wording; "
+                f"render only one coherent {self._photo_outfit_category_label_en(wardrobe.category)} outfit."
+            )
+        else:
+            resolution = (
+                "Conflict resolution: obey the current request's explicit wardrobe exclusions and ignore any residual wording that restores an excluded outfit."
+            )
+        negative_matches = list(re.finditer(r"Negative prompt\s*:", final_prompt, flags=re.I))
+        if negative_matches:
+            marker = negative_matches[-1]
+            positive, negative = final_prompt[:marker.start()], final_prompt[marker.end():]
+            merged = f"{positive.rstrip()}\n\n{resolution}\n\nNegative prompt:\n{negative.strip()}"
+        else:
+            avoid_matches = list(re.finditer(r"\n\s*\nAvoid\s+", final_prompt, flags=re.I))
+            if avoid_matches:
+                marker = avoid_matches[-1]
+                positive, negative = final_prompt[:marker.start()], final_prompt[marker.end():]
+                negative = re.sub(r"^\s*Avoid\s+", "", negative, flags=re.I)
+                merged = f"{positive.rstrip()}\n\n{resolution}\n\nAvoid {negative.strip()}"
+            else:
+                merged = f"{final_prompt.rstrip()}\n\n{resolution}"
+        return merged
 
     @staticmethod
     def _photo_generation_explicit_mirror_request(text: str) -> bool:
@@ -8228,6 +9531,20 @@ Output:
             limit=1800,
         )
 
+    def _apply_photo_generation_edit_guard(self, prompt_text: str, workflow_kind: str) -> str:
+        prompt = str(prompt_text or "").strip()
+        normalized = str(workflow_kind or "").strip().lower()
+        if normalized not in {"edit", "改图", "修图", "重绘", "p图"}:
+            return _single_line(prompt, 1800)
+        guard = (
+            "Image edit contract: use the user-provided image as the sole source canvas and visual identity reference. "
+            "This is not a selfie or a new character portrait. Preserve every subject, face, body, outfit, pose, "
+            "composition, camera angle, and background detail unless the user explicitly asks to change it. "
+            "Never replace a person with the assistant persona, a configured persona reference, or today's outfit. "
+            "Apply only the requested edit and keep all unrelated pixels and details as close to the source as possible."
+        )
+        return _single_line(f"{guard}\n\nEdit request and existing prompt: {prompt}".strip(), 1800)
+
     def _builtin_photo_generation_scene_presets(self) -> dict[str, str]:
         return {
             "角色自拍": (
@@ -8248,6 +9565,26 @@ Output:
                 "sleepwear or bedtime loungewear portrait matching the explicit clothing request and selected reference, "
                 "exactly one coherent sleepwear outfit, preserve the character identity, natural home or bedtime context, "
                 "do not restore a daytime outfit, coat, school uniform, or commuter layers unless explicitly requested"
+            ),
+            "居家服": (
+                "comfortable homewear portrait, one coherent relaxed indoor outfit, natural home activity and lived-in setting, "
+                "preserve the character identity and selected homewear reference, no commuter coat or formal layers unless requested"
+            ),
+            "校服人像": (
+                "school-uniform portrait matching the explicit request, one coherent uniform with consistent layers and colors, "
+                "natural school or campus context, preserve the character identity, not cosplay unless explicitly requested"
+            ),
+            "礼服人像": (
+                "formalwear portrait matching the explicit request, one coherent formal outfit with consistent silhouette and materials, "
+                "location-appropriate formal context, preserve the character identity, no casual or sportswear substitution"
+            ),
+            "泳装人像": (
+                "swimwear portrait matching the explicit request, one coherent swim outfit, appropriate pool or beach context, "
+                "preserve the character identity, tasteful natural composition, no unrelated daytime clothing layers"
+            ),
+            "运动服人像": (
+                "sportswear portrait matching the explicit request, one coherent practical athletic outfit, natural activity setting, "
+                "preserve the character identity, no formalwear or commuter outfit substitution"
             ),
             "镜前穿搭": (
                 "explicitly requested mirror outfit photo, half-body to three-quarter mirror composition, "
@@ -8311,14 +9648,28 @@ Output:
         presets.update(self._parse_photo_generation_scene_presets(getattr(self, "photo_generation_scene_presets", "")))
         return presets
 
-    def _photo_generation_preset_names_for_prompt(self, workflow_kind: str, prompt_text: str) -> list[str]:
+    def _photo_generation_preset_names_for_prompt(
+        self,
+        workflow_kind: str,
+        prompt_text: str,
+        *,
+        excluded_categories: tuple[str, ...] | list[str] | set[str] = (),
+    ) -> list[str]:
         kind = str(workflow_kind or "").strip().lower()
-        text = _single_line(prompt_text, 1200).lower()
         names: list[str] = []
+        if kind in {"edit", "改图", "修图", "重绘", "p图"}:
+            return names
+        intent = self._photo_generation_wardrobe_intent(prompt_text)
+        excluded = set(excluded_categories) | set(intent.excluded_categories)
+        target_category = intent.target_category
+        target_preset = self._photo_reference_preset_for_category(target_category)
+        if target_preset and target_category not in excluded:
+            return [target_preset]
+        text = _single_line(intent.positive_text, 1800).lower()
         if kind in {"selfie", "portrait", "自拍", "人像"}:
             if any(token in text for token in ("表情包", "贴纸", "sticker", "meme")):
                 names.append("表情包场景")
-            elif re.search(r"\bcos\b|cosplay|角色扮演|扮成|神灯|制服|女仆|巫女|魔法少女", text, flags=re.I):
+            elif re.search(r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演|扮成|神灯|女仆|巫女|魔法少女", text, flags=re.I):
                 names.append("COS自拍")
             elif self._photo_generation_explicit_mirror_request(text):
                 names.append("镜前穿搭")
@@ -8332,11 +9683,20 @@ Output:
                     "pyjama",
                     "sleepwear",
                     "nightgown",
-                    "loungewear",
                     "bedtime outfit",
                 )
             ):
                 names.append("居家睡衣")
+            elif any(token in text for token in ("居家服", "家居服", "家常服", "homewear", "loungewear")):
+                names.append("居家服")
+            elif any(token in text for token in ("校服", "学院制服", "学生制服", "school uniform")):
+                names.append("校服人像")
+            elif any(token in text for token in ("礼服", "晚礼服", "正装", "formalwear", "formal attire", "evening gown", "tuxedo")):
+                names.append("礼服人像")
+            elif any(token in text for token in ("泳装", "泳衣", "比基尼", "swimwear", "swimsuit", "bikini")):
+                names.append("泳装人像")
+            elif any(token in text for token in ("运动服", "健身服", "瑜伽服", "球衣", "sportswear", "activewear", "gym wear")):
+                names.append("运动服人像")
             elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "outfit", "clothes", "jacket", "uniform", "skirt")):
                 names.append("日常穿搭")
             elif any(token in text for token in ("头像", "特写", "大头", "avatar", "close-up", "closeup", "profile picture")):
@@ -8352,10 +9712,17 @@ Output:
                 names.append("可拍画面")
         return list(dict.fromkeys(names))[:3]
 
-    def _apply_photo_generation_scene_presets(self, prompt_text: str, workflow_kind: str) -> tuple[str, list[str]]:
+    def _apply_photo_generation_scene_presets(
+        self,
+        prompt_text: str,
+        workflow_kind: str,
+        *,
+        preset_names: list[str] | None = None,
+    ) -> tuple[str, list[str]]:
         prompt = str(prompt_text or "").strip()
         presets = self._photo_generation_scene_presets()
-        names = [name for name in self._photo_generation_preset_names_for_prompt(workflow_kind, prompt) if name in presets]
+        requested_names = preset_names if preset_names is not None else self._photo_generation_preset_names_for_prompt(workflow_kind, prompt)
+        names = [name for name in requested_names if name in presets]
         if not names:
             return _single_line(prompt, 1800), []
         blocks = []
@@ -8374,6 +9741,11 @@ Output:
             "COS自拍": "cosplay selfie",
             "日常穿搭": "daily outfit portrait",
             "居家睡衣": "home sleepwear portrait",
+            "居家服": "comfortable homewear portrait",
+            "校服人像": "school uniform portrait",
+            "礼服人像": "formalwear portrait",
+            "泳装人像": "swimwear portrait",
+            "运动服人像": "sportswear portrait",
             "镜前穿搭": "mirror outfit photo",
             "头像特写": "avatar close-up",
             "房间日常": "indoor slice-of-life",
@@ -8387,72 +9759,196 @@ Output:
         workflow_kind: str,
         prompt_text: str,
         session_key: str,
+        continuity_key: str = "",
         reference_image_path: str = "",
         image_size: str = "",
         allow_daily_outfit_reference: bool = True,
     ) -> tuple[str, str, str]:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
-        prompt_text = self._apply_photo_generation_prompt_format(prompt_text)
-        prompt_text, preset_names = self._apply_photo_generation_scene_presets(prompt_text, workflow_kind)
-        prompt_text = self._apply_photo_generation_fixed_prompt(prompt_text)
-        reference_image_path = _single_line(reference_image_path, 260)
-        selection_context = prompt_text
+        original_prompt_text = str(prompt_text or "").strip()
+        base_prompt = self._apply_photo_generation_prompt_format(original_prompt_text)
+        current_user_request, current_user_exclusions = self._photo_generation_current_user_request_parts(
+            original_prompt_text
+        )
+        reference_image_path = _path_text(reference_image_path, 1000)
         normalized_kind = str(workflow_kind or "").strip().lower()
+        scene_context_before = ""
         if normalized_kind in {"selfie", "portrait", "自拍", "人像"} and allow_daily_outfit_reference:
-            preliminary_scene_hint = self._photo_generation_selfie_schedule_scene_hint()
-            if preliminary_scene_hint:
-                selection_context = _single_line(
-                    f"Current schedule/location context: {preliminary_scene_hint}\n\nFinal image prompt: {prompt_text}",
-                    1800,
+            scene_context_before = self._photo_generation_selfie_schedule_scene_hint()
+        selection_context = self._photo_prompt_clip(
+            "\n\n".join(
+                part
+                for part in (
+                    f"Current schedule/location context: {scene_context_before}" if scene_context_before else "",
+                    f"Requested final image: {current_user_request or base_prompt}",
+                    f"Explicit wardrobe exclusions: {current_user_exclusions}" if current_user_exclusions else "",
                 )
-        if not reference_image_path:
-            reference_image_path = await self._photo_persona_reference_image_for_kind_async(
+                if part
+            ),
+            2400,
+            preserve_tail=True,
+        )
+        if reference_image_path:
+            reference_candidate = await self._photo_reference_candidate_for_path_async(
+                reference_image_path,
+                workflow_kind=workflow_kind,
+                allow_daily_outfit=allow_daily_outfit_reference,
+                continuity_key=continuity_key,
+            )
+        else:
+            reference_candidate = await self._select_photo_reference_candidate_async(
                 workflow_kind,
                 allow_daily_outfit=allow_daily_outfit_reference,
                 selection_context=selection_context,
+                continuity_key=continuity_key,
             )
-        prompt_text, selfie_scene_hint = self._apply_photo_generation_selfie_schedule_scene_prompt(
-            prompt_text,
-            workflow_kind,
-            allow_daily_outfit_reference=allow_daily_outfit_reference,
-            reference_image_path=reference_image_path,
+            reference_image_path = _path_text(reference_candidate.get("path"), 1000)
+
+        wardrobe = self._resolve_photo_wardrobe_decision(
+            workflow_kind=workflow_kind,
+            prompt_text=original_prompt_text or base_prompt,
+            reference=reference_candidate,
+            scene_snapshot=scene_context_before,
         )
-        prompt_text = self._apply_photo_generation_selfie_composition_guard(prompt_text, workflow_kind)
-        if selfie_scene_hint:
+        scene_context_after = scene_context_before
+        removed_conflicts: list[str] = []
+        if wardrobe.remove_daily_outfit_context and self._photo_generation_has_daily_outfit_context(scene_context_after):
+            cleaned_scene = self._photo_generation_scene_hint_without_daily_outfit_details(scene_context_after)
+            if cleaned_scene != scene_context_after:
+                scene_context_after = cleaned_scene
+                removed_conflicts.append("daily_outfit_context")
+        if wardrobe.remove_daily_outfit_context:
+            cleaned_prompt = self._photo_generation_prompt_without_generated_daily_outfit_continuity(base_prompt)
+            if cleaned_prompt != base_prompt:
+                base_prompt = cleaned_prompt
+                removed_conflicts.append("generated_daily_outfit_continuity")
+
+        preset_names = self._photo_generation_preset_names_for_decision(
+            workflow_kind,
+            base_prompt,
+            wardrobe,
+        )
+        preset_section, preset_names = self._apply_photo_generation_scene_presets(
+            "",
+            workflow_kind,
+            preset_names=preset_names,
+        )
+        continuity_section, recent_continuity_reference = self._photo_generation_recent_continuity_constraint(
+            workflow_kind,
+            reference_image_path=reference_image_path,
+            continuity_key=continuity_key,
+        )
+        prompt_text, prompt_sections = self._build_final_photo_prompt(
+            base_prompt=base_prompt,
+            workflow_kind=workflow_kind,
+            scene_hint=scene_context_after,
+            reference=reference_candidate,
+            wardrobe=wardrobe,
+            preset_section=preset_section,
+            continuity_section=continuity_section,
+        )
+        conflicts = self._detect_photo_prompt_conflicts(prompt_text, wardrobe)
+        if conflicts:
+            prompt_text = self._append_photo_prompt_conflict_resolution(prompt_text, wardrobe, conflicts)
+            logger.warning(
+                "[PrivateCompanion] 生图提示词冲突已柔性修复: trace=%s wardrobe=%s conflicts=%s",
+                trace_id,
+                _single_line(wardrobe.category, 40) or "none",
+                ",".join(conflicts),
+            )
+        prompt_path, prompt_hash = self._write_photo_prompt_debug_file(
+            trace_id=trace_id,
+            session_key=session_key,
+            workflow_kind=workflow_kind,
+            base_prompt=base_prompt,
+            scene_context_before=scene_context_before,
+            scene_context_after=scene_context_after,
+            reference=reference_candidate,
+            wardrobe=wardrobe,
+            presets=preset_names,
+            prompt_sections=prompt_sections,
+            final_prompt=prompt_text,
+            conflicts=conflicts,
+            removed_conflicts=removed_conflicts,
+        )
+        if scene_context_after:
             logger.info(
                 "[PrivateCompanion] 自拍生图已加入当前日程地点约束: trace=%s session=%s hint=%s reference=%s",
                 trace_id,
                 _single_line(session_key, 80),
-                _single_line(selfie_scene_hint, 180),
+                _single_line(scene_context_after, 180),
                 bool(reference_image_path),
             )
         preferred = self.photo_generation_backend
         try:
-            reference_exists = bool(reference_image_path and Path(reference_image_path).exists())
+            reference_exists = bool(reference_image_path and Path(reference_image_path).is_file())
         except (OSError, ValueError):
             reference_exists = False
         logger.info(
-            "[PrivateCompanion] 生图开始: trace=%s session=%s kind=%s presets=%s prompt_chars=%s prompt_preview_chars=%s prompt_preview=%s reference=%s reference_exists=%s image_size=%s %s",
+            "[PrivateCompanion] 生图开始: trace=%s session=%s kind=%s presets=%s prompt_chars=%s prompt_hash=%s prompt_debug=%s "
+            "reference=%s reference_exists=%s reference_id=%s reference_kind=%s reference_roles=%s "
+            "wardrobe_mode=%s wardrobe_category=%s outfit_locked=%s daily_outfit_removed=%s continuity_reference=%s "
+            "image_size=%s prompt_preview_chars=%s prompt_preview=%s %s",
             trace_id,
             _single_line(session_key, 80),
             _single_line(workflow_kind, 30),
             ",".join(preset_names) or "-",
             len(str(prompt_text or "")),
-            180,
-            _single_line(prompt_text, 180),
+            prompt_hash[:16],
+            _single_line(prompt_path, 160) or "-",
             bool(reference_image_path),
             reference_exists,
+            _single_line(reference_candidate.get("id"), 60) or "-",
+            _single_line(reference_candidate.get("kind"), 40) or "-",
+            ",".join(reference_candidate.get("reference_roles") or []) or "-",
+            wardrobe.mode or "none",
+            wardrobe.category or "none",
+            wardrobe.lock_outfit,
+            wardrobe.remove_daily_outfit_context,
+            recent_continuity_reference,
             _single_line(image_size, 40) or "-",
+            180,
+            _single_line(prompt_text, 180),
             self._photo_generation_backend_config_summary(),
         )
 
-        def finish(backend: str, image_path: str, note: str) -> tuple[str, str, str]:
+        def finish(
+            backend: str,
+            image_path: str,
+            note: str,
+            *,
+            reference_submitted: bool = False,
+        ) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
-            ok = bool(image_path)
+            image_path = _path_text(image_path, 1000)
+            output_exists = False
+            if image_path:
+                try:
+                    output_exists = Path(image_path).is_file()
+                except (OSError, ValueError):
+                    output_exists = False
+                if not output_exists:
+                    invalid_path = image_path
+                    image_path = ""
+                    detail = f"后端返回的图片文件不存在：{_single_line(invalid_path, 160)}"
+                    note = f"{_single_line(note, 260)}；{detail}" if note else detail
+                    logger.warning(
+                        "[PrivateCompanion] 生图后端返回无效图片路径: trace=%s backend=%s path=%s",
+                        trace_id,
+                        _single_line(backend, 60),
+                        _single_line(invalid_path, 180),
+                    )
+            ok = bool(image_path and output_exists)
+            reference_used = bool(
+                ok
+                and reference_exists
+                and reference_submitted
+            )
             self._record_recent_photo_generation(
                 trace_id=trace_id,
                 session_key=session_key,
+                continuity_key=continuity_key,
                 workflow_kind=workflow_kind,
                 backend=backend,
                 ok=ok,
@@ -8463,13 +9959,22 @@ Output:
                 image_size=image_size,
                 elapsed_ms=elapsed_ms,
                 presets=preset_names,
+                reference_used=reference_used,
+                reference_candidate=reference_candidate,
+                wardrobe=wardrobe,
+                prompt_hash=prompt_hash,
+                prompt_path=prompt_path,
+                prompt_sections=prompt_sections,
+                conflicts=conflicts,
+                removed_conflicts=removed_conflicts,
             )
             logger.info(
-                "[PrivateCompanion] 生图结束: trace=%s ok=%s backend=%s elapsed=%sms note=%s %s",
+                "[PrivateCompanion] 生图结束: trace=%s ok=%s backend=%s elapsed=%sms reference_used=%s note=%s %s",
                 trace_id,
                 ok,
                 _single_line(backend, 60),
                 elapsed_ms,
+                reference_used,
                 _single_line(note, 220),
                 self._photo_generation_file_detail(image_path),
             )
@@ -8493,7 +9998,12 @@ Output:
                 session_key=session_key,
                 reference_image_path=reference_image_path,
             )
-            return finish("ComfyUI", image_path, note)
+            return finish(
+                "ComfyUI",
+                image_path,
+                note,
+                reference_submitted=bool(reference_image_path),
+            )
         if preferred == "sdgen":
             if not self._sdgen_photo_available():
                 return finish("SDGen", "", "SDGen 插件不可用或未配置")
@@ -8518,7 +10028,12 @@ Output:
                 image_size=image_size,
             )
             if image_path:
-                return finish("函数工具", image_path, note)
+                return finish(
+                    "函数工具",
+                    image_path,
+                    note,
+                    reference_submitted=bool(reference_image_path),
+                )
             can_fallback = self._external_photo_available() or self._comfyui_photo_available() or (not reference_image_path and self._sdgen_photo_available())
             if not can_fallback:
                 return finish("函数工具", "", note)
@@ -8533,7 +10048,12 @@ Output:
                 image_size=image_size,
             )
             if image_path:
-                return finish("在线图片 API", image_path, note)
+                return finish(
+                    "在线图片 API",
+                    image_path,
+                    note,
+                    reference_submitted=bool(reference_image_path),
+                )
             can_fallback = self._comfyui_photo_available() or (not reference_image_path and self._sdgen_photo_available())
             if not can_fallback:
                 return finish("在线图片 API", "", note)
@@ -8549,7 +10069,12 @@ Output:
                 image_size=image_size,
             )
             if image_path:
-                return finish("在线图片 API", image_path, note)
+                return finish(
+                    "在线图片 API",
+                    image_path,
+                    note,
+                    reference_submitted=bool(reference_image_path),
+                )
             external_note = note
             logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=external note=%s", trace_id, _single_line(note, 180))
         else:
@@ -8570,7 +10095,12 @@ Output:
                         reference_image_path=reference_image_path,
                     )
                     if image_path:
-                        return finish("ComfyUI", image_path, note)
+                        return finish(
+                            "ComfyUI",
+                            image_path,
+                            note,
+                            reference_submitted=bool(reference_image_path),
+                        )
                     comfyui_note = note
                     logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=comfyui note=%s", trace_id, _single_line(note, 180))
                 else:
@@ -8599,7 +10129,44 @@ Output:
         else:
             sdgen_note = "SDGen 插件不可用或未配置"
             logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=sdgen note=%s", trace_id, sdgen_note)
-        return finish("在线图片 API", "", f"在线图片 API 失败：{external_note}；ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}")
+        return finish("生图链路", "", f"在线图片 API 失败：{external_note}；ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}")
+
+    async def _generate_photo_image_result(self, **kwargs: Any) -> PhotoGenerationResult:
+        backend, image_path, note = await self._generate_photo_image(**kwargs)
+        metadata = self._photo_generation_result_metadata(
+            image_path=image_path,
+            session_key=_single_line(kwargs.get("session_key"), 340),
+        )
+        reference_path = _path_text(
+            metadata.get("reference_path") or kwargs.get("reference_image_path"),
+            1000,
+        )
+        return PhotoGenerationResult(
+            backend=_single_line(backend, 80),
+            image_path=_path_text(image_path, 1000),
+            note=_single_line(note, 500),
+            trace_id=_single_line(metadata.get("trace"), 40),
+            reference_selected_path=reference_path,
+            reference_used=bool(metadata.get("reference_used")),
+            reference_id=_single_line(metadata.get("reference_id"), 60),
+            reference_kind=_single_line(metadata.get("reference_kind"), 40),
+            reference_roles=tuple(
+                _single_line(role, 40)
+                for role in (metadata.get("reference_roles") or [])
+                if _single_line(role, 40)
+            ),
+            wardrobe_mode=_single_line(metadata.get("wardrobe_mode"), 40),
+            wardrobe_category=_single_line(metadata.get("wardrobe_category"), 40),
+            outfit_locked=bool(metadata.get("outfit_locked")),
+            daily_outfit_removed=bool(metadata.get("daily_outfit_removed")),
+            preset_names=tuple(
+                _single_line(name, 60)
+                for name in (metadata.get("presets") or [])
+                if _single_line(name, 60)
+            ),
+            prompt_hash=_single_line(metadata.get("prompt_hash"), 80),
+            prompt_path=_path_text(metadata.get("prompt_path"), 1000),
+        )
 
     async def _build_photo_scene_prompt(
         self, user: dict[str, Any], name: str, reason: str
@@ -8805,7 +10372,7 @@ Output:
         return "真实", "真实摄影风格,像手机随手拍到的生活照片,光线自然,细节可信"
 
     def _photo_persona_reference_image_path(self) -> str:
-        raw = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+        raw = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
         if not raw:
             return ""
         raw = raw.strip().strip('"').strip("'")
@@ -8826,35 +10393,226 @@ Output:
             return str(path)
         return ""
 
-    def _photo_reference_library_entries(self) -> list[dict[str, str]]:
+    @staticmethod
+    def _photo_reference_normalize_roles(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        else:
+            raw_items = re.split(r"[,，、/|\s]+", str(value or ""))
+        aliases = {
+            "identity": "identity",
+            "persona": "identity",
+            "face": "identity",
+            "人设": "identity",
+            "身份": "identity",
+            "人物": "identity",
+            "脸": "identity",
+            "outfit": "outfit",
+            "wardrobe": "outfit",
+            "clothing": "outfit",
+            "服装": "outfit",
+            "穿搭": "outfit",
+            "pose": "pose",
+            "姿势": "pose",
+            "scene": "scene",
+            "background": "scene",
+            "场景": "scene",
+            "背景": "scene",
+            "style": "style",
+            "画风": "style",
+            "风格": "style",
+            "continuity": "continuity",
+            "连续性": "continuity",
+            "source": "source",
+            "原图": "source",
+        }
+        roles: list[str] = []
+        for item in raw_items:
+            key = str(item or "").strip().lower()
+            normalized = aliases.get(key, "")
+            if normalized and normalized not in roles:
+                roles.append(normalized)
+        return roles
+
+    @staticmethod
+    def _photo_outfit_category_matches(value: Any) -> list[tuple[str, int, int, str]]:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        if not text:
+            return []
+        patterns = (
+            ("cosplay", r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演|扮成|女仆装|巫女服|魔法少女|表演服"),
+            ("school_uniform", r"校服|学院制服|学生制服|school[\s_-]*uniform"),
+            ("sleepwear", r"睡衣|睡裙|睡袍|睡眠服|nightgown|nightdress|pajama|pyjama|sleepwear|bedtime outfit"),
+            ("swimwear", r"泳装|泳衣|比基尼|swimsuit|swimwear|bikini"),
+            ("sportswear", r"运动服|健身服|瑜伽服|球衣|sportswear|activewear|gym wear|jersey"),
+            ("formalwear", r"礼服|晚礼服|正装|燕尾服|西装|tuxedo|formalwear|formal attire|evening gown|\bsuit\b"),
+            ("homewear", r"居家服|家居服|家常服|宅家服|homewear|loungewear"),
+            ("daily_outfit", r"今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit"),
+        )
+        matches: list[tuple[str, int, int, str]] = []
+        for category, pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.I):
+                matches.append((category, match.start(), match.end(), match.group(0)))
+        matches.sort(key=lambda item: (item[1], item[2]))
+        return matches
+
+    @classmethod
+    def _photo_outfit_category_from_text(cls, value: Any) -> str:
+        matches = cls._photo_outfit_category_matches(value)
+        return matches[0][0] if matches else ""
+
+    @staticmethod
+    def _photo_reference_scene_categories_from_text(value: Any) -> list[str]:
+        text = re.sub(r"\s+", "", str(value or "")).lower()
+        categories: list[str] = []
+        mappings = (
+            ("home", ("在家", "家里", "居家", "宅家", "home")),
+            ("bedroom", ("卧室", "床边", "睡前", "刚起床", "bedroom", "bedtime")),
+            ("school", ("上学", "校园", "教室", "校门", "school", "campus")),
+            ("office", ("上班", "公司", "办公室", "office", "workplace")),
+            ("outdoor", ("外出", "通勤", "逛街", "街头", "旅行", "outdoor", "commute")),
+            ("formal_event", ("宴会", "舞会", "典礼", "正式场合", "banquet", "ceremony")),
+            ("sport", ("运动", "健身", "跑步", "瑜伽", "球场", "gym", "sport")),
+            ("beach", ("海边", "沙滩", "泳池", "beach", "pool")),
+        )
+        for category, tokens in mappings:
+            if any(token in text for token in tokens):
+                categories.append(category)
+        return categories
+
+    @staticmethod
+    def _photo_reference_preset_for_category(category: str) -> str:
+        return {
+            "sleepwear": "居家睡衣",
+            "homewear": "居家服",
+            "cosplay": "COS自拍",
+            "school_uniform": "校服人像",
+            "formalwear": "礼服人像",
+            "swimwear": "泳装人像",
+            "sportswear": "运动服人像",
+            "daily_outfit": "日常穿搭",
+            "custom_outfit": "日常穿搭",
+        }.get(str(category or "").strip().lower(), "")
+
+    @staticmethod
+    def _photo_reference_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None or str(value).strip() == "":
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "是", "开启", "锁定"}
+
+    def _normalize_photo_reference_candidate_metadata(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item or {})
+        note = _single_line(normalized.get("note") or normalized.get("description"), 700)
+        kind = _single_line(normalized.get("kind"), 40).lower() or "library"
+        explicit_roles = normalized.get("reference_roles", normalized.get("reference_role"))
+        roles = self._photo_reference_normalize_roles(explicit_roles)
+        raw_category = normalized.get("outfit_category") or normalized.get("wardrobe_category")
+        if not raw_category and isinstance(normalized.get("wardrobe_categories"), (list, tuple)):
+            raw_category = next(iter(normalized.get("wardrobe_categories") or []), "")
+        category = _single_line(raw_category, 40).lower()
+        if not category:
+            category = self._photo_outfit_category_from_text(note)
+        if not roles:
+            if kind == "persona":
+                roles = ["identity"]
+            elif kind in {"daily_outfit", "recent_sent_photo"}:
+                roles = ["identity", "outfit"]
+                if kind == "recent_sent_photo":
+                    roles.extend(["scene", "continuity"])
+            elif re.search(r"仅(?:用于)?(?:人设|身份|脸|发型)|只(?:参考|用于)(?:人设|身份|脸|发型)|identity only", note, flags=re.I):
+                roles = ["identity"]
+            elif category:
+                roles = ["identity", "outfit"]
+            else:
+                roles = ["identity"]
+        if kind == "daily_outfit" and not category:
+            category = "daily_outfit"
+        scene_values = normalized.get("scene_categories", normalized.get("scene_tags"))
+        if isinstance(scene_values, (list, tuple, set)):
+            scene_categories = [
+                _single_line(value, 40).lower()
+                for value in scene_values
+                if _single_line(value, 40)
+            ]
+        else:
+            scene_categories = self._photo_reference_scene_categories_from_text(scene_values or note)
+        lock_default = self._photo_reference_bool(
+            normalized.get("outfit_lock_default"),
+            default=bool("outfit" in roles and (category or kind in {"daily_outfit", "recent_sent_photo"})),
+        )
+        preferred_preset = _single_line(
+            normalized.get("preferred_preset") or normalized.get("preset"),
+            60,
+        ) or self._photo_reference_preset_for_category(category)
+        normalized.update(
+            {
+                "kind": kind,
+                "note": note,
+                "reference_roles": list(dict.fromkeys(roles)),
+                "outfit_category": category,
+                "outfit_lock_default": lock_default,
+                "scene_categories": list(dict.fromkeys(scene_categories)),
+                "preferred_preset": preferred_preset,
+                "metadata_source": _single_line(normalized.get("metadata_source"), 30)
+                or ("configured" if explicit_roles is not None or normalized.get("outfit_category") else "inferred_note"),
+            }
+        )
+        return normalized
+
+    def _photo_reference_library_entries(self) -> list[dict[str, Any]]:
         raw_items = getattr(self, "photo_reference_library", [])
         if not isinstance(raw_items, list):
             raw_items = str(raw_items or "").splitlines()
-        entries: list[dict[str, str]] = []
+        entries: list[dict[str, Any]] = []
         seen: set[str] = set()
         for index, raw_item in enumerate(raw_items[:24], start=1):
+            configured: dict[str, Any] = {}
             if isinstance(raw_item, dict):
-                source = _single_line(raw_item.get("path") or raw_item.get("url"), 1000)
+                configured = dict(raw_item)
+                source = _path_text(raw_item.get("source") or raw_item.get("path") or raw_item.get("url"), 1000)
                 note = _single_line(raw_item.get("note") or raw_item.get("description"), 500)
             else:
                 text = str(raw_item or "").strip()
-                parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)
-                source = _single_line(parts[0] if parts else "", 1000)
-                note = _single_line(parts[1] if len(parts) > 1 else "", 500)
+                if text.startswith("{") and text.endswith("}"):
+                    try:
+                        parsed = json.loads(text)
+                        configured = dict(parsed) if isinstance(parsed, dict) else {}
+                    except Exception:
+                        configured = {}
+                if configured:
+                    source = _path_text(configured.get("source") or configured.get("path") or configured.get("url"), 1000)
+                    note = _single_line(configured.get("note") or configured.get("description"), 500)
+                else:
+                    parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=2)
+                    source = _path_text(parts[0] if parts else "", 1000)
+                    note = _single_line(parts[1] if len(parts) > 1 else "", 500)
+                    if len(parts) > 2 and str(parts[2]).strip().startswith("{"):
+                        try:
+                            metadata = json.loads(str(parts[2]).strip())
+                            if isinstance(metadata, dict):
+                                configured.update(metadata)
+                        except Exception:
+                            note = _single_line(f"{note} || {parts[2]}", 500)
             source = source.strip().strip('"').strip("'")
             if not source or source in seen:
                 continue
             seen.add(source)
-            entries.append({
-                "id": f"library_{index}",
-                "source": source,
-                "note": note or "通用人物参考图；没有更具体的服装或场景匹配时使用",
-                "kind": "library",
-            })
+            configured.update(
+                {
+                    "id": _single_line(configured.get("id"), 60) or f"library_{index}",
+                    "source": source,
+                    "note": note or "通用人物参考图；没有更具体的服装或场景匹配时使用",
+                    "kind": "library",
+                    "_config_format": "dict" if isinstance(raw_item, dict) or bool(configured.get("reference_roles")) else "text",
+                }
+            )
+            entries.append(self._normalize_photo_reference_candidate_metadata(configured))
         return entries
 
     def _photo_reference_local_path(self, source: str) -> str:
-        raw = _single_line(source, 1000).strip().strip('"').strip("'")
+        raw = _path_text(source, 1000)
         if not raw or re.match(r"^https?://", raw, flags=re.I):
             return ""
         candidates = [Path(raw).expanduser()]
@@ -8875,7 +10633,7 @@ Output:
             return ""
         if _single_line(item.get("date"), 20) != _today_key():
             return ""
-        raw = _single_line(item.get("path"), 500).strip().strip('"').strip("'")
+        raw = _path_text(item.get("path"), 1000)
         if not raw:
             return ""
         try:
@@ -8911,7 +10669,7 @@ Output:
         local_path = self._photo_persona_reference_image_path()
         if local_path:
             return local_path
-        raw = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 1000).strip().strip('"').strip("'")
+        raw = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
         if not raw or not re.match(r"^https?://", raw, flags=re.I):
             return ""
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
@@ -8928,15 +10686,37 @@ Output:
         setter = getattr(self, "_set_photo_reference_config_path", None)
         if callable(setter):
             try:
-                setter(stable_path)
+                result = setter(stable_path)
+                if hasattr(result, "__await__"):
+                    result = await result
+                if result is False:
+                    logger.info(
+                        "[PrivateCompanion] 配置页人设参考图 URL 已下载但配置保存返回失败: path=%s",
+                        _single_line(stable_path, 160),
+                    )
             except Exception as exc:
                 logger.info("[PrivateCompanion] 配置页人设参考图 URL 已下载但回写失败: %s path=%s", _single_line(exc, 120), _single_line(stable_path, 160))
         logger.info("[PrivateCompanion] 配置页人设参考图 URL 已缓存为本地文件: path=%s", _single_line(stable_path, 160))
         return stable_path
 
-    async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True) -> list[dict[str, str]]:
-        candidates: list[dict[str, str]] = []
-        updated_library: list[str] = []
+    def _photo_reference_config_value(self, item: dict[str, Any], source: str = "") -> Any:
+        persisted_source = _path_text(source or item.get("source"), 1000)
+        note = _single_line(item.get("note"), 500)
+        if item.get("_config_format") != "dict":
+            return f"{persisted_source} || {note}" if note else persisted_source
+        return {
+            "path": persisted_source,
+            "note": note,
+            "reference_roles": list(item.get("reference_roles") or []),
+            "outfit_category": _single_line(item.get("outfit_category"), 40),
+            "outfit_lock_default": bool(item.get("outfit_lock_default")),
+            "scene_categories": list(item.get("scene_categories") or []),
+            "preferred_preset": _single_line(item.get("preferred_preset"), 60),
+        }
+
+    async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        updated_library: list[Any] = []
         library_changed = False
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
         for item in self._photo_reference_library_entries():
@@ -8954,40 +10734,61 @@ Output:
                 if path:
                     library_changed = True
             persisted_source = path or source
-            updated_library.append(f"{persisted_source} || {item['note']}")
+            updated_library.append(self._photo_reference_config_value(item, persisted_source))
             if path:
-                candidates.append({**item, "path": path})
+                candidates.append(self._normalize_photo_reference_candidate_metadata({**item, "path": path}))
         if library_changed:
             setter = getattr(self, "_set_photo_reference_library_config", None)
             if callable(setter):
-                setter(updated_library)
+                try:
+                    result = setter(updated_library)
+                    if hasattr(result, "__await__"):
+                        result = await result
+                    if result is False:
+                        logger.info("[PrivateCompanion] 参考图库远程图片已下载但配置保存返回失败")
+                except Exception as exc:
+                    logger.info(
+                        "[PrivateCompanion] 参考图库远程图片已下载但回写失败: %s",
+                        _single_line(exc, 120),
+                    )
 
         if allow_daily_outfit:
             outfit_path = self._daily_outfit_reference_image_path()
             if outfit_path:
-                candidates.append({
+                candidates.append(self._normalize_photo_reference_candidate_metadata({
                     "id": "daily_outfit",
                     "path": outfit_path,
                     "source": outfit_path,
                     "kind": "daily_outfit",
                     "note": "今天生成的外出穿搭；仅在画面明确承接今天外出、通勤、上学、逛街或展示当日穿搭时使用，在家、卧室、睡前、刚起床等场景不要使用",
-                })
+                    "reference_roles": ["identity", "outfit"],
+                    "outfit_category": "daily_outfit",
+                    "outfit_lock_default": True,
+                    "scene_categories": ["school", "office", "outdoor"],
+                    "preferred_preset": "日常穿搭",
+                    "metadata_source": "runtime",
+                }))
         persona_path = await self._photo_persona_reference_image_path_async()
         if persona_path and all(item.get("path") != persona_path for item in candidates):
-            candidates.append({
+            candidates.append(self._normalize_photo_reference_candidate_metadata({
                 "id": "persona_default",
                 "path": persona_path,
                 "source": persona_path,
                 "kind": "persona",
                 "note": "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
-            })
+                "reference_roles": ["identity"],
+                "outfit_lock_default": False,
+                "metadata_source": "runtime",
+            }))
         return candidates
 
-    @staticmethod
-    def _photo_reference_candidate_score(candidate: dict[str, str], context_text: str) -> float:
+    @classmethod
+    def _photo_reference_candidate_score(cls, candidate: dict[str, Any], context_text: str) -> float:
         context = re.sub(r"\s+", "", str(context_text or "")).lower()
         note = re.sub(r"\s+", "", str(candidate.get("note") or "")).lower()
-        score = 2.0 if candidate.get("kind") == "persona" else 1.0
+        intent = cls._photo_generation_wardrobe_intent(context_text)
+        kind = candidate.get("kind")
+        score = 2.0 if kind == "persona" else (0.5 if kind == "recent_sent_photo" else 1.0)
         categories = (
             ("home", ("在家", "家里", "居家", "宿舍", "公寓", "卧室", "房间", "客厅", "宅家", "居家室内", "室内日常")),
             ("sleep", ("睡衣", "睡前", "起床", "刚醒", "床上", "夜晚休息")),
@@ -9003,30 +10804,75 @@ Output:
                 score -= 20.0
             elif context_hit and note_hit:
                 score += 12.0
+        candidate_category = str(candidate.get("outfit_category") or "").strip().lower()
+        requested_category = intent.target_category
+        excluded_categories = set(intent.excluded_categories)
+        if candidate_category and candidate_category in excluded_categories:
+            score -= 40.0
+        elif candidate_category and candidate_category == requested_category:
+            score += 18.0
+        elif requested_category and candidate_category and candidate_category != "daily_outfit":
+            score -= 6.0
+        if requested_category == "custom_outfit" and bool(candidate.get("outfit_lock_default")):
+            score -= 8.0
+        structured_scenes = {
+            str(value or "").strip().lower()
+            for value in (candidate.get("scene_categories") or [])
+            if str(value or "").strip()
+        }
+        context_scenes: set[str] = set()
+        if any(token in context for token in ("在家", "家里", "居家", "宿舍", "卧室", "居家室内")):
+            context_scenes.add("home")
+        if any(token in context for token in ("卧室", "床边", "睡前", "刚起床")):
+            context_scenes.add("bedroom")
+        if any(token in context for token in ("上学", "校园", "教室", "校门")):
+            context_scenes.add("school")
+        if any(token in context for token in ("外出", "通勤", "逛街", "街头", "旅行")):
+            context_scenes.add("outdoor")
+        if structured_scenes & context_scenes:
+            score += 10.0
         for token in re.split(r"[，,。；;、/|：:\s]+", note):
             if len(token) >= 2 and token in context:
                 score += min(6.0, float(len(token)))
         return score
 
-    async def _select_photo_reference_image_async(
+    async def _select_photo_reference_candidate_async(
         self,
         workflow_kind: str,
         *,
         allow_daily_outfit: bool = True,
         selection_context: str = "",
-    ) -> str:
+        continuity_key: str = "",
+    ) -> dict[str, Any]:
         if not bool(getattr(self, "enable_photo_reference_image", False)):
-            return ""
+            return {}
         if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
-            return ""
+            return {}
         candidates = await self._photo_reference_candidates_async(allow_daily_outfit=allow_daily_outfit)
+        recent_candidate = self._recent_sent_photo_continuity_candidate(continuity_key)
+        if recent_candidate:
+            if all(
+                not self._photo_reference_paths_equal(item.get("path", ""), recent_candidate.get("path", ""))
+                for item in candidates
+            ):
+                candidates.insert(0, recent_candidate)
+            else:
+                recent_candidate = {}
         if not candidates:
-            return ""
+            return {}
+        wardrobe_intent = self._photo_generation_wardrobe_intent(selection_context)
+        excluded_categories = set(wardrobe_intent.excluded_categories)
         scored_candidates = [
             (item, self._photo_reference_candidate_score(item, selection_context))
             for item in candidates
         ]
-        fallback, _ = max(scored_candidates, key=lambda pair: pair[1])
+        normal_scored = [
+            pair
+            for pair in scored_candidates
+            if pair[0].get("kind") != "recent_sent_photo"
+            and str(pair[0].get("outfit_category") or "").strip().lower() not in excluded_categories
+        ]
+        fallback = max(normal_scored, key=lambda pair: pair[1])[0] if normal_scored else None
         selected = fallback
         selection_source = "rule_fallback"
         selection_reason = "model_not_attempted"
@@ -9041,33 +10887,56 @@ Output:
                 getattr(self, "mai_style_provider_id", ""),
             )
         llm_call = getattr(self, "_llm_call", None)
-        if selection_context and len(candidates) > 1 and callable(llm_call):
+        specialized_candidate = any(
+            bool(item.get("outfit_lock_default"))
+            or any(role in {"outfit", "scene", "continuity"} for role in (item.get("reference_roles") or []))
+            for item in candidates
+        )
+        needs_model_choice = len(candidates) > 1 or bool(recent_candidate) or specialized_candidate
+        if selection_context and needs_model_choice and callable(llm_call):
             selection_reason = "model_invalid_response"
             options = "\n".join(
-                f"{index}. id={item['id']}；注释={_single_line(item.get('note'), 360)}"
+                f"{index}. id={item['id']}；职责={','.join(item.get('reference_roles') or []) or 'identity'}；"
+                f"服装类别={_single_line(item.get('outfit_category'), 40) or 'none'}；"
+                f"默认锁服装={bool(item.get('outfit_lock_default'))}；注释={_single_line(item.get('note'), 360)}"
                 for index, item in enumerate(candidates, start=1)
             )
+            none_option = "\n0. 不使用这些候选参考图，按当前要求生成全新画面"
             prompt = f"""
 你在为角色生图选择一张人物参考图。结合最终画面需求中的日程、位置、当前场景和服装需求，按管理员给每张图的用途注释判断。
 优先选择用途更具体且与当前场景兼容的参考图；只有没有更具体的场景或服装参考时，才选择基础人物身份图。
 明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
+当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。
 不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
+候选 id=recent_sent_photo 是同一会话刚刚已发送的上一张成图。若用户是在自然续拍，主要只要求改变动作、表情、视线、拍摄角度或近似构图，应优先选择它来保持人物、服装和环境连续；若用户明确换人物、换装、换地点、换时间、换整体场景或另起主题，则选择更合适的其他参考图。只有所有候选都不适合新画面时才输出 0。
 只输出候选编号，不要解释。
 
 【最终画面需求】
 {_single_line(selection_context, 1600)}
 
 【候选参考图】
-{options}
+{options}{none_option}
             """.strip()
             try:
                 raw = await llm_call(prompt, max_tokens=12, provider_id=provider_id or None, task="photo_reference_selection")
                 model_reply = _single_line(raw, 80)
                 match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", model_reply)
-                if match and 1 <= int(match.group(1)) <= len(candidates):
-                    selected = candidates[int(match.group(1)) - 1]
+                choice = int(match.group(1)) if match else -1
+                if match and choice == 0:
+                    selected = None
                     selection_source = "model"
-                    selection_reason = "valid_candidate_number"
+                    selection_reason = "fresh_image_requested"
+                elif match and 1 <= choice <= len(candidates):
+                    proposed = candidates[choice - 1]
+                    proposed_category = str(proposed.get("outfit_category") or "").strip().lower()
+                    if proposed_category and proposed_category in excluded_categories:
+                        selected = None
+                        selection_source = "semantic_exclusion"
+                        selection_reason = "model_selected_explicitly_excluded_outfit"
+                    else:
+                        selected = proposed
+                        selection_source = "model"
+                        selection_reason = "valid_candidate_number"
                 elif not model_reply:
                     selection_reason = "model_empty_response"
                 elif match:
@@ -9078,7 +10947,7 @@ Output:
                     "[PrivateCompanion] 参考图库模型选图失败，使用规则兜底: error=%s",
                     _single_line(exc, 120),
                 )
-        elif len(candidates) == 1:
+        elif len(candidates) == 1 and not recent_candidate and not specialized_candidate:
             selection_source = "single_candidate"
             selection_reason = "only_one_candidate"
         elif not selection_context:
@@ -9092,7 +10961,7 @@ Output:
         )
         logger.info(
             "[PrivateCompanion] 参考图库候选评分: fallback=%s scores=%s context=%s",
-            fallback.get("id"),
+            fallback.get("id") if isinstance(fallback, dict) else "none",
             score_summary,
             _single_line(selection_context, 240),
         )
@@ -9101,15 +10970,80 @@ Output:
             "model_reply=%s path=%s note=%s candidates=%s",
             selection_source,
             selection_reason,
-            selected.get("id"),
-            selected.get("kind"),
-            fallback.get("id"),
+            selected.get("id") if isinstance(selected, dict) else "none",
+            selected.get("kind") if isinstance(selected, dict) else "none",
+            fallback.get("id") if isinstance(fallback, dict) else "none",
             model_reply or "-",
-            _single_line(selected.get("path"), 260),
-            _single_line(selected.get("note"), 160),
+            _single_line(selected.get("path"), 260) if isinstance(selected, dict) else "-",
+            _single_line(selected.get("note"), 160) if isinstance(selected, dict) else "-",
             len(candidates),
         )
-        return str(selected.get("path") or "")
+        return self._normalize_photo_reference_candidate_metadata(selected) if isinstance(selected, dict) else {}
+
+    async def _select_photo_reference_image_async(
+        self,
+        workflow_kind: str,
+        *,
+        allow_daily_outfit: bool = True,
+        selection_context: str = "",
+        continuity_key: str = "",
+    ) -> str:
+        selected = await self._select_photo_reference_candidate_async(
+            workflow_kind,
+            allow_daily_outfit=allow_daily_outfit,
+            selection_context=selection_context,
+            continuity_key=continuity_key,
+        )
+        return str(selected.get("path") or "") if selected else ""
+
+    async def _photo_reference_candidate_for_path_async(
+        self,
+        reference_image_path: str,
+        *,
+        workflow_kind: str,
+        allow_daily_outfit: bool = True,
+        continuity_key: str = "",
+    ) -> dict[str, Any]:
+        path = _path_text(reference_image_path, 1000)
+        if not path:
+            return {}
+        normalized_kind = str(workflow_kind or "").strip().lower()
+        if normalized_kind in {"edit", "改图", "修图", "重绘", "p图"}:
+            return self._normalize_photo_reference_candidate_metadata(
+                {
+                    "id": "explicit_reference",
+                    "path": path,
+                    "source": path,
+                    "kind": "source",
+                    "note": "用户本轮明确提供或引用的改图原图",
+                    "reference_roles": ["source"],
+                    "outfit_lock_default": False,
+                    "metadata_source": "runtime",
+                }
+            )
+        candidates = await self._photo_reference_candidates_async(
+            allow_daily_outfit=allow_daily_outfit,
+        )
+        recent = self._recent_sent_photo_continuity_candidate(continuity_key)
+        if recent:
+            candidates.insert(0, recent)
+        for candidate in candidates:
+            if self._photo_reference_paths_equal(path, candidate.get("path", "")):
+                return self._normalize_photo_reference_candidate_metadata(candidate)
+        kind = "explicit"
+        roles = ["identity", "outfit"]
+        return self._normalize_photo_reference_candidate_metadata(
+            {
+                "id": "explicit_reference",
+                "path": path,
+                "source": path,
+                "kind": kind,
+                "note": "用户本轮明确提供或引用的参考图",
+                "reference_roles": roles,
+                "outfit_lock_default": kind == "explicit",
+                "metadata_source": "runtime",
+            }
+        )
 
     async def _photo_persona_reference_image_for_kind_async(
         self,
@@ -9117,11 +11051,13 @@ Output:
         *,
         allow_daily_outfit: bool = True,
         selection_context: str = "",
+        continuity_key: str = "",
     ) -> str:
         return await self._select_photo_reference_image_async(
             workflow_kind,
             allow_daily_outfit=allow_daily_outfit,
             selection_context=selection_context,
+            continuity_key=continuity_key,
         )
 
     async def _run_comfyui_photo_workflow(
@@ -9141,8 +11077,10 @@ Output:
         try:
             server_ip, client_id = module._get_server_config(config)
             workflow_dir = module._get_workflow_dir()
-            reference_image_path = _single_line(reference_image_path, 260)
-            use_reference_image = bool(reference_image_path and os.path.exists(reference_image_path))
+            reference_image_path = _path_text(reference_image_path, 1000)
+            use_reference_image = bool(reference_image_path and os.path.isfile(reference_image_path))
+            if reference_image_path and not use_reference_image:
+                return "", "ComfyUI 提交前参考图已不可用，已停止纯文工作流回退"
             workflow_file = ""
             text_count = 1
             image_count = 0
@@ -9370,6 +11308,11 @@ Output:
         kwargs: dict[str, Any] = {prompt_param: prompt_text}
         if kind_param:
             kwargs[kind_param] = workflow_kind
+        if reference_image_path and not reference_param:
+            return "", (
+                "已选择参考图，但自定义生图工具未配置参考图参数 custom_photo_tool_reference_param；"
+                "已停止无参考图调用，避免生成结果丢失人物或服装一致性"
+            )
         if reference_param and reference_image_path:
             kwargs[reference_param] = reference_image_path
         if extra_params_text:
@@ -10212,6 +12155,13 @@ Output:
                 "请检查在线 API 地址是否需要 /v1，或该代理是否支持 /images/generations。"
                 f"返回：{diagnostic_text(raw, 120)}"
             )
+        if self._external_image_api_is_transient_status(status):
+            return (
+                f"{prefix}{endpoint_note}HTTP {status}：上游生图服务临时失败或网关中断。"
+                "这通常不是 Key、模型名或提示词的确定性错误；插件会自动短暂重试一次，"
+                "若仍失败请稍后重试或配置备用图片 API。"
+                f"返回：{diagnostic_text(raw, 140)}"
+            )
         if platform == "agnes" and int(status) in {400, 422}:
             return (
                 f"{prefix}{endpoint_note}HTTP {status}：Agnes Image 请求参数不符合模型要求。"
@@ -10220,6 +12170,17 @@ Output:
                 f"返回：{diagnostic_text(raw, 140)}"
             )
         return f"{prefix}{endpoint_note}HTTP {status}: {diagnostic_text(raw, 180)}"
+
+    @staticmethod
+    def _external_image_api_is_transient_status(status: Any) -> bool:
+        try:
+            return int(status) in {500, 502, 503, 504}
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _external_image_api_transient_retry_delay(status: Any) -> float:
+        return 1.5 if ProactiveMessageMixin._external_image_api_is_transient_status(status) else 0.0
 
     def _url_same_origin(self, left: str, right: str) -> bool:
         try:
@@ -10500,9 +12461,10 @@ Output:
                 reference_value = reference_image_path
                 if not re.match(r"^https?://", reference_value, flags=re.I):
                     reference_value = await self._reference_image_to_data_url(reference_value)
-                if reference_value:
-                    content.append({"type": "image", "image": reference_value})
-                    used_reference = True
+                if not reference_value:
+                    return "", "百炼参考图无法读取或转换，已停止纯文生图回退"
+                content.append({"type": "image", "image": reference_value})
+                used_reference = True
             payload = {
                 "model": self.external_image_api_model,
                 "input": {"messages": [{"role": "user", "content": content}]},
@@ -10929,6 +12891,8 @@ Output:
                 reference_value = await self._reference_image_to_data_url(reference_image_path)
             elif re.match(r"^data:image/[a-z0-9.+-]+;base64,", str(reference_image_path or ""), flags=re.I):
                 reference_value = str(reference_image_path or "").strip()
+            if reference_image_path and not reference_value:
+                return "", "Gemini 参考图无法读取或转换，已停止纯文生图回退"
             if reference_value and "," in reference_value:
                 header, encoded = reference_value.split(",", 1)
                 mime_match = re.match(r"data:(image/[a-z0-9.+-]+);base64", header, flags=re.I)
@@ -11288,7 +13252,7 @@ Output:
             return "", "未配置 Agnes Image 模型"
         size, ratio = self._agnes_image_size_and_ratio(image_size, prompt_text)
         extra_body: dict[str, Any] = {"response_format": "url"}
-        reference_image_path = _single_line(reference_image_path, 260)
+        reference_image_path = _path_text(reference_image_path, 1000)
         if reference_image_path:
             data_url = await self._reference_image_to_data_url(reference_image_path)
             if not data_url:
@@ -11403,7 +13367,7 @@ Output:
         model_note = self._external_image_model_misconfiguration_note()
         if model_note:
             return "", model_note
-        reference_image_path = _single_line(reference_image_path, 260)
+        reference_image_path = _path_text(reference_image_path, 1000)
         if platform == "bailian":
             multimodal_first = bool(reference_image_path) or self._bailian_prefers_multimodal()
             bailian_note = ""
@@ -11417,6 +13381,12 @@ Output:
                 if image_path:
                     return image_path, note
                 bailian_note = note
+                if reference_image_path:
+                    logger.info(
+                        "[PrivateCompanion] 百炼参考图多模态生图失败,停止异步纯文回退: %s",
+                        _single_line(note, 180),
+                    )
+                    return "", f"百炼参考图多模态接口失败：{_single_line(note, 180)}"
                 logger.info(
                     "[PrivateCompanion] 百炼多模态生图失败,回退异步文生图: %s",
                     _single_line(note, 180),
@@ -11465,7 +13435,9 @@ Output:
             )
         if platform == "sensenova" and reference_image_path:
             return "", "SenseNova U1 Fast 官方接口不支持参考图输入，请使用纯文生图或切换其他参考图后端"
-        if reference_image_path and os.path.exists(reference_image_path):
+        if reference_image_path and not os.path.isfile(reference_image_path):
+            return "", "在线图片 API 提交前参考图已不可用，已停止纯文生图回退"
+        if reference_image_path:
             logger.info(
                 "[PrivateCompanion] 在线图片 API 尝试参考图接口: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
                 self._external_image_diagnostic_text(self._external_image_endpoint("edits"), 160),
@@ -11506,37 +13478,55 @@ Output:
             endpoints = self._external_image_endpoint_candidates("generations") or [endpoint]
             last_error_note = ""
             data: dict[str, Any] | None = None
+            retried_after_upstream_error = False
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for index, candidate_endpoint in enumerate(endpoints):
-                    logger.info(
-                        "[PrivateCompanion] 在线图片 API 生图提交: endpoint=%s model=%s size=%s prompt_chars=%s prompt_preview_chars=%s prompt_preview=%s",
-                        self._external_image_diagnostic_text(candidate_endpoint, 160),
-                        _single_line(self.external_image_api_model, 80),
-                        payload["size"],
-                        len(str(prompt_text or "")),
-                        180,
-                        _single_line(prompt_text, 180),
-                    )
-                    async with session.post(candidate_endpoint, headers=headers, json=payload) as response:
-                        text = await response.text()
+                    text = ""
+                    for attempt in range(2):
                         logger.info(
-                            "[PrivateCompanion] 在线图片 API 生图响应: endpoint=%s status=%s chars=%s preview=%s",
+                            "[PrivateCompanion] 在线图片 API 生图提交: endpoint=%s model=%s size=%s prompt_chars=%s attempt=%s/2 prompt_preview_chars=%s prompt_preview=%s",
                             self._external_image_diagnostic_text(candidate_endpoint, 160),
-                            response.status,
-                            len(text or ""),
-                            self._external_image_diagnostic_text(text, 220),
+                            _single_line(self.external_image_api_model, 80),
+                            payload["size"],
+                            len(str(prompt_text or "")),
+                            attempt + 1,
+                            180,
+                            _single_line(prompt_text, 180),
                         )
-                        if response.status >= 400:
-                            last_error_note = self._external_image_api_error_note(response.status, text, endpoint=candidate_endpoint)
-                            if response.status == 404 and index + 1 < len(endpoints):
-                                logger.info(
-                                    "[PrivateCompanion] 在线图片 API 生图端点 404,尝试候选端点: failed=%s next=%s",
-                                    self._external_image_diagnostic_text(candidate_endpoint, 160),
-                                    self._external_image_diagnostic_text(endpoints[index + 1], 160),
-                                )
-                                continue
-                            return "", last_error_note
-                    data = self._extract_json_payload(text) if text else {}
+                        async with session.post(candidate_endpoint, headers=headers, json=payload) as response:
+                            text = await response.text()
+                            logger.info(
+                                "[PrivateCompanion] 在线图片 API 生图响应: endpoint=%s status=%s chars=%s preview=%s",
+                                self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                response.status,
+                                len(text or ""),
+                                self._external_image_diagnostic_text(text, 220),
+                            )
+                            if response.status >= 400:
+                                last_error_note = self._external_image_api_error_note(response.status, text, endpoint=candidate_endpoint)
+                                retry_delay = self._external_image_api_transient_retry_delay(response.status)
+                                if attempt == 0 and retry_delay > 0:
+                                    retried_after_upstream_error = True
+                                    logger.info(
+                                        "[PrivateCompanion] 在线图片 API 上游短暂失败,稍后重试同一端点: status=%s delay=%.1fs endpoint=%s",
+                                        response.status,
+                                        retry_delay,
+                                        self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                    )
+                                    await asyncio.sleep(retry_delay)
+                                    continue
+                                if response.status == 404 and index + 1 < len(endpoints):
+                                    logger.info(
+                                        "[PrivateCompanion] 在线图片 API 生图端点 404,尝试候选端点: failed=%s next=%s",
+                                        self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                        self._external_image_diagnostic_text(endpoints[index + 1], 160),
+                                    )
+                                    break
+                                return "", last_error_note
+                        data = self._extract_json_payload(text) if text else {}
+                        break
+                    if data is None and last_error_note and index + 1 < len(endpoints):
+                        continue
                     break
             if data is None:
                 return "", last_error_note or "在线图片 API 未返回数据"
@@ -11561,17 +13551,21 @@ Output:
                     len(image_bytes),
                     _single_line(path, 160),
                 )
-                return path, "ok" if path else "保存在线图片失败"
+                note = "ok；上游短暂错误后重试成功" if retried_after_upstream_error else "ok"
+                return path, note if path else "保存在线图片失败"
             image_url = str(first.get("url") or "").strip()
             if image_url:
                 logger.info(
                     "[PrivateCompanion] 在线图片 API 生图返回 URL: %s",
                     self._external_image_diagnostic_text(image_url, 180),
                 )
-                return await self._download_external_image_url(
+                saved, note = await self._download_external_image_url(
                     image_url,
                     session_key=session_key,
                 )
+                if saved and retried_after_upstream_error:
+                    note = f"{note}；上游短暂错误后重试成功"
+                return saved, note
             return "", "在线图片 API 未返回 url 或 b64_json"
         except asyncio.TimeoutError:
             note = self._external_image_timeout_note()
@@ -11633,37 +13627,55 @@ Output:
             endpoints = self._external_image_endpoint_candidates("edits") or [endpoint]
             last_error_note = ""
             data: dict[str, Any] | None = None
+            retried_after_upstream_error = False
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for index, candidate_endpoint in enumerate(endpoints):
-                    logger.info(
-                        "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference=%s bytes=%s prompt_preview=%s",
-                        self._external_image_diagnostic_text(candidate_endpoint, 160),
-                        _single_line(self.external_image_api_model, 80),
-                        self._sanitize_external_image_size(image_size),
-                        _single_line(str(path), 160),
-                        len(image_bytes),
-                        _single_line(prompt_text, 180),
-                    )
-                    async with session.post(candidate_endpoint, headers=headers, data=build_form()) as response:
-                        text = await response.text()
+                    text = ""
+                    for attempt in range(2):
                         logger.info(
-                            "[PrivateCompanion] 在线图片 API 参考图响应: endpoint=%s status=%s chars=%s preview=%s",
+                            "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference=%s bytes=%s attempt=%s/2 prompt_preview=%s",
                             self._external_image_diagnostic_text(candidate_endpoint, 160),
-                            response.status,
-                            len(text or ""),
-                            self._external_image_diagnostic_text(text, 220),
+                            _single_line(self.external_image_api_model, 80),
+                            self._sanitize_external_image_size(image_size),
+                            _single_line(str(path), 160),
+                            len(image_bytes),
+                            attempt + 1,
+                            _single_line(prompt_text, 180),
                         )
-                        if response.status >= 400:
-                            last_error_note = self._external_image_api_error_note(response.status, text, reference=True, endpoint=candidate_endpoint)
-                            if response.status == 404 and index + 1 < len(endpoints):
-                                logger.info(
-                                    "[PrivateCompanion] 在线图片 API 参考图端点 404,尝试候选端点: failed=%s next=%s",
-                                    self._external_image_diagnostic_text(candidate_endpoint, 160),
-                                    self._external_image_diagnostic_text(endpoints[index + 1], 160),
-                                )
-                                continue
-                            return "", last_error_note
-                    data = self._extract_json_payload(text) if text else {}
+                        async with session.post(candidate_endpoint, headers=headers, data=build_form()) as response:
+                            text = await response.text()
+                            logger.info(
+                                "[PrivateCompanion] 在线图片 API 参考图响应: endpoint=%s status=%s chars=%s preview=%s",
+                                self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                response.status,
+                                len(text or ""),
+                                self._external_image_diagnostic_text(text, 220),
+                            )
+                            if response.status >= 400:
+                                last_error_note = self._external_image_api_error_note(response.status, text, reference=True, endpoint=candidate_endpoint)
+                                retry_delay = self._external_image_api_transient_retry_delay(response.status)
+                                if attempt == 0 and retry_delay > 0:
+                                    retried_after_upstream_error = True
+                                    logger.info(
+                                        "[PrivateCompanion] 在线图片 API 参考图上游短暂失败,稍后重试同一端点: status=%s delay=%.1fs endpoint=%s",
+                                        response.status,
+                                        retry_delay,
+                                        self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                    )
+                                    await asyncio.sleep(retry_delay)
+                                    continue
+                                if response.status == 404 and index + 1 < len(endpoints):
+                                    logger.info(
+                                        "[PrivateCompanion] 在线图片 API 参考图端点 404,尝试候选端点: failed=%s next=%s",
+                                        self._external_image_diagnostic_text(candidate_endpoint, 160),
+                                        self._external_image_diagnostic_text(endpoints[index + 1], 160),
+                                    )
+                                    break
+                                return "", last_error_note
+                        data = self._extract_json_payload(text) if text else {}
+                        break
+                    if data is None and last_error_note and index + 1 < len(endpoints):
+                        continue
                     break
             if data is None:
                 return "", last_error_note or "参考图接口未返回数据"
@@ -11688,7 +13700,12 @@ Output:
                     len(generated_bytes),
                     _single_line(saved, 160),
                 )
-                return saved, "ok；已使用本地人设参考图" if saved else "保存在线参考图生图失败"
+                if not saved:
+                    return "", "保存在线参考图生图失败"
+                note = "ok；已使用本地人设参考图"
+                if retried_after_upstream_error:
+                    note += "；上游短暂错误后重试成功"
+                return saved, note
             image_url = str(first.get("url") or "").strip()
             if image_url:
                 logger.info(
@@ -11699,7 +13716,11 @@ Output:
                     image_url,
                     session_key=session_key,
                 )
-                return saved, ("ok；已使用本地人设参考图" if saved else note)
+                if saved:
+                    note = "ok；已使用本地人设参考图"
+                    if retried_after_upstream_error:
+                        note += "；上游短暂错误后重试成功"
+                return saved, note
             return "", "参考图接口未返回 url 或 b64_json"
         except asyncio.TimeoutError:
             note = self._external_image_timeout_note(reference=True)
@@ -11969,9 +13990,18 @@ Output:
                     getattr(handler, "handler_full_name", "unknown"),
                     e,
                 )
+        is_stopped = getattr(event, "is_stopped", None)
+        if callable(is_stopped):
+            try:
+                if is_stopped():
+                    return []
+            except Exception:
+                pass
         result = event.get_result()
         processed = getattr(result, "chain", None) if result is not None else None
-        processed_chain = list(processed or []) if processed is not None else chain
+        if processed is None:
+            return []
+        processed_chain = list(processed or [])
         return self._filter_decorated_proactive_chain(chain, processed_chain)
 
     def _proactive_plain_segment_component(
@@ -12001,7 +14031,7 @@ Output:
 
     def _filter_decorated_proactive_chain(self, original_chain: list[Any], processed_chain: list[Any]) -> list[Any]:
         if not processed_chain:
-            return original_chain
+            return []
 
         filtered: list[Any] = []
         removed_any = False
@@ -12025,7 +14055,7 @@ Output:
 
         if filtered:
             return filtered
-        return original_chain if removed_any else processed_chain
+        return [] if removed_any else processed_chain
 
     @staticmethod
     def _plain_component_text(component: Any) -> str:
@@ -12057,7 +14087,27 @@ Output:
             "消息发送成功",
             "messagesent",
             "sent",
+            "我主动开口了",
+            "我主动发了一段语音",
+            "我主动分享了一点东西",
+            "我主动做了一次小互动",
         }:
+            return True
+        if re.fullmatch(r"(?:图|图片|照片)(?:好|好了|生成好了|出来了|完成了)[啦了]*", compact):
+            return True
+        if re.fullmatch(r"(?:生图|出图|图片生成)(?:完成|好了|成功)[啦了]*", compact):
+            return True
+        if re.search(r"(?:还在|正在|继续)?(?:排队|队列|等待生成|等图|等图片|等它出图)", compact):
+            return True
+        if re.match(r"^(?:已经|已)(?:发|发送)过去[啦了]?(?:等(?:着|他|你|对方)|等回复|等回我)?$", compact):
+            return True
+        if re.match(r"^等(?:着)?(?:他|你|对方)?回(?:我|复)?[啦了]*$", compact):
+            return True
+        if compact.startswith("消息已送达"):
+            return True
+        if re.match(r"^这是.{0,80}(?:发的|发送的|收到的).{0,80}(?:消息|打招呼|问候|回复)", compact):
+            return True
+        if re.match(r"^这(?:条|是).{0,80}(?:语气|内容|消息).{0,80}$", compact):
             return True
         receipt_prefixes = (
             "消息已发送给",
@@ -12182,7 +14232,7 @@ Output:
         source: str = "send",
     ) -> dict[str, Any]:
         raw = str(text or "").strip()
-        has_media = bool(_single_line(image_path, 260)) or bool(extra_components)
+        has_media = bool(_path_text(image_path, 1000)) or bool(extra_components)
         if not raw:
             if has_media:
                 return {"decision": "send", "text": "", "reason": ""}
@@ -12281,7 +14331,7 @@ Output:
 
     def _onebot_forward_action_result_ok(self, result: Any) -> bool:
         if result is None:
-            return False
+            return True
         if isinstance(result, dict):
             status = str(result.get("status") or result.get("result") or "").strip().lower()
             if status in {"failed", "fail", "error", "nok"}:
@@ -12305,30 +14355,47 @@ Output:
                 continue
             try:
                 result = func(action, **params)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if self._onebot_forward_action_result_ok(result):
-                    return True
             except TypeError:
                 try:
                     result = func(action, params)
-                    if hasattr(result, "__await__"):
-                        result = await result
-                    if self._onebot_forward_action_result_ok(result):
+                except Exception as exc:
+                    if self._delivery_outcome_is_uncertain(exc):
+                        self._log_uncertain_onebot_submission(action, exc)
                         return True
-                except Exception:
                     continue
-            except Exception:
+            except Exception as exc:
+                if self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True
                 continue
+            try:
+                if hasattr(result, "__await__"):
+                    result = await result
+            except Exception as exc:
+                if self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True
+                continue
+            if self._onebot_forward_action_result_ok(result):
+                return True
         func = getattr(client, action, None)
         if callable(func):
             try:
                 result = func(**params)
+            except Exception as exc:
+                if self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True
+                return False
+            try:
                 if hasattr(result, "__await__"):
                     result = await result
-                return self._onebot_forward_action_result_ok(result)
-            except Exception:
+            except Exception as exc:
+                if self._delivery_outcome_is_uncertain(exc):
+                    self._log_uncertain_onebot_submission(action, exc)
+                    return True
                 return False
+            return self._onebot_forward_action_result_ok(result)
         return False
 
     async def _send_segmented_forward_message(
@@ -12364,7 +14431,7 @@ Output:
                 target_id,
                 _single_line(hit, 40),
             )
-            return True
+            return False
         client = self._resolve_aiocqhttp_client()
         if client is None:
             return False
@@ -12513,7 +14580,12 @@ Output:
         is_group = self._message_type_for_session(session) == MessageType.GROUP_MESSAGE
         action = "send_group_msg" if is_group else "send_private_msg"
         params = {"group_id": target_value, "message": messages} if is_group else {"user_id": target_value, "message": messages}
-        ok, error = await self._call_onebot_action_with_error(client, action, **params)
+        ok, error = await self._call_onebot_action_with_error(
+            client,
+            action,
+            at_most_once=True,
+            **params,
+        )
         if ok:
             logger.info(
                 "[PrivateCompanion] 主动消息已通过 OneBot 原生兜底发送: action=%s target=%s segments=%s umo=%s",
@@ -12531,7 +14603,7 @@ Output:
         chain: list[Any],
         *,
         apply_decorating_hooks: bool = True,
-    ) -> None:
+    ) -> bool:
         chain_redactor = getattr(self, "_redact_outbound_chain_secrets", None)
         if callable(chain_redactor):
             chain, redacted = chain_redactor(chain)
@@ -12553,7 +14625,7 @@ Output:
                     source_session=umo,
                     before=self._chain_text_for_forbidden_recall(chain),
                 )
-            return
+            return False
         processed_chain = (
             await self._trigger_proactive_decorating_hooks(umo, chain)
             if apply_decorating_hooks
@@ -12569,7 +14641,7 @@ Output:
                     source_session=umo,
                     before=self._chain_text_for_forbidden_recall(chain),
                 )
-            return
+            return False
         if callable(chain_redactor):
             processed_chain, redacted = chain_redactor(processed_chain)
             if redacted:
@@ -12581,7 +14653,7 @@ Output:
                 notifier = getattr(self, "_schedule_reply_interception_forward", None)
                 if callable(notifier):
                     notifier("proactive_block", source="主动发送 TTS 校验", reason="TTS 校验清空了待发送消息", source_session=umo)
-                return
+                return False
         hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(processed_chain))
         if hit:
             logger.warning(
@@ -12598,23 +14670,29 @@ Output:
                     source_session=umo,
                     before=self._chain_text_for_forbidden_recall(processed_chain),
                 )
-            return
+            return False
         session = self._parse_message_session(umo)
         platform = self._get_platform_for_session(session) if session else None
         precise_error: Exception | None = None
         if self.enable_precise_platform_send and session and platform:
+            status = getattr(platform, "status", None)
+            if status is not None and status != PlatformStatus.RUNNING:
+                logger.warning("[PrivateCompanion] 目标平台未运行,跳过主动发送: %s", umo)
+                notifier = getattr(self, "_schedule_reply_interception_forward", None)
+                if callable(notifier):
+                    notifier(
+                        "proactive_block",
+                        source="主动发送平台校验",
+                        reason="目标平台未运行",
+                        source_session=umo,
+                        before=self._chain_text_for_forbidden_recall(processed_chain),
+                    )
+                raise RuntimeError(f"目标平台未运行，无法发送主动消息: {_single_line(umo, 140)}")
             try:
-                status = getattr(platform, "status", None)
-                if status is not None and status != PlatformStatus.RUNNING:
-                    logger.warning("[PrivateCompanion] 目标平台未运行,跳过主动发送: %s", umo)
-                    notifier = getattr(self, "_schedule_reply_interception_forward", None)
-                    if callable(notifier):
-                        notifier("proactive_block", source="主动发送平台校验", reason="目标平台未运行", source_session=umo, before=self._chain_text_for_forbidden_recall(processed_chain))
-                    return
                 session_obj = self._session_for_platform(session, platform)
                 precise_result = await platform.send_by_session(session_obj, MessageChain(processed_chain))
                 if precise_result is not False:
-                    return
+                    return True
                 precise_error = RuntimeError("精确平台发送返回 False（平台未接受消息）")
                 logger.warning(
                     "[PrivateCompanion] 精确平台发送未被目标平台接受,回退核心发送: target=%s",
@@ -12629,6 +14707,13 @@ Output:
                         self._describe_send_target(umo, session, platform),
                     )
                     raise RuntimeError(summary) from e
+                if self._delivery_outcome_is_uncertain(e):
+                    logger.warning(
+                        "[PrivateCompanion] 精确平台发送回执不确定，为避免同一主动消息立即重复发送，本次按已提交处理: target=%s error=%s",
+                        self._describe_send_target(umo, session, platform),
+                        self._format_send_exception(e),
+                    )
+                    return True
                 logger.warning(
                     "[PrivateCompanion] 精确平台发送失败,回退核心发送: target=%s error=%s",
                     self._describe_send_target(umo, session, platform),
@@ -12642,7 +14727,7 @@ Output:
         try:
             core_result = await self.context.send_message(core_session, self._build_result_from_chain(processed_chain))
             if core_result is not False:
-                return
+                return True
             platform_supports = getattr(self, "_platform_supports", None)
             if not callable(platform_supports) or platform_supports("onebot_actions", umo=umo):
                 logger.warning(
@@ -12662,6 +14747,13 @@ Output:
                     self._describe_send_target(umo, session, platform),
                 )
                 raise RuntimeError(self._onebot_event_checker_rejection_summary()) from e
+            if self._delivery_outcome_is_uncertain(e):
+                logger.warning(
+                    "[PrivateCompanion] 主动核心发送回执不确定，为避免 OneBot 兜底重复发送，本次按已提交处理: target=%s error=%s",
+                    self._describe_send_target(umo, session, platform),
+                    self._format_send_exception(e),
+                )
+                return True
             target = self._describe_send_target(umo, session, platform)
             precise_text = self._format_send_exception(precise_error) or "未尝试或未失败"
             fallback_text = self._format_send_exception(e)
@@ -12683,7 +14775,7 @@ Output:
             ) from core_error
         direct_ok, direct_error = await self._send_chain_components_via_onebot_direct(umo, session, processed_chain)
         if direct_ok:
-            return
+            return True
         if self._is_onebot_event_checker_send_rejection(direct_error):
             raise RuntimeError(self._onebot_event_checker_rejection_summary())
         target = self._describe_send_target(umo, session, platform)
@@ -12714,8 +14806,25 @@ Output:
         extra_components: list[Any] | None = None,
         quote_message_id: str = "",
         disable_segmenting: bool = False,
-    ) -> None:
+    ) -> _ProactiveSendOutcome:
         trigger_message_id = _single_line(quote_message_id, 120)
+        delivered_segments: list[str] = []
+        complete = True
+        image_delivered = False
+        extra_components_delivered = 0
+
+        def outcome(*, note: str = "") -> _ProactiveSendOutcome:
+            delivered_text = "\n".join(item for item in delivered_segments if item).strip()
+            delivered = bool(delivered_text or image_delivered or extra_components_delivered)
+            return _ProactiveSendOutcome(
+                delivered=delivered,
+                complete=bool(delivered and complete and not note),
+                delivered_text=delivered_text,
+                image_delivered=image_delivered,
+                extra_components_delivered=extra_components_delivered,
+                note=_single_line(note, 240),
+            )
+
         has_prebuilt_voice = any(isinstance(component, Record) for component in (extra_components or []))
         if self._contains_inline_image_tag(text):
             image_path = ""
@@ -12752,8 +14861,9 @@ Output:
                 recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
                 if recalled_message_id:
                     logger.info("[PrivateCompanion] 触发消息已撤回，取消主动文本发送: umo=%s message_id=%s", umo, recalled_message_id)
-                    return
-                await self._send_chain_components(
+                    complete = False
+                    return outcome(note="触发消息已撤回")
+                sent = await self._send_chain_components(
                     umo,
                     self._with_optional_reply(
                         [
@@ -12768,13 +14878,19 @@ Output:
                         quote_message_id,
                     ),
                 )
+                if sent:
+                    delivered_segments.append(outbound_text)
+                else:
+                    complete = False
                 quote_message_id = ""
         else:
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，取消主动合并分段发送: umo=%s message_id=%s", umo, recalled_message_id)
-                return
+                complete = False
+                return outcome(note="触发消息已撤回")
             if await self._send_segmented_proactive_forward_message(umo, segments, source="proactive_media_text"):
+                delivered_segments.extend(segments)
                 quote_message_id = ""
             else:
                 for index, segment in enumerate(segments):
@@ -12783,7 +14899,8 @@ Output:
                     recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
                     if recalled_message_id:
                         logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
-                        return
+                        complete = False
+                        return outcome(note=f"第 {index + 1} 段发送前触发消息已撤回")
                     segment_comp = self._proactive_plain_segment_component(
                         segment,
                         full_text=text,
@@ -12792,7 +14909,23 @@ Output:
                         suppress_tts=has_prebuilt_voice,
                     )
                     chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
-                    await self._send_chain_components(umo, chain)
+                    try:
+                        sent = await self._send_chain_components(umo, chain)
+                    except Exception as exc:
+                        if not delivered_segments:
+                            raise
+                        complete = False
+                        logger.warning(
+                            "[PrivateCompanion] 主动媒体文本部分送达后后续分段失败，不再整条重试: umo=%s index=%s error=%s",
+                            _single_line(umo, 140),
+                            index + 1,
+                            _single_line(exc, 180),
+                        )
+                        return outcome(note=f"第 {index + 1} 段发送失败：{_single_line(exc, 160)}")
+                    if sent:
+                        delivered_segments.append(segment)
+                    else:
+                        complete = False
                     quote_message_id = ""
                     if index < len(segments) - 1:
                         await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
@@ -12807,10 +14940,28 @@ Output:
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，取消主动媒体发送: umo=%s message_id=%s", umo, recalled_message_id)
-                return
+                complete = False
+                return outcome(note="媒体发送前触发消息已撤回")
             media_chain = self._build_outbound_chain("", image_path, extra_components=extra_components)
             media_chain = self._with_optional_reply(media_chain, quote_message_id)
-            await self._send_chain_components(umo, media_chain)
+            try:
+                media_sent = await self._send_chain_components(umo, media_chain)
+            except Exception as exc:
+                if not delivered_segments:
+                    raise
+                complete = False
+                logger.warning(
+                    "[PrivateCompanion] 主动文本已送达但媒体发送失败，不再重复文本: umo=%s error=%s",
+                    _single_line(umo, 140),
+                    _single_line(exc, 180),
+                )
+                return outcome(note=f"媒体发送失败：{_single_line(exc, 160)}")
+            if media_sent:
+                image_delivered = bool(image_path and os.path.exists(image_path))
+                extra_components_delivered = len(extra_components or [])
+            else:
+                complete = False
+        return outcome()
 
     async def _send_proactive_message_chain(
         self,
@@ -12821,7 +14972,7 @@ Output:
         extra_components: list[Any] | None = None,
         quote_message_id: str = "",
         disable_segmenting: bool = False,
-    ) -> None:
+    ) -> _ProactiveSendOutcome:
         trigger_message_id = _single_line(quote_message_id, 120)
         placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
         if callable(placeholder_cleaner):
@@ -12835,7 +14986,7 @@ Output:
                 )
                 text = cleaned_text
         if image_path or extra_components:
-            await self._send_media_proactive_chain(
+            return await self._send_media_proactive_chain(
                 umo,
                 text,
                 image_path,
@@ -12843,7 +14994,6 @@ Output:
                 quote_message_id=quote_message_id,
                 disable_segmenting=disable_segmenting,
             )
-            return
         if text:
             await self._maybe_send_input_status(umo, text)
         segments = self._split_proactive_text(
@@ -12861,13 +15011,15 @@ Output:
             )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else text
+            if not str(outbound_text or "").strip():
+                return _ProactiveSendOutcome(False, False, note="主动正文为空")
             if quote_message_id and self._quote_skip_reason_for_short_reply(outbound_text):
                 quote_message_id = ""
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，取消主动消息发送: umo=%s message_id=%s", umo, recalled_message_id)
-                return
-            await self._send_chain_components(
+                return _ProactiveSendOutcome(False, False, note="触发消息已撤回")
+            sent = await self._send_chain_components(
                 umo,
                 self._with_optional_reply(
                     [
@@ -12876,26 +15028,65 @@ Output:
                     quote_message_id,
                 ),
             )
-            return
+            return _ProactiveSendOutcome(
+                delivered=bool(sent),
+                complete=bool(sent),
+                delivered_text=outbound_text if sent else "",
+                note="" if sent else "主动发送组件被取消或清空",
+            )
         recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
         if recalled_message_id:
             logger.info("[PrivateCompanion] 触发消息已撤回，取消主动合并分段发送: umo=%s message_id=%s", umo, recalled_message_id)
-            return
+            return _ProactiveSendOutcome(False, False, note="触发消息已撤回")
         if await self._send_segmented_proactive_forward_message(umo, segments, source="proactive_text"):
-            return
+            return _ProactiveSendOutcome(True, True, delivered_text="\n".join(segments).strip())
+        delivered_segments: list[str] = []
+        complete = True
         for index, segment in enumerate(segments):
             if index == 0 and quote_message_id and self._quote_skip_reason_for_short_reply(segment):
                 quote_message_id = ""
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，停止主动消息分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
-                return
+                return _ProactiveSendOutcome(
+                    bool(delivered_segments),
+                    False,
+                    delivered_text="\n".join(delivered_segments).strip(),
+                    note=f"第 {index + 1} 段发送前触发消息已撤回",
+                )
             segment_comp = self._proactive_plain_segment_component(segment, full_text=text, index=index, count=len(segments))
             chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
-            await self._send_chain_components(umo, chain)
+            try:
+                sent = await self._send_chain_components(umo, chain)
+            except Exception as exc:
+                if not delivered_segments:
+                    raise
+                logger.warning(
+                    "[PrivateCompanion] 主动文本部分送达后后续分段失败，不再整条重试: umo=%s index=%s error=%s",
+                    _single_line(umo, 140),
+                    index + 1,
+                    _single_line(exc, 180),
+                )
+                return _ProactiveSendOutcome(
+                    True,
+                    False,
+                    delivered_text="\n".join(delivered_segments).strip(),
+                    note=f"第 {index + 1} 段发送失败：{_single_line(exc, 160)}",
+                )
+            if sent:
+                delivered_segments.append(segment)
+            else:
+                complete = False
             quote_message_id = ""
             if index < len(segments) - 1:
                 await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
+        delivered_text = "\n".join(delivered_segments).strip()
+        return _ProactiveSendOutcome(
+            delivered=bool(delivered_text),
+            complete=bool(delivered_text and complete),
+            delivered_text=delivered_text,
+            note="" if complete else "部分分段被发送钩子取消或清空",
+        )
 
     def _build_outbound_result(
         self,
@@ -12918,6 +15109,88 @@ Output:
         # need a tiny synthetic user side. Keep it neutral: internal reason,
         # motive and action details stay in plugin state instead of visible chat.
         return "【主动承接占位】用户还没发来新消息；下一条是 Bot 主动发出的内容。后续如果用户回应，顺着上一条主动消息自然接住就好。"
+
+    @staticmethod
+    def _proactive_components_contain_image(components: list[Any] | None) -> bool:
+        return any(isinstance(component, Image) for component in (components or []))
+
+    def _build_actual_proactive_delivery_summary(
+        self,
+        *,
+        text: str,
+        image_path: str = "",
+        extra_components: list[Any] | None = None,
+        original_summary: str = "",
+    ) -> str:
+        parts: list[str] = []
+        visible_text = self._visible_text_without_tts_reading(text, limit=320)
+        if visible_text:
+            parts.append(f"文字消息：{visible_text}")
+
+        image_count = int(bool(image_path)) + sum(
+            1 for component in (extra_components or []) if isinstance(component, Image)
+        )
+        if image_count:
+            photo_caption = ""
+            if "：" in str(original_summary or "") or ":" in str(original_summary or ""):
+                photo_caption = _single_line(
+                    re.split(r"[:：]", str(original_summary), maxsplit=1)[-1],
+                    220,
+                )
+            image_label = "图片" if image_count == 1 else f"{image_count} 张图片"
+            if photo_caption and photo_caption not in {"发图", "图片", "photo_text"}:
+                parts.append(f"{image_label}：{photo_caption}")
+            else:
+                parts.append(f"{image_label}已发送")
+
+        voice_count = sum(
+            1 for component in (extra_components or []) if isinstance(component, Record)
+        )
+        if voice_count:
+            parts.append("语音消息已发送" if voice_count == 1 else f"{voice_count} 条语音消息已发送")
+
+        other_count = sum(
+            1
+            for component in (extra_components or [])
+            if not isinstance(component, (Image, Record))
+        )
+        if other_count:
+            parts.append(f"{other_count} 个附加消息组件已发送")
+        return _single_line("；".join(parts), 500)
+
+    def _reconcile_proactive_delivery_metadata(
+        self,
+        *,
+        text: str,
+        image_path: str = "",
+        extra_components: list[Any] | None = None,
+        action: str = "message",
+        action_summary: str = "",
+        delivery_complete: bool = True,
+    ) -> tuple[str, str, bool]:
+        delivered_photo = bool(image_path) or self._proactive_components_contain_image(extra_components)
+        if delivery_complete:
+            return action or "message", action_summary, delivered_photo
+
+        action_parts = [part.strip() for part in str(action or "").split("+") if part.strip()]
+        removed_media = False
+        if not delivered_photo and "photo_text" in action_parts:
+            action_parts = [part for part in action_parts if part != "photo_text"]
+            removed_media = True
+        delivered_voice = any(isinstance(component, Record) for component in (extra_components or []))
+        if not delivered_voice and "voice" in action_parts:
+            action_parts = [part for part in action_parts if part != "voice"]
+            removed_media = True
+        if removed_media and text and "message" not in action_parts:
+            action_parts.insert(0, "message")
+        actual_action = "+".join(action_parts) or ("message" if text else action or "message")
+        actual_summary = self._build_actual_proactive_delivery_summary(
+            text=text,
+            image_path=image_path,
+            extra_components=extra_components,
+            original_summary=action_summary,
+        )
+        return actual_action, actual_summary or "主动消息仅部分送达。", delivered_photo
 
     def _build_proactive_archive_assistant_text(
         self,
@@ -12944,15 +15217,32 @@ Output:
         if extra_components:
             tts_notes: list[str] = []
             note_builder = getattr(self, "_tts_component_log_note", None)
+            image_components = [comp for comp in extra_components if isinstance(comp, Image)]
             for comp in extra_components:
                 if isinstance(comp, Record) and callable(note_builder):
                     note = _single_line(note_builder(comp), 220)
                     if note:
                         tts_notes.append(note)
+            if image_components:
+                attachment_notes.append(
+                    "随消息发送了一张图片"
+                    if len(image_components) == 1
+                    else f"随消息发送了 {len(image_components)} 张图片"
+                )
+                photo_caption = ""
+                if "：" in str(action_summary or "") or ":" in str(action_summary or ""):
+                    photo_caption = _single_line(re.split(r"[:：]", str(action_summary), maxsplit=1)[-1], 220)
+                if photo_caption and photo_caption not in {"发图", "图片", "photo_text"}:
+                    attachment_notes.append(f"图片画面：{photo_caption}")
+                normalized_owner = _normalize_photo_subject_owner(photo_subject_owner)
+                if normalized_owner:
+                    attachment_notes.append(f"图片主体：{_photo_subject_owner_prompt_label(normalized_owner)}")
             if tts_notes:
                 attachment_notes.extend(tts_notes[:3])
-            else:
-                attachment_notes.append(f"随消息发送了 {len(extra_components)} 个附加消息组件")
+            record_count = sum(1 for comp in extra_components if isinstance(comp, Record))
+            other_count = len(extra_components) - len(image_components) - record_count
+            if other_count > 0:
+                attachment_notes.append(f"随消息发送了 {other_count} 个附加消息组件")
         if attachment_notes:
             suffix = "（" + ",".join(attachment_notes) + "）"
             message_text = f"{message_text}{suffix}" if message_text else suffix

@@ -6,6 +6,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 
+from astrbot.api import logger
 from quart import request
 
 from .qzone_recent_parser import parse_recent_feeds
@@ -69,11 +70,34 @@ class PrivateCompanionPageApiQzoneMixin:
             if scope == "friends":
                 cookie_header = await self.plugin._qzone_get_cookies(None)
                 ctx = self.plugin._qzone_context_from_cookies(cookie_header)
-                raw = await self.plugin._qzone_request(
-                    None,
-                    "GET",
-                    "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more",
-                    params={
+                viewer_uin = int(ctx.get("uin") or 0)
+                posts: list[Any] = []
+                h5_diagnostics: dict[str, Any] = {}
+                legacy_diagnostics: dict[str, Any] = {}
+                qzonetoken = str(ctx.get("qzonetoken") or "").strip()
+                source = "h5"
+                snapshotter = getattr(self.plugin, "_qzone_h5_index_snapshot", None)
+                if callable(snapshotter) and page == 1:
+                    try:
+                        snapshot = await snapshotter(
+                            None,
+                            cookie_header=cookie_header,
+                            ctx=ctx,
+                            max_cache_age=15,
+                        )
+                        qzonetoken = str(snapshot.get("token") or qzonetoken).strip()
+                        h5_payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+                        posts = parse_recent_feeds(h5_payload, h5_diagnostics)
+                    except Exception as exc:
+                        logger.info(
+                            "[PrivateCompanionPage] QQ 空间 H5 好友动态读取失败，准备使用旧接口: %s",
+                            self._single_line(exc, 120),
+                        )
+
+                own_only = bool(posts) and all(int(getattr(post, "uin", 0) or 0) == viewer_uin for post in posts)
+                if not posts or own_only or page > 1:
+                    source = "legacy" if not posts else "h5+legacy"
+                    legacy_params: dict[str, Any] = {
                         "uin": ctx["uin"],
                         "scope": 0,
                         "view": 1,
@@ -81,27 +105,74 @@ class PrivateCompanionPageApiQzoneMixin:
                         "flag": 1,
                         "applist": "all",
                         "pagenum": page,
+                        "count": 10,
+                        "refresh": 0,
                         "aisortEndTime": 0,
                         "aisortOffset": 0,
+                        "getAisort": 0,
                         "aisortBeginTime": 0,
                         "begintime": 0,
                         "format": "json",
                         "g_tk": ctx["gtk"],
                         "useutf8": 1,
                         "outputhtmlfeed": 1,
-                    },
-                    cookie_header=cookie_header,
+                    }
+                    if qzonetoken:
+                        legacy_params["qzonetoken"] = qzonetoken
+                    raw = await self.plugin._qzone_request(
+                        None,
+                        "GET",
+                        "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more",
+                        params=legacy_params,
+                        headers={
+                            "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "X-Requested-With": "XMLHttpRequest",
+                        },
+                        cookie_header=cookie_header,
+                    )
+                    raw_code = raw.get("_raw_code", raw.get("code", raw.get("ret", 0)))
+                    if raw_code not in {0, "0", None, ""} and not posts:
+                        raise RuntimeError(
+                            self._single_line(
+                                raw.get("_raw_message")
+                                or raw.get("message")
+                                or raw.get("msg")
+                                or f"好友动态查询失败 code={raw_code}",
+                                160,
+                            )
+                        )
+                    legacy_posts = parse_recent_feeds(raw, legacy_diagnostics)
+                    known = {(int(getattr(post, "uin", 0) or 0), str(getattr(post, "tid", "") or "")) for post in posts}
+                    for post in legacy_posts:
+                        key = (int(getattr(post, "uin", 0) or 0), str(getattr(post, "tid", "") or ""))
+                        if key not in known:
+                            posts.append(post)
+                            known.add(key)
+
+                final_own_only = bool(posts) and all(int(getattr(post, "uin", 0) or 0) == viewer_uin for post in posts)
+                logger.info(
+                    "[PrivateCompanionPage] QQ 空间好友动态读取: source=%s page=%s token=%s "
+                    "h5_candidates=%s h5_parsed=%s legacy_candidates=%s legacy_parsed=%s final=%s own_only=%s",
+                    source,
+                    page,
+                    bool(qzonetoken),
+                    h5_diagnostics.get("candidate_count", 0),
+                    h5_diagnostics.get("parsed_count", 0),
+                    legacy_diagnostics.get("candidate_count", 0),
+                    legacy_diagnostics.get("parsed_count", 0),
+                    len(posts),
+                    final_own_only,
                 )
-                posts = parse_recent_feeds(raw)
                 return self._ok(
                     {
                         "items": [
-                            self._qzone_page_post_payload(post, include_comments=False, viewer_uin=int(ctx.get("uin") or 0))
+                            self._qzone_page_post_payload(post, include_comments=False, viewer_uin=viewer_uin)
                             for post in posts[:10]
                         ],
                         "scope": scope,
                         "page": page,
                         "target_uin": target,
+                        "feed_source": source,
                     }
                 )
             cookie_header = await self.plugin._qzone_get_cookies(None)

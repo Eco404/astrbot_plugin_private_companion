@@ -106,6 +106,7 @@ from .dreaming import (
 from .helpers import (
     _date_key,
     _now_ts,
+    _path_text,
     _safe_float,
     _safe_int,
     _single_line,
@@ -1379,8 +1380,8 @@ class PrivateReadingMixin:
                 for item in (album.get("page_comments") if isinstance(album.get("page_comments"), list) else [])
                 if isinstance(item, dict) and _safe_int(item.get("page"), 0, 1) > 0 and _single_line(item.get("comment"), 80)
             ][:8],
-            "cover_path": _single_line(album.get("cover_path"), 260),
-            "download_path": _single_line(album.get("download_path"), 260),
+            "cover_path": _path_text(album.get("cover_path"), 1000),
+            "download_path": _path_text(album.get("download_path"), 1000),
             "pages": album.get("pages") if isinstance(album.get("pages"), list) else [],
             "sampled_pages": album.get("sampled_pages") if isinstance(album.get("sampled_pages"), list) else [],
             "image_count": _safe_int(album.get("image_count"), 0, 0),

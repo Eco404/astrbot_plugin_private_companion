@@ -23,6 +23,7 @@ except ImportError:
 from .helpers import (
     _missing_optional_model_dependency,
     _now_ts,
+    _path_text,
     _redact_outbound_secrets,
     _safe_float,
     _safe_int,
@@ -241,6 +242,7 @@ class LlmToolActionsMixin:
                     "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
                     '- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 指定“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
                     '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 指定“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；明确睡衣、睡裙、睡袍或睡前卧室自拍时优先“居家睡衣”，普通穿搭才用“日常穿搭”，只有明确“镜前/对镜/镜子”时才用镜前穿搭；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
+                    '- 用户在刚发出的角色照片后要求“比个心、看镜头、换个动作/表情/角度、再来一张”等自然续拍时，仍使用 `kind="selfie"`，并在 prompt 中说明只改变这次要求的部分、其余人物穿搭与场景继续保持；不必猜测或手填上一张图片路径，插件会在同一会话内交给选图模型判断是否复用。明确换装、换地点、换人物或另起主题时按新要求生成。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
                     '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。',
                 ]
@@ -1632,7 +1634,9 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "disabled", "message": "非指令生图/改图已关闭；显式指令仍可使用“陪伴 生图/自拍/改图”。"}, ensure_ascii=False)
         if not getattr(self, "enable_photo_text_action", False):
             return json.dumps({"status": "disabled", "message": "主动拍照/生图能力未启用"}, ensure_ascii=False)
-        if not callable(getattr(self, "_generate_photo_image", None)):
+        structured_generator = getattr(self, "_generate_photo_image_result", None)
+        legacy_generator = getattr(self, "_generate_photo_image", None)
+        if not callable(structured_generator) and not callable(legacy_generator):
             return json.dumps({"status": "disabled", "message": "缺少生图入口 _generate_photo_image"}, ensure_ascii=False)
         if not self._photo_text_available():
             return json.dumps({"status": "unavailable", "message": "当前没有可用生图后端，或已被负载/token 保护临时延后"}, ensure_ascii=False)
@@ -1646,7 +1650,7 @@ class LlmToolActionsMixin:
             workflow_kind = "selfie"
             intent_kind = "selfie"
         elif raw_kind in {"edit", "改图", "修图", "重绘", "p图", "P图"}:
-            workflow_kind = "selfie"
+            workflow_kind = "edit"
             intent_kind = "edit"
         else:
             workflow_kind = "text2img"
@@ -1715,14 +1719,14 @@ class LlmToolActionsMixin:
         send_image = bool_arg(send, True)
         if send_image:
             self._mark_smart_imagechat_skip_proactive_emoji(event)
-        reference_path = _single_line(
+        reference_path = _path_text(
             reference_image_path
             or kwargs.get("reference")
             or kwargs.get("image")
             or kwargs.get("image_path")
             or kwargs.get("image_url"),
             1000,
-        ).strip().strip('"').strip("'")
+        )
         if reference_path:
             resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
             if callable(resolver):
@@ -1850,22 +1854,33 @@ class LlmToolActionsMixin:
                 6500,
             )
 
-        session_key = _single_line(getattr(event, "unified_msg_origin", ""), 120) or "tool_photo"
+        event_umo = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+        session_key = event_umo or "tool_photo"
+        continuity_composer = getattr(self, "_compose_photo_continuity_key", None)
+        continuity_key = (
+            continuity_composer(event_umo, requester_id)
+            if callable(continuity_composer)
+            else ""
+        )
         generation_session_key = f"tool_photo_{session_key}"
         outer_timeout = self._photo_tool_call_timeout_seconds()
         timeout_margin = max(2.0, min(8.0, outer_timeout * 0.1))
         generation_timeout = outer_timeout - (time.monotonic() - tool_started_at) - timeout_margin
         if generation_timeout <= 0:
             generation_timeout = 0.01
+        generation_kwargs = {
+            "workflow_kind": workflow_kind,
+            "prompt_text": prompt_text,
+            "session_key": generation_session_key,
+            "continuity_key": continuity_key,
+            "reference_image_path": reference_path,
+            "image_size": _single_line(image_size or kwargs.get("size"), 40),
+        }
         try:
-            backend_name, image_path, note = await asyncio.wait_for(
-                self._generate_photo_image(
-                    workflow_kind=workflow_kind,
-                    prompt_text=prompt_text,
-                    session_key=generation_session_key,
-                    reference_image_path=reference_path,
-                    image_size=_single_line(image_size or kwargs.get("size"), 40),
-                ),
+            generation_output = await asyncio.wait_for(
+                structured_generator(**generation_kwargs)
+                if callable(structured_generator)
+                else legacy_generator(**generation_kwargs),
                 timeout=generation_timeout,
             )
         except asyncio.TimeoutError:
@@ -1894,6 +1909,37 @@ class LlmToolActionsMixin:
                 },
                 ensure_ascii=False,
             )
+        generation_metadata: dict[str, Any] = {}
+        if hasattr(generation_output, "as_legacy_tuple"):
+            backend_name, image_path, note = generation_output.as_legacy_tuple()
+            generation_metadata = {
+                "reference_used": bool(getattr(generation_output, "reference_used", False)),
+                "reference_path": _path_text(getattr(generation_output, "reference_selected_path", ""), 1000),
+                "reference_id": _single_line(getattr(generation_output, "reference_id", ""), 60),
+                "reference_kind": _single_line(getattr(generation_output, "reference_kind", ""), 40),
+                "reference_roles": list(getattr(generation_output, "reference_roles", ()) or ()),
+                "wardrobe_mode": _single_line(getattr(generation_output, "wardrobe_mode", ""), 40),
+                "wardrobe_category": _single_line(getattr(generation_output, "wardrobe_category", ""), 40),
+                "outfit_locked": bool(getattr(generation_output, "outfit_locked", False)),
+                "daily_outfit_removed": bool(getattr(generation_output, "daily_outfit_removed", False)),
+                "preset_names": list(getattr(generation_output, "preset_names", ()) or ()),
+                "prompt_hash": _single_line(getattr(generation_output, "prompt_hash", ""), 80),
+                "prompt_path": _single_line(getattr(generation_output, "prompt_path", ""), 1000),
+            }
+        else:
+            backend_name, image_path, note = generation_output
+            metadata_getter = getattr(self, "_photo_generation_result_metadata", None)
+            if callable(metadata_getter):
+                generation_metadata = metadata_getter(
+                    image_path=image_path,
+                    session_key=generation_session_key,
+                ) or {}
+        reference_usage_known = "reference_used" in generation_metadata
+        actual_reference_path = _path_text(
+            generation_metadata.get("reference_path") or reference_path,
+            1000,
+        )
+        used_reference = bool(generation_metadata.get("reference_used"))
         ok = bool(image_path and os.path.exists(image_path))
         annotator = getattr(self, "_annotate_recent_photo_generation", None)
         if callable(annotator):
@@ -1971,7 +2017,8 @@ class LlmToolActionsMixin:
                     sent=sent,
                     trigger="llm_tool",
                     scene_preset=preset_text,
-                    reference_image_path=reference_path,
+                    reference_image_path=actual_reference_path,
+                    reference_used=used_reference if reference_usage_known else None,
                 )
         overall_success = bool(ok and (not send_image or sent))
         result_payload = {
@@ -1985,11 +2032,25 @@ class LlmToolActionsMixin:
                 else ("图片已生成但按请求未发送" if ok and not send_image else (_single_line(note, 220) or "生图失败"))
             ),
             "backend": _single_line(backend_name, 80),
-            "path": _single_line(image_path, 260),
+            "path": _path_text(image_path, 1000),
             "kind": workflow_kind,
             "intent_kind": intent_kind,
-            "used_reference": bool(reference_path and "已使用" in str(note or "")),
-            "reference_image_path": _single_line(reference_path, 260),
+            "used_reference": used_reference,
+            "reference_image_path": _path_text(actual_reference_path, 1000),
+            "reference_id": _single_line(generation_metadata.get("reference_id"), 60),
+            "reference_kind": _single_line(generation_metadata.get("reference_kind"), 40),
+            "reference_roles": list(generation_metadata.get("reference_roles") or [])[:8],
+            "wardrobe_mode": _single_line(generation_metadata.get("wardrobe_mode"), 40),
+            "wardrobe_category": _single_line(generation_metadata.get("wardrobe_category"), 40),
+            "outfit_locked": bool(generation_metadata.get("outfit_locked")),
+            "daily_outfit_removed": bool(generation_metadata.get("daily_outfit_removed")),
+            "final_presets": [
+                _single_line(value, 60)
+                for value in (generation_metadata.get("preset_names") or [])
+                if _single_line(value, 60)
+            ][:6],
+            "prompt_hash": _single_line(generation_metadata.get("prompt_hash"), 80),
+            "prompt_path": _single_line(generation_metadata.get("prompt_path"), 1000),
             "sent": sent,
             "delivery": _single_line(delivery.get("destination"), 30),
             "safety_review": _single_line(delivery.get("review_label"), 30),
@@ -2158,7 +2219,7 @@ class LlmToolActionsMixin:
                 ensure_ascii=False,
             )
 
-        image_path = _single_line(lookup.get("path"), 1000)
+        image_path = _path_text(lookup.get("path"), 1000)
         if not image_path or not os.path.isfile(image_path):
             return json.dumps(
                 {

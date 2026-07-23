@@ -18256,6 +18256,354 @@ textarea {
   color: var(--muted);
 }
 
+.photo-reference-launch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+
+.photo-reference-launch > span {
+  display: grid;
+  gap: 2px;
+}
+
+.photo-reference-launch b {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.photo-reference-launch small {
+  color: var(--muted);
+}
+
+.photo-reference-launch button,
+.photo-reference-head-actions button,
+.photo-reference-add-form button,
+.photo-reference-item-tools button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 11px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.photo-reference-launch button,
+.photo-reference-add-form button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.photo-reference-manager {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding-bottom: 18px;
+  background: color-mix(in srgb, var(--surface) 92%, #fff 8%);
+}
+
+.photo-reference-manager[hidden],
+[data-feature-detail-overview][hidden] {
+  display: none !important;
+}
+
+.photo-reference-manager-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 4px 16px 0;
+}
+
+.photo-reference-manager-head h2 {
+  margin: 8px 0 4px;
+  font-size: 22px;
+}
+
+.photo-reference-manager-head p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.photo-reference-manager-head p b {
+  color: var(--ink);
+}
+
+.photo-reference-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.photo-reference-head-actions .feature-param-save {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.photo-reference-persona {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) 128px minmax(260px, 1.3fr);
+  gap: 14px;
+  align-items: center;
+  margin: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--line-soft));
+  border-left: 4px solid var(--blue);
+  border-radius: 8px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--blue-soft) 42%, #fff 58%);
+}
+
+.photo-reference-persona > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.photo-reference-persona h3,
+.photo-reference-persona span,
+.photo-reference-persona small {
+  margin: 0;
+}
+
+.photo-reference-persona > div:first-child > span,
+.photo-reference-persona small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.photo-reference-persona label,
+.photo-reference-add-form label,
+.photo-reference-item label,
+.photo-reference-toolbar label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.photo-reference-persona input,
+.photo-reference-add-form input,
+.photo-reference-item input,
+.photo-reference-item textarea,
+.photo-reference-toolbar input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.photo-reference-add-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin: 0 16px;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  padding: 14px 0;
+}
+
+.photo-reference-add-form > div {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.15fr) minmax(200px, 0.85fr);
+  gap: 10px;
+}
+
+.photo-reference-add-form button:disabled,
+.photo-reference-item-tools button:disabled,
+.photo-reference-head-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.photo-reference-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.photo-reference-toolbar label {
+  width: min(420px, 100%);
+}
+
+.photo-reference-toolbar > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.photo-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.photo-reference-item {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 246px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.photo-reference-item.is-unavailable {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line-soft));
+}
+
+.photo-reference-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 168px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--blue-soft) 34%, var(--surface) 66%);
+}
+
+.photo-reference-item > .photo-reference-thumb {
+  height: 100%;
+  min-height: 246px;
+}
+
+.photo-reference-persona .photo-reference-thumb {
+  width: 128px;
+  height: 96px;
+  min-height: 96px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.photo-reference-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-reference-thumb > span {
+  max-width: 90%;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.photo-reference-thumb.is-unavailable {
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface) 92%);
+}
+
+.photo-reference-item-body {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+  padding: 12px;
+}
+
+.photo-reference-item-body > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.photo-reference-item-body > header > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.photo-reference-item-body header span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.photo-reference-item-body header small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.photo-reference-responsibilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.photo-reference-responsibilities span {
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 86%, var(--ink) 4%);
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.photo-reference-item textarea {
+  min-height: 70px;
+  resize: vertical;
+}
+
+.photo-reference-item-tools {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.photo-reference-item-tools button {
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+}
+
+.photo-reference-item-tools button[data-confirm-key] {
+  width: 48px;
+  padding: 0 6px;
+}
+
+.photo-reference-item-tools .danger-outline {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  color: var(--danger);
+}
+
+.photo-reference-empty {
+  grid-column: 1 / -1;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  min-height: 180px;
+  place-content: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.photo-reference-empty b {
+  color: var(--ink);
+}
+
 .image-api-endpoint-panel {
   gap: 12px;
   background: color-mix(in srgb, var(--surface) 92%, var(--accent) 3%);
@@ -25487,6 +25835,48 @@ pre {
 /* —— 响应式 —— */
 
 @media (max-width: 760px) {
+  .photo-reference-manager-head,
+  .photo-reference-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .photo-reference-head-actions {
+    justify-content: flex-start;
+  }
+
+  .photo-reference-persona {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+
+  .photo-reference-persona > div:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .photo-reference-persona .photo-reference-thumb {
+    width: 96px;
+    height: 96px;
+  }
+
+  .photo-reference-add-form,
+  .photo-reference-add-form > div,
+  .photo-reference-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .photo-reference-add-form button,
+  .photo-reference-head-actions button {
+    width: 100%;
+  }
+
+  .photo-reference-item {
+    grid-template-columns: 112px minmax(0, 1fr);
+  }
+
+  .photo-reference-item > .photo-reference-thumb {
+    min-height: 280px;
+  }
+
   .exp-card-grid {
     grid-template-columns: 1fr;
   }
@@ -25613,6 +26003,27 @@ pre {
 
   .exp-card-enter {
     justify-self: end;
+  }
+}
+
+@media (max-width: 520px) {
+  .photo-reference-persona,
+  .photo-reference-item {
+    grid-template-columns: 1fr;
+  }
+
+  .photo-reference-persona .photo-reference-thumb {
+    width: 100%;
+    height: 180px;
+  }
+
+  .photo-reference-item > .photo-reference-thumb {
+    aspect-ratio: 4 / 3;
+    min-height: 0;
+  }
+
+  .photo-reference-item-body > header {
+    align-items: center;
   }
 }
 

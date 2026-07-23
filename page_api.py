@@ -27,7 +27,7 @@ from quart import request, send_file
 
 from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_FONT_NAMES, PAGE_THEME_NAMES, _REASON_TEXT
 from .config_migration import _ensure_config_parent_dir
-from .helpers import _flat_get, _normalize_timezone_name, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
+from .helpers import _flat_get, _normalize_timezone_name, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
@@ -42,11 +42,12 @@ PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 IMAGE_CACHE_THUMBNAIL_MAX_EDGE = 160
 IMAGE_CACHE_THUMBNAIL_QUALITY = 78
+PHOTO_REFERENCE_PREVIEW_MAX_BYTES = 20 * 1024 * 1024
 
 try:
     from PIL import Image as PILImage
     from PIL import ImageOps as PILImageOps
-except Exception:  # pragma: no cover - Pillow 缺失时回退压缩预览原图
+except Exception:  # pragma: no cover - Pillow 缺失时回退到原图预览
     PILImage = None
     PILImageOps = None
 
@@ -227,6 +228,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/image_cache/update", self.update_image_cache_item, ["POST"], "Private Companion Page update image cache item"),
             ("/image_cache/delete", self.delete_image_cache_item, ["POST"], "Private Companion Page delete image cache item"),
             ("/image_cache/bulk_delete", self.bulk_delete_image_cache_items, ["POST"], "Private Companion Page bulk delete image cache items"),
+            ("/photo_reference/list", self.list_photo_references, ["GET"], "Private Companion Page photo reference list"),
+            ("/photo_reference/image_data", self.get_photo_reference_image_data, ["GET"], "Private Companion Page photo reference image data"),
             ("/daily_outfit/image", self.get_daily_outfit_image, ["GET"], "Private Companion Page daily outfit image"),
             ("/daily_outfit/image_data", self.get_daily_outfit_image_data, ["GET"], "Private Companion Page daily outfit image data"),
             ("/bookshelf/unlock", self.unlock_bookshelf, ["POST"], "Private Companion Page unlock bookshelf"),
@@ -1060,11 +1063,193 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return key, path
 
     @staticmethod
-    async def _encode_image_cache_file_data_url(path: Path, mime: str = "") -> dict[str, str]:
-        raw = await asyncio.to_thread(path.read_bytes)
+    async def _encode_image_cache_file_data_url(
+        path: Path,
+        mime: str = "",
+        *,
+        max_bytes: int = 0,
+    ) -> dict[str, str]:
+        def read_file() -> bytes:
+            if max_bytes <= 0:
+                return path.read_bytes()
+            with path.open("rb") as stream:
+                payload = stream.read(max_bytes + 1)
+            if len(payload) > max_bytes:
+                raise ValueError(f"预览文件超过 {max_bytes} bytes 上限")
+            return payload
+
+        raw = await asyncio.to_thread(read_file)
         content_type = mime or mimetypes.guess_type(str(path))[0] or "image/jpeg"
         encoded = base64.b64encode(raw).decode("ascii")
         return {"data_url": f"data:{content_type};base64,{encoded}", "mime": content_type}
+
+    @staticmethod
+    def _photo_reference_page_id(kind: str, source: str) -> str:
+        payload = f"{kind}\0{source}".encode("utf-8", errors="ignore")
+        return hashlib.sha256(payload).hexdigest()[:24]
+
+    def _photo_reference_page_items(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        persona_source = _path_text(
+            getattr(self.plugin, "photo_persona_reference_image_path", ""),
+            1000,
+        )
+        if persona_source:
+            entries.append({
+                "kind": "persona",
+                "source": persona_source,
+                "note": "默认人设参考图",
+                "reference_roles": ["identity"],
+                "outfit_category": "",
+                "outfit_lock_default": False,
+                "scene_categories": [],
+                "preferred_preset": "",
+                "metadata_source": "runtime",
+            })
+
+        getter = getattr(self.plugin, "_photo_reference_library_entries", None)
+        if callable(getter):
+            try:
+                parsed = getter()
+            except Exception:
+                parsed = []
+        else:
+            parsed = []
+            raw_items = getattr(self.plugin, "photo_reference_library", [])
+            if not isinstance(raw_items, list):
+                raw_items = str(raw_items or "").splitlines()
+            for raw_item in raw_items:
+                text = str(raw_item or "").strip()
+                if not text:
+                    continue
+                parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)
+                parsed.append({
+                    "source": parts[0].strip(),
+                    "note": parts[1].strip() if len(parts) > 1 else "",
+                })
+
+        for item in parsed if isinstance(parsed, list) else []:
+            if not isinstance(item, dict):
+                continue
+            source = _path_text(item.get("source") or item.get("path") or item.get("url"), 1000)
+            if not source:
+                continue
+            entries.append({
+                "kind": "library",
+                "source": source,
+                "note": self._single_line(item.get("note") or item.get("description"), 500).strip(),
+                "reference_roles": list(item.get("reference_roles") or ["identity"]),
+                "outfit_category": self._single_line(item.get("outfit_category"), 40),
+                "outfit_lock_default": bool(item.get("outfit_lock_default")),
+                "scene_categories": list(item.get("scene_categories") or []),
+                "preferred_preset": self._single_line(item.get("preferred_preset"), 60),
+                "metadata_source": self._single_line(item.get("metadata_source"), 30),
+            })
+
+        resolver = getattr(self.plugin, "_photo_reference_local_path", None)
+        result: list[dict[str, Any]] = []
+        library_index = 0
+        for entry in entries:
+            kind = entry["kind"]
+            source = entry["source"]
+            remote = bool(re.match(r"^https?://", source, flags=re.I))
+            inline = source.lower().startswith("data:image/")
+            local_path = ""
+            if not remote and not inline:
+                try:
+                    local_path = str(resolver(source) or "") if callable(resolver) else source
+                except Exception:
+                    local_path = ""
+            path = Path(local_path).expanduser() if local_path else None
+            available = bool(remote or inline or (path is not None and path.is_file()))
+            item_id = self._photo_reference_page_id(kind, source)
+            item = {
+                "id": item_id,
+                "kind": kind,
+                "index": library_index if kind == "library" else -1,
+                "source": source,
+                "note": entry["note"],
+                "reference_roles": list(entry.get("reference_roles") or []),
+                "outfit_category": self._single_line(entry.get("outfit_category"), 40),
+                "outfit_lock_default": bool(entry.get("outfit_lock_default")),
+                "scene_categories": list(entry.get("scene_categories") or []),
+                "preferred_preset": self._single_line(entry.get("preferred_preset"), 60),
+                "metadata_source": self._single_line(entry.get("metadata_source"), 30),
+                "available": available,
+                "remote": remote,
+                "filename": Path(urlparse(source).path).name if remote else (path.name if path else Path(source).name),
+                "preview_endpoint": f"/photo_reference/image_data?id={quote(item_id, safe='')}" if available and not remote and not inline else "",
+                "direct_url": source if remote or inline else "",
+            }
+            if path is not None and path.is_file():
+                try:
+                    item["file_size"] = path.stat().st_size
+                except OSError:
+                    item["file_size"] = 0
+            else:
+                item["file_size"] = 0
+            result.append(item)
+            if kind == "library":
+                library_index += 1
+        return result
+
+    async def list_photo_references(self) -> dict[str, Any]:
+        try:
+            items = self._photo_reference_page_items()
+            persona = next((item for item in items if item.get("kind") == "persona"), None)
+            library = [item for item in items if item.get("kind") == "library"]
+            return self._ok({
+                "enabled": bool(getattr(self.plugin, "enable_photo_reference_image", False)),
+                "limit": 24,
+                "persona": persona,
+                "items": library,
+                "total": len(library),
+                "available": sum(1 for item in library if item.get("available")),
+            })
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取参考图库失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def get_photo_reference_image_data(self) -> dict[str, Any]:
+        item_id = self._single_line(request.args.get("id"), 80)
+        if not item_id:
+            return self._error("缺少参考图 id")
+        try:
+            item = next(
+                (candidate for candidate in self._photo_reference_page_items() if candidate.get("id") == item_id),
+                None,
+            )
+            if not item:
+                return self._error("参考图不存在或已不在当前配置中")
+            if item.get("remote") or item.get("direct_url"):
+                return self._error("远程参考图请使用其原始地址预览")
+            resolver = getattr(self.plugin, "_photo_reference_local_path", None)
+            source = _path_text(item.get("source"), 1000)
+            local_path = str(resolver(source) or "") if callable(resolver) else source
+            path = Path(local_path).expanduser()
+            if not path.is_file():
+                return self._error("参考图文件不存在")
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                return self._error("无法读取参考图文件大小")
+            if file_size > PHOTO_REFERENCE_PREVIEW_MAX_BYTES:
+                return self._error(
+                    f"参考图预览文件过大（{file_size} bytes），上限为 {PHOTO_REFERENCE_PREVIEW_MAX_BYTES} bytes"
+                )
+            mime = mimetypes.guess_type(str(path))[0] or ""
+            if not mime.startswith("image/"):
+                return self._error("参考图文件类型不受支持")
+            return self._ok(
+                await self._encode_image_cache_file_data_url(
+                    path,
+                    mime,
+                    max_bytes=PHOTO_REFERENCE_PREVIEW_MAX_BYTES,
+                )
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取参考图预览失败: {exc}", exc_info=True)
+            return self._error(str(exc))
 
     async def get_image_cache_preview(self) -> Any:
         try:
@@ -1098,9 +1283,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             key, source = resolved
             thumbnail = await self._get_or_create_image_cache_thumbnail(key, source)
             if thumbnail is not None:
-                return self._ok(
-                    await self._encode_image_cache_file_data_url(thumbnail, "image/webp")
-                )
+                return self._ok(await self._encode_image_cache_file_data_url(thumbnail, "image/webp"))
             return self._ok(await self._encode_image_cache_file_data_url(source))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取图片缓存缩略图失败: {exc}", exc_info=True)
@@ -1739,7 +1922,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "主动循环心跳不新鲜": "proactive.loop_stale",
             "私聊图片识别调度状态读取失败": "vision.runtime_unreadable",
             "私聊图片识别暂无可用模型": "vision.no_available_provider",
-            "识图模型最近调用失败": "vision.provider_recent_failure",
+            "有识图模型被临时降权": "vision.provider_cooldown",
             "配置诊断仍有待处理项": "diagnostic.pending",
         }
         return aliases.get(normalized, "")
@@ -2339,7 +2522,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "image_size": summary["size"],
             "endpoint_timeout_seconds": summary["timeout_seconds"],
             "backend_preference": "external_endpoint",
-            "warnings": ["本次只调用所选在线 API，不会尝试队列中的其他 API，也不会回退到 ComfyUI 或 SDGen。"],
+            "warnings": [
+                "本次是纯文单端点验证：只调用所选在线 API，不会尝试队列中的其他 API，也不会回退到 ComfyUI 或 SDGen。",
+                "不会上传参考图，也不覆盖自拍、改图、角色一致性或长提示词的真实调用；这些场景请在排障页运行“测试自拍”。",
+            ],
         }
         configuration_note = self._image_api_endpoint_configuration_note(endpoint)
         if configuration_note:
@@ -2447,7 +2633,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return {
             **base_result,
             "ok": ok,
-            "path": "" if artifact_cleaned else self._single_line(image_path, 260),
+            "path": "" if artifact_cleaned else _path_text(image_path, 1000),
             "file_size": file_size,
             "detail": safe_note or ("已生成图片" if ok else "接口未返回有效图片文件"),
             "prompt": prompt_text,
@@ -2460,7 +2646,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def _run_image_generation_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._image_api_runtime_lock():
             self._sync_photo_generation_runtime_config()
-        generator = getattr(self.plugin, "_generate_photo_image", None)
+        structured_generator = getattr(self.plugin, "_generate_photo_image_result", None)
+        legacy_generator = getattr(self.plugin, "_generate_photo_image", None)
+        generator = structured_generator if callable(structured_generator) else legacy_generator
         if not callable(generator):
             return {
                 "ok": False,
@@ -2472,10 +2660,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         reference_image_path = ""
         if reference_enabled and callable(reference_getter):
             try:
-                reference_image_path = self._single_line(reference_getter(), 260)
+                reference_image_path = _path_text(reference_getter(), 1000)
             except Exception:
                 reference_image_path = ""
-        configured_reference = self._single_line(getattr(self.plugin, "photo_persona_reference_image_path", ""), 1000).strip().strip('"').strip("'")
+        configured_reference = _path_text(getattr(self.plugin, "photo_persona_reference_image_path", ""), 1000)
         has_reference_source = bool(reference_enabled and (reference_image_path or re.match(r"^https?://", configured_reference, flags=re.I)))
         workflow_kind = self._single_line(payload.get("workflow_kind"), 20)
         if not workflow_kind:
@@ -2484,9 +2672,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             async_reference_getter = getattr(self.plugin, "_photo_persona_reference_image_for_kind_async", None)
             if callable(async_reference_getter):
                 try:
-                    reference_image_path = self._single_line(
+                    reference_image_path = _path_text(
                         await async_reference_getter(workflow_kind, allow_daily_outfit=True),
-                        260,
+                        1000,
                     )
                 except Exception as exc:
                     logger.info(
@@ -2536,7 +2724,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         )
         timeout = self._int(diagnostics.get("test_timeout_seconds"), 240, 45, 900)
         try:
-            backend_name, image_path, note = await asyncio.wait_for(
+            generation_output = await asyncio.wait_for(
                 generator(
                     workflow_kind=workflow_kind,
                     prompt_text=prompt_text,
@@ -2559,7 +2747,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "detail": f"测试超时（{timeout}s）",
                 "prompt": self._single_line(prompt_text, 220),
                 "workflow_kind": self._single_line(workflow_kind, 20),
-                "reference_image": self._single_line(reference_image_path, 260),
+                "reference_image": _path_text(reference_image_path, 1000),
                 "used_reference": False,
                 "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
                 "elapsed_ms": elapsed_ms,
@@ -2567,6 +2755,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 **diagnostics,
                 "warnings": warnings[:8],
             }
+        generation_metadata: dict[str, Any] = {}
+        if hasattr(generation_output, "as_legacy_tuple"):
+            backend_name, image_path, note = generation_output.as_legacy_tuple()
+            generation_metadata = {
+                "used_reference": bool(getattr(generation_output, "reference_used", False)),
+                "reference_image": _path_text(getattr(generation_output, "reference_selected_path", ""), 1000),
+                "reference_id": self._single_line(getattr(generation_output, "reference_id", ""), 60),
+                "reference_kind": self._single_line(getattr(generation_output, "reference_kind", ""), 40),
+                "reference_roles": list(getattr(generation_output, "reference_roles", ()) or ()),
+                "wardrobe_mode": self._single_line(getattr(generation_output, "wardrobe_mode", ""), 40),
+                "wardrobe_category": self._single_line(getattr(generation_output, "wardrobe_category", ""), 40),
+                "outfit_locked": bool(getattr(generation_output, "outfit_locked", False)),
+                "daily_outfit_removed": bool(getattr(generation_output, "daily_outfit_removed", False)),
+                "final_presets": list(getattr(generation_output, "preset_names", ()) or ()),
+                "prompt_hash": self._single_line(getattr(generation_output, "prompt_hash", ""), 80),
+                "prompt_path": _path_text(getattr(generation_output, "prompt_path", ""), 1000),
+            }
+        else:
+            backend_name, image_path, note = generation_output
         elapsed_ms = int((time.time() - started) * 1000)
         exists = False
         file_size = 0
@@ -2591,18 +2798,32 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "ok": bool(image_path and exists),
             "title": "图片生成链路测试",
             "backend": self._single_line(backend_name, 80),
-            "path": self._single_line(image_path, 260),
+            "path": _path_text(image_path, 1000),
             "file_size": file_size,
             "detail": self._single_line(note, 220) or ("已生成图片" if image_path else "未返回图片路径"),
             "prompt": self._single_line(prompt_text, 220),
             "workflow_kind": self._single_line(workflow_kind, 20),
-            "reference_image": self._single_line(reference_image_path, 260),
-            "used_reference": self._image_generation_result_used_reference(
-                workflow_kind=workflow_kind,
-                image_path=image_path,
-                image_exists=exists,
-                note=note,
+            "reference_image": _path_text(generation_metadata.get("reference_image") or reference_image_path, 1000),
+            "used_reference": (
+                bool(generation_metadata.get("used_reference"))
+                if generation_metadata
+                else self._image_generation_result_used_reference(
+                    workflow_kind=workflow_kind,
+                    image_path=image_path,
+                    image_exists=exists,
+                    note=note,
+                )
             ),
+            "reference_id": self._single_line(generation_metadata.get("reference_id"), 60),
+            "reference_kind": self._single_line(generation_metadata.get("reference_kind"), 40),
+            "reference_roles": list(generation_metadata.get("reference_roles") or [])[:8],
+            "wardrobe_mode": self._single_line(generation_metadata.get("wardrobe_mode"), 40),
+            "wardrobe_category": self._single_line(generation_metadata.get("wardrobe_category"), 40),
+            "outfit_locked": bool(generation_metadata.get("outfit_locked")),
+            "daily_outfit_removed": bool(generation_metadata.get("daily_outfit_removed")),
+            "final_presets": list(generation_metadata.get("final_presets") or [])[:6],
+            "prompt_hash": self._single_line(generation_metadata.get("prompt_hash"), 80),
+            "prompt_path": _path_text(generation_metadata.get("prompt_path"), 1000),
             "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
             "elapsed_ms": elapsed_ms,
             "error": "" if image_path and exists else (self._single_line(note, 220) or "图片生成未返回有效文件"),
@@ -2619,7 +2840,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     ) -> bool:
         if not image_path or not image_exists:
             return False
-        if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
+        if str(workflow_kind or "").strip().lower() not in {
+            "selfie", "portrait", "自拍", "人像", "edit", "改图", "修图", "重绘", "p图"
+        }:
             return False
         note_text = str(note or "")
         return bool(
@@ -4063,6 +4286,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             results[key] = item
         return results
 
+    def _photo_prompt_debug_payload(self, value: Any) -> dict[str, Any]:
+        raw_path = _path_text(value, 1000)
+        if not raw_path:
+            return {}
+        try:
+            root = (Path(self.plugin.data_dir) / "photo_prompt_debug").resolve()
+            path = Path(raw_path).expanduser().resolve()
+            if path.parent != root or path.suffix.lower() != ".json" or not path.is_file():
+                return {}
+            if path.stat().st_size > 256 * 1024:
+                return {}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {}
+
     def _recent_photo_generation_summary(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         raw = data.get("recent_photo_generations")
         if not isinstance(raw, list):
@@ -4073,6 +4312,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 continue
             ts = self._float(item.get("ts"))
             prompt = str(item.get("prompt") or "")
+            debug_payload = self._photo_prompt_debug_payload(item.get("prompt_path"))
+            full_prompt = str(debug_payload.get("final_prompt") or "")
             items.append(
                 {
                     "ts": ts,
@@ -4084,11 +4325,26 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "ok": bool(item.get("ok")),
                     "prompt_format": self._single_line(item.get("prompt_format"), 30),
                     "prompt": prompt[:500],
+                    "full_prompt": full_prompt[:12000],
                     "prompt_preview": self._single_line(prompt, 180),
-                    "path": self._single_line(item.get("path"), 260),
+                    "prompt_hash": self._single_line(
+                        item.get("prompt_hash") or debug_payload.get("final_prompt_sha256"),
+                        80,
+                    ),
+                    "prompt_path": _path_text(item.get("prompt_path"), 1000),
+                    "path": _path_text(item.get("path"), 1000),
                     "note": self._single_line(item.get("note"), 220),
                     "reference": bool(item.get("reference")),
-                    "reference_path": self._single_line(item.get("reference_path"), 260),
+                    "reference_used": bool(item.get("reference_used")),
+                    "reference_path": _path_text(item.get("reference_path"), 1000),
+                    "reference_id": self._single_line(item.get("reference_id"), 60),
+                    "reference_kind": self._single_line(item.get("reference_kind"), 40),
+                    "reference_roles": [
+                        self._single_line(role, 40)
+                        for role in (item.get("reference_roles") if isinstance(item.get("reference_roles"), list) else [])
+                        if self._single_line(role, 40)
+                    ][:8],
+                    "reference_outfit_category": self._single_line(item.get("reference_outfit_category"), 40),
                     "image_size": self._single_line(item.get("image_size"), 40),
                     "elapsed_ms": self._int(item.get("elapsed_ms")),
                     "trigger": self._single_line(item.get("trigger"), 40),
@@ -4096,6 +4352,22 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "sent": bool(item.get("sent")),
                     "caption": self._single_line(item.get("caption"), 120),
                     "scene_preset": self._single_line(item.get("scene_preset"), 80),
+                    "wardrobe_mode": self._single_line(item.get("wardrobe_mode"), 40),
+                    "wardrobe_source": self._single_line(item.get("wardrobe_source"), 40),
+                    "wardrobe_category": self._single_line(item.get("wardrobe_category"), 40),
+                    "outfit_locked": bool(item.get("outfit_locked")),
+                    "daily_outfit_removed": bool(item.get("daily_outfit_removed")),
+                    "wardrobe_reason": self._single_line(item.get("wardrobe_reason"), 240),
+                    "conflicts": [
+                        self._single_line(value, 120)
+                        for value in (item.get("conflicts") if isinstance(item.get("conflicts"), list) else [])
+                        if self._single_line(value, 120)
+                    ][:12],
+                    "removed_conflicts": [
+                        self._single_line(value, 120)
+                        for value in (item.get("removed_conflicts") if isinstance(item.get("removed_conflicts"), list) else [])
+                        if self._single_line(value, 120)
+                    ][:12],
                     "tool_name": self._single_line(item.get("tool_name"), 60),
                     "presets": [
                         self._single_line(name, 40)
@@ -4308,11 +4580,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "endpoint_timeout_seconds": self._int(result.get("endpoint_timeout_seconds")),
             "queue_wait_ms": self._int(result.get("queue_wait_ms")),
             "workflow_kind": self._single_line(result.get("workflow_kind"), 20),
-            "reference_image": self._single_line(result.get("reference_image"), 260),
+            "reference_image": self._single_line(result.get("reference_image"), 1000),
             "used_reference": bool(result.get("used_reference")),
+            "reference_id": self._single_line(result.get("reference_id"), 60),
+            "reference_kind": self._single_line(result.get("reference_kind"), 40),
+            "reference_roles": [
+                self._single_line(value, 40)
+                for value in (result.get("reference_roles") if isinstance(result.get("reference_roles"), list) else [])
+                if self._single_line(value, 40)
+            ][:8],
+            "wardrobe_mode": self._single_line(result.get("wardrobe_mode"), 40),
+            "wardrobe_category": self._single_line(result.get("wardrobe_category"), 40),
+            "outfit_locked": bool(result.get("outfit_locked")),
+            "daily_outfit_removed": bool(result.get("daily_outfit_removed")),
+            "final_presets": [
+                self._single_line(value, 60)
+                for value in (result.get("final_presets") if isinstance(result.get("final_presets"), list) else [])
+                if self._single_line(value, 60)
+            ][:6],
+            "prompt_hash": self._single_line(result.get("prompt_hash"), 80),
+            "prompt_path": self._single_line(result.get("prompt_path"), 1000),
             "provider": self._single_line(result.get("provider"), 100),
             "umo": self._single_line(result.get("umo"), 180),
-            "path": self._single_line(result.get("path"), 260),
+            "path": self._single_line(result.get("path"), 1000),
             "file_size": self._int(result.get("file_size")),
             "detail": self._single_line(result.get("detail"), 220),
             "error": self._single_line(result.get("error"), 220),
@@ -4974,14 +5264,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         provider_candidates = provider_runtime.get("candidates") if isinstance(provider_runtime.get("candidates"), list) else []
         usable_vision = [
             item for item in provider_candidates
-            if isinstance(item, dict) and item.get("available") and item.get("supports_image")
+            if isinstance(item, dict) and item.get("available") and item.get("supports_image") and not item.get("cooldown")
         ]
-        provider_failures = provider_runtime.get("recent_failures") if isinstance(provider_runtime.get("recent_failures"), list) else []
+        provider_cooldowns = provider_runtime.get("cooldowns") if isinstance(provider_runtime.get("cooldowns"), list) else []
         last_success = provider_runtime.get("last_success") if isinstance(provider_runtime.get("last_success"), dict) else {}
         vision_priority = self._single_line(provider_runtime.get("priority"), 40) or "astrbot_first"
         vision_priority_label = {
             "astrbot_first": "AstrBot 图片转文字优先",
             "plugin_first": "插件识图模型优先",
+            "recent_success_first": "近期成功模型优先",
         }.get(vision_priority, "AstrBot 图片转文字优先")
         if provider_runtime.get("error"):
             add("warn", "私聊图片识别调度状态读取失败", provider_runtime.get("error") or "无法读取当前视觉模型状态。", "刷新排障页或查看日志", "troubleshooting", "vision.runtime_unreadable")
@@ -4989,8 +5280,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add(
                 "warn",
                 "私聊图片识别暂无可用模型",
-                f"候选 {len(provider_candidates)} 个，但没有同时满足可用且支持图片的模型。",
-                "检查快速配置/精准配置里的插件识图模型",
+                f"候选 {len(provider_candidates)} 个，但没有同时满足可用、支持图片且不在冷却的模型。",
+                "检查快速配置/精准配置里的插件识图模型，或等待临时降权结束",
                 "config",
                 "vision.no_available_provider",
             )
@@ -5005,15 +5296,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         else:
             first_provider = usable_vision[0].get("provider_id") if usable_vision and isinstance(usable_vision[0], dict) else "-"
             add("info", "私聊图片识别候选模型可用", f"当前可用 {len(usable_vision)} 个，首选 {first_provider}；成功一次后会记录为视觉恢复候选。", "", "troubleshooting")
-        if provider_failures:
-            first_failure = provider_failures[0] if isinstance(provider_failures[0], dict) else {}
+        if provider_cooldowns:
+            first_cooldown = provider_cooldowns[0] if isinstance(provider_cooldowns[0], dict) else {}
             add(
                 "warn",
-                "识图模型最近调用失败",
-                f"{first_failure.get('provider_id') or '-'}：{first_failure.get('error') or '最近调用失败'}；最近 {first_failure.get('time') or '-'} 失败。",
+                "有识图模型被临时降权",
+                f"{first_cooldown.get('provider_id') or '-'}：{first_cooldown.get('error') or '最近调用失败'}；到期 {first_cooldown.get('until') or '-'}。",
                 "如果反复出现，换掉插件识图模型或调高单次超时",
                 "config",
-                "vision.provider_recent_failure",
+                "vision.provider_cooldown",
             )
 
         diag_warns = [item for item in diagnostics if item.get("level") in {"warn", "error"}]
@@ -5281,7 +5572,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
             path: Path | None = None
             if cover_requested and isinstance(target, dict):
-                cover_path = self._single_line(target.get("cover_path"), 300)
+                cover_path = _path_text(target.get("cover_path"), 1000)
                 if cover_path:
                     path = Path(cover_path).resolve()
             if path is None:
@@ -5705,7 +5996,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._error(str(exc))
 
     def _resolve_bookshelf_data_file(self, value: Any) -> Path | None:
-        path_text = self._single_line(value, 500)
+        path_text = _path_text(value, 1000)
         if not path_text:
             return None
         data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
@@ -11560,32 +11851,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _quick_bundle_from_precision(self, values: dict[str, str]) -> dict[str, str]:
         fast = self._single_line(
-            values.get("FAST_RESPONSE_PROVIDER_ID")
-            or values.get("RESPONSE_REVIEW_PROVIDER_ID")
+            values.get("RESPONSE_REVIEW_PROVIDER_ID")
             or values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID")
             or values.get("SMART_SILENCE_PROVIDER_ID")
-            or values.get("MAI_STYLE_PROVIDER_ID"),
+            or values.get("MAI_STYLE_PROVIDER_ID")
+            or values.get("LLM_PROVIDER_ID"),
             160,
         )
         complex_model = self._single_line(
-            values.get("COMPLEX_REASONING_PROVIDER_ID")
-            or values.get("LLM_PROVIDER_ID")
+            values.get("LLM_PROVIDER_ID")
             or values.get("DAILY_PLAN_PROVIDER_ID")
             or values.get("COMPANION_MEMORY_PROVIDER_ID")
             or values.get("MAI_STYLE_PROVIDER_ID"),
             160,
         )
         creative = self._single_line(
-            values.get("CREATIVE_MODEL_PROVIDER_ID")
-            or values.get("CREATIVE_PROVIDER_ID")
+            values.get("CREATIVE_PROVIDER_ID")
             or values.get("DREAM_DIARY_PROVIDER_ID")
             or values.get("PHOTO_PROMPT_PROVIDER_ID")
             or complex_model,
             160,
         )
         plugin_vision = self._single_line(
-            values.get("PLUGIN_VISION_PROVIDER_ID")
-            or values.get("PRIVATE_READING_VISION_PROVIDER_ID")
+            values.get("PRIVATE_READING_VISION_PROVIDER_ID")
             or values.get("NARRATION_PROVIDER_ID"),
             160,
         )
@@ -14694,8 +14982,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 self.plugin.external_image_api_endpoints = endpoints
                 continue
             if key == "photo_reference_library":
-                lines = value if isinstance(value, list) else str(value or "").splitlines()
-                setattr(self.plugin, attr, [str(item).strip() for item in lines if str(item or "").strip()][:24])
+                normalized_library = self._normalize_setting_value(key, value)
+                setattr(
+                    self.plugin,
+                    attr,
+                    normalized_library if isinstance(normalized_library, list) else [],
+                )
                 continue
             if key == "photo_persona_reference_image_path":
                 setattr(self.plugin, attr, str(value or "").strip())
@@ -15787,17 +16079,87 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             mode = str(value or "auto").strip().lower()
             return mode if mode in {"auto", "comfyui", "sdgen", "external", "tool_call"} else "auto"
         if key == "photo_reference_library":
-            raw_items = value if isinstance(value, list) else str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-            items: list[str] = []
+            if isinstance(value, list):
+                raw_items = value
+            else:
+                raw_text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                raw_items = []
+                parsed_array = False
+                if raw_text.startswith("[") and raw_text.endswith("]"):
+                    try:
+                        parsed_items = json.loads(raw_text)
+                        if isinstance(parsed_items, list):
+                            raw_items = parsed_items
+                            parsed_array = True
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                if not parsed_array and raw_text:
+                    raw_items = raw_text.split("\n")
+            items: list[Any] = []
+            seen_sources: set[str] = set()
             for raw_item in raw_items:
                 if isinstance(raw_item, dict):
-                    path = self._single_line(raw_item.get("path") or raw_item.get("url"), 1000)
-                    note = self._single_line(raw_item.get("note") or raw_item.get("description"), 500)
-                    text = f"{path} || {note}" if path and note else path
+                    item = dict(raw_item)
                 else:
                     text = str(raw_item or "").strip()
-                if text and text not in items:
-                    items.append(text[:1600])
+                    if not text:
+                        continue
+                    item = {}
+                    if text.startswith("{") and text.endswith("}"):
+                        try:
+                            parsed_item = json.loads(text)
+                            if isinstance(parsed_item, dict):
+                                item = dict(parsed_item)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                    if not item:
+                        parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=2)
+                        item = {
+                            "path": parts[0] if parts else "",
+                            "note": parts[1] if len(parts) > 1 else "",
+                        }
+                        if len(parts) > 2:
+                            metadata_text = str(parts[2] or "").strip()
+                            if metadata_text.startswith("{"):
+                                try:
+                                    metadata = json.loads(metadata_text)
+                                    if isinstance(metadata, dict):
+                                        item.update(
+                                            {
+                                                name: field_value
+                                                for name, field_value in metadata.items()
+                                                if name not in {"source", "path", "url", "note", "description"}
+                                            }
+                                        )
+                                    else:
+                                        item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
+                                except (TypeError, ValueError, json.JSONDecodeError):
+                                    item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
+                            else:
+                                item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
+
+                source = _path_text(item.get("source") or item.get("path") or item.get("url"), 1000)
+                if not source or source in seen_sources:
+                    continue
+                seen_sources.add(source)
+                note = str(item.get("note") or item.get("description") or "")
+                note = note.replace("\r\n", "\n").replace("\r", "\n").strip()[:500]
+                item["path"] = source
+                item["note"] = note
+                for field in ("reference_roles", "scene_categories"):
+                    if field in item and not isinstance(item.get(field), list):
+                        item[field] = [
+                            part
+                            for part in re.split(r"[,，、/|\s]+", str(item.get(field) or ""))
+                            if part
+                        ]
+                if "outfit_lock_default" in item:
+                    raw_lock = item.get("outfit_lock_default")
+                    if raw_lock is None or (isinstance(raw_lock, str) and not raw_lock.strip()):
+                        item.pop("outfit_lock_default", None)
+                    else:
+                        item["outfit_lock_default"] = self._normalize_bool_value(raw_lock)
+                items.append(item)
             return items[:24]
         if key == "external_image_api_endpoints":
             normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
@@ -16272,8 +16634,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return 1.2
         if key == "private_image_vision_wait_seconds":
             try:
-                # 只保留与后端 _cfg_float 一致的下界,不设上限(对齐后端:后端不夹上限)。
-                return max(0.0, float(value))
+                return max(0.0, min(600.0, float(value)))
             except (TypeError, ValueError):
                 return 30.0
         if key == "group_image_vision_wait_seconds":
@@ -16283,8 +16644,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return 8.0
         if key == "private_image_provider_timeout_seconds":
             try:
-                # 只保留与后端一致的下界 3s,不设上限(对齐后端;推理识图模型需要更长超时)。
-                return max(3.0, float(value))
+                return max(0.0, min(600.0, float(value)))
             except (TypeError, ValueError):
                 return 12.0
         if key == "private_image_vision_provider_priority":
@@ -16292,11 +16652,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if callable(normalizer):
                 return normalizer(value)
             normalized = str(value or "astrbot_first").strip().lower()
-            return normalized if normalized in {"astrbot_first", "plugin_first"} else "astrbot_first"
+            return normalized if normalized in {"astrbot_first", "plugin_first", "recent_success_first"} else "astrbot_first"
         if key == "context_image_caption_timeout_seconds":
             try:
-                # 只保留下界,不设上限(对齐后端:后端不夹上限)。
-                return max(0.0, float(value))
+                return max(0.0, min(600.0, float(value)))
             except (TypeError, ValueError):
                 return 8.0
         if key == "private_image_gif_max_frames":
@@ -16540,8 +16899,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     visit(item["items"], key)
                     continue
                 hidden = bool(item.get("invisible"))
-                index["group"][key] = group_key
-                index["item"][key] = item
+                existing_item = index["item"].get(key)
+                existing_group = str(index["group"].get(key) or "")
+                existing_hidden = bool(existing_item.get("invisible")) if isinstance(existing_item, dict) else True
+                prefer_candidate = (
+                    existing_item is None
+                    or (existing_hidden and not hidden)
+                    or (existing_hidden == hidden and bool(group_key) and not existing_group)
+                )
+                if prefer_candidate:
+                    index["group"][key] = group_key
+                    index["item"][key] = item
                 index["all"].add(key)
                 if not hidden:
                     index["public"].add(key)
@@ -17485,7 +17853,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         *,
         access_token: str = "",
     ) -> str:
-        cover_path = self._single_line(item.get("cover_path"), 500)
+        cover_path = _path_text(item.get("cover_path"), 1000)
         if cover_path:
             return self._bookshelf_image_url(
                 album_id,
@@ -18762,7 +19130,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "updated_ts": updated_ts,
                 "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_ts", 0)),
                 "candidate_id": self._single_line(raw.get("candidate_id"), 40),
-                "has_image": bool(self._single_line(raw.get("image_path"), 260)),
+                "has_image": bool(_path_text(raw.get("image_path"), 1000)),
                 "extra_count": self._int(raw.get("extra_count")),
                 "duplicate_count": max(1, self._int(raw.get("duplicate_count"))),
             }
@@ -18807,7 +19175,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     # ============================================================
 
     def _creative_project_cover_path(self, project: dict[str, Any]) -> Path | None:
-        path_text = self._single_line(project.get("cover_path"), 500)
+        path_text = _path_text(project.get("cover_path"), 1000)
         if not path_text:
             return None
         try:

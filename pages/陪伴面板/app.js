@@ -56,6 +56,11 @@ const state = {
   featureDetailDirty: false,
   featureSaveInProgress: false,
   featureDetailBaseline: null,
+  featureDetailParamDraft: {},
+  featureDetailSubpage: "",
+  photoReferenceManagerDraft: null,
+  photoReferenceLibraryStatus: null,
+  photoReferenceLibraryLoading: false,
   selectedFeatureKey: "",
   imageApiEndpointDraft: null,
   imageApiEndpointSavedFingerprints: [],
@@ -401,7 +406,9 @@ function syncProviderConfigModeControls() {
   const filter = document.getElementById("providerFilter");
   if (filter && quick) filter.value = "";
   document.querySelectorAll("[data-provider-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.providerMode === (state.providerMode || "all"));
+    const active = button.dataset.providerMode === (state.providerMode || "all");
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
   });
   const hint = document.getElementById("providerConfigModeHint");
   if (hint) {
@@ -499,6 +506,7 @@ function syncFeatureDraftFromOverview(overview = {}) {
   state.featureAuxiliaryDirty = false;
   state.featureDetailDirty = false;
   state.featureDetailBaseline = null;
+  state.featureDetailParamDraft = {};
 }
 
 function beginFeatureDetailSession(featureKey) {
@@ -513,7 +521,36 @@ function beginFeatureDetailSession(featureKey) {
     imageApiEndpointDraft: cloneFeatureStateValue(state.imageApiEndpointDraft),
     formSignature: "",
   };
+  state.featureDetailParamDraft = {};
   state.featureDetailDirty = false;
+}
+
+function rememberFeatureParamDraft(control) {
+  const key = String(control?.dataset?.featureParam || "").trim();
+  if (!key) return;
+  const value = collectSettingValue(key, control);
+  state.featureDetailParamDraft = {
+    ...(state.featureDetailParamDraft || {}),
+    [key]: value,
+  };
+  if (isProviderConfigKey(key)) {
+    const providerValue = String(value || "").trim();
+    state.providerDraft = { ...(state.providerDraft || {}), [key]: providerValue };
+    if (state.overview) {
+      state.overview.providers = state.overview.providers || {};
+      state.overview.providers[key] = providerValue;
+    }
+    return;
+  }
+  const isFeatureOnly = Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)
+    && !Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, key);
+  if (state.overview && !isFeatureOnly) {
+    state.overview.settings = state.overview.settings || {};
+    state.overview.settings[key] = value;
+  }
+  if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
+    state.featureDraft[key] = toBool(value);
+  }
 }
 
 function featureDetailFormSignature(root = document) {
@@ -568,6 +605,7 @@ function restoreFeatureDetailSession() {
   }
   state.providerDraft = cloneFeatureStateValue(baseline.providerDraft || {});
   state.imageApiEndpointDraft = cloneFeatureStateValue(baseline.imageApiEndpointDraft);
+  state.featureDetailParamDraft = {};
 }
 
 function hasUnsavedFeatureChanges() {
@@ -575,6 +613,10 @@ function hasUnsavedFeatureChanges() {
   return state.featureAuxiliaryDirty
     || state.featureDetailDirty
     || featureDraftSignature(state.featureDraft || {}) !== String(state.featureDraftBaseline || "");
+}
+
+function hasUnsavedChanges() {
+  return hasUnsavedFeatureChanges() || hasUnsavedModuleFormChanges();
 }
 
 function markFeatureDetailDirty() {
@@ -592,6 +634,12 @@ function markFeatureDetailDirty() {
 }
 
 function leaveFeatureDetail(control = null) {
+  if (state.featureDetailSubpage === "photo_reference_library") {
+    state.featureDetailSubpage = "";
+    state.photoReferenceManagerDraft = null;
+    renderFeatureSwitches();
+    return true;
+  }
   if (refreshFeatureDetailDirty()) {
     if (control instanceof HTMLButtonElement) {
       const confirmed = requireSecondClick(
@@ -609,6 +657,10 @@ function leaveFeatureDetail(control = null) {
   }
   state.featureDetailDirty = false;
   state.featureDetailBaseline = null;
+  state.featureDetailParamDraft = {};
+  state.featureDetailSubpage = "";
+  state.photoReferenceManagerDraft = null;
+  state.photoReferenceLibraryStatus = null;
   state.selectedFeatureKey = "";
   renderFeatureSwitches();
   return true;
@@ -619,6 +671,9 @@ function discardAllFeatureChanges() {
   state.featureAuxiliaryDirty = false;
   state.featureDetailDirty = false;
   state.featureDetailBaseline = null;
+  state.featureDetailSubpage = "";
+  state.photoReferenceManagerDraft = null;
+  state.photoReferenceLibraryStatus = null;
   state.selectedFeatureKey = "";
   syncFeatureDraftFromOverview(state.overview || {});
   syncFeatureFooterAction();
@@ -1045,7 +1100,7 @@ const featureMeta = {
   enable_qzone_life_publish: ["生活说说", "根据状态、日程和日记余味低频发布公开生活动态。"],
   enable_qzone_generated_image_publish: ["说说配图", "发布生活说说时可按概率调用主动生图能力生成配图。"],
   enable_qzone_comment_inbox: ["评论收件箱", "低频查看自己说说下的新评论，并按需公开追加回复。"],
-  enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；本地 ComfyUI 可在电脑忙时自动延后。"],
+  enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；生图 API 地址、Key、模型和队列请到“模型配置 → 生图模型”配置。"],
   enable_screen_glance_action: ["主动识屏", "允许 Bot 在合适动机下低频看一眼屏幕，并统一管理沉默后的额外识屏。"],
   enable_poke_action: ["主动戳一戳", "允许 Bot 在想轻轻刷存在感或逗一下用户时主动戳一戳。"],
   enable_voice_action: ["主动语音", "允许 Bot 在合适的主动场景里留一小句语音；需要当前会话有可用 TTS provider。"],
@@ -2124,8 +2179,8 @@ const configDescriptions = {
   quote_skip_short_reply_chars: "回复正文不超过该字数时不附带引用。0 表示不按长度跳过。",
   quote_target_strategy: "current 引用用户当前这条触发消息；quoted/auto 在用户引用 Bot 旧消息追问时优先引用那条旧消息。",
   private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片收口时间；视觉提前完成会立刻进入主链。",
-  private_image_provider_timeout_seconds: "每个视觉 provider 单次最多等待多久；超时后会切下一个视觉模型，避免某个上游 503 或重试过久拖慢整条单图回复。",
-  private_image_vision_provider_priority: "AstrBot 优先会先用当前会话的默认图片转文字模型；插件优先会先用模型配置中的插件识图模型及其备用。所有模式都会在失败或超时后继续尝试后续候选。",
+  private_image_provider_timeout_seconds: "每个视觉 provider 单次最多等待多久；超时只影响本轮并切换下一个模型，不会禁用后续图片调用。设为 0 时不额外施加插件超时。",
+  private_image_vision_provider_priority: "AstrBot 优先会先用当前会话的默认图片转文字模型；插件优先会先用模型配置中的插件识图模型及其备用；近期成功优先只提升仍在当前配置中的近期成功模型，不会让已删除的旧模型重新成为首选。所有模式都会在失败或超时后继续尝试后续候选。",
   enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
   private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
   private_image_self_recognition_hint: "只补充当前角色自己的外观、头像、名字、表情包特征或聊天截图昵称，让视觉转述更容易判断图里是不是当前角色。不要写用户资料。",
@@ -3251,7 +3306,7 @@ const featureSettingTypes = {
   dream_theme_candidates: { type: "textarea" },
   recall_message_cache_text_chars: { type: "number", min: 80, max: 2000, step: 20 },
   context_image_caption_max_items: { type: "number", min: 0, max: 50, step: 1 },
-  context_image_caption_timeout_seconds: { type: "number", min: 0, step: 0.5 },
+  context_image_caption_timeout_seconds: { type: "number", min: 0, max: 600, step: 0.5 },
   forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 60, step: 1 },
   group_image_vision_wait_seconds: { type: "number", min: 0, max: 60, step: 1 },
   group_image_max_images: { type: "number", min: 0, max: 12, step: 1 },
@@ -3320,7 +3375,7 @@ const featureSettingTypes = {
   memory_companion_context_max_chars: { type: "number", min: 240, max: 1800, step: 60 },
   natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   command_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
-  private_image_vision_provider_priority: { type: "select", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"]] },
+  private_image_vision_provider_priority: { type: "select", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]] },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
@@ -3694,7 +3749,7 @@ function photoApiEndpointCardHtml(endpoint, index, total, options = {}) {
           <small>${escapeHtml(ready ? "配置完整" : "需要地址、Key 和图片模型")}</small>
         </div>
         <div class="image-api-endpoint-buttons">
-          ${options.showTests ? `<button type="button" class="test" data-image-api-test data-index="${index}" ${!ready ? "disabled" : ""}>${result ? "重新测试" : "单独测试"}</button>` : ""}
+          ${options.showTests ? `<button type="button" class="test" data-image-api-test data-index="${index}" ${!ready ? "disabled" : ""}>${result ? "重新纯文测试" : "纯文测试"}</button>` : ""}
           <button type="button" title="上移" data-image-api-action="up" data-index="${index}" ${index <= 0 ? "disabled" : ""}>↑</button>
           <button type="button" title="下移" data-image-api-action="down" data-index="${index}" ${index >= total - 1 ? "disabled" : ""}>↓</button>
           <button type="button" title="删除" data-image-api-action="delete" data-index="${index}" ${total <= 1 ? "disabled" : ""}>删除</button>
@@ -4623,19 +4678,12 @@ async function applyConfigImport() {
     conflict,
     allow_checksum_mismatch: allowConfigChecksumMismatch(),
   });
+  if (!actionResultPersisted(result)) return result;
   state.configImportPreview = null;
   renderConfigMigrationPreview();
-  if (result) {
-    const requestSeq = ++loadAllRequestSeq;
-    state.overview = result;
-    state.configBackups = result.migration_backups || state.configBackups;
-    state.configLastChecks = result.post_import_checks || [];
-    state.lazyLoaded.userGroupLists = false;
-    state.userGroupListPromise = null;
-    renderAll();
-    void loadUserGroupLists(requestSeq, { force: true });
-  }
-  showToast("配置已导入，已自动备份导入前状态");
+  state.configBackups = result.migration_backups || state.configBackups;
+  state.configLastChecks = result.post_import_checks || [];
+  return result;
 }
 
 async function restoreConfigBackup(id) {
@@ -4643,17 +4691,10 @@ async function restoreConfigBackup(id) {
   if (!backupId) return;
   if (!window.confirm(`将从自动备份恢复：${backupId}\n恢复前也会再次备份当前状态。继续吗？`)) return;
   const result = await postJson("/config/restore", { id: backupId });
-  if (result) {
-    const requestSeq = ++loadAllRequestSeq;
-    state.overview = result;
-    state.configBackups = result.migration_backups || state.configBackups;
-    state.configLastChecks = result.post_import_checks || [];
-    state.lazyLoaded.userGroupLists = false;
-    state.userGroupListPromise = null;
-    renderAll();
-    void loadUserGroupLists(requestSeq, { force: true });
-  }
-  showToast("已从备份恢复");
+  if (!actionResultPersisted(result)) return result;
+  state.configBackups = result.migration_backups || state.configBackups;
+  state.configLastChecks = result.post_import_checks || [];
+  return result;
 }
 
 async function loadImageCache({ clampPage = true } = {}) {
@@ -4714,6 +4755,8 @@ async function loadTroubleshooting(options = {}) {
 
 function applyOverviewData(overview) {
   state.overview = overview;
+  // 总览是服务端权威值；旧草稿继续覆盖它会让已切换的模型看起来没有刷新。
+  state.providerDraft = {};
   hydrateTokenStatsFromOverview(overview);
   syncFeatureDraftFromOverview(overview);
   state.imageApiEndpointDraft = null;
@@ -5470,7 +5513,7 @@ const setupGuideAdvancedItems = {
       ],
       kind: "feature",
       settings: [
-        { key: "private_image_vision_provider_priority", type: "select", label: "识图增强优先级", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"]], description: "首选不可用、超时或不支持图片时会继续尝试后续候选。" },
+        { key: "private_image_vision_provider_priority", type: "select", label: "识图增强优先级", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]], description: "首选不可用、超时或不支持图片时会继续尝试后续候选。" },
         { key: "enable_private_image_vision_cache", type: "bool", label: "重复图片缓存", description: "推荐开启，表情包和重复图不会反复读。" },
         { key: "enable_private_image_gif_enhancement", type: "bool", label: "GIF 多帧增强", description: "会更懂动图，但更耗时。" },
         { key: "private_image_self_recognition_hint", type: "textarea", label: "自我识别提示", placeholder: "例如：图片里出现某个固定角色/头像时如何判断是 Bot 自己。" },
@@ -8078,10 +8121,7 @@ async function applySetupGuide({ close = true, advanced = false, control = null,
     const result = await postJson("/setup/apply", setupGuideApplyPayload());
     const overview = result && result.plugin ? result : result?.overview;
     if (overview && overview.plugin) {
-      state.overview = overview;
-      syncFeatureDraftFromOverview(overview);
-      state.providerDraft = { ...(state.providerDraft || {}), ...(overview.providers || {}) };
-      state.providerConfigMode = overview.settings?.provider_config_mode || state.providerConfigMode;
+      applyOverviewData(overview);
     } else {
       await loadAll();
     }
@@ -9533,7 +9573,7 @@ function troubleshootingFaqMarkup(data = {}, category = "all") {
       title: "为什么图片没有被识别？",
       meta: "先确认视觉模型与图片转述路径可用",
       body: [
-        "检查 AstrBot 图片转文字或插件视觉恢复候选是否可用；图片 URL 无法下载或文件已失效会导致识别跳过。",
+        "检查 AstrBot 图片转文字或插件视觉恢复候选是否可用；视觉 Provider 被冷却、图片 URL 无法下载或文件已失效都会导致识别跳过。",
         "如果是屏幕观察，先运行“测试窥屏”；如果是聊天图片，再确认图片缓存页面中对应文件可以正常打开。",
       ],
       actions: [
@@ -9698,7 +9738,14 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       outcomeLabels[result.outcome_type] || "",
       result.image_model ? `模型 ${result.image_model}` : "",
       result.workflow_kind ? `类型 ${result.workflow_kind}` : "",
-      result.used_reference ? "已带参考图" : "",
+      result.used_reference ? "参考图已实际提交" : "",
+      result.reference_id ? `参考 ${result.reference_id}` : "",
+      Array.isArray(result.reference_roles) && result.reference_roles.length ? `职责 ${result.reference_roles.join("、")}` : "",
+      result.wardrobe_category ? `服装裁决 ${result.wardrobe_category}` : "",
+      result.outfit_locked ? "服装已锁定" : "",
+      result.daily_outfit_removed ? "已移除今日穿搭" : "",
+      Array.isArray(result.final_presets) && result.final_presets.length ? `最终预设 ${result.final_presets.join("、")}` : "",
+      result.prompt_hash ? `提示词哈希 ${result.prompt_hash}` : "",
       result.timeout_seconds ? `等待上限 ${result.timeout_seconds}s` : "",
       result.timeout_budget ? `预算 ${result.timeout_budget}` : "",
       result.context_chars ? `摘要 ${result.context_chars} 字` : "",
@@ -9717,6 +9764,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
           <p>${escapeHtml(detailText)}</p>
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
           ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
+          ${result.prompt_path ? `<small class="path">完整调试文件：${escapeHtml(result.prompt_path)}</small>` : ""}
           ${previewMarkup}
           ${diagnosticMarkup}
           ${stepsMarkup}
@@ -9883,13 +9931,21 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
               item.trigger ? `来源 ${item.trigger}` : "",
               item.sent ? "已发送" : "",
               item.scene_preset ? `预设 ${item.scene_preset}` : "",
+              Array.isArray(item.presets) && item.presets.length ? `最终预设 ${item.presets.join("、")}` : "",
+              item.wardrobe_category ? `服装裁决 ${item.wardrobe_category}` : (item.wardrobe_mode ? `服装裁决 ${item.wardrobe_mode}` : ""),
+              item.outfit_locked ? "服装已锁定" : "",
+              item.daily_outfit_removed ? "已移除今日穿搭" : "",
               item.image_size ? `尺寸 ${item.image_size}` : "",
-              item.reference ? "带参考图" : "",
+              item.reference_used ? "参考图已实际提交" : (item.reference ? "已选参考图" : ""),
+              item.reference_id ? `参考 ${item.reference_id}` : "",
+              Array.isArray(item.reference_roles) && item.reference_roles.length ? `职责 ${item.reference_roles.join("、")}` : "",
               item.elapsed_ms ? `${item.elapsed_ms}ms` : "",
               item.time || "",
               item.trace ? `trace ${item.trace}` : "",
             ].filter(Boolean);
-            const promptText = String(item.prompt || item.prompt_preview || "").trim();
+            const promptText = String(item.full_prompt || item.prompt || item.prompt_preview || "").trim();
+            const conflicts = Array.isArray(item.conflicts) ? item.conflicts.filter(Boolean) : [];
+            const removedConflicts = Array.isArray(item.removed_conflicts) ? item.removed_conflicts.filter(Boolean) : [];
             return `
               <article class="photo-prompt-record">
                 <div class="photo-prompt-meta">
@@ -9897,8 +9953,13 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
                 </div>
                 ${item.note ? `<p class="photo-prompt-note">${escapeHtml(item.note)}</p>` : ""}
                 ${item.caption ? `<small class="photo-prompt-caption">附言：${escapeHtml(item.caption)}</small>` : ""}
+                ${item.wardrobe_reason ? `<small class="photo-prompt-caption">服装裁决：${escapeHtml(item.wardrobe_reason)}</small>` : ""}
+                ${removedConflicts.length ? `<small class="photo-prompt-caption">已物理移除：${escapeHtml(removedConflicts.join("、"))}</small>` : ""}
+                ${conflicts.length ? `<small class="photo-prompt-caption">冲突检测：${escapeHtml(conflicts.join("、"))}</small>` : ""}
                 ${item.path ? `<small class="path photo-prompt-path">输出：${escapeHtml(item.path)}</small>` : ""}
                 ${item.reference_path ? `<small class="path photo-prompt-path">参考图：${escapeHtml(item.reference_path)}</small>` : ""}
+                ${item.prompt_hash ? `<small class="path photo-prompt-path">提示词哈希：${escapeHtml(item.prompt_hash)}</small>` : ""}
+                ${item.prompt_path ? `<small class="path photo-prompt-path">完整调试文件：${escapeHtml(item.prompt_path)}</small>` : ""}
                 <pre class="photo-prompt-text">${escapeHtml(promptText || "暂无提示词内容")}</pre>
               </article>
             `;
@@ -10299,7 +10360,7 @@ async function hydrateImageCacheImages(root = document) {
         image.dataset.loaded = "1";
         image.classList.remove("is-load-error");
         image.closest(".image-cache-thumb, .image-cache-preview")?.classList.remove("is-load-error");
-      } catch (error) {
+      } catch (_error) {
         image.alt = "图片加载失败";
         image.classList.add("is-load-error");
         image.closest(".image-cache-thumb, .image-cache-preview")?.classList.add("is-load-error");
@@ -18273,6 +18334,25 @@ function markModuleFormClean(form) {
   card.classList.remove("is-dirty");
 }
 
+const unsavedModuleFormIds = [
+  "roleplayProfileForm",
+  "privateAliasForm",
+  "quickModuleForm",
+  "runtimeSettingsForm",
+];
+
+function hasUnsavedModuleFormChanges() {
+  return unsavedModuleFormIds.some((formId) => (
+    document.getElementById(formId)?.closest(".module-card")?.classList.contains("is-dirty")
+  ));
+}
+
+function discardUnsavedModuleFormChanges() {
+  unsavedModuleFormIds.forEach((formId) => {
+    markModuleFormClean(document.getElementById(formId));
+  });
+}
+
 function renderPresetCards() {
   const box = $("#presetCards");
   if (!box) return;
@@ -19788,6 +19868,10 @@ function renderFeatureSwitches() {
   if (embeddedFeatureParentByKey[state.selectedFeatureKey]) {
     state.selectedFeatureKey = embeddedFeatureParentByKey[state.selectedFeatureKey];
   }
+  if (state.selectedFeatureKey !== "enable_photo_text_action") {
+    state.featureDetailSubpage = "";
+    state.photoReferenceManagerDraft = null;
+  }
   if (state.selectedFeatureKey && state.selectedFeatureKey !== "enable_proactive_only_mode" && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
     state.selectedFeatureKey = "";
   }
@@ -19922,8 +20006,9 @@ function syncFeatureFooterAction() {
   actions.classList.toggle("has-unsaved", dirty);
   if (backButton) backButton.hidden = !inDetail;
   if (backButton) backButton.disabled = busy;
+  if (backButton) backButton.textContent = state.featureDetailSubpage === "photo_reference_library" ? "返回生图设置" : "返回功能列表";
   if (status) status.textContent = busy ? "正在保存更改" : dirty ? "有未保存更改" : "更改已保存";
-  button.textContent = busy ? "处理中..." : inDetail ? "保存更改" : "保存功能开关";
+  button.textContent = busy ? "处理中..." : state.featureDetailSubpage === "photo_reference_library" ? "保存参考图库" : inDetail ? "保存更改" : "保存功能开关";
   button.disabled = busy || !dirty;
 }
 
@@ -20108,7 +20193,9 @@ function featureRelatedSettings(key) {
     ))
     .map((item) => ({
       key: item,
-      value: Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
+      value: Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, item)
+        ? state.featureDetailParamDraft[item]
+        : Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
         ? state.featureDraft[item]
         : Object.prototype.hasOwnProperty.call(settings, item)
           ? settings[item]
@@ -20563,10 +20650,8 @@ function collectFeatureDetailPayload(featureKey, root = document) {
   } else {
     features[featureKey] = toBool(state.featureDraft[featureKey]);
   }
-  root.querySelectorAll("[data-feature-param]").forEach((input) => {
-    const key = input.dataset.featureParam;
+  const assignParam = (key, value) => {
     if (!key) return;
-    const value = collectSettingValue(key, input);
     if (isProviderConfigKey(key)) {
       providers[key] = String(value || "").trim();
       state.providerDraft = { ...(state.providerDraft || {}), [key]: providers[key] };
@@ -20581,7 +20666,13 @@ function collectFeatureDetailPayload(featureKey, root = document) {
     } else {
       settings[key] = value;
     }
+  };
+  root.querySelectorAll("[data-feature-param]").forEach((input) => {
+    const key = input.dataset.featureParam;
+    if (!key) return;
+    assignParam(key, collectSettingValue(key, input));
   });
+  Object.entries(state.featureDetailParamDraft || {}).forEach(([key, value]) => assignParam(key, value));
   return { features, settings, providers };
 }
 
@@ -20638,9 +20729,10 @@ async function saveFeatureSwitchChanges(control = null, successMessage = "已保
       successMessage,
       control || $("#saveFeaturesBtn"),
     );
-    if (result) {
+    if (actionResultPersisted(result)) {
       state.featureAuxiliaryDirty = false;
       state.featureDetailDirty = false;
+      state.featureDetailParamDraft = {};
       state.featureDraftBaseline = featureDraftSignature(state.featureDraft || {});
       state.featureDetailBaseline = null;
       if (state.selectedFeatureKey) {
@@ -20648,7 +20740,7 @@ async function saveFeatureSwitchChanges(control = null, successMessage = "已保
         captureFeatureDetailBaselineFromDom($("#featureFlags"));
       }
     }
-    return Boolean(result);
+    return actionResultPersisted(result);
   } finally {
     state.featureSaveInProgress = false;
     refreshFeatureDetailDirty();
@@ -21354,6 +21446,331 @@ function configDescription(name) {
   return configDescriptions[name] || featureDescription(name) || "这个参数会影响该功能的触发频率、上下文范围或行为边界。";
 }
 
+function normalizePhotoReferenceSource(value) {
+  const text = String(value || "").trim();
+  if (text.length >= 2 && (text[0] === '"' || text[0] === "'") && text[text.length - 1] === text[0]) {
+    return text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function normalizePhotoReferenceMetadataList(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[,，、/|\s]+/);
+  return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function normalizePhotoReferenceMetadataBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on", "是", "开启", "锁定"].includes(text)) return true;
+  if (["0", "false", "no", "off", "否", "关闭", "不锁定"].includes(text)) return false;
+  return undefined;
+}
+
+function photoReferenceMetadataFromObject(rawItem) {
+  const metadata = { ...(rawItem && typeof rawItem === "object" ? rawItem : {}) };
+  ["source", "path", "url", "note", "description"].forEach((key) => delete metadata[key]);
+  if (Object.prototype.hasOwnProperty.call(metadata, "reference_roles")) {
+    metadata.reference_roles = normalizePhotoReferenceMetadataList(metadata.reference_roles);
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, "scene_categories")) {
+    metadata.scene_categories = normalizePhotoReferenceMetadataList(metadata.scene_categories);
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, "outfit_lock_default")) {
+    const normalizedLock = normalizePhotoReferenceMetadataBoolean(metadata.outfit_lock_default);
+    if (normalizedLock !== undefined) metadata.outfit_lock_default = normalizedLock;
+  }
+  if (!Object.prototype.hasOwnProperty.call(metadata, "preferred_preset") && metadata.preset !== undefined) {
+    metadata.preferred_preset = metadata.preset;
+  }
+  delete metadata.preset;
+  return metadata;
+}
+
+function parsePhotoReferenceLibrary(value) {
+  let rawItems = Array.isArray(value) ? value : null;
+  if (!rawItems) {
+    const rawText = String(value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+    if (rawText.startsWith("[") && rawText.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(rawText);
+        if (Array.isArray(parsed)) rawItems = parsed;
+      } catch (_error) {
+        rawItems = null;
+      }
+    }
+    if (!rawItems) rawItems = rawText ? rawText.split("\n") : [];
+  }
+  const items = [];
+  rawItems.forEach((rawItem) => {
+    if (items.length >= 24) return;
+    if (rawItem && typeof rawItem === "object") {
+      const source = normalizePhotoReferenceSource(rawItem.source || rawItem.path || rawItem.url);
+      const note = String(rawItem.note || rawItem.description || "").trim();
+      const metadata = photoReferenceMetadataFromObject(rawItem);
+      if (source && !items.some((item) => item.source === source)) items.push({ source, note, metadata });
+      return;
+    }
+    const text = String(rawItem || "").trim();
+    if (!text) return;
+    if (text.startsWith("{") && text.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const source = normalizePhotoReferenceSource(parsed.source || parsed.path || parsed.url);
+          const note = String(parsed.note || parsed.description || "").trim();
+          const metadata = photoReferenceMetadataFromObject(parsed);
+          if (source && !items.some((item) => item.source === source)) items.push({ source, note, metadata });
+          return;
+        }
+      } catch (_error) {
+        // Fall through to the legacy `path || note` parser.
+      }
+    }
+    const parts = text.split(/\s*(?:\|\||｜｜)\s*/);
+    const source = normalizePhotoReferenceSource(parts.shift());
+    let metadata = {};
+    if (parts.length && /^\s*\{/.test(parts[parts.length - 1])) {
+      try {
+        const parsed = JSON.parse(parts[parts.length - 1]);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          metadata = photoReferenceMetadataFromObject(parsed);
+          parts.pop();
+        }
+      } catch (_error) {
+        metadata = {};
+      }
+    }
+    const note = String(parts.join(" || ") || "").trim();
+    if (source && !items.some((item) => item.source === source)) items.push({ source, note, metadata });
+  });
+  return items;
+}
+
+function serializePhotoReferenceLibrary(items) {
+  const payload = (Array.isArray(items) ? items : [])
+    .slice(0, 24)
+    .map((item) => {
+      const source = normalizePhotoReferenceSource(item?.source);
+      const note = String(item?.note || "").trim();
+      if (!source) return null;
+      const metadata = photoReferenceMetadataFromObject(item?.metadata);
+      return { ...metadata, path: source, note };
+    })
+    .filter(Boolean);
+  return JSON.stringify(payload);
+}
+
+function currentPhotoReferenceLibraryValue() {
+  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_reference_library")) {
+    return state.featureDetailParamDraft.photo_reference_library;
+  }
+  return state.overview?.settings?.photo_reference_library || [];
+}
+
+function currentPhotoPersonaReferenceValue() {
+  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_persona_reference_image_path")) {
+    return normalizePhotoReferenceSource(state.featureDetailParamDraft.photo_persona_reference_image_path);
+  }
+  return normalizePhotoReferenceSource(state.overview?.settings?.photo_persona_reference_image_path);
+}
+
+function photoReferenceManagerItems() {
+  if (!Array.isArray(state.photoReferenceManagerDraft)) {
+    state.photoReferenceManagerDraft = parsePhotoReferenceLibrary(currentPhotoReferenceLibraryValue());
+  }
+  return state.photoReferenceManagerDraft;
+}
+
+function photoReferenceStatusFor(kind, source) {
+  const status = state.photoReferenceLibraryStatus || {};
+  const normalizedSource = normalizePhotoReferenceSource(source);
+  if (kind === "persona") {
+    return normalizePhotoReferenceSource(status.persona?.source) === normalizedSource ? status.persona : null;
+  }
+  return (Array.isArray(status.items) ? status.items : []).find(
+    (item) => normalizePhotoReferenceSource(item.source) === normalizedSource,
+  ) || null;
+}
+
+function photoReferenceSourceKind(source) {
+  const text = String(source || "").trim();
+  if (/^https?:\/\//i.test(text)) return "远程 URL";
+  if (/^data:image\//i.test(text)) return "内嵌图片";
+  return "本地文件";
+}
+
+function photoReferencePreviewHtml(kind, source, alt) {
+  const status = photoReferenceStatusFor(kind, source);
+  const directUrl = String(status?.direct_url || (/^https?:\/\//i.test(source) || /^data:image\//i.test(source) ? source : ""));
+  const endpoint = String(status?.preview_endpoint || "");
+  const available = status ? status.available !== false : Boolean(directUrl);
+  return `
+    <div class="photo-reference-thumb ${available ? "" : "is-unavailable"}">
+      <img
+        data-photo-reference-image
+        data-preview-endpoint="${escapeHtml(endpoint)}"
+        data-direct-url="${escapeHtml(directUrl)}"
+        alt="${escapeHtml(alt)}"
+        hidden
+      />
+      <span data-photo-reference-placeholder>${escapeHtml(available ? "加载预览中" : "暂无预览")}</span>
+    </div>
+  `;
+}
+
+function photoReferenceManagerCard(item, index) {
+  const source = String(item?.source || "");
+  const note = String(item?.note || "");
+  const status = photoReferenceStatusFor("library", source);
+  const availability = status ? (status.available ? "可用" : "文件失效") : (/^https?:\/\//i.test(source) ? "远程图片" : "待保存验证");
+  const meta = [photoReferenceSourceKind(source), status?.file_size ? formatBytes(status.file_size) : "", availability].filter(Boolean).join(" · ");
+  const configuredMetadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const roles = Array.isArray(status?.reference_roles) ? status.reference_roles : (Array.isArray(configuredMetadata.reference_roles) ? configuredMetadata.reference_roles : []);
+  const outfitCategory = String(status?.outfit_category || configuredMetadata.outfit_category || "");
+  const preferredPreset = String(status?.preferred_preset || configuredMetadata.preferred_preset || "");
+  const outfitLocked = status ? Boolean(status.outfit_lock_default) : Boolean(configuredMetadata.outfit_lock_default);
+  const configuredRoles = normalizePhotoReferenceMetadataList(configuredMetadata.reference_roles);
+  const configuredScenes = normalizePhotoReferenceMetadataList(configuredMetadata.scene_categories);
+  const configuredCategory = String(configuredMetadata.outfit_category || "");
+  const configuredPreset = String(configuredMetadata.preferred_preset || "");
+  const configuredLock = Object.prototype.hasOwnProperty.call(configuredMetadata, "outfit_lock_default")
+    ? normalizePhotoReferenceMetadataBoolean(configuredMetadata.outfit_lock_default)
+    : undefined;
+  const configuredLockMode = configuredLock === true ? "true" : configuredLock === false ? "false" : "";
+  const responsibilityTags = [
+    ...roles.map((role) => `职责 ${role}`),
+    outfitCategory ? `服装 ${outfitCategory}` : "",
+    outfitLocked ? "默认锁定服装" : "",
+    preferredPreset ? `预设 ${preferredPreset}` : "",
+  ].filter(Boolean);
+  return `
+    <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}">
+      ${photoReferencePreviewHtml("library", source, `参考图 ${index + 1}`)}
+      <div class="photo-reference-item-body">
+        <header>
+          <div><span>参考图 ${index + 1}</span><small>${escapeHtml(meta)}</small></div>
+          <div class="photo-reference-item-tools" role="group" aria-label="调整参考图 ${index + 1}">
+            <button type="button" data-photo-reference-move="up" data-index="${index}" title="上移" aria-label="上移" ${index <= 0 ? "disabled" : ""}>↑</button>
+            <button type="button" data-photo-reference-move="down" data-index="${index}" title="下移" aria-label="下移" ${index >= photoReferenceManagerItems().length - 1 ? "disabled" : ""}>↓</button>
+            <button type="button" class="danger-outline" data-photo-reference-delete data-index="${index}" title="删除" aria-label="删除参考图 ${index + 1}">×</button>
+          </div>
+        </header>
+        ${responsibilityTags.length ? `<div class="photo-reference-responsibilities">${responsibilityTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+        <label>
+          <span>图片路径或 URL</span>
+          <input type="text" data-photo-reference-source data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" />
+        </label>
+        <label>
+          <span>用途注释</span>
+          <textarea data-photo-reference-note data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea>
+        </label>
+        <details class="photo-reference-metadata-editor">
+          <summary>参考职责与服装裁决</summary>
+          <label>
+            <span>参考职责</span>
+            <input type="text" data-photo-reference-roles data-index="${index}" value="${escapeHtml(configuredRoles.join(", "))}" maxlength="160" placeholder="identity, outfit, scene, continuity" />
+          </label>
+          <label>
+            <span>服装类别</span>
+            <input type="text" data-photo-reference-outfit-category data-index="${index}" value="${escapeHtml(configuredCategory)}" maxlength="40" placeholder="sleepwear / daily_outfit / formal" />
+          </label>
+          <label>
+            <span>默认服装锁</span>
+            <select data-photo-reference-outfit-lock data-index="${index}">
+              <option value="" ${configuredLockMode === "" ? "selected" : ""}>自动推断</option>
+              <option value="true" ${configuredLockMode === "true" ? "selected" : ""}>锁定参考图服装</option>
+              <option value="false" ${configuredLockMode === "false" ? "selected" : ""}>不锁定参考图服装</option>
+            </select>
+          </label>
+          <label>
+            <span>适用场景</span>
+            <input type="text" data-photo-reference-scenes data-index="${index}" value="${escapeHtml(configuredScenes.join(", "))}" maxlength="200" placeholder="home, bedroom, outdoor" />
+          </label>
+          <label>
+            <span>首选预设</span>
+            <input type="text" data-photo-reference-preferred-preset data-index="${index}" value="${escapeHtml(configuredPreset)}" maxlength="60" placeholder="居家睡衣" />
+          </label>
+        </details>
+      </div>
+    </article>
+  `;
+}
+
+function photoReferenceManagerPageHtml(open) {
+  const items = photoReferenceManagerItems();
+  const personaSource = currentPhotoPersonaReferenceValue();
+  const personaStatus = photoReferenceStatusFor("persona", personaSource);
+  const statusLoaded = Boolean(state.photoReferenceLibraryStatus);
+  const availableCount = items.filter((item) => photoReferenceStatusFor("library", item.source)?.available === true).length;
+  return `
+    <section class="photo-reference-manager" data-photo-reference-manager ${open ? "" : "hidden"}>
+      <nav class="feature-detail-breadcrumb photo-reference-breadcrumb" aria-label="页面层级">
+        <button type="button" data-photo-reference-back>生图/拍照能力</button>
+        <span>/ 参考图库管理</span>
+      </nav>
+      <header class="photo-reference-manager-head">
+        <div>
+          <span class="module-badge">REFERENCE LIBRARY</span>
+          <h2>参考图库</h2>
+          <p><b>${items.length} / 24</b> 张图库参考图 · ${statusLoaded ? `${availableCount} 张可用` : "状态读取中"}</p>
+        </div>
+        <div class="photo-reference-head-actions">
+          <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
+          <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
+        </div>
+      </header>
+
+      <section class="photo-reference-persona" aria-labelledby="photoReferencePersonaTitle">
+        <div>
+          <span>默认身份锚点</span>
+          <h3 id="photoReferencePersonaTitle">基础人设参考图</h3>
+          <small>${escapeHtml(personaStatus ? (personaStatus.available ? "文件可用" : "文件失效") : personaSource ? "待保存验证" : "未设置")}</small>
+        </div>
+        ${photoReferencePreviewHtml("persona", personaSource, "基础人设参考图")}
+        <label>
+          <span>图片路径或 URL</span>
+          <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
+        </label>
+      </section>
+
+      <form class="photo-reference-add-form" data-photo-reference-add-form>
+        <div>
+          <label><span>图片路径或 URL</span><input name="source" maxlength="1000" required placeholder="C:\\photo.png 或 https://..." /></label>
+          <label><span>用途注释</span><input name="note" maxlength="500" placeholder="居家服，在家或睡前使用" /></label>
+        </div>
+        <button type="submit" ${items.length >= 24 ? "disabled" : ""}>添加参考图</button>
+      </form>
+
+      <div class="photo-reference-toolbar">
+        <label><span>筛选图库</span><input type="search" data-photo-reference-filter placeholder="搜索路径或用途注释" /></label>
+        <span>${items.length ? `当前显示 ${items.length} 张` : "图库为空"}</span>
+      </div>
+      <div class="photo-reference-grid" data-photo-reference-grid>
+        ${items.length ? items.map(photoReferenceManagerCard).join("") : `
+          <div class="photo-reference-empty">
+            <b>图库为空</b>
+            <span>0 / 24</span>
+          </div>
+        `}
+      </div>
+    </section>
+  `;
+}
+
+function photoReferenceManagerLaunchControl(value) {
+  const count = parsePhotoReferenceLibrary(value).length;
+  return `
+    <div class="photo-reference-launch">
+      <span><b>${count} / 24</b><small>已配置参考图</small></span>
+      <button type="button" data-photo-reference-open>管理图库</button>
+    </div>
+  `;
+}
+
 function featureDetailPage(key) {
   const enabled = toBool(state.featureDraft[key]);
   const locked = featureLockedByProactiveOnlyMode(key);
@@ -21377,7 +21794,7 @@ function featureDetailPage(key) {
           <p>${escapeHtml(description)}</p>
         </div>
         <div class="feature-param-control">
-          ${featureSettingInput(name, value)}
+          ${name === "photo_reference_library" ? photoReferenceManagerLaunchControl(value) : featureSettingInput(name, value)}
         </div>
       </section>
     `;
@@ -21412,10 +21829,15 @@ function featureDetailPage(key) {
     ? `${groupedRows}${ungroupedRows}`
     : `<div class="feature-param-empty">暂无关联参数</div>`;
   const showParamCard = key !== "enable_food_menu_recommendation" || related.length || extraParamPanel;
+  const librarySetting = relatedMap.photo_reference_library;
+  const libraryDraftInput = librarySetting
+    ? `<textarea data-feature-param="photo_reference_library" hidden aria-hidden="true">${escapeHtml(featureTextareaValue("photo_reference_library", librarySetting.value))}</textarea>`
+    : "";
   const paramCardHtml = showParamCard ? `
         <article class="feature-detail-card feature-detail-card-params">
           <h3>关联参数</h3>
           <form class="feature-param-list ${key === "enable_tts_enhancement" ? "tts-config-layout" : ""}" data-feature-param-form="${escapeHtml(key)}">
+            ${libraryDraftInput}
             ${settingsRows}
             ${extraParamPanel}
             ${related.length ? `<button type="submit" class="feature-param-save">保存关联参数</button>` : ""}
@@ -21426,8 +21848,10 @@ function featureDetailPage(key) {
     ? dependencies.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")
     : `<div><dt>-</dt><dd>无额外依赖</dd></div>`;
   const impactRows = impacts.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  const referenceManagerOpen = key === "enable_photo_text_action" && state.featureDetailSubpage === "photo_reference_library";
   return `
     <section class="feature-detail-page ${displayEnabled ? "on" : "off"} ${locked ? "locked" : ""}">
+      <div data-feature-detail-overview ${referenceManagerOpen ? "hidden" : ""}>
       <nav class="feature-detail-breadcrumb">
         <button type="button" data-feature-back>功能开关</button>
         <span>/ ${escapeHtml(featureGroupForKey(key))}</span>
@@ -21484,6 +21908,8 @@ function featureDetailPage(key) {
           <dl>${dependencyRows}</dl>
         </article>
       </div>
+      </div>
+      ${key === "enable_photo_text_action" ? photoReferenceManagerPageHtml(referenceManagerOpen) : ""}
     </section>
   `;
 }
@@ -21493,8 +21919,16 @@ function bindFeatureDetailActions() {
     button.addEventListener("click", () => leaveFeatureDetail(button));
   });
   const detailPage = document.querySelector(".feature-detail-page");
-  detailPage?.addEventListener("input", markFeatureDetailDirty, true);
-  detailPage?.addEventListener("change", markFeatureDetailDirty, true);
+  const trackFeatureDetailChange = (event) => {
+    if (
+      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")
+      || event.target?.closest?.("[data-photo-reference-add-form]")
+    ) return;
+    rememberFeatureParamDraft(event.target);
+    markFeatureDetailDirty();
+  };
+  detailPage?.addEventListener("input", trackFeatureDetailChange, true);
+  detailPage?.addEventListener("change", trackFeatureDetailChange, true);
   document.querySelectorAll("[data-feature-detail-toggle]").forEach((input) => {
     input.addEventListener("change", () => {
       markFeatureDetailDirty();
@@ -21516,21 +21950,7 @@ function bindFeatureDetailActions() {
             state.overview.settings[paramKey] = input.checked;
           }
           const preserveFeatureParamDraft = () => {
-            form.querySelectorAll("[data-feature-param]").forEach((control) => {
-              const draftKey = control.dataset.featureParam || "";
-              if (!draftKey) return;
-              const draftValue = collectSettingValue(draftKey, control);
-              if (isProviderConfigKey(draftKey)) {
-                state.overview.providers = state.overview.providers || {};
-                state.overview.providers[draftKey] = String(draftValue || "").trim();
-                return;
-              }
-              state.overview.settings = state.overview.settings || {};
-              state.overview.settings[draftKey] = draftValue;
-              if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, draftKey)) {
-                state.featureDraft[draftKey] = toBool(draftValue);
-              }
-            });
+            form.querySelectorAll("[data-feature-param]").forEach(rememberFeatureParamDraft);
           };
           const syncSettingBackedFeatureParam = (paramKey, { rerender = false } = {}) => {
             state.featureDraft[paramKey] = input.checked;
@@ -21702,7 +22122,11 @@ function bindFeatureDetailActions() {
     });
     form.querySelectorAll("[data-feature-provider-select]").forEach((select) => {
       syncFeatureProviderInput(select);
-      select.addEventListener("change", () => syncFeatureProviderInput(select));
+      select.addEventListener("change", () => {
+        syncFeatureProviderInput(select);
+        const key = select.dataset.featureProviderSelect || "";
+        rememberFeatureParamDraft(document.querySelector(`[data-feature-param="${key}"]`));
+      });
     });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -21715,7 +22139,211 @@ function bindFeatureDetailActions() {
   if (state.selectedFeatureKey === "enable_food_menu_recommendation") {
     bindFoodMenuFeatureActions();
   }
+  if (state.selectedFeatureKey === "enable_photo_text_action") {
+    bindPhotoReferenceManagerActions();
+  }
   bindProactiveOnlyTempUnlockActions();
+}
+
+function syncPhotoReferenceManagerDraft() {
+  const items = photoReferenceManagerItems();
+  const libraryInput = document.querySelector('[data-feature-param="photo_reference_library"]');
+  if (libraryInput) {
+    libraryInput.value = serializePhotoReferenceLibrary(items);
+    rememberFeatureParamDraft(libraryInput);
+  }
+  const personaEditor = document.querySelector("[data-photo-reference-persona-source]");
+  const personaInput = document.querySelector('[data-feature-param="photo_persona_reference_image_path"]');
+  if (personaEditor && personaInput) {
+    personaInput.value = personaEditor.value.trim();
+    rememberFeatureParamDraft(personaInput);
+  }
+  markFeatureDetailDirty();
+}
+
+function photoReferenceDraftValidationError() {
+  const items = photoReferenceManagerItems();
+  if (items.length > 24) return "参考图库最多保存 24 张图片";
+  const sources = items.map((item) => String(item?.source || "").trim());
+  if (sources.some((source) => !source)) return "请补全每张参考图的路径或 URL";
+  if (new Set(sources).size !== sources.length) return "同一图片路径或 URL 不能重复添加";
+  return "";
+}
+
+async function refreshPhotoReferenceLibraryStatus(control = null) {
+  if (state.photoReferenceLibraryLoading) return;
+  state.photoReferenceLibraryLoading = true;
+  setActionBusy(control, true);
+  try {
+    state.photoReferenceLibraryStatus = await fetchJson("/photo_reference/list");
+  } catch (error) {
+    state.photoReferenceLibraryStatus = { items: [], persona: null };
+    showToast(`参考图状态读取失败：${error.message}`, "error");
+  } finally {
+    state.photoReferenceLibraryLoading = false;
+    setActionBusy(control, false);
+    if (state.featureDetailSubpage === "photo_reference_library") renderFeatureSwitches();
+  }
+}
+
+async function hydratePhotoReferencePreviews(root = document) {
+  const images = [...root.querySelectorAll("img[data-photo-reference-image]")];
+  await Promise.all(images.map(async (img) => {
+    if (img.dataset.loading === "1" || img.dataset.loaded === "1") return;
+    const endpoint = String(img.dataset.previewEndpoint || "");
+    const directUrl = String(img.dataset.directUrl || "");
+    if (!endpoint && !directUrl) return;
+    img.dataset.loading = "1";
+    const placeholder = img.parentElement?.querySelector("[data-photo-reference-placeholder]");
+    const reveal = () => {
+      img.hidden = false;
+      img.dataset.loaded = "1";
+      if (placeholder) placeholder.hidden = true;
+    };
+    const fail = () => {
+      img.hidden = true;
+      img.dataset.loaded = "0";
+      if (placeholder) {
+        placeholder.hidden = false;
+        placeholder.textContent = "预览失败";
+      }
+    };
+    img.addEventListener("load", reveal, { once: true });
+    img.addEventListener("error", fail, { once: true });
+    try {
+      if (endpoint) {
+        const result = await fetchJson(endpoint);
+        if (!result?.data_url) throw new Error("预览内容为空");
+        img.src = result.data_url;
+      } else {
+        img.src = directUrl;
+      }
+    } catch (_error) {
+      fail();
+    } finally {
+      img.dataset.loading = "0";
+    }
+  }));
+}
+
+function bindPhotoReferenceManagerActions() {
+  const manager = document.querySelector("[data-photo-reference-manager]");
+  const openButton = document.querySelector("[data-photo-reference-open]");
+  openButton?.addEventListener("click", () => {
+    document.querySelectorAll("[data-feature-param]").forEach(rememberFeatureParamDraft);
+    state.photoReferenceManagerDraft = parsePhotoReferenceLibrary(currentPhotoReferenceLibraryValue());
+    state.featureDetailSubpage = "photo_reference_library";
+    renderFeatureSwitches();
+  });
+  if (!manager || state.featureDetailSubpage !== "photo_reference_library") return;
+
+  manager.querySelector("[data-photo-reference-back]")?.addEventListener("click", () => {
+    syncPhotoReferenceManagerDraft();
+    state.featureDetailSubpage = "";
+    state.photoReferenceManagerDraft = null;
+    renderFeatureSwitches();
+  });
+  manager.querySelector("[data-photo-reference-refresh]")?.addEventListener("click", (event) => {
+    void refreshPhotoReferenceLibraryStatus(event.currentTarget);
+  });
+  manager.querySelector("[data-photo-reference-persona-source]")?.addEventListener("input", syncPhotoReferenceManagerDraft);
+  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset]").forEach((input) => {
+    input.addEventListener(input.matches("select") ? "change" : "input", () => {
+      const index = Number(input.dataset.index);
+      const item = photoReferenceManagerItems()[index];
+      if (!item) return;
+      if (input.matches("[data-photo-reference-source]")) item.source = input.value;
+      else if (input.matches("[data-photo-reference-note]")) item.note = input.value;
+      else {
+        item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+        if (input.matches("[data-photo-reference-roles]")) {
+          const value = normalizePhotoReferenceMetadataList(input.value);
+          if (value.length) item.metadata.reference_roles = value;
+          else delete item.metadata.reference_roles;
+        } else if (input.matches("[data-photo-reference-outfit-category]")) {
+          const value = String(input.value || "").trim();
+          if (value) item.metadata.outfit_category = value;
+          else delete item.metadata.outfit_category;
+        } else if (input.matches("[data-photo-reference-outfit-lock]")) {
+          if (input.value === "") delete item.metadata.outfit_lock_default;
+          else item.metadata.outfit_lock_default = input.value === "true";
+        } else if (input.matches("[data-photo-reference-scenes]")) {
+          const value = normalizePhotoReferenceMetadataList(input.value);
+          if (value.length) item.metadata.scene_categories = value;
+          else delete item.metadata.scene_categories;
+        } else if (input.matches("[data-photo-reference-preferred-preset]")) {
+          const value = String(input.value || "").trim();
+          if (value) item.metadata.preferred_preset = value;
+          else delete item.metadata.preferred_preset;
+        }
+      }
+      syncPhotoReferenceManagerDraft();
+    });
+  });
+  manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const source = String(form.elements.source?.value || "").trim();
+    const note = String(form.elements.note?.value || "").trim();
+    const items = photoReferenceManagerItems();
+    if (!source) return;
+    if (items.length >= 24) {
+      showToast("参考图库已达到 24 张上限", "error");
+      return;
+    }
+    if (items.some((item) => String(item.source || "").trim() === source)) {
+      showToast("这张图片已经在参考图库中", "error");
+      return;
+    }
+    items.push({ source, note, metadata: {} });
+    syncPhotoReferenceManagerDraft();
+    renderFeatureSwitches();
+  });
+  manager.querySelectorAll("[data-photo-reference-move]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.index);
+      const target = button.dataset.photoReferenceMove === "up" ? index - 1 : index + 1;
+      const items = photoReferenceManagerItems();
+      if (!items[index] || !items[target]) return;
+      [items[index], items[target]] = [items[target], items[index]];
+      syncPhotoReferenceManagerDraft();
+      renderFeatureSwitches();
+    });
+  });
+  manager.querySelectorAll("[data-photo-reference-delete]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.index);
+      if (!photoReferenceManagerItems()[index]) return;
+      if (!requireSecondClick(button, `photo-reference-delete-${index}`, "再次点击确认删除这张参考图", "确认")) return;
+      photoReferenceManagerItems().splice(index, 1);
+      syncPhotoReferenceManagerDraft();
+      renderFeatureSwitches();
+    });
+  });
+  manager.querySelector("[data-photo-reference-filter]")?.addEventListener("input", (event) => {
+    const query = String(event.target.value || "").trim().toLowerCase();
+    manager.querySelectorAll("[data-photo-reference-card]").forEach((card) => {
+      card.hidden = Boolean(query && !card.textContent.toLowerCase().includes(query));
+    });
+  });
+  manager.querySelector("[data-photo-reference-save]")?.addEventListener("click", async (event) => {
+    syncPhotoReferenceManagerDraft();
+    const error = photoReferenceDraftValidationError();
+    if (error) {
+      showToast(error, "error");
+      return;
+    }
+    const saved = await saveCurrentFeatureDetail(event.currentTarget, "已保存参考图库");
+    if (saved) {
+      state.photoReferenceManagerDraft = null;
+      state.photoReferenceLibraryStatus = null;
+      renderFeatureSwitches();
+    }
+  });
+  void hydratePhotoReferencePreviews(manager);
+  if (!state.photoReferenceLibraryStatus && !state.photoReferenceLibraryLoading) {
+    void refreshPhotoReferenceLibraryStatus();
+  }
 }
 
 function bindPhotoApiEndpointEditor(root = document) {
@@ -21897,7 +22525,7 @@ function renderImageModelConfig() {
     ${photoApiEndpointEditorHtml({
       showTests: true,
       title: "在线生图 API 队列",
-      description: "调整优先级后保存即可切换主用模型；单独测试只调用当前这一条，不触发队列和本地后端回退。",
+      description: "调整优先级后保存即可切换主用模型；纯文测试只调用当前这一条、不带参考图，也不触发队列和本地后端回退。自拍、改图或角色参考图请到排障页运行“测试自拍”。",
     })}
   `;
   bindPhotoApiEndpointEditor(document.getElementById("modelsImagePane"));
@@ -21979,7 +22607,12 @@ function currentProviderFallbackValues() {
 
 function bindProviderToolbar() {
   if (window.PrivateCompanionProviderTree?.bindProviderToolbar) {
-    window.PrivateCompanionProviderTree.bindProviderToolbar({ document, state, setProviderConfigMode });
+    window.PrivateCompanionProviderTree.bindProviderToolbar({
+      document,
+      state,
+      setProviderConfigMode,
+      rerenderProviders: renderProviders,
+    });
   }
 }
 
@@ -21993,6 +22626,7 @@ async function testProvider(key) {
       document,
       state,
       postJson,
+      currentProviderConfigMode,
       noFallbackProviderKeys,
       optionalNoFallbackProviderKeys,
     }, key);
@@ -22473,11 +23107,11 @@ async function runAction(action, successMessage = "", control = null, options = 
   showToast("正在处理...");
   try {
     const result = await action();
-    if (reload) {
+    const persistenceFailed = Boolean(result && result.config_saved === false);
+    if (reload && !persistenceFailed) {
       if (result && typeof result === "object" && result.plugin && result.features) {
         const requestSeq = ++loadAllRequestSeq;
-        state.overview = result;
-        syncFeatureDraftFromOverview(result);
+        applyOverviewData(result);
         state.lazyLoaded.userGroupLists = false;
         state.userGroupListPromise = null;
         renderAll();
@@ -22486,11 +23120,10 @@ async function runAction(action, successMessage = "", control = null, options = 
       } else {
         await loadAll();
       }
-    } else if (result && typeof result === "object" && result.plugin && result.features) {
-      state.overview = result;
-      syncFeatureDraftFromOverview(result);
+    } else if (!reload && !persistenceFailed && result && typeof result === "object" && result.plugin && result.features) {
+      applyOverviewData(result);
     }
-    if (result && result.config_saved === false) {
+    if (persistenceFailed) {
       showToast("已应用到运行态，但配置持久化失败；重启或刷新后可能恢复旧值，请查看日志", "error");
     } else {
       showToast(successMessage || result?.message || "操作已完成");
@@ -22501,6 +23134,10 @@ async function runAction(action, successMessage = "", control = null, options = 
   } finally {
     setActionBusy(control, false);
   }
+}
+
+function actionResultPersisted(result) {
+  return Boolean(result) && result?.config_saved !== false;
 }
 
 const experimentalFeatureKeys = [
@@ -25304,20 +25941,27 @@ function bindExperimentalOverviewActions() {
       const key = input.dataset.expToggle || "";
       if (!key) return;
       state.featureDraft = state.featureDraft || {};
-      state.featureDraft[key] = input.checked;
+      const previousValue = Object.prototype.hasOwnProperty.call(state.featureDraft, key)
+        ? toBool(state.featureDraft[key])
+        : !input.checked;
+      const requestedValue = Boolean(input.checked);
+      state.featureDraft[key] = requestedValue;
       const isSetting = Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, key);
       const payload = isSetting
-        ? { settings: { [key]: input.checked } }
-        : { features: { [key]: input.checked } };
+        ? { settings: { [key]: requestedValue } }
+        : { features: { [key]: requestedValue } };
       const result = await runAction(
         () => postJson("/settings/update", payload),
-        input.checked ? "已开启" : "已关闭",
+        requestedValue ? "已开启" : "已关闭",
         input.closest(".exp-card-toggle") || input.closest(".feature-detail-toggle"),
         { reload: false },
       );
-      if (result) {
-        reflectExperimentalToggleChange(key, input.checked);
+      if (actionResultPersisted(result)) {
+        reflectExperimentalToggleChange(key, requestedValue);
         scheduleExperimentalRuntimeRefresh(false);
+      } else {
+        state.featureDraft[key] = previousValue;
+        reflectExperimentalToggleChange(key, previousValue);
       }
     });
   });
@@ -25338,20 +25982,27 @@ function bindExperimentalSubpageActions(key) {
       const toggleKey = input.dataset.expToggle || "";
       if (!toggleKey) return;
       state.featureDraft = state.featureDraft || {};
-      state.featureDraft[toggleKey] = input.checked;
+      const previousValue = Object.prototype.hasOwnProperty.call(state.featureDraft, toggleKey)
+        ? toBool(state.featureDraft[toggleKey])
+        : !input.checked;
+      const requestedValue = Boolean(input.checked);
+      state.featureDraft[toggleKey] = requestedValue;
       const isSetting = Object.prototype.hasOwnProperty.call(state.overview?.settings || {}, toggleKey);
       const payload = isSetting
-        ? { settings: { [toggleKey]: input.checked } }
-        : { features: { [toggleKey]: input.checked } };
+        ? { settings: { [toggleKey]: requestedValue } }
+        : { features: { [toggleKey]: requestedValue } };
       const result = await runAction(
         () => postJson("/settings/update", payload),
-        input.checked ? "已开启" : "已关闭",
+        requestedValue ? "已开启" : "已关闭",
         input.closest(".feature-detail-toggle") || input.closest(".exp-card-toggle"),
         { reload: false },
       );
-      if (result) {
-        reflectExperimentalToggleChange(toggleKey, input.checked);
+      if (actionResultPersisted(result)) {
+        reflectExperimentalToggleChange(toggleKey, requestedValue);
         scheduleExperimentalRuntimeRefresh(false);
+      } else {
+        state.featureDraft[toggleKey] = previousValue;
+        reflectExperimentalToggleChange(toggleKey, previousValue);
       }
     });
   });
@@ -25617,10 +26268,16 @@ function switchTab(tabName) {
   const opensSocialLearning = tabName === "worldbook";
   tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (tabName || "dashboard"));
   if (opensSocialLearning) state.learningSection = "social";
-  if (state.activeTab === "config" && tabName !== "config" && hasUnsavedFeatureChanges()) {
-    const confirmed = window.confirm("功能开关还有未保存的更改。离开此页面将放弃这些更改，确定继续吗？");
+  if (tabName !== state.activeTab && hasUnsavedChanges()) {
+    const featureDirty = hasUnsavedFeatureChanges();
+    const moduleDirty = hasUnsavedModuleFormChanges();
+    const warning = moduleDirty
+      ? "当前页面还有未保存的配置。离开此页面将放弃这些更改，确定继续吗？"
+      : "功能开关还有未保存的更改。离开此页面将放弃这些更改，确定继续吗？";
+    const confirmed = window.confirm(warning);
     if (!confirmed) return;
-    discardAllFeatureChanges();
+    if (featureDirty) discardAllFeatureChanges();
+    if (moduleDirty) discardUnsavedModuleFormChanges();
   }
   if (tabName === state.activeTab) {
     if (opensSocialLearning) switchLearningSection("social", { focus: true });
@@ -26056,6 +26713,18 @@ document.addEventListener("click", async (event) => {
         ...(state.troubleshooting.chain_tests || {}),
         [testType]: result,
       };
+      if (testType.startsWith("image_generation")) {
+        try {
+          await loadTroubleshooting({ silent: true, skipExperimentalRender: true });
+        } catch (_error) {
+          // The direct test result still contains its hash/path when history refresh fails.
+        }
+        state.troubleshooting = state.troubleshooting || {};
+        state.troubleshooting.chain_tests = {
+          ...(state.troubleshooting.chain_tests || {}),
+          [testType]: result,
+        };
+      }
       renderTroubleshooting();
       if (result.pending) {
         showToast("主动消息链路测试已预约，约 1 分钟后刷新查看结果", "success");
@@ -26987,7 +27656,7 @@ bindProviderToolbar();
     const saved = await runAction(() => postJson("/settings/update", {
       settings: collectFormSettings(`#${formId}`),
     }), formId === "runtimeSettingsForm" ? "已保存运行设置" : "已保存模块调参", event.submitter);
-    if (!saved) return;
+    if (!actionResultPersisted(saved)) return;
     markModuleFormClean(form);
     if (formId === "privateAliasForm") {
       await loadAll();
@@ -27069,7 +27738,7 @@ $("#previewConfigImportBtn").addEventListener("click", async () => {
 });
 
 $("#applyConfigImportBtn").addEventListener("click", async () => {
-  await runAction(applyConfigImport, "", $("#applyConfigImportBtn"));
+  await runAction(applyConfigImport, "配置已导入，已自动备份导入前状态", $("#applyConfigImportBtn"));
 });
 
 $("#configImportMode").addEventListener("change", () => {
@@ -27106,7 +27775,7 @@ $("#storageConfigForm").addEventListener("submit", async (event) => {
 $("#configBackupList").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-config-restore]");
   if (!button) return;
-  await runAction(() => restoreConfigBackup(button.dataset.configRestore), "", button);
+  await runAction(() => restoreConfigBackup(button.dataset.configRestore), "已从备份恢复", button);
 });
 
 $("#accessForm").addEventListener("submit", async (event) => {
@@ -27176,7 +27845,7 @@ $("#enableSafeFeaturesBtn").addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", (event) => {
-  if (!hasUnsavedFeatureChanges()) return;
+  if (!hasUnsavedChanges()) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -27209,10 +27878,10 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
     "已保存模型配置，并覆盖 quick / precision 两套分流",
     $("#saveProvidersBtn")
   );
-  if (!saved) return;
+  if (!actionResultPersisted(saved)) return;
   state.overview = state.overview || {};
   state.overview.settings = { ...(state.overview.settings || {}), provider_config_mode };
-  state.providerDraft = { ...state.providerDraft, ...providers };
+  state.providerDraft = {};
   state.providerTimeoutDraft = { ...timeoutOverrides };
   state.providerFallbackDraft = { ...fallbackOverrides };
   state.overview.settings.model_timeout_overrides = { ...timeoutOverrides };
@@ -27236,7 +27905,7 @@ $("#saveImageModelsBtn").addEventListener("click", async () => {
     $("#saveImageModelsBtn"),
     { reload: false },
   );
-  if (!saved) return;
+  if (!actionResultPersisted(saved)) return;
   state.imageApiEndpointDraft = endpoints.map(normalizePhotoApiEndpoint);
   state.imageApiEndpointSavedFingerprints = state.imageApiEndpointDraft
     .map((endpoint, index) => photoApiEndpointFingerprint(endpoint, index));

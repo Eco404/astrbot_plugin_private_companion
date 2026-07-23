@@ -148,9 +148,20 @@ window.PrivateCompanionProviderTree = (() => {
     if (values[key]) return values[key];
     if (noFallbackProviderKeys.has(key)) return "";
     if (optionalNoFallbackProviderKeys.has(key)) return "";
-    const fast = values.FAST_RESPONSE_PROVIDER_ID || "";
-    const complex = values.COMPLEX_REASONING_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-    const creative = values.CREATIVE_MODEL_PROVIDER_ID || complex || fast;
+    const mode = typeof context.currentProviderConfigMode === "function"
+      ? context.currentProviderConfigMode()
+      : String(context.state?.providerConfigMode || "precision").trim().toLowerCase();
+    const quick = mode === "quick";
+    // 精准模式不能读取隐藏的快速配置值，否则切换模型后，留空项仍会显示并测试旧 Provider。
+    const complex = quick
+      ? (values.COMPLEX_REASONING_PROVIDER_ID || values.LLM_PROVIDER_ID || "")
+      : (values.LLM_PROVIDER_ID || "");
+    const fast = quick
+      ? (values.FAST_RESPONSE_PROVIDER_ID || complex || "")
+      : (values.MAI_STYLE_PROVIDER_ID || complex || "");
+    const creative = quick
+      ? (values.CREATIVE_MODEL_PROVIDER_ID || complex || fast)
+      : (values.CREATIVE_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || complex || fast);
     if (key === "LLM_PROVIDER_ID") return complex || "";
     if (key === "MAI_STYLE_PROVIDER_ID") return fast || complex || "";
     if (["DAILY_PLAN_PROVIDER_ID", "DETAIL_ENHANCEMENT_PROVIDER_ID", "HISTORY_SUMMARY_PROVIDER_ID", "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "COMPANION_MEMORY_PROVIDER_ID", "DIALOGUE_EPISODE_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID", "FORWARD_MESSAGE_PROVIDER_ID"].includes(key)) return complex || fast || "";
@@ -603,12 +614,12 @@ window.PrivateCompanionProviderTree = (() => {
   }
 
   function bindProviderToolbar(context) {
-    const { document, state, setProviderConfigMode } = context;
+    const { document, state, setProviderConfigMode, rerenderProviders } = context;
     const filter = document.getElementById("providerFilter");
     if (filter && filter.dataset.providerToolbarBound !== "1") {
       filter.addEventListener("input", () => {
         state.providerFilter = filter.value;
-        renderProviders(context);
+        rerenderProviders();
       });
       filter.dataset.providerToolbarBound = "1";
     }
@@ -617,17 +628,16 @@ window.PrivateCompanionProviderTree = (() => {
       button.addEventListener("click", () => setProviderConfigMode(button.dataset.providerConfigMode || "quick"));
       button.dataset.providerToolbarBound = "1";
     });
-    document.querySelectorAll("[data-provider-mode]").forEach((button) => {
-      if (button.dataset.providerToolbarBound === "1") return;
-      button.addEventListener("click", () => {
+    const modeSwitch = document.querySelector(".provider-mode-switch");
+    if (modeSwitch && modeSwitch.dataset.providerToolbarBound !== "1") {
+      modeSwitch.addEventListener("click", (event) => {
+        const button = event.target?.closest?.("[data-provider-mode]");
+        if (!button || !modeSwitch.contains(button)) return;
         state.providerMode = button.dataset.providerMode || "all";
-        document.querySelectorAll("[data-provider-mode]").forEach((item) => {
-          item.classList.toggle("active", item === button);
-        });
-        renderProviders(context);
+        rerenderProviders();
       });
-      button.dataset.providerToolbarBound = "1";
-    });
+      modeSwitch.dataset.providerToolbarBound = "1";
+    }
   }
 
   return {
@@ -637,6 +647,7 @@ window.PrivateCompanionProviderTree = (() => {
     currentProviderTimeoutValues,
     currentProviderFallbackValues,
     currentDeepseekPeakValues,
+    resolveProviderId,
     testProvider: (context, key) => testProvider(context, key),
   };
 })();

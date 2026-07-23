@@ -122,7 +122,7 @@ class SelfTimelineMixin:
         entries.extend(self._self_timeline_from_proactive_audit(data, user=user))
         entries.extend(self._self_timeline_from_creative(data))
         entries.extend(self._self_timeline_from_private_reading(data))
-        entries.extend(self._self_timeline_from_photo_generation(data))
+        entries.extend(self._self_timeline_from_photo_generation(data, user=user))
         entries.extend(self._self_timeline_from_qzone_publish(data))
 
         now = _now_ts()
@@ -320,12 +320,44 @@ class SelfTimelineMixin:
             }
         ]
 
-    def _self_timeline_from_photo_generation(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+    def _self_timeline_photo_continuity_key(self, user: dict[str, Any] | None) -> str:
+        if not isinstance(user, dict):
+            return ""
+        composer = getattr(self, "_compose_photo_continuity_key", None)
+        if callable(composer):
+            return _single_line(
+                composer(user.get("umo"), user.get("user_id")),
+                340,
+            )
+        session = _single_line(user.get("umo"), 240)
+        user_id = _single_line(user.get("user_id"), 80)
+        if not session or not user_id:
+            return ""
+        return _single_line(f"{session}|sender={user_id}", 340)
+
+    def _self_timeline_from_photo_generation(
+        self,
+        data: dict[str, Any],
+        *,
+        user: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         raw = data.get("recent_photo_generations") if isinstance(data.get("recent_photo_generations"), list) else []
+        expected_continuity_key = self._self_timeline_photo_continuity_key(user)
+        if user is not None and not expected_continuity_key:
+            return []
+        normalizer = getattr(self, "_normalize_photo_continuity_key", None)
         entries = []
         for item in raw[:12]:
             if not isinstance(item, dict):
                 continue
+            if user is not None:
+                item_continuity_key = _single_line(item.get("continuity_key"), 340)
+                if callable(normalizer):
+                    item_continuity_key = _single_line(normalizer(item_continuity_key), 340)
+                elif item_continuity_key.startswith("tool_photo_"):
+                    item_continuity_key = item_continuity_key[len("tool_photo_") :]
+                if not item_continuity_key or item_continuity_key != expected_continuity_key:
+                    continue
             ts = _safe_float(item.get("ts"), 0)
             kind = _single_line(item.get("kind"), 40)
             intent_kind = _single_line(item.get("intent_kind"), 40)

@@ -26,7 +26,7 @@ from .constants import (
     CREATIVE_STORY_BIBLE_TEMPLATE,
     CREATIVE_FALLBACK_CHUNKS,
 )
-from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _text_similarity
+from .helpers import _now_ts, _path_text, _safe_float, _safe_int, _single_line, _text_similarity
 
 DEFAULT_AI_DAILY_NEWS_SOURCE = "B站 AI早报|bilibili:285286947"
 
@@ -1356,7 +1356,7 @@ class CreativeMixin:
 
     @staticmethod
     def _creative_cover_file_exists(project: dict[str, Any]) -> bool:
-        path_text = _single_line(project.get("cover_path"), 500)
+        path_text = _path_text(project.get("cover_path"), 1000)
         if not path_text:
             return False
         try:
@@ -1636,7 +1636,7 @@ class CreativeMixin:
         )
 
     async def _store_creative_cover_image(self, project_id: str, image_path: str) -> str:
-        source_text = _single_line(image_path, 500)
+        source_text = _path_text(image_path, 1000)
         if not source_text:
             return ""
         try:
@@ -1718,13 +1718,13 @@ class CreativeMixin:
                 reference_getter = getattr(self, "_photo_persona_reference_image_for_kind_async", None)
                 if callable(reference_getter):
                     try:
-                        reference_image_path = _single_line(
+                        reference_image_path = _path_text(
                             await reference_getter(
                                 "portrait",
                                 allow_daily_outfit=False,
                                 selection_context=json.dumps(project_snapshot, ensure_ascii=False),
                             ),
-                            500,
+                            1000,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -1784,7 +1784,7 @@ class CreativeMixin:
                 project["cover_generation_backend"] = _single_line(backend, 80)
                 project["cover_generation_prompt"] = _single_line(prompt_text, 1800)
                 project["cover_generation_style"] = _single_line(style_label, 40)
-                project["cover_generation_reference_image"] = _single_line(reference_image_path, 500)
+                project["cover_generation_reference_image"] = _path_text(reference_image_path, 1000)
                 project["cover_generation_person_policy"] = (
                     "single_reference_character"
                     if reference_image_path

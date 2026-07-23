@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .helpers import _now_ts, _safe_int, _single_line
+from .helpers import _now_ts, _path_text, _safe_int, _single_line
 
 
 SCENE_CONTEXT_VERSION = 1
@@ -232,7 +232,7 @@ class SceneContextMixin:
         outfit_item = outfit_item if isinstance(outfit_item, dict) else {}
         outfit_profile = outfit_item.get("outfit_profile")
         outfit_profile = outfit_profile if isinstance(outfit_profile, dict) else {}
-        outfit_path = _single_line(outfit_item.get("path"), 500)
+        outfit_path = _path_text(outfit_item.get("path"), 1000)
         outfit_is_today = _single_line(outfit_item.get("date"), 20) == today
         outfit_available = False
         if outfit_is_today and outfit_path:
