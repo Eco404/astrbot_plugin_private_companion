@@ -87,6 +87,24 @@ FISH_AUDIO_S1_ALIAS_OVERRIDES = {
     "yawning": "soft tone",
     "break": "hesitating",
 }
+TTS_VISIBLE_EMOTION_CUES = frozenset(
+    str(item).strip().lower()
+    for item in (
+        set(FISH_AUDIO_S1_CUES)
+        | set(FISH_AUDIO_CUE_ALIASES)
+        | set(FISH_AUDIO_CUE_ALIASES.values())
+        | set(FISH_AUDIO_S1_ALIAS_OVERRIDES)
+        | set(FISH_AUDIO_S1_ALIAS_OVERRIDES.values())
+        | {
+            "happy", "sad", "angry", "calm", "excited", "surprised",
+            "nervous", "scared", "worried", "upset", "frustrated",
+            "embarrassed", "disgusted", "moved", "proud", "relaxed",
+            "grateful", "confident", "curious", "confused", "nostalgic",
+            "sleepy", "thoughtful", "yawning", "comforting",
+        }
+    )
+    if str(item).strip()
+)
 DEFAULT_AUTO_VOICE_PROMPT_MARKERS = (
     "随机日语语音模式",
     "日语语音",
@@ -777,8 +795,33 @@ class TtsEnhancementMixin:
         cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
+    @staticmethod
+    def _strip_visible_tts_emotion_cues(text: Any) -> str:
+        """Remove known synthesis cues while preserving ordinary bracketed text."""
+        source = str(text or "")
+
+        def strip_square(match: re.Match[str]) -> str:
+            label = re.sub(r"\s+", " ", str(match.group(1) or "").strip()).lower()
+            return "" if label in TTS_VISIBLE_EMOTION_CUES else match.group(0)
+
+        source = EMOTION_TAG_PATTERN.sub(strip_square, source)
+
+        def strip_parenthesized(match: re.Match[str]) -> str:
+            label = re.sub(r"\s+", " ", str(match.group(3) or "").strip()).lower()
+            if label not in TTS_VISIBLE_EMOTION_CUES:
+                return match.group(0)
+            return f"{match.group(1)}{match.group(2)}"
+
+        source = re.sub(
+            r"(^|[。！？.!?\n])(\s*)\(([^()\n]{1,40})\)",
+            strip_parenthesized,
+            source,
+        )
+        return source
+
     def _sanitize_tts_visible_text(self, text: Any, *, max_chars: int = 800) -> str:
         cleaned = self._strip_any_tts_markup(str(text or ""))
+        cleaned = self._strip_visible_tts_emotion_cues(cleaned)
         cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip()
         cleaned = re.sub(r"(?m)^\s*[>＞]\s*", "", cleaned).strip()
         previous = None
@@ -2231,6 +2274,7 @@ TTS 朗读文本：
                 continue
             original = str(getattr(comp, "text", "") or "")
             cleaned_control = _strip_nonstandard_chat_control_tags(original)
+            cleaned_control = self._strip_visible_tts_emotion_cues(cleaned_control)
             has_tts_markup = re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", cleaned_control, flags=re.IGNORECASE)
             if not has_tts_markup:
                 if cleaned_control != original:

@@ -251,7 +251,7 @@ class LlmToolActionsMixin:
             [
                 "- 默认 `send=true`；如果只想拿路径再决定，可传 `send=false`。",
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
-                f"- `caption` 会和图片一起作为可见消息发送。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
+                f"- `caption` 会和图片一起作为可见消息发送，只能填写用户应当直接看到的自然正文；不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
             ]
         )
@@ -273,6 +273,15 @@ class LlmToolActionsMixin:
             return False
         shorter, longer = sorted((caption, followup), key=len)
         return shorter in longer and len(shorter) / max(1, len(longer)) >= 0.45
+
+    def _sanitize_photo_tool_caption(self, value: Any, *, limit: int = 120) -> str:
+        """Keep synthesis and internal control cues out of visible image captions."""
+        cleaned = _strip_internal_message_blocks(str(value or ""))
+        cleaned = re.sub(r"&&[A-Za-z_][A-Za-z0-9_ -]{0,31}&&", "", cleaned)
+        cue_cleaner = getattr(self, "_strip_visible_tts_emotion_cues", None)
+        if callable(cue_cleaner):
+            cleaned = cue_cleaner(cleaned)
+        return _single_line(cleaned, max(1, int(limit or 120)))
 
     def _creative_work_tool_instruction(self) -> str:
         if not self.enabled:
@@ -1642,6 +1651,7 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "unavailable", "message": "当前没有可用生图后端，或已被负载/token 保护临时延后"}, ensure_ascii=False)
 
         content = _single_line(prompt or kwargs.get("text") or kwargs.get("description") or kwargs.get("prompt_text"), 900)
+        visible_caption = self._sanitize_photo_tool_caption(caption, limit=120)
         raw_kind = _single_line(kind or kwargs.get("workflow_kind") or kwargs.get("type"), 40).lower()
         if raw_kind in {"sticker", "emoji", "meme", "表情包", "贴纸"}:
             workflow_kind = "selfie"
@@ -1837,22 +1847,6 @@ class LlmToolActionsMixin:
         preset_text = _single_line(scene_preset or kwargs.get("preset") or kwargs.get("scene"), 80)
         if intent_kind == "sticker" and not preset_text:
             preset_text = "表情包场景"
-        if preset_text:
-            preset_lines = [preset_text]
-            preset_getter = getattr(self, "_photo_generation_scene_presets", None)
-            if callable(preset_getter):
-                try:
-                    presets = preset_getter()
-                    if isinstance(presets, dict):
-                        preset_detail = _single_line(presets.get(preset_text), 900)
-                        if preset_detail:
-                            preset_lines.append(preset_detail)
-                except Exception:
-                    pass
-            prompt_text = _single_line(
-                f"{prompt_text}\n\n【指定生图场景预设】\n" + "\n".join(preset_lines),
-                6500,
-            )
 
         event_umo = _single_line(getattr(event, "unified_msg_origin", ""), 240)
         session_key = event_umo or "tool_photo"
@@ -1875,6 +1869,7 @@ class LlmToolActionsMixin:
             "continuity_key": continuity_key,
             "reference_image_path": reference_path,
             "image_size": _single_line(image_size or kwargs.get("size"), 40),
+            "requested_scene_preset": preset_text,
         }
         try:
             generation_output = await asyncio.wait_for(
@@ -1949,7 +1944,7 @@ class LlmToolActionsMixin:
                 trigger="llm_tool",
                 intent_kind=intent_kind,
                 sent=False,
-                caption=caption,
+                caption=visible_caption,
                 scene_preset=preset_text,
                 tool_name="pc_generate_photo",
             )
@@ -1967,7 +1962,7 @@ class LlmToolActionsMixin:
         sent = False
         delivery: dict[str, Any] = {}
         if ok and send_image:
-            message = _single_line(caption, 120) or ("" if intent_kind == "sticker" else "生成好了。")
+            message = visible_caption or ("" if intent_kind == "sticker" else "生成好了。")
             try:
                 delivery = await self._deliver_generated_image_to_event(
                     event,
@@ -1999,7 +1994,7 @@ class LlmToolActionsMixin:
                 trigger="llm_tool",
                 intent_kind=intent_kind,
                 sent=sent,
-                caption=caption,
+                caption=visible_caption,
                 scene_preset=preset_text,
                 tool_name="pc_generate_photo",
             )
@@ -2235,7 +2230,7 @@ class LlmToolActionsMixin:
 
         sent = False
         delivery: dict[str, Any] = {}
-        visible_caption = _single_line(caption, 120)
+        visible_caption = self._sanitize_photo_tool_caption(caption, limit=120)
         if send_image:
             try:
                 delivery = await self._deliver_generated_image_to_event(

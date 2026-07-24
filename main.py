@@ -1438,6 +1438,7 @@ class PrivateCompanionPlugin(
         self.max_proactive_plan_lag_minutes = self._cfg_int(c, "max_proactive_plan_lag_minutes", 180, 5, 1440)
         self._recent_inbound_message_debounce: dict[str, float] = {}
         self._semantic_message_buffers: dict[str, dict[str, Any]] = {}
+        self._private_image_vision_handoffs: dict[Any, dict[str, Any]] = {}
         self.enable_detail_enhancement = self._cfg_bool(c, "enable_detail_enhancement", False)
         self.detail_enhancement_provider_id = self._cfg_str(c, "DETAIL_ENHANCEMENT_PROVIDER_ID", "")
         self.narration_provider_id = self._cfg_str(c, "NARRATION_PROVIDER_ID", "")
@@ -3492,6 +3493,47 @@ class PrivateCompanionPlugin(
             source="发送前检查",
             reason="发送前结果为空",
             level="info",
+        )
+
+    @staticmethod
+    def _photo_tool_followup_chain_has_visible_content(chain: list[Any]) -> bool:
+        for component in chain if isinstance(chain, list) else []:
+            if not isinstance(component, Plain):
+                return True
+            text = str(getattr(component, "text", "") or "")
+            visible = "".join(
+                char
+                for char in text
+                if not char.isspace() and not unicodedata.category(char).startswith("C")
+            )
+            if visible:
+                return True
+        return False
+
+    @filter.on_decorating_result(priority=-19000)
+    async def suppress_empty_photo_tool_followup_before_send(self, event: AstrMessageEvent, *args, **kwargs):
+        """Stop adapter-visible placeholder glyphs after a tool already sent the photo."""
+        if self is None or not self.enabled:
+            return
+        if not bool(getattr(event, "_private_companion_photo_tool_sent", False)):
+            return
+        result = event.get_result()
+        if result is None:
+            return
+        chain = list(getattr(result, "chain", []) or [])
+        if self._photo_tool_followup_chain_has_visible_content(chain):
+            return
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+        logger.info(
+            "[PrivateCompanion] 已阻止图片工具成功发送后的空白占位消息: session=%s components=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            len(chain),
         )
 
     @filter.on_decorating_result()
@@ -9102,6 +9144,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if private_image_enhancement_enabled_for_request
             else {}
         )
+        buffered_image_from_handoff = bool(
+            isinstance(buffered_image_context, dict)
+            and buffered_image_context.get("from_handoff")
+        )
         buffered_images = (
             [str(item) for item in buffered_image_context.get("images", []) if str(item or "").strip()]
             if isinstance(buffered_image_context, dict)
@@ -9146,7 +9192,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and buffered_image_mode != "no_vision"
             and (
                 buffered_images_include_gif
-                or (buffered_image_mode == "direct" and not self._event_main_provider_supports_image(event))
+                or (
+                    buffered_image_mode == "direct"
+                    and (
+                        buffered_image_from_handoff
+                        or not self._event_main_provider_supports_image(event)
+                    )
+                )
             )
         ):
             buffered_image_vision = _single_line(
@@ -9245,7 +9297,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 buffered_image_vision = contextual_vision
         if buffered_images:
             direct_image_mounted = False
-            if buffered_image_mode == "direct" and self._event_main_provider_supports_image(event) and not buffered_images_include_gif:
+            if (
+                not buffered_image_from_handoff
+                and buffered_image_mode == "direct"
+                and self._event_main_provider_supports_image(event)
+                and not buffered_images_include_gif
+            ):
                 image_refs: list[str] = []
                 for image_ref in buffered_images[:5]:
                     for request_ref in self._private_image_sources_for_astrbot_request([image_ref]):

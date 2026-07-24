@@ -1396,7 +1396,13 @@ class PrivateImageMixin:
         marker = getattr(self, "_mark_smart_imagechat_skip_proactive_emoji", None)
         if callable(marker):
             marker(event)
-        chain = self._build_outbound_chain(caption, image_path)
+        caption_sanitizer = getattr(self, "_sanitize_photo_tool_caption", None)
+        visible_caption = (
+            caption_sanitizer(caption, limit=120)
+            if callable(caption_sanitizer)
+            else _single_line(_strip_internal_message_blocks(caption), 120)
+        )
+        chain = self._build_outbound_chain(visible_caption, image_path)
 
         async def send_to_current_event() -> tuple[bool, str]:
             try:
@@ -3578,6 +3584,69 @@ class PrivateImageMixin:
             logger.info("[PrivateCompanion] 私聊单图后台视觉任务结果读取失败: %s", _single_line(exc, 120))
             return ""
 
+    def _private_image_vision_handoff_ttl_seconds(self) -> float:
+        debounce = self._message_debounce_seconds("image")
+        vision_wait = self._private_image_vision_wait_budget_seconds()
+        try:
+            provider_timeout = self._private_image_provider_timeout_seconds()
+        except Exception:
+            provider_timeout = 12.0
+        return max(30.0, min(180.0, debounce + max(vision_wait, provider_timeout) + 15.0))
+
+    def _private_image_vision_handoff_session(self, event: AstrMessageEvent) -> str:
+        return _single_line(getattr(event, "unified_msg_origin", ""), 500)
+
+    def _cleanup_private_image_vision_handoffs(self, *, now: float | None = None) -> dict[Any, dict[str, Any]]:
+        handoffs = getattr(self, "_private_image_vision_handoffs", None)
+        if not isinstance(handoffs, dict):
+            handoffs = {}
+            self._private_image_vision_handoffs = handoffs
+        current_ts = _now_ts() if now is None else float(now)
+        for handoff_key, handoff in list(handoffs.items()):
+            if not isinstance(handoff, dict) or _safe_float(handoff.get("expires_ts"), 0.0) <= current_ts:
+                handoffs.pop(handoff_key, None)
+        if len(handoffs) > 128:
+            oldest = sorted(
+                handoffs.items(),
+                key=lambda item: _safe_float(item[1].get("created_ts"), 0.0),
+            )[: len(handoffs) - 96]
+            for handoff_key, _handoff in oldest:
+                handoffs.pop(handoff_key, None)
+        return handoffs
+
+    def _remember_private_image_vision_handoff(
+        self,
+        key: Any,
+        event: AstrMessageEvent,
+        buffer: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _now_ts()
+        handoffs = self._cleanup_private_image_vision_handoffs(now=now)
+        images = [str(item) for item in (buffer.get("images") or [])[:5] if str(item or "").strip()]
+        image_limit = self._private_image_vision_text_limit(len(images))
+        vision_task = buffer.get("vision_task")
+        vision_text = _single_line(buffer.get("vision_text"), image_limit)
+        if not vision_text:
+            vision_text = _single_line(
+                self._completed_private_image_vision_task_text(vision_task),
+                image_limit,
+            )
+        handoff = {
+            "created_ts": now,
+            "expires_ts": now + self._private_image_vision_handoff_ttl_seconds(),
+            "session": self._private_image_vision_handoff_session(event),
+            "images": list(images),
+            "image_mode": _single_line(buffer.get("image_mode"), 20),
+            "vision_task": vision_task,
+            "vision_text": vision_text,
+            "delayed_dispatch_started_ts": now,
+            "delayed_dispatch_finished_ts": 0.0,
+            "delayed_reply_sent": False,
+            "delayed_reply_sent_ts": 0.0,
+        }
+        handoffs[key] = handoff
+        return handoff
+
     def _normalize_private_image_reply_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
         if not cleaned:
@@ -4139,21 +4208,64 @@ class PrivateImageMixin:
         if not sender_id:
             return {}
         key = self._semantic_buffer_key(f"private:{sender_id}", sender_id)
+        now = _now_ts()
+        handoffs = self._cleanup_private_image_vision_handoffs(now=now)
         buffers = getattr(self, "_semantic_message_buffers", None)
-        if not isinstance(buffers, dict):
+        buffer = buffers.get(key) if isinstance(buffers, dict) else None
+        max_live_age = max(30.0, self._message_debounce_seconds("image") + 30.0)
+        live_updated_ts = (
+            _safe_float(buffer.get("updated_ts"), buffer.get("first_ts"), 0)
+            if isinstance(buffer, dict)
+            else 0.0
+        )
+        if isinstance(buffer, dict) and now - live_updated_ts <= max_live_age:
+            handoffs.pop(key, None)
+            images = buffer.pop("images", [])
+            image_limit = self._private_image_vision_text_limit(len(images))
+            return {
+                "images": [str(item) for item in images[:5] if str(item or "").strip()],
+                "image_mode": _single_line(buffer.pop("image_mode", ""), 20),
+                "vision_task": buffer.pop("vision_task", None),
+                "vision_text": _single_line(buffer.pop("vision_text", ""), image_limit),
+                "from_handoff": False,
+            }
+
+        handoff = handoffs.get(key)
+        if not isinstance(handoff, dict):
             return {}
-        buffer = buffers.get(key)
-        if not isinstance(buffer, dict):
+        stored_session = _single_line(handoff.get("session"), 500)
+        current_session = self._private_image_vision_handoff_session(event)
+        if stored_session != current_session:
+            logger.info(
+                "[PrivateCompanion] 私聊图片视觉交接会话不匹配,保留给原会话: sender=%s stored=%s current=%s",
+                sender_id,
+                stored_session,
+                current_session or "-",
+            )
             return {}
-        if _now_ts() - _safe_float(buffer.get("updated_ts"), buffer.get("first_ts"), 0) > max(30.0, self._message_debounce_seconds("image") + 30.0):
-            return {}
-        images = buffer.pop("images", [])
+        handoffs.pop(key, None)
+        images = handoff.get("images") if isinstance(handoff.get("images"), list) else []
         image_limit = self._private_image_vision_text_limit(len(images))
+        vision_task = handoff.get("vision_task")
+        vision_text = _single_line(handoff.get("vision_text"), image_limit)
+        if not vision_text:
+            vision_text = _single_line(
+                self._completed_private_image_vision_task_text(vision_task),
+                image_limit,
+            )
+        logger.info(
+            "[PrivateCompanion] 私聊补充文字已领取延迟图片视觉交接: sender=%s images=%s has_vision=%s pending=%s",
+            sender_id,
+            len(images),
+            bool(vision_text),
+            isinstance(vision_task, asyncio.Task) and not vision_task.done(),
+        )
         return {
             "images": [str(item) for item in images[:5] if str(item or "").strip()],
-            "image_mode": _single_line(buffer.pop("image_mode", ""), 20),
-            "vision_task": buffer.pop("vision_task", None),
-            "vision_text": _single_line(buffer.pop("vision_text", ""), image_limit),
+            "image_mode": _single_line(handoff.get("image_mode"), 20),
+            "vision_task": vision_task,
+            "vision_text": vision_text,
+            "from_handoff": True,
         }
 
     def _private_image_context_user_message(self, *, vision_text: str, image_count: int = 1) -> str:
@@ -4836,6 +4948,8 @@ class PrivateImageMixin:
                 intent=intent_line,
             )
             sent_reply = await self._send_private_image_reply_text(event, reply)
+            buffer["delayed_reply_sent"] = bool(sent_reply)
+            buffer["delayed_reply_sent_ts"] = _now_ts() if sent_reply else 0.0
             if sent_reply:
                 await self._archive_private_image_turn_context(
                     event,
@@ -4876,12 +4990,35 @@ class PrivateImageMixin:
         if has_followup:
             logger.info("[PrivateCompanion] 私聊单图已由补充消息接管: user=%s", user_id)
             return
-        buffers.pop(key, None)
         original_event = buffer.get("original_event")
+        delayed_buffer = dict(buffer)
+        delayed_buffer["images"] = list(buffer.get("images") or [])
+        delayed_buffer["messages"] = list(messages)
+        handoff = (
+            self._remember_private_image_vision_handoff(key, original_event, delayed_buffer)
+            if isinstance(original_event, AstrMessageEvent)
+            else None
+        )
+        buffers.pop(key, None)
         if isinstance(original_event, AstrMessageEvent):
-            await self._send_delayed_private_image_only_event(original_event, user_id, buffer)
+            try:
+                await self._send_delayed_private_image_only_event(original_event, user_id, delayed_buffer)
+            finally:
+                if isinstance(handoff, dict):
+                    handoff["delayed_dispatch_finished_ts"] = _now_ts()
+                    handoff["delayed_reply_sent"] = bool(delayed_buffer.get("delayed_reply_sent"))
+                    handoff["delayed_reply_sent_ts"] = _safe_float(
+                        delayed_buffer.get("delayed_reply_sent_ts"),
+                        0.0,
+                    )
+                    completed_vision = self._completed_private_image_vision_task_text(handoff.get("vision_task"))
+                    if completed_vision:
+                        handoff["vision_text"] = _single_line(
+                            completed_vision,
+                            self._private_image_vision_text_limit(len(handoff.get("images") or [])),
+                        )
             return
-        vision_task = buffer.get("vision_task")
+        vision_task = delayed_buffer.get("vision_task")
         if isinstance(vision_task, asyncio.Task) and not vision_task.done():
             vision_task.cancel()
         logger.info("[PrivateCompanion] 私聊单图等待补充后无文字指示,但原事件不可用: user=%s", user_id)

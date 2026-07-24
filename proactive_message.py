@@ -2394,6 +2394,9 @@ class ProactiveMessageMixin:
         )
         if "主动生成工具边界" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{tool_boundary_hint}"
+        visible_format_hint = self._proactive_visible_text_format_hint(action)
+        if visible_format_hint and "主动可见正文格式" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{visible_format_hint}"
         if "时间锚定" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{temporal_grounding_hint}"
         if troubleshooting_hint and "本轮真实开口由头" not in prompt:
@@ -2481,6 +2484,16 @@ class ProactiveMessageMixin:
         if identity_guard:
             prompt = f"{prompt.rstrip()}\n\n{identity_guard}"
         return prompt.strip()
+
+    @staticmethod
+    def _proactive_visible_text_format_hint(action: str) -> str:
+        action_name = _single_line(action, 80) or "message"
+        return (
+            "【主动可见正文格式】\n"
+            f"- 当前动作：{action_name}。这里生成的是最终显示在聊天里的普通正文；图片动作写可见附言，语音动作的朗读内容和音频会由独立链路生成。\n"
+            "- 人格中的 TTS 专用规则只约束独立语音脚本，不约束这里的可见正文。不要输出 <tts>/<pc_tts>、[happy]/[sad] 等情绪控制词、语音专用日语或外语朗读稿、音标，也不要把语音内容再作为文字重复发送。\n"
+            "- 可见正文继续遵守人格平时的聊天语言和口吻；只有当人格本身明确要求日常可见聊天使用某种语言时，才使用该语言，不能仅凭 TTS 语种要求切换。"
+        )
 
     def _format_proactive_generation_intent_hint(
         self,
@@ -6909,6 +6922,9 @@ Output:
         placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
         if callable(placeholder_cleaner):
             source = placeholder_cleaner(source)
+        emotion_cleaner = getattr(self, "_strip_visible_tts_emotion_cues", None)
+        if callable(emotion_cleaner):
+            source = emotion_cleaner(source)
         normalizer = getattr(self, "_normalize_tts_tags", None)
         if callable(normalizer) and re.search(r"</?t{2,}s\b", source, flags=re.IGNORECASE):
             try:
@@ -7970,6 +7986,7 @@ Output:
         prompt_sections: dict[str, str] | None = None,
         conflicts: list[str] | None = None,
         removed_conflicts: list[str] | None = None,
+        requested_scene_preset: str = "",
     ) -> None:
         try:
             reference_candidate = reference_candidate or {}
@@ -7996,6 +8013,8 @@ Output:
                 "image_size": _single_line(image_size, 40),
                 "elapsed_ms": int(max(0, elapsed_ms or 0)),
                 "presets": [_single_line(name, 40) for name in (presets or []) if _single_line(name, 40)][:6],
+                "requested_scene_preset": _single_line(requested_scene_preset, 80),
+                "scene_preset": _single_line(requested_scene_preset, 80),
                 "wardrobe_mode": _single_line(wardrobe.mode, 40),
                 "wardrobe_source": _single_line(wardrobe.source, 40),
                 "wardrobe_category": _single_line(wardrobe.category, 40),
@@ -8042,6 +8061,7 @@ Output:
         final_prompt: str,
         conflicts: list[str],
         removed_conflicts: list[str],
+        requested_scene_preset: str = "",
     ) -> tuple[str, str]:
         prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
         try:
@@ -8077,6 +8097,7 @@ Output:
                     "trace": _single_line(trace_id, 40),
                     "session": _single_line(session_key, 340),
                     "workflow_kind": _single_line(workflow_kind, 40),
+                    "requested_scene_preset": _single_line(requested_scene_preset, 80),
                     "prompt_format": self._photo_generation_prompt_format_mode(),
                     "base_prompt": base_prompt,
                     "scene_context_before": scene_context_before,
@@ -8851,6 +8872,7 @@ Output:
         prompt_text: str,
         reference: dict[str, Any] | None,
         scene_snapshot: str = "",
+        requested_scene_preset: str = "",
     ) -> PhotoWardrobeDecision:
         normalized_kind = str(workflow_kind or "").strip().lower()
         reference = self._normalize_photo_reference_candidate_metadata(reference or {}) if reference else {}
@@ -8875,11 +8897,47 @@ Output:
         explicit_category = intent.target_category
         reference_category = _single_line(reference.get("outfit_category"), 40).lower()
         reference_locks = bool(reference.get("outfit_lock_default")) and "outfit" in roles
+        requested_preset = _single_line(requested_scene_preset, 80)
+        preset_category = self._photo_generation_scene_preset_wardrobe_category(requested_preset)
         exclusion_instruction = (
             f"Respect the current request's explicit wardrobe exclusions: {intent.exclusion_text}."
             if intent.exclusion_text
             else ""
         )
+        if preset_category:
+            if reference_category and reference_category != preset_category:
+                effective_roles = tuple(role for role in roles if role != "outfit")
+            category_label = self._photo_outfit_category_label_en(preset_category)
+            effective_exclusions = tuple(
+                category for category in intent.excluded_categories if category != preset_category
+            )
+            return PhotoWardrobeDecision(
+                mode="explicit_preset",
+                source="requested_scene_preset",
+                category=preset_category,
+                lock_outfit=True,
+                remove_daily_outfit_context=preset_category != "daily_outfit",
+                preset_name=requested_preset,
+                reference_image_path=reference_path,
+                reference_id=reference_id,
+                reference_kind=reference_kind,
+                reference_roles=roles,
+                effective_reference_roles=effective_roles,
+                positive_instruction=(
+                    f"The explicitly requested scene preset '{requested_preset}' is an authoritative wardrobe request. "
+                    f"Render exactly one coherent {category_label} outfit; use a matching outfit reference when available, "
+                    "and use an incompatible reference only for identity and other compatible details."
+                ),
+                negative_instruction=(
+                    "Do not restore clothing from today's outfit, schedule context, an older photo, or an incompatible reference. "
+                    "Do not reinterpret the requested preset as a negative prompt or an excluded wardrobe category."
+                    if preset_category != "daily_outfit"
+                    else "Do not replace today's requested outfit with an unrelated costume or wardrobe."
+                ),
+                reason="structured scene preset explicitly controls the wardrobe",
+                excluded_categories=effective_exclusions,
+                requested_outfit_text=requested_preset,
+            )
         if explicit_category:
             if explicit_category == "custom_outfit" or (reference_category and reference_category != explicit_category):
                 effective_roles = tuple(role for role in roles if role != "outfit")
@@ -9068,8 +9126,12 @@ Output:
         workflow_kind: str,
         prompt_text: str,
         wardrobe: PhotoWardrobeDecision,
+        requested_scene_preset: str = "",
     ) -> list[str]:
         presets = self._photo_generation_scene_presets()
+        requested_preset = _single_line(requested_scene_preset, 80)
+        if requested_preset and requested_preset in presets:
+            return [requested_preset]
         if wardrobe.preset_name and wardrobe.preset_name in presets:
             return [wardrobe.preset_name]
         return self._photo_generation_preset_names_for_prompt(
@@ -9673,6 +9735,22 @@ Output:
         presets.update(self._parse_photo_generation_scene_presets(getattr(self, "photo_generation_scene_presets", "")))
         return presets
 
+    def _photo_generation_scene_preset_wardrobe_category(self, preset_name: Any) -> str:
+        name = _single_line(preset_name, 80)
+        if not name:
+            return ""
+        exact = {
+            "COS自拍": "cosplay",
+            "日常穿搭": "daily_outfit",
+            "居家睡衣": "sleepwear",
+            "居家服": "homewear",
+            "校服人像": "school_uniform",
+            "礼服人像": "formalwear",
+            "泳装人像": "swimwear",
+            "运动服人像": "sportswear",
+        }
+        return exact.get(name) or self._photo_outfit_category_from_text(name)
+
     def _photo_generation_preset_names_for_prompt(
         self,
         workflow_kind: str,
@@ -9788,6 +9866,7 @@ Output:
         reference_image_path: str = "",
         image_size: str = "",
         allow_daily_outfit_reference: bool = True,
+        requested_scene_preset: str = "",
     ) -> tuple[str, str, str]:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
@@ -9797,6 +9876,10 @@ Output:
             original_prompt_text
         )
         reference_image_path = _path_text(reference_image_path, 1000)
+        requested_scene_preset = _single_line(requested_scene_preset, 80)
+        requested_preset_category = self._photo_generation_scene_preset_wardrobe_category(
+            requested_scene_preset
+        )
         normalized_kind = str(workflow_kind or "").strip().lower()
         scene_context_before = ""
         if normalized_kind in {"selfie", "portrait", "自拍", "人像"} and allow_daily_outfit_reference:
@@ -9807,6 +9890,12 @@ Output:
                 for part in (
                     f"Current schedule/location context: {scene_context_before}" if scene_context_before else "",
                     f"Requested final image: {current_user_request or base_prompt}",
+                    (
+                        f"Structured requested scene preset: {requested_scene_preset}; "
+                        f"authoritative wardrobe category: {requested_preset_category or 'none'}"
+                        if requested_scene_preset
+                        else ""
+                    ),
                     f"Explicit wardrobe exclusions: {current_user_exclusions}" if current_user_exclusions else "",
                 )
                 if part
@@ -9827,6 +9916,7 @@ Output:
                 allow_daily_outfit=allow_daily_outfit_reference,
                 selection_context=selection_context,
                 continuity_key=continuity_key,
+                requested_scene_preset=requested_scene_preset,
             )
             reference_image_path = _path_text(reference_candidate.get("path"), 1000)
 
@@ -9835,9 +9925,47 @@ Output:
             prompt_text=original_prompt_text or base_prompt,
             reference=reference_candidate,
             scene_snapshot=scene_context_before,
+            requested_scene_preset=requested_scene_preset,
         )
+        consistency_repairs: list[str] = []
+        if requested_preset_category and (
+            wardrobe.category != requested_preset_category
+            or not wardrobe.lock_outfit
+            or wardrobe.remove_daily_outfit_context != (requested_preset_category != "daily_outfit")
+        ):
+            reference_roles = tuple(reference_candidate.get("reference_roles") or ())
+            reference_category = _single_line(reference_candidate.get("outfit_category"), 40).lower()
+            effective_roles = (
+                tuple(role for role in reference_roles if role != "outfit")
+                if reference_category and reference_category != requested_preset_category
+                else reference_roles
+            )
+            wardrobe = PhotoWardrobeDecision(
+                mode="explicit_preset",
+                source="requested_scene_preset_consistency",
+                category=requested_preset_category,
+                lock_outfit=True,
+                remove_daily_outfit_context=requested_preset_category != "daily_outfit",
+                preset_name=requested_scene_preset,
+                reference_image_path=reference_image_path,
+                reference_id=_single_line(reference_candidate.get("id"), 60),
+                reference_kind=_single_line(reference_candidate.get("kind"), 40),
+                reference_roles=reference_roles,
+                effective_reference_roles=effective_roles,
+                positive_instruction=(
+                    f"The structured scene preset '{requested_scene_preset}' is authoritative. "
+                    f"Render exactly one coherent {self._photo_outfit_category_label_en(requested_preset_category)} outfit."
+                ),
+                negative_instruction=(
+                    "Do not restore today's outfit or reinterpret the requested preset as negative content."
+                ),
+                reason="final structured scene-preset consistency repair",
+                requested_outfit_text=requested_scene_preset,
+            )
+            consistency_repairs.append("requested_scene_preset_wardrobe_consistency")
         scene_context_after = scene_context_before
         removed_conflicts: list[str] = []
+        removed_conflicts.extend(consistency_repairs)
         if wardrobe.remove_daily_outfit_context and self._photo_generation_has_daily_outfit_context(scene_context_after):
             cleaned_scene = self._photo_generation_scene_hint_without_daily_outfit_details(scene_context_after)
             if cleaned_scene != scene_context_after:
@@ -9853,7 +9981,19 @@ Output:
             workflow_kind,
             base_prompt,
             wardrobe,
+            requested_scene_preset=requested_scene_preset,
         )
+        if requested_scene_preset in self._photo_generation_scene_presets() and preset_names != [requested_scene_preset]:
+            preset_names = [requested_scene_preset]
+            removed_conflicts.append("requested_scene_preset_name_consistency")
+        if consistency_repairs or "requested_scene_preset_name_consistency" in removed_conflicts:
+            logger.warning(
+                "[PrivateCompanion] 指定场景预设一致性已自动修正: trace=%s requested=%s wardrobe=%s presets=%s",
+                trace_id,
+                requested_scene_preset,
+                wardrobe.category or "none",
+                ",".join(preset_names) or "-",
+            )
         preset_section, preset_names = self._apply_photo_generation_scene_presets(
             "",
             workflow_kind,
@@ -9896,6 +10036,7 @@ Output:
             final_prompt=prompt_text,
             conflicts=conflicts,
             removed_conflicts=removed_conflicts,
+            requested_scene_preset=requested_scene_preset,
         )
         if scene_context_after:
             logger.info(
@@ -9992,6 +10133,7 @@ Output:
                 prompt_sections=prompt_sections,
                 conflicts=conflicts,
                 removed_conflicts=removed_conflicts,
+                requested_scene_preset=requested_scene_preset,
             )
             logger.info(
                 "[PrivateCompanion] 生图结束: trace=%s ok=%s backend=%s elapsed=%sms reference_used=%s note=%s %s",
@@ -10808,7 +10950,13 @@ Output:
         return candidates
 
     @classmethod
-    def _photo_reference_candidate_score(cls, candidate: dict[str, Any], context_text: str) -> float:
+    def _photo_reference_candidate_score(
+        cls,
+        candidate: dict[str, Any],
+        context_text: str,
+        *,
+        requested_outfit_category: str = "",
+    ) -> float:
         context = re.sub(r"\s+", "", str(context_text or "")).lower()
         note = re.sub(r"\s+", "", str(candidate.get("note") or "")).lower()
         intent = cls._photo_generation_wardrobe_intent(context_text)
@@ -10830,7 +10978,7 @@ Output:
             elif context_hit and note_hit:
                 score += 12.0
         candidate_category = str(candidate.get("outfit_category") or "").strip().lower()
-        requested_category = intent.target_category
+        requested_category = _single_line(requested_outfit_category, 40).lower() or intent.target_category
         excluded_categories = set(intent.excluded_categories)
         if candidate_category and candidate_category in excluded_categories:
             score -= 40.0
@@ -10868,6 +11016,7 @@ Output:
         allow_daily_outfit: bool = True,
         selection_context: str = "",
         continuity_key: str = "",
+        requested_scene_preset: str = "",
     ) -> dict[str, Any]:
         if not bool(getattr(self, "enable_photo_reference_image", False)):
             return {}
@@ -10886,9 +11035,22 @@ Output:
         if not candidates:
             return {}
         wardrobe_intent = self._photo_generation_wardrobe_intent(selection_context)
-        excluded_categories = set(wardrobe_intent.excluded_categories)
+        structured_requested_category = self._photo_generation_scene_preset_wardrobe_category(
+            requested_scene_preset
+        )
+        requested_category = structured_requested_category or wardrobe_intent.target_category
+        excluded_categories = set(wardrobe_intent.excluded_categories) - (
+            {structured_requested_category} if structured_requested_category else set()
+        )
         scored_candidates = [
-            (item, self._photo_reference_candidate_score(item, selection_context))
+            (
+                item,
+                self._photo_reference_candidate_score(
+                    item,
+                    selection_context,
+                    requested_outfit_category=requested_category,
+                ),
+            )
             for item in candidates
         ]
         normal_scored = [
@@ -10896,8 +11058,22 @@ Output:
             for pair in scored_candidates
             if pair[0].get("kind") != "recent_sent_photo"
             and str(pair[0].get("outfit_category") or "").strip().lower() not in excluded_categories
+            and (
+                not structured_requested_category
+                or not str(pair[0].get("outfit_category") or "").strip().lower()
+                or str(pair[0].get("outfit_category") or "").strip().lower() == structured_requested_category
+            )
         ]
         fallback = max(normal_scored, key=lambda pair: pair[1])[0] if normal_scored else None
+        structured_exact_fallback = next(
+            (
+                item
+                for item, _score in sorted(scored_candidates, key=lambda pair: pair[1], reverse=True)
+                if structured_requested_category
+                and str(item.get("outfit_category") or "").strip().lower() == structured_requested_category
+            ),
+            None,
+        )
         selected = fallback
         selection_source = "rule_fallback"
         selection_reason = "model_not_attempted"
@@ -10927,9 +11103,16 @@ Output:
                 for index, item in enumerate(candidates, start=1)
             )
             none_option = "\n0. 不使用这些候选参考图，按当前要求生成全新画面"
+            structured_preset_rule = (
+                f"结构化指定场景预设为“{_single_line(requested_scene_preset, 80)}”，对应服装类别={structured_requested_category}。"
+                "这是明确的最终画面要求；存在同类别服装参考图时应优先选择，不要选择其他锁定服装类别。"
+                if requested_scene_preset and structured_requested_category
+                else ""
+            )
             prompt = f"""
 你在为角色生图选择一张人物参考图。结合最终画面需求中的日程、位置、当前场景和服装需求，按管理员给每张图的用途注释判断。
 优先选择用途更具体且与当前场景兼容的参考图；只有没有更具体的场景或服装参考时，才选择基础人物身份图。
+{structured_preset_rule}
 明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
 当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。
 不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
@@ -10948,9 +11131,13 @@ Output:
                 match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", model_reply)
                 choice = int(match.group(1)) if match else -1
                 if match and choice == 0:
-                    selected = None
-                    selection_source = "model"
-                    selection_reason = "fresh_image_requested"
+                    selected = structured_exact_fallback
+                    selection_source = "semantic_preset" if structured_exact_fallback else "model"
+                    selection_reason = (
+                        "matching_structured_preset_reference_preferred"
+                        if structured_exact_fallback
+                        else "fresh_image_requested"
+                    )
                 elif match and 1 <= choice <= len(candidates):
                     proposed = candidates[choice - 1]
                     proposed_category = str(proposed.get("outfit_category") or "").strip().lower()
@@ -10958,6 +11145,18 @@ Output:
                         selected = None
                         selection_source = "semantic_exclusion"
                         selection_reason = "model_selected_explicitly_excluded_outfit"
+                    elif (
+                        structured_requested_category
+                        and proposed_category
+                        and proposed_category != structured_requested_category
+                    ):
+                        selected = fallback
+                        selection_source = "semantic_preset"
+                        selection_reason = "model_selected_incompatible_preset_outfit"
+                    elif structured_exact_fallback and not proposed_category:
+                        selected = structured_exact_fallback
+                        selection_source = "semantic_preset"
+                        selection_reason = "matching_structured_preset_reference_preferred_over_identity_only"
                     else:
                         selected = proposed
                         selection_source = "model"
@@ -15399,6 +15598,9 @@ Output:
         cleaned = re.sub(r"<[^>\n]{0,200}>", "", cleaned)
         cleaned = cleaned.replace("[图片]", "").replace("【图片】", "")
         cleaned = cleaned.replace("（图片已送达）", "").replace("(图片已送达)", "")
+        emotion_cleaner = getattr(self, "_strip_visible_tts_emotion_cues", None)
+        if callable(emotion_cleaner):
+            cleaned = emotion_cleaner(cleaned)
         cleaned = self._strip_internal_identity_anchors(cleaned)
         cleaned = re.sub(r"^```(?:text)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
