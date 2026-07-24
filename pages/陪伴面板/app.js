@@ -2009,7 +2009,7 @@ const configDescriptions = {
   daily_plan_prompt: "高级设置。留空使用内置日程提示词；自定义内容必须继续要求模型输出包含 schedule 数组的 JSON。",
   enable_health_state: "开启后健康/不适状态视为可用，拟人状态可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
   enable_hunger_state: "开启后饥饿/胃口状态视为可用，拟人状态可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
-  enable_qq_presence_sync: "开启后，日程细化会通过 OneBot 的 set_online_status 尝试同步在线/忙碌等基础 QQ 状态；不包含自定义短状态。离开、隐身、请勿打扰会自动降级为在线。",
+  enable_qq_presence_sync: "开启后，日程细化会通过 OneBot 的 set_online_status 尝试同步在线/忙碌等基础 QQ 状态；不包含自定义短状态。每次只提交一次标准请求，SnowLuma 的成功异常会按成功收口，真实失败一小时内不会重复请求。",
   enable_qq_custom_presence_sync: "默认关闭。开启后才会尝试同步“专注中/休息中”等 QQ 自定义短状态；这依赖协议端支持非标准 OneBot 扩展。为避免 NapCat 兼容问题，插件不会调用 set_custom_online_status。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",

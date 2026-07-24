@@ -6212,6 +6212,13 @@ Output:
                     return False
         return True
 
+    @staticmethod
+    def _onebot_action_reported_success(action: str, result_or_error: Any) -> bool:
+        if str(action or "").strip().lower() != "set_online_status":
+            return False
+        text = _single_line(result_or_error, 500).lower()
+        return "set status success" in text or "set online status success" in text
+
     def _delivery_outcome_is_uncertain(self, error: Any) -> bool:
         if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
             return True
@@ -6271,42 +6278,58 @@ Output:
                 try:
                     result = func(action, params)
                 except Exception as exc:
+                    if self._onebot_action_reported_success(action, exc):
+                        return True, "协议端已设置状态"
                     if self._is_onebot_event_checker_send_rejection(exc):
                         return False, self._onebot_event_checker_rejection_summary()
                     if at_most_once and self._delivery_outcome_is_uncertain(exc):
                         self._log_uncertain_onebot_submission(action, exc)
                         return True, "回执不确定，已停止立即重试"
                     last_error = self._format_send_exception(exc)
+                    if at_most_once:
+                        return False, last_error
                     continue
             except Exception as exc:
+                if self._onebot_action_reported_success(action, exc):
+                    return True, "协议端已设置状态"
                 if self._is_onebot_event_checker_send_rejection(exc):
                     return False, self._onebot_event_checker_rejection_summary()
                 if at_most_once and self._delivery_outcome_is_uncertain(exc):
                     self._log_uncertain_onebot_submission(action, exc)
                     return True, "回执不确定，已停止立即重试"
                 last_error = self._format_send_exception(exc)
+                if at_most_once:
+                    return False, last_error
                 continue
             try:
                 if hasattr(result, "__await__"):
                     result = await result
             except Exception as exc:
+                if self._onebot_action_reported_success(action, exc):
+                    return True, "协议端已设置状态"
                 if self._is_onebot_event_checker_send_rejection(exc):
                     return False, self._onebot_event_checker_rejection_summary()
                 if at_most_once and self._delivery_outcome_is_uncertain(exc):
                     self._log_uncertain_onebot_submission(action, exc)
                     return True, "回执不确定，已停止立即重试"
                 last_error = self._format_send_exception(exc)
+                if at_most_once:
+                    return False, last_error
                 continue
-            if self._onebot_action_result_ok(result):
+            if self._onebot_action_result_ok(result) or self._onebot_action_reported_success(action, result):
                 return True, ""
             last_error = f"{attr} 返回失败: {_single_line(result, 180)}"
             if self._is_onebot_event_checker_send_rejection(result):
                 return False, self._onebot_event_checker_rejection_summary()
+            if at_most_once:
+                return False, last_error
         func = getattr(client, action, None)
         if callable(func):
             try:
                 result = func(**params)
             except Exception as exc:
+                if self._onebot_action_reported_success(action, exc):
+                    return True, "协议端已设置状态"
                 if at_most_once and self._delivery_outcome_is_uncertain(exc):
                     self._log_uncertain_onebot_submission(action, exc)
                     return True, "回执不确定，已停止立即重试"
@@ -6315,11 +6338,13 @@ Output:
                 if hasattr(result, "__await__"):
                     result = await result
             except Exception as exc:
+                if self._onebot_action_reported_success(action, exc):
+                    return True, "协议端已设置状态"
                 if at_most_once and self._delivery_outcome_is_uncertain(exc):
                     self._log_uncertain_onebot_submission(action, exc)
                     return True, "回执不确定，已停止立即重试"
                 return False, self._format_send_exception(exc)
-            if self._onebot_action_result_ok(result):
+            if self._onebot_action_result_ok(result) or self._onebot_action_reported_success(action, result):
                 return True, ""
             return False, f"{action} 返回失败: {_single_line(result, 180)}"
         return False, last_error or f"OneBot 客户端不支持动作 {action}"
@@ -6451,17 +6476,17 @@ Output:
         if client is None:
             return False, "未找到可用 QQ 客户端"
         status, ext_status, label = self._qq_presence_codes(mode)
-        variants = (
-            {"status": status, "ext_status": ext_status, "battery_status": 0},
-            {"status": status, "ext_status": ext_status},
-            {"status": status},
-            {"status_id": status},
-            {"mode": str(mode or "online")},
+        ok, error = await self._call_onebot_action_with_error(
+            client,
+            "set_online_status",
+            at_most_once=True,
+            status=status,
+            ext_status=ext_status,
+            battery_status=0,
         )
-        for params in variants:
-            if await self._call_onebot_action(client, "set_online_status", **params):
-                return True, label
-        return False, f"平台不支持 set_online_status：{label}"
+        if ok:
+            return True, label
+        return False, f"平台不支持 set_online_status：{label}（{_single_line(error, 100)}）"
 
     async def _set_qq_custom_presence(self, text: str) -> tuple[bool, str]:
         if not getattr(self, "enable_qq_custom_presence_sync", False):

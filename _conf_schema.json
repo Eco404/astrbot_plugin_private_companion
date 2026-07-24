@@ -9878,7 +9878,7 @@
       "enable_qq_presence_sync": {
         "description": "同步 QQ 在线状态",
         "type": "bool",
-        "hint": "开启后，当前时间段细化可决定在线/忙碌等基础状态，并通过 OneBot 的 set_online_status 尝试同步。离开、隐身、请勿打扰会自动降级为在线；失败会静默跳过。",
+        "hint": "开启后，当前时间段细化可决定在线/忙碌等基础状态，并通过 OneBot 的 set_online_status 尝试同步。离开、隐身、请勿打扰会自动降级为在线；单次只提交标准参数，SnowLuma 的成功异常会按成功收口，真实失败一小时内不会重复请求。",
         "default": true
       },
       "enable_qq_custom_presence_sync": {
