@@ -614,6 +614,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             await self._refresh_group_names_from_platform([(group_id, group)], force=True)
             self._refresh_group_atmosphere_for_page(group)
             detail = self._group_summary(group_id, group)
+            safety_getter = getattr(self.plugin, "_group_member_safety_compact_summary", None)
+            member_safety = safety_getter(group) if callable(safety_getter) else {}
             detail.update(
                 {
                     "members": group.get("members") if isinstance(group.get("members"), dict) else {},
@@ -625,6 +627,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "last_bot_interjection": self._sanitize_last_bot_interjection(group.get("last_bot_interjection")),
                     "group_wakeup_logs": self._group_wakeup_logs(group),
                     "slang_items": self._group_slang_items(group),
+                    "member_safety": member_safety,
                     "formatted": {
                         "status": self.plugin._format_group_status(group),
                         "feedback": self.plugin._format_group_interjection_feedback(group),
@@ -636,6 +639,60 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取群详情失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    async def get_group_member_safety(self) -> dict[str, Any]:
+        group_id = str(request.args.get("group_id", "")).strip()
+        if not group_id:
+            return self._error("缺少 group_id")
+        try:
+            async with self.plugin._data_lock:
+                group = deepcopy((self.plugin.data.get("groups") or {}).get(group_id))
+            if not isinstance(group, dict):
+                return self._error("群不存在")
+            getter = getattr(self.plugin, "_group_member_safety_summary", None)
+            if not callable(getter):
+                return self._error("当前插件版本不支持成员风控")
+            summary = getter(group)
+            summary["group_id"] = group_id
+            summary["group_name"] = self._single_line(
+                group.get("name") or group.get("group_name") or group.get("display_name"), 80
+            )
+            return self._ok(summary)
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 获取成员风控失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def update_group_member_safety(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        group_id = str(payload.get("group_id", "")).strip()
+        user_id = str(payload.get("user_id", "")).strip()
+        action = str(payload.get("action", "")).strip().lower()
+        if not group_id:
+            return self._error("缺少 group_id")
+        if not user_id:
+            return self._error("缺少成员 ID")
+        if action not in {"manual_block", "unblock", "clear_strikes", "exempt", "unexempt"}:
+            return self._error("不支持的成员风控操作")
+        try:
+            async with self.plugin._data_lock:
+                group = self.plugin._get_group(group_id)
+                profiles = group.get("members") if isinstance(group.get("members"), dict) else {}
+                profile = profiles.get(user_id) if isinstance(profiles.get(user_id), dict) else {}
+                name = self._single_line(payload.get("name") or profile.get("name") or profile.get("identity_name"), 60)
+                updater = getattr(self.plugin, "_apply_group_member_safety_action", None)
+                getter = getattr(self.plugin, "_group_member_safety_summary", None)
+                if not callable(updater) or not callable(getter):
+                    return self._error("当前插件版本不支持成员风控")
+                item = updater(group, user_id=user_id, action=action, name=name)
+                self.plugin._save_data_sync()
+                summary = getter(group)
+            return self._ok({"item": item, "summary": summary})
+        except ValueError as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新成员风控失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     async def update_group(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         group_id = str(payload.get("group_id", "")).strip()
@@ -682,6 +739,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             "interject_today": 0,
                             "recent_messages": [],
                             "members": {},
+                            "member_safety": {},
                             "slang_terms": [],
                             "slang_meanings": {},
                             "topic_signatures": [],

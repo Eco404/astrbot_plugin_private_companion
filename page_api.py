@@ -203,6 +203,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
             ("/group/delete", self.delete_group, ["POST"], "Private Companion Page delete group"),
             ("/group/slang/update", self.update_group_slang, ["POST"], "Private Companion Page update group slang"),
+            ("/group/member-safety", self.get_group_member_safety, ["GET"], "Private Companion Page group member safety"),
+            ("/group/member-safety/action", self.update_group_member_safety, ["POST"], "Private Companion Page update group member safety"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
             ("/settings/swap_image_api", self.swap_image_api_settings, ["POST"], "Private Companion Page swap image API settings"),
             ("/image_api/status", self.get_image_api_status, ["GET"], "Private Companion Page image API status"),
@@ -11116,6 +11118,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     visible_terms.append(item)
             slang_terms = visible_terms
         identity_count = sum(1 for item in members.values() if isinstance(item, dict) and item.get("identity_known"))
+        safety_getter = getattr(self.plugin, "_group_member_safety_compact_summary", None)
+        member_safety = safety_getter(group) if callable(safety_getter) else {}
         wakeup_logs = group.get("group_wakeup_logs") if isinstance(group.get("group_wakeup_logs"), list) else []
         last_wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
         last_interjection = self._sanitize_last_bot_interjection(group.get("last_bot_interjection"))
@@ -11132,6 +11136,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "last_seen": self.plugin._format_timestamp_elapsed(group.get("last_seen", 0)),
             "member_count": len(members),
             "recognized_member_count": identity_count,
+            "member_safety_blocked_count": _safe_int(member_safety.get("blocked_count"), 0),
+            "member_safety_watching_count": _safe_int(member_safety.get("watching_count"), 0),
             "recent_message_count": len(group.get("recent_messages") or []),
             "slang_count": len(slang_terms),
             "slang_meaning_count": len(slang_meanings),
@@ -11596,6 +11602,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_solar_term_perception",
             "enable_almanac_perception",
             "enable_group_companion",
+            "enable_group_member_safety",
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",
@@ -14705,6 +14712,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "GROUP_EPISODE_PROVIDER_ID": "group_episode_provider_id",
             "GROUP_SLANG_PROVIDER_ID": "group_slang_provider_id",
             "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": "group_followup_judge_provider_id",
+            "GROUP_MEMBER_SAFETY_PROVIDER_ID": "group_member_safety_provider_id",
             "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
             "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
             "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",

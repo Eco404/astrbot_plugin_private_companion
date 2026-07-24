@@ -295,6 +295,7 @@ def _text_looks_garbled(text: Any) -> bool:
 
 def _strip_internal_message_blocks(text: Any) -> str:
     normalized = str(text or "")
+    normalized = _strip_group_member_safety_markers(normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
@@ -324,6 +325,36 @@ _MARKDOWN_CODE_SPAN_PATTERN = re.compile(
     r"(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\r\n]+`)",
     re.MULTILINE,
 )
+
+_GROUP_MEMBER_SAFETY_MARKER_PATTERN = re.compile(
+    r"<\s*pc_member_safety\s*>(?P<body>[\s\S]*?)<\s*/\s*pc_member_safety\s*>",
+    re.IGNORECASE,
+)
+_ESCAPED_GROUP_MEMBER_SAFETY_MARKER_PATTERN = re.compile(
+    r"&lt;\s*pc_member_safety\s*&gt;[\s\S]*?&lt;\s*/\s*pc_member_safety\s*&gt;",
+    re.IGNORECASE,
+)
+
+
+def _strip_group_member_safety_markers(text: Any) -> str:
+    """Remove complete or malformed internal member-safety markers from outbound text."""
+    normalized = str(text or "")
+    normalized = _GROUP_MEMBER_SAFETY_MARKER_PATTERN.sub("", normalized)
+    normalized = _ESCAPED_GROUP_MEMBER_SAFETY_MARKER_PATTERN.sub("", normalized)
+    # A truncated generation must not leak a partial control block either.
+    normalized = re.sub(
+        r"<\s*/?\s*pc_member_safety\s*>|<\s*pc_member_safety\b[\s\S]*$",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"&lt;\s*/?\s*pc_member_safety\s*&gt;|&lt;\s*pc_member_safety\b[\s\S]*$",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return normalized
 
 
 def _strip_nonstandard_chat_control_tags(text: Any) -> str:
@@ -358,6 +389,7 @@ def _strip_outbound_control_blocks(
     allowed_private_tts_tokens: set[str] | None = None,
 ) -> str:
     normalized = str(text or "")
+    normalized = _strip_group_member_safety_markers(normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     if preserve_private_tts_tokens and allowed_private_tts_tokens:
         allowed = {str(token) for token in allowed_private_tts_tokens if str(token)}

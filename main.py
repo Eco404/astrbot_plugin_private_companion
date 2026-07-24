@@ -138,6 +138,7 @@ from .creative import CreativeMixin
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
+from .group_member_safety import GroupMemberSafetyMixin
 from .event_dispatch import EventDispatchMixin
 from .private_reading import PrivateReadingMixin
 from .news_exploration import NewsExplorationMixin
@@ -913,6 +914,7 @@ class PrivateCompanionPlugin(
     TtsToolSanitizerMixin,
     GroupWakeupMixin,
     GroupObservationMixin,
+    GroupMemberSafetyMixin,
     EventDispatchMixin,
     PrivateReadingMixin,
     NewsExplorationMixin,
@@ -1753,6 +1755,35 @@ class PrivateCompanionPlugin(
         self.require_target_group = self._cfg_bool(c, "require_target_group", True)
         self.enable_group_slang_learning = self._cfg_bool(c, "enable_group_slang_learning", True)
         self.enable_group_member_profiles = self._cfg_bool(c, "enable_group_member_profiles", True)
+        self.enable_group_member_safety = self._cfg_bool(c, "enable_group_member_safety", True)
+        self.group_member_safety_review_mode = self._cfg_str(
+            c, "group_member_safety_review_mode", "directed", "directed"
+        ).lower()
+        if self.group_member_safety_review_mode not in {"directed", "suspicious", "all"}:
+            self.group_member_safety_review_mode = "directed"
+        self.group_member_safety_hidden_marker_mode = self._cfg_str(
+            c, "group_member_safety_hidden_marker_mode", "supplement", "supplement"
+        ).lower()
+        if self.group_member_safety_hidden_marker_mode not in {"supplement", "reply_only", "disabled"}:
+            self.group_member_safety_hidden_marker_mode = "supplement"
+        self.group_member_safety_strike_threshold = self._cfg_int(
+            c, "group_member_safety_strike_threshold", 3, 1, 20
+        )
+        self.group_member_safety_strike_window_days = self._cfg_int(
+            c, "group_member_safety_strike_window_days", 30, 1, 365
+        )
+        self.group_member_safety_block_hours = self._cfg_int(
+            c, "group_member_safety_block_hours", 168, 0, 8760
+        )
+        self.group_member_safety_min_confidence = self._cfg_float(
+            c, "group_member_safety_min_confidence", 0.86, 0.5, 1.0
+        )
+        self.group_member_safety_exempt_managers = self._cfg_bool(
+            c, "group_member_safety_exempt_managers", True
+        )
+        self.group_member_safety_audit_limit = self._cfg_int(
+            c, "group_member_safety_audit_limit", 40, 10, 200
+        )
         self.enable_group_context_injection = self._cfg_bool(c, "enable_group_context_injection", True)
         self.enable_group_injection_guard = self._cfg_bool(c, "enable_group_injection_guard", True)
         self.enable_group_persona_denoise = self._cfg_bool(c, "enable_group_persona_denoise", True)
@@ -1864,6 +1895,7 @@ class PrivateCompanionPlugin(
         self.group_episode_provider_id = self._cfg_str(c, "GROUP_EPISODE_PROVIDER_ID", "")
         self.group_slang_provider_id = self._cfg_str(c, "GROUP_SLANG_PROVIDER_ID", "")
         self.group_followup_judge_provider_id = self._cfg_str(c, "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "")
+        self.group_member_safety_provider_id = self._cfg_str(c, "GROUP_MEMBER_SAFETY_PROVIDER_ID", "")
         self.enable_livingmemory_integration = self._cfg_bool(c, "enable_livingmemory_integration", True)
         self.livingmemory_tool_name = self._cfg_str(c, "livingmemory_tool_name", "recall_long_term_memory", "recall_long_term_memory")
         self.memory_companion_context_timeout_seconds = self._cfg_float(c, "memory_companion_context_timeout_seconds", 1.2, 0.2)
@@ -2787,6 +2819,96 @@ class PrivateCompanionPlugin(
             segment_count,
             bool(bridge_context.get("tts_sent")),
             _single_line(source_text, 160),
+        )
+
+    @filter.on_decorating_result(priority=20000)
+    async def consume_group_member_safety_hidden_marker(self, event: AstrMessageEvent, *args, **kwargs):
+        """Consume the reply model's internal member-risk decision before any outbound transform."""
+        if self is None:
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        plain_components = [component for component in chain if isinstance(component, Plain)]
+        if not plain_components:
+            return
+
+        combined_original = "".join(str(getattr(component, "text", "") or "") for component in plain_components)
+        combined_cleaned, combined_decisions = self._extract_group_member_safety_hidden_markers(combined_original)
+        rebuilt: list[Any] = []
+        per_component_cleaned: list[str] = []
+        per_component_decisions: list[dict[str, Any]] = []
+        changed = False
+        for component in plain_components:
+            original = str(getattr(component, "text", "") or "")
+            cleaned, decisions = self._extract_group_member_safety_hidden_markers(original)
+            per_component_cleaned.append(cleaned)
+            per_component_decisions.extend(decisions)
+            changed = changed or cleaned != original
+
+        cross_component_marker = "".join(per_component_cleaned) != combined_cleaned
+        first_plain_written = False
+        plain_index = 0
+        for component in chain:
+            if not isinstance(component, Plain):
+                rebuilt.append(component)
+                continue
+            if cross_component_marker:
+                if not first_plain_written and combined_cleaned:
+                    rebuilt.append(Plain(combined_cleaned))
+                    first_plain_written = True
+                changed = True
+            else:
+                cleaned = per_component_cleaned[plain_index]
+                if cleaned:
+                    rebuilt.append(Plain(cleaned) if cleaned != str(getattr(component, "text", "") or "") else component)
+                plain_index += 1
+        if changed:
+            try:
+                result.chain = rebuilt
+            except Exception:
+                event.set_result(self._build_result_from_chain(rebuilt))
+
+        decisions = combined_decisions if combined_decisions else per_component_decisions
+        if not decisions:
+            return
+        if (
+            self._group_member_safety_hidden_marker_mode() == "disabled"
+            or not bool(getattr(event, "_private_companion_member_safety_hidden_marker_expected", False))
+        ):
+            logger.warning(
+                "[PrivateCompanion] 已清理未授权的群成员风控隐性标签，未计数: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return
+        if bool(getattr(event, "_private_companion_member_safety_hidden_marker_consumed", False)):
+            return
+        setattr(event, "_private_companion_member_safety_hidden_marker_consumed", True)
+        decision = max(
+            decisions,
+            key=lambda item: (_safe_float(item.get("confidence"), 0.0), _safe_int(item.get("severity"), 1, 1, 3)),
+        )
+        group_id = _single_line(getattr(event, "_private_companion_member_safety_group_id", ""), 128)
+        sender_id = _single_line(getattr(event, "_private_companion_member_safety_sender_id", ""), 128)
+        sender_name = _single_line(getattr(event, "_private_companion_member_safety_sender_name", ""), 60)
+        source_text = str(getattr(event, "_private_companion_member_safety_message_text", "") or "")
+        if not group_id or not sender_id:
+            return
+        recorded = await self._record_group_member_safety_decision(
+            event,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            text=source_text,
+            decision=decision,
+            source="reply_hidden_marker",
+        )
+        logger.info(
+            "[PrivateCompanion] 已消费群成员风控隐性标签: group=%s sender=%s counted=%s blocked=%s reason=%s",
+            group_id,
+            sender_id,
+            bool(recorded.get("counted")),
+            bool(recorded.get("blocked")),
+            _single_line(recorded.get("reason"), 80),
         )
 
     @filter.on_decorating_result(priority=-20000)
@@ -8684,6 +8806,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             await self._append_group_injection_guard_to_request(event, req)
             await self._append_group_persona_denoise_to_request(event, req)
             await self._append_group_high_intensity_reply_guard_to_request(event, req)
+            await self._append_group_member_safety_hidden_marker_to_request(event, req)
         else:
             await self._append_non_target_private_identity_guard_to_request(event, req)
         if not self._feature_enabled_or_temp_unlocked("inject_passive_states"):
@@ -11709,6 +11832,55 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._schedule_data_save()
             return captured
 
+    def _stop_group_member_safety_event(self, event: AstrMessageEvent) -> None:
+        """清空可能已生成的结果，并停止已静默成员的当前群消息。"""
+        try:
+            event.set_result(self._build_result_from_chain([]))
+        except Exception:
+            pass
+        try:
+            event.stop_event()
+        except Exception:
+            pass
+        setattr(event, "_private_companion_member_safety_blocked", True)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=210000)
+    async def guard_blocked_group_member_early(self, event: AstrMessageEvent, *args, **kwargs):
+        """在群聊观察和回复插件之前丢弃已静默成员的消息。"""
+        if self is None or self._is_onebot_poke_notice_event(event):
+            return
+        if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
+            return
+        if not bool(getattr(self, "enable_group_member_safety", True)):
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id or not self._group_enabled_for_event(group_id):
+            return
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        if not sender_id or sender_id == self._event_self_id(event):
+            return
+        async with self._data_lock:
+            group = self._get_group(group_id)
+            member = self._group_member_safety_member(group, sender_id, create=False)
+            if not isinstance(member, dict):
+                return
+            if not bool(member.get("manual_blocked")) and self._group_member_safety_is_exempt_event(event, sender_id):
+                return
+            was_blocked = bool(member and (_safe_float(member.get("blocked_at"), 0) > 0 or member.get("manual_blocked")))
+            blocked = self._group_member_safety_active(member, expire=True)
+            if was_blocked and not blocked:
+                self._save_data_sync()
+        if blocked:
+            logger.info(
+                "[PrivateCompanion] 已静默群成员消息: group=%s sender=%s",
+                group_id,
+                sender_id,
+            )
+            self._stop_group_member_safety_event(event)
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=200000)
     async def capture_group_observation_early(self, event: AstrMessageEvent, *args, **kwargs):
         """Record allowed group messages before reply plugins can stop propagation."""
@@ -11744,6 +11916,48 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             sender_id=sender_id,
             text=text,
         )
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=190000)
+    async def review_group_member_safety_early(self, event: AstrMessageEvent, *args, **kwargs):
+        """在回复链路前保守审核当前消息，达到阈值时立即静默。"""
+        if self is None or self._is_onebot_poke_notice_event(event):
+            return
+        if bool(getattr(event, "_private_companion_member_safety_blocked", False)):
+            return
+        if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
+            return
+        if not bool(getattr(self, "enable_group_member_safety", True)):
+            return
+        if self._group_member_safety_hidden_marker_mode() == "reply_only":
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id or not self._group_enabled_for_event(group_id):
+            return
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        if not sender_id or sender_id == self._event_self_id(event):
+            return
+        text = self._group_observation_event_text(event)
+        if not text or text.startswith(("陪伴群", "/陪伴群", "群陪伴", "群聊陪伴")):
+            return
+        if self._message_debounce_command_text(event, text):
+            return
+        result = await self._review_group_member_safety_message(
+            event,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=self._sender_display_name(event),
+            text=text,
+        )
+        if result.get("blocked"):
+            logger.warning(
+                "[PrivateCompanion] 群成员风险次数达到阈值，已静默当前消息: group=%s sender=%s",
+                group_id,
+                sender_id,
+            )
+            self._stop_group_member_safety_event(event)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):

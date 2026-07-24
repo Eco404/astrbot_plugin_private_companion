@@ -591,6 +591,12 @@
     "default": "",
     "invisible": true
   },
+  "GROUP_MEMBER_SAFETY_PROVIDER_ID": {
+    "description": "Legacy flat config: 群成员风控判定模型",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "FORWARD_MESSAGE_PROVIDER_ID": {
     "description": "Legacy flat config: 合并消息转述模型",
     "type": "string",
@@ -2333,6 +2339,60 @@
     "description": "Legacy flat config: 启用群内成员观察",
     "type": "bool",
     "default": true,
+    "invisible": true
+  },
+  "enable_group_member_safety": {
+    "description": "Legacy flat config: 启用群成员风控",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "group_member_safety_review_mode": {
+    "description": "Legacy flat config: 群成员风控审核范围",
+    "type": "string",
+    "default": "directed",
+    "invisible": true
+  },
+  "group_member_safety_hidden_marker_mode": {
+    "description": "Legacy flat config: 群成员风控隐性标签模式",
+    "type": "string",
+    "default": "supplement",
+    "invisible": true
+  },
+  "group_member_safety_strike_threshold": {
+    "description": "Legacy flat config: 群成员静默风险次数",
+    "type": "int",
+    "default": 3,
+    "invisible": true
+  },
+  "group_member_safety_strike_window_days": {
+    "description": "Legacy flat config: 群成员风险统计窗口天数",
+    "type": "int",
+    "default": 30,
+    "invisible": true
+  },
+  "group_member_safety_block_hours": {
+    "description": "Legacy flat config: 群成员自动静默时长",
+    "type": "int",
+    "default": 168,
+    "invisible": true
+  },
+  "group_member_safety_min_confidence": {
+    "description": "Legacy flat config: 群成员风险最低置信度",
+    "type": "float",
+    "default": 0.86,
+    "invisible": true
+  },
+  "group_member_safety_exempt_managers": {
+    "description": "Legacy flat config: 群成员风控豁免管理者",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "group_member_safety_audit_limit": {
+    "description": "Legacy flat config: 群成员风控审计上限",
+    "type": "int",
+    "default": 40,
     "invisible": true
   },
   "enable_group_topic_threads": {
@@ -4182,6 +4242,16 @@
         "description": "群聊续接判断模型",
         "type": "string",
         "hint": "用于群聊续接判断：判断用户后续没 @ 的发言是否仍在和 Bot 对话。适合便宜、低延迟、指令遵循稳定、YES/NO 分类准确的小模型。快速模式会跟随快速响应模型；精准模式留空时只使用规则判断。",
+        "default": "",
+        "condition": {
+          "provider_config_mode": "precision"
+        },
+        "_special": "select_provider"
+      },
+      "GROUP_MEMBER_SAFETY_PROVIDER_ID": {
+        "description": "群成员风控判定模型",
+        "type": "string",
+        "hint": "用于保守判断明确针对 Bot 的持续骚扰、威胁或重复攻击。建议选择指令遵循稳定、JSON 输出可靠的小模型；留空会依次回退到群聊续接、回复复核和陪伴通用模型。",
         "default": "",
         "condition": {
           "provider_config_mode": "precision"
@@ -6899,6 +6969,127 @@
         "default": [],
         "condition": {
           "enable_group_companion": true
+        }
+      },
+      "enable_group_member_safety": {
+        "description": "启用群成员风控",
+        "type": "bool",
+        "hint": "由模型保守判断明确针对 Bot 的持续骚扰、威胁或重复攻击；达到次数后只静默该成员，不影响群内其他人。普通批评、玩笑、争论和偶发脏话不应累计。",
+        "default": true,
+        "condition": {
+          "enable_group_companion": true
+        }
+      },
+      "group_member_safety_review_mode": {
+        "description": "成员风控审核范围",
+        "type": "string",
+        "hint": "建议使用“只审核对 Bot 的消息”。扩大范围会增加模型调用量，仍由提示词进行语义判断，不使用关键词直接封禁。",
+        "options": [
+          "directed",
+          "suspicious",
+          "all"
+        ],
+        "labels": [
+          "只审核明确对 Bot 的消息",
+          "包含 Bot 对话续接窗口",
+          "审核群内所有消息"
+        ],
+        "default": "directed",
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_hidden_marker_mode": {
+        "description": "回复模型隐性风控标签",
+        "type": "string",
+        "hint": "补充审核会保留独立审核模型，并允许正常回复模型在高置信恶性行为时附加发送前即被移除的内部标签；仅回复标签可节省独立审核调用，但未触发回复的消息不会被新增计数。标签不会发送到群聊。",
+        "options": [
+          "supplement",
+          "reply_only",
+          "disabled"
+        ],
+        "labels": [
+          "补充独立审核（推荐）",
+          "仅使用回复模型标签",
+          "关闭隐性标签"
+        ],
+        "default": "supplement",
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_strike_threshold": {
+        "description": "自动静默所需风险次数",
+        "type": "int",
+        "hint": "同一成员在统计窗口内累计到该次数后静默。每条消息最多累计一次，建议至少 3 次。",
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 3,
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_strike_window_days": {
+        "description": "风险次数统计窗口（天）",
+        "type": "int",
+        "hint": "只统计最近这段时间内且晚于最近一次解除/豁免的风险记录。",
+        "slider": {
+          "min": 1,
+          "max": 90,
+          "step": 1
+        },
+        "default": 30,
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_block_hours": {
+        "description": "自动静默时长（小时）",
+        "type": "int",
+        "hint": "默认 168 小时（7 天）。填 0 表示直到管理员手动解除；手动静默始终需要手动解除。",
+        "default": 168,
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_min_confidence": {
+        "description": "风险记录最低置信度",
+        "type": "float",
+        "hint": "模型判定为恶意且置信度达到该值才累计。数值越高越保守，建议保持 0.86 或更高。",
+        "slider": {
+          "min": 0.5,
+          "max": 0.99,
+          "step": 0.01
+        },
+        "default": 0.86,
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_exempt_managers": {
+        "description": "自动豁免管理者和主要用户",
+        "type": "bool",
+        "hint": "开启后，AstrBot 管理员、群主、群管理员和本插件主要用户不会进入自动风控。建议保持开启。",
+        "default": true,
+        "condition": {
+          "enable_group_member_safety": true
+        }
+      },
+      "group_member_safety_audit_limit": {
+        "description": "每位成员保留审计记录数",
+        "type": "int",
+        "hint": "限制每位成员保留的模型判定风险记录数量，便于在管理页回看理由。",
+        "slider": {
+          "min": 10,
+          "max": 120,
+          "step": 10
+        },
+        "default": 40,
+        "condition": {
+          "enable_group_member_safety": true
         }
       },
       "enable_group_context_injection": {

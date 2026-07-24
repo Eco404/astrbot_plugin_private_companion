@@ -511,6 +511,7 @@ _DEFAULT_GROUP_TEMPLATE = {
     "interject_today": 0,
     "recent_messages": [],
     "members": {},
+    "member_safety": {},
     "slang_terms": [],
     "slang_meanings": {},
     "topic_signatures": [],

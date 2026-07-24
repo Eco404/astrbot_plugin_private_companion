@@ -49,6 +49,13 @@ const state = {
   },
   expressionScopeOpen: false,
   selectedGroupId: "",
+  groupDetailView: "overview",
+  groupMemberSafety: null,
+  groupMemberSafetyLoading: false,
+  groupMemberSafetyError: "",
+  groupMemberSafetyFilter: "all",
+  groupMemberSafetyQuery: "",
+  selectedGroupSafetyUserId: "",
   featureDraft: {},
   featureDraftBaseline: "[]",
   featureAuxiliaryDraft: {},
@@ -202,6 +209,7 @@ const providerLabels = {
   GROUP_EPISODE_PROVIDER_ID: "群聊片段整理",
   GROUP_SLANG_PROVIDER_ID: "群内黑话释义",
   GROUP_FOLLOWUP_JUDGE_PROVIDER_ID: "群聊续接判断",
+  GROUP_MEMBER_SAFETY_PROVIDER_ID: "群成员风控判定",
   FORWARD_MESSAGE_PROVIDER_ID: "合并消息转述",
   PLUGIN_VISION_PROVIDER_ID: "插件识图模型",
   PRIVATE_READING_VISION_PROVIDER_ID: "夹层阅读视觉模型",
@@ -1058,6 +1066,7 @@ const featureMeta = {
   enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
   enable_yesterday_screen_diary_context: ["昨日屏幕日记", "每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景，不读取实时屏幕。"],
   enable_group_companion: ["群聊启用范围", "总开关、白名单/黑名单范围；某个群没反应时先看这里。"],
+  enable_group_member_safety: ["群成员风控", "模型保守识别持续骚扰、威胁和重复攻击；达到次数后只静默该成员。"],
   group_access_mode: "群聊启用模式",
   group_whitelist_ids: "群聊白名单",
   group_blacklist_ids: "群聊黑名单",
@@ -1172,6 +1181,7 @@ const featureGroups = [
     note: "按要解决的问题找开关：启用范围、续话、读空气、合并、理解、安全、唤醒、学习、复读、转述和跨用户记忆。",
     keys: [
       "enable_group_companion",
+      "enable_group_member_safety",
       "enable_group_conversation_followup",
       "enable_group_air_reply_guard",
       "enable_group_high_intensity_mode",
@@ -1588,6 +1598,15 @@ const configLabels = {
   group_conversation_followup_seconds: "群聊续接判断秒数",
   group_conversation_followup_max_turns: "群聊连续续接上限",
   enable_group_conversation_followup: "启用连续对话保持",
+  enable_group_member_safety: "启用群成员风控",
+  group_member_safety_review_mode: "成员风控审核范围",
+  group_member_safety_hidden_marker_mode: "回复模型隐性风控标签",
+  group_member_safety_strike_threshold: "自动静默风险次数",
+  group_member_safety_strike_window_days: "风险统计窗口天数",
+  group_member_safety_block_hours: "自动静默时长小时",
+  group_member_safety_min_confidence: "风险最低置信度",
+  group_member_safety_exempt_managers: "豁免管理者和主要用户",
+  group_member_safety_audit_limit: "每位成员审计记录上限",
   enable_group_air_reply_guard: "启用读空气防互刷",
   group_air_guard_window_seconds: "读空气检测窗口秒数",
   group_air_guard_max_bot_replies: "窗口内最大 Bot 回复数",
@@ -2214,6 +2233,15 @@ const configDescriptions = {
   group_blacklist_ids: "黑名单模式下禁止插件参与的群号列表。可填写数组，也可在输入框里一行一个或用逗号分隔；适合临时屏蔽机器人多、话题敏感或不想观察的群。",
   group_conversation_followup_seconds: "群里用户叫过 Bot 后，后续未 @ 的消息在多久内可能被判断为仍在对 Bot 说。",
   group_conversation_followup_max_turns: "一次群聊连续对话最多自动续接几轮，防止 Bot 一直卷进对话。",
+  enable_group_member_safety: "开启后，模型会保守审核配置范围内明确针对 Bot 的持续骚扰、威胁和重复攻击；达到次数后只静默当前群里的该成员。普通批评、玩笑、争论、偶发脏话和不确定内容应放行。",
+  group_member_safety_review_mode: "directed 只审核明确对 Bot 的消息；suspicious 还包含同一成员的 Bot 对话续接窗口；all 会审核全部群消息并显著增加模型调用量。",
+  group_member_safety_hidden_marker_mode: "supplement 会让独立审核与回复模型标签互相补充且同一消息最多计数一次；reply_only 可节省独立审核调用，但没有生成回复的消息不会新增风险次数；disabled 只使用原独立审核。内部标签会在 TTS、分段和发送前移除。",
+  group_member_safety_strike_threshold: "同一成员在统计窗口内累计到该次数后自动静默。每条消息最多累计一次，建议至少 3 次。",
+  group_member_safety_strike_window_days: "只统计最近这段时间内、且晚于最近一次解除或豁免的风险记录。",
+  group_member_safety_block_hours: "自动静默持续小时数；0 表示直到人工解除。三级管理页中的手动静默始终需要人工解除。",
+  group_member_safety_min_confidence: "模型同时判定为恶意且达到该置信度才累计。建议保持 0.86 或更高。",
+  group_member_safety_exempt_managers: "开启后，模型不会自动审核 AstrBot 管理员、群主、群管理员和本插件主要用户；三级页中的明确手动静默仍可覆盖自动豁免。",
+  group_member_safety_audit_limit: "每位成员最多保留多少条模型风险和人工管理审计记录。",
   enable_group_air_reply_guard: "开启后，明确 @ 或引用 Bot 也会先过一层“读空气”防线；当窗口内 Bot 已多次回复、或话题进入晚安/谢谢/拜拜等收尾循环时，会静默不回。",
   group_air_guard_window_seconds: "统计最近多少秒内 Bot 在本群的回复次数。建议 120-300 秒；越短越宽松。",
   group_air_guard_max_bot_replies: "窗口内 Bot 回复达到该次数后，后续明确唤醒也会硬拦截，防止机器人互相引用刷屏。建议 3。",
@@ -2560,6 +2588,7 @@ const featureSettingGroups = {
   enable_environment_change_proactive: ["environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [],
+  enable_group_member_safety: ["group_member_safety_review_mode", "group_member_safety_hidden_marker_mode", "group_member_safety_strike_threshold", "group_member_safety_strike_window_days", "group_member_safety_block_hours", "group_member_safety_min_confidence", "group_member_safety_exempt_managers", "group_member_safety_audit_limit", "GROUP_MEMBER_SAFETY_PROVIDER_ID"],
   enable_group_image_understanding: ["group_image_vision_wait_seconds", "group_image_max_images"],
   enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
   enable_group_air_reply_guard: ["group_air_guard_window_seconds", "group_air_guard_max_bot_replies", "group_air_guard_polite_loop_limit"],
@@ -2897,6 +2926,18 @@ const featureSettingSections = {
       title: "群聊启用范围",
       note: "总开关由当前功能控制；这里配置白名单/黑名单。",
       keys: ["group_access_mode", "group_whitelist_ids", "group_blacklist_ids"],
+    },
+  ],
+  enable_group_member_safety: [
+    {
+      title: "判定范围与模型",
+      note: "默认只审核明确对 Bot 的消息；提示词要求对普通批评、玩笑、争论和不确定内容放行。",
+      keys: ["group_member_safety_review_mode", "group_member_safety_hidden_marker_mode", "group_member_safety_min_confidence", "GROUP_MEMBER_SAFETY_PROVIDER_ID"],
+    },
+    {
+      title: "累计与恢复",
+      note: "按群、按成员独立累计。解除静默后旧记录不会立刻再次触发。",
+      keys: ["group_member_safety_strike_threshold", "group_member_safety_strike_window_days", "group_member_safety_block_hours", "group_member_safety_exempt_managers", "group_member_safety_audit_limit"],
     },
   ],
   enable_group_conversation_followup: [
@@ -3919,6 +3960,7 @@ const tokenTaskLabels = {
   group_slang_meaning: "黑话释义",
   group_question_wakeup_reply_review: "群聊答疑复核",
   group_followup_judge: "群聊续接判断",
+  group_member_safety: "群成员风控判定",
   worldbook_registration: "关系网自登记",
   web_exploration_query: "探索选题",
   web_exploration_digest: "探索笔记",
@@ -5635,6 +5677,24 @@ const setupGuideAdvancedItems = {
         { key: "group_access_mode", type: "select", label: "启用模式", options: [["whitelist", "白名单模式"], ["blacklist", "黑名单模式"]] },
         { key: "group_whitelist_ids", type: "textarea", label: "群白名单", placeholder: "一行一个群号" },
         { key: "group_blacklist_ids", type: "textarea", label: "群黑名单", placeholder: "一行一个群号" },
+      ],
+    },
+    {
+      key: "enable_group_member_safety",
+      title: "群成员风控",
+      ask: "是否让 Bot 对反复恶意攻击的群成员停止回应？",
+      description: "模型会保守审核对 Bot 的消息，按群独立累计风险次数；达到阈值后只静默该成员，并在群详情的三级页保留审计和人工管理入口。",
+      caution: "推荐保持“只审核明确对 Bot 的消息”、至少 3 次和较高置信度。扩大到全群会明显增加模型调用量。",
+      kind: "feature",
+      settings: [
+        { key: "group_member_safety_review_mode", type: "select", label: "审核范围", options: [["directed", "只审核对 Bot 的消息"], ["suspicious", "包含对话续接窗口"], ["all", "全部群消息"]] },
+        { key: "group_member_safety_hidden_marker_mode", type: "select", label: "隐性标签模式", options: [["supplement", "补充独立审核（推荐）"], ["reply_only", "仅使用回复模型标签"], ["disabled", "关闭隐性标签"]] },
+        { key: "group_member_safety_strike_threshold", type: "number", label: "自动静默次数", placeholder: "3", min: 1, max: 20 },
+        { key: "group_member_safety_strike_window_days", type: "number", label: "统计窗口天数", placeholder: "30", min: 1, max: 365 },
+        { key: "group_member_safety_block_hours", type: "number", label: "静默小时数", placeholder: "168", min: 0 },
+        { key: "group_member_safety_min_confidence", type: "number", label: "最低置信度", placeholder: "0.86", min: 0.5, max: 1, step: 0.01 },
+        { key: "group_member_safety_exempt_managers", type: "bool", label: "豁免管理者和主要用户", description: "建议保持开启。" },
+        { key: "GROUP_MEMBER_SAFETY_PROVIDER_ID", type: "provider", label: "风控判定模型", description: "留空时回退到群聊续接、回复复核或陪伴通用模型。" },
       ],
     },
     {
@@ -10547,6 +10607,8 @@ function renderGroupBubbleChart() {
   document.querySelectorAll("[data-observe-group]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedGroupId = button.dataset.observeGroup;
+      state.groupDetailView = "overview";
+      state.groupMemberSafety = null;
       switchTab("group");
       renderGroups();
       renderGroupDetail(true);
@@ -13517,8 +13579,12 @@ function renderGroups() {
   });
   if (!rows.length) {
     state.selectedGroupId = "";
+    state.groupDetailView = "overview";
+    state.groupMemberSafety = null;
   } else if (!rows.some((group) => String(group.group_id) === String(state.selectedGroupId))) {
     state.selectedGroupId = rows[0].group_id;
+    state.groupDetailView = "overview";
+    state.groupMemberSafety = null;
   }
   const count = $("#groupListCount");
   if (count) {
@@ -13543,6 +13609,7 @@ function renderGroups() {
           <span>消息 <b>${escapeHtml(group.message_count || 0)}</b></span>
           <span>群友 <b>${escapeHtml(group.member_count || 0)}</b></span>
           <span>话题 <b>${escapeHtml(group.topic_count || 0)}</b></span>
+          ${Number(group.member_safety_blocked_count || 0) ? `<span class="is-risk">静默 <b>${escapeHtml(group.member_safety_blocked_count)}</b></span>` : ""}
         </div>
         ${groupWakeupCardLine(group)}
         <footer>
@@ -13555,7 +13622,13 @@ function renderGroups() {
     : `<div class="empty small">暂无群聊观测数据</div>`);
   document.querySelectorAll("[data-group-id]").forEach((row) => {
     row.addEventListener("click", async () => {
+      const changed = String(state.selectedGroupId) !== String(row.dataset.groupId);
       state.selectedGroupId = row.dataset.groupId;
+      if (changed) {
+        state.groupDetailView = "overview";
+        state.groupMemberSafety = null;
+        state.selectedGroupSafetyUserId = "";
+      }
       renderGroups();
       await renderGroupDetail(true);
     });
@@ -13612,6 +13685,10 @@ async function renderGroupDetail(forceFetch = false) {
     box.innerHTML = `<div class="empty">选择左侧群聊后查看话题线、关系网和插话状态</div>`;
     return;
   }
+  if (state.groupDetailView === "member-safety") {
+    await renderGroupMemberSafetyPage(forceFetch);
+    return;
+  }
   let detail = state.groups.find((group) => String(group.group_id) === String(state.selectedGroupId));
   if (forceFetch || !detail?.formatted) {
     try {
@@ -13651,6 +13728,7 @@ async function renderGroupDetail(forceFetch = false) {
     </div>
     <div class="detail-grid group-detail-grid">
       ${groupDetailPanel("群状态", groupStateOverview(detail), { wide: true, className: "group-state-panel" })}
+      ${groupDetailPanel("成员风控", groupMemberSafetyOverview(detail.member_safety || {}), { wide: true, className: "group-safety-panel" })}
       ${groupDetailPanel("黑话检视", groupSlangManagerView(detail.slang_items || []), { wide: true, className: "group-slang-panel", collapsed: true, meta: `${(detail.slang_items || []).length || 0} 条` })}
       ${groupDetailPanel("活跃群友", groupActiveMembersView(detail.members || {}), { className: "group-compact-panel" })}
       ${groupDetailPanel("插话反馈", groupInterjectionFeedbackView(detail), { className: "group-compact-panel" })}
@@ -13662,6 +13740,227 @@ async function renderGroupDetail(forceFetch = false) {
     </div>
   `;
   bindGroupActions(detail);
+}
+
+function groupMemberSafetyOverview(safety) {
+  const enabled = safety.enabled !== false;
+  const modeLabels = {
+    directed: "仅对 Bot",
+    suspicious: "含续接窗口",
+    all: "全部消息",
+  };
+  const blockText = Number(safety.block_hours || 0) > 0 ? `${safety.block_hours} 小时` : "手动解除";
+  const hiddenMarkerLabels = {
+    supplement: "回复标签补充",
+    reply_only: "仅回复标签",
+    disabled: "仅独立审核",
+  };
+  return `
+    <div class="group-safety-overview">
+      <div class="group-safety-overview-metrics">
+        ${groupMetricTile("运行状态", enabled ? "已启用" : "已暂停")}
+        ${groupMetricTile("已静默", safety.blocked_count || 0)}
+        ${groupMetricTile("观察中", safety.watching_count || 0)}
+        ${groupMetricTile("已豁免", safety.exempt_count || 0)}
+      </div>
+      <div class="group-safety-overview-footer">
+        <span>${escapeHtml(modeLabels[safety.review_mode] || safety.review_mode || "仅对 Bot")} · ${escapeHtml(hiddenMarkerLabels[safety.hidden_marker_mode] || "回复标签补充")} · ${escapeHtml(safety.strike_threshold || 3)} 次 / ${escapeHtml(safety.strike_window_days || 30)} 天 · ${escapeHtml(blockText)}</span>
+        <button type="button" data-open-member-safety>打开管理</button>
+      </div>
+    </div>
+  `;
+}
+
+function groupMemberSafetyStatusLabel(item) {
+  if (item?.status_label) return item.status_label;
+  return { blocked: "已静默", watching: "观察中", exempt: "已豁免", clear: "正常" }[item?.status] || "正常";
+}
+
+function groupMemberSafetyExpiry(item) {
+  if (!item?.blocked) return "";
+  if (item.block_indefinite || !Number(item.blocked_until || 0)) return "直到手动解除";
+  return `至 ${formatRecentTime(item.blocked_until, "-")}`;
+}
+
+function groupMemberSafetyAuditView(item) {
+  if (!item) {
+    return `<div class="empty small">选择成员后查看风险记录</div>`;
+  }
+  const events = Array.isArray(item.events) ? item.events : [];
+  return `
+    <div class="group-safety-audit-head">
+      <div>
+        <span class="eyebrow">成员审计</span>
+        <h3>${escapeHtml(item.name || item.user_id)}</h3>
+        <small>${escapeHtml(item.user_id || "")}</small>
+      </div>
+      <span class="group-safety-status ${escapeHtml(item.status || "clear")}">${escapeHtml(groupMemberSafetyStatusLabel(item))}</span>
+    </div>
+    <div class="group-safety-member-actions">
+      ${item.blocked
+        ? `<button type="button" data-safety-action="unblock" data-safety-user="${escapeHtml(item.user_id)}">解除静默</button>`
+        : `<button type="button" data-safety-action="manual_block" data-safety-user="${escapeHtml(item.user_id)}" class="danger">手动静默</button>`}
+      <button type="button" data-safety-action="clear_strikes" data-safety-user="${escapeHtml(item.user_id)}" ${item.risk_event_count ? "" : "disabled"}>清除次数</button>
+      <button type="button" data-safety-action="${item.exempt ? "unexempt" : "exempt"}" data-safety-user="${escapeHtml(item.user_id)}">${escapeHtml(item.exempt ? "取消豁免" : "设为豁免")}</button>
+    </div>
+    <div class="group-safety-audit-list">
+      ${events.length ? events.map((event) => `
+        <article>
+          <header>
+            <b>${escapeHtml({ harassment: "持续骚扰", threat: "威胁恐吓", manipulation: "恶意操控", repeated_attack: "重复攻击", other: "其他恶意行为", manual_block: "手动静默", unblock: "解除静默", clear_strikes: "清除次数", exempt: "设为豁免", unexempt: "取消豁免" }[event.category] || event.category || "风险记录")}</b>
+            <time>${escapeHtml(formatRecentTime(event.ts, "-"))}</time>
+          </header>
+          <p>${escapeHtml(event.reason || "未记录理由")}</p>
+          ${event.message ? `<blockquote>${escapeHtml(event.message)}</blockquote>` : ""}
+          <footer>
+            ${event.source === "manual"
+              ? `<span>人工操作</span>`
+              : `<span>置信度 ${escapeHtml(Math.round(Number(event.confidence || 0) * 100))}%</span><span>严重度 ${escapeHtml(event.severity || 1)}/3</span><span>${escapeHtml(event.source === "reply_hidden_marker" ? "回复模型隐性标签" : "独立模型审核")}</span>`}
+          </footer>
+        </article>
+      `).join("") : `<div class="empty small">暂无风险记录</div>`}
+    </div>
+  `;
+}
+
+function renderGroupMemberSafetyContent() {
+  const box = $("#groupDetail");
+  const safety = state.groupMemberSafety || {};
+  const allItems = Array.isArray(safety.items) ? safety.items : [];
+  const query = String(state.groupMemberSafetyQuery || "").trim().toLowerCase();
+  const filter = state.groupMemberSafetyFilter || "all";
+  const items = allItems.filter((item) => {
+    if (filter !== "all" && item.status !== filter) return false;
+    if (!query) return true;
+    return `${item.name || ""} ${item.user_id || ""} ${item.last_reason || ""}`.toLowerCase().includes(query);
+  });
+  if (!items.some((item) => String(item.user_id) === String(state.selectedGroupSafetyUserId))) {
+    state.selectedGroupSafetyUserId = items[0]?.user_id || "";
+  }
+  const selected = allItems.find((item) => String(item.user_id) === String(state.selectedGroupSafetyUserId)) || null;
+  const modeLabels = { directed: "只审核对 Bot 的消息", suspicious: "包含 Bot 对话续接窗口", all: "审核全部群消息" };
+  const hiddenMarkerLabels = { supplement: "回复标签补充", reply_only: "仅回复标签", disabled: "仅独立审核" };
+  box.innerHTML = `
+    <section class="group-safety-page">
+      <header class="group-safety-page-head">
+        <button type="button" class="group-safety-back" data-close-member-safety aria-label="返回群详情"><span aria-hidden="true">←</span> 返回群详情</button>
+        <div>
+          <span class="eyebrow">成员风控管理</span>
+          <h2>${escapeHtml(safety.group_name || groupDisplayName(state.groups.find((group) => String(group.group_id) === String(state.selectedGroupId))))}</h2>
+          <p>${escapeHtml(modeLabels[safety.review_mode] || safety.review_mode || "只审核对 Bot 的消息")} · ${escapeHtml(hiddenMarkerLabels[safety.hidden_marker_mode] || "回复标签补充")} · ${escapeHtml(safety.strike_threshold || 3)} 次 / ${escapeHtml(safety.strike_window_days || 30)} 天</p>
+        </div>
+        <span class="group-safety-runtime ${safety.enabled === false ? "off" : ""}">${escapeHtml(safety.enabled === false ? "功能已暂停" : "功能运行中")}</span>
+      </header>
+      <div class="group-safety-stats" aria-label="成员风控统计">
+        ${groupMetricTile("全部成员", safety.total || allItems.length)}
+        ${groupMetricTile("观察中", safety.watching_count || 0)}
+        ${groupMetricTile("已静默", safety.blocked_count || 0)}
+        ${groupMetricTile("已豁免", safety.exempt_count || 0)}
+      </div>
+      <div class="group-safety-toolbar">
+        <input type="search" value="${escapeHtml(state.groupMemberSafetyQuery || "")}" data-safety-search placeholder="搜索成员昵称 / ID / 理由" aria-label="搜索风控成员" />
+        <div class="group-safety-filters" role="group" aria-label="筛选成员状态">
+          ${[["all", "全部"], ["watching", "观察中"], ["blocked", "已静默"], ["exempt", "已豁免"]].map(([value, label]) => `<button type="button" data-safety-filter="${value}" class="${filter === value ? "active" : ""}" aria-pressed="${filter === value ? "true" : "false"}">${label}</button>`).join("")}
+        </div>
+      </div>
+      ${state.groupMemberSafetyError ? `<div class="group-safety-error">${escapeHtml(state.groupMemberSafetyError)}</div>` : ""}
+      <div class="group-safety-workbench">
+        <section class="group-safety-members" aria-label="群成员列表">
+          <header><b>成员</b><span>${escapeHtml(items.length)} 人</span></header>
+          <div class="group-safety-member-list">
+            ${items.length ? items.map((item) => `
+              <button type="button" data-safety-select="${escapeHtml(item.user_id)}" class="${String(item.user_id) === String(state.selectedGroupSafetyUserId) ? "active" : ""}">
+                <span class="group-safety-avatar">${escapeHtml(String(item.name || item.user_id || "?").slice(0, 1))}</span>
+                <span class="group-safety-member-copy">
+                  <b>${escapeHtml(item.name || item.user_id)}</b>
+                  <small>${escapeHtml(item.user_id)}${item.blocked ? ` · ${escapeHtml(groupMemberSafetyExpiry(item))}` : ""}</small>
+                </span>
+                <span class="group-safety-status ${escapeHtml(item.status || "clear")}">${escapeHtml(item.status === "watching" ? `${item.strike_count}/${safety.strike_threshold || 3}` : groupMemberSafetyStatusLabel(item))}</span>
+              </button>
+            `).join("") : `<div class="empty small">没有符合当前条件的成员</div>`}
+          </div>
+        </section>
+        <aside class="group-safety-audit" aria-label="成员风险审计">
+          ${groupMemberSafetyAuditView(selected)}
+        </aside>
+      </div>
+    </section>
+  `;
+  bindGroupMemberSafetyActions();
+}
+
+async function renderGroupMemberSafetyPage(forceFetch = false) {
+  const box = $("#groupDetail");
+  const hasCurrent = state.groupMemberSafety && String(state.groupMemberSafety.group_id || "") === String(state.selectedGroupId);
+  if (!forceFetch && hasCurrent) {
+    renderGroupMemberSafetyContent();
+    return;
+  }
+  state.groupMemberSafetyLoading = true;
+  state.groupMemberSafetyError = "";
+  box.innerHTML = `<div class="group-safety-loading"><span class="spinner" aria-hidden="true"></span><p>正在读取成员风控记录…</p></div>`;
+  try {
+    state.groupMemberSafety = await fetchJson(`/group/member-safety?group_id=${encodeURIComponent(state.selectedGroupId)}`);
+  } catch (error) {
+    state.groupMemberSafetyError = error.message || "读取失败";
+    box.innerHTML = `<div class="group-safety-load-error"><b>成员风控读取失败</b><p>${escapeHtml(state.groupMemberSafetyError)}</p><div><button type="button" data-close-member-safety>返回群详情</button><button type="button" data-retry-member-safety>重试</button></div></div>`;
+    box.querySelector("[data-close-member-safety]")?.addEventListener("click", () => {
+      state.groupDetailView = "overview";
+      renderGroupDetail(true);
+    });
+    box.querySelector("[data-retry-member-safety]")?.addEventListener("click", () => renderGroupMemberSafetyPage(true));
+    return;
+  } finally {
+    state.groupMemberSafetyLoading = false;
+  }
+  renderGroupMemberSafetyContent();
+}
+
+function bindGroupMemberSafetyActions() {
+  document.querySelector("[data-close-member-safety]")?.addEventListener("click", () => {
+    state.groupDetailView = "overview";
+    state.groupMemberSafetyError = "";
+    renderGroupDetail(true);
+  });
+  document.querySelector("[data-safety-search]")?.addEventListener("input", (event) => {
+    state.groupMemberSafetyQuery = event.target.value || "";
+    renderGroupMemberSafetyContent();
+    const input = document.querySelector("[data-safety-search]");
+    input?.focus();
+    if (input) input.setSelectionRange(input.value.length, input.value.length);
+  });
+  document.querySelectorAll("[data-safety-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.groupMemberSafetyFilter = button.dataset.safetyFilter || "all";
+      renderGroupMemberSafetyContent();
+    });
+  });
+  document.querySelectorAll("[data-safety-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedGroupSafetyUserId = button.dataset.safetySelect || "";
+      renderGroupMemberSafetyContent();
+    });
+  });
+  document.querySelectorAll("[data-safety-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.safetyAction || "";
+      const userId = button.dataset.safetyUser || "";
+      if (action === "manual_block" && !requireSecondClick(button, `member-safety-block:${state.selectedGroupId}:${userId}`, "再次点击静默该成员", "再次点击静默")) return;
+      const result = await runAction(
+        () => postJson("/group/member-safety/action", { group_id: state.selectedGroupId, user_id: userId, action }),
+        { manual_block: "已手动静默成员", unblock: "已解除成员静默", clear_strikes: "已清除风险次数", exempt: "已豁免成员", unexempt: "已取消成员豁免" }[action] || "已更新成员风控",
+        button,
+        { reload: false },
+      );
+      if (!result) return;
+      if (result?.summary) {
+        state.groupMemberSafety = { ...result.summary, group_id: state.selectedGroupId, group_name: state.groupMemberSafety?.group_name || "" };
+        renderGroupMemberSafetyContent();
+      } else {
+        await renderGroupMemberSafetyPage(true);
+      }
+    });
+  });
 }
 
 function groupDetailPanel(title, content, options = {}) {
@@ -13995,6 +14294,15 @@ function groupWakeupLogItem(item) {
 }
 
 function bindGroupActions(detail) {
+  document.querySelector("[data-open-member-safety]")?.addEventListener("click", async () => {
+    state.groupDetailView = "member-safety";
+    state.groupMemberSafety = null;
+    state.groupMemberSafetyError = "";
+    state.groupMemberSafetyFilter = "all";
+    state.groupMemberSafetyQuery = "";
+    state.selectedGroupSafetyUserId = "";
+    await renderGroupMemberSafetyPage(true);
+  });
   document.querySelectorAll("[data-group-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const action = button.dataset.groupAction;
@@ -21107,6 +21415,12 @@ const featureDetailGuides = {
     enabled: "群聊相关子功能才有运行基础。",
     disabled: "多数群聊观察、唤醒、插话和群资料更新都会停止。",
   },
+  enable_group_member_safety: {
+    summary: "由模型保守识别明确针对 Bot 的持续骚扰、威胁和重复攻击，按群累计后静默单个成员。",
+    trigger: "允许观察的群中，成员向 Bot 发言或命中配置的审核范围时。",
+    enabled: "达到风险次数的成员消息会被停止，群内其他成员不受影响；群详情可审计和人工管理。",
+    disabled: "不再审核或静默群成员，已有记录保留但不会生效。",
+  },
   enable_group_context_injection: {
     summary: "群聊回复前注入群氛围、当前话题、相关成员和关系网信息。",
     trigger: "Bot 准备在群聊回复时。",
@@ -27704,6 +28018,8 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
   const listMode = String(form.get("list_mode") || "none");
   if (!groupId) return;
   state.selectedGroupId = groupId;
+  state.groupDetailView = "overview";
+  state.groupMemberSafety = null;
   const saved = await runAction(async () => {
     let result = await postJson("/group/update", { group_id: groupId, enabled: true });
     if (listMode !== "none") {
