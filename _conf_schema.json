@@ -10086,13 +10086,52 @@
   "weather_config": {
     "description": "天气上下文与屏幕日记",
     "type": "object",
-    "hint": "推荐先只开启天气上下文：已安装并配置 screen_companion 时会自动复用其天气能力；需要独立查询时，再填写 OpenWeatherMap Key 和一个地点（城市优先，经纬度二选一）。",
+    "hint": "推荐先只开启天气上下文：已安装并配置 screen_companion 时会自动复用其天气能力；独立查询可选择 OpenWeatherMap、Open-Meteo 或高德地图 API。",
     "items": {
       "enable_weather_context": {
         "description": "启用天气上下文",
         "type": "bool",
-        "hint": "开启后优先使用本插件的 OpenWeatherMap 配置；尚未配置自建天气时，会尝试回退复用 screen_companion。天气只作为日程、日记和主动契机的背景，不会每句聊天都提。",
+        "hint": "开启后优先使用本插件配置的天气数据源；尚未配置自建天气时，会尝试回退复用 screen_companion。天气只作为日程、日记和主动契机的背景，不会每句聊天都提。",
         "default": true
+      },
+      "weather_source": {
+        "description": "天气数据源",
+        "type": "string",
+        "options": [
+          "openweathermap",
+          "openmeteo",
+          "amap"
+        ],
+        "labels": [
+          "OpenWeatherMap",
+          "Open-Meteo",
+          "高德地图 API"
+        ],
+        "hint": "OpenWeatherMap 需要 API Key；Open-Meteo 无需 Key，但必须填写经纬度；高德地图 API 需要 API Key 和城市编码。",
+        "default": "openweathermap",
+        "condition": {
+          "enable_weather_context": true
+        }
+      },
+      "weather_amap_api_key": {
+        "description": "高德地图 API Key",
+        "type": "string",
+        "hint": "高德开放平台 Web 服务 API Key；仅高德地图数据源使用。",
+        "default": "",
+        "condition": {
+          "enable_weather_context": true,
+          "weather_source": "amap"
+        }
+      },
+      "weather_amap_city": {
+        "description": "高德城市编码",
+        "type": "string",
+        "hint": "填写高德城市 adcode，例如东城区 110101；可从[高德城市编码表](https://a.amap.com/lbs/static/code_resource/AMap_adcode_citycode.zip)查询。",
+        "default": "",
+        "condition": {
+          "enable_weather_context": true,
+          "weather_source": "amap"
+        }
       },
       "weather_api_key": {
         "description": "天气 API Key",
@@ -10100,22 +10139,24 @@
         "hint": "仅独立查询时需要。访问 https://home.openweathermap.org/api_keys 创建 Key 后粘贴；还必须再填写“天气城市”或一组经纬度。留空时会尝试复用 screen_companion 的天气能力。",
         "default": "",
         "condition": {
-          "enable_weather_context": true
+          "enable_weather_context": true,
+          "weather_source": "openweathermap"
         }
       },
       "weather_city": {
         "description": "天气城市（推荐）",
         "type": "string",
-        "hint": "最省事的定位方式，例如 Beijing,CN、Shanghai,CN。城市已填写时会优先使用它，下面的经纬度会被忽略；不填城市才会使用经纬度。",
+        "hint": "仅 OpenWeatherMap 使用，例如 Beijing,CN、Shanghai,CN；城市已填写时会优先使用它，不填城市才会使用经纬度。Open-Meteo 必须填写经纬度。",
         "default": "",
         "condition": {
-          "enable_weather_context": true
+          "enable_weather_context": true,
+          "weather_source": "openweathermap"
         }
       },
       "weather_lat": {
         "description": "天气纬度",
         "type": "float",
-        "hint": "只在“天气城市”留空时生效。需与经度成对填写，例如北京约 39.9042。",
+        "hint": "使用 Open-Meteo 必须填写，并需与经度成对；OpenWeatherMap 仅在城市留空时使用，例如北京约 39.9042；使用高德地图 API 不需要填写经纬度。",
         "default": 0,
         "condition": {
           "enable_weather_context": true
@@ -10124,7 +10165,7 @@
       "weather_lon": {
         "description": "天气经度",
         "type": "float",
-        "hint": "只在“天气城市”留空时生效。需与纬度成对填写，例如北京约 116.4074。",
+        "hint": "使用 Open-Meteo 必须填写，并需与纬度成对；OpenWeatherMap 仅在城市留空时使用，例如北京约 116.4074；使用高德地图 API 不需要填写经纬度。",
         "default": 0,
         "condition": {
           "enable_weather_context": true

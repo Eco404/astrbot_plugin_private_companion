@@ -1587,8 +1587,13 @@ class PrivateCompanionPlugin(
             else str(raw_natural_photo_extra).strip()
         )
         self.enable_weather_context = self._cfg_bool(c, "enable_weather_context", True)
+        self.weather_source = self._cfg_str(c, "weather_source", "openweathermap").lower()
+        if self.weather_source not in {"openweathermap", "amap", "openmeteo"}:
+            self.weather_source = "openweathermap"
         self.weather_api_key = self._cfg_str(c, "weather_api_key", "")
         self.weather_city = self._cfg_str(c, "weather_city", "")
+        self.weather_amap_api_key = self._cfg_str(c, "weather_amap_api_key", "")
+        self.weather_amap_city = self._cfg_str(c, "weather_amap_city", "")
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)

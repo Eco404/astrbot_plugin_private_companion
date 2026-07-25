@@ -138,6 +138,40 @@ DEFAULT_NEWS_SOURCES = "\n".join(
 
 DEFAULT_PERSONA_PROMPT_FALLBACK = "未读取到 AstrBot 默认人格。请保持简洁、温和、有边界,不额外创造新身份。"
 
+
+def _openmeteo_weather_description(code: Any) -> str:
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return "未知"
+    if code == 0:
+        return "晴天"
+    if code == 1:
+        return "少云"
+    if code == 2:
+        return "多云"
+    if code == 3:
+        return "阴天"
+    if code in {45, 48}:
+        return "雾"
+    if 51 <= code <= 55:
+        return "毛毛雨"
+    if code in {56, 57}:
+        return "冻毛毛雨"
+    if 61 <= code <= 65:
+        return "降雨"
+    if code in {66, 67}:
+        return "冻雨"
+    if 71 <= code <= 77:
+        return "降雪"
+    if 80 <= code <= 82:
+        return "阵雨"
+    if code in {85, 86}:
+        return "阵雪"
+    if 95 <= code <= 99:
+        return "雷暴"
+    return "未知"
+
 LEGACY_DEFAULT_NEWS_SOURCES = "\n".join(
     [
         "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
@@ -4006,12 +4040,14 @@ class DailyStateMixin:
         today = _today_key()
         if not self.enable_weather_context:
             return {"date": today, "prompt": "暂无天气信息", "source": "disabled"}
+        weather_source = getattr(self, "weather_source", "openweathermap")
         cached = self.data.get("daily_weather", {})
         if isinstance(cached, dict):
             fetched_at = _safe_float(cached.get("fetched_ts"), 0)
             if (
                 not force
                 and cached.get("date") == today
+                and cached.get("weather_source", "openweathermap") == weather_source
                 and _now_ts() - fetched_at < self.weather_refresh_minutes * 60
             ):
                 return cached
@@ -4037,6 +4073,7 @@ class DailyStateMixin:
             "date": today,
             "prompt": prompt,
             "source": source,
+            "weather_source": weather_source,
             "fetched_ts": _now_ts(),
         }
         async with self._data_lock:
@@ -4332,7 +4369,101 @@ class DailyStateMixin:
             text = text[:max_chars]
         return text or "暂无可用的昨日屏幕观察日记。"
 
+    async def _fetch_openmeteo_weather(self) -> dict[str, str]:
+        try:
+            lat = float(getattr(self, "weather_lat", 0))
+            lon = float(getattr(self, "weather_lon", 0))
+        except (TypeError, ValueError):
+            return {"prompt": "", "source": ""}
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lon)
+            or not -90 <= lat <= 90
+            or not -180 <= lon <= 180
+            or lat == 0 and lon == 0
+        ):
+            return {"prompt": "", "source": ""}
+        params = urlencode(
+            {
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,weather_code",
+            }
+        )
+        url = f"https://api.open-meteo.com/v1/forecast?{params}"
+        try:
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        logger.debug(f"[PrivateCompanion] Open-Meteo 天气请求失败: {response.status}")
+                        return {"prompt": "", "source": ""}
+                    weather_data = await response.json()
+        except Exception as e:
+            logger.debug(f"[PrivateCompanion] Open-Meteo 天气获取失败: {e}")
+            return {"prompt": "", "source": ""}
+        try:
+            if not isinstance(weather_data, dict):
+                return {"prompt": "", "source": ""}
+            current = weather_data.get("current")
+            if not isinstance(current, dict):
+                return {"prompt": "", "source": ""}
+            temperature = float(current["temperature_2m"])
+            weather_code = int(current["weather_code"])
+            if not math.isfinite(temperature):
+                return {"prompt": "", "source": ""}
+            description = _openmeteo_weather_description(weather_code)
+            return {
+                "prompt": f"当前天气 {description},约 {temperature:g}°C。",
+                "source": "openmeteo",
+            }
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return {"prompt": "", "source": ""}
+
+    async def _fetch_amap_weather(self) -> dict[str, str]:
+        key = str(getattr(self, "weather_amap_api_key", "") or "").strip()
+        city = str(getattr(self, "weather_amap_city", "") or "").strip()
+        if not key or not city:
+            return {"prompt": "", "source": ""}
+        url = "https://restapi.amap.com/v3/weather/weatherInfo?" + urlencode(
+            {"key": key, "city": city, "extensions": "base", "output": "JSON"}
+        )
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        logger.debug(f"[PrivateCompanion] 高德天气请求失败: {response.status}")
+                        return {"prompt": "", "source": ""}
+                    weather_data = await response.json()
+        except Exception as e:
+            logger.debug(f"[PrivateCompanion] 高德天气获取失败: {e}")
+            return {"prompt": "", "source": ""}
+        try:
+            if not isinstance(weather_data, dict) or str(weather_data.get("status")) != "1":
+                return {"prompt": "", "source": ""}
+            lives = weather_data.get("lives")
+            live = lives[0] if isinstance(lives, list) and lives else None
+            if not isinstance(live, dict) or not str(live.get("weather") or "").strip():
+                return {"prompt": "", "source": ""}
+            temperature = float(live["temperature"])
+            if not math.isfinite(temperature):
+                return {"prompt": "", "source": ""}
+            return {
+                "prompt": f"当前天气 {live['weather']}，约 {temperature:g}°C。",
+                "source": "amap",
+            }
+        except (KeyError, TypeError, ValueError):
+            return {"prompt": "", "source": ""}
+
     async def _fetch_own_weather_prompt(self) -> dict[str, str]:
+        if getattr(self, "weather_source", "openweathermap") == "amap":
+            return await self._fetch_amap_weather()
+        if getattr(self, "weather_source", "openweathermap") == "openmeteo":
+            return await self._fetch_openmeteo_weather()
         if not self.weather_api_key:
             return {"prompt": "", "source": ""}
         url = self._build_weather_url()
