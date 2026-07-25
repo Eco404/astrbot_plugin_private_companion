@@ -138,7 +138,60 @@ from .creative import CreativeMixin
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
-from .group_member_safety import GroupMemberSafetyMixin
+try:
+    from .group_member_safety import GroupMemberSafetyMixin
+except ModuleNotFoundError as exc:
+    if str(getattr(exc, "name", "") or "").split(".")[-1] != "group_member_safety":
+        raise
+
+    class GroupMemberSafetyMixin:
+        """Fail-open fallback for an incomplete release package."""
+
+        @staticmethod
+        def _extract_group_member_safety_hidden_markers(text: Any) -> tuple[str, list[dict[str, Any]]]:
+            return str(text or ""), []
+
+        @staticmethod
+        def _group_member_safety_hidden_marker_mode() -> str:
+            return "disabled"
+
+        @staticmethod
+        def _group_member_safety_member(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        @staticmethod
+        def _group_member_safety_is_exempt_event(*args: Any, **kwargs: Any) -> bool:
+            return True
+
+        @staticmethod
+        def _group_member_safety_active(*args: Any, **kwargs: Any) -> bool:
+            return False
+
+        async def _append_group_member_safety_hidden_marker_to_request(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            return None
+
+        async def _record_group_member_safety_decision(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return {"reviewed": False, "counted": False, "blocked": False, "reason": "module_missing"}
+
+        async def _review_group_member_safety_message(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return {"reviewed": False, "counted": False, "blocked": False, "reason": "module_missing"}
+
+    logger.error(
+        "[PrivateCompanion] 发布包缺少 group_member_safety.py，群成员风控已停用；插件其余功能继续加载。"
+        "请重新安装包含该文件的完整版本。"
+    )
 from .event_dispatch import EventDispatchMixin
 from .private_reading import PrivateReadingMixin
 from .news_exploration import NewsExplorationMixin

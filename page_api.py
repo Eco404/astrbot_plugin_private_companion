@@ -15251,6 +15251,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_solar_term_perception",
             "enable_almanac_perception",
             "enable_group_companion",
+            "enable_group_member_safety",
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",

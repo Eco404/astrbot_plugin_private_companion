@@ -7593,11 +7593,30 @@ Output:
             80,
         )
         custom = _single_line(getattr(self, "daily_outfit_photo_prompt", ""), 220)
+        anime_style = style_name == "二次元"
+        composition_style = (
+            [
+                "daily outfit character illustration",
+                "selfie-inspired outfit portrait composition",
+                "non-mirror casual illustrated portrait",
+                "soft illustrated lighting",
+                "clean illustrated background",
+                "anime slice-of-life atmosphere",
+            ]
+            if anime_style
+            else [
+                "daily outfit selfie",
+                "selfie outfit photo",
+                "non-mirror handheld selfie or natural environmental outfit portrait",
+                "natural phone snapshot",
+                "soft natural light",
+                "clean background",
+                "lifelike daily atmosphere",
+            ]
+        )
         positive = [
             "single character",
-            "daily outfit selfie",
-            "selfie outfit photo",
-            "non-mirror handheld selfie or natural environmental outfit portrait",
+            *composition_style[:3],
             "solo",
             "visible face",
             "complete head and hair",
@@ -7607,10 +7626,7 @@ Output:
             "centered composition",
             "1:1 square cover composition",
             "safe margins around head and body",
-            "natural phone snapshot",
-            "soft natural light",
-            "clean background",
-            "lifelike daily atmosphere",
+            *composition_style[3:],
             persona or "keep the face, hairstyle, hair color, eye color, and key traits consistent with the reference image",
             outfit_hint,
             scene_hint,
@@ -7670,6 +7686,16 @@ Output:
             "nsfw",
             "revealing outfit",
         ]
+        if anime_style:
+            negative.extend(
+                [
+                    "photorealistic",
+                    "real person",
+                    "live-action",
+                    "realistic photography",
+                    "photo-real skin texture",
+                ]
+            )
         if rotation_reference:
             negative.extend(
                 [
@@ -7690,7 +7716,7 @@ Output:
         name = _single_line(style_name, 40)
         instruction = _single_line(style_instruction, 220)
         if name == "二次元":
-            return "anime illustration style, clean detailed character art, soft colors, slice-of-life feeling"
+            return "2D anime illustration style, clean detailed character art, cel-shaded rendering, soft colors, slice-of-life feeling"
         if name == "真实":
             return "realistic photography style, believable phone photo, natural lighting, realistic fabric details"
         if instruction:
@@ -9273,7 +9299,7 @@ Output:
         explicit_mirror = self._photo_generation_explicit_mirror_request(prompt_text)
         if explicit_mirror:
             positive = (
-                "Selfie composition: exactly one real character wearing one coherent outfit in one continuous scene; "
+                "Selfie composition: exactly one character wearing one coherent outfit in one continuous scene; "
                 "one mirror reflection of that same outfit is allowed; keep the complete face visible and do not let the phone cover it."
             )
             negative = "duplicated subject, outfit alternatives, comparison panels, split screen, side-by-side panels, collage, character sheet, phone covering face"
@@ -9515,6 +9541,7 @@ Output:
             positive_scan,
             flags=re.I,
         )
+        positive_scan = re.sub(r"\bnon[-\s]?mirror\b", " ", positive_scan, flags=re.I)
         positive_scan = re.sub(r"unless[^,.;；。]*mirror[^,.;；。]*", " ", positive_scan, flags=re.I)
         if re.search(
             r"镜前|对镜|镜中|镜子|全身镜|穿衣镜|试衣镜|\bmirror\b|looking\s+in\s+the\s+mirror|in\s+front\s+of\s+(?:a\s+)?mirror",
@@ -9582,7 +9609,7 @@ Output:
         explicit_mirror = self._photo_generation_explicit_mirror_request(prompt)
         if explicit_mirror:
             guard = (
-                "Selfie composition guard: exactly one real character wearing exactly one coherent outfit in one continuous scene; "
+                "Selfie composition guard: exactly one character wearing exactly one coherent outfit in one continuous scene; "
                 "a single mirror reflection of that same outfit is allowed, but do not create outfit alternatives, comparison panels, duplicated subjects, or a collage; "
                 "keep the face visible and avoid the phone covering the face."
             )
