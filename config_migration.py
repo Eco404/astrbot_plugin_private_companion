@@ -145,7 +145,11 @@ def _migrate_flat_config_into_schema_groups(
             # The grouped value is what AstrBot's official config page exposes.
             # Once it exists it must be authoritative, including when the user
             # intentionally changes a setting back to its schema default.
-            visible_value = _coerce_schema_value(group.get(key), item)
+            grouped_value = group.get(key)
+            visible_value = _coerce_schema_value(grouped_value, item)
+            if grouped_value != visible_value:
+                group[key] = visible_value
+                changed.append(f"{key}~schema-type")
             if root.get(key) != visible_value:
                 root[key] = visible_value
                 changed.append(f"{key}~group-authority")
@@ -601,8 +605,7 @@ def _coerce_schema_value(value: Any, item: dict[str, Any]) -> Any:
         text = str(value or "").strip()
         if not text:
             return []
-        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("，", ",").replace("\n", ",")
-        return [part.strip() for part in text.split(",") if part.strip()]
+        return [part.strip() for part in re.split(r"[\n,，、;；]+", text) if part.strip()]
     if item_type in {"string", "text"}:
         return str(value or "")
     return value

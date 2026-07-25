@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import gc
 import hashlib
 import html
@@ -135,6 +136,8 @@ from .planning import (
     pick_detail_segment,
 )
 from .scene_context import infer_companion_scene_category
+
+_EXTERNAL_IMAGE_MAX_BYTES = 32 * 1024 * 1024
 
 DEFAULT_NEWS_SOURCES = "\n".join(
     [
@@ -12295,27 +12298,95 @@ Output:
             return "", "图片结果为空"
         if raw.lower().startswith("data:image") and "," in raw:
             header, encoded = raw.split(",", 1)
-            mime_match = re.match(r"data:(image/[a-z0-9.+-]+);base64$", header.strip(), flags=re.I)
-            ext = ".png"
-            if mime_match:
-                mime_type = mime_match.group(1).lower()
-                if "jpeg" in mime_type or "jpg" in mime_type:
-                    ext = ".jpg"
-                elif "webp" in mime_type:
-                    ext = ".webp"
-            image_bytes = base64.b64decode(encoded)
-            saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=ext)
-            return saved, success_note if saved else "保存在线图片失败"
+            if not re.fullmatch(r"data:image/[a-z0-9.+-]+;base64", header.strip(), flags=re.I):
+                return "", "图片 data URI 格式无效"
+            return await self._materialize_external_image_base64(
+                encoded,
+                session_key=session_key,
+                success_note=success_note,
+            )
         if re.fullmatch(r"[A-Za-z0-9+/=\\s]+", raw) and len(raw) > 128:
-            try:
-                image_bytes = base64.b64decode(raw)
-                saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=".png")
-                if saved:
-                    return saved, success_note
-            except Exception:
-                pass
+            return await self._materialize_external_image_base64(
+                raw,
+                session_key=session_key,
+                success_note=success_note,
+            )
         saved, note = await self._download_external_image_url(raw, session_key=session_key)
         return saved, success_note if saved else note
+
+    @staticmethod
+    def _external_image_extension_from_bytes(image_bytes: bytes) -> str:
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if len(image_bytes) >= 12 and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            return ".webp"
+        return ""
+
+    async def _materialize_external_image_base64(
+        self,
+        encoded: Any,
+        *,
+        session_key: str,
+        success_note: str,
+    ) -> tuple[str, str]:
+        compact = re.sub(r"\s+", "", str(encoded or ""))
+        if not compact:
+            return "", "图片 base64 数据为空"
+        max_encoded_chars = ((_EXTERNAL_IMAGE_MAX_BYTES + 2) // 3) * 4
+        if len(compact) > max_encoded_chars:
+            return "", f"在线图片数据过大（超过 {_EXTERNAL_IMAGE_MAX_BYTES // (1024 * 1024)} MB）"
+        padded = compact + ("=" * (-len(compact) % 4))
+        try:
+            image_bytes = base64.b64decode(padded, validate=True)
+        except (binascii.Error, ValueError):
+            return "", "图片 base64 数据无效"
+        if len(image_bytes) > _EXTERNAL_IMAGE_MAX_BYTES:
+            return "", f"在线图片数据过大（超过 {_EXTERNAL_IMAGE_MAX_BYTES // (1024 * 1024)} MB）"
+        ext = self._external_image_extension_from_bytes(image_bytes)
+        if not ext:
+            return "", "在线图片数据不是受支持的 PNG、JPEG 或 WebP 图片"
+        saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=ext)
+        return saved, success_note if saved else "保存在线图片失败"
+
+    async def _materialize_external_openai_image_item(
+        self,
+        item: dict[str, Any],
+        *,
+        session_key: str,
+        success_note: str,
+    ) -> tuple[str, str]:
+        b64_value = str(item.get("b64_json") or "").strip()
+        url_value = str(item.get("url") or "").strip()
+        candidates: list[tuple[str, str]] = []
+        if b64_value:
+            normalized = b64_value
+            if not b64_value.lower().startswith("data:image"):
+                normalized = f"data:image/png;base64,{b64_value}"
+            candidates.append(("b64_json", normalized))
+        if url_value and url_value != b64_value:
+            candidates.append(("url", url_value))
+        if not candidates:
+            return "", "在线图片 API 未返回 url 或 b64_json"
+
+        last_note = "图片结果为空"
+        for index, (source, candidate) in enumerate(candidates):
+            saved, note = await self._materialize_external_image_value(
+                candidate,
+                session_key=session_key,
+                success_note=success_note,
+            )
+            if saved:
+                return saved, note
+            last_note = note
+            if index + 1 < len(candidates):
+                logger.info(
+                    "[PrivateCompanion] 在线图片 API 图片候选解析失败,尝试下一个: source=%s note=%s",
+                    source,
+                    self._external_image_diagnostic_text(note, 180),
+                )
+        return "", last_note
 
     def _external_image_model_misconfiguration_note(self) -> str:
         model = _single_line(getattr(self, "external_image_api_model", ""), 120)
@@ -12587,7 +12658,7 @@ Output:
         configured_timeout = _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 20, 600)
         # Keep URL retrieval independent from the longer image-generation request.
         download_timeout = min(configured_timeout, 75)
-        max_bytes = 32 * 1024 * 1024
+        max_bytes = _EXTERNAL_IMAGE_MAX_BYTES
         started_at = time.perf_counter()
         temporary_path: Path | None = None
         try:
@@ -13795,8 +13866,8 @@ Output:
                     "[PrivateCompanion] 在线图片 API 生图返回: %s",
                     self._external_image_diagnostic_text(image_value, 180),
                 )
-                saved, note = await self._materialize_external_image_value(
-                    image_value,
+                saved, note = await self._materialize_external_openai_image_item(
+                    first,
                     session_key=session_key,
                     success_note="ok",
                 )
@@ -13930,8 +14001,8 @@ Output:
                     "[PrivateCompanion] 在线图片 API 参考图返回: %s",
                     self._external_image_diagnostic_text(image_value, 180),
                 )
-                saved, note = await self._materialize_external_image_value(
-                    image_value,
+                saved, note = await self._materialize_external_openai_image_item(
+                    first,
                     session_key=session_key,
                     success_note="ok；已使用本地人设参考图",
                 )

@@ -4220,8 +4220,7 @@ class PrivateImageMixin:
         )
         if isinstance(buffer, dict) and now - live_updated_ts <= max_live_age:
             handoffs.pop(key, None)
-            # 标记图片上下文已被本轮文字请求认领,防抖 finalizer 检查到该标记后
-            # 会跳过延迟派发,避免同一张图产生第二条无视觉摘要的回复。
+            # 标记图片上下文已被本轮文字请求认领，防抖 finalizer 会跳过二次派发。
             buffer["vision_context_claimed_ts"] = now
             images = buffer.pop("images", [])
             image_limit = self._private_image_vision_text_limit(len(images))

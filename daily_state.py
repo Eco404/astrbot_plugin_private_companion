@@ -172,7 +172,8 @@ def _openmeteo_weather_description(code: Any) -> str:
         return "雷暴"
     return "未知"
 
-LEGACY_DEFAULT_NEWS_SOURCES = "\n".join(
+
+LEGACY_DEFAULT_NEWS_SOURCES = "\\n".join(
     [
         "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
         "Google新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans",

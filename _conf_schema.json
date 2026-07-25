@@ -10107,7 +10107,6 @@
           "Open-Meteo",
           "高德地图 API"
         ],
-        "hint": "OpenWeatherMap 需要 API Key；Open-Meteo 无需 Key，但必须填写经纬度；高德地图 API 需要 API Key 和城市编码。",
         "default": "openweathermap",
         "condition": {
           "enable_weather_context": true

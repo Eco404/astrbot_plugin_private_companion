@@ -911,14 +911,18 @@ class TtsEnhancementMixin:
     def _protect_tts_blocks_for_framework(self, text: str, event: Any) -> str:
         normalized = self._normalize_tts_tags(str(text or ""))
         if "<tts>" not in normalized.lower() or "</tts>" not in normalized.lower():
-            return normalized
-        protected = getattr(event, "_private_companion_tts_block_tokens", None)
-        if not isinstance(protected, dict):
-            protected = {}
+            # 清除可能存在的旧 TTS tokens，避免模型切换后残留内容被恢复
             try:
-                setattr(event, "_private_companion_tts_block_tokens", protected)
+                setattr(event, "_private_companion_tts_block_tokens", {})
             except Exception:
-                protected = {}
+                pass
+            return normalized
+        # 清除之前模型响应留下的旧 tokens，防止模型切换后旧的 TTS 内容被错误恢复
+        protected: dict[str, str] = {}
+        try:
+            setattr(event, "_private_companion_tts_block_tokens", protected)
+        except Exception:
+            pass
 
         def repl(match: re.Match[str]) -> str:
             token = uuid.uuid4().hex[:16]
@@ -1274,9 +1278,50 @@ class TtsEnhancementMixin:
         )
         return bool(simplified)
 
+    @staticmethod
+    def _tts_text_is_provider_safety_refusal(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "")).lower()
+        if not compact:
+            return False
+        markers = (
+            "您的请求包含低俗色情内容",
+            "不符合公序良俗",
+            "已被平台拒绝",
+            "违反内容安全策略",
+            "违反内容政策",
+            "违反社区准则",
+            "contentpolicyviolation",
+            "safetyfilter",
+        )
+        return any(marker in compact for marker in markers)
+
+    def _drop_tts_provider_safety_blocks(self, text: str) -> tuple[str, bool]:
+        """Remove only provider safety refusals that were incorrectly wrapped as voice."""
+        source = str(text or "")
+        removed = False
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal removed
+            if not self._tts_text_is_provider_safety_refusal(match.group(1)):
+                return match.group(0)
+            removed = True
+            return ""
+
+        cleaned = re.sub(
+            r"<tts\b[^>]*>(.*?)</tts>",
+            _replace,
+            source,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if removed:
+            cleaned = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", cleaned).strip()
+        return cleaned, removed
+
     def _sanitize_tts_spoken_text(self, text: str, *, provider_kind: str) -> str:
         """Clean text immediately before get_audio, scoped to TTS强化 only."""
         if not text:
+            return ""
+        if self._tts_text_is_provider_safety_refusal(text):
             return ""
         source = str(text)
         source = TTS_MARKDOWN_LINK_PATTERN.sub(lambda match: match.group(1).strip(), source)
@@ -2063,6 +2108,14 @@ TTS 朗读文本：
                 )
             return
         text = self._normalize_tts_tags(str(getattr(resp, "completion_text", "") or ""))
+        text, dropped_safety_voice = self._drop_tts_provider_safety_blocks(text)
+        if dropped_safety_voice:
+            resp.completion_text = _normalize_outbound_punctuation_flow(text)
+            logger.warning(
+                "[PrivateCompanion] 已从模型回复中移除提供商安全回执语音块: session=%s remaining=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(text, 160) or "empty",
+            )
         if text:
             has_tts_markup = bool(re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE))
             if has_tts_markup:
@@ -2137,6 +2190,16 @@ TTS 朗读文本：
                     event.set_result(self._build_result_from_chain([]))
                     return
         normalized = self._normalize_tts_tags(text)
+        normalized, dropped_safety_voice = self._drop_tts_provider_safety_blocks(normalized)
+        if dropped_safety_voice:
+            logger.warning(
+                "[PrivateCompanion] TTS发送前已移除提供商安全回执语音块: session=%s remaining=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(normalized, 160) or "empty",
+            )
+            if not normalized:
+                event.set_result(self._build_result_from_chain([]))
+                return
         if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
             # A tag can also arrive from a tool or an extension that bypasses the LLM response hook.
             # Treat it as plain source text so it cannot re-enter the fast-tag path.
@@ -2233,6 +2296,14 @@ TTS 朗读文本：
         if not re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
             return
         normalized = self._normalize_tts_tags(text)
+        normalized, dropped_safety_voice = self._drop_tts_provider_safety_blocks(normalized)
+        if dropped_safety_voice and not normalized:
+            event.set_result(self._build_result_from_chain([]))
+            logger.warning(
+                "[PrivateCompanion] 发送前终检已丢弃仅包含提供商安全回执的语音块: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
         new_chain: list[Any] = []
@@ -2572,6 +2643,13 @@ TTS 朗读文本：
 
     async def _maybe_convert_plain_reply_to_tts(self, text: str, event: Any) -> list[Any]:
         mode = getattr(self, "tts_generation_mode", "fast_tag")
+        if self._tts_text_is_provider_safety_refusal(text):
+            logger.info(
+                "[PrivateCompanion] 提供商安全回执保持纯文字,不进入 TTS: session=%s preview=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(text, 140),
+            )
+            return []
         visible_override, suppress_visible, conversion_source, skip_conversion = self._tts_proactive_segment_visible_policy(event)
         if skip_conversion:
             logger.info(
@@ -3528,6 +3606,13 @@ Provider 规则：{emotion_rule}
             source_spoken = spoken
             spoken = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
             if not spoken:
+                if self._tts_text_is_provider_safety_refusal(source_spoken):
+                    record_failed = True
+                    logger.warning(
+                        "[PrivateCompanion] TTS转换结果命中提供商安全回执,已跳过合成并保留原回复: session=%s preview=%s",
+                        _single_line(self._tts_session_key(event), 80) or "unknown",
+                        _single_line(source_spoken, 140),
+                    )
                 pos = match.end()
                 continue
             remaining = self._tts_session_interval_remaining(event)

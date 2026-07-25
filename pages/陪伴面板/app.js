@@ -1704,8 +1704,11 @@ const configLabels = {
   environment_perception_timezone: "环境感知时区",
   holiday_country: "节假日地区",
   enable_weather_context: "天气上下文",
+  weather_source: "天气数据源",
   weather_api_key: "OpenWeatherMap API Key",
   weather_city: "天气城市（推荐）",
+  weather_amap_api_key: "高德地图 API Key",
+  weather_amap_city: "高德城市编码",
   weather_lat: "天气纬度",
   weather_lon: "天气经度",
   weather_refresh_minutes: "天气刷新间隔（分钟）",
@@ -2085,11 +2088,14 @@ const configDescriptions = {
   advanced_cycle_pms_energy: "未开启强度联动时使用的精力增减值，负数表示精力稍低。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
-  enable_weather_context: "开启后优先使用本插件的 OpenWeatherMap 配置；未配置独立天气时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
-  weather_api_key: "仅独立查询天气时需要。还需填写天气城市，或同时填写一组经纬度；留空时会尝试复用 screen_companion。",
-  weather_city: "例如 Beijing,CN、Shanghai,CN。填写城市后优先使用城市定位，并忽略经纬度。",
-  weather_lat: "仅在天气城市留空时使用，需与经度成对填写。",
-  weather_lon: "仅在天气城市留空时使用，需与纬度成对填写。",
+  enable_weather_context: "开启后优先使用本插件配置的天气数据源；未完成独立天气配置时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
+  weather_source: "选择 OpenWeatherMap、无需 Key 的 Open-Meteo，或高德地图 Web 服务 API。",
+  weather_api_key: "仅 OpenWeatherMap 使用。还需填写天气城市，或同时填写一组经纬度。",
+  weather_city: "仅 OpenWeatherMap 使用，例如 Beijing,CN、Shanghai,CN。填写城市后优先使用城市定位，并忽略经纬度。",
+  weather_amap_api_key: "仅高德地图数据源使用，需填写高德开放平台 Web 服务 API Key。",
+  weather_amap_city: "仅高德地图数据源使用，填写城市或区县 adcode，例如东城区 110101。",
+  weather_lat: "Open-Meteo 必须填写，并需与经度成对；OpenWeatherMap 仅在天气城市留空时使用。",
+  weather_lon: "Open-Meteo 必须填写，并需与纬度成对；OpenWeatherMap 仅在天气城市留空时使用。",
   weather_refresh_minutes: "天气缓存的刷新间隔；更换地点或 Key 后会在下一次刷新时使用新配置。",
   enable_environment_change_proactive: "独立轮询天气变化，只在开始或停止降水、雷暴、降雪、明显雾风和温差突变时生成短时主动候选。",
   environment_change_check_minutes: "检查实时天气是否出现明显变化的间隔。",
@@ -2576,7 +2582,7 @@ const featureSettingGroups = {
   enable_private_image_self_recognition: ["private_image_vision_provider_priority", "private_image_vision_custom_prompt", "private_image_vision_max_chars", "private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "private_image_provider_failure_cooldown_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit", "forward_message_image_vision_timeout_seconds"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
-  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
+  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_source", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_balance_awareness: ["balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_holiday_perception: ["holiday_country"],
   enable_platform_perception: [],
@@ -2584,7 +2590,7 @@ const featureSettingGroups = {
   enable_lunar_perception: ["environment_perception_timezone"],
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
-  enable_weather_context: ["weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+  enable_weather_context: ["weather_source", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_environment_change_proactive: ["environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [],
@@ -2863,8 +2869,8 @@ const featureSettingSections = {
     },
     {
       title: "天气上下文",
-      note: "优先使用独立 OpenWeatherMap 配置，也可回退复用 screen_companion；地点优先填写城市。",
-      keys: ["enable_weather_context", "weather_api_key", "weather_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+      note: "可选 OpenWeatherMap、Open-Meteo 或高德地图，也可回退复用 screen_companion。",
+      keys: ["enable_weather_context", "weather_source", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
     },
     {
       title: "余额与补给",
@@ -3388,7 +3394,9 @@ const featureSettingTypes = {
   proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴：不省成本"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
   enable_weather_context: { type: "checkbox" },
+  weather_source: { type: "select", options: [["openweathermap", "OpenWeatherMap"], ["openmeteo", "Open-Meteo"], ["amap", "高德地图 API"]] },
   weather_api_key: { type: "password" },
+  weather_amap_api_key: { type: "password" },
   weather_lat: { type: "number", min: -90, max: 90, step: 0.0001 },
   weather_lon: { type: "number", min: -180, max: 180, step: 0.0001 },
   weather_refresh_minutes: { type: "number", min: 10, max: 720, step: 10 },
@@ -18324,14 +18332,19 @@ function weatherConfigStatusText(settings = state.overview?.settings || {}) {
   const overview = state.overview || {};
   const cache = overview.cache?.weather || {};
   const enabled = toBool(settings.enable_weather_context);
+  const weatherSource = String(settings.weather_source || "openweathermap").trim().toLowerCase();
   const apiKey = String(settings.weather_api_key || "").trim();
   const city = String(settings.weather_city || "").trim();
+  const amapApiKey = String(settings.weather_amap_api_key || "").trim();
+  const amapCity = String(settings.weather_amap_city || "").trim();
   const lat = Number(settings.weather_lat || 0);
   const lon = Number(settings.weather_lon || 0);
   const hasCoordinates = Number.isFinite(lat) && Number.isFinite(lon) && lat !== 0 && lon !== 0;
   const screenAvailable = Boolean(overview.screen_companion?.available);
   const sourceLabels = {
     private_companion: "本插件 OpenWeatherMap",
+    openmeteo: "本插件 Open-Meteo",
+    amap: "本插件高德地图",
     screen_companion: "screen_companion 回退",
     disabled: "已关闭",
     none: "暂无可用来源",
@@ -18340,14 +18353,22 @@ function weatherConfigStatusText(settings = state.overview?.settings || {}) {
   let status = "";
   if (!enabled) {
     status = "天气上下文已关闭，不会参与日程、日记或主动话题。";
-  } else if (apiKey && (city || hasCoordinates)) {
-    status = `独立查询已就绪：${city ? `城市 ${city}` : "经纬度定位"}。`;
+  } else if (weatherSource === "openmeteo" && hasCoordinates) {
+    status = "Open-Meteo 已就绪：经纬度定位，无需 API Key。";
+  } else if (weatherSource === "amap" && amapApiKey && amapCity) {
+    status = `高德地图已就绪：城市编码 ${amapCity}。`;
+  } else if (weatherSource === "openweathermap" && apiKey && (city || hasCoordinates)) {
+    status = `OpenWeatherMap 已就绪：${city ? `城市 ${city}` : "经纬度定位"}。`;
   } else if (screenAvailable) {
     status = "未完成独立天气配置，当前会尝试复用 screen_companion 的天气能力。";
+  } else if (weatherSource === "openmeteo") {
+    status = "Open-Meteo 还缺少一组有效经纬度。";
+  } else if (weatherSource === "amap") {
+    status = "高德地图还缺少 API Key 或城市编码。";
   } else if (apiKey) {
-    status = "已填写 API Key，但还缺少城市或一组经纬度。";
+    status = "OpenWeatherMap 已填写 API Key，但还缺少城市或一组经纬度。";
   } else {
-    status = "尚未配置独立天气；填写 Key 和城市即可启用，或安装 screen_companion 作为回退。";
+    status = "OpenWeatherMap 还缺少 API Key 和地点；也可改用 Open-Meteo 或高德地图。";
   }
   const runtime = source
     ? ` 最近结果：${source}${cache.summary ? `，${cache.summary}` : ""}${cache.age ? `（${cache.age}）` : ""}。`
@@ -20677,8 +20698,11 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_environment_perception") {
     const weatherChildren = new Set([
+      "weather_source",
       "weather_api_key",
       "weather_city",
+      "weather_amap_api_key",
+      "weather_amap_city",
       "weather_lat",
       "weather_lon",
       "weather_refresh_minutes",
@@ -20687,6 +20711,9 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       "environment_change_cooldown_minutes",
     ]);
     if (weatherChildren.has(settingKey) && !boolSetting("enable_weather_context")) return false;
+    const weatherSource = String(valueSetting("weather_source", "openweathermap") || "openweathermap").toLowerCase();
+    if (["weather_api_key", "weather_city"].includes(settingKey) && weatherSource !== "openweathermap") return false;
+    if (["weather_amap_api_key", "weather_amap_city"].includes(settingKey) && weatherSource !== "amap") return false;
     if (["environment_change_check_minutes", "environment_change_cooldown_minutes"].includes(settingKey)) {
       return boolSetting("enable_environment_change_proactive");
     }

@@ -5881,6 +5881,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "forward_message",
             "group_injection_guard",
             "reply_chain",
+            "media_delivery_truth",
         )
         marker_pattern = "|".join(re.escape(f"private_companion_{name}_v1") for name in block_markers)
         cleaned = re.sub(
@@ -6230,6 +6231,61 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 }
             )
 
+        current_user_id = ""
+        if is_private_chat:
+            try:
+                current_user_id = _single_line(current_user.get("user_id") or event.get_sender_id(), 80)
+            except Exception:
+                current_user_id = _single_line(current_user.get("user_id"), 80)
+
+        current_state_memory_needed = bool(
+            re.search(
+                r"(你|星缘|bot|机器人).{0,8}(在干嘛|在做什么|做什么|穿什么|穿的?什么|衣服|衣服颜色|什么颜色|吃了什么|吃的?什么|几点吃|什么时候吃|吃饭|进食|在哪里|在哪儿|当前位置|今天状态|现在状态)",
+                inbound_text,
+            )
+            or re.search(
+                r"(穿搭|自拍|衣服.{0,8}(颜色|什么色)|穿.{0,6}什么|今天.*衣服|今天.*颜色|刚才.*做|几点.*做了什么)",
+                inbound_text,
+            )
+        )
+
+        async def current_state_memory_context() -> str:
+            composer = getattr(self, "_memory_companion_compose_feature_context", None)
+            if not callable(composer):
+                return ""
+            current_state_memory = await composer(
+                kind="current_state_reply",
+                query=(
+                    f"当前状态问答：{inbound_text}；"
+                    "今日穿搭、衣服颜色、当前日程、当前位置、刚才做了什么、进食时间、吃了什么、最近自拍、用户常问状态习惯"
+                ),
+                user=current_user,
+                user_id=current_user_id,
+                event=event,
+                top_k=6,
+                max_chars=950,
+                timeout_seconds=1.6,
+            )
+            current_state_memory = str(current_state_memory or "").strip()
+            if not current_state_memory:
+                return ""
+            return (
+                "【我会牢牢记住你 当前状态参考】\n"
+                f"{current_state_memory}\n"
+                "使用方式：只把它当作回答当前状态、穿搭、吃饭、日程连续性的辅助证据；"
+                "优先服从本轮状态注入和明确时间线。不要说“我查到/记忆里”。"
+            )
+
+        if is_private_chat and current_state_memory_needed:
+            add_spec(
+                "memory.current_state",
+                "memory_companion",
+                54,
+                current_state_memory_context,
+                timeout=1.65,
+                metadata={"范围": "当前私聊会话", "触发": "当前状态问答"},
+            )
+
         add_spec("creative.hidden", "creative", 60, lambda: self._format_hidden_creative_context_for_reply(inbound_text, current_user))
         add_spec("photo.recent_share", "photo", 61, lambda: self._format_recent_photo_share_snapshot_for_reply(current_user, inbound_text))
         add_spec(
@@ -6258,10 +6314,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not private_context_deferred:
             add_spec("private.context", "companion", 70, lambda: self._format_private_chat_context_injection(current_user))
         if is_private_chat and not private_context_deferred:
-            try:
-                current_user_id = _single_line(current_user.get("user_id") or event.get_sender_id(), 80)
-            except Exception:
-                current_user_id = _single_line(current_user.get("user_id"), 80)
             add_spec(
                 "memory.private_recall",
                 "memory_companion",
@@ -6280,17 +6332,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             add_spec("livingmemory.guidance", "livingmemory", 90, lambda: self._format_livingmemory_guidance(scope="private" if is_private_chat else "group"))
         add_spec("detail.injection", "daily_detail", 40, self._format_detail_injection)
 
-        current_user_id = ""
         if is_private_chat:
-            try:
-                current_user_id = self._expression_private_scope_id(
-                    current_user.get("user_id") or event.get_sender_id()
-                )
-            except Exception:
-                current_user_id = self._expression_private_scope_id(current_user.get("user_id"))
+            expression_user_id = self._expression_private_scope_id(current_user_id)
             expression_voice_selection = self._expression_voice_selection(
                 scope="private",
-                target_id=current_user_id,
+                target_id=expression_user_id,
                 inbound_text=inbound_text,
                 context_owner=current_user,
             )
@@ -6312,7 +6358,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     "expression",
                     68,
                     lambda: expression_voice,
-                    metadata={"范围": "全局抽象表达底色", "目标": current_user_id},
+                    metadata={"范围": "全局抽象表达底色", "目标": expression_user_id},
                 )
 
         async def timer_context() -> str:
@@ -6378,6 +6424,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             text=boundary,
             source="guard",
             mode="group",
+        )
+
+    async def _append_media_delivery_truth_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        media_truth_instruction = self._media_delivery_truth_instruction()
+        current_prompt = req.system_prompt or ""
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        media_truth_marker = "<!-- private_companion_media_delivery_truth_v1 -->"
+        if (
+            not media_truth_instruction
+            or media_truth_marker in current_prompt
+            or media_truth_marker in current_turn_prompt
+        ):
+            return
+        req.system_prompt = f"{current_prompt}\n\n{media_truth_marker}\n{media_truth_instruction}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="媒体发送真实性约束",
+            key="tools.media_delivery_truth",
+            text=media_truth_instruction,
+            source="tools",
+            mode="always",
+            metadata={"注入位置": "system_prompt"},
         )
 
     async def _append_conditional_tool_instructions_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -6599,34 +6667,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 metadata={"注入位置": placement},
             )
 
-        media_truth_instruction = self._media_delivery_truth_instruction()
-        current_prompt = req.system_prompt or ""
-        current_turn_prompt = str(getattr(req, "prompt", "") or "")
-        media_truth_marker = "<!-- private_companion_media_delivery_truth_v1 -->"
-        if (
-            media_truth_instruction
-            and media_truth_marker not in current_prompt
-            and media_truth_marker not in current_turn_prompt
-        ):
-            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
-                req,
-                media_truth_marker,
-                media_truth_instruction,
-                priority=89,
-                source="tools",
-            ) else "system_prompt"
-            if placement == "system_prompt":
-                current_prompt = f"{current_prompt}\n\n{media_truth_marker}\n{media_truth_instruction}".strip()
-                req.system_prompt = current_prompt
-            await self._record_request_prompt_fragment(
-                event,
-                title="媒体发送真实性约束",
-                key="tools.media_delivery_truth",
-                text=media_truth_instruction,
-                source="tools",
-                mode="always",
-                metadata={"注入位置": placement},
-            )
+        await self._append_media_delivery_truth_to_request(event, req)
         photo_instruction = self._photo_generation_tool_instruction()
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -9426,39 +9467,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             prompt_surface.add("food.meal_care", meal_care_reply_context, priority=55, source="food")
         if food_menu_context:
             prompt_surface.add("food.menu", food_menu_context, priority=53, source="food")
-        if re.search(
-            r"(你|星缘|bot|机器人).{0,8}(在干嘛|在做什么|做什么|穿什么|穿的?什么|衣服|衣服颜色|什么颜色|吃了什么|吃的?什么|几点吃|什么时候吃|吃饭|进食|在哪里|在哪儿|当前位置|今天状态|现在状态)",
-            inbound_text,
-        ) or re.search(r"(穿搭|自拍|衣服.{0,8}(颜色|什么色)|穿.{0,6}什么|今天.*衣服|今天.*颜色|刚才.*做|几点.*做了什么)", inbound_text):
-            composer = getattr(self, "_memory_companion_compose_feature_context", None)
-            if callable(composer):
-                try:
-                    current_state_memory = await composer(
-                        kind="current_state_reply",
-                        query=(
-                            f"当前状态问答：{inbound_text}；"
-                            "今日穿搭、衣服颜色、当前日程、当前位置、刚才做了什么、进食时间、吃了什么、最近自拍、用户常问状态习惯"
-                        ),
-                        user=current_user,
-                        user_id=user_id,
-                        event=event,
-                        top_k=6,
-                        max_chars=950,
-                        timeout_seconds=1.6,
-                    )
-                except Exception as exc:
-                    current_state_memory = ""
-                    logger.debug("[PrivateCompanion] 当前状态 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-                if current_state_memory:
-                    prompt_surface.add(
-                        "memory.current_state",
-                        "【我会牢牢记住你 当前状态参考】\n"
-                        f"{current_state_memory}\n"
-                        "使用方式：只把它当作回答当前状态、穿搭、吃饭、日程连续性的辅助证据；"
-                        "优先服从本轮状态注入和明确时间线。不要说“我查到/记忆里”。",
-                        priority=54,
-                        source="memory_companion",
-                    )
         if (
             buffered_images
             and buffered_image_vision
