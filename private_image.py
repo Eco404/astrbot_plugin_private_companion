@@ -4220,6 +4220,9 @@ class PrivateImageMixin:
         )
         if isinstance(buffer, dict) and now - live_updated_ts <= max_live_age:
             handoffs.pop(key, None)
+            # 标记图片上下文已被本轮文字请求认领,防抖 finalizer 检查到该标记后
+            # 会跳过延迟派发,避免同一张图产生第二条无视觉摘要的回复。
+            buffer["vision_context_claimed_ts"] = now
             images = buffer.pop("images", [])
             image_limit = self._private_image_vision_text_limit(len(images))
             return {
@@ -4989,6 +4992,15 @@ class PrivateImageMixin:
         )
         if has_followup:
             logger.info("[PrivateCompanion] 私聊单图已由补充消息接管: user=%s", user_id)
+            return
+        claimed_ts = _safe_float(buffer.get("vision_context_claimed_ts"), 0.0)
+        if claimed_ts > 0:
+            logger.info(
+                "[PrivateCompanion] 私聊单图上下文已由补充文字请求认领,跳过延迟派发: user=%s claimed_ago=%.1fs",
+                user_id,
+                max(0.0, _now_ts() - claimed_ts),
+            )
+            buffers.pop(key, None)
             return
         original_event = buffer.get("original_event")
         delayed_buffer = dict(buffer)
