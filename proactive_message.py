@@ -13789,30 +13789,16 @@ Output:
                 first = items[0]
             if not isinstance(first, dict):
                 return "", "在线图片 API 未返回图片数据"
-            b64 = str(first.get("b64_json") or "").strip()
-            if b64:
-                image_bytes = base64.b64decode(b64)
-                path = await self._save_external_generated_image(
-                    image_bytes,
-                    session_key=session_key,
-                    ext=".png",
-                )
+            image_value = str(first.get("b64_json") or first.get("url") or "").strip()
+            if image_value:
                 logger.info(
-                    "[PrivateCompanion] 在线图片 API 生图返回 base64: bytes=%s path=%s",
-                    len(image_bytes),
-                    _single_line(path, 160),
+                    "[PrivateCompanion] 在线图片 API 生图返回: %s",
+                    self._external_image_diagnostic_text(image_value, 180),
                 )
-                note = "ok；上游短暂错误后重试成功" if retried_after_upstream_error else "ok"
-                return path, note if path else "保存在线图片失败"
-            image_url = str(first.get("url") or "").strip()
-            if image_url:
-                logger.info(
-                    "[PrivateCompanion] 在线图片 API 生图返回 URL: %s",
-                    self._external_image_diagnostic_text(image_url, 180),
-                )
-                saved, note = await self._download_external_image_url(
-                    image_url,
+                saved, note = await self._materialize_external_image_value(
+                    image_value,
                     session_key=session_key,
+                    success_note="ok",
                 )
                 if saved and retried_after_upstream_error:
                     note = f"{note}；上游短暂错误后重试成功"
@@ -13938,39 +13924,19 @@ Output:
                 first = items[0]
             if not isinstance(first, dict):
                 return "", "参考图接口未返回图片数据"
-            b64 = str(first.get("b64_json") or "").strip()
-            if b64:
-                generated_bytes = base64.b64decode(b64)
-                saved = await self._save_external_generated_image(
-                    generated_bytes,
-                    session_key=session_key,
-                    ext=".png",
-                )
+            image_value = str(first.get("b64_json") or first.get("url") or "").strip()
+            if image_value:
                 logger.info(
-                    "[PrivateCompanion] 在线图片 API 参考图返回 base64: bytes=%s path=%s",
-                    len(generated_bytes),
-                    _single_line(saved, 160),
+                    "[PrivateCompanion] 在线图片 API 参考图返回: %s",
+                    self._external_image_diagnostic_text(image_value, 180),
                 )
-                if not saved:
-                    return "", "保存在线参考图生图失败"
-                note = "ok；已使用本地人设参考图"
-                if retried_after_upstream_error:
+                saved, note = await self._materialize_external_image_value(
+                    image_value,
+                    session_key=session_key,
+                    success_note="ok；已使用本地人设参考图",
+                )
+                if saved and retried_after_upstream_error:
                     note += "；上游短暂错误后重试成功"
-                return saved, note
-            image_url = str(first.get("url") or "").strip()
-            if image_url:
-                logger.info(
-                    "[PrivateCompanion] 在线图片 API 参考图返回 URL: %s",
-                    self._external_image_diagnostic_text(image_url, 180),
-                )
-                saved, note = await self._download_external_image_url(
-                    image_url,
-                    session_key=session_key,
-                )
-                if saved:
-                    note = "ok；已使用本地人设参考图"
-                    if retried_after_upstream_error:
-                        note += "；上游短暂错误后重试成功"
                 return saved, note
             return "", "参考图接口未返回 url 或 b64_json"
         except asyncio.TimeoutError:
