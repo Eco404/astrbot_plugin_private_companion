@@ -14,6 +14,13 @@ _DAILY_OUTFIT_PATTERN = re.compile(
     r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)\s*[：:]",
     flags=re.I,
 )
+_SCENE_CONTEXT_FIELD_LABEL = (
+    r"(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|当前场景|场景|"
+    r"天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格|"
+    r"current\s+(?:time|schedule|location|scene|weather)|schedule|location|scene|"
+    r"weather(?:\s+background)?|background|mood|recent\s+selfie|hairstyle|hair\s+color|"
+    r"eye\s+color|expression|style)"
+)
 _OUTFIT_PATTERNS = (
     ("cosplay", r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演|扮成|女仆装|巫女服|魔法少女|表演服"),
     ("school_uniform", r"校服|学院制服|学生制服|school[\s_-]*uniform"),
@@ -387,7 +394,8 @@ def _scene_without_daily_outfit_details(scene_context: str) -> str:
     if not text or not re.search(rf"{outfit_label}\s*[：:]", text, flags=re.I):
         return text
     cleaned = re.sub(
-        rf"(^|[；;,，])\s*{outfit_label}\s*[：:].*?(?=[；;,，]\s*(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|当前场景|场景|天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格)[：:]|$)",
+        rf"(^|[；;,，])\s*{outfit_label}\s*[：:].*?"
+        rf"(?=[；;,，]\s*{_SCENE_CONTEXT_FIELD_LABEL}\s*[：:]|$)",
         lambda match: match.group(1),
         text,
         flags=re.S | re.I,
@@ -399,8 +407,7 @@ def _scene_without_daily_outfit_details(scene_context: str) -> str:
 def _daily_outfit_details(scene_context: str) -> str:
     match = re.search(
         r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)\s*[：:]\s*(.*?)"
-        r"(?=(?:[；;,，]|\n)\s*(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|"
-        r"当前场景|场景|天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格)\s*[：:]|$)",
+        rf"(?=(?:[；;,，]|\n)\s*{_SCENE_CONTEXT_FIELD_LABEL}\s*[：:]|$)",
         str(scene_context or ""),
         flags=re.I | re.S,
     )
@@ -429,6 +436,24 @@ def _daily_outfit_matches_custom_exclusion(scene_context: str, exclusion_text: s
     details = re.sub(r"[\W_]+", "", _daily_outfit_details(scene_context).lower(), flags=re.UNICODE)
     return bool(details) and any(
         phrase in details for phrase in _normalized_exclusion_phrases(exclusion_text)
+    )
+
+
+def _reference_matches_custom_exclusion(
+    reference: Mapping[str, Any], exclusion_text: str
+) -> bool:
+    phrases = _normalized_exclusion_phrases(exclusion_text)
+    if not phrases:
+        return False
+    reference_texts = (
+        reference.get("outfit_category"),
+        reference.get("note"),
+    )
+    return any(
+        phrase in re.sub(r"[\W_]+", "", _clean_text(value, 600).lower(), flags=re.UNICODE)
+        for value in reference_texts
+        for phrase in phrases
+        if value
     )
 
 
@@ -570,7 +595,16 @@ def _clean_decision_context(
 
 def _daily_outfit_context_is_applicable(prompt_text: str, scene_context: str) -> bool:
     prompt = _clean_text(prompt_text, 1800)
-    text = _clean_text(f"{prompt}；{scene_context}", 3600)
+    context = _clean_text(scene_context, 2400)
+    blocked_pattern = (
+        r"卧室|在家|家里|居家|睡前|临睡|准备睡|刚起床|刚醒|起床后"
+        r"|\b(?:bedroom|at\s+home|bedtime|before\s+bed|just\s+woke|waking\s+up)\b"
+    )
+    applicable_pattern = (
+        r"外出|出门|通勤|上学|上班|逛街|购物|商场|街头|街边|旅行|旅游|公园|户外|散步"
+        r"|\b(?:outdoors?|going\s+out|commut(?:e|ing)|school|class|work|office|shopping|mall|street|"
+        r"travel|trip|park|walk(?:ing)?)\b"
+    )
     if re.search(
         r"(?:展示|看看|晒|拍).{0,12}(?:今日|今天|当天).{0,8}(?:穿搭|衣服|服装|造型)"
         r"|(?:今日|今天|当天).{0,8}(?:穿搭|衣服|服装|造型).{0,12}(?:展示|看看|晒|拍)"
@@ -579,22 +613,13 @@ def _daily_outfit_context_is_applicable(prompt_text: str, scene_context: str) ->
         flags=re.I,
     ):
         return True
-    if re.search(
-        r"卧室|在家|家里|居家|睡前|临睡|准备睡|刚起床|刚醒|起床后"
-        r"|\b(?:bedroom|at\s+home|bedtime|before\s+bed|just\s+woke|waking\s+up)\b",
-        text,
-        flags=re.I,
-    ):
+    if re.search(blocked_pattern, prompt, flags=re.I):
         return False
-    return bool(
-        re.search(
-            r"外出|出门|通勤|上学|上班|逛街|购物|商场|街头|街边|旅行|旅游|公园|户外|散步"
-            r"|\b(?:outdoors?|going\s+out|commut(?:e|ing)|school|class|work|office|shopping|mall|street|"
-            r"travel|trip|park|walk(?:ing)?)\b",
-            text,
-            flags=re.I,
-        )
-    )
+    if re.search(applicable_pattern, prompt, flags=re.I):
+        return True
+    if re.search(blocked_pattern, context, flags=re.I):
+        return False
+    return bool(re.search(applicable_pattern, context, flags=re.I))
 
 
 def resolve_photo_wardrobe_decision(
@@ -780,7 +805,15 @@ def resolve_photo_wardrobe_decision(
         )
 
     excluded_categories = set(resolved_intent.excluded_categories)
-    reference_outfit_excluded = bool(reference_category and reference_category in excluded_categories)
+    reference_outfit_excluded = bool(
+        reference_category and reference_category in excluded_categories
+    ) or bool(
+        "outfit" in roles
+        and _reference_matches_custom_exclusion(
+            reference_data,
+            resolved_intent.exclusion_text,
+        )
+    )
     scene_outfit_categories = {
         category for category, *_ in _outfit_category_matches(scene_context)
     }
@@ -871,7 +904,11 @@ def resolve_photo_wardrobe_decision(
             adjustments=tuple(adjustments),
         )
 
-    if reference_kind == "daily_outfit":
+    daily_outfit_reference_removed = False
+    if reference_kind == "daily_outfit" and _daily_outfit_context_is_applicable(
+        resolved_intent.positive_text,
+        scene_context,
+    ):
         preset_name = "日常穿搭"
         selected = _selected_presets(
             workflow_kind=workflow_kind,
@@ -916,6 +953,23 @@ def resolve_photo_wardrobe_decision(
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
         )
+
+    if reference_kind == "daily_outfit":
+        adjustments.append("daily_outfit_reference_not_applicable")
+        if "outfit" in effective_roles:
+            effective_roles = tuple(role for role in effective_roles if role != "outfit")
+            adjustments.append("reference_outfit_role_removed")
+        reference_locks = False
+        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
+            base_prompt=base_prompt,
+            prompt_text=prompt_text,
+            scene_context=scene_context,
+            remove_daily_outfit=True,
+        )
+        base_prompt = cleaned_prompt
+        scene_context = cleaned_scene
+        adjustments.extend(context_adjustments)
+        daily_outfit_reference_removed = True
 
     if reference_kind == "recent_sent_photo" and reference_locks:
         category = reference_category or "reference_outfit"
@@ -1043,7 +1097,7 @@ def resolve_photo_wardrobe_decision(
             adjustments=tuple(adjustments),
         )
 
-    daily_outfit_context_removed = False
+    daily_outfit_context_removed = daily_outfit_reference_removed
     daily_outfit_context_available = bool(
         _DAILY_OUTFIT_PATTERN.search(str(scene_context or ""))
     )
@@ -1114,7 +1168,7 @@ def resolve_photo_wardrobe_decision(
         reference_id=reference_id,
         reference_kind=reference_kind,
         reference_roles=roles,
-        effective_reference_roles=roles,
+        effective_reference_roles=effective_roles,
         positive_instruction=(
             "Use the selected reference only for character identity and appearance traits; its incidental clothing is not an outfit lock."
             if reference_path

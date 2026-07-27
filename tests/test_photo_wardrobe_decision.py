@@ -183,6 +183,34 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertEqual(decision.effective_reference_roles, ("identity", "pose"))
         self.assertIn("reference_outfit_role_removed", decision.adjustments)
 
+    def test_custom_exclusion_removes_matching_locked_reference_outfit_role(self) -> None:
+        prompt = "在街边拍照，不要红色吊带长裙"
+        intent = analyze_photo_wardrobe(prompt)
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=intent,
+            reference={
+                "id": "library-red-dress",
+                "kind": "library",
+                "path": "C:/images/red-dress.png",
+                "note": "红色吊带长裙，适合街拍",
+                "reference_roles": ["identity", "outfit", "pose"],
+                "outfit_category": "custom:红色吊带长裙",
+                "outfit_lock_default": True,
+            },
+            scene_context="当前位置：街边；当前场景：散步",
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(intent.excluded_categories, ())
+        self.assertEqual(decision.rule_id, "explicit_exclusion")
+        self.assertFalse(decision.lock_outfit)
+        self.assertEqual(decision.effective_reference_roles, ("identity", "pose"))
+        self.assertIn("reference_outfit_role_removed", decision.adjustments)
+
     def test_explicit_exclusion_removes_matching_daily_outfit_context_without_reference(self) -> None:
         prompt = "在卧室拍照，不要睡衣"
         decision = resolve_photo_wardrobe_decision(
@@ -245,6 +273,8 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertEqual(decision.rule_id, "explicit_exclusion")
         self.assertTrue(decision.remove_daily_outfit_context)
         self.assertNotIn("today's outfit", decision.scene_context.lower())
+        self.assertIn("Current location: street", decision.scene_context)
+        self.assertIn("Current scene: walking", decision.scene_context)
         self.assertNotIn("日常穿搭", decision.selected_presets)
 
     def test_home_scene_ignores_unrelated_exclusion_and_removes_daily_outfit_context(self) -> None:
@@ -273,6 +303,24 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertNotIn("今日穿搭", decision.base_prompt)
         self.assertNotIn("today's outfit and character", decision.base_prompt.lower())
         self.assertIn("character identity", decision.base_prompt.lower())
+
+    def test_current_outdoor_request_overrides_stale_home_context(self) -> None:
+        prompt = "去公园拍一张自然自拍"
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference=None,
+            scene_context="当前位置：卧室；今日穿搭：针织衫和长裙；当前场景：睡前",
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(decision.rule_id, "daily_outfit_context")
+        self.assertFalse(decision.remove_daily_outfit_context)
+        self.assertIn("今日穿搭", decision.scene_context)
+        self.assertEqual(decision.selected_presets, ("日常穿搭",))
 
     def test_explicit_outfit_showcase_keeps_daily_outfit_context_at_home(self) -> None:
         prompt = "在卧室拍一张照片，给我看看今天的穿搭"
@@ -324,6 +372,36 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertEqual(decision.selected_presets, ("日常穿搭",))
         self.assertEqual(decision.effective_reference_roles, ("identity", "outfit"))
         self.assertEqual(decision.adjustments, ())
+
+    def test_daily_outfit_reference_does_not_lock_in_home_scene(self) -> None:
+        prompt = "在卧室拍一张自然自拍"
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference={
+                "id": "daily_outfit",
+                "kind": "daily_outfit",
+                "path": "C:/images/today.png",
+                "reference_roles": ["identity", "outfit"],
+                "outfit_category": "daily_outfit",
+                "outfit_lock_default": True,
+            },
+            scene_context="当前位置：卧室；今日穿搭：针织衫和长裙；当前场景：睡前",
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(decision.rule_id, "identity_only")
+        self.assertEqual(decision.category, "")
+        self.assertFalse(decision.lock_outfit)
+        self.assertTrue(decision.remove_daily_outfit_context)
+        self.assertEqual(decision.effective_reference_roles, ("identity",))
+        self.assertNotIn("今日穿搭", decision.scene_context)
+        self.assertEqual(decision.selected_presets, ("角色自拍",))
+        self.assertIn("daily_outfit_reference_not_applicable", decision.adjustments)
+        self.assertIn("reference_outfit_role_removed", decision.adjustments)
 
     def test_recent_sent_photo_locks_outfit_and_cleans_advanced_schedule_context(self) -> None:
         prompt = "保持上一张的样子，换个坐姿"
