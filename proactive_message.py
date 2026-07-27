@@ -2371,6 +2371,13 @@ class ProactiveMessageMixin:
                 f"{recent_history_hint}\n"
                 "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
             )
+        body_health_hint_getter = getattr(self, "_format_body_monitor_health_prompt", None)
+        if callable(body_health_hint_getter):
+            body_health_hint = body_health_hint_getter(user, reason=reason)
+            if body_health_hint:
+                body_health_hint = sanitize_relationship_source(body_health_hint, "proactive.body_health_hint")
+                if body_health_hint:
+                    prompt = f"{prompt.rstrip()}\n\n{body_health_hint}"
         balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
         if callable(balance_hint_getter):
             balance_hint = balance_hint_getter(user, reason=reason)
@@ -2535,7 +2542,13 @@ class ProactiveMessageMixin:
             lines.append("这次由头不算很硬或打扰压力偏高：正文要更短、更轻，最好像把一句话放下，不追问、不求回应。")
         elif semantic_score >= 0.68:
             lines.append("这次有明确由头：正文可以贴着那个由头说一个具体点，但仍然不要解释调度原因。")
-        if reason == "low_balance":
+        if reason == "health_alert":
+            body_health_hint_getter = getattr(self, "_format_body_monitor_health_prompt", None)
+            body_health_hint = body_health_hint_getter(user, reason=reason) if callable(body_health_hint_getter) else ""
+            if body_health_hint:
+                lines.append(body_health_hint)
+            lines.append("这是一次有时效的身体状态关心线索：只温和问候当前感受，不作医疗判断，不夸大风险，也不要求对方立即回复。")
+        elif reason == "low_balance":
             balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
             balance_hint = balance_hint_getter(user, reason=reason) if callable(balance_hint_getter) else ""
             if balance_hint:
@@ -4764,6 +4777,11 @@ Output:
             )
             if part
         )
+        body_health_hint_getter = getattr(self, "_format_body_monitor_health_prompt", None)
+        if reason == "health_alert" and callable(body_health_hint_getter):
+            body_health_hint = body_health_hint_getter(user, reason=reason)
+            if body_health_hint:
+                reference = f"{reference}\n{body_health_hint}" if reference else body_health_hint
         balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
         if reason == "low_balance" and callable(balance_hint_getter):
             balance_hint = balance_hint_getter(user, reason=reason)

@@ -17298,6 +17298,7 @@ function proactiveModelJudgeMeta(item) {
 }
 
 function renderProactiveCandidates() {
+  renderBodyMonitorIntegration();
   const data = state.overview?.proactive_candidates || {};
   const users = data.users || [];
   const selectedFilter = validProactiveCandidateFilter(data, state.proactiveCandidateFilter);
@@ -17361,8 +17362,8 @@ function renderProactiveCandidates() {
       <section class="proactive-candidate ${escapeHtml(item.status || "unknown")}">
         <div class="proactive-candidate-head">
           <div>
-            <b>${escapeHtml(item.topic || item.reason_label || item.reason || "未命名候选")}</b>
-            <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)} · ${escapeHtml(item.reason_label || item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
+            <b>${escapeHtml(item.topic || item.reason_label || proactiveCandidateReasonLabel(item.reason) || "未命名候选")}</b>
+            <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)} · ${escapeHtml(item.reason_label || proactiveCandidateReasonLabel(item.reason) || "-")} · ${escapeHtml(item.action || "message")}</span>
           </div>
           <div class="toolbar">
             <span class="badge">${escapeHtml(repeat > 1 ? `${status} x${repeat}` : status)}</span>
@@ -17385,6 +17386,74 @@ function renderProactiveCandidates() {
       </section>
     `;
   }).join("");
+}
+
+function bodyMonitorBatchSummary(batch = {}) {
+  const received = Math.max(0, Number(batch.received || 0));
+  const accepted = Math.max(0, Number(batch.accepted || 0));
+  const skipped = Math.max(0, Number(batch.skipped || 0));
+  const duplicate = Math.max(0, Number(batch.duplicate || 0));
+  const expired = Math.max(0, Number(batch.expired || 0));
+  if (![received, accepted, skipped, duplicate, expired].some(Boolean)) return "暂无批次记录";
+  return `拉取 ${received} · 入选 ${accepted} · 跳过 ${skipped} · 重复 ${duplicate} · 过期 ${expired}`;
+}
+
+function renderBodyMonitorIntegration() {
+  const root = $("#bodyMonitorIntegrationCard");
+  if (!root) return;
+  const status = state.overview?.body_monitor_integration || {};
+  const settings = state.overview?.settings || {};
+  const enabled = toBool(status.enabled ?? settings.enable_body_monitor_integration);
+  const stateName = String(status.state || (enabled ? "initializing" : "disabled"));
+  const tone = stateName === "connected" ? "ok" : stateName === "error" || stateName === "incompatible" ? "error" : stateName === "initializing" ? "warn" : "off";
+  const lastPull = status.last_pull_text || (Number(status.last_pull_at || 0) > 0 ? formatRecentTime(status.last_pull_at, "-") : "尚未拉取");
+  const versionText = Number(status.api_version || 0) > 0
+    ? `v${Number(status.api_version)} / v${Number(status.supported_api_version || 1)}`
+    : `期望 v${Number(status.supported_api_version || 1)}`;
+  root.innerHTML = `
+    <section class="body-monitor-card ${escapeHtml(tone)}">
+      <div class="body-monitor-main">
+        <div class="body-monitor-title-row">
+          <div>
+            <span>BODY MONITOR</span>
+            <h3>健康事件联动</h3>
+          </div>
+          <span class="body-monitor-state ${escapeHtml(tone)}">${escapeHtml(status.state_text || (enabled ? "正在初始化" : "联动已关闭"))}</span>
+        </div>
+        <div class="body-monitor-metrics">
+          <span><small>最近拉取</small><b>${escapeHtml(lastPull)}</b></span>
+          <span><small>接口版本</small><b>${escapeHtml(versionText)}</b></span>
+          <span class="wide"><small>最近批次</small><b>${escapeHtml(bodyMonitorBatchSummary(status.last_batch || {}))}</b></span>
+        </div>
+        ${status.error ? `<div class="body-monitor-error" role="status">${escapeHtml(status.error)}</div>` : ""}
+      </div>
+      <label class="body-monitor-toggle">
+        <input type="checkbox" data-body-monitor-toggle ${enabled ? "checked" : ""}>
+        <span class="feature-toggle-visual" aria-hidden="true"></span>
+        <b>${enabled ? "已开启" : "已关闭"}</b>
+      </label>
+    </section>
+  `;
+  root.querySelector("[data-body-monitor-toggle]")?.addEventListener("change", async (event) => {
+    const input = event.currentTarget;
+    const nextEnabled = Boolean(input.checked);
+    input.disabled = true;
+    try {
+      const result = await postJson("/settings/update", {
+        settings: { enable_body_monitor_integration: nextEnabled },
+      });
+      applyOverviewData(result);
+      renderProactiveCandidates();
+      showToast(result?.config_saved === false
+        ? "联动已应用，但配置持久化失败"
+        : nextEnabled ? "Body Monitor 联动已开启" : "Body Monitor 联动已关闭",
+      result?.config_saved === false ? "error" : "success");
+    } catch (error) {
+      input.checked = !nextEnabled;
+      input.disabled = false;
+      showToast(`联动设置保存失败：${error.message}`, "error");
+    }
+  });
 }
 
 function renderProactiveTasks() {
@@ -17429,7 +17498,7 @@ function renderProactiveTasks() {
 function proactiveTaskMarkup(item) {
   const status = proactiveTaskStatusLabel(item.status);
   const source = proactiveTaskSourceLabel(item.source, item.has_timer_event);
-  const title = item.topic || item.reason_label || item.reason || "未命名主动任务";
+  const title = item.topic || item.reason_label || proactiveCandidateReasonLabel(item.reason) || "未命名主动任务";
   const semanticMeta = proactiveSemanticMeta(item);
   const windowMeta = proactiveWindowMeta(item);
   const readinessMeta = proactiveReadinessMeta(item);
@@ -17591,14 +17660,14 @@ function proactiveAuditHtml(items) {
   }
   return visibleItems.slice(0, 30).map((item) => {
     const status = proactiveAuditStatusLabel(item.status);
-    const title = item.topic || item.reason_label || item.reason || item.note || "主动执行记录";
+    const title = item.topic || item.reason_label || proactiveCandidateReasonLabel(item.reason) || item.note || "主动执行记录";
     const sourceLabel = item.source_label || proactiveCandidateSourceLabel(item.source);
     const semanticMeta = proactiveSemanticMeta(item);
     const meta = [
       `用户：${item.user_label || item.user_id || "-"}`,
       `来源：${sourceLabel}`,
       `动作：${item.action || "message"}`,
-      item.reason_label ? `原因：${item.reason_label}` : (item.reason ? `原因：${item.reason}` : ""),
+      item.reason_label ? `原因：${item.reason_label}` : (item.reason ? `原因：${proactiveCandidateReasonLabel(item.reason)}` : ""),
       item.original_text_preview ? `原候选：${item.original_text_preview}` : "",
       item.final_text_preview ? `最终发送：${item.final_text_preview}` : "",
       item.text_preview && !item.final_text_preview ? `消息：${item.text_preview}` : "",
@@ -17680,6 +17749,7 @@ function proactiveTaskSourceLabel(source, hasTimerEvent = false) {
   if (source === "candidate") return "主动候选";
   if (source === "followup" || source === "pending_followup") return "补一句";
   if (source === "state") return "身体小需求";
+  if (source === "body_monitor") return "身体状态联动";
   if (source === "daily_greeting") return "日常招呼";
   if (source === "external") return "外部主动能力";
   return source || "插件主动";
@@ -17701,6 +17771,7 @@ function proactiveCandidateSourceLabel(source) {
     web_exploration: "主动搜索",
     news: "新闻阅读",
     environment_change: "环境突变",
+    body_monitor: "身体状态联动",
     meal_care: "饭点关心",
     group_ignore_complaint: "群内冒泡关心",
     post_goodnight_group_activity: "晚安后群聊活跃",
@@ -17713,6 +17784,10 @@ function proactiveCandidateSourceLabel(source) {
     proactive: "插件主动",
     unknown: "未记录来源",
   }[source] || source || "插件主动";
+}
+
+function proactiveCandidateReasonLabel(reason) {
+  return { health_alert: "身体状态关心" }[String(reason || "")] || String(reason || "");
 }
 
 function validProactiveCandidateFilter(data, value) {

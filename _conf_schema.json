@@ -999,6 +999,12 @@
     "default": true,
     "invisible": true
   },
+  "enable_body_monitor_integration": {
+    "description": "Legacy flat config: 联动 Body Monitor",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "proactive_chat_bridge_review_mode": {
     "description": "Legacy flat config: Proactive Chat 联动复核模式",
     "type": "string",

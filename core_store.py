@@ -388,6 +388,7 @@ class CoreStoreMixin:
             "group_llm_reply_blocks": {},
             "cache_metrics": {},
             "balance_awareness": {},
+            "body_monitor_integration": {},
             "environment_change_awareness": {},
             "personal_goal_state": {},
             "personal_goals": [],
@@ -453,6 +454,7 @@ class CoreStoreMixin:
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("cache_metrics", {})
         data.setdefault("balance_awareness", {})
+        data.setdefault("body_monitor_integration", {})
         data.setdefault("environment_change_awareness", {})
         data.setdefault("personal_goal_state", {})
         data.setdefault("personal_goals", [])

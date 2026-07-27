@@ -14114,6 +14114,13 @@ class DailyStateMixin:
         return bool(friend_proactive) or normalize_legacy_tag_text(reason) == "creative_share"
 
     async def _tick(self):
+        try:
+            await self._pull_body_monitor_candidates()
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] Body Monitor 事件拉取失败，本轮继续执行其他主动任务: %s",
+                _single_line(exc, 160),
+            )
         async with self._data_lock:
             runtime = self.data.setdefault("proactive_runtime", {})
             if isinstance(runtime, dict):
