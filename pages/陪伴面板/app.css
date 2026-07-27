@@ -15040,7 +15040,11 @@ html[data-bookshelf-cover-preview="open"] {
 }
 
 .body-monitor-integration {
-  margin-bottom: 14px;
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  background: var(--surface);
 }
 
 .body-monitor-card {
