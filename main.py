@@ -4793,7 +4793,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             image_size(string): 可选，在线图片 API 尺寸，如 1024x1024。
             send(boolean): 是否生成后直接发送到当前会话，默认 true。
             caption(string): 发送图片时附带的短文字。
-            scene_preset(string): 可选场景预设，如 角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景。
+            scene_preset(string): 可选场景预设建议，如 角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景；不会覆盖用户原话或参考图强约束。
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'

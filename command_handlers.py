@@ -4087,47 +4087,6 @@ class CommandHandlersMixin:
         user["last_command_photo_path"] = _path_text(image_path, 1000)
         user["last_command_photo_at"] = _now_ts()
 
-    @staticmethod
-    def _natural_photo_prompt_has_explicit_wardrobe_request(prompt: Any) -> bool:
-        text = _single_line(prompt, 1200).lower()
-        if not text:
-            return False
-        chinese_markers = (
-            "睡衣",
-            "睡裙",
-            "睡袍",
-            "居家服",
-            "家居服",
-            "角色扮演",
-            "扮成",
-            "换装",
-            "换衣",
-            "校服",
-            "制服",
-            "礼服",
-            "泳装",
-            "泳衣",
-            "比基尼",
-            "运动服",
-            "健身服",
-            "瑜伽服",
-            "女仆装",
-            "巫女服",
-        )
-        if any(marker in text for marker in chinese_markers):
-            return True
-        return bool(
-            re.search(
-                r"(?<![a-z0-9])(?:cos|cosplay)(?![a-z0-9])|"
-                r"\b(?:costume|pajamas?|pyjamas?|sleepwear|nightgown|nightdress|loungewear|homewear|"
-                r"swimsuits?|swimwear|bikini|sportswear|activewear|tuxedo)\b|"
-                r"\b(?:school\s+uniform|formal\s+dress|evening\s+gown|gym\s+wear|workout\s+(?:clothes|outfit)|"
-                r"home\s+wear|lounge\s+wear)\b",
-                text,
-                flags=re.I,
-            )
-        )
-
     def _build_natural_language_photo_prompt(
         self,
         *,
@@ -4169,21 +4128,11 @@ class CommandHandlersMixin:
                 "nsfw",
             ]
         elif kind == "selfie":
-            explicit_wardrobe_request = self._natural_photo_prompt_has_explicit_wardrobe_request(prompt)
-            if explicit_wardrobe_request:
-                wardrobe_continuity = (
-                    "the user's explicit clothing or outfit request in this turn has highest priority; follow that requested "
-                    "wardrobe and ignore any conflicting details from today's outfit or older wardrobe continuity; preserve the "
-                    "character identity and stable appearance"
-                )
-                if has_reference:
-                    wardrobe_continuity += (
-                        "; use the reference image for identity and compatible visual details, not to restore conflicting clothes"
-                    )
-            elif has_reference:
-                wardrobe_continuity = "keep today's outfit and character appearance consistent with the reference image"
-            else:
-                wardrobe_continuity = "keep today's outfit and character appearance consistent with available visual continuity"
+            identity_continuity = (
+                "preserve character identity and stable appearance from the selected reference image"
+                if has_reference
+                else "preserve character identity and stable appearance from available visual continuity"
+            )
             positive = [
                 "single character selfie",
                 "solo",
@@ -4239,9 +4188,7 @@ class CommandHandlersMixin:
         if extra_prompt:
             positive.append(f"additional generation preference: {_single_line(extra_prompt, 420)}")
         if kind == "selfie":
-            # Keep the current-turn wardrobe decision after inherited visual
-            # context so stale outfit details cannot become the last instruction.
-            positive.append(wardrobe_continuity)
+            positive.append(identity_continuity)
         return _single_line(
             "Positive prompt: "
             + ", ".join(part for part in positive if _single_line(part, 520))
@@ -4595,6 +4542,7 @@ class CommandHandlersMixin:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
+                request_text=str(intent.get("prompt") or ""),
                 session_key=generation_session_key,
                 continuity_key=continuity_key,
                 reference_image_path=reference_path,
@@ -4830,6 +4778,7 @@ class CommandHandlersMixin:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
+                request_text=prompt,
                 session_key=generation_session_key,
                 continuity_key=continuity_key,
                 reference_image_path=reference_path,
