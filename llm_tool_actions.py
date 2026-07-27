@@ -1836,13 +1836,16 @@ class LlmToolActionsMixin:
 
         prompt_builder = getattr(self, "_build_natural_language_photo_prompt", None)
         if callable(prompt_builder):
-            prompt_text = prompt_builder(
+            prompt_sections = prompt_builder(
                 prompt=content,
                 kind="selfie" if intent_kind == "sticker" else intent_kind,
                 has_reference=bool(reference_path),
                 memory_context="",
+                structured=True,
             )
+            prompt_text = content
         else:
+            prompt_sections = None
             prompt_text = content
         preset_text = _single_line(scene_preset or kwargs.get("preset") or kwargs.get("scene"), 80)
         if intent_kind == "sticker" and not preset_text:
@@ -1870,6 +1873,7 @@ class LlmToolActionsMixin:
             "reference_image_path": reference_path,
             "image_size": _single_line(image_size or kwargs.get("size"), 40),
             "requested_scene_preset": preset_text,
+            "prompt_sections": prompt_sections,
         }
         try:
             generation_output = await asyncio.wait_for(

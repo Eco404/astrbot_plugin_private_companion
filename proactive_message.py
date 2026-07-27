@@ -141,6 +141,10 @@ from .photo_reference_catalog import (
     build_daily_outfit_reference,
     project_reference_candidate,
 )
+from .photo_prompt_context import (
+    PhotoPromptSection,
+    resolve_photo_prompt_context,
+)
 from .photo_wardrobe_decision import (
     PhotoWardrobeDecision,
     PhotoWardrobeIntent,
@@ -7104,12 +7108,19 @@ Output:
             memory_context=memory_context,
             outfit_profile=outfit_profile,
         )
+        prompt_sections = self._build_daily_outfit_photo_prompt(
+            diary if isinstance(diary, dict) else {},
+            memory_context=memory_context,
+            outfit_profile=outfit_profile,
+            structured=True,
+        )
         backend_name, image_path, note = await self._generate_photo_image(
             workflow_kind="selfie",
             prompt_text=prompt_text,
             session_key="daily_outfit",
             image_size="1024x1024",
             allow_daily_outfit_reference=False,
+            prompt_sections=prompt_sections,
         )
         if image_path:
             return await self._record_daily_outfit_photo_result(
@@ -7542,7 +7553,8 @@ Output:
         *,
         memory_context: str = "",
         outfit_profile: dict[str, Any] | None = None,
-    ) -> str:
+        structured: bool = False,
+    ) -> str | tuple[PhotoPromptSection, ...]:
         persona = self._daily_outfit_role_appearance_text()
         style_name, style_instruction = self._get_photo_style_instruction()
         style_prompt = self._photo_style_prompt_en(style_name, style_instruction)
@@ -7622,10 +7634,6 @@ Output:
             )
         if diary_hint:
             positive.append(f"daily mood cue: {diary_hint}")
-        if visual_memory:
-            positive.append(f"visual continuity reference: {visual_memory}")
-        if custom:
-            positive.append(f"additional outfit preference: {custom}")
         negative = [
             "cropped head",
             "headless",
@@ -7684,11 +7692,40 @@ Output:
                     f"repeat any recently used outfit element: {rotation_reference}",
                 ]
             )
+        sections = [
+            PhotoPromptSection(
+                name="user_request",
+                source="user_request",
+                positive=", ".join(
+                    _single_line(part, 220) for part in positive if _single_line(part, 220)
+                ),
+                negative=", ".join(negative),
+                protected=True,
+            )
+        ]
+        if visual_memory:
+            sections.append(
+                PhotoPromptSection(
+                    name="visual_memory",
+                    source="visual_memory",
+                    positive=f"visual continuity reference: {visual_memory}",
+                )
+            )
+        if custom:
+            sections.append(
+                PhotoPromptSection(
+                    name="daily_outfit_preference",
+                    source="fixed_prompt",
+                    positive=f"additional outfit preference: {custom}",
+                )
+            )
+        if structured:
+            return tuple(sections)
         prompt = (
             "Positive prompt: "
-            + ", ".join(_single_line(part, 220) for part in positive if _single_line(part, 220))
+            + ", ".join(section.positive for section in sections if section.positive)
             + ". Negative prompt: "
-            + ", ".join(negative)
+            + ", ".join(section.negative for section in sections if section.negative)
             + "."
         )
         return _single_line(prompt, 1400)
@@ -7993,11 +8030,32 @@ Output:
         prompt_sections: dict[str, str] | None = None,
         conflicts: list[str] | None = None,
         removed_conflicts: list[str] | None = None,
+        residual_conflicts: list[str] | None = None,
+        reference_removed: dict[str, Any] | None = None,
+        sanitizer_version: int = 0,
+        detected_conflict_details: list[dict[str, Any]] | None = None,
+        removed_conflict_details: list[dict[str, Any]] | None = None,
+        residual_conflict_details: list[dict[str, Any]] | None = None,
         requested_scene_preset: str = "",
     ) -> None:
         try:
             reference_candidate = reference_candidate or {}
             wardrobe_payload = wardrobe.as_dict() if wardrobe is not None else {}
+
+            def compact_audit(values: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+                result: list[dict[str, str]] = []
+                for value in values or []:
+                    if not isinstance(value, dict):
+                        continue
+                    item = {
+                        key: _single_line(value.get(key), 120 if key == "preview" else 80)
+                        for key in ("source", "section", "rule", "category", "action", "preview", "sha256")
+                        if _single_line(value.get(key), 120 if key == "preview" else 80)
+                    }
+                    if item:
+                        result.append(item)
+                return result[:24]
+
             item = {
                 "ts": _now_ts(),
                 "trace": _single_line(trace_id, 40),
@@ -8028,7 +8086,10 @@ Output:
                 "wardrobe_source": _single_line(wardrobe_payload.get("source"), 40),
                 "wardrobe_category": _single_line(wardrobe_payload.get("category"), 40),
                 "outfit_locked": bool(wardrobe_payload.get("lock_outfit")),
-                "daily_outfit_removed": bool(wardrobe_payload.get("remove_daily_outfit_context")),
+                "daily_outfit_removed": any(
+                    "daily_outfit" in str(value or "")
+                    for value in (removed_conflicts or [])
+                ),
                 "wardrobe_reason": _single_line(wardrobe_payload.get("reason"), 240),
                 "wardrobe_authoritative_preset": _single_line(
                     wardrobe_payload.get("authoritative_preset"),
@@ -8057,6 +8118,17 @@ Output:
                     for value in (removed_conflicts or [])
                     if _single_line(value, 120)
                 ][:12],
+                "residual_conflicts": [
+                    _single_line(value, 120)
+                    for value in (residual_conflicts or [])
+                    if _single_line(value, 120)
+                ][:12],
+                "reference_removed": bool(reference_removed),
+                "reference_removal": dict(reference_removed or {}),
+                "sanitizer_version": _safe_int(sanitizer_version, 0, 0),
+                "detected_conflicts": compact_audit(detected_conflict_details),
+                "removed_conflict_details": compact_audit(removed_conflict_details),
+                "residual_conflict_details": compact_audit(residual_conflict_details),
             }
             raw = self.data.setdefault("recent_photo_generations", [])
             if not isinstance(raw, list):
@@ -8080,10 +8152,18 @@ Output:
         reference: dict[str, Any] | None,
         wardrobe: PhotoWardrobeDecision,
         presets: list[str],
+        prompt_sections_before: dict[str, Any],
         prompt_sections: dict[str, str],
+        prompt_sections_after: dict[str, Any],
         final_prompt: str,
         conflicts: list[str],
         removed_conflicts: list[str],
+        residual_conflicts: list[str],
+        detected_conflict_details: list[dict[str, Any]],
+        removed_conflict_details: list[dict[str, Any]],
+        residual_conflict_details: list[dict[str, Any]],
+        reference_removed: dict[str, Any] | None,
+        sanitizer_version: int,
         requested_scene_preset: str = "",
     ) -> tuple[str, str]:
         prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
@@ -8115,7 +8195,7 @@ Output:
             }
             payload = redact(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "created_at": now.isoformat(timespec="seconds"),
                     "trace": _single_line(trace_id, 40),
                     "session": _single_line(session_key, 340),
@@ -8128,9 +8208,17 @@ Output:
                     "reference": reference_payload,
                     "wardrobe_decision": wardrobe.as_dict(),
                     "presets": list(presets),
+                    "prompt_sections_before": prompt_sections_before,
                     "prompt_sections": prompt_sections,
+                    "prompt_sections_after": prompt_sections_after,
                     "conflicts": list(conflicts),
                     "removed_conflicts": list(removed_conflicts),
+                    "residual_conflicts": list(residual_conflicts),
+                    "detected_conflicts": list(detected_conflict_details),
+                    "removed_conflict_details": list(removed_conflict_details),
+                    "residual_conflict_details": list(residual_conflict_details),
+                    "reference_removed": dict(reference_removed or {}),
+                    "sanitizer_version": _safe_int(sanitizer_version, 0, 0),
                     "final_prompt": final_prompt,
                     "final_prompt_length": len(str(final_prompt or "")),
                     "final_prompt_sha256": prompt_hash,
@@ -8577,6 +8665,7 @@ Output:
         *,
         reference_image_path: str,
         continuity_key: str,
+        wardrobe: PhotoWardrobeDecision | None = None,
     ) -> tuple[str, bool]:
         normalized_kind = str(workflow_kind or "").strip().lower()
         if normalized_kind not in {"selfie", "portrait", "自拍", "人像"}:
@@ -8587,23 +8676,20 @@ Output:
             recent.get("path", ""),
         ):
             return "", False
+        effective_roles = set(getattr(wardrobe, "effective_reference_roles", ()) or ())
+        preserved = ["identity", "face", "hairstyle"]
+        if "outfit" in effective_roles:
+            preserved.append("exact outfit and accessories")
+        if effective_roles & {"scene", "continuity"}:
+            preserved.extend(("room or location", "lighting", "time of day"))
         continuity_instruction = (
             "Recent-photo continuity: this reference is the last image actually sent in the same conversation. "
-            "Unless the current request explicitly changes them, preserve identity, face, hairstyle, exact outfit and accessories, "
-            "room or location, lighting, and time of day. Change only the requested action, pose, expression, gaze, camera angle, or framing. "
+            f"Unless the current request explicitly changes them, preserve {', '.join(preserved)}. "
+            "Change only the requested action, pose, expression, gaze, camera angle, or framing. "
             "Any explicit new clothing, person, place, time, or scene request still has priority."
         )
         return continuity_instruction, True
 
-    @staticmethod
-    def _photo_generation_has_daily_outfit_context(value: Any) -> bool:
-        return bool(
-            re.search(
-                r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)\s*[：:]",
-                str(value or ""),
-                flags=re.I,
-            )
-        )
     @staticmethod
     def _photo_prompt_clip(value: Any, limit: int, *, preserve_tail: bool = False) -> str:
         text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -8763,201 +8849,6 @@ Output:
             "Apply only the requested edit and keep unrelated pixels and details as close to the source as possible.",
             "replacing the source person with the assistant persona, restoring today's outfit, unrelated redesigns",
         )
-
-    def _build_final_photo_prompt(
-        self,
-        *,
-        base_prompt: str,
-        workflow_kind: str,
-        scene_hint: str,
-        reference: dict[str, Any] | None,
-        wardrobe: PhotoWardrobeDecision,
-        preset_section: str,
-        continuity_section: str = "",
-    ) -> tuple[str, dict[str, str]]:
-        user_positive, user_negative = self._photo_prompt_split_formatted(base_prompt)
-        wardrobe_positive, wardrobe_negative = self._photo_generation_reference_wardrobe_section(reference, wardrobe)
-        compact_scene_hint = self._photo_generation_compact_scene_hint(scene_hint)
-        scene_section = self._photo_generation_selfie_scene_constraint(
-            workflow_kind,
-            compact_scene_hint,
-            has_reference=bool(reference),
-        )
-        composition_positive, composition_negative = self._photo_generation_composition_sections(
-            workflow_kind,
-            user_positive,
-        )
-        edit_positive, edit_negative = self._photo_generation_edit_contract(workflow_kind)
-        fixed = str(getattr(self, "photo_generation_fixed_prompt", "") or "").strip()
-        continuity_budget = 460 if str(continuity_section or "").startswith("Recent-photo continuity:") else 280
-        continuity_for_prompt = self._photo_prompt_clip(
-            continuity_section,
-            continuity_budget,
-            preserve_tail=True,
-        )
-
-        section_a = self._photo_prompt_clip(user_positive, 620, preserve_tail=True)
-        section_b = self._photo_prompt_clip(wardrobe_positive, 420, preserve_tail=True)
-        section_c = "\n".join(
-            part
-            for part in (
-                self._photo_prompt_clip(scene_section, 700, preserve_tail=True),
-                self._photo_prompt_clip(preset_section, 140, preserve_tail=True),
-                self._photo_prompt_clip(
-                    f"Additional fixed prompt: {fixed}" if fixed else "",
-                    100,
-                    preserve_tail=True,
-                ),
-            )
-            if part
-        )
-        section_d = self._photo_prompt_clip(
-            "\n".join(
-                part
-                for part in (edit_positive, composition_positive, continuity_for_prompt)
-                if part
-            ),
-            680,
-            preserve_tail=True,
-        )
-        decision_negative = self._photo_prompt_clip(
-            ", ".join(
-                part.strip(" ,.;")
-                for part in (wardrobe_negative, edit_negative, composition_negative)
-                if str(part or "").strip(" ,.;")
-            ),
-            230,
-            preserve_tail=True,
-        )
-        user_negative = self._photo_prompt_clip(user_negative, 260, preserve_tail=True)
-        negative = ", ".join(part for part in (decision_negative, user_negative) if part)
-        sections = {
-            "user_request": section_a,
-            "reference_wardrobe": section_b,
-            "scene_style_preset": section_c,
-            "composition_continuity": section_d,
-            "negative": negative,
-        }
-        positive_blocks = [
-            f"[{label}]\n{text}"
-            for label, text in (
-                ("User image request", section_a),
-                ("Reference and wardrobe ruling", section_b),
-                ("Scene, style and final preset", section_c),
-                ("Composition and continuity", section_d),
-            )
-            if text
-        ]
-        if self._photo_generation_prompt_format_mode() == "natural_language":
-            final_prompt = "\n\n".join(positive_blocks)
-            if negative:
-                final_prompt = f"{final_prompt}\n\nAvoid {negative}."
-        else:
-            final_prompt = "Positive prompt:\n" + "\n\n".join(positive_blocks)
-            if negative:
-                final_prompt += f"\n\nNegative prompt:\n{negative}"
-        # Every section has its own budget, so a final whole-prompt truncation would
-        # only reintroduce the possibility of cutting a complete semantic section.
-        return final_prompt.strip(), sections
-
-    def _detect_photo_prompt_conflicts(
-        self,
-        final_prompt: str,
-        wardrobe: PhotoWardrobeDecision,
-    ) -> list[str]:
-        if not wardrobe.category and not wardrobe.excluded_categories:
-            return []
-        positive_text = str(final_prompt or "")
-        negative_matches = list(re.finditer(r"Negative prompt\s*:", positive_text, flags=re.I))
-        if negative_matches:
-            positive_text = positive_text[:negative_matches[-1].start()]
-        else:
-            avoid_matches = list(re.finditer(r"\n\s*\nAvoid\s+", positive_text, flags=re.I))
-            if avoid_matches:
-                positive_text = positive_text[:avoid_matches[-1].start()]
-        positive_text = re.sub(
-            r"(?:do not|don't|not|avoid|without|no|不要|别穿|不穿|不用|不是|避免|禁止)[^.;；。]*",
-            " ",
-            positive_text,
-            flags=re.I,
-        )
-        conflicts: list[str] = []
-        if wardrobe.remove_daily_outfit_context and self._photo_generation_has_daily_outfit_context(positive_text):
-            conflicts.append("daily_outfit_context_remained")
-        if wardrobe.lock_outfit and re.search(r"today'?s outfit may inform continuity", positive_text, flags=re.I):
-            conflicts.append("legacy_daily_outfit_soft_override")
-        category_markers = {
-            "sleepwear": r"sleepwear|nightgown|nightdress|pajama|pyjama|睡衣|睡裙|睡袍",
-            "homewear": r"homewear|loungewear|居家服|家居服",
-            "cosplay": r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演",
-            "school_uniform": r"school[\s_-]*uniform|校服|学院制服",
-            "formalwear": r"formalwear|formal attire|evening gown|tuxedo|\bsuit\b|礼服|正装|西装",
-            "swimwear": r"swimwear|swimsuit|bikini|泳装|泳衣|比基尼",
-            "sportswear": r"sportswear|activewear|gym wear|运动服|健身服|瑜伽服",
-            "daily_outfit": r"daily outfit portrait|today'?s outfit|daily outfit|今日穿搭|当天穿搭|日常穿搭",
-        }
-        active_categories = {
-            category
-            for category, pattern in category_markers.items()
-            if re.search(pattern, positive_text, flags=re.I)
-        }
-        compatible = {wardrobe.category} if wardrobe.category else set()
-        if wardrobe.category in {"sleepwear", "homewear"}:
-            # Natural-language presets often describe pajamas as loungewear and
-            # homewear as sleep-ready clothing. Treat the neighboring labels as
-            # compatible while the authoritative wardrobe decision stays intact.
-            compatible.update({"sleepwear", "homewear"})
-        if wardrobe.category == "cosplay":
-            compatible.update({"school_uniform", "formalwear", "sportswear"})
-        if wardrobe.category == "custom_outfit":
-            compatible.add("daily_outfit")
-        if wardrobe.category:
-            for category in sorted(active_categories - compatible):
-                conflicts.append(f"conflicting_wardrobe:{category}")
-        for category in sorted(active_categories & set(wardrobe.excluded_categories)):
-            conflicts.append(f"explicitly_excluded_wardrobe:{category}")
-        expected_presets = set(wardrobe.selected_presets)
-        preset_labels = {
-            name: self._photo_generation_scene_preset_label_en(name)
-            for name in self._photo_generation_scene_presets()
-        }
-        for name, label in preset_labels.items():
-            if expected_presets and name not in expected_presets and f"Scene preset: {label}" in positive_text:
-                conflicts.append(f"conflicting_preset:{name}")
-        return list(dict.fromkeys(conflicts))
-
-    def _append_photo_prompt_conflict_resolution(
-        self,
-        final_prompt: str,
-        wardrobe: PhotoWardrobeDecision,
-        conflicts: list[str],
-    ) -> str:
-        if not conflicts:
-            return final_prompt
-        if wardrobe.category:
-            resolution = (
-                "Conflict resolution: the wardrobe ruling is authoritative. Ignore any residual incompatible wardrobe or preset wording; "
-                "render only the single coherent outfit required by that ruling."
-            )
-        else:
-            resolution = (
-                "Conflict resolution: obey the current request's explicit wardrobe exclusions and ignore any residual wording that restores an excluded outfit."
-            )
-        negative_matches = list(re.finditer(r"Negative prompt\s*:", final_prompt, flags=re.I))
-        if negative_matches:
-            marker = negative_matches[-1]
-            positive, negative = final_prompt[:marker.start()], final_prompt[marker.end():]
-            merged = f"{positive.rstrip()}\n\n{resolution}\n\nNegative prompt:\n{negative.strip()}"
-        else:
-            avoid_matches = list(re.finditer(r"\n\s*\nAvoid\s+", final_prompt, flags=re.I))
-            if avoid_matches:
-                marker = avoid_matches[-1]
-                positive, negative = final_prompt[:marker.start()], final_prompt[marker.end():]
-                negative = re.sub(r"^\s*Avoid\s+", "", negative, flags=re.I)
-                merged = f"{positive.rstrip()}\n\n{resolution}\n\nAvoid {negative.strip()}"
-            else:
-                merged = f"{final_prompt.rstrip()}\n\n{resolution}"
-        return merged
 
     @staticmethod
     def _photo_generation_explicit_mirror_request(text: str) -> bool:
@@ -9252,6 +9143,7 @@ Output:
         image_size: str = "",
         allow_daily_outfit_reference: bool = True,
         requested_scene_preset: str = "",
+        prompt_sections: tuple[PhotoPromptSection, ...] | None = None,
     ) -> tuple[str, str, str]:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
@@ -9330,25 +9222,137 @@ Output:
             workflow_kind,
             reference_image_path=reference_image_path,
             continuity_key=continuity_key,
-        )
-        prompt_text, prompt_sections = self._build_final_photo_prompt(
-            base_prompt=base_prompt,
-            workflow_kind=workflow_kind,
-            scene_hint=scene_context_after,
-            reference=reference_candidate,
             wardrobe=wardrobe,
-            preset_section=preset_section,
-            continuity_section=continuity_section,
         )
-        conflicts = self._detect_photo_prompt_conflicts(prompt_text, wardrobe)
-        if conflicts:
-            prompt_text = self._append_photo_prompt_conflict_resolution(prompt_text, wardrobe, conflicts)
-            logger.warning(
-                "[PrivateCompanion] 生图提示词冲突已柔性修复: trace=%s wardrobe=%s conflicts=%s",
-                trace_id,
-                _single_line(wardrobe.category, 40) or "none",
-                ",".join(conflicts),
+        initial_sections = list(prompt_sections or ())
+        if not initial_sections:
+            user_positive, user_negative = self._photo_prompt_split_formatted(base_prompt)
+            initial_sections.append(
+                PhotoPromptSection(
+                    name="user_request",
+                    source="user_request",
+                    positive=user_positive,
+                    negative=user_negative,
+                    protected=True,
+                )
             )
+        wardrobe_positive, wardrobe_negative = self._photo_generation_reference_wardrobe_section(
+            reference_candidate,
+            wardrobe,
+        )
+        compact_scene_hint = self._photo_generation_compact_scene_hint(scene_context_after)
+        scene_section = self._photo_generation_selfie_scene_constraint(
+            workflow_kind,
+            compact_scene_hint,
+            has_reference=bool(reference_candidate),
+        )
+        composition_positive, composition_negative = self._photo_generation_composition_sections(
+            workflow_kind,
+            original_prompt_text,
+        )
+        edit_positive, edit_negative = self._photo_generation_edit_contract(workflow_kind)
+        fixed_prompt = str(getattr(self, "photo_generation_fixed_prompt", "") or "").strip()
+        generated_sections = (
+            PhotoPromptSection(
+                name="wardrobe_decision",
+                source="wardrobe_decision",
+                positive=wardrobe_positive,
+                negative=wardrobe_negative,
+            ),
+            PhotoPromptSection(
+                name="scene_context",
+                source="scene_context",
+                positive=scene_section,
+            ),
+            PhotoPromptSection(
+                name="scene_preset",
+                source="preset",
+                positive=preset_section,
+            ),
+            PhotoPromptSection(
+                name="global_fixed_prompt",
+                source="fixed_prompt",
+                positive=f"Additional fixed prompt: {fixed_prompt}" if fixed_prompt else "",
+            ),
+            PhotoPromptSection(
+                name="edit_contract",
+                source="edit_contract",
+                positive=edit_positive,
+                negative=edit_negative,
+            ),
+            PhotoPromptSection(
+                name="composition",
+                source="composition",
+                positive=composition_positive,
+                negative=composition_negative,
+            ),
+            PhotoPromptSection(
+                name="recent_continuity",
+                source="recent_continuity",
+                positive=continuity_section,
+            ),
+        )
+        context_before = tuple((*initial_sections, *generated_sections))
+        resolved_context = resolve_photo_prompt_context(
+            wardrobe=wardrobe,
+            sections=context_before,
+            prompt_format=self._photo_generation_prompt_format_mode(),
+            workflow_kind=workflow_kind,
+            reference=reference_candidate or None,
+        )
+        prompt_text = resolved_context.final_prompt
+        reference_candidate = dict(resolved_context.reference or {})
+        reference_image_path = _path_text(reference_candidate.get("path"), 1000)
+        def section_log_key(section: PhotoPromptSection, used: dict[str, int]) -> str:
+            base = _single_line(section.name, 80) or section.source
+            used[base] = used.get(base, 0) + 1
+            return base if used[base] == 1 else f"{base}#{used[base]}"
+
+        prompt_sections_for_log: dict[str, str] = {}
+        prompt_sections_after: dict[str, Any] = {}
+        after_names: dict[str, int] = {}
+        for section in resolved_context.prompt_sections:
+            key = section_log_key(section, after_names)
+            if section.positive or section.negative:
+                prompt_sections_for_log[key] = "\n".join(
+                    part for part in (section.positive, section.negative) if str(part or "").strip()
+                )
+            prompt_sections_after[key] = {
+                "source": section.source,
+                "positive": section.positive,
+                "negative": section.negative,
+                "protected": section.protected,
+            }
+        detected_conflict_details = [dict(item) for item in resolved_context.detected_conflicts]
+        removed_conflict_details = [dict(item) for item in resolved_context.removed_conflicts]
+        residual_conflict_details = [dict(item) for item in resolved_context.residual_conflicts]
+        conflicts = [
+            f"{item.get('source')}:{item.get('rule')}:{item.get('category')}"
+            for item in resolved_context.detected_conflicts
+        ]
+        removed_conflicts.extend(
+            f"{item.get('source')}:{item.get('rule')}:{item.get('category')}:{item.get('action')}"
+            for item in resolved_context.removed_conflicts
+        )
+        if resolved_context.reference_removed:
+            item = resolved_context.reference_removed
+            removed_conflicts.append(
+                f"reference:{item.get('rule')}:{item.get('category')}:reference_removed"
+            )
+            recent_continuity_reference = False
+        residual_conflicts = [
+            f"{item.get('source')}:{item.get('rule')}:{item.get('category')}"
+            for item in resolved_context.residual_conflicts
+        ]
+        prompt_sections_before: dict[str, Any] = {}
+        before_names: dict[str, int] = {}
+        for section in context_before:
+            prompt_sections_before[section_log_key(section, before_names)] = {
+                "source": section.source,
+                "positive": section.positive,
+                "negative": section.negative,
+                "protected": section.protected,
+            }
         prompt_path, prompt_hash = self._write_photo_prompt_debug_file(
             trace_id=trace_id,
             session_key=session_key,
@@ -9359,10 +9363,18 @@ Output:
             reference=reference_candidate,
             wardrobe=wardrobe,
             presets=preset_names,
-            prompt_sections=prompt_sections,
+            prompt_sections_before=prompt_sections_before,
+            prompt_sections=prompt_sections_for_log,
+            prompt_sections_after=prompt_sections_after,
             final_prompt=prompt_text,
             conflicts=conflicts,
             removed_conflicts=removed_conflicts,
+            residual_conflicts=residual_conflicts,
+            detected_conflict_details=detected_conflict_details,
+            removed_conflict_details=removed_conflict_details,
+            residual_conflict_details=residual_conflict_details,
+            reference_removed=resolved_context.reference_removed,
+            sanitizer_version=resolved_context.sanitizer_version,
             requested_scene_preset=requested_scene_preset,
         )
         if scene_context_after:
@@ -9383,6 +9395,7 @@ Output:
             "reference=%s reference_exists=%s reference_id=%s reference_kind=%s reference_roles=%s "
             "wardrobe_version=%s wardrobe_rule=%s wardrobe_mode=%s wardrobe_category=%s outfit_locked=%s "
             "authoritative_preset=%s selected_presets=%s adjustments=%s daily_outfit_removed=%s continuity_reference=%s "
+            "sanitizer_version=%s conflicts=%s removed_conflicts=%s residual_conflicts=%s reference_removed=%s "
             "image_size=%s prompt_preview_chars=%s prompt_preview=%s %s",
             trace_id,
             _single_line(session_key, 80),
@@ -9406,6 +9419,11 @@ Output:
             ",".join(wardrobe.adjustments) or "-",
             wardrobe.remove_daily_outfit_context,
             recent_continuity_reference,
+            resolved_context.sanitizer_version,
+            ",".join(conflicts) or "-",
+            ",".join(removed_conflicts) or "-",
+            ",".join(residual_conflicts) or "-",
+            bool(resolved_context.reference_removed),
             _single_line(image_size, 40) or "-",
             180,
             _single_line(prompt_text, 180),
@@ -9463,9 +9481,15 @@ Output:
                 wardrobe=wardrobe,
                 prompt_hash=prompt_hash,
                 prompt_path=prompt_path,
-                prompt_sections=prompt_sections,
+                prompt_sections=prompt_sections_for_log,
                 conflicts=conflicts,
                 removed_conflicts=removed_conflicts,
+                residual_conflicts=residual_conflicts,
+                reference_removed=resolved_context.reference_removed,
+                sanitizer_version=resolved_context.sanitizer_version,
+                detected_conflict_details=detected_conflict_details,
+                removed_conflict_details=removed_conflict_details,
+                residual_conflict_details=residual_conflict_details,
                 requested_scene_preset=requested_scene_preset,
             )
             logger.info(
@@ -9479,6 +9503,18 @@ Output:
                 self._photo_generation_file_detail(image_path),
             )
             return backend, image_path, note
+
+        if residual_conflicts:
+            logger.error(
+                "[PrivateCompanion] 生图服装上下文仍有残留冲突，已停止调用后端: trace=%s residual=%s",
+                trace_id,
+                ",".join(residual_conflicts),
+            )
+            return finish(
+                "上下文清理",
+                "",
+                "生图上下文仍存在未能安全清理的服装冲突，已停止调用后端",
+            )
 
         if reference_image_path and not reference_exists:
             return finish("参考图", "", f"参考图路径不可用或文件不存在：{_single_line(reference_image_path, 160)}")

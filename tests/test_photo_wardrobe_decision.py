@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
 
-PLUGIN_PARENT = Path(__file__).resolve().parents[2]
-if str(PLUGIN_PARENT) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_PARENT))
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_NAME = "astrbot_plugin_private_companion"
+if PACKAGE_NAME not in sys.modules:
+    spec = importlib.util.spec_from_file_location(
+        PACKAGE_NAME,
+        PLUGIN_ROOT / "__init__.py",
+        submodule_search_locations=[str(PLUGIN_ROOT)],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load plugin package for tests")
+    package = importlib.util.module_from_spec(spec)
+    sys.modules[PACKAGE_NAME] = package
+    spec.loader.exec_module(package)
 
 from astrbot_plugin_private_companion import photo_wardrobe_decision
 from astrbot_plugin_private_companion.photo_wardrobe_decision import (
@@ -414,6 +425,29 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertIn("今日穿搭", decision.scene_context)
         self.assertEqual(decision.selected_presets, ("日常穿搭",))
 
+    def test_explicit_outfit_removes_unknown_reference_outfit_role(self) -> None:
+        prompt = "换成校服"
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference={
+                "id": "explicit-reference",
+                "kind": "explicit",
+                "path": "C:/images/source.png",
+                "reference_roles": ["identity", "outfit"],
+                "outfit_category": "",
+                "outfit_lock_default": True,
+            },
+            base_prompt=prompt,
+            available_presets={"校服人像"},
+        )
+
+        self.assertEqual(decision.rule_id, "explicit_prompt")
+        self.assertEqual(decision.effective_reference_roles, ("identity",))
+        self.assertIn("reference_outfit_role_removed", decision.adjustments)
+
     def test_daily_outfit_reference_is_the_authoritative_fallback(self) -> None:
         intent = analyze_photo_wardrobe("在街边拍一张自然自拍")
 
@@ -728,6 +762,7 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
             "negative_instruction",
             "reason",
             "excluded_categories",
+            "excluded_outfit_text",
             "requested_outfit_text",
         ):
             self.assertIn(key, payload)

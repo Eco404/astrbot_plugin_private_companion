@@ -125,12 +125,23 @@ class PhotoWardrobeIntegrationTests(unittest.TestCase):
     def test_debug_schema_and_command_prompt_use_the_unified_decision_contract(self) -> None:
         proactive = (PLUGIN_ROOT / "proactive_message.py").read_text(encoding="utf-8")
         commands = (PLUGIN_ROOT / "command_handlers.py").read_text(encoding="utf-8")
+        page_api = (PLUGIN_ROOT / "page_api.py").read_text(encoding="utf-8")
 
-        self.assertIn('"schema_version": 2', proactive)
+        self.assertIn('"schema_version": 3', proactive)
         self.assertIn('"wardrobe_rule_id"', proactive)
         self.assertIn('"wardrobe_adjustments"', proactive)
+        self.assertIn("resolve_photo_prompt_context(", proactive)
+        self.assertIn('"residual_conflicts"', proactive)
+        self.assertIn('"sanitizer_version"', proactive)
+        self.assertIn('"detected_conflicts"', proactive)
+        self.assertIn('"removed_conflict_details"', proactive)
+        self.assertIn('"prompt_sections_after"', proactive)
+        self.assertNotIn("def _append_photo_prompt_conflict_resolution", proactive)
         self.assertNotIn("_natural_photo_prompt_has_explicit_wardrobe_request", commands)
+        self.assertIn("structured=True", commands)
         self.assertIn("preserve character identity and stable appearance", commands)
+        self.assertIn('"reference_removed"', page_api)
+        self.assertIn('"residual_conflicts"', page_api)
 
 
 if __name__ == "__main__":
