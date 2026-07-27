@@ -107,9 +107,13 @@ _ASTRBOT_STUBS = {
     ),
 }
 
-PLUGIN_PARENT = Path(__file__).resolve().parents[2]
-if str(PLUGIN_PARENT) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_PARENT))
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_NAME = "astrbot_plugin_private_companion"
+if PACKAGE_NAME not in sys.modules:
+    package = types.ModuleType(PACKAGE_NAME)
+    package.__path__ = [str(PLUGIN_ROOT)]
+    package.__package__ = PACKAGE_NAME
+    sys.modules[PACKAGE_NAME] = package
 
 with mock.patch.dict(sys.modules, _ASTRBOT_STUBS):
     from astrbot_plugin_private_companion.busy_reply_gate import BusyReplyGateMixin
