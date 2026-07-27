@@ -202,7 +202,52 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertNotIn("日常穿搭", decision.selected_presets)
         self.assertIn("daily_outfit_context_removed", decision.adjustments)
 
-    def test_unrelated_exclusion_keeps_compatible_daily_outfit_context(self) -> None:
+    def test_custom_chinese_exclusion_removes_matching_daily_outfit_context(self) -> None:
+        prompt = "在街边拍照，不要红色吊带长裙"
+        intent = analyze_photo_wardrobe(prompt)
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=intent,
+            reference=None,
+            scene_context="当前位置：街边；今日穿搭：红色吊带长裙；当前场景：散步",
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(intent.excluded_categories, ())
+        self.assertEqual(intent.exclusion_text, "红色吊带长裙")
+        self.assertEqual(decision.rule_id, "explicit_exclusion")
+        self.assertTrue(decision.remove_daily_outfit_context)
+        self.assertNotIn("今日穿搭", decision.scene_context)
+        self.assertNotIn("日常穿搭", decision.selected_presets)
+
+    def test_custom_english_exclusion_removes_matching_daily_outfit_context(self) -> None:
+        prompt = "Take a street photo. Do not wear the red strappy maxi dress."
+        intent = analyze_photo_wardrobe(prompt)
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=intent,
+            reference=None,
+            scene_context=(
+                "Current location: street; Today's outfit: red strappy maxi dress; "
+                "Current scene: walking"
+            ),
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(intent.excluded_categories, ())
+        self.assertEqual(intent.exclusion_text, "wear the red strappy maxi dress")
+        self.assertEqual(decision.rule_id, "explicit_exclusion")
+        self.assertTrue(decision.remove_daily_outfit_context)
+        self.assertNotIn("today's outfit", decision.scene_context.lower())
+        self.assertNotIn("日常穿搭", decision.selected_presets)
+
+    def test_home_scene_ignores_unrelated_exclusion_and_removes_daily_outfit_context(self) -> None:
         prompt = "在卧室拍照，不要校服"
         decision = resolve_photo_wardrobe_decision(
             workflow_kind="selfie",
@@ -210,11 +255,42 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
             intent=analyze_photo_wardrobe(prompt),
             reference=None,
             scene_context="当前位置：卧室；今日穿搭：睡衣；当前场景：睡前",
+            base_prompt=(
+                "Positive prompt: user request: 在卧室拍照, visual continuity reference: "
+                "今日穿搭：睡衣, keep today's outfit and character appearance consistent "
+                "with available visual continuity."
+            ),
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(decision.rule_id, "no_wardrobe_source")
+        self.assertTrue(decision.remove_daily_outfit_context)
+        self.assertNotIn("今日穿搭", decision.scene_context)
+        self.assertEqual(decision.selected_presets, ("角色自拍",))
+        self.assertIn("daily_outfit_context_not_applicable", decision.adjustments)
+        self.assertIn("daily_outfit_context_removed", decision.adjustments)
+        self.assertIn("generated_daily_outfit_continuity_removed", decision.adjustments)
+        self.assertNotIn("今日穿搭", decision.base_prompt)
+        self.assertNotIn("today's outfit and character", decision.base_prompt.lower())
+        self.assertIn("character identity", decision.base_prompt.lower())
+
+    def test_explicit_outfit_showcase_keeps_daily_outfit_context_at_home(self) -> None:
+        prompt = "在卧室拍一张照片，给我看看今天的穿搭"
+        intent = analyze_photo_wardrobe(prompt)
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=intent,
+            reference=None,
+            scene_context="当前位置：卧室；今日穿搭：针织衫和长裙；当前场景：休息",
             base_prompt=prompt,
             available_presets={"角色自拍", "日常穿搭"},
         )
 
+        self.assertEqual(intent.target_category, "")
         self.assertEqual(decision.rule_id, "daily_outfit_context")
+        self.assertFalse(decision.remove_daily_outfit_context)
         self.assertIn("今日穿搭", decision.scene_context)
         self.assertEqual(decision.selected_presets, ("日常穿搭",))
 
