@@ -1,0 +1,469 @@
+from __future__ import annotations
+
+import inspect
+import sys
+import tempfile
+import time
+import types
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+class _Logger:
+    def __getattr__(self, _name: str):
+        return lambda *args, **kwargs: None
+
+
+class _AstrBotStub:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+
+def _astrbot_stubs() -> dict[str, types.ModuleType]:
+    module_names = (
+        "astrbot",
+        "astrbot.api",
+        "astrbot.api.event",
+        "astrbot.api.message_components",
+        "astrbot.api.provider",
+        "astrbot.api.star",
+        "astrbot.core",
+        "astrbot.core.agent",
+        "astrbot.core.agent.message",
+        "astrbot.core.astr_main_agent",
+        "astrbot.core.db",
+        "astrbot.core.db.po",
+        "astrbot.core.message",
+        "astrbot.core.message.components",
+        "astrbot.core.platform",
+        "astrbot.core.platform.astrbot_message",
+        "astrbot.core.platform.message_session",
+        "astrbot.core.platform.message_type",
+        "astrbot.core.platform.platform",
+        "astrbot.core.platform.platform_metadata",
+        "astrbot.core.provider",
+        "astrbot.core.provider.entities",
+        "astrbot.core.star",
+        "astrbot.core.star.star_handler",
+        "astrbot.core.utils",
+        "astrbot.core.utils.astrbot_path",
+    )
+    modules = {name: types.ModuleType(name) for name in module_names}
+    for name, module in modules.items():
+        if any(other.startswith(f"{name}.") for other in module_names):
+            module.__path__ = []
+        module.__getattr__ = lambda _name: _AstrBotStub
+
+    for name, module in modules.items():
+        if "." in name:
+            parent_name, child_name = name.rsplit(".", 1)
+            setattr(modules[parent_name], child_name, module)
+
+    api = modules["astrbot.api"]
+    event = modules["astrbot.api.event"]
+    api.logger = _Logger()
+    api.AstrBotConfig = dict
+    event.AstrMessageEvent = type("AstrMessageEvent", (), {})
+    event.MessageChain = _AstrBotStub
+    event.filter = _AstrBotStub
+    modules["astrbot.core.utils.astrbot_path"].get_astrbot_data_path = lambda: tempfile.gettempdir()
+    return modules
+
+
+with mock.patch.dict(sys.modules, _astrbot_stubs()):
+    PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+    plugin_package = types.ModuleType("astrbot_plugin_private_companion")
+    plugin_package.__path__ = [str(PLUGIN_ROOT)]
+    plugin_package.__package__ = "astrbot_plugin_private_companion"
+    sys.modules.setdefault("astrbot_plugin_private_companion", plugin_package)
+
+    from astrbot_plugin_private_companion.photo_wardrobe_decision import (
+        PhotoWardrobeDecision,
+        analyze_photo_wardrobe,
+    )
+    from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixin
+    from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
+
+
+def _candidate(
+    reference_id: str,
+    *,
+    outfit_category: str,
+    scene_categories: tuple[str, ...],
+    note: str,
+) -> dict[str, object]:
+    return {
+        "id": reference_id,
+        "kind": "library",
+        "path": f"C:/images/{reference_id}.png",
+        "source": f"C:/images/{reference_id}.png",
+        "note": note,
+        "reference_roles": ["identity", "outfit", "scene"],
+        "outfit_category": outfit_category,
+        "outfit_lock_default": True,
+        "scene_categories": list(scene_categories),
+        "preferred_preset": "",
+        "metadata_source": "test",
+    }
+
+
+class _SelectionHarness(ProactiveMessageMixin):
+    def __init__(self, candidates: list[dict[str, object]], llm_reply: str):
+        self.enable_photo_reference_image = True
+        self._candidates = candidates
+        self._llm_reply = llm_reply
+        self.llm_prompts: list[str] = []
+
+    async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True):
+        return [dict(candidate) for candidate in self._candidates]
+
+    @staticmethod
+    def _recent_sent_photo_continuity_candidate(_continuity_key: str):
+        return {}
+
+    async def _llm_call(self, prompt: str, **_kwargs):
+        self.llm_prompts.append(prompt)
+        return self._llm_reply
+
+
+class _ContinuityHarness(ProactiveMessageMixin):
+    def __init__(self):
+        self.data: dict[str, object] = {}
+        self.saved = 0
+
+    def _save_data_sync(self) -> None:
+        self.saved += 1
+
+
+class _ToolPhotoHarness(LlmToolActionsMixin):
+    natural_language_photo_generation_mode = "tool_first"
+    enable_photo_text_action = True
+
+    def __init__(self, image_path: str):
+        self.image_path = image_path
+        self.generation_kwargs: dict[str, object] = {}
+
+    @staticmethod
+    def _photo_text_available() -> bool:
+        return True
+
+    @staticmethod
+    def _build_natural_language_photo_prompt(**kwargs) -> str:
+        return str(kwargs.get("prompt") or "")
+
+    async def _generate_photo_image_result(self, **kwargs):
+        self.generation_kwargs = dict(kwargs)
+        return types.SimpleNamespace(
+            backend="test",
+            image_path=self.image_path,
+            note="",
+            preset_names=("表情包场景",),
+            preset_hint="",
+            preset_source="workflow_default",
+            suggestion_status="not_provided",
+            as_legacy_tuple=lambda: ("test", self.image_path, ""),
+        )
+
+
+class _ToolEvent:
+    unified_msg_origin = "test-session"
+
+    @staticmethod
+    def get_sender_id() -> str:
+        return "test-user"
+
+
+class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_request_outweighs_conflicting_ambient_context(self) -> None:
+        sleepwear = _candidate(
+            "sleepwear-bedroom",
+            outfit_category="sleepwear",
+            scene_categories=("home", "bedroom"),
+            note="卧室睡衣",
+        )
+        school = _candidate(
+            "school-uniform",
+            outfit_category="school_uniform",
+            scene_categories=("school",),
+            note="学校教室校服",
+        )
+        harness = _SelectionHarness([sleepwear, school], llm_reply="2")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="请在卧室穿睡衣拍一张照片",
+            ambient_context="日程显示正在学校教室上学，身穿校服",
+        )
+
+        self.assertEqual(selected["id"], "sleepwear-bedroom")
+        self.assertEqual(len(harness.llm_prompts), 1)
+        self.assertIn("场景类别=bedroom,home", harness.llm_prompts[0])
+        self.assertNotIn("preferred_preset", harness.llm_prompts[0])
+
+    def test_selection_interface_has_no_scene_preset_parameter(self) -> None:
+        parameters = inspect.signature(
+            ProactiveMessageMixin._select_photo_reference_candidate_async
+        ).parameters
+
+        self.assertNotIn("scene_preset", parameters)
+        self.assertNotIn("requested_scene_preset", parameters)
+        self.assertNotIn("suggested_scene_preset", parameters)
+
+    async def test_model_choice_zero_returns_no_reference(self) -> None:
+        sleepwear = _candidate(
+            "sleepwear-bedroom",
+            outfit_category="sleepwear",
+            scene_categories=("home", "bedroom"),
+            note="卧室睡衣",
+        )
+        school = _candidate(
+            "school-uniform",
+            outfit_category="school_uniform",
+            scene_categories=("school",),
+            note="学校教室校服",
+        )
+        harness = _SelectionHarness([sleepwear, school], llm_reply="0")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="请拍一张全新的照片",
+            ambient_context="正在学校教室",
+        )
+
+        self.assertEqual(selected, {})
+
+    async def test_identity_only_candidate_is_not_filtered_by_outfit_label(self) -> None:
+        identity = _candidate(
+            "identity-only",
+            outfit_category="sleepwear",
+            scene_categories=(),
+            note="基础身份参考",
+        )
+        identity["reference_roles"] = ["identity"]
+        identity["outfit_lock_default"] = False
+        harness = _SelectionHarness([identity], llm_reply="1")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="穿校服拍一张照片",
+            ambient_context="",
+        )
+
+        self.assertEqual(selected["id"], "identity-only")
+
+    async def test_sticker_default_is_not_recorded_as_tool_suggestion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "sticker.png"
+            image_path.write_bytes(b"png")
+            harness = _ToolPhotoHarness(str(image_path))
+
+            payload = await harness._pc_generate_photo_impl(
+                _ToolEvent(),
+                prompt="开心地挥挥手",
+                kind="sticker",
+                send=False,
+            )
+
+        result = __import__("json").loads(payload)
+        self.assertEqual(harness.generation_kwargs["suggested_scene_preset"], "")
+        self.assertEqual(
+            harness.generation_kwargs["workflow_default_scene_preset"],
+            "表情包场景",
+        )
+        self.assertEqual(result["preset_hint"], "")
+        self.assertEqual(result["preset_source"], "workflow_default")
+        self.assertEqual(result["suggestion_status"], "not_provided")
+        self.assertEqual(result["final_presets"], ["表情包场景"])
+
+    def test_user_scene_match_scores_above_ambient_scene_match(self) -> None:
+        request_text = "在卧室拍一张照片"
+        ambient_context = "日程显示正在学校教室"
+        wardrobe_intent = analyze_photo_wardrobe(request_text)
+        bedroom = _candidate(
+            "bedroom",
+            outfit_category="",
+            scene_categories=("bedroom",),
+            note="室内",
+        )
+        school = _candidate(
+            "school",
+            outfit_category="",
+            scene_categories=("school",),
+            note="室内",
+        )
+
+        bedroom_score = ProactiveMessageMixin._photo_reference_candidate_score(
+            bedroom,
+            request_text,
+            ambient_context,
+            wardrobe_intent=wardrobe_intent,
+        )
+        school_score = ProactiveMessageMixin._photo_reference_candidate_score(
+            school,
+            request_text,
+            ambient_context,
+            wardrobe_intent=wardrobe_intent,
+        )
+
+        self.assertGreater(bedroom_score, school_score)
+
+    def test_recent_generation_records_only_final_preset_and_keeps_hint_separate(self) -> None:
+        harness = _ContinuityHarness()
+        decision = PhotoWardrobeDecision(
+            rule_id="explicit_prompt",
+            preset_name="校服人像",
+            selected_presets=("校服人像",),
+            suggested_preset="居家睡衣",
+            preset_source="wardrobe_category",
+            suggestion_status="rejected_user_conflict",
+        )
+
+        harness._record_recent_photo_generation(
+            trace_id="trace-1",
+            session_key="session-1",
+            workflow_kind="selfie",
+            backend="test",
+            ok=True,
+            prompt_text="穿校服拍照",
+            presets=["校服人像", "角色自拍"],
+            wardrobe=decision,
+            suggested_scene_preset="居家睡衣",
+        )
+
+        item = harness.data["recent_photo_generations"][0]
+        self.assertEqual(item["schema_version"], 2)
+        self.assertEqual(item["presets"], ["校服人像"])
+        self.assertEqual(item["scene_preset"], "校服人像")
+        self.assertEqual(item["preset_hint"], "居家睡衣")
+        self.assertEqual(item["suggestion_status"], "rejected_user_conflict")
+
+    def test_prompt_adapter_applies_at_most_one_scene_preset(self) -> None:
+        harness = _ContinuityHarness()
+
+        prompt, names = harness._apply_photo_generation_scene_presets(
+            "base prompt",
+            "selfie",
+            preset_names=["校服人像", "角色自拍"],
+        )
+
+        self.assertEqual(names, ["校服人像"])
+        self.assertIn("school uniform portrait", prompt)
+        self.assertNotIn("casual character selfie", prompt)
+
+    def test_rejected_hint_does_not_pollute_sent_photo_continuity(self) -> None:
+        harness = _ContinuityHarness()
+        continuity_key = "session-2|sender=user-1"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "generated.png"
+            image_path.write_bytes(b"png")
+            decision = PhotoWardrobeDecision(
+                rule_id="explicit_prompt",
+                category="school_uniform",
+                lock_outfit=True,
+                preset_name="校服人像",
+                selected_presets=("校服人像",),
+                suggested_preset="居家睡衣",
+                preset_source="wardrobe_category",
+                suggestion_status="rejected_user_conflict",
+            )
+            harness._record_recent_photo_generation(
+                trace_id="trace-2",
+                session_key="session-2",
+                continuity_key=continuity_key,
+                workflow_kind="selfie",
+                backend="test",
+                ok=True,
+                prompt_text="穿校服拍照",
+                image_path=str(image_path),
+                presets=["校服人像"],
+                wardrobe=decision,
+                suggested_scene_preset="居家睡衣",
+            )
+
+            harness._annotate_recent_photo_generation(
+                image_path=str(image_path),
+                sent=True,
+                preset_hint="居家睡衣",
+            )
+
+            item = harness.data["recent_photo_generations"][0]
+            candidate = harness._recent_sent_photo_continuity_candidate(continuity_key)
+            self.assertEqual(item["scene_preset"], "校服人像")
+            self.assertEqual(item["preset_hint"], "居家睡衣")
+            self.assertEqual(candidate["preferred_preset"], "校服人像")
+
+    def test_schema_one_continuity_ignores_legacy_scene_preset(self) -> None:
+        harness = _ContinuityHarness()
+        continuity_key = "session-3|sender=user-1"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "legacy.png"
+            image_path.write_bytes(b"png")
+            store_key = harness._photo_continuity_store_key(continuity_key)
+            harness.data["recent_photo_continuity"] = {
+                store_key: {
+                    "schema_version": 1,
+                    "continuity_key": continuity_key,
+                    "sent_at": time.time(),
+                    "path": str(image_path),
+                    "scene_preset": "居家睡衣",
+                    "wardrobe_category": "school_uniform",
+                }
+            }
+
+            candidate = harness._recent_sent_photo_continuity_candidate(continuity_key)
+
+            self.assertEqual(candidate["preferred_preset"], "")
+
+    def test_annotating_legacy_generation_does_not_promote_old_scene_hint(self) -> None:
+        harness = _ContinuityHarness()
+        continuity_key = "session-legacy|sender=user-1"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "legacy-generation.png"
+            image_path.write_bytes(b"png")
+            harness.data["recent_photo_generations"] = [
+                {
+                    "ok": True,
+                    "sent": False,
+                    "continuity_key": continuity_key,
+                    "path": str(image_path),
+                    "scene_preset": "居家睡衣",
+                    "presets": [],
+                    "wardrobe_category": "school_uniform",
+                }
+            ]
+
+            harness._annotate_recent_photo_generation(
+                image_path=str(image_path),
+                sent=True,
+                preset_hint="校服人像",
+            )
+
+            candidate = harness._recent_sent_photo_continuity_candidate(continuity_key)
+            self.assertEqual(candidate["preferred_preset"], "")
+
+    def test_schema_two_continuity_exposes_actual_final_preset(self) -> None:
+        harness = _ContinuityHarness()
+        continuity_key = "session-4|sender=user-1"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "current.png"
+            image_path.write_bytes(b"png")
+            store_key = harness._photo_continuity_store_key(continuity_key)
+            harness.data["recent_photo_continuity"] = {
+                store_key: {
+                    "schema_version": 2,
+                    "continuity_key": continuity_key,
+                    "sent_at": time.time(),
+                    "path": str(image_path),
+                    "scene_preset": "校服人像",
+                    "wardrobe_category": "school_uniform",
+                }
+            }
+
+            candidate = harness._recent_sent_photo_continuity_candidate(continuity_key)
+
+            self.assertEqual(candidate["preferred_preset"], "校服人像")
+
+
+if __name__ == "__main__":
+    unittest.main()

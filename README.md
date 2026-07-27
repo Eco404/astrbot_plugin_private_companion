@@ -661,6 +661,7 @@ daily_state.py                  状态、日程、细化、天气、日记、技
 proactive.py                    私聊主动排程与会话路由
 proactive_engine.py             候选、评分、时间窗、生命周期和动作选择
 proactive_message.py            主动生成、图片、动作执行和发送
+photo_wardrobe_decision.py      生图服装意图、优先级裁决、预设选择和冲突清理
 group_observation.py            群聊观察、群友、黑话、话题和片段
 group_wakeup.py                 群聊唤醒、续接和高强度模式
 user_memory.py                  用户画像、表达、关系状态和对话片段

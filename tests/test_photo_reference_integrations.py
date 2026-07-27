@@ -46,9 +46,13 @@ def _astrbot_stubs() -> dict[str, types.ModuleType]:
 
 
 with mock.patch.dict(sys.modules, _astrbot_stubs()):
-    PLUGIN_PARENT = Path(__file__).resolve().parents[2]
-    if str(PLUGIN_PARENT) not in sys.path:
-        sys.path.insert(0, str(PLUGIN_PARENT))
+    PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+    PACKAGE_NAME = "astrbot_plugin_private_companion"
+    if PACKAGE_NAME not in sys.modules:
+        package = types.ModuleType(PACKAGE_NAME)
+        package.__path__ = [str(PLUGIN_ROOT)]
+        package.__package__ = PACKAGE_NAME
+        sys.modules[PACKAGE_NAME] = package
 
     from astrbot_plugin_private_companion.command_handlers import CommandHandlersMixin
     from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi

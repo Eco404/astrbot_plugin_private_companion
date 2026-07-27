@@ -26,6 +26,7 @@ from .photo_reference_catalog import (
     load_catalog,
     validate_and_serialize,
 )
+from .photo_prompt_context import PhotoPromptSection
 
 
 _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -4087,47 +4088,6 @@ class CommandHandlersMixin:
         user["last_command_photo_path"] = _path_text(image_path, 1000)
         user["last_command_photo_at"] = _now_ts()
 
-    @staticmethod
-    def _natural_photo_prompt_has_explicit_wardrobe_request(prompt: Any) -> bool:
-        text = _single_line(prompt, 1200).lower()
-        if not text:
-            return False
-        chinese_markers = (
-            "睡衣",
-            "睡裙",
-            "睡袍",
-            "居家服",
-            "家居服",
-            "角色扮演",
-            "扮成",
-            "换装",
-            "换衣",
-            "校服",
-            "制服",
-            "礼服",
-            "泳装",
-            "泳衣",
-            "比基尼",
-            "运动服",
-            "健身服",
-            "瑜伽服",
-            "女仆装",
-            "巫女服",
-        )
-        if any(marker in text for marker in chinese_markers):
-            return True
-        return bool(
-            re.search(
-                r"(?<![a-z0-9])(?:cos|cosplay)(?![a-z0-9])|"
-                r"\b(?:costume|pajamas?|pyjamas?|sleepwear|nightgown|nightdress|loungewear|homewear|"
-                r"swimsuits?|swimwear|bikini|sportswear|activewear|tuxedo)\b|"
-                r"\b(?:school\s+uniform|formal\s+dress|evening\s+gown|gym\s+wear|workout\s+(?:clothes|outfit)|"
-                r"home\s+wear|lounge\s+wear)\b",
-                text,
-                flags=re.I,
-            )
-        )
-
     def _build_natural_language_photo_prompt(
         self,
         *,
@@ -4135,7 +4095,8 @@ class CommandHandlersMixin:
         kind: str,
         has_reference: bool,
         memory_context: str = "",
-    ) -> str:
+        structured: bool = False,
+    ) -> str | tuple[PhotoPromptSection, ...]:
         style_name, style_instruction = self._get_photo_style_instruction() if callable(getattr(self, "_get_photo_style_instruction", None)) else ("默认", "")
         style_prompt = (
             self._photo_style_prompt_en(style_name, style_instruction)
@@ -4148,11 +4109,11 @@ class CommandHandlersMixin:
         ).strip()
         visual_memory = self._visual_photo_memory_context(memory_context)
         if kind == "edit" and has_reference:
+            user_request = _single_line(prompt, 420) or "edit the reference image"
             positive = [
                 "image edit based on the provided reference image",
                 "the provided image is the sole visual reference and source canvas",
                 "this is an image editing task, not a selfie or new portrait generation request",
-                f"user request: {_single_line(prompt, 420) or 'edit the reference image'}",
                 "preserve unchanged subjects, composition, identity, clothing, and important details",
                 "only modify the parts explicitly requested by the user",
                 "do not replace any person with the assistant persona or today's outfit",
@@ -4169,25 +4130,15 @@ class CommandHandlersMixin:
                 "nsfw",
             ]
         elif kind == "selfie":
-            explicit_wardrobe_request = self._natural_photo_prompt_has_explicit_wardrobe_request(prompt)
-            if explicit_wardrobe_request:
-                wardrobe_continuity = (
-                    "the user's explicit clothing or outfit request in this turn has highest priority; follow that requested "
-                    "wardrobe and ignore any conflicting details from today's outfit or older wardrobe continuity; preserve the "
-                    "character identity and stable appearance"
-                )
-                if has_reference:
-                    wardrobe_continuity += (
-                        "; use the reference image for identity and compatible visual details, not to restore conflicting clothes"
-                    )
-            elif has_reference:
-                wardrobe_continuity = "keep today's outfit and character appearance consistent with the reference image"
-            else:
-                wardrobe_continuity = "keep today's outfit and character appearance consistent with available visual continuity"
+            user_request = _single_line(prompt, 420) or "take a selfie"
+            identity_continuity = (
+                "preserve character identity and stable appearance from the selected reference image"
+                if has_reference
+                else "preserve character identity and stable appearance from available visual continuity"
+            )
             positive = [
                 "single character selfie",
                 "solo",
-                f"user request: {_single_line(prompt, 420) or 'take a selfie'}",
                 "visible face",
                 "complete head and hair",
                 "clear eyes",
@@ -4215,9 +4166,9 @@ class CommandHandlersMixin:
                 "nsfw",
             ]
         else:
+            user_request = _single_line(prompt, 520)
             positive = [
                 "generate an image from the user request",
-                f"user request: {_single_line(prompt, 520)}",
                 "clear main subject",
                 "concrete scene",
                 "natural lighting",
@@ -4234,19 +4185,55 @@ class CommandHandlersMixin:
                 "logo",
                 "nsfw",
             ]
-        if visual_memory and kind != "edit":
-            positive.append(f"visual continuity reference: {_single_line(visual_memory, 360)}")
-        if extra_prompt:
-            positive.append(f"additional generation preference: {_single_line(extra_prompt, 420)}")
+        sections = [
+            PhotoPromptSection(
+                name="user_request",
+                source="user_request",
+                positive=f"user request: {user_request}",
+                protected=True,
+            )
+        ]
+        sections.append(
+            PhotoPromptSection(
+                name="natural_language_contract",
+                source="edit_contract" if kind == "edit" and has_reference else "composition",
+                positive=", ".join(part for part in positive if _single_line(part, 520)),
+                negative=", ".join(negative),
+            )
+        )
         if kind == "selfie":
-            # Keep the current-turn wardrobe decision after inherited visual
-            # context so stale outfit details cannot become the last instruction.
-            positive.append(wardrobe_continuity)
+            sections.append(
+                PhotoPromptSection(
+                    name="identity_continuity",
+                    source="visual_memory",
+                    positive=identity_continuity,
+                )
+            )
+        if visual_memory and kind != "edit":
+            sections.append(
+                PhotoPromptSection(
+                    name="visual_memory",
+                    source="visual_memory",
+                    positive=f"visual continuity reference: {_single_line(visual_memory, 360)}",
+                )
+            )
+        if extra_prompt:
+            sections.append(
+                PhotoPromptSection(
+                    name="natural_language_extra",
+                    source="fixed_prompt",
+                    positive=f"additional generation preference: {_single_line(extra_prompt, 420)}",
+                )
+            )
+        if structured:
+            return tuple(sections)
+        combined_positive = ", ".join(section.positive for section in sections if section.positive)
+        combined_negative = ", ".join(section.negative for section in sections if section.negative)
         return _single_line(
             "Positive prompt: "
-            + ", ".join(part for part in positive if _single_line(part, 520))
+            + combined_positive
             + ". Negative prompt: "
-            + ", ".join(negative)
+            + combined_negative
             + ".",
             6500,
         )
@@ -4569,12 +4556,14 @@ class CommandHandlersMixin:
                 )
             except Exception:
                 memory_context = ""
-        prompt_text = self._build_natural_language_photo_prompt(
+        prompt_sections = self._build_natural_language_photo_prompt(
             prompt=str(intent.get("prompt") or ""),
             kind=str(intent.get("kind") or "text2img"),
             has_reference=bool(reference_path),
             memory_context=memory_context,
+            structured=True,
         )
+        prompt_text = str(intent.get("prompt") or "")
         intent_kind = str(intent.get("kind") or "text2img")
         workflow_kind = self._photo_generation_workflow_kind(intent_kind)
         ack_text = await self._natural_language_photo_ack_reply_text(
@@ -4595,9 +4584,11 @@ class CommandHandlersMixin:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
+                request_text=str(intent.get("prompt") or ""),
                 session_key=generation_session_key,
                 continuity_key=continuity_key,
                 reference_image_path=reference_path,
+                prompt_sections=prompt_sections,
             )
         except Exception as exc:
             missing = _missing_optional_model_dependency(exc)
@@ -4802,12 +4793,14 @@ class CommandHandlersMixin:
             except Exception:
                 memory_context = ""
 
-        prompt_text = self._build_natural_language_photo_prompt(
+        prompt_sections = self._build_natural_language_photo_prompt(
             prompt=prompt,
             kind=forced_kind,
             has_reference=bool(reference_path),
             memory_context=memory_context,
+            structured=True,
         )
+        prompt_text = prompt
         workflow_kind = self._photo_generation_workflow_kind(forced_kind)
         async with self._data_lock:
             user = self._get_user(user_id)
@@ -4830,9 +4823,11 @@ class CommandHandlersMixin:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
+                request_text=prompt,
                 session_key=generation_session_key,
                 continuity_key=continuity_key,
                 reference_image_path=reference_path,
+                prompt_sections=prompt_sections,
             )
         except Exception as exc:
             missing = _missing_optional_model_dependency(exc)

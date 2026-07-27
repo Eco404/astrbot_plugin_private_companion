@@ -415,6 +415,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "proactive_intensity": self._proactive_intensity_summary(),
                 "proactive_only": self._proactive_only_mode_snapshot(),
                 "proactive_chat": self._proactive_chat_summary(data),
+                "body_monitor_integration": self._body_monitor_integration_summary(),
                 "expression_scope": self._expression_learning_scope_summary(data),
                 "providers": self._provider_settings(),
                 "settings": self._runtime_settings(),
@@ -1488,6 +1489,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             else:
                 for key, value in changed.items():
                     self._apply_config_value(key, value, apply_overrides)
+            if "enable_body_monitor_integration" in changed:
+                runtime_task = getattr(self.plugin, "_body_monitor_integration_toggle_task", None)
+                if isinstance(runtime_task, asyncio.Task):
+                    await runtime_task
             expression_scope_keys = {
                 "expression_private_learning_source_mode",
                 "expression_private_learning_source_ids",
@@ -2780,7 +2785,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "wardrobe_category": self._single_line(getattr(generation_output, "wardrobe_category", ""), 40),
                 "outfit_locked": bool(getattr(generation_output, "outfit_locked", False)),
                 "daily_outfit_removed": bool(getattr(generation_output, "daily_outfit_removed", False)),
-                "final_presets": list(getattr(generation_output, "preset_names", ()) or ()),
+                "final_presets": list(getattr(generation_output, "preset_names", ()) or ())[:1],
                 "prompt_hash": self._single_line(getattr(generation_output, "prompt_hash", ""), 80),
                 "prompt_path": _path_text(getattr(generation_output, "prompt_path", ""), 1000),
             }
@@ -2833,7 +2838,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "wardrobe_category": self._single_line(generation_metadata.get("wardrobe_category"), 40),
             "outfit_locked": bool(generation_metadata.get("outfit_locked")),
             "daily_outfit_removed": bool(generation_metadata.get("daily_outfit_removed")),
-            "final_presets": list(generation_metadata.get("final_presets") or [])[:6],
+            "final_presets": list(generation_metadata.get("final_presets") or [])[:1],
             "prompt_hash": self._single_line(generation_metadata.get("prompt_hash"), 80),
             "prompt_path": _path_text(generation_metadata.get("prompt_path"), 1000),
             "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
@@ -4318,6 +4323,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         raw = data.get("recent_photo_generations")
         if not isinstance(raw, list):
             return []
+
+        def compact_audit(values: Any) -> list[dict[str, str]]:
+            if not isinstance(values, list):
+                return []
+            result: list[dict[str, str]] = []
+            for value in values[:24]:
+                if not isinstance(value, dict):
+                    continue
+                record = {
+                    key: self._single_line(value.get(key), 120 if key == "preview" else 80)
+                    for key in ("source", "section", "rule", "category", "action", "preview", "sha256")
+                    if self._single_line(value.get(key), 120 if key == "preview" else 80)
+                }
+                if record:
+                    result.append(record)
+            return result
+
         items: list[dict[str, Any]] = []
         for item in raw[:8]:
             if not isinstance(item, dict):
@@ -4364,6 +4386,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "sent": bool(item.get("sent")),
                     "caption": self._single_line(item.get("caption"), 120),
                     "scene_preset": self._single_line(item.get("scene_preset"), 80),
+                    "preset_hint": self._single_line(item.get("preset_hint"), 80),
+                    "preset_source": self._single_line(item.get("preset_source"), 40),
+                    "suggestion_status": self._single_line(item.get("suggestion_status"), 60),
                     "wardrobe_mode": self._single_line(item.get("wardrobe_mode"), 40),
                     "wardrobe_source": self._single_line(item.get("wardrobe_source"), 40),
                     "wardrobe_category": self._single_line(item.get("wardrobe_category"), 40),
@@ -4380,12 +4405,31 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         for value in (item.get("removed_conflicts") if isinstance(item.get("removed_conflicts"), list) else [])
                         if self._single_line(value, 120)
                     ][:12],
+                    "residual_conflicts": [
+                        self._single_line(value, 120)
+                        for value in (
+                            item.get("residual_conflicts")
+                            if isinstance(item.get("residual_conflicts"), list)
+                            else []
+                        )
+                        if self._single_line(value, 120)
+                    ][:12],
+                    "reference_removed": bool(item.get("reference_removed")),
+                    "reference_removal": (
+                        dict(item.get("reference_removal"))
+                        if isinstance(item.get("reference_removal"), dict)
+                        else {}
+                    ),
+                    "sanitizer_version": self._int(item.get("sanitizer_version")),
+                    "detected_conflicts": compact_audit(item.get("detected_conflicts")),
+                    "removed_conflict_details": compact_audit(item.get("removed_conflict_details")),
+                    "residual_conflict_details": compact_audit(item.get("residual_conflict_details")),
                     "tool_name": self._single_line(item.get("tool_name"), 60),
                     "presets": [
                         self._single_line(name, 40)
                         for name in (item.get("presets") if isinstance(item.get("presets"), list) else [])
                         if self._single_line(name, 40)
-                    ][:6],
+                    ][:1],
                 }
             )
         return items
@@ -4609,7 +4653,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 self._single_line(value, 60)
                 for value in (result.get("final_presets") if isinstance(result.get("final_presets"), list) else [])
                 if self._single_line(value, 60)
-            ][:6],
+            ][:1],
             "prompt_hash": self._single_line(result.get("prompt_hash"), 80),
             "prompt_path": self._single_line(result.get("prompt_path"), 1000),
             "provider": self._single_line(result.get("provider"), 100),
@@ -11549,6 +11593,122 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "last_sent": last_sent,
         }
 
+    @staticmethod
+    def _body_monitor_status_state(raw: dict[str, Any], *, enabled: bool, installed: bool) -> str:
+        if not enabled:
+            return "disabled"
+        aliases = {
+            "missing": "not_installed",
+            "unavailable": "not_installed",
+            "not-installed": "not_installed",
+            "version_mismatch": "incompatible",
+            "version-mismatch": "incompatible",
+            "unsupported": "incompatible",
+            "waiting": "initializing",
+            "starting": "initializing",
+            "ready": "connected",
+            "active": "connected",
+            "ok": "connected",
+            "failed": "error",
+        }
+        state = str(raw.get("state") or raw.get("status") or "").strip().lower()
+        state = aliases.get(state, state)
+        if state == "disabled":
+            state = "initializing"
+        if state in {"disabled", "not_installed", "incompatible", "initializing", "connected", "error"}:
+            return state
+        if not installed or raw.get("available") is False:
+            return "not_installed"
+        if raw.get("compatible") is False or raw.get("api_compatible") is False:
+            return "incompatible"
+        if raw.get("connected") is True:
+            return "connected"
+        if raw.get("last_error") or raw.get("error"):
+            return "error"
+        return "initializing"
+
+    def _body_monitor_status_error(self, value: Any) -> str:
+        return "Body Monitor 事件读取失败，请查看服务端日志" if self._single_line(value, 240) else ""
+
+    def _body_monitor_integration_summary(self) -> dict[str, Any]:
+        enabled = bool(getattr(self.plugin, "enable_body_monitor_integration", False))
+        installed = False
+        detector = getattr(self.plugin, "_integrated_plugin_installed", None)
+        if callable(detector):
+            try:
+                installed = bool(detector("astrbot_plugin_body_monitor"))
+            except Exception:
+                installed = False
+
+        raw: dict[str, Any] = {}
+        status_getter = getattr(self.plugin, "_body_monitor_integration_status_view", None)
+        if callable(status_getter):
+            try:
+                value = status_getter()
+                raw = value if isinstance(value, dict) else {}
+            except Exception as exc:
+                raw = {"state": "error", "last_error": exc}
+
+        if "installed" in raw:
+            installed = bool(raw.get("installed"))
+        elif raw.get("available") is True:
+            installed = True
+        state = self._body_monitor_status_state(raw, enabled=enabled, installed=installed)
+        state_text = {
+            "disabled": "联动已关闭",
+            "not_installed": "未安装 Body Monitor",
+            "incompatible": "接口版本不兼容",
+            "initializing": "正在初始化",
+            "connected": "已连接",
+            "error": "连接异常",
+        }[state]
+
+        last_pull_at = self._float(
+            raw.get("last_pull_at")
+            or raw.get("last_pull_ts")
+            or raw.get("last_polled_at")
+        )
+        last_pull_text = self._single_line(raw.get("last_pull_text"), 80)
+        formatter = getattr(self.plugin, "_format_timestamp_elapsed", None)
+        if not last_pull_text and last_pull_at > 0 and callable(formatter):
+            try:
+                last_pull_text = self._single_line(formatter(last_pull_at), 80)
+            except Exception:
+                last_pull_text = ""
+
+        raw_batch = raw.get("last_batch")
+        if not isinstance(raw_batch, dict):
+            raw_batch = raw.get("batch") if isinstance(raw.get("batch"), dict) else {}
+        batch = {
+            "received": max(0, self._int(raw_batch.get("received"))),
+            "accepted": max(0, self._int(raw_batch.get("accepted") or raw_batch.get("queued"))),
+            "skipped": max(0, self._int(raw_batch.get("skipped") or raw_batch.get("rejected"))),
+            "duplicate": max(0, self._int(raw_batch.get("duplicate") or raw_batch.get("duplicates"))),
+            "expired": max(0, self._int(raw_batch.get("expired"))),
+        }
+        api_version = self._int(
+            raw.get("api_version")
+            or raw.get("proactive_event_api_version")
+            or raw.get("version")
+        )
+        supported_api_version = self._int(
+            raw.get("supported_api_version")
+            or raw.get("expected_api_version")
+            or 1
+        )
+        return {
+            "enabled": enabled,
+            "installed": installed,
+            "state": state,
+            "state_text": state_text,
+            "api_version": api_version,
+            "supported_api_version": supported_api_version,
+            "last_pull_at": last_pull_at,
+            "last_pull_text": last_pull_text,
+            "last_batch": batch,
+            "error": self._body_monitor_status_error(raw.get("last_error") or raw.get("error")),
+        }
+
     def _feature_flags(self) -> dict[str, bool]:
         keys = [
             "enable_proactive_only_mode",
@@ -12840,6 +13000,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "model_timeout_overrides",
             "model_fallback_overrides",
             "enable_deepseek_peak_replacement",
+            "enable_body_monitor_integration",
             "deepseek_peak_windows",
             "deepseek_peak_timezone",
             "deepseek_peak_match_keywords",
@@ -14627,6 +14788,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
         self._set_config_value(key, value)
+        if key == "enable_body_monitor_integration":
+            enabled = self._normalize_bool_value(value)
+            self.plugin.enable_body_monitor_integration = enabled
+            self._schedule_body_monitor_integration_toggle(enabled)
+            return
         if key == "photo_reference_catalog":
             loaded = load_catalog(
                 value,
@@ -14917,6 +15083,63 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return
         if key in self._allowed_setting_keys():
             setattr(self.plugin, key, value)
+
+    async def _sync_body_monitor_integration_toggle(self, enabled: bool) -> None:
+        integration = getattr(self.plugin, "_body_monitor_integration", None)
+        setter = getattr(integration, "set_enabled", None)
+        if callable(setter):
+            try:
+                result = setter(enabled)
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanionPage] Body Monitor 联动运行态切换失败: enabled=%s error=%s",
+                    enabled,
+                    self._single_line(exc, 160),
+                )
+                return
+        if enabled:
+            kicker = getattr(self.plugin, "_kick_proactive_loop_once", None)
+            if callable(kicker):
+                try:
+                    result = kicker()
+                    if hasattr(result, "__await__"):
+                        task = asyncio.create_task(
+                            result,
+                            name="private_companion_body_monitor_kick",
+                        )
+                        self.plugin._body_monitor_integration_kick_task = task
+
+                        def _consume_kick_result(finished: asyncio.Task[Any]) -> None:
+                            try:
+                                finished.result()
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as exc:
+                                logger.warning(
+                                    "[PrivateCompanionPage] Body Monitor 联动即时拉取失败: %s",
+                                    self._single_line(exc, 160),
+                                )
+
+                        task.add_done_callback(_consume_kick_result)
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanionPage] Body Monitor 联动即时拉取触发失败: %s",
+                        self._single_line(exc, 160),
+                    )
+
+    def _schedule_body_monitor_integration_toggle(self, enabled: bool) -> asyncio.Task[Any] | None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task = loop.create_task(
+            self._sync_body_monitor_integration_toggle(enabled),
+            name="private_companion_body_monitor_toggle",
+        )
+        self.plugin._body_monitor_integration_toggle_task = task
+        return task
 
     def _sync_legacy_external_image_api_config_from_endpoints(self, endpoints: list[dict[str, Any]]) -> None:
         normalized = endpoints if isinstance(endpoints, list) else []
@@ -15407,6 +15630,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "deepseek_peak_timezone",
             "deepseek_peak_match_keywords",
             "enable_proactive_only_mode",
+            "enable_body_monitor_integration",
             "plugin_specific_persona_id",
             "target_user_ids",
             "private_user_aliases",
@@ -15820,6 +16044,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return keys
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
+        if key == "enable_body_monitor_integration":
+            return self._normalize_bool_value(value)
         if key in self._schema_bool_keys():
             return self._normalize_bool_value(value)
         expression_modes = {
@@ -18290,6 +18516,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "web_exploration": {"label": "主动搜索", "note": ""},
             "news": {"label": "新闻阅读", "note": ""},
             "environment_change": {"label": "环境突变", "note": "实时环境出现明显变化后形成的短时主动。"},
+            "body_monitor": {"label": "身体状态联动", "note": "由 Body Monitor 提供的短时身体状态关心事件。"},
             "meal_care": {"label": "饭点关心", "note": "在合适饭点形成的低压力饮食关心。"},
             "group_ignore_complaint": {
                 "label": "群内冒泡关心",

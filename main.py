@@ -133,6 +133,7 @@ from .qzone_integration import QzoneMixin
 from .segmented_message import flatten_component_chunks, split_plain_component_chain_detailed
 from .token_budget import TokenBudgetMixin
 from .balance_awareness import BalanceAwarenessMixin
+from .body_monitor_integration import BodyMonitorIntegration
 from .worldbook import WorldbookMixin
 from .user_memory import UserMemoryMixin
 from .creative import CreativeMixin
@@ -1395,6 +1396,7 @@ class PrivateCompanionPlugin(
         self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
         self.enable_proactive_chat_integration = self._cfg_bool(c, "enable_proactive_chat_integration", True)
+        self.enable_body_monitor_integration = self._cfg_bool(c, "enable_body_monitor_integration", False)
         self.proactive_chat_bridge_review_mode = self._cfg_str(
             c,
             "proactive_chat_bridge_review_mode",
@@ -2186,6 +2188,7 @@ class PrivateCompanionPlugin(
         self._qzone_last_bot = None
         startup_load_started = time.perf_counter()
         self.data = self._load_data_sync()
+        self._body_monitor_integration = BodyMonitorIntegration(self)
         self._apply_tts_runtime_overrides()
         load_elapsed_ms = int((time.perf_counter() - startup_load_started) * 1000)
         if load_elapsed_ms > 1200:
@@ -2193,6 +2196,28 @@ class PrivateCompanionPlugin(
         self._proactive_chat_runtime_bridge = ProactiveChatRuntimeBridge(self)
         self.page_api = None
         self._register_page_api_if_available()
+
+    async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
+        integration = getattr(self, "_body_monitor_integration", None)
+        if integration is None:
+            return {}
+        return await integration.poll()
+
+    def _body_monitor_integration_status_view(self) -> dict[str, Any]:
+        integration = getattr(self, "_body_monitor_integration", None)
+        if integration is None:
+            return {
+                "enabled": bool(getattr(self, "enable_body_monitor_integration", False)),
+                "state": "initializing",
+                "status": "initializing",
+            }
+        return integration.status_view()
+
+    def _format_body_monitor_health_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
+        integration = getattr(self, "_body_monitor_integration", None)
+        if integration is None:
+            return ""
+        return integration.format_health_prompt(user, reason=reason)
 
     def _sqlite_wal_candidate_paths(self) -> list[Path]:
         data_root = Path(get_astrbot_data_path())
@@ -2372,6 +2397,7 @@ class PrivateCompanionPlugin(
         self._log_registered_command_handlers()
         self._install_send_message_to_user_tool_sanitizer()
         self._schedule_default_persona_prompt_refresh()
+        await self._body_monitor_integration.set_enabled(self.enable_body_monitor_integration)
         needs_startup_save = False
         async with self._data_lock:
             changed = False
@@ -4793,7 +4819,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             image_size(string): 可选，在线图片 API 尺寸，如 1024x1024。
             send(boolean): 是否生成后直接发送到当前会话，默认 true。
             caption(string): 发送图片时附带的短文字。
-            scene_preset(string): 可选场景预设，如 角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景。
+            scene_preset(string): 可选场景预设建议，如 角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景；不会覆盖用户原话或参考图强约束。
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'

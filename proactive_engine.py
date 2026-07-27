@@ -457,6 +457,13 @@ class ProactiveEngineMixin:
             user["proactive_impulses"] = raw
         return raw
 
+    @staticmethod
+    def _scrub_body_monitor_impulse_context(item: dict[str, Any]) -> None:
+        if _single_line(item.get("source"), 40) != "body_monitor":
+            return
+        item.pop("context", None)
+        item["context_key"] = ""
+
     def _cleanup_proactive_impulses(
         self,
         user: dict[str, Any],
@@ -476,6 +483,7 @@ class ProactiveEngineMixin:
             best_until_at = _safe_float(item.get("best_until_at"), preferred_ts)
             expire_at = _safe_float(item.get("expire_at"), 0)
             if state in {"sent", "blocked", "cancelled", "dropped"}:
+                self._scrub_body_monitor_impulse_context(item)
                 if max(created, updated, expire_at) > 0 and check_now - max(created, updated, expire_at) <= 12 * 3600:
                     kept.append(item)
                 continue
@@ -484,6 +492,7 @@ class ProactiveEngineMixin:
                 item["last_status"] = "blocked"
                 item["last_note"] = "潜在念头窗口已过期"
                 item["updated_ts"] = check_now
+                self._scrub_body_monitor_impulse_context(item)
                 kept.append(item)
                 continue
             if not (
@@ -494,6 +503,7 @@ class ProactiveEngineMixin:
                 item["last_status"] = "blocked"
                 item["last_note"] = "潜在念头时间窗口无效"
                 item["updated_ts"] = check_now
+                self._scrub_body_monitor_impulse_context(item)
                 kept.append(item)
                 continue
             if expire_at > 0 and check_now - expire_at > 2 * 3600:
@@ -2438,6 +2448,33 @@ class ProactiveEngineMixin:
         delivery = self._ensure_planned_proactive_delivery_state(user, now=check_now)
         freshness = _single_line(delivery.get("freshness"), 24) or "contextual"
         best_until = _safe_float(delivery.get("best_until_at"), 0)
+        source = _single_line(user.get("planned_proactive_source"), 40)
+        hard_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0) if source == "body_monitor" else 0
+        if hard_expire_at > 0 and not block_current:
+            delay = random.uniform(max(1.0, delay_minutes[0]), max(delay_minutes[0] + 1.0, delay_minutes[1])) * 60
+            next_window = check_now + delay
+            if next_window >= hard_expire_at:
+                self._mark_planned_candidate_status(user, "blocked", "身体状态事件有效期已结束")
+                if isinstance(impulse, dict):
+                    impulse["state"] = "blocked"
+                    impulse["last_note"] = "身体状态事件有效期已结束"
+                    impulse["updated_ts"] = check_now
+                self._clear_pending_proactive_plan(user)
+                return False
+            self._mark_planned_candidate_status(user, "deferred", note)
+            if isinstance(impulse, dict):
+                impulse["state"] = "deferred"
+                impulse["window_start_at"] = next_window
+                impulse["preferred_ts"] = next_window
+                impulse["best_until_at"] = min(_safe_float(impulse.get("best_until_at"), hard_expire_at), hard_expire_at)
+                impulse["expire_at"] = hard_expire_at
+                impulse["updated_ts"] = check_now
+            user["next_proactive_at"] = next_window
+            user["planned_proactive_window_start_at"] = next_window
+            user["planned_proactive_best_until_at"] = min(_safe_float(user.get("planned_proactive_best_until_at"), hard_expire_at), hard_expire_at)
+            user["planned_proactive_expire_at"] = hard_expire_at
+            user["planned_proactive_delivery_state"] = "deferred"
+            return False
         is_immediate = freshness == "immediate"
         if is_immediate and not block_current and best_until > 0 and check_now >= best_until:
             expired_note = _single_line(note, 120) or "即时主动已过自然窗口"
@@ -2980,12 +3017,18 @@ class ProactiveEngineMixin:
             except Exception:
                 busy_until = 0.0
         if busy_until > now and scheduled < busy_until:
+            if source == "body_monitor" and busy_until >= _safe_float(candidate.get("expire_at"), 0):
+                self._record_proactive_candidate(user_id, candidate, status="blocked", note="身体状态事件有效期内无法投递", user=user)
+                return False
             shift = busy_until - scheduled
             candidate = dict(candidate)
-            for key in ("scheduled_ts", "window_start_at", "preferred_ts", "best_until_at", "expire_at"):
+            shift_keys = ("scheduled_ts", "window_start_at", "preferred_ts", "best_until_at") if source == "body_monitor" else ("scheduled_ts", "window_start_at", "preferred_ts", "best_until_at", "expire_at")
+            for key in shift_keys:
                 value = _safe_float(candidate.get(key), 0.0)
                 if value > 0:
                     candidate[key] = value + shift
+            if source == "body_monitor":
+                candidate["best_until_at"] = min(_safe_float(candidate.get("best_until_at"), 0), _safe_float(candidate.get("expire_at"), 0))
             scheduled = _safe_float(candidate.get("scheduled_ts"), busy_until)
         if not self._user_enabled_for_proactive(str(user_id), user):
             self._clear_pending_proactive_plan(user)
@@ -3992,8 +4035,16 @@ class ProactiveEngineMixin:
                     if next_at > 0:
                         impulse["window_start_at"] = next_at
                         impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), next_at)
-                        impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_at + 20 * 60)
-                        impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), impulse["best_until_at"] + 40 * 60)
+                        if _single_line(impulse.get("source"), 40) == "body_monitor":
+                            hard_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+                            impulse["best_until_at"] = min(
+                                max(_safe_float(impulse.get("best_until_at"), 0), next_at),
+                                hard_expire_at,
+                            )
+                            impulse["expire_at"] = hard_expire_at
+                        else:
+                            impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_at + 20 * 60)
+                            impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), impulse["best_until_at"] + 40 * 60)
                 else:
                     impulse["state"] = "queued"
                 break

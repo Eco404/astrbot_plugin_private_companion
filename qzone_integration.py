@@ -2851,7 +2851,8 @@ class QzoneMixin(QzoneMediaMixin):
                 qzone_selfie_reference_path = await reference_getter(
                     "selfie",
                     allow_daily_outfit=True,
-                    selection_context=f"说说：{post_text}\n当前日程：{current_desc}\n当前状态：{state_desc}",
+                    request_text=f"说说：{post_text}",
+                    ambient_context=f"当前日程：{current_desc}\n当前状态：{state_desc}",
                 )
             except Exception as ref_exc:
                 logger.info(
