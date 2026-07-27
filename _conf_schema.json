@@ -9566,6 +9566,30 @@
         "condition": {
           "enable_unanswered_screen_peek_followup": true
         }
+      },
+      "enable_goodnight_screen_check": {
+        "description": "晚安识屏提醒",
+        "type": "bool",
+        "hint": "互道晚安后等待配置分钟数看一眼屏幕；对方疑似还没睡时按人格轻声提醒，已入睡则不打扰。",
+        "default": false,
+        "condition": {
+          "enable_screen_glance_action": true
+        }
+      },
+      "goodnight_screen_check_delay_minutes": {
+        "description": "晚安识屏等待分钟",
+        "type": "int",
+        "hint": "互道晚安后等待多久再看一次屏幕；对方疑似已入睡时不会发送提醒。",
+        "slider": {
+          "min": 1,
+          "max": 180,
+          "step": 1
+        },
+        "default": 45,
+        "condition": {
+          "enable_screen_glance_action": true,
+          "enable_goodnight_screen_check": true
+        }
       }
     }
   },
