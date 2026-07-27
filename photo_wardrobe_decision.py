@@ -285,9 +285,12 @@ class PhotoWardrobeDecision:
             raise ValueError("effective reference roles must be a subset of reference roles")
         if len(set(self.selected_presets)) != len(self.selected_presets):
             raise ValueError("selected presets must be unique")
-        if self.remove_daily_outfit_context and _DAILY_OUTFIT_PATTERN.search(self.scene_context):
+        non_daily_category = bool(self.category and self.category != "daily_outfit")
+        if (self.remove_daily_outfit_context or non_daily_category) and _DAILY_OUTFIT_PATTERN.search(
+            self.scene_context
+        ):
             raise ValueError("conflicting daily outfit context was not removed")
-        if self.remove_daily_outfit_context and re.search(
+        if (self.remove_daily_outfit_context or non_daily_category) and re.search(
             r"keep today's outfit and character appearance consistent",
             self.base_prompt,
             flags=re.I,
@@ -583,7 +586,7 @@ def resolve_photo_wardrobe_decision(
         )
 
     if preset_category:
-        if reference_category and reference_category != preset_category and "outfit" in effective_roles:
+        if reference_category != preset_category and "outfit" in effective_roles:
             effective_roles = tuple(role for role in effective_roles if role != "outfit")
             adjustments.append("reference_outfit_role_removed")
         effective_exclusions = tuple(
@@ -642,7 +645,7 @@ def resolve_photo_wardrobe_decision(
     if explicit_category:
         if (
             explicit_category == "custom_outfit"
-            or (reference_category and reference_category != explicit_category)
+            or reference_category != explicit_category
         ) and "outfit" in effective_roles:
             effective_roles = tuple(role for role in effective_roles if role != "outfit")
             adjustments.append("reference_outfit_role_removed")
@@ -711,11 +714,45 @@ def resolve_photo_wardrobe_decision(
             adjustments=tuple(adjustments),
         )
 
-    if reference_category and reference_category in set(resolved_intent.excluded_categories):
-        if "outfit" in effective_roles:
+    excluded_categories = set(resolved_intent.excluded_categories)
+    reference_outfit_excluded = bool(reference_category and reference_category in excluded_categories)
+    scene_outfit_categories = {
+        category for category, *_ in _outfit_category_matches(scene_context)
+    }
+    scene_daily_outfit_excluded = bool(
+        _DAILY_OUTFIT_PATTERN.search(str(scene_context or ""))
+        and scene_outfit_categories.intersection(excluded_categories)
+    )
+    compatible_locked_reference = bool(
+        reference_locks
+        and reference_category
+        and reference_category not in excluded_categories
+        and reference_kind != "daily_outfit"
+    )
+    unknown_locked_reference = bool(reference_locks and not reference_category and excluded_categories)
+
+    if scene_daily_outfit_excluded and compatible_locked_reference:
+        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
+            base_prompt=base_prompt,
+            prompt_text=prompt_text,
+            scene_context=scene_context,
+            remove_daily_outfit=True,
+        )
+        base_prompt = cleaned_prompt
+        scene_context = cleaned_scene
+        adjustments.extend(context_adjustments)
+
+    if (
+        reference_outfit_excluded
+        or unknown_locked_reference
+        or (scene_daily_outfit_excluded and not compatible_locked_reference)
+    ):
+        if "outfit" in effective_roles and (
+            reference_outfit_excluded or unknown_locked_reference or reference_kind == "daily_outfit"
+        ):
             effective_roles = tuple(role for role in effective_roles if role != "outfit")
             adjustments.append("reference_outfit_role_removed")
-        remove_daily = reference_category == "daily_outfit"
+        remove_daily = reference_category == "daily_outfit" or scene_daily_outfit_excluded
         cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
             base_prompt=base_prompt,
             prompt_text=prompt_text,
@@ -748,11 +785,15 @@ def resolve_photo_wardrobe_decision(
             reference_roles=roles,
             effective_reference_roles=effective_roles,
             positive_instruction=(
-                "Use the selected reference for identity and other compatible responsibilities only; "
-                "its outfit is explicitly excluded by the current request."
+                "Use the selected reference and schedule context only for responsibilities compatible with the current request; "
+                "do not use wardrobe details that the current request explicitly excludes."
             ),
             negative_instruction=exclusion_instruction,
-            reason="selected reference outfit is explicitly excluded by the current request",
+            reason=(
+                "selected reference outfit is explicitly excluded by the current request"
+                if reference_outfit_excluded or unknown_locked_reference
+                else "daily outfit context conflicts with an explicit wardrobe exclusion"
+            ),
             excluded_categories=resolved_intent.excluded_categories,
             base_prompt=cleaned_prompt,
             scene_context=cleaned_scene,

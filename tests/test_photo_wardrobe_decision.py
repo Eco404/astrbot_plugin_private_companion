@@ -68,6 +68,28 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertIn("daily_outfit_context_removed", decision.adjustments)
         self.assertIn("generated_daily_outfit_continuity_removed", decision.adjustments)
 
+    def test_explicit_scene_preset_removes_uncategorized_reference_outfit_role(self) -> None:
+        intent = analyze_photo_wardrobe("拍一张照片", requested_scene_preset="居家睡衣")
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text="拍一张照片",
+            intent=intent,
+            requested_scene_preset="居家睡衣",
+            reference={
+                "id": "explicit_reference",
+                "kind": "explicit",
+                "path": "C:/images/reference.png",
+                "reference_roles": ["identity", "outfit", "style"],
+                "outfit_category": "",
+                "outfit_lock_default": True,
+            },
+            available_presets={"居家睡衣"},
+        )
+
+        self.assertEqual(decision.rule_id, "explicit_scene_preset")
+        self.assertEqual(decision.effective_reference_roles, ("identity", "style"))
+        self.assertIn("reference_outfit_role_removed", decision.adjustments)
+
     def test_explicit_prompt_parses_traditional_format_and_overrides_locked_reference(self) -> None:
         prompt = (
             "Positive prompt: user request: change into a school uniform, classroom selfie. "
@@ -104,6 +126,27 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertTrue(decision.remove_daily_outfit_context)
         self.assertNotIn("今日穿搭", decision.scene_context)
 
+    def test_explicit_prompt_removes_uncategorized_reference_outfit_role(self) -> None:
+        prompt = "换成校服"
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference={
+                "id": "explicit_reference",
+                "kind": "explicit",
+                "path": "C:/images/reference.png",
+                "reference_roles": ["identity", "outfit", "pose"],
+                "outfit_category": "",
+                "outfit_lock_default": True,
+            },
+            available_presets={"校服人像"},
+        )
+
+        self.assertEqual(decision.rule_id, "explicit_prompt")
+        self.assertEqual(decision.effective_reference_roles, ("identity", "pose"))
+        self.assertIn("reference_outfit_role_removed", decision.adjustments)
+
     def test_custom_outfit_is_recognized_without_forcing_a_known_category(self) -> None:
         intent = analyze_photo_wardrobe("换成红色吊带长裙，别穿校服")
 
@@ -139,6 +182,41 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertFalse(decision.lock_outfit)
         self.assertEqual(decision.effective_reference_roles, ("identity", "pose"))
         self.assertIn("reference_outfit_role_removed", decision.adjustments)
+
+    def test_explicit_exclusion_removes_matching_daily_outfit_context_without_reference(self) -> None:
+        prompt = "在卧室拍照，不要睡衣"
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference=None,
+            scene_context="当前位置：卧室；今日穿搭：睡衣；当前场景：睡前",
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭", "居家睡衣"},
+        )
+
+        self.assertEqual(decision.rule_id, "explicit_exclusion")
+        self.assertEqual(decision.category, "")
+        self.assertTrue(decision.remove_daily_outfit_context)
+        self.assertNotIn("今日穿搭", decision.scene_context)
+        self.assertNotIn("日常穿搭", decision.selected_presets)
+        self.assertIn("daily_outfit_context_removed", decision.adjustments)
+
+    def test_unrelated_exclusion_keeps_compatible_daily_outfit_context(self) -> None:
+        prompt = "在卧室拍照，不要校服"
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference=None,
+            scene_context="当前位置：卧室；今日穿搭：睡衣；当前场景：睡前",
+            base_prompt=prompt,
+            available_presets={"角色自拍", "日常穿搭"},
+        )
+
+        self.assertEqual(decision.rule_id, "daily_outfit_context")
+        self.assertIn("今日穿搭", decision.scene_context)
+        self.assertEqual(decision.selected_presets, ("日常穿搭",))
 
     def test_daily_outfit_reference_is_the_authoritative_fallback(self) -> None:
         intent = analyze_photo_wardrobe("在街边拍一张自然自拍")
@@ -235,6 +313,31 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertEqual(decision.preset_name, "居家睡衣")
         self.assertEqual(decision.selected_presets, ("居家睡衣",))
         self.assertEqual(decision.effective_reference_roles, ("identity", "outfit", "style"))
+        self.assertNotIn("今日穿搭", decision.scene_context)
+        self.assertIn("daily_outfit_context_removed", decision.adjustments)
+
+    def test_compatible_locked_reference_survives_unrelated_scene_exclusion(self) -> None:
+        prompt = "保持上一张，不要睡衣"
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference={
+                "id": "library-formal",
+                "kind": "library",
+                "path": "C:/images/formal.png",
+                "reference_roles": ["identity", "outfit"],
+                "outfit_category": "formalwear",
+                "outfit_lock_default": True,
+            },
+            scene_context="当前位置：卧室；今日穿搭：睡衣；当前场景：睡前",
+            base_prompt=prompt,
+            available_presets={"礼服人像", "角色自拍"},
+        )
+
+        self.assertEqual(decision.rule_id, "locked_reference_outfit")
+        self.assertEqual(decision.category, "formalwear")
+        self.assertTrue(decision.lock_outfit)
         self.assertNotIn("今日穿搭", decision.scene_context)
         self.assertIn("daily_outfit_context_removed", decision.adjustments)
 
@@ -360,6 +463,15 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
             PhotoWardrobeDecision(
                 rule_id="invalid_context",
                 remove_daily_outfit_context=True,
+                scene_context="今日穿搭：校服",
+            )
+
+    def test_non_daily_category_cannot_keep_conflicting_daily_outfit_context(self) -> None:
+        with self.assertRaisesRegex(ValueError, "was not removed"):
+            PhotoWardrobeDecision(
+                rule_id="invalid_non_daily_context",
+                category="sleepwear",
+                lock_outfit=True,
                 scene_context="今日穿搭：校服",
             )
 

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import ast
+import re
 import unittest
 from pathlib import Path
+from typing import Any
+
+from astrbot_plugin_private_companion.photo_wardrobe_decision import PhotoWardrobeIntent
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +53,60 @@ class PhotoWardrobeIntegrationTests(unittest.TestCase):
         self.assertIsInstance(resolve_intent, ast.Name)
         self.assertEqual(select_intent.id, "wardrobe_intent")
         self.assertEqual(resolve_intent.id, "wardrobe_intent")
+
+    def test_structured_preset_category_is_not_penalized_as_an_exclusion(self) -> None:
+        score_function = _function(
+            _module_tree("proactive_message.py"),
+            "_photo_reference_candidate_score",
+        )
+        harness = ast.ClassDef(
+            name="ScoreHarness",
+            bases=[],
+            keywords=[],
+            body=[score_function],
+            decorator_list=[],
+        )
+        module = ast.fix_missing_locations(ast.Module(body=[harness], type_ignores=[]))
+        namespace = {
+            "Any": Any,
+            "PhotoWardrobeIntent": PhotoWardrobeIntent,
+            "re": re,
+            "_single_line": lambda value, limit: str(value or "").strip()[:limit],
+        }
+        exec(compile(module, "proactive_message.py", "exec"), namespace)
+        score = namespace["ScoreHarness"]._photo_reference_candidate_score
+        intent = PhotoWardrobeIntent(
+            excluded_categories=("sleepwear",),
+            requested_scene_preset="居家睡衣",
+            requested_preset_category="sleepwear",
+        )
+
+        matching_score = score(
+            {
+                "kind": "library",
+                "note": "卧室睡衣参考",
+                "outfit_category": "sleepwear",
+                "reference_roles": ["identity", "outfit"],
+                "outfit_lock_default": True,
+            },
+            "在卧室拍照，不要睡衣",
+            wardrobe_intent=intent,
+            requested_outfit_category="sleepwear",
+        )
+        persona_score = score(
+            {
+                "kind": "persona",
+                "note": "基础身份图",
+                "outfit_category": "",
+                "reference_roles": ["identity"],
+                "outfit_lock_default": False,
+            },
+            "在卧室拍照，不要睡衣",
+            wardrobe_intent=intent,
+            requested_outfit_category="sleepwear",
+        )
+
+        self.assertGreater(matching_score, persona_score)
 
     def test_only_wardrobe_module_constructs_production_decisions(self) -> None:
         offenders: list[str] = []

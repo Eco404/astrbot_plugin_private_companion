@@ -10082,6 +10082,8 @@ Output:
             or wardrobe_intent.target_category
         )
         excluded_categories = set(wardrobe_intent.excluded_categories)
+        if wardrobe_intent.requested_preset_category:
+            excluded_categories.discard(wardrobe_intent.requested_preset_category)
         if candidate_category and candidate_category in excluded_categories:
             score -= 40.0
         elif candidate_category and candidate_category == requested_category:
