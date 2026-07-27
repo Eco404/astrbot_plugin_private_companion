@@ -2855,6 +2855,17 @@ class ProactiveMixin:
         user["planned_proactive_delivery_state"] = ""
 
     def _clear_pending_proactive_plan(self, user: dict[str, Any]) -> None:
+        current_impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        user.pop("body_monitor_health_context", None)
+        impulses = user.get("proactive_impulses")
+        if current_impulse_id and isinstance(impulses, list):
+            for impulse in impulses:
+                if not isinstance(impulse, dict) or _single_line(impulse.get("id"), 20) != current_impulse_id:
+                    continue
+                if _single_line(impulse.get("source"), 40) == "body_monitor":
+                    impulse.pop("context", None)
+                    impulse["context_key"] = ""
+                break
         user["next_proactive_at"] = 0
         user["planned_proactive_reason"] = ""
         user["planned_proactive_action"] = ""

@@ -411,16 +411,30 @@ class BusyReplyGateMixin:
             return False
         base = current if current > 0 else now
         shift = max(0.0, until - base)
+        hard_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0.0) if _single_line(user.get("planned_proactive_source"), 40) == "body_monitor" else 0.0
+        if hard_expire_at > 0 and until >= hard_expire_at:
+            marker = getattr(self, "_mark_planned_candidate_status", None)
+            if callable(marker):
+                marker(user, "blocked", "身体状态事件有效期内无法投递")
+            clearer = getattr(self, "_clear_pending_proactive_plan", None)
+            if callable(clearer):
+                clearer(user)
+            return True
         user["next_proactive_at"] = until
-        for key in (
+        shift_keys = [
             "planned_proactive_window_start_at",
             "planned_proactive_preferred_at",
             "planned_proactive_best_until_at",
-            "planned_proactive_expire_at",
-        ):
+        ]
+        if hard_expire_at <= 0:
+            shift_keys.append("planned_proactive_expire_at")
+        for key in shift_keys:
             value = _safe_float(user.get(key), 0.0)
             if value > 0:
                 user[key] = value + shift
+        if hard_expire_at > 0:
+            user["planned_proactive_best_until_at"] = min(_safe_float(user.get("planned_proactive_best_until_at"), hard_expire_at), hard_expire_at)
+            user["planned_proactive_expire_at"] = hard_expire_at
         if _safe_float(user.get("planned_proactive_window_start_at"), 0.0) <= 0:
             user["planned_proactive_window_start_at"] = until
             user["planned_proactive_best_until_at"] = until + 45 * 60
