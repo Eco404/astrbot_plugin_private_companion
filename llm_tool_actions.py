@@ -240,8 +240,8 @@ class LlmToolActionsMixin:
             lines.extend(
                 [
                     "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
-                    '- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 建议“可拍画面/房间日常”。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
-                    '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`。`scene_preset` 只是建议，插件会先按用户原话和参考图元数据选图，再决定最终预设；建议不得覆盖用户明确要求或参考图强服装锁。可建议“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
+                    '- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 建议“可拍画面/房间日常”；该字段只是建议，不会覆盖用户原话或参考图约束。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
+                    '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 建议“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；明确睡衣、睡裙、睡袍或睡前卧室自拍时优先建议“居家睡衣”，普通穿搭才建议“日常穿搭”，只有明确“镜前/对镜/镜子”时才建议镜前穿搭；最终只采用一个兼容预设。只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
                     '- 用户在刚发出的角色照片后要求“比个心、看镜头、换个动作/表情/角度、再来一张”等自然续拍时，仍使用 `kind="selfie"`，并在 prompt 中说明只改变这次要求的部分、其余人物穿搭与场景继续保持；不必猜测或手填上一张图片路径，插件会在同一会话内交给选图模型判断是否复用。明确换装、换地点、换人物或另起主题时按新要求生成。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
                     '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。',
@@ -1836,13 +1836,16 @@ class LlmToolActionsMixin:
 
         prompt_builder = getattr(self, "_build_natural_language_photo_prompt", None)
         if callable(prompt_builder):
-            prompt_text = prompt_builder(
+            prompt_sections = prompt_builder(
                 prompt=content,
                 kind="selfie" if intent_kind == "sticker" else intent_kind,
                 has_reference=bool(reference_path),
                 memory_context="",
+                structured=True,
             )
+            prompt_text = content
         else:
+            prompt_sections = None
             prompt_text = content
         preset_text = _single_line(scene_preset or kwargs.get("preset") or kwargs.get("scene"), 80)
         workflow_default_preset = "表情包场景" if intent_kind == "sticker" else ""
@@ -1871,6 +1874,7 @@ class LlmToolActionsMixin:
             "image_size": _single_line(image_size or kwargs.get("size"), 40),
             "suggested_scene_preset": preset_text,
             "workflow_default_scene_preset": workflow_default_preset,
+            "prompt_sections": prompt_sections,
         }
         try:
             generation_output = await asyncio.wait_for(

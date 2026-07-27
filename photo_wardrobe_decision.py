@@ -269,6 +269,7 @@ class PhotoWardrobeDecision:
     negative_instruction: str = ""
     reason: str = ""
     excluded_categories: tuple[str, ...] = ()
+    excluded_outfit_text: str = ""
     requested_outfit_text: str = ""
     base_prompt: str = ""
     scene_context: str = ""
@@ -290,9 +291,12 @@ class PhotoWardrobeDecision:
         final_preset = self.selected_presets[0] if self.selected_presets else ""
         if _clean_text(self.preset_name, 80) != final_preset:
             raise ValueError("preset_name must match the single selected preset")
-        if self.remove_daily_outfit_context and _DAILY_OUTFIT_PATTERN.search(self.scene_context):
+        non_daily_category = bool(self.category and self.category != "daily_outfit")
+        if (self.remove_daily_outfit_context or non_daily_category) and _DAILY_OUTFIT_PATTERN.search(
+            self.scene_context
+        ):
             raise ValueError("conflicting daily outfit context was not removed")
-        if self.remove_daily_outfit_context and re.search(
+        if (self.remove_daily_outfit_context or non_daily_category) and re.search(
             r"keep today's outfit and character appearance consistent",
             self.base_prompt,
             flags=re.I,
@@ -322,6 +326,7 @@ class PhotoWardrobeDecision:
             "negative_instruction": self.negative_instruction,
             "reason": self.reason,
             "excluded_categories": list(self.excluded_categories),
+            "excluded_outfit_text": self.excluded_outfit_text,
             "requested_outfit_text": self.requested_outfit_text,
             "base_prompt": self.base_prompt,
             "scene_context": self.scene_context,
@@ -776,6 +781,8 @@ def resolve_photo_wardrobe_decision(
             reference_roles=roles,
             effective_reference_roles=roles,
             reason="non-selfie workflow keeps its own image-edit contract",
+            excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
             adjustments=tuple(adjustments),
@@ -882,6 +889,7 @@ def resolve_photo_wardrobe_decision(
                 else "explicit clothing request in the current image prompt"
             ),
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             requested_outfit_text=resolved_intent.target_text,
             base_prompt=cleaned_prompt,
             scene_context=cleaned_scene,
@@ -1026,6 +1034,7 @@ def resolve_photo_wardrobe_decision(
             negative_instruction=exclusion_instruction,
             reason="selected reference outfit is explicitly excluded by the current request",
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=cleaned_prompt,
             scene_context=cleaned_scene,
             adjustments=tuple(adjustments),
@@ -1125,6 +1134,7 @@ def resolve_photo_wardrobe_decision(
             ),
             reason="selected reference is today's outfit reference",
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
             adjustments=tuple(adjustments),
@@ -1252,6 +1262,7 @@ def resolve_photo_wardrobe_decision(
             ),
             reason="selected reference is the last image sent in this conversation",
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=cleaned_prompt,
             scene_context=cleaned_scene,
             adjustments=tuple(adjustments),
@@ -1383,6 +1394,7 @@ def resolve_photo_wardrobe_decision(
             ),
             reason="selected reference is an outfit-bearing reference with outfit_lock_default=true",
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=cleaned_prompt,
             scene_context=cleaned_scene,
             adjustments=tuple(adjustments),
@@ -1438,6 +1450,7 @@ def resolve_photo_wardrobe_decision(
             negative_instruction="Do not restore a conflicting outfit from schedule context or today's outfit.",
             reason="compatible tool suggestion fills an otherwise unspecified wardrobe",
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=cleaned_prompt,
             scene_context=cleaned_scene,
             adjustments=tuple(adjustments),
@@ -1501,6 +1514,7 @@ def resolve_photo_wardrobe_decision(
             negative_instruction="Do not copy incidental clothing from an identity-only reference over today's outfit.",
             reason="identity-only reference with available daily outfit context",
             excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
             adjustments=tuple(adjustments),
@@ -1579,6 +1593,7 @@ def resolve_photo_wardrobe_decision(
         ),
         reason="selected reference is identity-only" if reference_path else "no wardrobe source selected",
         excluded_categories=resolved_intent.excluded_categories,
+        excluded_outfit_text=resolved_intent.exclusion_text,
         base_prompt=str(base_prompt or prompt_text or "").strip(),
         scene_context=_clean_text(scene_context, 2400),
         adjustments=tuple(adjustments),

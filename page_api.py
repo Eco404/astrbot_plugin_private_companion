@@ -4318,6 +4318,23 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         raw = data.get("recent_photo_generations")
         if not isinstance(raw, list):
             return []
+
+        def compact_audit(values: Any) -> list[dict[str, str]]:
+            if not isinstance(values, list):
+                return []
+            result: list[dict[str, str]] = []
+            for value in values[:24]:
+                if not isinstance(value, dict):
+                    continue
+                record = {
+                    key: self._single_line(value.get(key), 120 if key == "preview" else 80)
+                    for key in ("source", "section", "rule", "category", "action", "preview", "sha256")
+                    if self._single_line(value.get(key), 120 if key == "preview" else 80)
+                }
+                if record:
+                    result.append(record)
+            return result
+
         items: list[dict[str, Any]] = []
         for item in raw[:8]:
             if not isinstance(item, dict):
@@ -4383,6 +4400,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         for value in (item.get("removed_conflicts") if isinstance(item.get("removed_conflicts"), list) else [])
                         if self._single_line(value, 120)
                     ][:12],
+                    "residual_conflicts": [
+                        self._single_line(value, 120)
+                        for value in (
+                            item.get("residual_conflicts")
+                            if isinstance(item.get("residual_conflicts"), list)
+                            else []
+                        )
+                        if self._single_line(value, 120)
+                    ][:12],
+                    "reference_removed": bool(item.get("reference_removed")),
+                    "reference_removal": (
+                        dict(item.get("reference_removal"))
+                        if isinstance(item.get("reference_removal"), dict)
+                        else {}
+                    ),
+                    "sanitizer_version": self._int(item.get("sanitizer_version")),
+                    "detected_conflicts": compact_audit(item.get("detected_conflicts")),
+                    "removed_conflict_details": compact_audit(item.get("removed_conflict_details")),
+                    "residual_conflict_details": compact_audit(item.get("residual_conflict_details")),
                     "tool_name": self._single_line(item.get("tool_name"), 60),
                     "presets": [
                         self._single_line(name, 40)
