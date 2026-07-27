@@ -66,6 +66,7 @@ const state = {
   featureDetailParamDraft: {},
   featureDetailSubpage: "",
   photoReferenceManagerDraft: null,
+  photoReferenceFieldErrors: {},
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
   selectedFeatureKey: "",
@@ -1874,8 +1875,7 @@ const configLabels = {
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "文生图工作流",
   COMFYUI_SELFIE_WORKFLOW_NAME: "自拍工作流",
   enable_photo_reference_image: "参考图一致性",
-  photo_persona_reference_image_path: "人设参考图路径",
-  photo_reference_library: "带注释的参考图库",
+  photo_reference_catalog: "参考图目录",
   enable_daily_outfit_photo: "每日穿搭照片",
   enable_creative_cover_generation: "为创作内容生成封面",
   daily_outfit_photo_prompt: "每日穿搭提示词",
@@ -2369,8 +2369,7 @@ const configDescriptions = {
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "用于普通随手拍、风景、桌面小物等 photo_text 的 ComfyUI 工作流名。",
   COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。开启参考图一致性并配置参考图后，会优先寻找 images=1 的自拍工作流。",
   enable_photo_reference_image: "可选。开启后，自拍、人像、头像和角色表情包会自动使用今日穿搭图或下方人设参考图来保持外观一致；关闭后不自动读取固定参考图，只按提示词生成。用户显式发送或引用图片要求改图时不受影响。",
-  photo_persona_reference_image_path: "可选。仅在参考图一致性开启时使用。png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 不支持参考图。",
-  photo_reference_library: "一行一张，格式：图片路径或 URL || 用途注释。请写清服装、地点和适用场景；Bot 会结合最终画面自动选择，不再机械优先使用今日穿搭图。也可私聊发送图片后使用“陪伴 参考图库 添加 注释”。",
+  photo_reference_catalog: "统一保存基础人设图与图库参考图的稳定 ID、职责、服装锁、场景和首选预设；请使用参考图库管理器编辑。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
   enable_creative_cover_generation: "默认关闭。开启后，已有正文但没有封面的创作项目会在空闲创作推进时调用当前文生图后端生成封面，并按悬疑、科幻奇幻、诗歌散文、古风、日常治愈等作品特征自动匹配画风。失败最多重试 3 次并带冷却；关闭后不再生成，但不会删除已有封面。",
   daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
@@ -2630,7 +2629,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -3223,7 +3222,7 @@ const featureSettingSections = {
     {
       title: "参考图一致性",
       note: "可选。只在你需要自拍、头像或角色表情包稳定外观时开启；普通文生图和用户显式改图不依赖它。",
-      keys: ["enable_photo_reference_image", "photo_persona_reference_image_path", "photo_reference_library"],
+      keys: ["enable_photo_reference_image", "photo_reference_catalog"],
     },
     {
       title: "群聊安全投递",
@@ -3503,7 +3502,7 @@ const featureSettingTypes = {
   photo_generation_fixed_prompt: { type: "textarea" },
   natural_language_photo_extra_prompt: { type: "textarea" },
   photo_generation_scene_presets: { type: "textarea" },
-  photo_reference_library: { type: "textarea" },
+  photo_reference_catalog: { type: "textarea" },
   segmented_proactive_regex: { type: "textarea" },
   segmented_proactive_split_words: { type: "textarea" },
   segmented_proactive_content_cleanup_rule: { type: "textarea" },
@@ -4283,7 +4282,11 @@ async function fetchJson(path, options = {}) {
   }
 
   payload = normalizeResponse(payload);
-  if (!payload.success) throw new Error(payload.error || "请求失败");
+  if (!payload.success) {
+    const error = new Error(payload.error || "请求失败");
+    error.fieldErrors = payload.field_errors || {};
+    throw error;
+  }
   return payload.data;
 }
 
@@ -5943,8 +5946,6 @@ const setupGuideAdvancedItems = {
         { key: "external_image_download_proxy", type: "text", label: "在线结果下载代理", placeholder: "http://127.0.0.1:7890", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_proxy", draft) },
         { key: "external_image_download_use_environment_proxy", type: "bool", label: "结果下载使用系统代理", description: "仅影响在线生图结果 URL 的下载。", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_use_environment_proxy", draft) },
         { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。", showWhen: (draft) => photoSettingVisibleForValues("enable_photo_reference_image", draft) },
-        { key: "photo_persona_reference_image_path", type: "text", label: "人设参考图路径/URL", placeholder: "C:\\path\\role.png 或 https://...", description: "仅在参考图一致性开启时使用；本地路径和图片 URL 都可以。", showWhen: (draft) => photoSettingVisibleForValues("photo_persona_reference_image_path", draft) },
-        { key: "photo_reference_library", type: "textarea", label: "带注释的参考图库", placeholder: "C:\\path\\home.png || 居家服，在家、卧室、睡前使用\nC:\\path\\outdoor.png || 外出服，逛街、通勤时使用", description: "一行一张。Bot 会根据最终场景选择一张；今日穿搭图只在场景确实匹配时参与选择。", showWhen: (draft) => photoSettingVisibleForValues("photo_reference_library", draft) },
         { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "setting", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
         { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_timeout_seconds", draft) },
         { key: "enable_daily_outfit_photo", type: "bool", kind: "setting", label: "每日穿搭照片", description: "日程生成后额外生成一张角色当天穿搭照。" },
@@ -20591,7 +20592,7 @@ function photoSettingVisibleForValues(settingKey, values = {}) {
     return onlineBackends.has(backend);
   }
   if (settingKey === "enable_photo_reference_image") return backend !== "sdgen";
-  if (["photo_persona_reference_image_path", "photo_reference_library"].includes(settingKey)) {
+  if (settingKey === "photo_reference_catalog") {
     return backend !== "sdgen" && enabled("enable_photo_reference_image");
   }
   if (settingKey === "group_nsfw_image_review_timeout_seconds") {
@@ -21813,145 +21814,93 @@ function normalizePhotoReferenceSource(value) {
   return text;
 }
 
-function normalizePhotoReferenceMetadataList(value) {
-  const values = Array.isArray(value)
-    ? value
-    : String(value || "").split(/[,，、/|\s]+/);
-  return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
+function newPhotoReferenceId(kind = "library") {
+  const value = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return kind === "persona" ? "persona" : `library_${value.replaceAll("-", "")}`;
 }
 
-function normalizePhotoReferenceMetadataBoolean(value) {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value !== 0;
-  const text = String(value ?? "").trim().toLowerCase();
-  if (["1", "true", "yes", "on", "是", "开启", "锁定"].includes(text)) return true;
-  if (["0", "false", "no", "off", "否", "关闭", "不锁定"].includes(text)) return false;
-  return undefined;
-}
-
-function photoReferenceMetadataFromObject(rawItem) {
-  const metadata = { ...(rawItem && typeof rawItem === "object" ? rawItem : {}) };
-  ["source", "path", "url", "note", "description"].forEach((key) => delete metadata[key]);
-  if (Object.prototype.hasOwnProperty.call(metadata, "reference_roles")) {
-    metadata.reference_roles = normalizePhotoReferenceMetadataList(metadata.reference_roles);
-  }
-  if (Object.prototype.hasOwnProperty.call(metadata, "scene_categories")) {
-    metadata.scene_categories = normalizePhotoReferenceMetadataList(metadata.scene_categories);
-  }
-  if (Object.prototype.hasOwnProperty.call(metadata, "outfit_lock_default")) {
-    const normalizedLock = normalizePhotoReferenceMetadataBoolean(metadata.outfit_lock_default);
-    if (normalizedLock !== undefined) metadata.outfit_lock_default = normalizedLock;
-  }
-  if (!Object.prototype.hasOwnProperty.call(metadata, "preferred_preset") && metadata.preset !== undefined) {
-    metadata.preferred_preset = metadata.preset;
-  }
-  delete metadata.preset;
-  return metadata;
-}
-
-function parsePhotoReferenceLibrary(value) {
-  let rawItems = Array.isArray(value) ? value : null;
-  if (!rawItems) {
-    const rawText = String(value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-    if (rawText.startsWith("[") && rawText.endsWith("]")) {
-      try {
-        const parsed = JSON.parse(rawText);
-        if (Array.isArray(parsed)) rawItems = parsed;
-      } catch (_error) {
-        rawItems = null;
-      }
+function parsePhotoReferenceCatalog(value) {
+  let rawItems = Array.isArray(value) ? value : [];
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) rawItems = parsed;
+    } catch (_error) {
+      rawItems = [];
     }
-    if (!rawItems) rawItems = rawText ? rawText.split("\n") : [];
   }
-  const items = [];
-  rawItems.forEach((rawItem) => {
-    if (items.length >= 24) return;
-    if (rawItem && typeof rawItem === "object") {
-      const source = normalizePhotoReferenceSource(rawItem.source || rawItem.path || rawItem.url);
-      const note = String(rawItem.note || rawItem.description || "").trim();
-      const metadata = photoReferenceMetadataFromObject(rawItem);
-      if (source && !items.some((item) => item.source === source)) items.push({ source, note, metadata });
-      return;
-    }
-    const text = String(rawItem || "").trim();
-    if (!text) return;
-    if (text.startsWith("{") && text.endsWith("}")) {
-      try {
-        const parsed = JSON.parse(text);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          const source = normalizePhotoReferenceSource(parsed.source || parsed.path || parsed.url);
-          const note = String(parsed.note || parsed.description || "").trim();
-          const metadata = photoReferenceMetadataFromObject(parsed);
-          if (source && !items.some((item) => item.source === source)) items.push({ source, note, metadata });
-          return;
-        }
-      } catch (_error) {
-        // Fall through to the legacy `path || note` parser.
-      }
-    }
-    const parts = text.split(/\s*(?:\|\||｜｜)\s*/);
-    const source = normalizePhotoReferenceSource(parts.shift());
-    let metadata = {};
-    if (parts.length && /^\s*\{/.test(parts[parts.length - 1])) {
-      try {
-        const parsed = JSON.parse(parts[parts.length - 1]);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          metadata = photoReferenceMetadataFromObject(parsed);
-          parts.pop();
-        }
-      } catch (_error) {
-        metadata = {};
-      }
-    }
-    const note = String(parts.join(" || ") || "").trim();
-    if (source && !items.some((item) => item.source === source)) items.push({ source, note, metadata });
-  });
-  return items;
+  return rawItems
+    .filter((item) => item && typeof item === "object" && ["persona", "library"].includes(String(item.kind || "")))
+    .map((item) => ({
+      id: String(item.id || ""),
+      kind: String(item.kind || ""),
+      source: String(item.source || ""),
+      note: String(item.note || ""),
+      reference_roles: Array.isArray(item.reference_roles) ? [...item.reference_roles] : [],
+      outfit_category: String(item.outfit_category || ""),
+      outfit_lock_default: item.outfit_lock_default === true,
+      scene_categories: Array.isArray(item.scene_categories) ? [...item.scene_categories] : [],
+      preferred_preset: String(item.preferred_preset || ""),
+      metadata_source: String(item.metadata_source || "configured"),
+    }));
 }
 
-function serializePhotoReferenceLibrary(items) {
-  const payload = (Array.isArray(items) ? items : [])
-    .slice(0, 24)
-    .map((item) => {
-      const source = normalizePhotoReferenceSource(item?.source);
-      const note = String(item?.note || "").trim();
-      if (!source) return null;
-      const metadata = photoReferenceMetadataFromObject(item?.metadata);
-      return { ...metadata, path: source, note };
-    })
-    .filter(Boolean);
-  return JSON.stringify(payload);
+function serializePhotoReferenceCatalog(items) {
+  return JSON.stringify(Array.isArray(items) ? items : []);
 }
 
-function currentPhotoReferenceLibraryValue() {
-  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_reference_library")) {
-    return state.featureDetailParamDraft.photo_reference_library;
+function currentPhotoReferenceCatalogValue() {
+  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_reference_catalog")) {
+    return state.featureDetailParamDraft.photo_reference_catalog;
   }
-  return state.overview?.settings?.photo_reference_library || [];
+  return state.overview?.settings?.photo_reference_catalog || [];
 }
 
-function currentPhotoPersonaReferenceValue() {
-  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_persona_reference_image_path")) {
-    return normalizePhotoReferenceSource(state.featureDetailParamDraft.photo_persona_reference_image_path);
-  }
-  return normalizePhotoReferenceSource(state.overview?.settings?.photo_persona_reference_image_path);
-}
-
-function photoReferenceManagerItems() {
+function photoReferenceManagerCatalog() {
   if (!Array.isArray(state.photoReferenceManagerDraft)) {
-    state.photoReferenceManagerDraft = parsePhotoReferenceLibrary(currentPhotoReferenceLibraryValue());
+    state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue());
   }
   return state.photoReferenceManagerDraft;
 }
 
-function photoReferenceStatusFor(kind, source) {
+function photoReferenceManagerItems() {
+  return photoReferenceManagerCatalog().filter((item) => item.kind === "library");
+}
+
+function photoReferencePersonaDraft(create = false) {
+  const catalog = photoReferenceManagerCatalog();
+  let persona = catalog.find((item) => item.kind === "persona") || null;
+  if (!persona && create) {
+    persona = {
+      id: "persona",
+      kind: "persona",
+      source: "",
+      note: "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
+      reference_roles: ["identity"],
+      outfit_category: "",
+      outfit_lock_default: false,
+      scene_categories: [],
+      preferred_preset: "",
+      metadata_source: "configured",
+    };
+    catalog.unshift(persona);
+  }
+  return persona;
+}
+
+function photoReferenceStatusFor(kind, item) {
   const status = state.photoReferenceLibraryStatus || {};
-  const normalizedSource = normalizePhotoReferenceSource(source);
+  const referenceId = String(item?.id || "");
+  const normalizedSource = normalizePhotoReferenceSource(item?.source);
   if (kind === "persona") {
-    return normalizePhotoReferenceSource(status.persona?.source) === normalizedSource ? status.persona : null;
+    return status.persona && (
+      String(status.persona.id || "") === referenceId
+      || normalizePhotoReferenceSource(status.persona.source) === normalizedSource
+    ) ? status.persona : null;
   }
   return (Array.isArray(status.items) ? status.items : []).find(
-    (item) => normalizePhotoReferenceSource(item.source) === normalizedSource,
+    (statusItem) => String(statusItem.id || "") === referenceId
+      || normalizePhotoReferenceSource(statusItem.source) === normalizedSource,
   ) || null;
 }
 
@@ -21962,8 +21911,9 @@ function photoReferenceSourceKind(source) {
   return "本地文件";
 }
 
-function photoReferencePreviewHtml(kind, source, alt) {
-  const status = photoReferenceStatusFor(kind, source);
+function photoReferencePreviewHtml(kind, item, alt) {
+  const source = String(item?.source || "");
+  const status = photoReferenceStatusFor(kind, item);
   const directUrl = String(status?.direct_url || (/^https?:\/\//i.test(source) || /^data:image\//i.test(source) ? source : ""));
   const endpoint = String(status?.preview_endpoint || "");
   const available = status ? status.available !== false : Boolean(directUrl);
@@ -21981,37 +21931,114 @@ function photoReferencePreviewHtml(kind, source, alt) {
   `;
 }
 
+function photoReferenceOptionData() {
+  const options = state.photoReferenceLibraryStatus?.options || {};
+  return {
+    referenceRoles: Array.isArray(options.reference_roles) ? options.reference_roles : [],
+    outfitCategories: Array.isArray(options.outfit_categories) ? options.outfit_categories : [],
+    sceneCategories: Array.isArray(options.scene_categories) ? options.scene_categories : [],
+    presets: Array.isArray(options.presets) ? options.presets : [],
+  };
+}
+
+function photoReferenceFieldError(item, field) {
+  const catalogIndex = photoReferenceManagerCatalog().indexOf(item);
+  const messages = state.photoReferenceFieldErrors?.[`items.${catalogIndex}.${field}`] || [];
+  return messages.length ? `<small class="photo-reference-field-error">${escapeHtml(messages.join("；"))}</small>` : "";
+}
+
+function photoReferenceMetadataEditor(item, index, kind) {
+  const options = photoReferenceOptionData();
+  const roles = Array.isArray(item.reference_roles) ? item.reference_roles : [];
+  const scenes = Array.isArray(item.scene_categories) ? item.scene_categories : [];
+  const builtInOutfits = new Set(options.outfitCategories.map((option) => String(option.value || "")));
+  const customOutfit = String(item.outfit_category || "").startsWith("custom:")
+    ? String(item.outfit_category).slice(7)
+    : "";
+  const selectedOutfit = customOutfit ? "__custom__" : String(item.outfit_category || "");
+  const builtInScenes = new Set(options.sceneCategories.map((option) => String(option.value || "")));
+  const customScenes = scenes
+    .filter((scene) => String(scene).startsWith("custom:") || !builtInScenes.has(String(scene)))
+    .map((scene) => String(scene).replace(/^custom:/, ""));
+  const target = `data-kind="${escapeHtml(kind)}" data-index="${index}"`;
+  return `
+    <details class="photo-reference-metadata-editor" open>
+      <summary>参考职责与服装裁决</summary>
+      <fieldset class="photo-reference-option-group">
+        <legend>参考职责</legend>
+        <div class="photo-reference-choice-grid">
+          ${options.referenceRoles.map((option) => `
+            <label class="photo-reference-choice">
+              <input type="checkbox" data-photo-reference-role ${target} value="${escapeHtml(option.value)}" ${roles.includes(option.value) ? "checked" : ""} />
+              <span>${escapeHtml(option.label)}</span>
+            </label>
+          `).join("")}
+        </div>
+        ${photoReferenceFieldError(item, "reference_roles")}
+      </fieldset>
+      <label>
+        <span>服装类别</span>
+        <select data-photo-reference-outfit-category ${target}>
+          <option value="" ${selectedOutfit === "" ? "selected" : ""}>不限定</option>
+          ${options.outfitCategories.map((option) => `<option value="${escapeHtml(option.value)}" ${selectedOutfit === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          <option value="__custom__" ${selectedOutfit === "__custom__" || (selectedOutfit && !builtInOutfits.has(selectedOutfit)) ? "selected" : ""}>自定义</option>
+        </select>
+      </label>
+      <label ${selectedOutfit === "__custom__" ? "" : "hidden"} data-photo-reference-custom-outfit-wrap>
+        <span>自定义服装</span>
+        <input type="text" data-photo-reference-custom-outfit ${target} value="${escapeHtml(customOutfit)}" maxlength="70" placeholder="例如 礼裙" />
+      </label>
+      ${photoReferenceFieldError(item, "outfit_category")}
+      <label class="photo-reference-switch-row">
+        <span>默认锁定参考图服装</span>
+        <input type="checkbox" role="switch" data-photo-reference-outfit-lock ${target} ${item.outfit_lock_default ? "checked" : ""} />
+      </label>
+      <fieldset class="photo-reference-option-group">
+        <legend>适用场景</legend>
+        <div class="photo-reference-choice-grid">
+          ${options.sceneCategories.map((option) => `
+            <label class="photo-reference-choice">
+              <input type="checkbox" data-photo-reference-scene ${target} value="${escapeHtml(option.value)}" ${scenes.includes(option.value) ? "checked" : ""} />
+              <span>${escapeHtml(option.label)}</span>
+            </label>
+          `).join("")}
+        </div>
+        <label>
+          <span>自定义场景</span>
+          <input type="text" data-photo-reference-custom-scenes ${target} value="${escapeHtml(customScenes.join(", "))}" maxlength="180" placeholder="逗号分隔，例如 舞台" />
+        </label>
+        ${photoReferenceFieldError(item, "scene_categories")}
+      </fieldset>
+      <label>
+        <span>首选预设</span>
+        <select data-photo-reference-preferred-preset ${target}>
+          <option value="" ${!item.preferred_preset ? "selected" : ""}>不指定</option>
+          ${options.presets.map((preset) => `<option value="${escapeHtml(preset)}" ${item.preferred_preset === preset ? "selected" : ""}>${escapeHtml(preset)}</option>`).join("")}
+        </select>
+      </label>
+      ${photoReferenceFieldError(item, "preferred_preset")}
+    </details>
+  `;
+}
+
 function photoReferenceManagerCard(item, index) {
   const source = String(item?.source || "");
   const note = String(item?.note || "");
-  const status = photoReferenceStatusFor("library", source);
+  const status = photoReferenceStatusFor("library", item);
   const availability = status ? (status.available ? "可用" : "文件失效") : (/^https?:\/\//i.test(source) ? "远程图片" : "待保存验证");
   const meta = [photoReferenceSourceKind(source), status?.file_size ? formatBytes(status.file_size) : "", availability].filter(Boolean).join(" · ");
-  const configuredMetadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
-  const roles = Array.isArray(status?.reference_roles) ? status.reference_roles : (Array.isArray(configuredMetadata.reference_roles) ? configuredMetadata.reference_roles : []);
-  const outfitCategory = String(status?.outfit_category || configuredMetadata.outfit_category || "");
-  const preferredPreset = String(status?.preferred_preset || configuredMetadata.preferred_preset || "");
-  const outfitLocked = status ? Boolean(status.outfit_lock_default) : Boolean(configuredMetadata.outfit_lock_default);
-  const configuredRoles = normalizePhotoReferenceMetadataList(configuredMetadata.reference_roles);
-  const configuredScenes = normalizePhotoReferenceMetadataList(configuredMetadata.scene_categories);
-  const configuredCategory = String(configuredMetadata.outfit_category || "");
-  const configuredPreset = String(configuredMetadata.preferred_preset || "");
-  const configuredLock = Object.prototype.hasOwnProperty.call(configuredMetadata, "outfit_lock_default")
-    ? normalizePhotoReferenceMetadataBoolean(configuredMetadata.outfit_lock_default)
-    : undefined;
-  const configuredLockMode = configuredLock === true ? "true" : configuredLock === false ? "false" : "";
   const responsibilityTags = [
-    ...roles.map((role) => `职责 ${role}`),
-    outfitCategory ? `服装 ${outfitCategory}` : "",
-    outfitLocked ? "默认锁定服装" : "",
-    preferredPreset ? `预设 ${preferredPreset}` : "",
+    ...(item.reference_roles || []).map((role) => `职责 ${role}`),
+    item.outfit_category ? `服装 ${item.outfit_category}` : "",
+    item.outfit_lock_default ? "默认锁定服装" : "",
+    item.preferred_preset ? `预设 ${item.preferred_preset}` : "",
   ].filter(Boolean);
   return `
-    <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}">
-      ${photoReferencePreviewHtml("library", source, `参考图 ${index + 1}`)}
+    <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}" data-reference-id="${escapeHtml(item.id)}">
+      ${photoReferencePreviewHtml("library", item, `参考图 ${index + 1}`)}
       <div class="photo-reference-item-body">
         <header>
-          <div><span>参考图 ${index + 1}</span><small>${escapeHtml(meta)}</small></div>
+          <div><span>参考图 ${index + 1}</span><small>${escapeHtml(meta)} · ID ${escapeHtml(item.id)}</small></div>
           <div class="photo-reference-item-tools" role="group" aria-label="调整参考图 ${index + 1}">
             <button type="button" data-photo-reference-move="up" data-index="${index}" title="上移" aria-label="上移" ${index <= 0 ? "disabled" : ""}>↑</button>
             <button type="button" data-photo-reference-move="down" data-index="${index}" title="下移" aria-label="下移" ${index >= photoReferenceManagerItems().length - 1 ? "disabled" : ""}>↓</button>
@@ -22019,41 +22046,10 @@ function photoReferenceManagerCard(item, index) {
           </div>
         </header>
         ${responsibilityTags.length ? `<div class="photo-reference-responsibilities">${responsibilityTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
-        <label>
-          <span>图片路径或 URL</span>
-          <input type="text" data-photo-reference-source data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" />
-        </label>
-        <label>
-          <span>用途注释</span>
-          <textarea data-photo-reference-note data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea>
-        </label>
-        <details class="photo-reference-metadata-editor">
-          <summary>参考职责与服装裁决</summary>
-          <label>
-            <span>参考职责</span>
-            <input type="text" data-photo-reference-roles data-index="${index}" value="${escapeHtml(configuredRoles.join(", "))}" maxlength="160" placeholder="identity, outfit, scene, continuity" />
-          </label>
-          <label>
-            <span>服装类别</span>
-            <input type="text" data-photo-reference-outfit-category data-index="${index}" value="${escapeHtml(configuredCategory)}" maxlength="40" placeholder="sleepwear / daily_outfit / formal" />
-          </label>
-          <label>
-            <span>默认服装锁</span>
-            <select data-photo-reference-outfit-lock data-index="${index}">
-              <option value="" ${configuredLockMode === "" ? "selected" : ""}>自动推断</option>
-              <option value="true" ${configuredLockMode === "true" ? "selected" : ""}>锁定参考图服装</option>
-              <option value="false" ${configuredLockMode === "false" ? "selected" : ""}>不锁定参考图服装</option>
-            </select>
-          </label>
-          <label>
-            <span>适用场景</span>
-            <input type="text" data-photo-reference-scenes data-index="${index}" value="${escapeHtml(configuredScenes.join(", "))}" maxlength="200" placeholder="home, bedroom, outdoor" />
-          </label>
-          <label>
-            <span>首选预设</span>
-            <input type="text" data-photo-reference-preferred-preset data-index="${index}" value="${escapeHtml(configuredPreset)}" maxlength="60" placeholder="居家睡衣" />
-          </label>
-        </details>
+        <label><span>图片路径或 URL</span><input type="text" data-photo-reference-source data-kind="library" data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" /></label>
+        ${photoReferenceFieldError(item, "source")}
+        <label><span>用途注释</span><textarea data-photo-reference-note data-kind="library" data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea></label>
+        ${photoReferenceMetadataEditor(item, index, "library")}
       </div>
     </article>
   `;
@@ -22061,10 +22057,22 @@ function photoReferenceManagerCard(item, index) {
 
 function photoReferenceManagerPageHtml(open) {
   const items = photoReferenceManagerItems();
-  const personaSource = currentPhotoPersonaReferenceValue();
-  const personaStatus = photoReferenceStatusFor("persona", personaSource);
+  const persona = photoReferencePersonaDraft() || {
+    id: "persona",
+    kind: "persona",
+    source: "",
+    note: "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
+    reference_roles: ["identity"],
+    outfit_category: "",
+    outfit_lock_default: false,
+    scene_categories: [],
+    preferred_preset: "",
+    metadata_source: "configured",
+  };
+  const personaSource = String(persona.source || "");
+  const personaStatus = photoReferenceStatusFor("persona", persona);
   const statusLoaded = Boolean(state.photoReferenceLibraryStatus);
-  const availableCount = items.filter((item) => photoReferenceStatusFor("library", item.source)?.available === true).length;
+  const availableCount = items.filter((item) => photoReferenceStatusFor("library", item)?.available === true).length;
   return `
     <section class="photo-reference-manager" data-photo-reference-manager ${open ? "" : "hidden"}>
       <nav class="feature-detail-breadcrumb photo-reference-breadcrumb" aria-label="页面层级">
@@ -22079,7 +22087,7 @@ function photoReferenceManagerPageHtml(open) {
         </div>
         <div class="photo-reference-head-actions">
           <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
-          <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
+          <button type="button" class="feature-param-save" data-photo-reference-save>保存目录</button>
         </div>
       </header>
 
@@ -22089,11 +22097,18 @@ function photoReferenceManagerPageHtml(open) {
           <h3 id="photoReferencePersonaTitle">基础人设参考图</h3>
           <small>${escapeHtml(personaStatus ? (personaStatus.available ? "文件可用" : "文件失效") : personaSource ? "待保存验证" : "未设置")}</small>
         </div>
-        ${photoReferencePreviewHtml("persona", personaSource, "基础人设参考图")}
+        ${photoReferencePreviewHtml("persona", persona, "基础人设参考图")}
         <label>
           <span>图片路径或 URL</span>
-          <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
+          <input type="text" data-photo-reference-source data-kind="persona" data-index="-1" value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
         </label>
+        ${photoReferenceFieldError(persona, "source")}
+        <label>
+          <span>用途注释</span>
+          <textarea data-photo-reference-note data-kind="persona" data-index="-1" maxlength="500" rows="2">${escapeHtml(persona.note || "")}</textarea>
+        </label>
+        ${photoReferenceMetadataEditor(persona, -1, "persona")}
+        ${personaSource ? `<button type="button" class="danger-outline" data-photo-reference-persona-delete title="清空基础人设参考图">清空人设图</button>` : ""}
       </section>
 
       <form class="photo-reference-add-form" data-photo-reference-add-form>
@@ -22121,7 +22136,7 @@ function photoReferenceManagerPageHtml(open) {
 }
 
 function photoReferenceManagerLaunchControl(value) {
-  const count = parsePhotoReferenceLibrary(value).length;
+  const count = parsePhotoReferenceCatalog(value).filter((item) => item.kind === "library").length;
   return `
     <div class="photo-reference-launch">
       <span><b>${count} / 24</b><small>已配置参考图</small></span>
@@ -22153,7 +22168,7 @@ function featureDetailPage(key) {
           <p>${escapeHtml(description)}</p>
         </div>
         <div class="feature-param-control">
-          ${name === "photo_reference_library" ? photoReferenceManagerLaunchControl(value) : featureSettingInput(name, value)}
+          ${name === "photo_reference_catalog" ? photoReferenceManagerLaunchControl(value) : featureSettingInput(name, value)}
         </div>
       </section>
     `;
@@ -22188,9 +22203,9 @@ function featureDetailPage(key) {
     ? `${groupedRows}${ungroupedRows}`
     : `<div class="feature-param-empty">暂无关联参数</div>`;
   const showParamCard = key !== "enable_food_menu_recommendation" || related.length || extraParamPanel;
-  const librarySetting = relatedMap.photo_reference_library;
-  const libraryDraftInput = librarySetting
-    ? `<textarea data-feature-param="photo_reference_library" hidden aria-hidden="true">${escapeHtml(featureTextareaValue("photo_reference_library", librarySetting.value))}</textarea>`
+  const catalogSetting = relatedMap.photo_reference_catalog;
+  const libraryDraftInput = catalogSetting
+    ? `<textarea data-feature-param="photo_reference_catalog" hidden aria-hidden="true">${escapeHtml(serializePhotoReferenceCatalog(parsePhotoReferenceCatalog(catalogSetting.value)))}</textarea>`
     : "";
   const paramCardHtml = showParamCard ? `
         <article class="feature-detail-card feature-detail-card-params">
@@ -22280,7 +22295,7 @@ function bindFeatureDetailActions() {
   const detailPage = document.querySelector(".feature-detail-page");
   const trackFeatureDetailChange = (event) => {
     if (
-      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")
+      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-role], [data-photo-reference-outfit-category], [data-photo-reference-custom-outfit], [data-photo-reference-outfit-lock], [data-photo-reference-scene], [data-photo-reference-custom-scenes], [data-photo-reference-preferred-preset]")
       || event.target?.closest?.("[data-photo-reference-add-form]")
     ) return;
     rememberFeatureParamDraft(event.target);
@@ -22505,17 +22520,10 @@ function bindFeatureDetailActions() {
 }
 
 function syncPhotoReferenceManagerDraft() {
-  const items = photoReferenceManagerItems();
-  const libraryInput = document.querySelector('[data-feature-param="photo_reference_library"]');
-  if (libraryInput) {
-    libraryInput.value = serializePhotoReferenceLibrary(items);
-    rememberFeatureParamDraft(libraryInput);
-  }
-  const personaEditor = document.querySelector("[data-photo-reference-persona-source]");
-  const personaInput = document.querySelector('[data-feature-param="photo_persona_reference_image_path"]');
-  if (personaEditor && personaInput) {
-    personaInput.value = personaEditor.value.trim();
-    rememberFeatureParamDraft(personaInput);
+  const catalogInput = document.querySelector('[data-feature-param="photo_reference_catalog"]');
+  if (catalogInput) {
+    catalogInput.value = serializePhotoReferenceCatalog(photoReferenceManagerCatalog());
+    rememberFeatureParamDraft(catalogInput);
   }
   markFeatureDetailDirty();
 }
@@ -22523,7 +22531,8 @@ function syncPhotoReferenceManagerDraft() {
 function photoReferenceDraftValidationError() {
   const items = photoReferenceManagerItems();
   if (items.length > 24) return "参考图库最多保存 24 张图片";
-  const sources = items.map((item) => String(item?.source || "").trim());
+  const catalog = photoReferenceManagerCatalog();
+  const sources = catalog.map((item) => String(item?.source || "").trim());
   if (sources.some((source) => !source)) return "请补全每张参考图的路径或 URL";
   if (new Set(sources).size !== sources.length) return "同一图片路径或 URL 不能重复添加";
   return "";
@@ -22590,7 +22599,8 @@ function bindPhotoReferenceManagerActions() {
   const openButton = document.querySelector("[data-photo-reference-open]");
   openButton?.addEventListener("click", () => {
     document.querySelectorAll("[data-feature-param]").forEach(rememberFeatureParamDraft);
-    state.photoReferenceManagerDraft = parsePhotoReferenceLibrary(currentPhotoReferenceLibraryValue());
+    state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue());
+    state.photoReferenceFieldErrors = {};
     state.featureDetailSubpage = "photo_reference_library";
     renderFeatureSwitches();
   });
@@ -22600,44 +22610,73 @@ function bindPhotoReferenceManagerActions() {
     syncPhotoReferenceManagerDraft();
     state.featureDetailSubpage = "";
     state.photoReferenceManagerDraft = null;
+    state.photoReferenceFieldErrors = {};
     renderFeatureSwitches();
   });
   manager.querySelector("[data-photo-reference-refresh]")?.addEventListener("click", (event) => {
     void refreshPhotoReferenceLibraryStatus(event.currentTarget);
   });
-  manager.querySelector("[data-photo-reference-persona-source]")?.addEventListener("input", syncPhotoReferenceManagerDraft);
-  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset]").forEach((input) => {
-    input.addEventListener(input.matches("select") ? "change" : "input", () => {
-      const index = Number(input.dataset.index);
-      const item = photoReferenceManagerItems()[index];
+  const itemForControl = (input) => {
+    if (input.dataset.kind === "persona") return photoReferencePersonaDraft(true);
+    return photoReferenceManagerItems()[Number(input.dataset.index)] || null;
+  };
+  const customValues = (value) => String(value || "")
+    .split(/[,，、;；]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => `custom:${part.replace(/^custom:/, "")}`);
+  const selectorFor = (input, attribute) => `[${attribute}][data-kind="${input.dataset.kind}"][data-index="${input.dataset.index}"]`;
+  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-role], [data-photo-reference-outfit-category], [data-photo-reference-custom-outfit], [data-photo-reference-outfit-lock], [data-photo-reference-scene], [data-photo-reference-custom-scenes], [data-photo-reference-preferred-preset]").forEach((input) => {
+    const eventName = input.matches("select, input[type=checkbox]") ? "change" : "input";
+    input.addEventListener(eventName, () => {
+      const item = itemForControl(input);
       if (!item) return;
       if (input.matches("[data-photo-reference-source]")) item.source = input.value;
       else if (input.matches("[data-photo-reference-note]")) item.note = input.value;
-      else {
-        item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
-        if (input.matches("[data-photo-reference-roles]")) {
-          const value = normalizePhotoReferenceMetadataList(input.value);
-          if (value.length) item.metadata.reference_roles = value;
-          else delete item.metadata.reference_roles;
-        } else if (input.matches("[data-photo-reference-outfit-category]")) {
-          const value = String(input.value || "").trim();
-          if (value) item.metadata.outfit_category = value;
-          else delete item.metadata.outfit_category;
-        } else if (input.matches("[data-photo-reference-outfit-lock]")) {
-          if (input.value === "") delete item.metadata.outfit_lock_default;
-          else item.metadata.outfit_lock_default = input.value === "true";
-        } else if (input.matches("[data-photo-reference-scenes]")) {
-          const value = normalizePhotoReferenceMetadataList(input.value);
-          if (value.length) item.metadata.scene_categories = value;
-          else delete item.metadata.scene_categories;
-        } else if (input.matches("[data-photo-reference-preferred-preset]")) {
-          const value = String(input.value || "").trim();
-          if (value) item.metadata.preferred_preset = value;
-          else delete item.metadata.preferred_preset;
+      else if (input.matches("[data-photo-reference-role]")) {
+        item.reference_roles = [...manager.querySelectorAll(selectorFor(input, "data-photo-reference-role"))]
+          .filter((control) => control.checked)
+          .map((control) => control.value);
+      } else if (input.matches("[data-photo-reference-outfit-category]")) {
+        const customInput = manager.querySelector(selectorFor(input, "data-photo-reference-custom-outfit"));
+        item.outfit_category = input.value === "__custom__"
+          ? (customInput?.value.trim() ? `custom:${customInput.value.trim().replace(/^custom:/, "")}` : "")
+          : input.value;
+        const customWrap = input.closest("details")?.querySelector("[data-photo-reference-custom-outfit-wrap]");
+        if (customWrap) customWrap.hidden = input.value !== "__custom__";
+      } else if (input.matches("[data-photo-reference-custom-outfit]")) {
+        item.outfit_category = input.value.trim() ? `custom:${input.value.trim().replace(/^custom:/, "")}` : "";
+      } else if (input.matches("[data-photo-reference-outfit-lock]")) {
+        item.outfit_lock_default = input.checked;
+        if (input.checked && !item.reference_roles.includes("outfit")) {
+          item.reference_roles.push("outfit");
+          const outfitRole = [...manager.querySelectorAll(selectorFor(input, "data-photo-reference-role"))]
+            .find((control) => control.value === "outfit");
+          if (outfitRole) outfitRole.checked = true;
         }
+      } else if (input.matches("[data-photo-reference-scene], [data-photo-reference-custom-scenes]")) {
+        const builtIn = [...manager.querySelectorAll(selectorFor(input, "data-photo-reference-scene"))]
+          .filter((control) => control.checked)
+          .map((control) => control.value);
+        const customInput = manager.querySelector(selectorFor(input, "data-photo-reference-custom-scenes"));
+        item.scene_categories = [...builtIn, ...customValues(customInput?.value)];
+      } else if (input.matches("[data-photo-reference-preferred-preset]")) {
+        item.preferred_preset = input.value;
       }
+      item.metadata_source = "configured";
+      state.photoReferenceFieldErrors = {};
       syncPhotoReferenceManagerDraft();
     });
+  });
+  manager.querySelector("[data-photo-reference-persona-delete]")?.addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    if (!requireSecondClick(button, "photo-reference-delete-persona", "再次点击确认清空基础人设参考图", "确认")) return;
+    const persona = photoReferencePersonaDraft();
+    const index = persona ? photoReferenceManagerCatalog().indexOf(persona) : -1;
+    if (index >= 0) photoReferenceManagerCatalog().splice(index, 1);
+    state.photoReferenceFieldErrors = {};
+    syncPhotoReferenceManagerDraft();
+    renderFeatureSwitches();
   });
   manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -22654,7 +22693,19 @@ function bindPhotoReferenceManagerActions() {
       showToast("这张图片已经在参考图库中", "error");
       return;
     }
-    items.push({ source, note, metadata: {} });
+    photoReferenceManagerCatalog().push({
+      id: newPhotoReferenceId("library"),
+      kind: "library",
+      source,
+      note,
+      reference_roles: ["identity"],
+      outfit_category: "",
+      outfit_lock_default: false,
+      scene_categories: [],
+      preferred_preset: "",
+      metadata_source: "configured",
+    });
+    state.photoReferenceFieldErrors = {};
     syncPhotoReferenceManagerDraft();
     renderFeatureSwitches();
   });
@@ -22664,7 +22715,10 @@ function bindPhotoReferenceManagerActions() {
       const target = button.dataset.photoReferenceMove === "up" ? index - 1 : index + 1;
       const items = photoReferenceManagerItems();
       if (!items[index] || !items[target]) return;
-      [items[index], items[target]] = [items[target], items[index]];
+      const catalog = photoReferenceManagerCatalog();
+      const currentIndex = catalog.indexOf(items[index]);
+      const targetIndex = catalog.indexOf(items[target]);
+      [catalog[currentIndex], catalog[targetIndex]] = [catalog[targetIndex], catalog[currentIndex]];
       syncPhotoReferenceManagerDraft();
       renderFeatureSwitches();
     });
@@ -22672,9 +22726,12 @@ function bindPhotoReferenceManagerActions() {
   manager.querySelectorAll("[data-photo-reference-delete]").forEach((button) => {
     button.addEventListener("click", () => {
       const index = Number(button.dataset.index);
-      if (!photoReferenceManagerItems()[index]) return;
-      if (!requireSecondClick(button, `photo-reference-delete-${index}`, "再次点击确认删除这张参考图", "确认")) return;
-      photoReferenceManagerItems().splice(index, 1);
+      const item = photoReferenceManagerItems()[index];
+      if (!item) return;
+      if (!requireSecondClick(button, `photo-reference-delete-${item.id}`, "再次点击确认删除这张参考图", "确认")) return;
+      const catalogIndex = photoReferenceManagerCatalog().findIndex((candidate) => candidate.id === item.id);
+      if (catalogIndex >= 0) photoReferenceManagerCatalog().splice(catalogIndex, 1);
+      state.photoReferenceFieldErrors = {};
       syncPhotoReferenceManagerDraft();
       renderFeatureSwitches();
     });
@@ -22692,11 +22749,29 @@ function bindPhotoReferenceManagerActions() {
       showToast(error, "error");
       return;
     }
-    const saved = await saveCurrentFeatureDetail(event.currentTarget, "已保存参考图库");
-    if (saved) {
-      state.photoReferenceManagerDraft = null;
+    const control = event.currentTarget;
+    setActionBusy(control, true);
+    try {
+      const result = await promiseWithTimeout(
+        postJson("/settings/update", { settings: { photo_reference_catalog: photoReferenceManagerCatalog() } }),
+        30000,
+        "保存响应超时，请刷新页面确认目录是否已生效",
+      );
+      if (result?.config_saved === false) throw new Error("运行态已更新，但配置未能持久化");
+      state.photoReferenceFieldErrors = {};
+      applyOverviewData(result);
+      state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(result?.settings?.photo_reference_catalog || []);
+      state.featureDetailParamDraft.photo_reference_catalog = serializePhotoReferenceCatalog(state.photoReferenceManagerDraft);
       state.photoReferenceLibraryStatus = null;
+      showToast("已保存参考图目录");
+      await refreshPhotoReferenceLibraryStatus();
+    } catch (saveError) {
+      state.photoReferenceFieldErrors = saveError.fieldErrors || {};
+      const firstMessage = Object.values(state.photoReferenceFieldErrors).flat()[0];
+      showToast(`保存失败：${firstMessage || saveError.message}`, "error");
       renderFeatureSwitches();
+    } finally {
+      setActionBusy(control, false);
     }
   });
   void hydratePhotoReferencePreviews(manager);

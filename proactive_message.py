@@ -23,7 +23,7 @@ import unicodedata
 import uuid
 import zoneinfo
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
@@ -136,6 +136,11 @@ from .planning import (
     pick_detail_segment,
 )
 from .scene_context import infer_companion_scene_category
+from .photo_reference_catalog import (
+    PhotoReference,
+    build_daily_outfit_reference,
+    project_reference_candidate,
+)
 
 _EXTERNAL_IMAGE_MAX_BYTES = 32 * 1024 * 1024
 
@@ -8904,11 +8909,11 @@ Output:
         requested_scene_preset: str = "",
     ) -> PhotoWardrobeDecision:
         normalized_kind = str(workflow_kind or "").strip().lower()
-        reference = self._normalize_photo_reference_candidate_metadata(reference or {}) if reference else {}
+        reference = dict(reference or {})
         reference_path = _path_text(reference.get("path"), 1000)
         reference_id = _single_line(reference.get("id"), 60)
         reference_kind = _single_line(reference.get("kind"), 40)
-        roles = tuple(self._photo_reference_normalize_roles(reference.get("reference_roles")))
+        roles = tuple(reference.get("reference_roles") or ())
         effective_roles = roles
         if normalized_kind not in {"selfie", "portrait", "自拍", "人像"}:
             return PhotoWardrobeDecision(
@@ -10569,7 +10574,15 @@ Output:
         return "真实", "真实摄影风格,像手机随手拍到的生活照片,光线自然,细节可信"
 
     def _photo_persona_reference_image_path(self) -> str:
-        raw = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+        persona = next(
+            (
+                item
+                for item in (getattr(self, "photo_reference_catalog", ()) or ())
+                if isinstance(item, PhotoReference) and item.kind == "persona"
+            ),
+            None,
+        )
+        raw = _path_text(persona.source if persona is not None else "", 1000)
         if not raw:
             return ""
         raw = raw.strip().strip('"').strip("'")
@@ -10589,47 +10602,6 @@ Output:
                 continue
             return str(path)
         return ""
-
-    @staticmethod
-    def _photo_reference_normalize_roles(value: Any) -> list[str]:
-        if isinstance(value, (list, tuple, set)):
-            raw_items = list(value)
-        else:
-            raw_items = re.split(r"[,，、/|\s]+", str(value or ""))
-        aliases = {
-            "identity": "identity",
-            "persona": "identity",
-            "face": "identity",
-            "人设": "identity",
-            "身份": "identity",
-            "人物": "identity",
-            "脸": "identity",
-            "outfit": "outfit",
-            "wardrobe": "outfit",
-            "clothing": "outfit",
-            "服装": "outfit",
-            "穿搭": "outfit",
-            "pose": "pose",
-            "姿势": "pose",
-            "scene": "scene",
-            "background": "scene",
-            "场景": "scene",
-            "背景": "scene",
-            "style": "style",
-            "画风": "style",
-            "风格": "style",
-            "continuity": "continuity",
-            "连续性": "continuity",
-            "source": "source",
-            "原图": "source",
-        }
-        roles: list[str] = []
-        for item in raw_items:
-            key = str(item or "").strip().lower()
-            normalized = aliases.get(key, "")
-            if normalized and normalized not in roles:
-                roles.append(normalized)
-        return roles
 
     @staticmethod
     def _photo_outfit_category_matches(value: Any) -> list[tuple[str, int, int, str]]:
@@ -10659,25 +10631,6 @@ Output:
         return matches[0][0] if matches else ""
 
     @staticmethod
-    def _photo_reference_scene_categories_from_text(value: Any) -> list[str]:
-        text = re.sub(r"\s+", "", str(value or "")).lower()
-        categories: list[str] = []
-        mappings = (
-            ("home", ("在家", "家里", "居家", "宅家", "home")),
-            ("bedroom", ("卧室", "床边", "睡前", "刚起床", "bedroom", "bedtime")),
-            ("school", ("上学", "校园", "教室", "校门", "school", "campus")),
-            ("office", ("上班", "公司", "办公室", "office", "workplace")),
-            ("outdoor", ("外出", "通勤", "逛街", "街头", "旅行", "outdoor", "commute")),
-            ("formal_event", ("宴会", "舞会", "典礼", "正式场合", "banquet", "ceremony")),
-            ("sport", ("运动", "健身", "跑步", "瑜伽", "球场", "gym", "sport")),
-            ("beach", ("海边", "沙滩", "泳池", "beach", "pool")),
-        )
-        for category, tokens in mappings:
-            if any(token in text for token in tokens):
-                categories.append(category)
-        return categories
-
-    @staticmethod
     def _photo_reference_preset_for_category(category: str) -> str:
         return {
             "sleepwear": "居家睡衣",
@@ -10691,122 +10644,12 @@ Output:
             "custom_outfit": "日常穿搭",
         }.get(str(category or "").strip().lower(), "")
 
-    @staticmethod
-    def _photo_reference_bool(value: Any, default: bool = False) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value is None or str(value).strip() == "":
-            return default
-        return str(value).strip().lower() in {"1", "true", "yes", "on", "是", "开启", "锁定"}
-
-    def _normalize_photo_reference_candidate_metadata(self, item: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(item or {})
-        note = _single_line(normalized.get("note") or normalized.get("description"), 700)
-        kind = _single_line(normalized.get("kind"), 40).lower() or "library"
-        explicit_roles = normalized.get("reference_roles", normalized.get("reference_role"))
-        roles = self._photo_reference_normalize_roles(explicit_roles)
-        raw_category = normalized.get("outfit_category") or normalized.get("wardrobe_category")
-        if not raw_category and isinstance(normalized.get("wardrobe_categories"), (list, tuple)):
-            raw_category = next(iter(normalized.get("wardrobe_categories") or []), "")
-        category = _single_line(raw_category, 40).lower()
-        if not category:
-            category = self._photo_outfit_category_from_text(note)
-        if not roles:
-            if kind == "persona":
-                roles = ["identity"]
-            elif kind in {"daily_outfit", "recent_sent_photo"}:
-                roles = ["identity", "outfit"]
-                if kind == "recent_sent_photo":
-                    roles.extend(["scene", "continuity"])
-            elif re.search(r"仅(?:用于)?(?:人设|身份|脸|发型)|只(?:参考|用于)(?:人设|身份|脸|发型)|identity only", note, flags=re.I):
-                roles = ["identity"]
-            elif category:
-                roles = ["identity", "outfit"]
-            else:
-                roles = ["identity"]
-        if kind == "daily_outfit" and not category:
-            category = "daily_outfit"
-        scene_values = normalized.get("scene_categories", normalized.get("scene_tags"))
-        if isinstance(scene_values, (list, tuple, set)):
-            scene_categories = [
-                _single_line(value, 40).lower()
-                for value in scene_values
-                if _single_line(value, 40)
-            ]
-        else:
-            scene_categories = self._photo_reference_scene_categories_from_text(scene_values or note)
-        lock_default = self._photo_reference_bool(
-            normalized.get("outfit_lock_default"),
-            default=bool("outfit" in roles and (category or kind in {"daily_outfit", "recent_sent_photo"})),
-        )
-        preferred_preset = _single_line(
-            normalized.get("preferred_preset") or normalized.get("preset"),
-            60,
-        ) or self._photo_reference_preset_for_category(category)
-        normalized.update(
-            {
-                "kind": kind,
-                "note": note,
-                "reference_roles": list(dict.fromkeys(roles)),
-                "outfit_category": category,
-                "outfit_lock_default": lock_default,
-                "scene_categories": list(dict.fromkeys(scene_categories)),
-                "preferred_preset": preferred_preset,
-                "metadata_source": _single_line(normalized.get("metadata_source"), 30)
-                or ("configured" if explicit_roles is not None or normalized.get("outfit_category") else "inferred_note"),
-            }
-        )
-        return normalized
-
     def _photo_reference_library_entries(self) -> list[dict[str, Any]]:
-        raw_items = getattr(self, "photo_reference_library", [])
-        if not isinstance(raw_items, list):
-            raw_items = str(raw_items or "").splitlines()
-        entries: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for index, raw_item in enumerate(raw_items[:24], start=1):
-            configured: dict[str, Any] = {}
-            if isinstance(raw_item, dict):
-                configured = dict(raw_item)
-                source = _path_text(raw_item.get("source") or raw_item.get("path") or raw_item.get("url"), 1000)
-                note = _single_line(raw_item.get("note") or raw_item.get("description"), 500)
-            else:
-                text = str(raw_item or "").strip()
-                if text.startswith("{") and text.endswith("}"):
-                    try:
-                        parsed = json.loads(text)
-                        configured = dict(parsed) if isinstance(parsed, dict) else {}
-                    except Exception:
-                        configured = {}
-                if configured:
-                    source = _path_text(configured.get("source") or configured.get("path") or configured.get("url"), 1000)
-                    note = _single_line(configured.get("note") or configured.get("description"), 500)
-                else:
-                    parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=2)
-                    source = _path_text(parts[0] if parts else "", 1000)
-                    note = _single_line(parts[1] if len(parts) > 1 else "", 500)
-                    if len(parts) > 2 and str(parts[2]).strip().startswith("{"):
-                        try:
-                            metadata = json.loads(str(parts[2]).strip())
-                            if isinstance(metadata, dict):
-                                configured.update(metadata)
-                        except Exception:
-                            note = _single_line(f"{note} || {parts[2]}", 500)
-            source = source.strip().strip('"').strip("'")
-            if not source or source in seen:
-                continue
-            seen.add(source)
-            configured.update(
-                {
-                    "id": _single_line(configured.get("id"), 60) or f"library_{index}",
-                    "source": source,
-                    "note": note or "通用人物参考图；没有更具体的服装或场景匹配时使用",
-                    "kind": "library",
-                    "_config_format": "dict" if isinstance(raw_item, dict) or bool(configured.get("reference_roles")) else "text",
-                }
-            )
-            entries.append(self._normalize_photo_reference_candidate_metadata(configured))
-        return entries
+        return [
+            project_reference_candidate(item)
+            for item in (getattr(self, "photo_reference_catalog", ()) or ())
+            if isinstance(item, PhotoReference) and item.kind == "library"
+        ]
 
     def _photo_reference_local_path(self, source: str) -> str:
         raw = _path_text(source, 1000)
@@ -10866,7 +10709,15 @@ Output:
         local_path = self._photo_persona_reference_image_path()
         if local_path:
             return local_path
-        raw = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+        persona = next(
+            (
+                item
+                for item in (getattr(self, "photo_reference_catalog", ()) or ())
+                if isinstance(item, PhotoReference) and item.kind == "persona"
+            ),
+            None,
+        )
+        raw = _path_text(persona.source if persona is not None else "", 1000)
         if not raw or not re.match(r"^https?://", raw, flags=re.I):
             return ""
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
@@ -10896,49 +10747,36 @@ Output:
         logger.info("[PrivateCompanion] 配置页人设参考图 URL 已缓存为本地文件: path=%s", _single_line(stable_path, 160))
         return stable_path
 
-    def _photo_reference_config_value(self, item: dict[str, Any], source: str = "") -> Any:
-        persisted_source = _path_text(source or item.get("source"), 1000)
-        note = _single_line(item.get("note"), 500)
-        if item.get("_config_format") != "dict":
-            return f"{persisted_source} || {note}" if note else persisted_source
-        return {
-            "path": persisted_source,
-            "note": note,
-            "reference_roles": list(item.get("reference_roles") or []),
-            "outfit_category": _single_line(item.get("outfit_category"), 40),
-            "outfit_lock_default": bool(item.get("outfit_lock_default")),
-            "scene_categories": list(item.get("scene_categories") or []),
-            "preferred_preset": _single_line(item.get("preferred_preset"), 60),
-        }
-
     async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
-        updated_library: list[Any] = []
-        library_changed = False
+        catalog = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+        updated_catalog = list(catalog)
+        catalog_changed = False
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
-        for item in self._photo_reference_library_entries():
-            source = item["source"]
+        for index, item in enumerate(catalog):
+            if not isinstance(item, PhotoReference) or item.kind != "library":
+                continue
+            source = item.source
             path = self._photo_reference_local_path(source)
             if not path and re.match(r"^https?://", source, flags=re.I) and callable(resolver):
                 try:
-                    path = await resolver(source, stem=item["id"])
+                    path = await resolver(source, stem=item.id)
                 except Exception as exc:
                     logger.info(
                         "[PrivateCompanion] 参考图库远程图片下载失败: item=%s error=%s",
-                        item["id"],
+                        item.id,
                         _single_line(exc, 120),
                     )
                 if path:
-                    library_changed = True
-            persisted_source = path or source
-            updated_library.append(self._photo_reference_config_value(item, persisted_source))
+                    updated_catalog[index] = replace(item, source=path)
+                    catalog_changed = True
             if path:
-                candidates.append(self._normalize_photo_reference_candidate_metadata({**item, "path": path}))
-        if library_changed:
-            setter = getattr(self, "_set_photo_reference_library_config", None)
+                candidates.append(project_reference_candidate(item, resolved_source=path))
+        if catalog_changed:
+            setter = getattr(self, "_set_photo_reference_catalog_config", None)
             if callable(setter):
                 try:
-                    result = setter(updated_library)
+                    result = setter(updated_catalog)
                     if hasattr(result, "__await__"):
                         result = await result
                     if result is False:
@@ -10952,31 +10790,24 @@ Output:
         if allow_daily_outfit:
             outfit_path = self._daily_outfit_reference_image_path()
             if outfit_path:
-                candidates.append(self._normalize_photo_reference_candidate_metadata({
-                    "id": "daily_outfit",
-                    "path": outfit_path,
-                    "source": outfit_path,
-                    "kind": "daily_outfit",
-                    "note": "今天生成的外出穿搭；仅在画面明确承接今天外出、通勤、上学、逛街或展示当日穿搭时使用，在家、卧室、睡前、刚起床等场景不要使用",
-                    "reference_roles": ["identity", "outfit"],
-                    "outfit_category": "daily_outfit",
-                    "outfit_lock_default": True,
-                    "scene_categories": ["school", "office", "outdoor"],
-                    "preferred_preset": "日常穿搭",
-                    "metadata_source": "runtime",
-                }))
+                daily_reference = build_daily_outfit_reference(
+                    outfit_path,
+                    note="今天生成的外出穿搭；仅在画面明确承接今天外出、通勤、上学、逛街或展示当日穿搭时使用，在家、卧室、睡前、刚起床等场景不要使用",
+                    preset_names=self._photo_generation_scene_presets().keys(),
+                )
+                candidates.append(project_reference_candidate(daily_reference, resolved_source=outfit_path))
         persona_path = await self._photo_persona_reference_image_path_async()
         if persona_path and all(item.get("path") != persona_path for item in candidates):
-            candidates.append(self._normalize_photo_reference_candidate_metadata({
-                "id": "persona_default",
-                "path": persona_path,
-                "source": persona_path,
-                "kind": "persona",
-                "note": "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
-                "reference_roles": ["identity"],
-                "outfit_lock_default": False,
-                "metadata_source": "runtime",
-            }))
+            persona = next(
+                (
+                    item
+                    for item in (getattr(self, "photo_reference_catalog", ()) or ())
+                    if isinstance(item, PhotoReference) and item.kind == "persona"
+                ),
+                None,
+            )
+            if persona is not None:
+                candidates.append(project_reference_candidate(persona, resolved_source=persona_path))
         return candidates
 
     @classmethod
@@ -11232,7 +11063,7 @@ Output:
             _single_line(selected.get("note"), 160) if isinstance(selected, dict) else "-",
             len(candidates),
         )
-        return self._normalize_photo_reference_candidate_metadata(selected) if isinstance(selected, dict) else {}
+        return dict(selected) if isinstance(selected, dict) else {}
 
     async def _select_photo_reference_image_async(
         self,
@@ -11263,18 +11094,19 @@ Output:
             return {}
         normalized_kind = str(workflow_kind or "").strip().lower()
         if normalized_kind in {"edit", "改图", "修图", "重绘", "p图"}:
-            return self._normalize_photo_reference_candidate_metadata(
-                {
-                    "id": "explicit_reference",
-                    "path": path,
-                    "source": path,
-                    "kind": "source",
-                    "note": "用户本轮明确提供或引用的改图原图",
-                    "reference_roles": ["source"],
-                    "outfit_lock_default": False,
-                    "metadata_source": "runtime",
-                }
-            )
+            return {
+                "id": "explicit_reference",
+                "path": path,
+                "source": path,
+                "kind": "source",
+                "note": "用户本轮明确提供或引用的改图原图",
+                "reference_roles": ["source"],
+                "outfit_category": "",
+                "outfit_lock_default": False,
+                "scene_categories": [],
+                "preferred_preset": "",
+                "metadata_source": "runtime",
+            }
         candidates = await self._photo_reference_candidates_async(
             allow_daily_outfit=allow_daily_outfit,
         )
@@ -11283,21 +11115,22 @@ Output:
             candidates.insert(0, recent)
         for candidate in candidates:
             if self._photo_reference_paths_equal(path, candidate.get("path", "")):
-                return self._normalize_photo_reference_candidate_metadata(candidate)
+                return dict(candidate)
         kind = "explicit"
         roles = ["identity", "outfit"]
-        return self._normalize_photo_reference_candidate_metadata(
-            {
-                "id": "explicit_reference",
-                "path": path,
-                "source": path,
-                "kind": kind,
-                "note": "用户本轮明确提供或引用的参考图",
-                "reference_roles": roles,
-                "outfit_lock_default": kind == "explicit",
-                "metadata_source": "runtime",
-            }
-        )
+        return {
+            "id": "explicit_reference",
+            "path": path,
+            "source": path,
+            "kind": kind,
+            "note": "用户本轮明确提供或引用的参考图",
+            "reference_roles": roles,
+            "outfit_category": "",
+            "outfit_lock_default": kind == "explicit",
+            "scene_categories": [],
+            "preferred_preset": "",
+            "metadata_source": "runtime",
+        }
 
     async def _photo_persona_reference_image_for_kind_async(
         self,

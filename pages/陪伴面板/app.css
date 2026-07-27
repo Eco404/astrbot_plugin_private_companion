@@ -18781,7 +18781,7 @@ textarea {
 
 .photo-reference-persona {
   display: grid;
-  grid-template-columns: minmax(150px, 0.7fr) 128px minmax(260px, 1.3fr);
+  grid-template-columns: 128px minmax(260px, 1fr);
   gap: 14px;
   align-items: center;
   margin: 0 16px;
@@ -18794,6 +18794,7 @@ textarea {
 
 .photo-reference-persona > div:first-child {
   display: grid;
+  grid-column: 1 / -1;
   gap: 4px;
 }
 
@@ -18821,9 +18822,12 @@ textarea {
 }
 
 .photo-reference-persona input,
+.photo-reference-persona textarea,
+.photo-reference-persona select,
 .photo-reference-add-form input,
 .photo-reference-item input,
 .photo-reference-item textarea,
+.photo-reference-item select,
 .photo-reference-toolbar input {
   width: 100%;
   min-width: 0;
@@ -18833,6 +18837,92 @@ textarea {
   background: #fff;
   color: var(--ink);
   font: inherit;
+}
+
+.photo-reference-persona > label,
+.photo-reference-persona > .photo-reference-field-error {
+  grid-column: 2;
+}
+
+.photo-reference-persona > .photo-reference-metadata-editor,
+.photo-reference-persona > .danger-outline {
+  grid-column: 1 / -1;
+}
+
+.photo-reference-metadata-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+
+.photo-reference-metadata-editor summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.photo-reference-option-group {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.photo-reference-option-group legend {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.photo-reference-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 6px;
+}
+
+.photo-reference-choice {
+  display: flex !important;
+  align-items: center;
+  gap: 6px !important;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--surface);
+  color: var(--ink) !important;
+  cursor: pointer;
+}
+
+.photo-reference-choice input,
+.photo-reference-switch-row input {
+  width: 16px !important;
+  min-width: 16px;
+  margin: 0;
+}
+
+.photo-reference-switch-row {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px !important;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  background: var(--surface);
+}
+
+.photo-reference-field-error {
+  display: block;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .photo-reference-add-form {
@@ -26285,6 +26375,13 @@ pre {
     height: 96px;
   }
 
+  .photo-reference-persona > label,
+  .photo-reference-persona > .photo-reference-field-error,
+  .photo-reference-persona > .photo-reference-metadata-editor,
+  .photo-reference-persona > .danger-outline {
+    grid-column: 1 / -1;
+  }
+
   .photo-reference-add-form,
   .photo-reference-add-form > div,
   .photo-reference-grid {
@@ -26451,6 +26548,10 @@ pre {
 
   .photo-reference-item-body > header {
     align-items: center;
+  }
+
+  .photo-reference-choice-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

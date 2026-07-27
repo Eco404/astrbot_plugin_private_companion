@@ -3007,6 +3007,18 @@
     "default": [],
     "invisible": true
   },
+  "photo_reference_catalog": {
+    "description": "Canonical photo reference catalog",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
+  "photo_reference_catalog_version": {
+    "description": "Canonical photo reference catalog migration version",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
   "enable_daily_outfit_photo": {
     "description": "Legacy flat config: 每日穿搭照片",
     "type": "bool",
@@ -9031,11 +9043,25 @@
           "enable_group_nsfw_private_fallback": true
         }
       },
+      "photo_reference_catalog": {
+        "description": "规范参考图目录",
+        "type": "list",
+        "hint": "由陪伴面板参考图库管理器维护的规范元数据目录。",
+        "default": [],
+        "invisible": true
+      },
+      "photo_reference_catalog_version": {
+        "description": "规范参考图目录版本",
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "photo_persona_reference_image_path": {
         "description": "人设参考图路径或图片 URL",
         "type": "string",
         "hint": "可选。仅在人设/穿搭参考图一致性开启时使用。可填 png/jpg/jpeg/webp 本地文件路径，也可填 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 不支持参考图。",
         "default": "",
+        "invisible": true,
         "condition": {
           "enable_photo_text_action": true,
           "enable_photo_reference_image": true
@@ -9046,6 +9072,7 @@
         "type": "list",
         "hint": "可选，一行一张，格式为“图片路径或 URL || 用途注释”。注释应写清服装、地点和适用场景，例如：C:\\role_home.png || 居家服，在家、卧室、睡前或刚起床时使用。生成前 Bot 会结合最终画面提示词自动选择最合适的一张；今日穿搭图不再无条件优先。也可在私聊中发送一张或多张图片并使用“陪伴 参考图库 添加 注释”上传。最多保存 24 张。",
         "default": [],
+        "invisible": true,
         "condition": {
           "enable_photo_text_action": true,
           "enable_photo_reference_image": true

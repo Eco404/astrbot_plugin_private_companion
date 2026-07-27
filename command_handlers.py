@@ -8,6 +8,7 @@ import hashlib
 import re
 import shutil
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,15 @@ from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
 from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _path_text, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
+from .photo_reference_catalog import (
+    CATALOG_VERSION,
+    CatalogValidationError,
+    PhotoReference,
+    add_reference,
+    delete_reference,
+    load_catalog,
+    validate_and_serialize,
+)
 
 
 _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -690,8 +700,7 @@ class CommandHandlersMixin:
             "BACKUP_EXTERNAL_IMAGE_API_MODEL": {"label": "备选在线图片模型", "location": "拓展页 -> 模型配置 -> 生图模型 -> 在线 API 队列"},
             "backup_external_image_api_size": {"label": "备选在线生图尺寸", "location": "拓展页 -> 模型配置 -> 生图模型 -> 在线 API 队列"},
             "backup_external_image_api_timeout_seconds": {"label": "备选在线生图超时秒数", "location": "拓展页 -> 模型配置 -> 生图模型 -> 在线 API 队列"},
-            "photo_persona_reference_image_path": {"label": "人设参考图路径", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图一致性；也可用命令 陪伴 参考图 设置"},
-            "photo_reference_library": {"label": "带注释的参考图库", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图一致性；也可用命令 陪伴 参考图库"},
+            "photo_reference_catalog": {"label": "规范参考图目录", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 参考图库；也可用命令 陪伴 参考图 / 参考图库"},
             "natural_language_photo_generation_mode": {"label": "非指令生图处理方式", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
             "natural_language_photo_extra_prompt": {"label": "规则快判生图附加提示词", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图"},
             "photo_generation_prompt_format": {"label": "生图提示词表达方式", "location": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 画面风格"},
@@ -2751,7 +2760,7 @@ class CommandHandlersMixin:
                     "natural_language_photo_generation_max_daily",
                     "natural_language_photo_extra_prompt",
                     "enable_photo_reference_image",
-                    "photo_persona_reference_image_path",
+                    "photo_reference_catalog",
                     "photo_generation_backend",
                     "photo_generation_prompt_format",
                     "photo_generation_fixed_prompt",
@@ -3581,54 +3590,63 @@ class CommandHandlersMixin:
 
     async def _set_photo_reference_config_path(self, path: str) -> bool:
         clean = _path_text(path, 1000)
-        previous = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
-        self.photo_persona_reference_image_path = clean
         try:
-            saved = _set_into_config(self.config, "photo_persona_reference_image_path", clean)
-            if saved and not await self._save_config_if_possible():
-                self.photo_persona_reference_image_path = previous
-                _set_into_config(self.config, "photo_persona_reference_image_path", previous)
-                return False
-            return bool(saved)
-        except Exception:
-            self.photo_persona_reference_image_path = previous
-            try:
-                _set_into_config(self.config, "photo_persona_reference_image_path", previous)
-            except Exception:
-                pass
+            catalog = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+            persona = next((item for item in catalog if item.kind == "persona"), None)
+            if clean and persona is not None:
+                updated = tuple(replace(item, source=clean) if item.id == persona.id else item for item in catalog)
+            elif clean:
+                updated = add_reference(
+                    catalog,
+                    kind="persona",
+                    source=clean,
+                    note="基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
+                    preset_names=self._photo_generation_scene_presets().keys(),
+                )
+            elif persona is not None:
+                updated = delete_reference(catalog, persona.id)
+            else:
+                updated = catalog
+            return await self._set_photo_reference_catalog_config(updated)
+        except (CatalogValidationError, KeyError, TypeError, ValueError) as exc:
+            logger.warning("[PrivateCompanion] 保存 persona 参考图失败: %s", _single_line(exc, 160))
             return False
 
-    async def _set_photo_reference_library_config(self, items: list[Any]) -> bool:
-        normalized: list[Any] = []
-        seen_sources: set[str] = set()
-        for raw_item in items[:24]:
-            if isinstance(raw_item, dict):
-                source = _path_text(raw_item.get("source") or raw_item.get("path") or raw_item.get("url"), 1000)
-                if not source or source in seen_sources:
-                    continue
-                seen_sources.add(source)
-                normalized.append(dict(raw_item))
-                continue
-            text = str(raw_item or "").strip()
-            source = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)[0].strip() if text else ""
-            if text and source not in seen_sources:
-                seen_sources.add(source)
-                normalized.append(text[:3000])
-        previous = list(getattr(self, "photo_reference_library", []) or [])
-        self.photo_reference_library = normalized
+    async def _set_photo_reference_catalog_config(self, items: Any) -> bool:
+        if bool(getattr(self, "photo_reference_catalog_read_only", False)):
+            logger.warning("[PrivateCompanion] 参考图目录当前为只读状态，拒绝覆盖原配置；请在管理页校验并保存目录")
+            return False
+        previous = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+        previous_version = _safe_int(getattr(self, "photo_reference_catalog_version", 0), 0, 0)
+        preset_names = self._photo_generation_scene_presets().keys()
         try:
-            saved = _set_into_config(self.config, "photo_reference_library", normalized)
-            if saved and not await self._save_config_if_possible():
-                self.photo_reference_library = previous
-                _set_into_config(self.config, "photo_reference_library", previous)
+            serialized = validate_and_serialize(items, preset_names=preset_names)
+            loaded = load_catalog(serialized, catalog_version=CATALOG_VERSION, preset_names=preset_names)
+            previous_serialized = validate_and_serialize(previous, preset_names=preset_names)
+            self.photo_reference_catalog = loaded.references
+            self.photo_reference_catalog_version = CATALOG_VERSION
+            catalog_set = _set_into_config(self.config, "photo_reference_catalog", serialized)
+            version_set = _set_into_config(self.config, "photo_reference_catalog_version", CATALOG_VERSION)
+            if not catalog_set or not version_set or not await self._save_config_if_possible():
+                self.photo_reference_catalog = previous
+                self.photo_reference_catalog_version = previous_version
+                _set_into_config(self.config, "photo_reference_catalog", previous_serialized)
+                _set_into_config(self.config, "photo_reference_catalog_version", previous_version)
                 return False
-            return bool(saved)
-        except Exception:
-            self.photo_reference_library = previous
+            return True
+        except Exception as exc:
+            self.photo_reference_catalog = previous
+            self.photo_reference_catalog_version = previous_version
             try:
-                _set_into_config(self.config, "photo_reference_library", previous)
+                _set_into_config(
+                    self.config,
+                    "photo_reference_catalog",
+                    validate_and_serialize(previous, preset_names=preset_names),
+                )
+                _set_into_config(self.config, "photo_reference_catalog_version", previous_version)
             except Exception:
                 pass
+            logger.warning("[PrivateCompanion] 保存规范参考图目录失败: %s", _single_line(exc, 180))
             return False
 
     async def _photo_reference_library_command_payload(
@@ -3649,8 +3667,19 @@ class CommandHandlersMixin:
                 ), ""
             lines = [f"参考图库：{len(entries)}/24 张"]
             for index, item in enumerate(entries, start=1):
-                lines.append(f"{index}. {_single_line(item.get('note'), 160)}\n   {_single_line(item.get('source'), 260)}")
-            lines.append("预览：陪伴 参考图库 预览 编号；删除：陪伴 参考图库 删除 编号")
+                summary = [
+                    f"职责={','.join(item.get('reference_roles') or []) or '-'}",
+                    f"服装={_single_line(item.get('outfit_category'), 50) or '-'}",
+                    f"锁定={'是' if item.get('outfit_lock_default') else '否'}",
+                    f"场景={','.join(item.get('scene_categories') or []) or '-'}",
+                    f"预设={_single_line(item.get('preferred_preset'), 60) or '-'}",
+                ]
+                lines.append(
+                    f"{index}. {_single_line(item.get('note'), 160)}\n"
+                    f"   ID={_single_line(item.get('id'), 80)}｜{'｜'.join(summary)}\n"
+                    f"   {_single_line(item.get('source'), 260)}"
+                )
+            lines.append("预览：陪伴 参考图库 预览 编号；删除：陪伴 参考图库 删除 编号或ID")
             return "\n".join(lines), ""
         preview_match = re.match(r"^(?:预览|查看|preview|show)\s*(\d{1,2})$", action, flags=re.I)
         if preview_match:
@@ -3663,25 +3692,50 @@ class CommandHandlersMixin:
                 path = await self._photo_reference_source_to_stable_path(item["source"], stem=f"library_preview_{index + 1}")
             if not path:
                 return f"第 {index + 1} 张参考图当前不可用，请检查路径或 URL。", ""
-            return f"参考图 {index + 1}：{_single_line(item.get('note'), 260)}", path
-        delete_match = re.match(r"^(?:删除|移除|delete|remove)\s*(\d{1,2})$", action, flags=re.I)
-        if delete_match:
-            index = int(delete_match.group(1)) - 1
-            if not 0 <= index < len(entries):
-                return "没有这个编号的参考图。", ""
-            removed = entries[index]
-            kept = [
-                f"{item['source']} || {item['note']}"
-                for item_index, item in enumerate(entries)
-                if item_index != index
+            summary = [
+                f"职责={','.join(item.get('reference_roles') or []) or '-'}",
+                f"服装={_single_line(item.get('outfit_category'), 50) or '-'}",
+                f"锁定={'是' if item.get('outfit_lock_default') else '否'}",
+                f"场景={','.join(item.get('scene_categories') or []) or '-'}",
+                f"预设={_single_line(item.get('preferred_preset'), 60) or '-'}",
             ]
-            saved = await self._set_photo_reference_library_config(kept)
+            return (
+                f"参考图 {index + 1}：{_single_line(item.get('note'), 260)}\n"
+                f"ID={_single_line(item.get('id'), 80)}｜{'｜'.join(summary)}",
+                path,
+            )
+        delete_match = re.match(r"^(?:删除|移除|delete|remove)\s+([0-9A-Za-z_-]{1,80})$", action, flags=re.I)
+        if delete_match:
+            identifier = delete_match.group(1)
+            if identifier.isdigit():
+                index = int(identifier) - 1
+                if not 0 <= index < len(entries):
+                    return "没有这个编号的参考图。", ""
+                removed = entries[index]
+            else:
+                removed = next((item for item in entries if item.get("id") == identifier), None)
+                if removed is None:
+                    return "没有这个 ID 的参考图。", ""
+                index = entries.index(removed)
+            try:
+                kept = delete_reference(
+                    tuple(getattr(self, "photo_reference_catalog", ()) or ()),
+                    removed["id"],
+                )
+            except KeyError:
+                return "这张参考图已经不存在。", ""
+            saved = await self._set_photo_reference_catalog_config(kept)
             return (
                 f"已从参考图库删除第 {index + 1} 张：{_single_line(removed.get('note'), 160)}"
                 + ("" if saved else "\n但配置保存可能失败，请到面板确认。")
             ), ""
         if action in {"清空", "全部清空", "clear", "clear all"}:
-            saved = await self._set_photo_reference_library_config([])
+            kept = tuple(
+                item
+                for item in (getattr(self, "photo_reference_catalog", ()) or ())
+                if isinstance(item, PhotoReference) and item.kind != "library"
+            )
+            saved = await self._set_photo_reference_catalog_config(kept)
             return "已清空参考图库。" + ("" if saved else "\n但配置保存可能失败，请到面板确认。"), ""
 
         add_match = re.match(r"^(?:添加|上传|新增|add|upload)(?:\s+([\s\S]*))?$", action, flags=re.I)
@@ -3692,13 +3746,24 @@ class CommandHandlersMixin:
                 if saw_image:
                     return "找到了图片，但没能保存为参考图；请确认是 png、jpg、jpeg 或 webp。", ""
                 return "请把一张或多张图片与命令一起发送，或回复图片后发送“陪伴 参考图库 添加 用途注释”。", ""
-            current = [f"{item['source']} || {item['note']}" for item in entries]
-            available = max(0, 24 - len(current))
+            current = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+            available = max(0, 24 - len(entries))
             added = images[:available]
             if not added:
                 return "参考图库已达到 24 张上限，请先删除不用的图片。", ""
-            current.extend(f"{path} || {note}" for path, _label in added)
-            saved = await self._set_photo_reference_library_config(current)
+            try:
+                updated = current
+                for path, _label in added:
+                    updated = add_reference(
+                        updated,
+                        kind="library",
+                        source=path,
+                        note=note,
+                        preset_names=self._photo_generation_scene_presets().keys(),
+                    )
+            except CatalogValidationError as exc:
+                return f"参考图元数据校验失败：{_single_line(exc, 300)}", ""
+            saved = await self._set_photo_reference_catalog_config(updated)
             return (
                 f"已向参考图库添加 {len(added)} 张图片。\n用途注释：{note}\n"
                 "生成时会结合地点、服装和画面要求自动选择其中一张；今日穿搭图不再无条件优先。"
@@ -3747,7 +3812,15 @@ class CommandHandlersMixin:
                     return "找到了图片，但没能保存成参考图。参考图只支持 png、jpg、jpeg、webp；也可能是平台只给了图片 file id，拿不到原图。", ""
                 return "没有在这条消息或引用消息里找到图片。可以发送图片并附上“陪伴 参考图”，或回复一条近期图片消息发送“陪伴 参考图”。", ""
         if not action or action in preview_actions:
-            configured = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+            persona = next(
+                (
+                    item
+                    for item in (getattr(self, "photo_reference_catalog", ()) or ())
+                    if isinstance(item, PhotoReference) and item.kind == "persona"
+                ),
+                None,
+            )
+            configured = _path_text(persona.source if persona is not None else "", 1000)
             resolved = self._photo_persona_reference_image_path() if callable(getattr(self, "_photo_persona_reference_image_path", None)) else ""
             enabled = bool(getattr(self, "enable_photo_reference_image", False))
             if not configured:

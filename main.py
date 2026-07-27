@@ -122,6 +122,7 @@ from .helpers import (
     _today_key,
 )
 from .config_migration import migrate_flat_config_into_schema_groups
+from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
 from .user_rest_gate import UserRestGateMixin
 from .busy_reply_gate import BusyReplyGateMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
@@ -1502,17 +1503,7 @@ class PrivateCompanionPlugin(
         self.comfyui_text2img_workflow_name = self._cfg_str(c, "COMFYUI_TEXT2IMG_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.comfyui_selfie_workflow_name = self._cfg_str(c, "COMFYUI_SELFIE_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.photo_persona_reference_image_path = self._cfg_str(c, "photo_persona_reference_image_path", "")
-        raw_reference_library = self._cfg_raw(c, "photo_reference_library", [])
-        if isinstance(raw_reference_library, list):
-            self.photo_reference_library = [
-                (dict(item) if isinstance(item, dict) else str(item).strip())
-                for item in raw_reference_library
-                if (isinstance(item, dict) and bool(item)) or str(item or "").strip()
-            ][:24]
-        else:
-            self.photo_reference_library = [
-                line.strip() for line in str(raw_reference_library or "").splitlines() if line.strip()
-            ][:24]
+        self.photo_reference_library = self._cfg_raw(c, "photo_reference_library", [])
         self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
         self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
         if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
@@ -1565,6 +1556,42 @@ class PrivateCompanionPlugin(
         self.photo_generation_style_custom_prompt = self._cfg_str(c, "photo_generation_style_custom_prompt", "")
         self.photo_generation_fixed_prompt = self._cfg_str(c, "photo_generation_fixed_prompt", "")
         self.photo_generation_scene_presets = self._cfg_raw(c, "photo_generation_scene_presets", "")
+        raw_reference_catalog = self._cfg_raw(c, "photo_reference_catalog", [])
+        raw_reference_catalog_version = self._cfg_raw(c, "photo_reference_catalog_version", 0)
+        loaded_reference_catalog = load_catalog(
+            raw_reference_catalog,
+            catalog_version=raw_reference_catalog_version,
+            legacy_persona=self.photo_persona_reference_image_path,
+            legacy_library=self.photo_reference_library,
+            preset_names=self._photo_generation_scene_presets().keys(),
+        )
+        self.photo_reference_catalog = loaded_reference_catalog.references
+        self.photo_reference_catalog_read_only = loaded_reference_catalog.read_only
+        try:
+            self.photo_reference_catalog_version = int(raw_reference_catalog_version or 0)
+        except (TypeError, ValueError):
+            self.photo_reference_catalog_version = 0
+        self._startup_photo_reference_catalog_migration_pending = False
+        for warning in loaded_reference_catalog.warnings:
+            logger.warning("[PrivateCompanion] 参考图目录加载警告: %s", warning)
+        if loaded_reference_catalog.needs_persist:
+            self.photo_reference_catalog_read_only = True
+            try:
+                serialized_reference_catalog = validate_and_serialize(
+                    loaded_reference_catalog.references,
+                    preset_names=self._photo_generation_scene_presets().keys(),
+                )
+                if _set_into_config(c, "photo_reference_catalog", serialized_reference_catalog):
+                    self._startup_photo_reference_catalog_migration_pending = True
+                    self._startup_config_migration_changes += 1
+                else:
+                    logger.error("[PrivateCompanion] 参考图目录迁移无法写入配置，启动期间继续使用旧配置的只读内存投影")
+            except Exception as exc:
+                logger.error(
+                    "[PrivateCompanion] 参考图目录迁移失败，启动期间继续使用旧配置的只读内存投影: %s",
+                    _single_line(exc, 180),
+                    exc_info=True,
+                )
         self.enable_daily_outfit_photo = self._cfg_bool(c, "enable_daily_outfit_photo", False)
         self.enable_creative_cover_generation = self._cfg_bool(c, "enable_creative_cover_generation", False)
         self.daily_outfit_photo_prompt = self._cfg_str(c, "daily_outfit_photo_prompt", "")
@@ -2576,7 +2603,30 @@ class PrivateCompanionPlugin(
         await asyncio.sleep(0)
         started = time.perf_counter()
         try:
-            if _safe_int(getattr(self, "_startup_config_migration_changes", 0), 0, 0) > 0:
+            if bool(getattr(self, "_startup_photo_reference_catalog_migration_pending", False)):
+                config_started = time.perf_counter()
+                catalog_saved = await self._save_config_if_possible()
+                if catalog_saved and _set_into_config(self.config, "photo_reference_catalog_version", CATALOG_VERSION):
+                    self.photo_reference_catalog_version = CATALOG_VERSION
+                    marker_saved = await self._save_config_if_possible()
+                    if marker_saved:
+                        self._startup_photo_reference_catalog_migration_pending = False
+                        self.photo_reference_catalog_read_only = False
+                        logger.info(
+                            "[PrivateCompanion] 参考图目录迁移完成: version=%s references=%s",
+                            CATALOG_VERSION,
+                            len(getattr(self, "photo_reference_catalog", ()) or ()),
+                        )
+                    else:
+                        logger.error("[PrivateCompanion] 参考图目录已保存，但迁移版本号保存失败；下次启动会安全重试")
+                elif not catalog_saved:
+                    logger.error("[PrivateCompanion] 参考图目录迁移保存失败，当前进程继续使用只读内存投影")
+                else:
+                    logger.error("[PrivateCompanion] 参考图目录已保存，但迁移版本号无法写入；当前进程继续使用只读内存投影")
+                elapsed_ms = int((time.perf_counter() - config_started) * 1000)
+                if elapsed_ms > 1200:
+                    logger.warning("[PrivateCompanion] 启动后台配置保存耗时较高: elapsed=%sms", elapsed_ms)
+            elif _safe_int(getattr(self, "_startup_config_migration_changes", 0), 0, 0) > 0:
                 config_started = time.perf_counter()
                 await self._save_config_if_possible()
                 elapsed_ms = int((time.perf_counter() - config_started) * 1000)

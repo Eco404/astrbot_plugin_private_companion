@@ -37,6 +37,14 @@ from .memo_notes import (
     memo_note_sort_key,
     normalize_memo_note,
 )
+from .photo_reference_catalog import (
+    CATALOG_VERSION,
+    CatalogValidationError,
+    PhotoReference,
+    load_catalog,
+    project_reference_candidate,
+    validate_and_serialize,
+)
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -1091,62 +1099,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return hashlib.sha256(payload).hexdigest()[:24]
 
     def _photo_reference_page_items(self) -> list[dict[str, Any]]:
-        entries: list[dict[str, Any]] = []
-        persona_source = _path_text(
-            getattr(self.plugin, "photo_persona_reference_image_path", ""),
-            1000,
-        )
-        if persona_source:
-            entries.append({
-                "kind": "persona",
-                "source": persona_source,
-                "note": "默认人设参考图",
-                "reference_roles": ["identity"],
-                "outfit_category": "",
-                "outfit_lock_default": False,
-                "scene_categories": [],
-                "preferred_preset": "",
-                "metadata_source": "runtime",
-            })
-
-        getter = getattr(self.plugin, "_photo_reference_library_entries", None)
-        if callable(getter):
-            try:
-                parsed = getter()
-            except Exception:
-                parsed = []
-        else:
-            parsed = []
-            raw_items = getattr(self.plugin, "photo_reference_library", [])
-            if not isinstance(raw_items, list):
-                raw_items = str(raw_items or "").splitlines()
-            for raw_item in raw_items:
-                text = str(raw_item or "").strip()
-                if not text:
-                    continue
-                parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)
-                parsed.append({
-                    "source": parts[0].strip(),
-                    "note": parts[1].strip() if len(parts) > 1 else "",
-                })
-
-        for item in parsed if isinstance(parsed, list) else []:
-            if not isinstance(item, dict):
-                continue
-            source = _path_text(item.get("source") or item.get("path") or item.get("url"), 1000)
-            if not source:
-                continue
-            entries.append({
-                "kind": "library",
-                "source": source,
-                "note": self._single_line(item.get("note") or item.get("description"), 500).strip(),
-                "reference_roles": list(item.get("reference_roles") or ["identity"]),
-                "outfit_category": self._single_line(item.get("outfit_category"), 40),
-                "outfit_lock_default": bool(item.get("outfit_lock_default")),
-                "scene_categories": list(item.get("scene_categories") or []),
-                "preferred_preset": self._single_line(item.get("preferred_preset"), 60),
-                "metadata_source": self._single_line(item.get("metadata_source"), 30),
-            })
+        entries = [
+            project_reference_candidate(reference)
+            for reference in (getattr(self.plugin, "photo_reference_catalog", ()) or ())
+            if isinstance(reference, PhotoReference) and reference.kind in {"persona", "library"}
+        ]
 
         resolver = getattr(self.plugin, "_photo_reference_local_path", None)
         result: list[dict[str, Any]] = []
@@ -1164,7 +1121,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     local_path = ""
             path = Path(local_path).expanduser() if local_path else None
             available = bool(remote or inline or (path is not None and path.is_file()))
-            item_id = self._photo_reference_page_id(kind, source)
+            item_id = self._single_line(entry.get("id"), 80)
             item = {
                 "id": item_id,
                 "kind": kind,
@@ -1200,13 +1157,50 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             items = self._photo_reference_page_items()
             persona = next((item for item in items if item.get("kind") == "persona"), None)
             library = [item for item in items if item.get("kind") == "library"]
+            preset_getter = getattr(self.plugin, "_photo_generation_scene_presets", None)
+            presets = list(preset_getter().keys()) if callable(preset_getter) else []
             return self._ok({
                 "enabled": bool(getattr(self.plugin, "enable_photo_reference_image", False)),
+                "catalog_version": _safe_int(getattr(self.plugin, "photo_reference_catalog_version", 0), 0, 0),
+                "read_only": bool(getattr(self.plugin, "photo_reference_catalog_read_only", False)),
                 "limit": 24,
                 "persona": persona,
                 "items": library,
                 "total": len(library),
                 "available": sum(1 for item in library if item.get("available")),
+                "options": {
+                    "reference_roles": [
+                        {"value": "identity", "label": "身份"},
+                        {"value": "outfit", "label": "服装"},
+                        {"value": "pose", "label": "姿势"},
+                        {"value": "scene", "label": "场景"},
+                        {"value": "style", "label": "风格"},
+                        {"value": "continuity", "label": "连续性"},
+                        {"value": "source", "label": "原图"},
+                    ],
+                    "outfit_categories": [
+                        {"value": "cosplay", "label": "COS"},
+                        {"value": "school_uniform", "label": "校服"},
+                        {"value": "sleepwear", "label": "睡衣"},
+                        {"value": "swimwear", "label": "泳装"},
+                        {"value": "sportswear", "label": "运动服"},
+                        {"value": "formalwear", "label": "正装/礼服"},
+                        {"value": "homewear", "label": "居家服"},
+                        {"value": "daily_outfit", "label": "日常穿搭"},
+                        {"value": "custom_outfit", "label": "自定义穿搭"},
+                    ],
+                    "scene_categories": [
+                        {"value": "home", "label": "居家"},
+                        {"value": "bedroom", "label": "卧室"},
+                        {"value": "school", "label": "校园"},
+                        {"value": "office", "label": "办公室"},
+                        {"value": "outdoor", "label": "户外"},
+                        {"value": "formal_event", "label": "正式场合"},
+                        {"value": "sport", "label": "运动"},
+                        {"value": "beach", "label": "海边"},
+                    ],
+                    "presets": presets,
+                },
             })
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取参考图库失败: {exc}", exc_info=True)
@@ -1551,6 +1545,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     if key in self._allowed_setting_keys():
                         settings[key] = value
             return overview
+        except CatalogValidationError as exc:
+            logger.info("[PrivateCompanionPage] 参考图目录字段校验失败: %s", self._single_line(exc, 240))
+            return {
+                "success": False,
+                "error": "参考图目录存在无效字段",
+                "field_errors": exc.errors,
+                "ts": int(time.time()),
+            }
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新设置失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -2665,7 +2667,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 reference_image_path = _path_text(reference_getter(), 1000)
             except Exception:
                 reference_image_path = ""
-        configured_reference = _path_text(getattr(self.plugin, "photo_persona_reference_image_path", ""), 1000)
+        persona_reference = next(
+            (
+                item
+                for item in (getattr(self.plugin, "photo_reference_catalog", ()) or ())
+                if isinstance(item, PhotoReference) and item.kind == "persona"
+            ),
+            None,
+        )
+        configured_reference = _path_text(persona_reference.source if persona_reference is not None else "", 1000)
         has_reference_source = bool(reference_enabled and (reference_image_path or re.match(r"^https?://", configured_reference, flags=re.I)))
         workflow_kind = self._single_line(payload.get("workflow_kind"), 20)
         if not workflow_kind:
@@ -12987,8 +12997,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "custom_photo_tool_extra_params",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
             "COMFYUI_SELFIE_WORKFLOW_NAME",
-            "photo_persona_reference_image_path",
-            "photo_reference_library",
+            "photo_reference_catalog",
             "enable_daily_outfit_photo",
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
@@ -13253,6 +13262,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             if key not in keys and key not in provider_keys:
                 keys.append(key)
         values = {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
+        if "photo_reference_catalog" in values:
+            try:
+                values["photo_reference_catalog"] = validate_and_serialize(
+                    getattr(self.plugin, "photo_reference_catalog", ()) or (),
+                    preset_names=self.plugin._photo_generation_scene_presets().keys(),
+                )
+            except CatalogValidationError:
+                values["photo_reference_catalog"] = []
         for key in self._schema_bool_keys():
             if key not in values:
                 continue
@@ -14610,6 +14627,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
         self._set_config_value(key, value)
+        if key == "photo_reference_catalog":
+            loaded = load_catalog(
+                value,
+                catalog_version=CATALOG_VERSION,
+                preset_names=self.plugin._photo_generation_scene_presets().keys(),
+            )
+            self._set_config_value("photo_reference_catalog_version", CATALOG_VERSION)
+            self.plugin.photo_reference_catalog = loaded.references
+            self.plugin.photo_reference_catalog_version = CATALOG_VERSION
+            self.plugin.photo_reference_catalog_read_only = loaded.read_only
+            return
         if key == "external_image_api_endpoints":
             normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
             endpoints = normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])
@@ -14961,8 +14989,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "custom_photo_tool_extra_params": "custom_photo_tool_extra_params",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
-            "photo_persona_reference_image_path": "photo_persona_reference_image_path",
-            "photo_reference_library": "photo_reference_library",
+            "photo_reference_catalog": "photo_reference_catalog",
             "daily_outfit_photo_prompt": "daily_outfit_photo_prompt",
             "daily_outfit_rotation_days": "daily_outfit_rotation_days",
             "external_image_api_platform": "external_image_api_platform",
@@ -14986,22 +15013,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_scene_presets": "photo_generation_scene_presets",
         }
         for key, attr in mapping.items():
-            value = self._config_get_raw(key) if key in {"external_image_api_endpoints", "photo_reference_library"} else self._config_get(key)
+            value = self._config_get_raw(key) if key in {"external_image_api_endpoints", "photo_reference_catalog"} else self._config_get(key)
             if key == "external_image_api_endpoints":
                 normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
                 endpoints = normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])
                 self.plugin.external_image_api_endpoints = endpoints
                 continue
-            if key == "photo_reference_library":
-                normalized_library = self._normalize_setting_value(key, value)
-                setattr(
-                    self.plugin,
-                    attr,
-                    normalized_library if isinstance(normalized_library, list) else [],
-                )
-                continue
-            if key == "photo_persona_reference_image_path":
-                setattr(self.plugin, attr, str(value or "").strip())
+            if key == "photo_reference_catalog":
+                try:
+                    serialized_catalog = self._normalize_setting_value(key, value)
+                    loaded_catalog = load_catalog(
+                        serialized_catalog,
+                        catalog_version=CATALOG_VERSION,
+                        preset_names=self.plugin._photo_generation_scene_presets().keys(),
+                    )
+                    self.plugin.photo_reference_catalog = loaded_catalog.references
+                    self.plugin.photo_reference_catalog_version = CATALOG_VERSION
+                    self.plugin.photo_reference_catalog_read_only = loaded_catalog.read_only
+                except CatalogValidationError as exc:
+                    logger.warning("[PrivateCompanionPage] 忽略无效的运行时参考图目录同步: %s", self._single_line(exc, 180))
                 continue
             if value not in ("", None):
                 text = str(value).strip()
@@ -15538,8 +15568,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
             "COMFYUI_SELFIE_WORKFLOW_NAME",
             "enable_photo_reference_image",
-            "photo_persona_reference_image_path",
-            "photo_reference_library",
+            "photo_reference_catalog",
             "enable_daily_outfit_photo",
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
@@ -16101,89 +16130,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "photo_generation_backend":
             mode = str(value or "auto").strip().lower()
             return mode if mode in {"auto", "comfyui", "sdgen", "external", "tool_call"} else "auto"
-        if key == "photo_reference_library":
-            if isinstance(value, list):
-                raw_items = value
-            else:
-                raw_text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-                raw_items = []
-                parsed_array = False
-                if raw_text.startswith("[") and raw_text.endswith("]"):
-                    try:
-                        parsed_items = json.loads(raw_text)
-                        if isinstance(parsed_items, list):
-                            raw_items = parsed_items
-                            parsed_array = True
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        pass
-                if not parsed_array and raw_text:
-                    raw_items = raw_text.split("\n")
-            items: list[Any] = []
-            seen_sources: set[str] = set()
-            for raw_item in raw_items:
-                if isinstance(raw_item, dict):
-                    item = dict(raw_item)
-                else:
-                    text = str(raw_item or "").strip()
-                    if not text:
-                        continue
-                    item = {}
-                    if text.startswith("{") and text.endswith("}"):
-                        try:
-                            parsed_item = json.loads(text)
-                            if isinstance(parsed_item, dict):
-                                item = dict(parsed_item)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            pass
-                    if not item:
-                        parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=2)
-                        item = {
-                            "path": parts[0] if parts else "",
-                            "note": parts[1] if len(parts) > 1 else "",
-                        }
-                        if len(parts) > 2:
-                            metadata_text = str(parts[2] or "").strip()
-                            if metadata_text.startswith("{"):
-                                try:
-                                    metadata = json.loads(metadata_text)
-                                    if isinstance(metadata, dict):
-                                        item.update(
-                                            {
-                                                name: field_value
-                                                for name, field_value in metadata.items()
-                                                if name not in {"source", "path", "url", "note", "description"}
-                                            }
-                                        )
-                                    else:
-                                        item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
-                                except (TypeError, ValueError, json.JSONDecodeError):
-                                    item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
-                            else:
-                                item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
-
-                source = _path_text(item.get("source") or item.get("path") or item.get("url"), 1000)
-                if not source or source in seen_sources:
-                    continue
-                seen_sources.add(source)
-                note = str(item.get("note") or item.get("description") or "")
-                note = note.replace("\r\n", "\n").replace("\r", "\n").strip()[:500]
-                item["path"] = source
-                item["note"] = note
-                for field in ("reference_roles", "scene_categories"):
-                    if field in item and not isinstance(item.get(field), list):
-                        item[field] = [
-                            part
-                            for part in re.split(r"[,，、/|\s]+", str(item.get(field) or ""))
-                            if part
-                        ]
-                if "outfit_lock_default" in item:
-                    raw_lock = item.get("outfit_lock_default")
-                    if raw_lock is None or (isinstance(raw_lock, str) and not raw_lock.strip()):
-                        item.pop("outfit_lock_default", None)
-                    else:
-                        item["outfit_lock_default"] = self._normalize_bool_value(raw_lock)
-                items.append(item)
-            return items[:24]
+        if key == "photo_reference_catalog":
+            raw_items = value
+            if isinstance(value, str):
+                try:
+                    raw_items = json.loads(value or "[]")
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise CatalogValidationError({"photo_reference_catalog": ["目录必须是 JSON 数组"]}) from exc
+            if not isinstance(raw_items, list):
+                raise CatalogValidationError({"photo_reference_catalog": ["目录必须是数组"]})
+            return validate_and_serialize(
+                raw_items,
+                preset_names=self.plugin._photo_generation_scene_presets().keys(),
+            )
         if key == "external_image_api_endpoints":
             normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
             return normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])

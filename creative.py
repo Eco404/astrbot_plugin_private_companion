@@ -1371,11 +1371,13 @@ class CreativeMixin:
         getter = getattr(self, "_photo_persona_reference_image_path", None)
         if callable(getter):
             try:
-                if _single_line(getter(), 500):
-                    return True
+                return bool(_single_line(getter(), 500))
             except Exception:
                 pass
-        return bool(_single_line(getattr(self, "photo_persona_reference_image_path", ""), 1000))
+        return any(
+            getattr(item, "kind", "") == "persona" and _single_line(getattr(item, "source", ""), 1000)
+            for item in (getattr(self, "photo_reference_catalog", ()) or ())
+        )
 
     def _creative_cover_needs_identity_upgrade(self, project: dict[str, Any]) -> bool:
         if not self._creative_cover_file_exists(project):
