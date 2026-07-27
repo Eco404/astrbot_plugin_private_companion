@@ -233,7 +233,7 @@ def _current_user_request_parts(prompt_text: str) -> tuple[str, str]:
 def _contains_specific_outfit_text(value: Any) -> bool:
     return bool(
         re.search(
-            r"连衣裙|裙子|短裙|长裙|吊带|衬衫|外套|夹克|西装|制服|汉服|旗袍|和服|洛丽塔|"
+            r"裙|吊带|衬衫|外套|夹克|西装|制服|汉服|旗袍|和服|洛丽塔|"
             r"裤(?:子)?|毛衣|卫衣|T恤|背心|上衣|套装|袜(?:子)?|鞋(?:子)?|"
             r"\b(?:dress|skirt|shirt|blouse|coat|jacket|suit|uniform|hoodie|sweater|pants|trousers|shorts|top)\b",
             str(value or ""),
@@ -432,10 +432,25 @@ def _normalized_exclusion_phrases(exclusion_text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(phrases))
 
 
+def _matches_normalized_exclusion(candidate: str, phrase: str) -> bool:
+    if not candidate or not phrase:
+        return False
+    if phrase in candidate:
+        return True
+    phrase_index = 0
+    for character in candidate:
+        if character == phrase[phrase_index]:
+            phrase_index += 1
+            if phrase_index == len(phrase):
+                return True
+    return False
+
+
 def _daily_outfit_matches_custom_exclusion(scene_context: str, exclusion_text: str) -> bool:
     details = re.sub(r"[\W_]+", "", _daily_outfit_details(scene_context).lower(), flags=re.UNICODE)
     return bool(details) and any(
-        phrase in details for phrase in _normalized_exclusion_phrases(exclusion_text)
+        _matches_normalized_exclusion(details, phrase)
+        for phrase in _normalized_exclusion_phrases(exclusion_text)
     )
 
 
@@ -450,7 +465,10 @@ def _reference_matches_custom_exclusion(
         reference.get("note"),
     )
     return any(
-        phrase in re.sub(r"[\W_]+", "", _clean_text(value, 600).lower(), flags=re.UNICODE)
+        _matches_normalized_exclusion(
+            re.sub(r"[\W_]+", "", _clean_text(value, 600).lower(), flags=re.UNICODE),
+            phrase,
+        )
         for value in reference_texts
         for phrase in phrases
         if value
@@ -605,12 +623,22 @@ def _daily_outfit_context_is_applicable(prompt_text: str, scene_context: str) ->
         r"|\b(?:outdoors?|going\s+out|commut(?:e|ing)|school|class|work|office|shopping|mall|street|"
         r"travel|trip|park|walk(?:ing)?)\b"
     )
+    departing_home_pattern = (
+        r"(?:离开|走出)(?:卧室|家里|家)|从(?:卧室|家里|家).{0,10}(?:出门|外出|去|前往|到)"
+        r"|\b(?:leave|leaving)\s+(?:the\s+)?(?:bedroom|home)\b"
+        r"|\bfrom\s+(?:the\s+)?(?:bedroom|home).{0,30}\b(?:to|for|going\s+out)\b"
+    )
     if re.search(
         r"(?:展示|看看|晒|拍).{0,12}(?:今日|今天|当天).{0,8}(?:穿搭|衣服|服装|造型)"
         r"|(?:今日|今天|当天).{0,8}(?:穿搭|衣服|服装|造型).{0,12}(?:展示|看看|晒|拍)"
         r"|\b(?:show(?:ing)?\s+off\s+today'?s\s+outfit|show\s+(?:me\s+)?today'?s\s+outfit|outfit\s+check|ootd)\b",
         prompt,
         flags=re.I,
+    ):
+        return True
+    if (
+        re.search(departing_home_pattern, prompt, flags=re.I)
+        and re.search(applicable_pattern, prompt, flags=re.I)
     ):
         return True
     if re.search(blocked_pattern, prompt, flags=re.I):
