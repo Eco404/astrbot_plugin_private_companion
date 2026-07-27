@@ -298,11 +298,16 @@ class BodyMonitorIntegration:
         version = _cursor(payload.get("version"))
         if version != SUPPORTED_API_VERSION:
             raise RuntimeError(f"Body Monitor 事件批次版本不兼容: {version or 'unknown'}")
-        stream_id = _text(payload.get("stream_id"), 80)
+        stream_id = " ".join(str(payload.get("stream_id") or "").split())
         next_cursor = _cursor(payload.get("next_cursor"))
         latest_cursor = _cursor(payload.get("latest_cursor"))
         events = payload.get("events")
-        if not stream_id or next_cursor is None or latest_cursor is None or not isinstance(events, list):
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", stream_id)
+            or next_cursor is None
+            or latest_cursor is None
+            or not isinstance(events, list)
+        ):
             raise RuntimeError("Body Monitor 返回的事件批次字段不完整")
         if after_cursor is None and events:
             events = []
@@ -377,12 +382,19 @@ class BodyMonitorIntegration:
     def _normalize_event(raw: Any) -> dict[str, Any] | None:
         if not isinstance(raw, dict) or _text(raw.get("type"), 40) != "health_alert":
             return None
-        event_id = _text(raw.get("id"), 64)
+        event_id = _cursor(raw.get("id"))
         event_key = _text(raw.get("event_key"), 120)
         occurred_at = _timestamp(raw.get("occurred_at"))
         expires_at = _timestamp(raw.get("expires_at"))
         targets_raw = raw.get("targets")
-        if not event_id or not event_key or occurred_at <= 0 or expires_at <= occurred_at or not isinstance(targets_raw, list):
+        if (
+            event_id is None
+            or event_id > 9223372036854775807
+            or not event_key
+            or occurred_at <= 0
+            or expires_at <= occurred_at
+            or not isinstance(targets_raw, list)
+        ):
             return None
         targets: list[str] = []
         for item in targets_raw:
@@ -416,7 +428,7 @@ class BodyMonitorIntegration:
             if limited_today:
                 clean_context["today"] = limited_today
         return {
-            "id": event_id,
+            "id": str(event_id),
             "event_key": event_key,
             "occurred_at": occurred_at,
             "expires_at": expires_at,
@@ -477,9 +489,8 @@ class BodyMonitorIntegration:
     @staticmethod
     def _candidate(stream_id: str, event: dict[str, Any], target_umo: str, *, now: float) -> dict[str, Any]:
         target_hash = hashlib.sha256(target_umo.encode("utf-8", errors="ignore")).hexdigest()[:12]
-        stream_hash = hashlib.sha256(stream_id.encode("utf-8", errors="ignore")).hexdigest()[:8]
-        stream_token = f"{_text(stream_id, 20)}-{stream_hash}"
-        event_token = _text(event.get("id"), 24)
+        stream_token = stream_id
+        event_token = str(event["id"])
         context = dict(event["context"])
         metric = _text(context.get("metric") or event.get("topic"), 80) or "身体状态"
         occurred_at = max(0.0, float(event["occurred_at"]))

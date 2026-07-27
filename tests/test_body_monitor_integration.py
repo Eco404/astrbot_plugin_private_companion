@@ -157,6 +157,7 @@ class BodyMonitorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     events=[
                         valid_event,
                         _event(event_id=9, target="aiocqhttp:GroupMessage:10001"),
+                        _event(event_id=10, target="aiocqhttp:FriendMessage:unknown"),
                     ],
                 )
             ]
@@ -168,7 +169,7 @@ class BodyMonitorIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(api.calls, [7])
         self.assertEqual(result["last_batch"]["offered"], 1)
-        self.assertEqual(result["last_batch"]["skipped"], 1)
+        self.assertEqual(result["last_batch"]["skipped"], 2)
         self.assertEqual(host.data["body_monitor_integration"]["cursor"], 9)
         user_id, candidate = host.offered[0]
         self.assertEqual(user_id, "10001")
@@ -178,7 +179,7 @@ class BodyMonitorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["context_key"], "body_monitor_health_context")
         self.assertEqual(candidate["expire_at"], candidate["best_until_at"])
         self.assertEqual(candidate["expire_at"], valid_event["expires_at"])
-        self.assertRegex(candidate["origin_event_id"], r"^body:stream-a-[0-9a-f]{8}:8:[0-9a-f]{12}$")
+        self.assertRegex(candidate["origin_event_id"], r"^body:stream-a:8:[0-9a-f]{12}$")
         self.assertEqual(candidate["context"]["value"], 108)
         self.assertEqual(candidate["context"]["baseline"], {"mean": 76})
         self.assertEqual(
@@ -189,6 +190,39 @@ class BodyMonitorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("body_composition", candidate["context"])
         self.assertNotIn("z_score", candidate["context"])
         self.assertNotIn("raw_record", candidate["context"])
+
+    def test_origin_event_id_preserves_full_validated_stream_and_event_id(self) -> None:
+        event = BodyMonitorIntegration._normalize_event(_event(event_id=9223372036854775807))
+        self.assertIsNotNone(event)
+        stream_id = "12345678-1234-1234-1234-123456789abc"
+
+        candidate = BodyMonitorIntegration._candidate(
+            stream_id,
+            event,
+            "aiocqhttp:FriendMessage:10001",
+            now=time.time(),
+        )
+
+        self.assertIn(f"body:{stream_id}:9223372036854775807:", candidate["origin_event_id"])
+        self.assertLessEqual(len(candidate["origin_event_id"]), 80)
+
+    async def test_unverified_private_target_is_not_offered(self) -> None:
+        host = _Host()
+        host.data["body_monitor_integration"] = {
+            "enabled_last": True,
+            "initialized": True,
+            "stream_id": "stream-a",
+            "cursor": 7,
+        }
+        host.data["users"]["10001"]["last_inbound_umo"] = "aiocqhttp:FriendMessage:old-route"
+        api = _Api([_feed(cursor=8, events=[_event(target="aiocqhttp:FriendMessage:10001")])])
+        integration = BodyMonitorIntegration(host)
+
+        with mock.patch("importlib.import_module", return_value=_module_for(api)):
+            result = await integration.poll()
+
+        self.assertEqual(result["last_batch"]["accepted"], 0)
+        self.assertEqual(host.offered, [])
 
     def test_event_context_requires_canonical_numeric_core_fields(self) -> None:
         valid = _event(event_id=99)
@@ -205,6 +239,10 @@ class BodyMonitorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 raw = dict(valid)
                 raw["context"] = context
                 self.assertIsNone(BodyMonitorIntegration._normalize_event(raw))
+
+        oversized_id = dict(valid)
+        oversized_id["id"] = 9223372036854775808
+        self.assertIsNone(BodyMonitorIntegration._normalize_event(oversized_id))
 
     async def test_stream_rebuild_reinitializes_without_delivering_old_events(self) -> None:
         host = _Host()
