@@ -17298,7 +17298,6 @@ function proactiveModelJudgeMeta(item) {
 }
 
 function renderProactiveCandidates() {
-  renderBodyMonitorIntegration();
   const data = state.overview?.proactive_candidates || {};
   const users = data.users || [];
   const selectedFilter = validProactiveCandidateFilter(data, state.proactiveCandidateFilter);
@@ -17443,7 +17442,7 @@ function renderBodyMonitorIntegration() {
         settings: { enable_body_monitor_integration: nextEnabled },
       });
       applyOverviewData(result);
-      renderProactiveCandidates();
+      renderFeatureSwitches();
       showToast(result?.config_saved === false
         ? "联动已应用，但配置持久化失败"
         : nextEnabled ? "Body Monitor 联动已开启" : "Body Monitor 联动已关闭",
@@ -20261,6 +20260,12 @@ function renderFeatureSwitches() {
   const intensity = state.overview?.proactive_intensity || {};
   const intensitySearchText = "主动强度预设 主动触达 proactive_intensity_preset 私聊主动 群聊唤醒 群主动插话";
   const intensityVisible = !filter || intensitySearchText.toLowerCase().includes(filter);
+  const bodyMonitorSearchText = "健康事件联动 身体状态联动 body monitor enable_body_monitor_integration";
+  const bodyMonitorVisible = !filter || bodyMonitorSearchText.toLowerCase().includes(filter);
+  const bodyMonitorEnabled = toBool(
+    state.overview?.body_monitor_integration?.enabled
+      ?? overviewSettings.enable_body_monitor_integration,
+  );
   const visibleDraftKeys = visibleTopLevelFeatureKeys(state.featureDraft || {});
   const total = visibleDraftKeys.length;
   const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
@@ -20315,11 +20320,17 @@ function renderFeatureSwitches() {
       return featureSearchText(key).includes(filter);
     });
     const hasIntensityCard = group.title === "通用能力" && intensityVisible;
-    if (!visibleKeys.length && !hasIntensityCard) return "";
-    const groupEnabled = visibleKeys.filter((key) => toBool(state.featureDraft[key])).length;
-    const groupMeta = visibleKeys.length ? `${groupEnabled} / ${visibleKeys.length}` : "设置项";
+    const hasBodyMonitorCard = group.title === "长线主动" && bodyMonitorVisible;
+    if (!visibleKeys.length && !hasIntensityCard && !hasBodyMonitorCard) return "";
+    const visibleSettingCount = visibleKeys.length + (hasBodyMonitorCard ? 1 : 0);
+    const groupEnabled = visibleKeys.filter((key) => toBool(state.featureDraft[key])).length
+      + (hasBodyMonitorCard && bodyMonitorEnabled ? 1 : 0);
+    const groupMeta = visibleSettingCount ? `${groupEnabled} / ${visibleSettingCount}` : "设置项";
     const prefix = hasIntensityCard
       ? proactiveIntensityCommonSettingCard(overviewSettings, intensity)
+      : "";
+    const suffix = hasBodyMonitorCard
+      ? '<div id="bodyMonitorIntegrationCard" class="body-monitor-integration"></div>'
       : "";
     return `
       <section class="feature-switch-group">
@@ -20332,11 +20343,13 @@ function renderFeatureSwitches() {
         <div class="feature-switch-list">
           ${prefix}
           ${visibleKeys.map((key) => featureSwitchItem(key)).join("")}
+          ${suffix}
         </div>
       </section>
     `;
   }).filter(Boolean).join("");
   $("#featureFlags").innerHTML = board || `<div class="empty small">没有匹配的功能开关</div>`;
+  renderBodyMonitorIntegration();
   document.querySelectorAll("[data-feature-key]").forEach((input) => {
     input.addEventListener("change", () => {
       state.featureDraft[input.dataset.featureKey] = input.checked;
