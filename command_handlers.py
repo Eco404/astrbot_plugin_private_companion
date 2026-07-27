@@ -35,6 +35,118 @@ _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 class CommandHandlersMixin:
     """Implementation bodies for command handlers registered in main.py."""
 
+    async def _qweather_location_command_text(self, action: str, value: Any = "") -> str:
+        """View or persist the shared QWeather city used by weather and alerts."""
+
+        configured = _single_line(getattr(self, "weather_location", ""), 180).replace("，", ",").strip()
+        if action in {"查看城市", "当前城市", "天气城市"}:
+            snapshot_getter = getattr(self, "_qweather_location_snapshot", None)
+            snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+            label = _single_line(snapshot.get("label"), 120) if isinstance(snapshot, dict) else ""
+            location_id = _single_line(snapshot.get("location_id"), 40) if isinstance(snapshot, dict) else ""
+            lines = [f"当前绑定城市：{configured or '未绑定'}"]
+            if label:
+                lines.append(f"和风匹配地点：{label}")
+            if location_id:
+                lines.append(f"LocationID：{location_id}")
+            lines.append("绑定方式：陪伴 绑定城市 <城市|区县,城市|LocationID>")
+            return "\n".join(lines)
+
+        if action in {"解绑城市", "清除城市"}:
+            if not configured:
+                return "当前没有绑定城市。\n绑定方式：陪伴 绑定城市 <城市|区县,城市|LocationID>"
+            saved = await self._persist_qweather_location_setting("")
+            if not saved:
+                return "解绑城市失败：配置未能保存，原城市仍然保留。"
+            return "已清除绑定城市。若仍配置了天气经纬度，天气功能会继续使用经纬度作为兜底。"
+
+        query = _single_line(value, 180).replace("，", ",").strip()
+        if not query:
+            return (
+                "请这样使用：陪伴 绑定城市 <城市|区县,城市|LocationID>\n"
+                "同名区县建议写成“朝阳区,北京”。"
+            )
+        if str(getattr(self, "weather_source", "qweather") or "qweather").strip().lower() != "qweather":
+            return "当前天气来源不是和风天气。请先在功能开关的天气设置中选择和风天气，再绑定城市。"
+        host_getter = getattr(self, "_qweather_alert_api_host", None)
+        token_getter = getattr(self, "_qweather_alert_token", None)
+        if not callable(host_getter) or not host_getter():
+            return "和风天气 API Host 尚未配置，无法查询城市。"
+        if not callable(token_getter) or not token_getter():
+            return "和风天气 API 凭据尚未配置，无法查询城市。"
+
+        command_lock = getattr(self, "_qweather_location_command_lock", None)
+        if not isinstance(command_lock, asyncio.Lock):
+            command_lock = asyncio.Lock()
+            self._qweather_location_command_lock = command_lock
+        async with command_lock:
+            lookup = getattr(self, "_fetch_qweather_location_lookup", None)
+            resolved = await lookup(query) if callable(lookup) else {}
+            if (
+                not isinstance(resolved, dict)
+                or resolved.get("lat") is None
+                or resolved.get("lon") is None
+            ):
+                return (
+                    f"没有从和风天气匹配到“{query}”，原城市未修改。\n"
+                    "请尝试填写“区县,城市”或 LocationID，并检查 Host 与 API 凭据。"
+                )
+            if not await self._persist_qweather_location_setting(query, resolved=resolved):
+                return "绑定城市失败：配置未能保存，原城市仍然保留。"
+
+        label = _single_line(resolved.get("label"), 120) or query
+        location_id = _single_line(resolved.get("location_id"), 40)
+        result = f"已绑定城市：{label}"
+        if location_id:
+            result += f"\nLocationID：{location_id}"
+        return result
+
+    async def _persist_qweather_location_setting(
+        self,
+        value: str,
+        *,
+        resolved: dict[str, Any] | None = None,
+    ) -> bool:
+        config = getattr(self, "config", None)
+        if config is None:
+            return False
+        previous_runtime = str(getattr(self, "weather_location", "") or "")
+        previous_config = _flat_get(config, "weather_location", previous_runtime)
+        self.weather_location = value
+        if not _set_into_config(config, "weather_location", value):
+            self.weather_location = previous_runtime
+            return False
+        if not await self._save_config_if_possible():
+            self.weather_location = previous_runtime
+            _set_into_config(config, "weather_location", previous_config)
+            return False
+
+        data = getattr(self, "data", None)
+
+        def invalidate() -> None:
+            if not isinstance(data, dict):
+                return
+            data["qweather_location"] = {}
+            data.pop("daily_weather", None)
+            data["weather_alerts"] = {}
+            data["weather_alert_awareness"] = {}
+            saver = getattr(self, "_save_data_sync", None)
+            if callable(saver):
+                saver()
+
+        data_lock = getattr(self, "_data_lock", None)
+        if isinstance(data_lock, asyncio.Lock):
+            async with data_lock:
+                invalidate()
+        else:
+            invalidate()
+
+        if value and isinstance(resolved, dict):
+            store = getattr(self, "_store_qweather_location", None)
+            if callable(store):
+                await store(resolved)
+        return True
+
     def _feature_on_text(self, value: Any) -> str:
         return "开启" if bool(value) else "关闭"
 
@@ -3591,9 +3703,29 @@ class CommandHandlersMixin:
 
     async def _set_photo_reference_config_path(self, path: str) -> bool:
         clean = _path_text(path, 1000)
+        if getattr(self, "photo_reference_catalog", None) is None:
+            previous = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+            self.photo_persona_reference_image_path = clean
+            try:
+                saved = _set_into_config(self.config, "photo_persona_reference_image_path", clean)
+                if saved and not await self._save_config_if_possible():
+                    self.photo_persona_reference_image_path = previous
+                    _set_into_config(self.config, "photo_persona_reference_image_path", previous)
+                    return False
+                return bool(saved)
+            except Exception:
+                self.photo_persona_reference_image_path = previous
+                try:
+                    _set_into_config(self.config, "photo_persona_reference_image_path", previous)
+                except Exception:
+                    pass
+                return False
         try:
             catalog = tuple(getattr(self, "photo_reference_catalog", ()) or ())
-            persona = next((item for item in catalog if item.kind == "persona"), None)
+            persona = next(
+                (item for item in catalog if isinstance(item, PhotoReference) and item.kind == "persona"),
+                None,
+            )
             if clean and persona is not None:
                 updated = tuple(replace(item, source=clean) if item.id == persona.id else item for item in catalog)
             elif clean:
@@ -3648,6 +3780,58 @@ class CommandHandlersMixin:
             except Exception:
                 pass
             logger.warning("[PrivateCompanion] 保存规范参考图目录失败: %s", _single_line(exc, 180))
+            return False
+
+    async def _set_photo_reference_library_config(self, items: list[Any]) -> bool:
+        if getattr(self, "photo_reference_catalog", None) is None:
+            normalized: list[Any] = []
+            seen_sources: set[str] = set()
+            for raw_item in items[:24]:
+                if isinstance(raw_item, dict):
+                    source = _path_text(raw_item.get("source") or raw_item.get("path") or raw_item.get("url"), 1000)
+                    if not source or source in seen_sources:
+                        continue
+                    seen_sources.add(source)
+                    normalized.append(dict(raw_item))
+                    continue
+                text = str(raw_item or "").strip()
+                source = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=1)[0].strip() if text else ""
+                if text and source not in seen_sources:
+                    seen_sources.add(source)
+                    normalized.append(text[:3000])
+            previous = list(getattr(self, "photo_reference_library", []) or [])
+            self.photo_reference_library = normalized
+            try:
+                saved = _set_into_config(self.config, "photo_reference_library", normalized)
+                if saved and not await self._save_config_if_possible():
+                    self.photo_reference_library = previous
+                    _set_into_config(self.config, "photo_reference_library", previous)
+                    return False
+                return bool(saved)
+            except Exception:
+                self.photo_reference_library = previous
+                try:
+                    _set_into_config(self.config, "photo_reference_library", previous)
+                except Exception:
+                    pass
+                return False
+        try:
+            preset_names = self._photo_generation_scene_presets().keys()
+            loaded = load_catalog(
+                [],
+                catalog_version=0,
+                legacy_library=items,
+                preset_names=preset_names,
+            )
+            catalog = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+            kept = tuple(
+                item
+                for item in catalog
+                if isinstance(item, PhotoReference) and item.kind != "library"
+            )
+            return await self._set_photo_reference_catalog_config((*kept, *loaded.references))
+        except (CatalogValidationError, TypeError, ValueError) as exc:
+            logger.warning("[PrivateCompanion] 保存兼容参考图库失败: %s", _single_line(exc, 160))
             return False
 
     async def _photo_reference_library_command_payload(
@@ -4088,6 +4272,50 @@ class CommandHandlersMixin:
         user["last_command_photo_path"] = _path_text(image_path, 1000)
         user["last_command_photo_at"] = _now_ts()
 
+    @staticmethod
+    def _natural_photo_prompt_has_explicit_people_request(prompt: Any) -> bool:
+        text = _single_line(prompt, 1200).lower()
+        if not text:
+            return False
+        if any(
+            marker in text
+            for marker in (
+                "人物",
+                "角色",
+                "女孩",
+                "少女",
+                "女人",
+                "男人",
+                "男生",
+                "女生",
+                "男孩",
+                "小孩",
+                "人群",
+                "路人",
+                "游客",
+                "行人",
+                "背影",
+            )
+        ):
+            return True
+        return bool(
+            re.search(
+                r"\b(?:person|people|girl|woman|boy|man|human|character|crowd|pedestrian|tourist)s?\b",
+                text,
+                flags=re.I,
+            )
+        )
+
+    @staticmethod
+    def _natural_photo_prompt_has_explicit_back_view_request(prompt: Any) -> bool:
+        text = _single_line(prompt, 1200).lower()
+        if not text:
+            return False
+        return bool(
+            any(marker in text for marker in ("背影", "背对镜头", "背对相机", "从背后", "身后视角"))
+            or re.search(r"\b(?:back[-\s]?view|from\s+behind|facing\s+away)\b", text, flags=re.I)
+        )
+
     def _build_natural_language_photo_prompt(
         self,
         *,
@@ -4108,6 +4336,13 @@ class CommandHandlersMixin:
             or ""
         ).strip()
         visual_memory = self._visual_photo_memory_context(memory_context)
+        explicit_people_request = self._natural_photo_prompt_has_explicit_people_request(prompt)
+        explicit_back_view_request = self._natural_photo_prompt_has_explicit_back_view_request(prompt)
+        if kind not in {"edit", "selfie"} and style_name == "二次元" and not explicit_people_request:
+            style_prompt = (
+                "2D anime illustration style, detailed environment and object art, "
+                "cel-shaded rendering, soft colors, slice-of-life atmosphere"
+            )
         if kind == "edit" and has_reference:
             user_request = _single_line(prompt, 420) or "edit the reference image"
             positive = [
@@ -4136,27 +4371,37 @@ class CommandHandlersMixin:
                 if has_reference
                 else "preserve character identity and stable appearance from available visual continuity"
             )
-            positive = [
-                "single character selfie",
-                "solo",
-                "visible face",
-                "complete head and hair",
-                "clear eyes",
-                "natural expression",
-                "upper body or outfit visible",
-                "natural phone snapshot",
-                "centered composition",
-                "soft natural light",
-                style_prompt,
-            ]
+            if explicit_back_view_request:
+                positive = [
+                    "single character environmental portrait",
+                    "solo",
+                    "the requested back view is intentional",
+                    "complete head and hair",
+                    "recognizable hairstyle silhouette and stable character appearance",
+                    "outfit and surrounding scene visible",
+                    "natural environmental composition",
+                    "soft natural light",
+                    style_prompt,
+                ]
+            else:
+                positive = [
+                    "single character selfie",
+                    "solo",
+                    "visible face",
+                    "complete head and hair",
+                    "clear eyes",
+                    "natural expression",
+                    "upper body or outfit visible",
+                    "natural phone snapshot",
+                    "centered composition",
+                    "soft natural light",
+                    style_prompt,
+                ]
             negative = [
                 "cropped head",
                 "headless",
-                "faceless",
-                "face hidden",
                 "body only",
                 "outfit only",
-                "back view",
                 "bad hands",
                 "extra fingers",
                 "text",
@@ -4165,6 +4410,8 @@ class CommandHandlersMixin:
                 "other people",
                 "nsfw",
             ]
+            if not explicit_back_view_request:
+                negative.extend(["faceless", "face hidden", "back view"])
         else:
             user_request = _single_line(prompt, 520)
             positive = [
@@ -4185,6 +4432,18 @@ class CommandHandlersMixin:
                 "logo",
                 "nsfw",
             ]
+            if not explicit_people_request:
+                positive.append(
+                    "show only the requested scene or object; do not add any unrequested person, character, or visible photographer"
+                )
+                negative.extend(
+                    [
+                        "unrequested person",
+                        "unrequested character",
+                        "visible photographer",
+                        "back-view person",
+                    ]
+                )
         sections = [
             PhotoPromptSection(
                 name="user_request",

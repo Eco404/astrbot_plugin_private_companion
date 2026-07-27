@@ -25,7 +25,14 @@ from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from quart import request, send_file
 
-from .constants import DEFAULT_DAILY_PLAN_ITEMS, PAGE_FONT_NAMES, PAGE_THEME_NAMES, _REASON_TEXT
+from .constants import (
+    DEFAULT_DAILY_PLAN_ITEMS,
+    PAGE_FONT_NAMES,
+    PAGE_THEME_NAMES,
+    WORLDBOOK_IMPORTANT_MEMORY_CAPACITY,
+    WORLDBOOK_PENDING_OBSERVATION_CAPACITY,
+    _REASON_TEXT,
+)
 from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _normalize_timezone_name, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
@@ -51,6 +58,19 @@ PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 IMAGE_CACHE_THUMBNAIL_MAX_EDGE = 160
 IMAGE_CACHE_THUMBNAIL_QUALITY = 78
 PHOTO_REFERENCE_PREVIEW_MAX_BYTES = 20 * 1024 * 1024
+TTS_PROVIDER_SYSTEM_KEYS = {"id", "provider", "type", "provider_type", "enable", "hint", "provider_source_id"}
+TTS_PROVIDER_SECRET_KEYS = {
+    "api_key",
+    "azure_tts_subscription_key",
+    "gemini_tts_api_key",
+    "proxy",
+}
+FISH_AUDIO_MODEL_OPTIONS = [
+    {"value": "s2.1-pro-free", "label": "S2.1 Pro Free"},
+    {"value": "s2.1-pro", "label": "S2.1 Pro"},
+    {"value": "s2-pro", "label": "S2 Pro"},
+    {"value": "s1", "label": "S1 旧版"},
+]
 
 try:
     from PIL import Image as PILImage
@@ -135,6 +155,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
+
+    def _photo_reference_preset_names(self) -> tuple[str, ...]:
+        preset_provider = getattr(self.plugin, "_photo_generation_scene_presets", None)
+        if not callable(preset_provider):
+            return ()
+        try:
+            presets = preset_provider()
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 读取生图场景预设失败，参考图目录将跳过预设关联校验: %s",
+                self._single_line(exc, 160),
+            )
+            return ()
+        return tuple(str(name) for name in presets.keys()) if isinstance(presets, dict) else ()
 
     def _troubleshooting_proactive_wakeup_tasks(self) -> dict[str, asyncio.Task[Any]]:
         tasks = getattr(self.plugin, "_troubleshooting_proactive_wakeup_tasks", None)
@@ -309,6 +343,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/preset/apply", self.apply_preset, ["POST"], "Private Companion Page apply preset"),
             ("/providers/available", self.list_available_providers, ["GET"], "Private Companion Page available providers"),
             ("/provider/test", self.test_provider, ["POST"], "Private Companion Page test provider"),
+            ("/tts/providers", self.list_tts_provider_configs, ["GET"], "Private Companion Page TTS provider configs"),
+            ("/tts/provider/create", self.create_tts_provider_config, ["POST"], "Private Companion Page create TTS provider"),
+            ("/tts/provider/clone", self.clone_tts_provider_config, ["POST"], "Private Companion Page clone TTS provider"),
+            ("/tts/provider/update", self.update_tts_provider_config, ["POST"], "Private Companion Page update TTS provider"),
+            ("/tts/provider/test", self.test_tts_provider_config, ["POST"], "Private Companion Page test TTS provider"),
         ]
         for path, handler, methods, desc in routes:
             register(f"{PAGE_API_PREFIX}{path}", handler, methods, desc)
@@ -830,6 +869,71 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         atrelay_count = len(atrelay_cache) if isinstance(atrelay_cache, dict) else 0
         weather = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
         weather_age = self.plugin._format_timestamp_elapsed(weather.get("fetched_ts", 0)) if weather else ""
+        qweather_location = data.get("qweather_location") if isinstance(data.get("qweather_location"), dict) else {}
+        location_label = ""
+        weather_key_getter = getattr(self.plugin, "_weather_context_config_key", None)
+        try:
+            current_weather_key = self._single_line(weather_key_getter(), 96) if callable(weather_key_getter) else ""
+        except Exception:
+            current_weather_key = ""
+        if not current_weather_key or self._single_line(weather.get("config_key"), 96) == current_weather_key:
+            location_label = self._single_line(weather.get("location_label"), 120)
+        location_key_getter = getattr(self.plugin, "_qweather_location_cache_key", None)
+        has_location_key_getter = callable(location_key_getter)
+        try:
+            current_location_key = self._single_line(location_key_getter(), 96) if has_location_key_getter else ""
+        except Exception:
+            current_location_key = ""
+        if (
+            not location_label
+            and (
+                not has_location_key_getter
+                or (
+                    current_location_key
+                    and self._single_line(qweather_location.get("config_key"), 96) == current_location_key
+                )
+            )
+        ):
+            weather_source = str(getattr(self.plugin, "weather_source", "qweather") or "qweather").strip().lower()
+            qweather_location_allowed = weather_source == "qweather" or bool(
+                getattr(self.plugin, "enable_weather_alerts", False)
+            )
+            if qweather_location_allowed:
+                location_label = self._single_line(qweather_location.get("label"), 120)
+        weather_alert_cache = data.get("weather_alerts") if isinstance(data.get("weather_alerts"), dict) else {}
+        raw_alerts = weather_alert_cache.get("alerts") if isinstance(weather_alert_cache.get("alerts"), list) else []
+        alert_cache_matches = True
+        alert_config_getter = getattr(self.plugin, "_weather_alert_config_key", None)
+        if callable(alert_config_getter):
+            try:
+                current_alert_config = self._single_line(alert_config_getter(), 96)
+            except Exception:
+                current_alert_config = ""
+            if not current_alert_config or self._single_line(weather_alert_cache.get("config_key"), 96) != current_alert_config:
+                alert_cache_matches = False
+                raw_alerts = []
+        alert_filter = getattr(self.plugin, "_filter_weather_alerts", None)
+        try:
+            visible_alerts = alert_filter(raw_alerts, getattr(self.plugin, "weather_alert_min_severity", "blue")) if callable(alert_filter) else raw_alerts
+        except Exception:
+            visible_alerts = raw_alerts
+        alerts_enabled = bool(getattr(self.plugin, "enable_weather_context", True)) and bool(getattr(self.plugin, "enable_weather_alerts", False))
+        if not alerts_enabled:
+            visible_alerts = []
+        alert_rank = getattr(self.plugin, "_qweather_alert_rank", None)
+        if callable(alert_rank):
+            try:
+                visible_alerts = sorted(
+                    [item for item in visible_alerts if isinstance(item, dict)],
+                    key=lambda item: alert_rank(item.get("color_code") or item.get("color") or item.get("severity")),
+                    reverse=True,
+                )
+            except Exception:
+                visible_alerts = [item for item in visible_alerts if isinstance(item, dict)]
+        weather_alert_age = self.plugin._format_timestamp_elapsed(weather_alert_cache.get("fetched_ts", 0)) if weather_alert_cache else ""
+        top_alert = visible_alerts[0] if visible_alerts else {}
+        alert_attributions = weather_alert_cache.get("attributions") if alert_cache_matches and isinstance(weather_alert_cache.get("attributions"), list) else []
+        alert_attributions = [self._single_line(item, 320) for item in alert_attributions if self._single_line(item, 320)][:4]
         provider_runtime: dict[str, Any] = {}
         runtime_getter = getattr(self.plugin, "_private_image_visual_provider_runtime_summary", None)
         if callable(runtime_getter):
@@ -856,6 +960,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "age": weather_age,
                 "source": self._single_line(weather.get("source"), 40),
                 "summary": self._single_line(weather.get("prompt"), 120),
+                "location_label": location_label,
+                "alerts_enabled": alerts_enabled,
+                "alerts_cached": bool(weather_alert_cache) and alert_cache_matches,
+                "alerts_count": len(visible_alerts),
+                "alerts_highest_level": self._single_line(top_alert.get("color") or top_alert.get("severity"), 24),
+                "alerts_age": weather_alert_age,
+                "alerts_stale": bool(weather_alert_cache.get("stale")),
+                "alerts_error": self._single_line(weather_alert_cache.get("error"), 100),
+                "alerts_attributions": alert_attributions,
             },
         }
 
@@ -1100,11 +1213,52 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return hashlib.sha256(payload).hexdigest()[:24]
 
     def _photo_reference_page_items(self) -> list[dict[str, Any]]:
-        entries = [
-            project_reference_candidate(reference)
-            for reference in (getattr(self.plugin, "photo_reference_catalog", ()) or ())
-            if isinstance(reference, PhotoReference) and reference.kind in {"persona", "library"}
-        ]
+        catalog = getattr(self.plugin, "photo_reference_catalog", None)
+        if catalog is not None:
+            entries = [
+                project_reference_candidate(reference)
+                for reference in (catalog or ())
+                if isinstance(reference, PhotoReference) and reference.kind in {"persona", "library"}
+            ]
+        else:
+            entries: list[dict[str, Any]] = []
+            persona_source = _path_text(getattr(self.plugin, "photo_persona_reference_image_path", ""), 1000)
+            if persona_source:
+                entries.append({
+                    "id": self._photo_reference_page_id("persona", persona_source),
+                    "kind": "persona",
+                    "source": persona_source,
+                    "note": "默认人设参考图",
+                    "reference_roles": ["identity"],
+                    "outfit_category": "",
+                    "outfit_lock_default": False,
+                    "scene_categories": [],
+                    "preferred_preset": "",
+                    "metadata_source": "legacy",
+                })
+            getter = getattr(self.plugin, "_photo_reference_library_entries", None)
+            try:
+                parsed = getter() if callable(getter) else []
+            except Exception:
+                parsed = []
+            for item in parsed if isinstance(parsed, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                source = _path_text(item.get("source") or item.get("path") or item.get("url"), 1000)
+                if not source:
+                    continue
+                entries.append({
+                    "id": self._photo_reference_page_id("library", source),
+                    "kind": "library",
+                    "source": source,
+                    "note": self._single_line(item.get("note") or item.get("description"), 500),
+                    "reference_roles": list(item.get("reference_roles") or ["identity"]),
+                    "outfit_category": self._single_line(item.get("outfit_category"), 40),
+                    "outfit_lock_default": bool(item.get("outfit_lock_default")),
+                    "scene_categories": list(item.get("scene_categories") or []),
+                    "preferred_preset": self._single_line(item.get("preferred_preset"), 60),
+                    "metadata_source": self._single_line(item.get("metadata_source"), 30) or "legacy",
+                })
 
         resolver = getattr(self.plugin, "_photo_reference_local_path", None)
         result: list[dict[str, Any]] = []
@@ -1185,10 +1339,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         {"value": "sleepwear", "label": "睡衣"},
                         {"value": "swimwear", "label": "泳装"},
                         {"value": "sportswear", "label": "运动服"},
-                        {"value": "formalwear", "label": "正装/礼服"},
+                        {"value": "formalwear", "label": "礼服/正装"},
                         {"value": "homewear", "label": "居家服"},
                         {"value": "daily_outfit", "label": "日常穿搭"},
-                        {"value": "custom_outfit", "label": "自定义穿搭"},
                     ],
                     "scene_categories": [
                         {"value": "home", "label": "居家"},
@@ -1198,7 +1351,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         {"value": "outdoor", "label": "户外"},
                         {"value": "formal_event", "label": "正式场合"},
                         {"value": "sport", "label": "运动"},
-                        {"value": "beach", "label": "海边"},
+                        {"value": "beach", "label": "海边/泳池"},
                     ],
                     "presets": presets,
                 },
@@ -6289,7 +6442,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                             accepted = item
                             continue
                         kept.append(item)
-                    profile["pending_observations"] = kept[:24]
+                    profile["pending_observations"] = kept[
+                        :WORLDBOOK_PENDING_OBSERVATION_CAPACITY
+                    ]
                     if accepted and payload.get("accept_pending_observation_id"):
                         memories = self._normalize_important_memories(profile.get("important_memories"))
                         memories.insert(
@@ -6298,9 +6453,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                                 "title": self._single_line(accepted.get("title"), 60) or "群聊观察",
                                 "content": str(accepted.get("content") or accepted.get("evidence") or "").strip()[:500],
                                 "weight": self._clamp_int(accepted.get("weight"), 35, 0, 100),
-                                "privacy": "internal",
-                                "source": self._single_line(accepted.get("source"), 40) or "group_observation",
-                                "enabled": True,
+                                 "privacy": "internal",
+                                 "source": self._single_line(accepted.get("source"), 40) or "group_observation",
+                                 "import_batch_id": self._single_line(accepted.get("import_batch_id"), 120),
+                                 "source_observation_id": self._single_line(accepted.get("id"), 120),
+                                 "enabled": True,
                                 "updated_at": time.time(),
                             },
                         )
@@ -7837,6 +7994,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 live_items = live_plan.get("items") if isinstance(live_plan, dict) else None
                 live_index = self._int(segment.get("index"), -1, -1)
                 live_item = live_items[live_index] if isinstance(live_items, list) and 0 <= live_index < len(live_items) and isinstance(live_items[live_index], dict) else None
+                self.plugin._sync_detail_enhancement_day_locked(plan.get("date"))
                 enhanced = self.plugin.data.setdefault("detail_enhanced_segments", {})
                 if not isinstance(enhanced, dict):
                     enhanced = {}
@@ -9650,7 +9808,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def list_available_providers(self) -> dict[str, Any]:
         try:
             items = self._available_provider_items()
-            return self._ok({"items": items, "total": len(items)})
+            tts_items = self._available_tts_provider_items()
+            return self._ok(
+                {
+                    "items": items,
+                    "total": len(items),
+                    "tts_items": tts_items,
+                    "tts_total": len(tts_items),
+                }
+            )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取 Provider 列表失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -11745,6 +11911,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_quote_private_proactive",
             "enable_photo_text_action",
             "enable_screen_glance_action",
+            "enable_goodnight_screen_check",
             "enable_poke_action",
             "enable_voice_action",
             "enable_photo_reference_image",
@@ -11812,6 +11979,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_news_boredom_read",
             "enable_ai_daily_watch",
             "enable_external_event_self_link",
+            "enable_body_monitor_integration",
             "enable_web_exploration",
             "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
@@ -11824,6 +11992,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_goodnight_screen_check",
             "enable_screen_glance_action",
             "enable_poke_action",
             "enable_voice_action",
@@ -12873,6 +13042,648 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         items.sort(key=lambda item: (not item["is_default"], item["name"].lower(), item["id"].lower()))
         return items
 
+    def _available_tts_provider_items(self) -> list[dict[str, Any]]:
+        context = getattr(self.plugin, "context", None)
+        get_all = getattr(context, "get_all_tts_providers", None)
+        try:
+            providers = list(get_all() or []) if callable(get_all) else []
+        except Exception:
+            providers = []
+        if not providers:
+            manager = getattr(context, "provider_manager", None)
+            providers = list(getattr(manager, "tts_provider_insts", None) or [])
+
+        using_id = ""
+        get_using = getattr(context, "get_using_tts_provider", None)
+        if callable(get_using):
+            try:
+                using_id = self._provider_id(get_using())
+            except Exception:
+                using_id = ""
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for provider in providers:
+            provider_id = self._provider_id(provider)
+            if not provider_id or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            items.append(
+                {
+                    "id": provider_id,
+                    "name": self._provider_name(provider, provider_id),
+                    "type": self._provider_type(provider),
+                    "model": self._provider_model(provider),
+                    "is_default": provider_id == using_id,
+                }
+            )
+        items.sort(key=lambda item: (not item["is_default"], item["name"].lower(), item["id"].lower()))
+        return items
+
+    def _tts_provider_manager(self) -> Any:
+        context = getattr(self.plugin, "context", None)
+        manager = getattr(context, "provider_manager", None)
+        if manager is None:
+            raise RuntimeError("当前 AstrBot 未提供 ProviderManager")
+        return manager
+
+    @staticmethod
+    def _is_tts_provider_config(config: Any) -> bool:
+        if not isinstance(config, dict):
+            return False
+        provider_type = str(config.get("provider_type") or "").strip().lower()
+        return provider_type in {"text_to_speech", "tts"}
+
+    @staticmethod
+    def _tts_provider_field_type(value: Any, metadata: dict[str, Any]) -> str:
+        field_type = str(metadata.get("type") or "").strip().lower()
+        if field_type:
+            return field_type
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, int):
+            return "int"
+        if isinstance(value, float):
+            return "float"
+        if isinstance(value, dict):
+            return "object"
+        if isinstance(value, list):
+            return "list"
+        return "string"
+
+    @staticmethod
+    def _tts_provider_field_group(key: str) -> str:
+        lowered = str(key or "").lower()
+        if lowered in {"api_base", "api_key", "proxy", "timeout", "appid", "minimax-group-id"}:
+            return "connection"
+        if any(
+            marker in lowered
+            for marker in (
+                "model",
+                "voice",
+                "character",
+                "reference",
+                "emotion",
+                "language",
+                "text_lang",
+                "prompt_text_lang",
+                "style",
+                "role",
+                "format",
+                "dialect",
+                "speed",
+                "pitch",
+                "volume",
+                "rate",
+            )
+        ):
+            return "voice"
+        return "advanced"
+
+    @staticmethod
+    def _tts_provider_secret_field(key: str) -> bool:
+        lowered = str(key or "").strip().lower()
+        return lowered in TTS_PROVIDER_SECRET_KEYS or any(
+            marker in lowered
+            for marker in (
+                "api-key",
+                "api_key",
+                "api_token",
+                "access_token",
+                "access_key",
+                "secret_key",
+                "subscription_key",
+                "password",
+            )
+        ) or lowered in {
+            "key",
+            "token",
+            "secret",
+        }
+
+    @staticmethod
+    def _tts_provider_fallback_label(key: str) -> str:
+        labels = {
+            "api_key": "API Key",
+            "api_base": "API 地址",
+            "proxy": "代理地址",
+            "timeout": "超时时间",
+            "model": "模型",
+            "appid": "App ID",
+            "openai-tts-voice": "音色",
+            "mimo-tts-voice": "音色",
+            "mimo-tts-format": "输出格式",
+            "mimo-tts-style-prompt": "风格提示词",
+            "mimo-tts-dialect": "方言",
+            "mimo-tts-seed-text": "种子文本",
+            "edge-tts-voice": "音色",
+            "rate": "语速",
+            "volume": "音量",
+            "pitch": "音调",
+            "fishaudio-tts-character": "角色名称",
+            "fishaudio-tts-reference-id": "参考模型 ID",
+            "dashscope_tts_voice": "音色",
+            "azure_tts_subscription_key": "订阅密钥",
+            "azure_tts_region": "服务区域",
+            "volcengine_cluster": "集群",
+            "volcengine_voice_type": "音色 ID",
+            "gemini_tts_api_key": "API Key",
+            "gemini_tts_api_base": "API 地址",
+            "gemini_tts_timeout": "超时时间",
+            "gemini_tts_model": "模型",
+            "gemini_tts_prefix": "朗读前缀",
+            "gemini_tts_voice_name": "音色",
+            "elevenlabs-tts-voice-id": "Voice ID",
+            "elevenlabs-tts-output-format": "输出格式",
+            "elevenlabs-tts-stability": "稳定度",
+            "elevenlabs-tts-similarity-boost": "相似度增强",
+            "elevenlabs-tts-style": "风格强度",
+            "elevenlabs-tts-use-speaker-boost": "启用说话人增强",
+        }
+        if key in labels:
+            return labels[key]
+        return str(key or "").replace("_", " ").replace("-", " ").strip()
+
+    @staticmethod
+    def _tts_provider_fallback_hint(key: str) -> str:
+        hints = {
+            "api_key": "密钥不会在页面回显；留空保存会保留现有值。",
+            "api_base": "服务接口地址，使用官方服务时通常保持默认。",
+            "proxy": "可选代理地址，支持 HTTP、HTTPS 或 SOCKS5；留空保存会保留现有值。",
+            "timeout": "单次语音合成请求的超时时间。",
+        }
+        return hints.get(str(key or ""), "")
+
+    @staticmethod
+    def _tts_provider_metadata_unresolved(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        return (
+            lowered.startswith("provider_group.")
+            or lowered.startswith("config.")
+            or lowered.endswith(".description")
+            or lowered.endswith(".hint")
+        )
+
+    def _tts_provider_schema_bundle(self) -> dict[str, Any]:
+        config_templates: dict[str, Any] = {}
+        field_metadata: dict[str, Any] = {}
+        try:
+            from astrbot.core.config.default import CONFIG_METADATA_2
+
+            provider_metadata = (
+                CONFIG_METADATA_2.get("provider_group", {})
+                .get("metadata", {})
+                .get("provider", {})
+            )
+            config_templates = deepcopy(provider_metadata.get("config_template", {}) or {})
+            field_metadata = deepcopy(provider_metadata.get("items", {}) or {})
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 读取 AstrBot TTS Provider 模板失败，将使用运行态字段: %s",
+                self._single_line(exc, 160),
+            )
+
+        templates: list[dict[str, Any]] = []
+        by_type: dict[str, dict[str, Any]] = {}
+        for display_name, source in config_templates.items():
+            if not self._is_tts_provider_config(source):
+                continue
+            defaults = deepcopy(source)
+            provider_type = self._single_line(defaults.get("type"), 80)
+            if not provider_type:
+                continue
+            if provider_type == "fishaudio_tts_api":
+                defaults.setdefault("model", "s2.1-pro-free")
+
+            fields: list[dict[str, Any]] = []
+            for key, default in defaults.items():
+                if key in TTS_PROVIDER_SYSTEM_KEYS:
+                    continue
+                metadata = deepcopy(field_metadata.get(key, {}) or {})
+                if provider_type == "fishaudio_tts_api" and key == "model":
+                    metadata.update(
+                        {
+                            "type": "string",
+                            "description": "Fish Audio 模型",
+                            "hint": "S2/S2.1 使用方括号自然语言情绪控制；S1 使用旧版圆括号控制。",
+                            "options": deepcopy(FISH_AUDIO_MODEL_OPTIONS),
+                        }
+                    )
+                options = metadata.get("options") if isinstance(metadata.get("options"), list) else []
+                option_labels = metadata.get("labels") if isinstance(metadata.get("labels"), list) else []
+                normalized_options: list[dict[str, str]] = []
+                for index, option in enumerate(options):
+                    if isinstance(option, dict):
+                        value = str(option.get("value", "") or "")
+                        label = str(option.get("label", value) or value)
+                    else:
+                        value = str(option or "")
+                        label = str(option_labels[index] or value) if index < len(option_labels) else value
+                    normalized_options.append({"value": value, "label": label})
+                slider = metadata.get("slider") if isinstance(metadata.get("slider"), dict) else {}
+                fallback_label = self._tts_provider_fallback_label(key)
+                raw_label = self._single_line(metadata.get("description"), 120)
+                if (
+                    not raw_label
+                    or self._tts_provider_metadata_unresolved(raw_label)
+                    or (re.search(r"[\u4e00-\u9fff]", fallback_label) and not re.search(r"[\u4e00-\u9fff]", raw_label))
+                ):
+                    raw_label = fallback_label
+                raw_hint = self._multi_line(metadata.get("hint"), 600)
+                if self._tts_provider_metadata_unresolved(raw_hint):
+                    raw_hint = self._tts_provider_fallback_hint(key)
+                fields.append(
+                    {
+                        "key": key,
+                        "label": raw_label,
+                        "type": self._tts_provider_field_type(default, metadata),
+                        "hint": raw_hint,
+                        "options": normalized_options,
+                        "default": deepcopy(default),
+                        "secret": self._tts_provider_secret_field(key),
+                        "group": self._tts_provider_field_group(key),
+                        "min": metadata.get("min", slider.get("min")),
+                        "max": metadata.get("max", slider.get("max")),
+                        "step": metadata.get("step", slider.get("step")),
+                    }
+                )
+
+            template = {
+                "name": self._single_line(display_name, 120),
+                "type": provider_type,
+                "provider": self._single_line(defaults.get("provider"), 80),
+                "hint": self._multi_line(defaults.get("hint"), 600),
+                "default_id": self._single_line(defaults.get("id"), 80),
+                "defaults": {
+                    key: deepcopy(value)
+                    for key, value in defaults.items()
+                    if key not in {"hint"}
+                },
+                "fields": fields,
+            }
+            templates.append(template)
+            by_type[provider_type] = template
+
+        templates.sort(key=lambda item: (item["name"].lower(), item["type"]))
+        return {"templates": templates, "by_type": by_type}
+
+    def _tts_provider_runtime_configs(self) -> list[dict[str, Any]]:
+        manager = self._tts_provider_manager()
+        configs = list(getattr(manager, "providers_config", None) or [])
+        return [deepcopy(item) for item in configs if self._is_tts_provider_config(item)]
+
+    def _serialize_tts_provider_config(
+        self,
+        config: dict[str, Any],
+        schema_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        manager = self._tts_provider_manager()
+        provider_id = self._single_line(config.get("id"), 160)
+        provider_type = self._single_line(config.get("type"), 80)
+        template = schema_bundle.get("by_type", {}).get(provider_type, {})
+        merged = deepcopy(config)
+        merger = getattr(manager, "get_merged_provider_config", None)
+        if callable(merger):
+            try:
+                merged = merger(config)
+            except Exception:
+                merged = deepcopy(config)
+
+        fields = deepcopy(template.get("fields", []) or [])
+        known_keys = {str(field.get("key") or "") for field in fields}
+        for key, value in merged.items():
+            if key in TTS_PROVIDER_SYSTEM_KEYS or key in known_keys:
+                continue
+            fields.append(
+                {
+                    "key": key,
+                    "label": self._tts_provider_fallback_label(key),
+                    "type": self._tts_provider_field_type(value, {}),
+                    "hint": "",
+                    "options": [],
+                    "default": "",
+                    "secret": self._tts_provider_secret_field(key),
+                    "group": self._tts_provider_field_group(key),
+                }
+            )
+
+        values: dict[str, Any] = {}
+        secret_configured: dict[str, bool] = {}
+        for field in fields:
+            key = str(field.get("key") or "")
+            value = deepcopy(merged.get(key, field.get("default", "")))
+            if field.get("secret"):
+                secret_configured[key] = value not in (None, "", [], {})
+                value = ""
+            values[key] = value
+
+        loaded = provider_id in (getattr(manager, "inst_map", {}) or {})
+        using_id = ""
+        context = getattr(self.plugin, "context", None)
+        getter = getattr(context, "get_using_tts_provider", None)
+        if callable(getter):
+            try:
+                using_id = self._provider_id(getter())
+            except Exception:
+                using_id = ""
+        return {
+            "id": provider_id,
+            "name": self._single_line(template.get("name"), 120) or provider_id,
+            "type": provider_type,
+            "provider": self._single_line(config.get("provider"), 80),
+            "provider_source_id": self._single_line(config.get("provider_source_id"), 160),
+            "enable": bool(config.get("enable", False)),
+            "loaded": loaded,
+            "is_default": provider_id == using_id,
+            "model": self._single_line(merged.get("model") or merged.get("gemini_tts_model"), 160),
+            "values": values,
+            "secret_configured": secret_configured,
+            "fields": fields,
+        }
+
+    def _tts_provider_management_payload(self) -> dict[str, Any]:
+        schema_bundle = self._tts_provider_schema_bundle()
+        items = [
+            self._serialize_tts_provider_config(config, schema_bundle)
+            for config in self._tts_provider_runtime_configs()
+        ]
+        items.sort(key=lambda item: (not item["enable"], not item["loaded"], item["name"].lower(), item["id"].lower()))
+        return {
+            "items": items,
+            "templates": schema_bundle.get("templates", []),
+            "fish_audio_models": deepcopy(FISH_AUDIO_MODEL_OPTIONS),
+            "total": len(items),
+            "enabled": sum(1 for item in items if item.get("enable")),
+            "loaded": sum(1 for item in items if item.get("loaded")),
+        }
+
+    @staticmethod
+    def _coerce_tts_provider_field(value: Any, field: dict[str, Any]) -> Any:
+        field_type = str(field.get("type") or "string").lower()
+        if field_type == "bool":
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+        if field_type == "int":
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field.get('label') or field.get('key')} 必须是整数") from exc
+        if field_type == "float":
+            try:
+                return float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field.get('label') or field.get('key')} 必须是数字") from exc
+        if field_type in {"object", "list"}:
+            parsed = value
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return {} if field_type == "object" else []
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"{field.get('label') or field.get('key')} 不是有效 JSON") from exc
+            if field_type == "object" and not isinstance(parsed, dict):
+                raise ValueError(f"{field.get('label') or field.get('key')} 必须是 JSON 对象")
+            if field_type == "list" and not isinstance(parsed, list):
+                raise ValueError(f"{field.get('label') or field.get('key')} 必须是 JSON 数组")
+            return parsed
+        return str(value or "").strip()[:12000]
+
+    def _normalized_tts_provider_update(
+        self,
+        current: dict[str, Any],
+        incoming: dict[str, Any],
+        schema_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider_type = self._single_line(current.get("type"), 80)
+        template = schema_bundle.get("by_type", {}).get(provider_type, {})
+        fields = list(template.get("fields", []) or [])
+        field_map = {str(field.get("key") or ""): field for field in fields}
+        for key, value in current.items():
+            if key in TTS_PROVIDER_SYSTEM_KEYS or key in field_map:
+                continue
+            field_map[key] = {
+                "key": key,
+                "label": self._tts_provider_fallback_label(key),
+                "type": self._tts_provider_field_type(value, {}),
+                "secret": self._tts_provider_secret_field(key),
+            }
+
+        normalized = deepcopy(current)
+        if "enable" in incoming:
+            normalized["enable"] = self._coerce_tts_provider_field(
+                incoming.get("enable"), {"key": "enable", "label": "启用", "type": "bool"}
+            )
+        values = incoming.get("values") if isinstance(incoming.get("values"), dict) else {}
+        for key, value in values.items():
+            field = field_map.get(str(key))
+            if not field:
+                continue
+            if field.get("secret") and value in (None, ""):
+                continue
+            normalized[str(key)] = self._coerce_tts_provider_field(value, field)
+
+        if provider_type == "fishaudio_tts_api":
+            model = str(normalized.get("model") or "s2.1-pro-free").strip().lower()
+            allowed = {str(item["value"]) for item in FISH_AUDIO_MODEL_OPTIONS}
+            if model not in allowed:
+                raise ValueError("Fish Audio 模型不在支持列表中")
+            normalized["model"] = model
+        normalized["id"] = self._single_line(current.get("id"), 160)
+        normalized["type"] = provider_type
+        normalized["provider_type"] = "text_to_speech"
+        return normalized
+
+    async def list_tts_provider_configs(self) -> dict[str, Any]:
+        try:
+            return self._ok(self._tts_provider_management_payload())
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 获取 TTS Provider 配置失败: %s", exc, exc_info=True)
+            return self._error(self._single_line(exc, 240))
+
+    async def create_tts_provider_config(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        provider_type = self._single_line(payload.get("type"), 80)
+        provider_id = self._single_line(payload.get("id"), 80)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}", provider_id):
+            return self._error("Provider ID 只能包含字母、数字、点、下划线、冒号和短横线")
+        try:
+            manager = self._tts_provider_manager()
+            schema_bundle = self._tts_provider_schema_bundle()
+            template = schema_bundle.get("by_type", {}).get(provider_type)
+            if not isinstance(template, dict):
+                return self._error("不支持该 TTS Provider 类型")
+            config = deepcopy(template.get("defaults", {}) or {})
+            config.update(
+                {
+                    "id": provider_id,
+                    "type": provider_type,
+                    "provider": self._single_line(template.get("provider"), 80),
+                    "provider_type": "text_to_speech",
+                    "enable": False,
+                }
+            )
+            if provider_type == "fishaudio_tts_api":
+                config["model"] = "s2.1-pro-free"
+            creator = getattr(manager, "create_provider", None)
+            if not callable(creator):
+                return self._error("当前 AstrBot 不支持动态创建 Provider")
+            await creator(config)
+            return self._ok(self._tts_provider_management_payload())
+        except Exception as exc:
+            return self._error(self._single_line(_redact_outbound_secrets(str(exc)), 240))
+
+    @staticmethod
+    def _tts_language_clone_provider_id(
+        source_provider_id: str,
+        language: str,
+        existing_ids: set[str],
+    ) -> str:
+        source = re.sub(r"[^A-Za-z0-9._:-]+", "-", str(source_provider_id or "")).strip("._:-") or "tts"
+        language = language if language in {"zh", "ja", "en"} else "voice"
+        existing_lower = {str(item or "").lower() for item in existing_ids}
+        for index in range(1, 1000):
+            suffix = f"-{language}" if index == 1 else f"-{language}-{index}"
+            base = source[: max(1, 80 - len(suffix))].rstrip("._:-") or "tts"
+            candidate = f"{base}{suffix}"
+            if candidate.lower() not in existing_lower:
+                return candidate
+        raise ValueError("无法生成不重复的语种专用 Provider ID")
+
+    async def clone_tts_provider_config(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        source_provider_id = self._single_line(payload.get("source_provider_id"), 160)
+        language = self._single_line(payload.get("language"), 8).lower()
+        incoming = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        if not source_provider_id:
+            return self._error("缺少源 TTS Provider ID")
+        if language not in {"zh", "ja", "en"}:
+            return self._error("语种必须是 zh、ja 或 en")
+        try:
+            manager = self._tts_provider_manager()
+            getter = getattr(manager, "get_provider_config_by_id", None)
+            current = getter(source_provider_id) if callable(getter) else next(
+                (deepcopy(item) for item in self._tts_provider_runtime_configs() if item.get("id") == source_provider_id),
+                None,
+            )
+            if not self._is_tts_provider_config(current):
+                return self._error("源 TTS Provider 不存在")
+            runtime_configs = self._tts_provider_runtime_configs()
+            clone_id = self._tts_language_clone_provider_id(
+                source_provider_id,
+                language,
+                {self._single_line(item.get("id"), 160) for item in runtime_configs},
+            )
+            normalized = self._normalized_tts_provider_update(
+                current,
+                incoming,
+                self._tts_provider_schema_bundle(),
+            )
+            normalized["id"] = clone_id
+            creator = getattr(manager, "create_provider", None)
+            if not callable(creator):
+                return self._error("当前 AstrBot 不支持动态创建 Provider")
+            await creator(normalized)
+            result = self._tts_provider_management_payload()
+            result.update(
+                {
+                    "provider_id": clone_id,
+                    "source_provider_id": source_provider_id,
+                    "language": language,
+                }
+            )
+            logger.info(
+                "[PrivateCompanionPage] 已复制语种专用 TTS Provider: language=%s source=%s clone=%s",
+                language,
+                source_provider_id,
+                clone_id,
+            )
+            return self._ok(result)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 复制语种专用 TTS Provider 失败: language=%s source=%s error=%s",
+                language,
+                source_provider_id,
+                self._single_line(_redact_outbound_secrets(str(exc)), 240),
+            )
+            return self._error(self._single_line(_redact_outbound_secrets(str(exc)), 240))
+
+    async def update_tts_provider_config(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        provider_id = self._single_line(payload.get("provider_id"), 160)
+        incoming = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        if not provider_id:
+            return self._error("缺少 TTS Provider ID")
+        try:
+            manager = self._tts_provider_manager()
+            getter = getattr(manager, "get_provider_config_by_id", None)
+            current = getter(provider_id) if callable(getter) else next(
+                (deepcopy(item) for item in self._tts_provider_runtime_configs() if item.get("id") == provider_id),
+                None,
+            )
+            if not self._is_tts_provider_config(current):
+                return self._error("TTS Provider 不存在")
+            schema_bundle = self._tts_provider_schema_bundle()
+            normalized = self._normalized_tts_provider_update(current, incoming, schema_bundle)
+            updater = getattr(manager, "update_provider", None)
+            if not callable(updater):
+                return self._error("当前 AstrBot 不支持动态更新 Provider")
+            await updater(provider_id, normalized)
+            return self._ok(self._tts_provider_management_payload())
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] TTS Provider 保存失败: provider=%s error=%s",
+                provider_id,
+                self._single_line(_redact_outbound_secrets(str(exc)), 240),
+            )
+            return self._error(self._single_line(_redact_outbound_secrets(str(exc)), 240))
+
+    async def test_tts_provider_config(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        provider_id = self._single_line(payload.get("provider_id"), 160)
+        start = time.perf_counter()
+        try:
+            manager = self._tts_provider_manager()
+            config_getter = getattr(manager, "get_provider_config_by_id", None)
+            config = config_getter(provider_id) if callable(config_getter) else None
+            if not self._is_tts_provider_config(config):
+                return self._error("TTS Provider 不存在")
+            provider = (getattr(manager, "inst_map", {}) or {}).get(provider_id)
+            if provider is None:
+                return self._ok(
+                    {
+                        "ok": False,
+                        "provider_id": provider_id,
+                        "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                        "error": "Provider 尚未启用或加载失败，请先保存并启用",
+                    }
+                )
+            tester = getattr(provider, "test", None)
+            if not callable(tester):
+                return self._error("该 Provider 不支持测试")
+            await asyncio.wait_for(tester(), timeout=90.0)
+            return self._ok(
+                {
+                    "ok": True,
+                    "provider_id": provider_id,
+                    "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                }
+            )
+        except Exception as exc:
+            return self._ok(
+                {
+                    "ok": False,
+                    "provider_id": provider_id,
+                    "elapsed_ms": int((time.perf_counter() - start) * 1000),
+                    "error": self._single_line(_redact_outbound_secrets(str(exc)), 240),
+                }
+            )
+
     @staticmethod
     def _provider_config(provider: Any) -> Any:
         return getattr(provider, "provider_config", None) or getattr(provider, "config", None) or {}
@@ -12982,7 +13793,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     @classmethod
     def _provider_model(cls, provider: Any) -> str:
-        return cls._provider_config_value(provider, "model", "model_name", "api_model", "model_id")
+        configured = cls._provider_config_value(provider, "model", "model_name", "api_model", "model_id")
+        if configured:
+            return configured
+        get_model = getattr(provider, "get_model", None)
+        if callable(get_model):
+            try:
+                return str(get_model() or "").strip()
+            except Exception:
+                pass
+        return str(getattr(provider, "model_name", "") or getattr(provider, "model", "") or "").strip()
 
     @classmethod
     def _provider_type(cls, provider: Any) -> str:
@@ -13055,6 +13875,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "response_review_max_chars",
             "passive_topic_memory_hours",
             "tts_synthesis_backend",
+            "tts_provider_id_zh",
+            "tts_provider_id_ja",
+            "tts_provider_id_en",
             "tts_mimo_tool_name",
             "tts_mimo_voice_name",
             "tts_mimo_style_prompt",
@@ -13159,6 +13982,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
             "COMFYUI_SELFIE_WORKFLOW_NAME",
             "photo_reference_catalog",
+            "photo_persona_reference_image_path",
+            "photo_reference_library",
             "enable_daily_outfit_photo",
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
@@ -13382,6 +14207,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
+            "enable_goodnight_screen_check",
+            "goodnight_screen_check_delay_minutes",
             "private_reading_min_interval_hours",
             "private_reading_max_photo_count",
             "private_reading_share_probability",
@@ -13393,6 +14220,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
+            "enable_goodnight_screen_check",
+            "goodnight_screen_check_delay_minutes",
             "enable_creative_writing",
             "creative_inspiration_probability",
             "creative_share_probability",
@@ -13427,7 +14256,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             try:
                 values["photo_reference_catalog"] = validate_and_serialize(
                     getattr(self.plugin, "photo_reference_catalog", ()) or (),
-                    preset_names=self.plugin._photo_generation_scene_presets().keys(),
+                    preset_names=self._photo_reference_preset_names(),
                 )
             except CatalogValidationError:
                 values["photo_reference_catalog"] = []
@@ -14797,7 +15626,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             loaded = load_catalog(
                 value,
                 catalog_version=CATALOG_VERSION,
-                preset_names=self.plugin._photo_generation_scene_presets().keys(),
+                preset_names=self._photo_reference_preset_names(),
             )
             self._set_config_value("photo_reference_catalog_version", CATALOG_VERSION)
             self.plugin.photo_reference_catalog = loaded.references
@@ -15020,6 +15849,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return
         tts_runtime_keys = {
             "tts_synthesis_backend",
+            "tts_provider_id_zh",
+            "tts_provider_id_ja",
+            "tts_provider_id_en",
             "tts_mimo_tool_name",
             "tts_mimo_voice_name",
             "tts_mimo_style_prompt",
@@ -15213,6 +16045,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
             "photo_reference_catalog": "photo_reference_catalog",
+            "photo_persona_reference_image_path": "photo_persona_reference_image_path",
+            "photo_reference_library": "photo_reference_library",
             "daily_outfit_photo_prompt": "daily_outfit_photo_prompt",
             "daily_outfit_rotation_days": "daily_outfit_rotation_days",
             "external_image_api_platform": "external_image_api_platform",
@@ -15236,7 +16070,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "photo_generation_scene_presets": "photo_generation_scene_presets",
         }
         for key, attr in mapping.items():
-            value = self._config_get_raw(key) if key in {"external_image_api_endpoints", "photo_reference_catalog"} else self._config_get(key)
+            value = self._config_get_raw(key) if key in {"external_image_api_endpoints", "photo_reference_catalog", "photo_reference_library"} else self._config_get(key)
             if key == "external_image_api_endpoints":
                 normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
                 endpoints = normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])
@@ -15248,13 +16082,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     loaded_catalog = load_catalog(
                         serialized_catalog,
                         catalog_version=CATALOG_VERSION,
-                        preset_names=self.plugin._photo_generation_scene_presets().keys(),
+                        preset_names=self._photo_reference_preset_names(),
                     )
                     self.plugin.photo_reference_catalog = loaded_catalog.references
                     self.plugin.photo_reference_catalog_version = CATALOG_VERSION
                     self.plugin.photo_reference_catalog_read_only = loaded_catalog.read_only
                 except CatalogValidationError as exc:
                     logger.warning("[PrivateCompanionPage] 忽略无效的运行时参考图目录同步: %s", self._single_line(exc, 180))
+                continue
+            if key == "photo_reference_library":
+                normalized_library = self._normalize_setting_value(key, value)
+                setattr(self.plugin, attr, normalized_library if isinstance(normalized_library, list) else [])
+                continue
+            if key == "photo_persona_reference_image_path":
+                setattr(self.plugin, attr, str(value or "").strip())
                 continue
             if value not in ("", None):
                 text = str(value).strip()
@@ -15544,6 +16385,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_news_daily_hot_read",
             "enable_ai_daily_watch",
             "enable_external_event_self_link",
+            "enable_body_monitor_integration",
             "enable_web_exploration",
             "enable_web_exploration_boredom_search",
             "enable_qzone_integration",
@@ -15556,6 +16398,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_goodnight_screen_check",
             "enable_screen_glance_action",
             "enable_poke_action",
             "enable_voice_action",
@@ -15701,6 +16544,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "memory_companion_context_max_chars",
             "passive_topic_memory_hours",
             "tts_synthesis_backend",
+            "tts_provider_id_zh",
+            "tts_provider_id_ja",
+            "tts_provider_id_en",
             "tts_mimo_tool_name",
             "tts_mimo_voice_name",
             "tts_mimo_style_prompt",
@@ -15793,6 +16639,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "COMFYUI_SELFIE_WORKFLOW_NAME",
             "enable_photo_reference_image",
             "photo_reference_catalog",
+            "photo_persona_reference_image_path",
+            "photo_reference_library",
             "enable_daily_outfit_photo",
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
@@ -16015,6 +16863,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
+            "enable_goodnight_screen_check",
+            "goodnight_screen_check_delay_minutes",
             "enable_creative_writing",
             "creative_inspiration_probability",
             "creative_share_probability",
@@ -16293,6 +17143,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if key == "tts_voice_language":
             lang = str(value or "ja").strip().lower()
             return lang if lang in {"ja", "zh", "en"} else "ja"
+        if key in {"tts_provider_id_zh", "tts_provider_id_ja", "tts_provider_id_en"}:
+            return str(value or "").strip()[:160]
         if key == "tts_fishaudio_model":
             model = str(value or "auto").strip().lower()
             return model if model in {"auto", "s2.1-pro-free", "s2.1-pro", "s2-pro", "s1"} else "auto"
@@ -16367,8 +17219,91 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 raise CatalogValidationError({"photo_reference_catalog": ["目录必须是数组"]})
             return validate_and_serialize(
                 raw_items,
-                preset_names=self.plugin._photo_generation_scene_presets().keys(),
+                preset_names=self._photo_reference_preset_names(),
             )
+        if key == "photo_reference_library":
+            if isinstance(value, list):
+                raw_items = value
+            else:
+                raw_text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                raw_items = []
+                parsed_array = False
+                if raw_text.startswith("[") and raw_text.endswith("]"):
+                    try:
+                        parsed_items = json.loads(raw_text)
+                        if isinstance(parsed_items, list):
+                            raw_items = parsed_items
+                            parsed_array = True
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                if not parsed_array and raw_text:
+                    raw_items = raw_text.split("\n")
+            items: list[Any] = []
+            seen_sources: set[str] = set()
+            for raw_item in raw_items:
+                if isinstance(raw_item, dict):
+                    item = dict(raw_item)
+                else:
+                    text = str(raw_item or "").strip()
+                    if not text:
+                        continue
+                    item = {}
+                    if text.startswith("{") and text.endswith("}"):
+                        try:
+                            parsed_item = json.loads(text)
+                            if isinstance(parsed_item, dict):
+                                item = dict(parsed_item)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                    if not item:
+                        parts = re.split(r"\s*(?:\|\||｜｜)\s*", text, maxsplit=2)
+                        item = {
+                            "path": parts[0] if parts else "",
+                            "note": parts[1] if len(parts) > 1 else "",
+                        }
+                        if len(parts) > 2:
+                            metadata_text = str(parts[2] or "").strip()
+                            if metadata_text.startswith("{"):
+                                try:
+                                    metadata = json.loads(metadata_text)
+                                    if isinstance(metadata, dict):
+                                        item.update(
+                                            {
+                                                name: field_value
+                                                for name, field_value in metadata.items()
+                                                if name not in {"source", "path", "url", "note", "description"}
+                                            }
+                                        )
+                                    else:
+                                        item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
+                                except (TypeError, ValueError, json.JSONDecodeError):
+                                    item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
+                            else:
+                                item["note"] = f"{item['note']} || {metadata_text}".strip(" |")
+
+                source = _path_text(item.get("source") or item.get("path") or item.get("url"), 1000)
+                if not source or source in seen_sources:
+                    continue
+                seen_sources.add(source)
+                note = str(item.get("note") or item.get("description") or "")
+                note = note.replace("\r\n", "\n").replace("\r", "\n").strip()[:500]
+                item["path"] = source
+                item["note"] = note
+                for field in ("reference_roles", "scene_categories"):
+                    if field in item and not isinstance(item.get(field), list):
+                        item[field] = [
+                            part
+                            for part in re.split(r"[,，、/|\s]+", str(item.get(field) or ""))
+                            if part
+                        ]
+                if "outfit_lock_default" in item:
+                    raw_lock = item.get("outfit_lock_default")
+                    if raw_lock is None or (isinstance(raw_lock, str) and not raw_lock.strip()):
+                        item.pop("outfit_lock_default", None)
+                    else:
+                        item["outfit_lock_default"] = self._normalize_bool_value(raw_lock)
+                items.append(item)
+            return items[:24]
         if key == "external_image_api_endpoints":
             normalizer = getattr(self.plugin, "_normalize_external_image_api_endpoints", None)
             return normalizer(value) if callable(normalizer) else (value if isinstance(value, list) else [])
@@ -16749,6 +17684,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "private_reading_preference_max_terms",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
+            "goodnight_screen_check_delay_minutes",
             "creative_chars_per_session",
             "creative_max_active_projects",
             "worldbook_member_inject_limit",
@@ -16932,6 +17868,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
+            "enable_goodnight_screen_check",
             "enable_creative_writing",
             "creative_hidden_mode",
             "enable_environment_perception",
@@ -17473,19 +18410,24 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             privacy = self._single_line(raw.get("privacy"), 20).lower()
             if privacy not in {"public", "private", "internal"}:
                 privacy = "internal"
-            memories.append(
-                {
-                    "title": self._single_line(raw.get("title"), 60),
-                    "content": content,
-                    "weight": self._clamp_int(raw.get("weight"), 50, 0, 100),
-                    "privacy": privacy,
-                    "source": self._single_line(raw.get("source"), 40),
-                    "enabled": bool(raw.get("enabled", True)),
-                    "updated_at": float(raw.get("updated_at") or time.time()),
-                }
-            )
+            memory = {
+                "title": self._single_line(raw.get("title"), 60),
+                "content": content,
+                "weight": self._clamp_int(raw.get("weight"), 50, 0, 100),
+                "privacy": privacy,
+                "source": self._single_line(raw.get("source"), 40),
+                "enabled": bool(raw.get("enabled", True)),
+                "updated_at": float(raw.get("updated_at") or time.time()),
+            }
+            import_batch_id = self._single_line(raw.get("import_batch_id"), 120)
+            source_observation_id = self._single_line(raw.get("source_observation_id"), 120)
+            if import_batch_id:
+                memory["import_batch_id"] = import_batch_id
+            if source_observation_id:
+                memory["source_observation_id"] = source_observation_id
+            memories.append(memory)
         memories.sort(key=lambda item: (item.get("enabled", True), item.get("weight", 50), item.get("updated_at", 0)), reverse=True)
-        return memories[:8]
+        return memories[:WORLDBOOK_IMPORTANT_MEMORY_CAPACITY]
 
     def _livingmemory_summary(self) -> dict[str, Any]:
         try:
@@ -18479,6 +19421,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "web_exploration_share": "分享主动搜索后的发现",
             "news_share": "分享刚读到的新闻",
             "environment_change": "注意到外面的环境突然变了",
+            "weather_alert": "收到一条与当前位置有关的气象预警",
             "personal_goal_progress": "自己的一个长期目标有了新进展",
             "timer": "聊天中形成的临时约定",
             "troubleshooting_test": "排障测试触发",
@@ -18516,6 +19459,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "web_exploration": {"label": "主动搜索", "note": ""},
             "news": {"label": "新闻阅读", "note": ""},
             "environment_change": {"label": "环境突变", "note": "实时环境出现明显变化后形成的短时主动。"},
+            "weather_alert": {"label": "气象预警", "note": "官方预警出现、更新或解除后形成的主要用户提醒。"},
             "body_monitor": {"label": "身体状态联动", "note": "由 Body Monitor 提供的短时身体状态关心事件。"},
             "meal_care": {"label": "饭点关心", "note": "在合适饭点形成的低压力饮食关心。"},
             "group_ignore_complaint": {
@@ -19912,7 +20856,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _daily_timeline_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
-        enhanced = data.get("detail_enhanced_segments") if isinstance(data.get("detail_enhanced_segments"), dict) else {}
+        raw_enhanced = data.get("detail_enhanced_segments") if isinstance(data.get("detail_enhanced_segments"), dict) else {}
+        enhanced = self.plugin._detail_enhanced_segments_for_plan_date(
+            plan.get("date"),
+            raw_enhanced,
+            detail_day=data.get("detail_enhanced_day"),
+        )
         story = data.get("daily_story_plan") if isinstance(data.get("daily_story_plan"), dict) else {}
         adjustments = data.get("schedule_adjustments") if isinstance(data.get("schedule_adjustments"), list) else []
         presence = data.get("qq_presence_state") if isinstance(data.get("qq_presence_state"), dict) else {}

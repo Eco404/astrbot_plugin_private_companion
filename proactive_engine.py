@@ -665,7 +665,7 @@ class ProactiveEngineMixin:
     def _proactive_impulse_default_window_seconds(self, reason: str) -> tuple[float, float]:
         if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
             return 70 * 60.0, 35 * 60.0
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "environment_change"}:
+        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "environment_change", "weather_alert"}:
             return 45 * 60.0, 60 * 60.0
         if reason in {"quiet_care", "check_in", "state_share"}:
             return 55 * 60.0, 80 * 60.0
@@ -1533,7 +1533,7 @@ class ProactiveEngineMixin:
             kind = "self_share"
         elif normalized_reason in {"important_date_share", "memo_note_reminder", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
             kind = "reminder"
-        elif normalized_reason == "environment_change":
+        elif normalized_reason in {"environment_change", "weather_alert"}:
             kind = "observation"
         elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
             kind = "external_share"
@@ -1558,7 +1558,7 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "current_activity", 0.62
         elif normalized_reason in {"important_date_share", "birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
             anchor_type, anchor_score = "important_date", 0.78
-        elif normalized_reason == "environment_change":
+        elif normalized_reason in {"environment_change", "weather_alert"}:
             anchor_type, anchor_score = "environment", 0.82
         elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
             anchor_type, anchor_score = "external_info", 0.66
@@ -2310,7 +2310,7 @@ class ProactiveEngineMixin:
         normalized_reason = self._normalize_legacy_proactive_text(reason, limit=40)
         normalized_source = self._normalize_legacy_proactive_text(source, limit=40)
         normalized_kind = self._normalize_legacy_proactive_text(semantic_kind, limit=40)
-        if normalized_reason == "environment_change" or normalized_source == "environment_change":
+        if normalized_reason in {"environment_change", "weather_alert"} or normalized_source in {"environment_change", "weather_alert"}:
             return "immediate"
         if normalized_source == "timer" or normalized_reason in {
             "birthday_eve_hint",
@@ -3078,7 +3078,7 @@ class ProactiveEngineMixin:
         if not self._action_is_available(action, user):
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="动作不可用或媒体额度不足", user=user)
             return False
-        if source != "environment_change" and self._proactive_candidate_repeated(user, candidate):
+        if source not in {"environment_change", "weather_alert"} and self._proactive_candidate_repeated(user, candidate):
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="近期主题过于相似", user=user)
             return False
         impulse = self._candidate_to_impulse(user, candidate, source=source, now=now)
@@ -8224,6 +8224,7 @@ class ProactiveEngineMixin:
             "news_share": [(8 * 60, 23 * 60)],
             "web_exploration_share": [(9 * 60, 23 * 60)],
             "environment_change": [(6 * 60, 23 * 60 + 30)],
+            "weather_alert": [(0, 24 * 60)],
             "jm_cosmos_recommendation_request": [(10 * 60, 23 * 60)],
             "creative_share": [(10 * 60, 23 * 60)],
             "personal_goal_progress": [(8 * 60, 22 * 60)],

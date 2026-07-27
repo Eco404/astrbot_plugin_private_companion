@@ -240,8 +240,8 @@ class LlmToolActionsMixin:
             lines.extend(
                 [
                     "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
-                    '- 普通场景/物件/风景：传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 建议“可拍画面/房间日常”；该字段只是建议，不会覆盖用户原话或参考图约束。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
-                    '- 角色本人出镜、自拍、拍照、头像、穿搭、COS、人像：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 建议“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；明确睡衣、睡裙、睡袍或睡前卧室自拍时优先建议“居家睡衣”，普通穿搭才建议“日常穿搭”，只有明确“镜前/对镜/镜子”时才建议镜前穿搭；最终只采用一个兼容预设。只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
+                    '- 普通场景/物件/风景：仅当画面中不出现角色本人时，传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 建议“可拍画面/房间日常”；该字段只是建议，不会覆盖用户原话或参考图约束。把它写成角色镜头看到的画面，不要擅自加入拍摄者、陌生女孩或人物背影。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
+                    '- 角色本人以任何形式出镜，包括自拍、背影、侧脸、环境人像、头像、穿搭或 COS：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 建议“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；明确睡衣、睡裙、睡袍或睡前卧室自拍时优先建议“居家睡衣”，普通穿搭才建议“日常穿搭”，只有明确“镜前/对镜/镜子”时才建议镜前穿搭；最终只采用一个兼容预设。只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
                     '- 用户在刚发出的角色照片后要求“比个心、看镜头、换个动作/表情/角度、再来一张”等自然续拍时，仍使用 `kind="selfie"`，并在 prompt 中说明只改变这次要求的部分、其余人物穿搭与场景继续保持；不必猜测或手填上一张图片路径，插件会在同一会话内交给选图模型判断是否复用。明确换装、换地点、换人物或另起主题时按新要求生成。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
                     '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。',
@@ -297,6 +297,7 @@ class LlmToolActionsMixin:
 - 回复必须直接说读取结果，不要用“（翻了翻书柜）”“（挠挠头）”之类括号动作代替结果。
 - 不得把被动提示中的短片段、长期记忆或聊天印象冒充完整原文；找不到作品或部分时如实说明，并可根据 candidates 请用户进一步说明。
 - 这是只读工具，不能修改、续写或删除创作。
+- 用户只是让你讲一个、编一个或说一个新故事，或泛泛地让你讲“你的故事”时，不是在读取书柜作品，不要调用此工具；只有用户明确提到你写过的故事、某篇作品、书柜内容、原文或具体章节时才读取。
 """.strip()
 
     @staticmethod
@@ -324,13 +325,37 @@ class LlmToolActionsMixin:
             return False
         if self._creative_work_inventory_query_matches(normalized):
             return True
+
+        # “故事”也常用于临时讲述或现场创作。只有句子同时指向一篇已经
+        # 存在的作品时，才把它当作书柜读取请求。
+        if "故事" in normalized:
+            existing_story_anchors = (
+                "你写的", "你写过的", "你以前写的", "你之前写的", "你最近写的",
+                "你创作的", "你创作过的", "自己写的", "自己创作的",
+                "那篇", "这篇", "哪篇", "那部", "这部", "哪部",
+                "那篇故事", "这篇故事", "哪篇故事", "那个故事", "这个故事",
+                "上次的故事", "之前的故事", "书柜里的故事", "书架里的故事",
+                "故事原文", "故事正文", "故事全文", "故事片段", "故事章节",
+                "故事的原文", "故事的正文", "故事的全文", "故事的片段", "故事的章节",
+                "故事第", "故事写了什么", "故事写的什么", "写过什么故事",
+                "写了什么故事", "创作过什么故事", "创作了什么故事",
+            )
+            has_existing_story_anchor = any(
+                token in normalized for token in existing_story_anchors
+            ) or bool(
+                re.search(r"《[^》]{1,80}》", normalized)
+                or re.search(r"故事.{0,12}第\s*[一二三四五六七八九十百零两\d]+\s*(?:部分|章|节|段)", normalized)
+            )
+            if not has_existing_story_anchor:
+                return False
         work_terms = (
             "创作", "作品", "写作", "札记", "随笔", "散文", "小说", "故事",
             "诗", "歌词", "剧本", "手稿", "草稿", "正文", "片段", "章节",
         )
         query_terms = (
             "讲讲", "说说", "看看", "看一下", "读", "回顾", "总结", "内容",
-            "写了什么", "写的什么", "怎么看", "看待", "觉得", "想法", "为什么",
+            "写了什么", "写过什么", "写的什么", "创作过什么",
+            "怎么看", "看待", "觉得", "想法", "为什么",
             "第", "部分", "哪一段", "这一段", "那一段", "原文", "全文",
         )
         return any(token in normalized for token in work_terms) and any(
@@ -1674,11 +1699,33 @@ class LlmToolActionsMixin:
                 ensure_ascii=False,
             )
         compact_prompt = re.sub(r"\s+", "", content)
+        bot_name = re.sub(r"\s+", "", _single_line(getattr(self, "bot_name", ""), 80))
+        assistant_in_frame = bool(
+            (bot_name and bot_name in compact_prompt)
+            or any(
+                token in compact_prompt
+                for token in (
+                    "我本人",
+                    "我在画面",
+                    "我站在",
+                    "我坐在",
+                    "我躺在",
+                    "我走在",
+                    "我的背影",
+                    "我的侧脸",
+                    "我的全身",
+                    "角色本人",
+                    "本人出镜",
+                )
+            )
+            or re.search(r"\b(?:the\s+assistant|assistant\s+persona|bot\s+character)\b", content, flags=re.I)
+        )
         if intent_kind == "text2img" and any(token in compact_prompt for token in ("表情包", "贴纸", "sticker", "meme")):
             workflow_kind = "selfie"
             intent_kind = "sticker"
         elif intent_kind == "text2img" and (
             self._character_photo_request_matches(content)
+            or assistant_in_frame
             or any(
                 token in compact_prompt
                 for token in ("自拍", "拍照", "头像", "人像", "角色本人", "本人出镜", "露脸", "穿搭", "镜前", "cos", "COS", "cosplay")
@@ -1872,7 +1919,7 @@ class LlmToolActionsMixin:
             "continuity_key": continuity_key,
             "reference_image_path": reference_path,
             "image_size": _single_line(image_size or kwargs.get("size"), 40),
-            "suggested_scene_preset": preset_text,
+            "requested_scene_preset": preset_text,
             "workflow_default_scene_preset": workflow_default_preset,
             "prompt_sections": prompt_sections,
         }

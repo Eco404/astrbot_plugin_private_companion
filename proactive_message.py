@@ -139,6 +139,7 @@ from .scene_context import infer_companion_scene_category
 from .photo_reference_catalog import (
     PhotoReference,
     build_daily_outfit_reference,
+    load_catalog,
     project_reference_candidate,
 )
 from .photo_prompt_context import (
@@ -2207,6 +2208,8 @@ class ProactiveMessageMixin:
             current_schedule = "（本轮不使用生活片段；只按用户刚发起的测试请求自然开口，不补写虚构见闻）"
         elif reason in source_focused_reasons:
             current_schedule = "（本轮不取生活片段，只围绕主动来源本身）"
+        elif reason == "goodnight_screen_check":
+            current_schedule = "（本轮不取生活片段、旧记忆或屏幕内容，只轻声提醒一次早点休息）"
         elif reason in {"meal_care", "meal_care_followup"}:
             current_schedule = (
                 "（饭点关心只使用当前时间、饭点和本轮动机；"
@@ -2378,6 +2381,15 @@ class ProactiveMessageMixin:
                 f"{recent_history_hint}\n"
                 "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
             )
+        if reason == "goodnight_screen_check" and "晚安识屏提醒边界" not in prompt:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "【晚安识屏提醒边界】\n"
+                "- 内部状态只说明互道晚安后仍有明确活动迹象；没有向你提供屏幕画面、应用、窗口、账号或文字内容。\n"
+                "- 只生成一句轻声、低压力的休息提醒，可以说‘还没睡的话，忙完就早点休息’，但不要声称看见了屏幕或知道对方在做什么。\n"
+                "- 不提识屏、监控、查岗、电脑、软件、窗口、具体活动或任何隐私细节，不复述刚才的晚安。\n"
+                "- 不追问、不催促、不要求解释，也不要要求对方回复。"
+            )
         body_health_hint_getter = getattr(self, "_format_body_monitor_health_prompt", None)
         if callable(body_health_hint_getter):
             body_health_hint = body_health_hint_getter(user, reason=reason)
@@ -2399,6 +2411,13 @@ class ProactiveMessageMixin:
                 environment_hint = sanitize_relationship_source(environment_hint, "proactive.environment_hint")
                 if environment_hint:
                     prompt = f"{prompt.rstrip()}\n\n{environment_hint}"
+        weather_alert_hint_getter = getattr(self, "_format_weather_alert_prompt", None)
+        if callable(weather_alert_hint_getter):
+            weather_alert_hint = weather_alert_hint_getter(user, reason=reason)
+            if weather_alert_hint:
+                weather_alert_hint = sanitize_relationship_source(weather_alert_hint, "proactive.weather_alert_hint")
+                if weather_alert_hint:
+                    prompt = f"{prompt.rstrip()}\n\n{weather_alert_hint}"
         personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
         if callable(personal_goal_hint_getter):
             personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
@@ -2567,6 +2586,12 @@ class ProactiveMessageMixin:
             if environment_hint:
                 lines.append(environment_hint)
             lines.append("这是有短时效的环境变化：只贴着刚发生的变化说一个具体点，不扩写预报，不假设用户正在室外，也不解释信息来源。")
+        elif reason == "weather_alert":
+            weather_alert_hint_getter = getattr(self, "_format_weather_alert_prompt", None)
+            weather_alert_hint = weather_alert_hint_getter(user, reason=reason) if callable(weather_alert_hint_getter) else ""
+            if weather_alert_hint:
+                lines.append(weather_alert_hint)
+            lines.append("这是来自官方气象渠道的当前预警：优先保留等级、现象和防护建议等事实，用熟悉的口吻及时说清；不要提接口、缓存、轮询、API Host 或内部字段，不把预警写成夸张灾情，也不要替用户判断已经发生了什么。")
         elif reason == "personal_goal_progress":
             personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
             personal_goal_hint = personal_goal_hint_getter(user, reason=reason) if callable(personal_goal_hint_getter) else ""
@@ -3967,6 +3992,8 @@ class ProactiveMessageMixin:
             "creative_share",
             "jm_cosmos_share",
             "jm_cosmos_recommendation_request",
+            "weather_alert",
+            "goodnight_screen_check",
         }
         if str(reason or "").strip() in source_reasons:
             return True
@@ -4799,6 +4826,11 @@ Output:
             environment_hint = environment_hint_getter(user, reason=reason)
             if environment_hint:
                 reference = f"{reference}\n{environment_hint}" if reference else environment_hint
+        weather_alert_hint_getter = getattr(self, "_format_weather_alert_prompt", None)
+        if reason == "weather_alert" and callable(weather_alert_hint_getter):
+            weather_alert_hint = weather_alert_hint_getter(user, reason=reason)
+            if weather_alert_hint:
+                reference = f"{reference}\n{weather_alert_hint}" if reference else weather_alert_hint
         personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
         if reason == "personal_goal_progress" and callable(personal_goal_hint_getter):
             personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
@@ -4809,6 +4841,11 @@ Output:
             memo_hint = memo_hint_getter(user, reason=reason)
             if memo_hint:
                 reference = f"{reference}\n{memo_hint}" if reference else memo_hint
+        if reason == "goodnight_screen_check":
+            reference = (
+                f"互道晚安后，如果{name or '对方'}还没睡，就轻声提醒忙完早点休息；"
+                "不提看见了什么，不追问，不要求回复，也不表现成在监控。"
+            )
         if not reference:
             reference = f"自然地向{name or '对方'}主动说一句与当前状态有关、低压力且无需立即回复的话。"
         reference = sanitize_relationship_source(reference, "proactive_fallback.reference")
@@ -5618,6 +5655,8 @@ Output:
         action_context: str,
     ) -> str:
         context = str(action_context or "")
+        if reason == "goodnight_screen_check":
+            return "还没睡的话，忙完就早点休息，不用回我。"
         if "screen_peek" in action:
             if "逻辑分支" in context:
                 return "你还在跟那个逻辑分支较劲啊。先别急,慢慢捋嘛。"
@@ -5890,6 +5929,328 @@ Output:
             "InvalidParameter",
         )
         return any(token in text for token in fail_tokens)
+
+    @staticmethod
+    def _goodnight_screen_check_reply_matches(text: Any) -> bool:
+        cleaned = _single_line(text, 240)
+        if not cleaned:
+            return False
+        return bool(re.search(r"晚安|好梦|早点睡|睡吧|休息吧|明天见", cleaned))
+
+    def _maybe_schedule_goodnight_screen_check(
+        self,
+        user: dict[str, Any],
+        bot_reply: Any,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Schedule one private screen check after a mutual goodnight."""
+        if not bool(getattr(self, "enable_screen_glance_action", False)) or not bool(
+            getattr(self, "enable_goodnight_screen_check", False)
+        ):
+            return False
+        if not isinstance(user, dict) or not self._goodnight_screen_check_reply_matches(bot_reply):
+            return False
+        user_id = _single_line(user.get("user_id") or user.get("id"), 128)
+        if not user_id or self._private_user_role(user, user_id) != "owner":
+            return False
+        umo = _single_line(user.get("umo"), 240)
+        if not umo or ":FriendMessage:" not in umo or not user.get("enabled", True):
+            return False
+
+        rest_kind = _single_line(user.get("user_rest_kind"), 24).lower()
+        rest_set_at = _safe_float(user.get("user_rest_set_at"), 0)
+        rest_reason = _single_line(user.get("user_rest_reason"), 240)
+        if rest_kind != "sleep" or rest_set_at <= 0:
+            return False
+        quiet_checker = getattr(self, "_user_rest_signal_should_block_current_reply", None)
+        if callable(quiet_checker) and quiet_checker(rest_reason):
+            return False
+
+        check_now = _now_ts() if now is None else float(now)
+        if check_now + 0.001 < rest_set_at or check_now - rest_set_at > 30 * 60:
+            return False
+        episode_key = f"{user_id}:{rest_set_at:.3f}"
+        if _single_line(user.get("goodnight_screen_check_episode_key"), 180) == episode_key:
+            return False
+        if _single_line(user.get("goodnight_screen_check_checked_episode_key"), 180) == episode_key:
+            return False
+
+        delay_minutes = max(
+            1,
+            min(180, _safe_int(getattr(self, "goodnight_screen_check_delay_minutes", 45), 45, 1, 180)),
+        )
+        user["goodnight_screen_check_due_at"] = check_now + delay_minutes * 60
+        user["goodnight_screen_check_episode_at"] = rest_set_at
+        user["goodnight_screen_check_episode_key"] = episode_key
+        user["goodnight_screen_check_scheduled_at"] = check_now
+        user["goodnight_screen_check_checked_at"] = 0
+        user["goodnight_screen_check_state"] = "scheduled"
+        return True
+
+    def _goodnight_screen_check_block_reason(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        episode_at: float,
+        now: float,
+        require_screen: bool,
+    ) -> str:
+        if not bool(getattr(self, "enable_screen_glance_action", False)):
+            return "screen_glance_disabled"
+        if not bool(getattr(self, "enable_goodnight_screen_check", False)):
+            return "goodnight_screen_check_disabled"
+        if not isinstance(user, dict) or self._private_user_role(user, user_id) != "owner":
+            return "not_primary_user"
+        enabled_checker = getattr(self, "_user_enabled_for_proactive", None)
+        if callable(enabled_checker) and not enabled_checker(user_id, user):
+            return "private_proactive_disabled"
+        umo = _single_line(user.get("umo"), 240)
+        if not umo or ":FriendMessage:" not in umo:
+            return "private_route_unavailable"
+        generation_disabled = getattr(self, "_proactive_generation_disabled", None)
+        if callable(generation_disabled) and generation_disabled(user):
+            return "proactive_generation_disabled"
+
+        rest_set_at = _safe_float(user.get("user_rest_set_at"), 0)
+        if _single_line(user.get("user_rest_kind"), 24).lower() != "sleep" or abs(rest_set_at - episode_at) > 0.01:
+            return "goodnight_episode_ended"
+        rest_reason = _single_line(user.get("user_rest_reason"), 240)
+        quiet_checker = getattr(self, "_user_rest_signal_should_block_current_reply", None)
+        if callable(quiet_checker) and quiet_checker(rest_reason):
+            return "explicit_do_not_disturb"
+        latest_activity = max(
+            _safe_float(user.get("last_activity_at"), 0),
+            _safe_float(user.get("last_user_message_at"), 0),
+        )
+        if latest_activity > episode_at + 0.001:
+            return "user_active_after_goodnight"
+        rest_until_getter = getattr(self, "_user_rest_silence_until", None)
+        if callable(rest_until_getter) and rest_until_getter(user, now=now) <= now:
+            return "rest_window_ended"
+
+        reset_daily = getattr(self, "_reset_daily_counter_if_needed", None)
+        if callable(reset_daily):
+            reset_daily(user)
+        daily_limit_getter = getattr(self, "_effective_user_daily_limit", None)
+        daily_limit = daily_limit_getter(user) if callable(daily_limit_getter) else 0
+        unlimited_checker = getattr(self, "_proactive_daily_limit_is_unlimited", None)
+        unlimited = bool(unlimited_checker(daily_limit)) if callable(unlimited_checker) else False
+        if daily_limit <= 0 or (not unlimited and _safe_int(user.get("sent_today"), 0) >= daily_limit):
+            return "daily_proactive_limit"
+
+        relation = user.get("relationship_state")
+        if isinstance(relation, dict):
+            mode = _single_line(relation.get("mode"), 24).lower()
+            blocked_until = max(
+                _safe_float(relation.get("backoff_until"), 0),
+                _safe_float(relation.get("hurt_until"), 0),
+            )
+            if mode in {"backoff", "hurt", "refusing"} and blocked_until > now:
+                return "relationship_backoff"
+        if bool(user.get("proactive_sending")):
+            return "another_proactive_message_is_sending"
+        if require_screen and not self._screen_glance_available(user):
+            return "screen_glance_unavailable"
+        return ""
+
+    async def _classify_goodnight_screen_activity(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        name: str,
+    ) -> str:
+        plugin = self._get_screen_companion_plugin()
+        if plugin is None or not callable(getattr(plugin, "_invoke_screen_skill", None)):
+            return "uncertain"
+        async with self._data_lock:
+            current = self._get_user(user_id)
+            self._note_screen_peek_attempt(user_id, reason="goodnight_screen_check", count_daily=True)
+            self._save_data_sync()
+
+        event = None
+        target = _single_line(user.get("umo"), 240)
+        if target and hasattr(plugin, "_create_virtual_event"):
+            try:
+                event = plugin._create_virtual_event(target)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 创建晚安识屏虚拟事件失败: %s", _single_line(exc, 160))
+        prompt = (
+            "这是一次用户已授权的晚安后单次状态确认，只用于决定是否需要轻声提醒休息。"
+            "请只判断当前画面是否能明确证明用户仍在主动使用电脑，不要转述或摘录任何屏幕内容。"
+            "active 仅用于存在明确持续操作或正在进行活动的证据；画面静止、锁屏、黑屏、无人操作、"
+            "证据不足或无法判断都输出 inactive 或 uncertain。"
+            "只输出 JSON：{\"state\":\"active|inactive|uncertain\",\"reason\":\"不含隐私的极短判断依据\"}。"
+            "reason 禁止包含应用名、窗口名、账号、联系人、文件名、聊天内容、网页内容或屏幕文字。"
+        )
+        try:
+            result = await plugin._invoke_screen_skill(
+                event,
+                request_prompt=prompt,
+                history_user_text=f"晚安后单次确认 {name or '用户'} 是否仍在主动使用电脑。",
+                task_id="private_companion_goodnight_screen_check",
+            )
+        except Exception as exc:
+            context = f"goodnight_screen_check：失败,{_single_line(exc, 240)}"
+            logger.warning("[PrivateCompanion] 晚安识屏判断失败: %s", _single_line(exc, 180))
+            if self._is_screen_peek_provider_failure(context):
+                self._note_screen_peek_failure(user, context)
+            return "uncertain"
+        if self._is_screen_peek_provider_failure(str(result or "")):
+            self._note_screen_peek_failure(user, _single_line(result, 180))
+            return "uncertain"
+        parser = getattr(self, "_parse_json_object", None)
+        parsed = parser(result) if callable(parser) else None
+        if not isinstance(parsed, dict) and isinstance(result, dict):
+            parsed = result
+        state = _single_line(parsed.get("state"), 24).lower() if isinstance(parsed, dict) else ""
+        return state if state in {"active", "inactive", "uncertain"} else "uncertain"
+
+    async def _maybe_process_goodnight_screen_checks(self) -> None:
+        now = _now_ts()
+        claimed: list[tuple[str, float, str]] = []
+        changed = False
+        async with self._data_lock:
+            users = self.data.get("users")
+            if not isinstance(users, dict):
+                return
+            for raw_user_id, user in users.items():
+                if not isinstance(user, dict):
+                    continue
+                due_at = _safe_float(user.get("goodnight_screen_check_due_at"), 0)
+                if due_at <= 0 or due_at > now:
+                    continue
+                user_id = _single_line(user.get("user_id") or raw_user_id, 128)
+                episode_at = _safe_float(user.get("goodnight_screen_check_episode_at"), 0)
+                episode_key = _single_line(user.get("goodnight_screen_check_episode_key"), 180)
+                user["goodnight_screen_check_due_at"] = 0
+                user["goodnight_screen_check_checked_at"] = now
+                user["goodnight_screen_check_checked_episode_key"] = episode_key
+                user["goodnight_screen_check_state"] = "claimed"
+                changed = True
+                if user_id and episode_at > 0:
+                    claimed.append((user_id, episode_at, episode_key))
+            if changed:
+                self._save_data_sync()
+
+        for user_id, episode_at, episode_key in claimed:
+            async with self._data_lock:
+                user = self._get_user(user_id)
+                block_reason = self._goodnight_screen_check_block_reason(
+                    user_id,
+                    user,
+                    episode_at=episode_at,
+                    now=_now_ts(),
+                    require_screen=True,
+                )
+                if block_reason:
+                    user["goodnight_screen_check_state"] = block_reason
+                    self._save_data_sync()
+                    continue
+                name = _single_line(user.get("nickname"), 40) or user_id
+
+            state = await self._classify_goodnight_screen_activity(user_id, user, name=name)
+            async with self._data_lock:
+                current = self._get_user(user_id)
+                current["goodnight_screen_check_state"] = state
+                current["goodnight_screen_check_result_at"] = _now_ts()
+                self._save_data_sync()
+            if state != "active":
+                continue
+
+            async with self._data_lock:
+                current = self._get_user(user_id)
+                block_reason = self._goodnight_screen_check_block_reason(
+                    user_id,
+                    current,
+                    episode_at=episode_at,
+                    now=_now_ts(),
+                    require_screen=False,
+                )
+                if block_reason:
+                    current["goodnight_screen_check_state"] = block_reason
+                    self._save_data_sync()
+                    continue
+                current["proactive_sending"] = True
+                current["proactive_sending_started_at"] = _now_ts()
+                user = current
+                name = _single_line(current.get("nickname"), 40) or user_id
+                umo = _single_line(current.get("umo"), 240)
+                self._save_data_sync()
+
+            motive = "互道晚安后仍有明确活动迹象，轻声提醒一次早点休息，不要求回复"
+            safe_context = "内部状态判断：晚安后仍有明确活动迹象；没有提供任何屏幕内容或应用信息"
+            try:
+                text = await self._generate_proactive_message_with_llm(
+                    user,
+                    name,
+                    "goodnight_screen_check",
+                    action_context=safe_context,
+                    action="message",
+                    motive=motive,
+                )
+                if not text:
+                    continue
+                review = await self._review_proactive_message_send_decision(
+                    user,
+                    text,
+                    reason="goodnight_screen_check",
+                    action="message",
+                    motive=motive,
+                    topic="早点休息",
+                    action_summary=safe_context,
+                )
+                decision = _single_line(review.get("decision"), 20).lower()
+                if decision in {"drop", "defer"}:
+                    continue
+                if decision == "rewrite" and _single_line(review.get("text"), 500):
+                    text = _single_line(review.get("text"), 500)
+                outcome = await self._send_proactive_message_chain(umo, text)
+                if not bool(getattr(outcome, "delivered", False)):
+                    continue
+                if getattr(self, "context", None) is not None:
+                    await self._archive_proactive_message_to_conversation(
+                        user=user,
+                        user_prompt=self._build_proactive_archive_user_prompt(
+                            reason="goodnight_screen_check",
+                            action="message",
+                            motive=motive,
+                            action_summary=safe_context,
+                        ),
+                        assistant_response=self._build_proactive_archive_assistant_text(
+                            text=text,
+                            action_summary=safe_context,
+                        ),
+                    )
+                sent_at = _now_ts()
+                visible = self._visible_text_without_tts_reading(text, limit=500)
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    self._reset_daily_counter_if_needed(current)
+                    current["last_sent"] = sent_at
+                    current["last_proactive_sent_at"] = sent_at
+                    current["last_proactive_message"] = _single_line(visible, 500)
+                    current["last_companion_message"] = _single_line(visible, 500)
+                    current["last_companion_message_at"] = sent_at
+                    current["last_proactive_reason"] = "goodnight_screen_check"
+                    current["last_proactive_action"] = "message"
+                    current["last_proactive_motive"] = motive
+                    current["last_proactive_delivery_umo"] = umo
+                    current["last_proactive_delivery_inbound_count"] = _safe_int(current.get("inbound_count"), 0)
+                    current["goodnight_screen_check_reminded_at"] = sent_at
+                    current["goodnight_screen_check_state"] = "reminded"
+                    current["goodnight_screen_check_reminded_episode_key"] = episode_key
+                    current["sent_today"] = _safe_int(current.get("sent_today"), 0) + 1
+                    current["proactive_sent_count"] = _safe_int(current.get("proactive_sent_count"), 0) + 1
+                    self._save_data_sync()
+            finally:
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    current["proactive_sending"] = False
+                    current["proactive_sending_started_at"] = 0
+                    self._save_data_sync()
 
     async def _run_screen_peek_action(
         self,
@@ -8090,6 +8451,7 @@ Output:
                 "elapsed_ms": int(max(0, elapsed_ms or 0)),
                 "presets": final_presets,
                 "preset_hint": _single_line(suggested_scene_preset, 80),
+                "requested_scene_preset": _single_line(suggested_scene_preset, 80),
                 "scene_preset": final_presets[0] if final_presets else "",
                 "wardrobe_decision_version": _safe_int(wardrobe_payload.get("decision_version"), 0),
                 "wardrobe_rule_id": _single_line(wardrobe_payload.get("rule_id"), 80),
@@ -8207,6 +8569,7 @@ Output:
                     "session": _single_line(session_key, 340),
                     "workflow_kind": _single_line(workflow_kind, 40),
                     "preset_hint": _single_line(suggested_scene_preset, 80),
+                    "requested_scene_preset": _single_line(suggested_scene_preset, 80),
                     "prompt_format": self._photo_generation_prompt_format_mode(),
                     "base_prompt": base_prompt,
                     "scene_context_before": scene_context_before,
@@ -8847,7 +9210,15 @@ Output:
         if normalized not in {"selfie", "portrait", "自拍", "人像"}:
             return "", ""
         explicit_mirror = self._photo_generation_explicit_mirror_request(prompt_text)
-        if explicit_mirror:
+        explicit_back_view = self._photo_generation_explicit_back_view_request(prompt_text)
+        if explicit_back_view:
+            positive = (
+                "Back-view character composition: exactly one recognizable character wearing one coherent outfit in one continuous scene; "
+                "the requested back view or facing-away pose is intentional, preserve the reference hairstyle silhouette and stable appearance, "
+                "and compose a natural environmental portrait without requiring the face to be visible."
+            )
+            negative = "duplicated subject, twins, multiple people, outfit alternatives, comparison panels, split screen, side-by-side panels, collage, character sheet"
+        elif explicit_mirror:
             positive = (
                 "Selfie composition: exactly one character wearing one coherent outfit in one continuous scene; "
                 "one mirror reflection of that same outfit is allowed; keep the complete face visible and do not let the phone cover it."
@@ -8863,6 +9234,24 @@ Output:
                 "side-by-side panels, diptych, collage, character sheet, mirror selfie, full-length mirror selfie, dressing-room mirror, phone covering face"
             )
         return positive, negative
+
+    @staticmethod
+    def _photo_generation_explicit_back_view_request(text: str) -> bool:
+        raw = _single_line(text, 1200)
+        if not raw:
+            return False
+        positive = re.split(r"negative prompt\s*:", raw, maxsplit=1, flags=re.I)[0]
+        positive = re.sub(
+            r"(?:不要|避免|别|不许|禁止).{0,18}(?:背影|背对镜头|背对相机)|"
+            r"\b(?:no|not|avoid|without)\s+(?:a\s+)?(?:back[-\s]?view|facing\s+away)[^,.;；。]*",
+            " ",
+            positive,
+            flags=re.I,
+        )
+        return bool(
+            any(marker in positive for marker in ("背影", "背对镜头", "背对相机", "从背后", "身后视角"))
+            or re.search(r"\b(?:back[-\s]?view|from\s+behind|facing\s+away)\b", positive, flags=re.I)
+        )
 
     @staticmethod
     def _photo_generation_edit_contract(workflow_kind: str) -> tuple[str, str]:
@@ -8962,7 +9351,14 @@ Output:
         if normalized not in {"selfie", "portrait", "自拍", "人像"}:
             return _single_line(prompt, 1800)
         explicit_mirror = self._photo_generation_explicit_mirror_request(prompt)
-        if explicit_mirror:
+        explicit_back_view = self._photo_generation_explicit_back_view_request(prompt)
+        if explicit_back_view:
+            guard = (
+                "Back-view character composition guard: exactly one recognizable character wearing exactly one coherent outfit in one continuous scene; "
+                "the explicitly requested back-view pose is allowed, preserve the reference hairstyle silhouette and stable appearance, "
+                "and do not require the face to be visible."
+            )
+        elif explicit_mirror:
             guard = (
                 "Selfie composition guard: exactly one character wearing exactly one coherent outfit in one continuous scene; "
                 "a single mirror reflection of that same outfit is allowed, but do not create outfit alternatives, comparison panels, duplicated subjects, or a collage; "
@@ -8989,11 +9385,12 @@ Output:
             "collage",
             "character sheet",
         ]
-        if not explicit_mirror:
+        if not explicit_mirror and not explicit_back_view:
             negative_terms.extend(
                 ["mirror selfie", "full-length mirror selfie", "full body mirror shot", "dressing room mirror"]
             )
-        negative_terms.append("phone covering face")
+        if not explicit_back_view:
+            negative_terms.append("phone covering face")
         return self._append_photo_negative_terms(
             merged,
             negative_terms,
@@ -9017,8 +9414,8 @@ Output:
     def _builtin_photo_generation_scene_presets(self) -> dict[str, str]:
         return {
             "角色自拍": (
-                "natural casual selfie, single character, face visible, clear face, hair, expression, neck and shoulders, "
-                "phone snapshot feeling, lifelike composition, no cropped head, no hidden face, no back view, no body-only framing"
+                "natural casual character photo, single character, face visible by default, clear face, hair, expression, neck and shoulders, "
+                "phone snapshot feeling, lifelike composition, no cropped head, no hidden face or back view unless explicitly requested, no body-only framing"
             ),
             "COS自拍": (
                 "cosplay themed selfie, keep the character's own face, hair color, eye color, and key visual traits, "
@@ -9070,7 +9467,9 @@ Output:
             ),
             "可拍画面": (
                 "casual photo shared with a close friend, concrete visual subject, natural lighting, not a vague landscape, "
-                "not a weather report, no private screen, no real personal information, no unrelated text, no watermark"
+                "not a weather report, when the request is scenery or an object frame it from the photographer's point of view, "
+                "do not insert an unrequested person, character, visible photographer, or back-view figure, "
+                "no private screen, no real personal information, no unrelated text, no watermark"
             ),
             "表情包场景": (
                 "single sticker-like image for chat, clear emotion, simple composition, cute exaggerated expression, "
@@ -9169,6 +9568,7 @@ Output:
         reference_image_path: str = "",
         image_size: str = "",
         allow_daily_outfit_reference: bool = True,
+        requested_scene_preset: str = "",
         suggested_scene_preset: str = "",
         workflow_default_scene_preset: str = "",
         prompt_sections: tuple[PhotoPromptSection, ...] | None = None,
@@ -9178,7 +9578,12 @@ Output:
         original_prompt_text = str(prompt_text or "").strip()
         request_text = str(request_text or original_prompt_text).strip()
         reference_image_path = _path_text(reference_image_path, 1000)
-        suggested_scene_preset = _single_line(suggested_scene_preset, 80)
+        # requested_scene_preset is the documented tool/generator contract.
+        # Keep the short-lived suggested_scene_preset name as a compatibility alias.
+        suggested_scene_preset = _single_line(
+            requested_scene_preset or suggested_scene_preset,
+            80,
+        )
         workflow_default_scene_preset = _single_line(workflow_default_scene_preset, 80)
         wardrobe_intent = analyze_photo_wardrobe(request_text)
         base_prompt = self._apply_photo_generation_prompt_format(original_prompt_text)
@@ -9213,6 +9618,7 @@ Output:
                 allow_daily_outfit=allow_daily_outfit_reference,
                 request_text=selection_request,
                 ambient_context=scene_context_before,
+                suggested_scene_preset=suggested_scene_preset,
                 continuity_key=continuity_key,
                 wardrobe_intent=wardrobe_intent,
             )
@@ -9933,15 +10339,19 @@ Output:
         return "真实", "真实摄影风格,像手机随手拍到的生活照片,光线自然,细节可信"
 
     def _photo_persona_reference_image_path(self) -> str:
-        persona = next(
-            (
-                item
-                for item in (getattr(self, "photo_reference_catalog", ()) or ())
-                if isinstance(item, PhotoReference) and item.kind == "persona"
-            ),
-            None,
-        )
-        raw = _path_text(persona.source if persona is not None else "", 1000)
+        catalog = getattr(self, "photo_reference_catalog", None)
+        if catalog is None:
+            raw = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+        else:
+            persona = next(
+                (
+                    item
+                    for item in (catalog or ())
+                    if isinstance(item, PhotoReference) and item.kind == "persona"
+                ),
+                None,
+            )
+            raw = _path_text(persona.source if persona is not None else "", 1000)
         if not raw:
             return ""
         raw = raw.strip().strip('"').strip("'")
@@ -9962,7 +10372,188 @@ Output:
             return str(path)
         return ""
 
+    @staticmethod
+    def _photo_reference_normalize_roles(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        else:
+            raw_items = re.split(r"[,，、/|\s]+", str(value or ""))
+        aliases = {
+            "identity": "identity",
+            "persona": "identity",
+            "face": "identity",
+            "人设": "identity",
+            "身份": "identity",
+            "人物": "identity",
+            "脸": "identity",
+            "outfit": "outfit",
+            "wardrobe": "outfit",
+            "clothing": "outfit",
+            "服装": "outfit",
+            "穿搭": "outfit",
+            "pose": "pose",
+            "姿势": "pose",
+            "scene": "scene",
+            "background": "scene",
+            "场景": "scene",
+            "背景": "scene",
+            "style": "style",
+            "画风": "style",
+            "风格": "style",
+            "continuity": "continuity",
+            "连续性": "continuity",
+            "source": "source",
+            "原图": "source",
+        }
+        roles: list[str] = []
+        for item in raw_items:
+            key = str(item or "").strip().lower()
+            normalized = aliases.get(key, "")
+            if normalized and normalized not in roles:
+                roles.append(normalized)
+        return roles
+
+    @staticmethod
+    def _photo_outfit_category_matches(value: Any) -> list[tuple[str, int, int, str]]:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        if not text:
+            return []
+        patterns = (
+            ("cosplay", r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演|扮成|女仆装|巫女服|魔法少女|表演服"),
+            ("school_uniform", r"校服|学院制服|学生制服|school[\s_-]*uniform"),
+            ("sleepwear", r"睡衣|睡裙|睡袍|睡眠服|nightgown|nightdress|pajama|pyjama|sleepwear|bedtime outfit"),
+            ("swimwear", r"泳装|泳衣|比基尼|swimsuit|swimwear|bikini"),
+            ("sportswear", r"运动服|健身服|瑜伽服|球衣|sportswear|activewear|gym wear|jersey"),
+            ("formalwear", r"礼服|晚礼服|正装|燕尾服|西装|tuxedo|formalwear|formal attire|evening gown|\bsuit\b"),
+            ("homewear", r"居家服|家居服|家常服|宅家服|homewear|loungewear"),
+            ("daily_outfit", r"今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit"),
+        )
+        matches: list[tuple[str, int, int, str]] = []
+        for category, pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.I):
+                matches.append((category, match.start(), match.end(), match.group(0)))
+        matches.sort(key=lambda item: (item[1], item[2]))
+        return matches
+
+    @classmethod
+    def _photo_outfit_category_from_text(cls, value: Any) -> str:
+        matches = cls._photo_outfit_category_matches(value)
+        return matches[0][0] if matches else ""
+
+    @staticmethod
+    def _photo_reference_scene_categories_from_text(value: Any) -> list[str]:
+        text = re.sub(r"\s+", "", str(value or "")).lower()
+        categories: list[str] = []
+        mappings = (
+            ("home", ("在家", "家里", "居家", "宅家", "home")),
+            ("bedroom", ("卧室", "床边", "睡前", "刚起床", "bedroom", "bedtime")),
+            ("school", ("上学", "校园", "教室", "校门", "school", "campus")),
+            ("office", ("上班", "公司", "办公室", "office", "workplace")),
+            ("outdoor", ("外出", "通勤", "逛街", "街头", "旅行", "outdoor", "commute")),
+            ("formal_event", ("宴会", "舞会", "典礼", "正式场合", "banquet", "ceremony")),
+            ("sport", ("运动", "健身", "跑步", "瑜伽", "球场", "gym", "sport")),
+            ("beach", ("海边", "沙滩", "泳池", "beach", "pool")),
+        )
+        for category, tokens in mappings:
+            if any(token in text for token in tokens):
+                categories.append(category)
+        return categories
+
+    @staticmethod
+    def _photo_reference_preset_for_category(category: str) -> str:
+        return {
+            "sleepwear": "居家睡衣",
+            "homewear": "居家服",
+            "cosplay": "COS自拍",
+            "school_uniform": "校服人像",
+            "formalwear": "礼服人像",
+            "swimwear": "泳装人像",
+            "sportswear": "运动服人像",
+            "daily_outfit": "日常穿搭",
+            "custom_outfit": "日常穿搭",
+        }.get(str(category or "").strip().lower(), "")
+
+    @staticmethod
+    def _photo_reference_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None or str(value).strip() == "":
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "是", "开启", "锁定"}
+
+    def _normalize_photo_reference_candidate_metadata(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item or {})
+        note = _single_line(normalized.get("note") or normalized.get("description"), 700)
+        kind = _single_line(normalized.get("kind"), 40).lower() or "library"
+        explicit_roles = normalized.get("reference_roles", normalized.get("reference_role"))
+        roles = self._photo_reference_normalize_roles(explicit_roles)
+        raw_category = normalized.get("outfit_category") or normalized.get("wardrobe_category")
+        if not raw_category and isinstance(normalized.get("wardrobe_categories"), (list, tuple)):
+            raw_category = next(iter(normalized.get("wardrobe_categories") or []), "")
+        category = _single_line(raw_category, 40).lower()
+        if not category:
+            category = self._photo_outfit_category_from_text(note)
+        if not roles:
+            if kind == "persona":
+                roles = ["identity"]
+            elif kind in {"daily_outfit", "recent_sent_photo"}:
+                roles = ["identity", "outfit"]
+                if kind == "recent_sent_photo":
+                    roles.extend(["scene", "continuity"])
+            elif re.search(r"仅(?:用于)?(?:人设|身份|脸|发型)|只(?:参考|用于)(?:人设|身份|脸|发型)|identity only", note, flags=re.I):
+                roles = ["identity"]
+            elif category:
+                roles = ["identity", "outfit"]
+            else:
+                roles = ["identity"]
+        if kind == "daily_outfit" and not category:
+            category = "daily_outfit"
+        scene_values = normalized.get("scene_categories", normalized.get("scene_tags"))
+        if isinstance(scene_values, (list, tuple, set)):
+            scene_categories = [
+                _single_line(value, 40).lower()
+                for value in scene_values
+                if _single_line(value, 40)
+            ]
+        else:
+            scene_categories = self._photo_reference_scene_categories_from_text(scene_values or note)
+        lock_default = self._photo_reference_bool(
+            normalized.get("outfit_lock_default"),
+            default=bool("outfit" in roles and (category or kind in {"daily_outfit", "recent_sent_photo"})),
+        )
+        preferred_preset = _single_line(
+            normalized.get("preferred_preset") or normalized.get("preset"),
+            60,
+        ) or self._photo_reference_preset_for_category(category)
+        normalized.update(
+            {
+                "kind": kind,
+                "note": note,
+                "reference_roles": list(dict.fromkeys(roles)),
+                "outfit_category": category,
+                "outfit_lock_default": lock_default,
+                "scene_categories": list(dict.fromkeys(scene_categories)),
+                "preferred_preset": preferred_preset,
+                "metadata_source": _single_line(normalized.get("metadata_source"), 30)
+                or ("configured" if explicit_roles is not None or normalized.get("outfit_category") else "inferred_note"),
+            }
+        )
+        return normalized
+
     def _photo_reference_library_entries(self) -> list[dict[str, Any]]:
+        if getattr(self, "photo_reference_catalog", None) is None:
+            loaded = load_catalog(
+                [],
+                catalog_version=0,
+                legacy_library=getattr(self, "photo_reference_library", []),
+                preset_names=self._photo_generation_scene_presets().keys(),
+            )
+            entries = [project_reference_candidate(item) for item in loaded.references if item.kind == "library"]
+            for index, entry in enumerate(entries):
+                raw_items = getattr(self, "photo_reference_library", []) or []
+                raw_item = raw_items[index] if isinstance(raw_items, list) and index < len(raw_items) else None
+                entry["_config_format"] = "dict" if isinstance(raw_item, dict) else "text"
+            return entries
         return [
             project_reference_candidate(item)
             for item in (getattr(self, "photo_reference_catalog", ()) or ())
@@ -10027,15 +10618,19 @@ Output:
         local_path = self._photo_persona_reference_image_path()
         if local_path:
             return local_path
-        persona = next(
-            (
-                item
-                for item in (getattr(self, "photo_reference_catalog", ()) or ())
-                if isinstance(item, PhotoReference) and item.kind == "persona"
-            ),
-            None,
-        )
-        raw = _path_text(persona.source if persona is not None else "", 1000)
+        catalog = getattr(self, "photo_reference_catalog", None)
+        if catalog is None:
+            raw = _path_text(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+        else:
+            persona = next(
+                (
+                    item
+                    for item in (catalog or ())
+                    if isinstance(item, PhotoReference) and item.kind == "persona"
+                ),
+                None,
+            )
+            raw = _path_text(persona.source if persona is not None else "", 1000)
         if not raw or not re.match(r"^https?://", raw, flags=re.I):
             return ""
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
@@ -10065,9 +10660,34 @@ Output:
         logger.info("[PrivateCompanion] 配置页人设参考图 URL 已缓存为本地文件: path=%s", _single_line(stable_path, 160))
         return stable_path
 
+    def _photo_reference_config_value(self, item: dict[str, Any], source: str = "") -> Any:
+        persisted_source = _path_text(source or item.get("source"), 1000)
+        note = _single_line(item.get("note"), 500)
+        if item.get("_config_format") != "dict":
+            return f"{persisted_source} || {note}" if note else persisted_source
+        return {
+            "path": persisted_source,
+            "note": note,
+            "reference_roles": list(item.get("reference_roles") or []),
+            "outfit_category": _single_line(item.get("outfit_category"), 40),
+            "outfit_lock_default": bool(item.get("outfit_lock_default")),
+            "scene_categories": list(item.get("scene_categories") or []),
+            "preferred_preset": _single_line(item.get("preferred_preset"), 60),
+        }
+
     async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
-        catalog = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+        canonical_mode = getattr(self, "photo_reference_catalog", None) is not None
+        if canonical_mode:
+            catalog = tuple(getattr(self, "photo_reference_catalog", ()) or ())
+        else:
+            catalog = load_catalog(
+                [],
+                catalog_version=0,
+                legacy_persona=getattr(self, "photo_persona_reference_image_path", ""),
+                legacy_library=getattr(self, "photo_reference_library", []),
+                preset_names=self._photo_generation_scene_presets().keys(),
+            ).references
         updated_catalog = list(catalog)
         catalog_changed = False
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
@@ -10091,10 +10711,29 @@ Output:
             if path:
                 candidates.append(project_reference_candidate(item, resolved_source=path))
         if catalog_changed:
-            setter = getattr(self, "_set_photo_reference_catalog_config", None)
+            setter = getattr(
+                self,
+                "_set_photo_reference_catalog_config" if canonical_mode else "_set_photo_reference_library_config",
+                None,
+            )
             if callable(setter):
                 try:
-                    result = setter(updated_catalog)
+                    payload: Any = updated_catalog
+                    if not canonical_mode:
+                        payload = [
+                            {
+                                "path": item.source,
+                                "note": item.note,
+                                "reference_roles": list(item.reference_roles),
+                                "outfit_category": item.outfit_category,
+                                "outfit_lock_default": item.outfit_lock_default,
+                                "scene_categories": list(item.scene_categories),
+                                "preferred_preset": item.preferred_preset,
+                            }
+                            for item in updated_catalog
+                            if isinstance(item, PhotoReference) and item.kind == "library"
+                        ]
+                    result = setter(payload)
                     if hasattr(result, "__await__"):
                         result = await result
                     if result is False:
@@ -10119,7 +10758,7 @@ Output:
             persona = next(
                 (
                     item
-                    for item in (getattr(self, "photo_reference_catalog", ()) or ())
+                    for item in catalog
                     if isinstance(item, PhotoReference) and item.kind == "persona"
                 ),
                 None,
@@ -10213,6 +10852,8 @@ Output:
         allow_daily_outfit: bool = True,
         request_text: str = "",
         ambient_context: str = "",
+        selection_context: str = "",
+        suggested_scene_preset: str = "",
         continuity_key: str = "",
         wardrobe_intent: PhotoWardrobeIntent | None = None,
     ) -> dict[str, Any]:
@@ -10232,8 +10873,34 @@ Output:
                 recent_candidate = {}
         if not candidates:
             return {}
+        legacy_context = str(selection_context or "").strip()
+        if legacy_context:
+            looks_like_ambient_context = bool(
+                re.search(
+                    r"(?:^|[；;，,])\s*(?:时间|状态|当前日程|日程|情绪|可分享碎片|"
+                    r"当前位置|当前场景|天气背景|今日穿搭|当天穿搭|日常穿搭)\s*[：:]",
+                    legacy_context,
+                    flags=re.I,
+                )
+            )
+            if not request_text and not ambient_context:
+                if looks_like_ambient_context:
+                    ambient_context = legacy_context
+                else:
+                    request_text = legacy_context
+            elif not ambient_context:
+                ambient_context = legacy_context
         wardrobe_intent = wardrobe_intent or analyze_photo_wardrobe(request_text)
-        requested_category = wardrobe_intent.target_category
+        suggested_scene_preset = _single_line(suggested_scene_preset, 80)
+        suggested_category = ""
+        available_presets = self._photo_generation_scene_presets()
+        if (
+            not wardrobe_intent.target_category
+            and suggested_scene_preset
+            and suggested_scene_preset in available_presets
+        ):
+            suggested_category = self._photo_outfit_category_from_text(suggested_scene_preset)
+        requested_category = wardrobe_intent.target_category or suggested_category
         excluded_categories = set(wardrobe_intent.excluded_categories)
         scored_candidates = [
             (
@@ -10304,6 +10971,7 @@ Output:
 明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
 当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。
 用户原始要求高于环境上下文；两者冲突时必须按用户原始要求选图，不能让日程或位置覆盖用户明确要求。
+若用户没有明确服装要求，但结构化场景预设给出了服装类别，且候选中存在同类别服装参考，优先选择该服装参考，不要改选基础身份图。结构化预设只用于补足空白，不得覆盖用户明确要求。
 不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
 候选 id=recent_sent_photo 是同一会话刚刚已发送的上一张成图。若用户是在自然续拍，主要只要求改变动作、表情、视线、拍摄角度或近似构图，应优先选择它来保持人物、服装和环境连续；若用户明确换人物、换装、换地点、换时间、换整体场景或另起主题，则选择更合适的其他参考图。只有所有候选都不适合新画面时才输出 0。
 只输出候选编号，不要解释。
@@ -10313,6 +10981,9 @@ Output:
 
 【环境上下文】
 {_single_line(ambient_context, 800) or "无"}
+
+【结构化场景预设】
+{suggested_scene_preset or "无"}
 
 【候选参考图】
 {options}{none_option}
@@ -10344,6 +11015,15 @@ Output:
                         selected = fallback
                         selection_source = "semantic_user_request"
                         selection_reason = "model_selected_incompatible_user_outfit"
+                    elif (
+                        requested_category
+                        and not proposed_category
+                        and isinstance(fallback, dict)
+                        and responsible_outfit_category(fallback) == requested_category
+                    ):
+                        selected = fallback
+                        selection_source = "semantic_scene_preset"
+                        selection_reason = "model_ignored_matching_outfit_reference"
                     else:
                         selected = proposed
                         selection_source = "model"
@@ -10390,7 +11070,7 @@ Output:
             _single_line(selected.get("note"), 160) if isinstance(selected, dict) else "-",
             len(candidates),
         )
-        return dict(selected) if isinstance(selected, dict) else {}
+        return self._normalize_photo_reference_candidate_metadata(selected) if isinstance(selected, dict) else {}
 
     async def _select_photo_reference_image_async(
         self,
@@ -10399,6 +11079,8 @@ Output:
         allow_daily_outfit: bool = True,
         request_text: str = "",
         ambient_context: str = "",
+        selection_context: str = "",
+        suggested_scene_preset: str = "",
         continuity_key: str = "",
     ) -> str:
         selected = await self._select_photo_reference_candidate_async(
@@ -10406,6 +11088,8 @@ Output:
             allow_daily_outfit=allow_daily_outfit,
             request_text=request_text,
             ambient_context=ambient_context,
+            selection_context=selection_context,
+            suggested_scene_preset=suggested_scene_preset,
             continuity_key=continuity_key,
         )
         return str(selected.get("path") or "") if selected else ""
@@ -10423,19 +11107,18 @@ Output:
             return {}
         normalized_kind = str(workflow_kind or "").strip().lower()
         if normalized_kind in {"edit", "改图", "修图", "重绘", "p图"}:
-            return {
-                "id": "explicit_reference",
-                "path": path,
-                "source": path,
-                "kind": "source",
-                "note": "用户本轮明确提供或引用的改图原图",
-                "reference_roles": ["source"],
-                "outfit_category": "",
-                "outfit_lock_default": False,
-                "scene_categories": [],
-                "preferred_preset": "",
-                "metadata_source": "runtime",
-            }
+            return self._normalize_photo_reference_candidate_metadata(
+                {
+                    "id": "explicit_reference",
+                    "path": path,
+                    "source": path,
+                    "kind": "source",
+                    "note": "用户本轮明确提供或引用的改图原图",
+                    "reference_roles": ["source"],
+                    "outfit_lock_default": False,
+                    "metadata_source": "runtime",
+                }
+            )
         candidates = await self._photo_reference_candidates_async(
             allow_daily_outfit=allow_daily_outfit,
         )
@@ -10444,22 +11127,21 @@ Output:
             candidates.insert(0, recent)
         for candidate in candidates:
             if self._photo_reference_paths_equal(path, candidate.get("path", "")):
-                return dict(candidate)
+                return self._normalize_photo_reference_candidate_metadata(candidate)
         kind = "explicit"
         roles = ["identity", "outfit"]
-        return {
-            "id": "explicit_reference",
-            "path": path,
-            "source": path,
-            "kind": kind,
-            "note": "用户本轮明确提供或引用的参考图",
-            "reference_roles": roles,
-            "outfit_category": "",
-            "outfit_lock_default": kind == "explicit",
-            "scene_categories": [],
-            "preferred_preset": "",
-            "metadata_source": "runtime",
-        }
+        return self._normalize_photo_reference_candidate_metadata(
+            {
+                "id": "explicit_reference",
+                "path": path,
+                "source": path,
+                "kind": kind,
+                "note": "用户本轮明确提供或引用的参考图",
+                "reference_roles": roles,
+                "outfit_lock_default": kind == "explicit",
+                "metadata_source": "runtime",
+            }
+        )
 
     async def _photo_persona_reference_image_for_kind_async(
         self,
@@ -10468,6 +11150,8 @@ Output:
         allow_daily_outfit: bool = True,
         request_text: str = "",
         ambient_context: str = "",
+        selection_context: str = "",
+        suggested_scene_preset: str = "",
         continuity_key: str = "",
     ) -> str:
         return await self._select_photo_reference_image_async(
@@ -10475,6 +11159,8 @@ Output:
             allow_daily_outfit=allow_daily_outfit,
             request_text=request_text,
             ambient_context=ambient_context,
+            selection_context=selection_context,
+            suggested_scene_preset=suggested_scene_preset,
             continuity_key=continuity_key,
         )
 
@@ -11779,7 +12465,7 @@ Output:
         except Exception:
             parsed = None
         if not parsed or parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-            logger.warning("[PrivateCompanion] 在线图片下载代理格式无效，已忽略")
+            logger.warning("[PrivateCompanion] 在线图片网络代理格式无效，已忽略")
             return ""
         return proxy
 
@@ -12410,16 +13096,32 @@ Output:
             if self.external_image_api_key and "key" not in query:
                 headers.setdefault("x-goog-api-key", self.external_image_api_key)
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            use_environment_proxy = bool(
+                getattr(self, "external_image_download_use_environment_proxy", False)
+            )
+            proxy_url = self._external_image_download_proxy_url()
+            proxy_mode = "explicit" if proxy_url else ("environment" if use_environment_proxy else "direct")
             logger.info(
-                "[PrivateCompanion] Gemini 生图提交: endpoint=%s model=%s size=%s reference=%s prompt_preview=%s",
+                "[PrivateCompanion] Gemini 生图提交: endpoint=%s model=%s size=%s reference=%s proxy=%s prompt_preview=%s",
                 self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _single_line(size_hint, 40),
                 used_reference,
+                proxy_mode,
                 _single_line(prompt_text, 180),
             )
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(endpoint, headers=headers, params=query, json=payload) as response:
+            request_options: dict[str, Any] = {
+                "headers": headers,
+                "params": query,
+                "json": payload,
+            }
+            if proxy_url:
+                request_options["proxy"] = proxy_url
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                trust_env=use_environment_proxy,
+            ) as session:
+                async with session.post(endpoint, **request_options) as response:
                     text = await response.text()
                     logger.info(
                         "[PrivateCompanion] Gemini 生图响应: status=%s chars=%s preview=%s",

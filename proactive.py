@@ -1145,6 +1145,7 @@ class ProactiveMixin:
             "jm_cosmos_share",
             "jm_cosmos_recommendation_request",
             "creative_share",
+            "weather_alert",
         }
 
     def _friend_sensitive_proactive_action(self, action: Any) -> bool:
@@ -2947,12 +2948,14 @@ class ProactiveMixin:
                     ("创作推进", self._maybe_advance_creative_projects),
                     ("个人目标", self._maybe_settle_personal_goals),
                     ("备忘便签", self._maybe_process_memo_notes),
+                    ("天气预警", self._maybe_refresh_weather_alerts),
                     ("环境突变", self._maybe_refresh_environment_change),
                     ("余额感知", self._maybe_refresh_balance_awareness),
+                    ("晚安识屏", self._maybe_process_goodnight_screen_checks),
                     ("被动注入缓存", self._refresh_passive_injection_cache),
                 )
                 if self._proactive_generation_disabled():
-                    passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "被动注入缓存"}
+                    passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "天气预警", "晚安识屏", "被动注入缓存"}
                     maintenance_tasks = tuple(item for item in maintenance_tasks if item[0] in passive_labels)
                 for label, task_factory in maintenance_tasks:
                     try:
@@ -2981,12 +2984,14 @@ class ProactiveMixin:
                 ("创作推进", self._maybe_advance_creative_projects),
                 ("个人目标", self._maybe_settle_personal_goals),
                 ("备忘便签", self._maybe_process_memo_notes),
+                ("天气预警", self._maybe_refresh_weather_alerts),
                 ("环境突变", self._maybe_refresh_environment_change),
                 ("余额感知", self._maybe_refresh_balance_awareness),
+                ("晚安识屏", self._maybe_process_goodnight_screen_checks),
                 ("被动注入缓存", self._refresh_passive_injection_cache),
             )
             if self._proactive_generation_disabled():
-                passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "被动注入缓存"}
+                passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "天气预警", "晚安识屏", "被动注入缓存"}
                 maintenance_tasks = tuple(item for item in maintenance_tasks if item[0] in passive_labels)
             for label, task_factory in maintenance_tasks:
                 try:
@@ -3012,11 +3017,15 @@ class ProactiveMixin:
                 if not raw_user.get("umo"):
                     continue
                 next_at = _safe_float(raw_user.get("next_proactive_at"), 0)
-                if next_at <= 0:
-                    continue
-                due_in = max(0.0, next_at - now)
-                if nearest_due_in is None or due_in < nearest_due_in:
-                    nearest_due_in = due_in
+                due_times = [next_at]
+                if bool(getattr(self, "enable_goodnight_screen_check", False)):
+                    due_times.append(_safe_float(raw_user.get("goodnight_screen_check_due_at"), 0))
+                for due_at in due_times:
+                    if due_at <= 0:
+                        continue
+                    due_in = max(0.0, due_at - now)
+                    if nearest_due_in is None or due_in < nearest_due_in:
+                        nearest_due_in = due_in
 
         if nearest_due_in is None:
             detail_due_in = self._next_detail_due_in_seconds(now)

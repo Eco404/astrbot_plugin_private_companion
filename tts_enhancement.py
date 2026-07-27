@@ -38,6 +38,11 @@ FISH_AUDIO_S2_CUE_PATTERN = re.compile(r"\[([^\[\]\n]{1,40})\]")
 FISH_AUDIO_S1_CUE_PATTERN = re.compile(r"\(([^()\n]{1,24})\)", re.IGNORECASE)
 FISH_AUDIO_MODELS = {"s1", "s2-pro", "s2.1-pro", "s2.1-pro-free"}
 FISH_AUDIO_EMOTION_MODES = {"balanced", "expressive", "manual"}
+TTS_LANGUAGE_PROVIDER_ATTRS = {
+    "zh": "tts_provider_id_zh",
+    "ja": "tts_provider_id_ja",
+    "en": "tts_provider_id_en",
+}
 FISH_AUDIO_S1_CUES = frozenset({
     "angry", "sad", "excited", "surprised", "satisfied", "delighted",
     "scared", "worried", "upset", "nervous", "frustrated", "depressed",
@@ -74,10 +79,20 @@ FISH_AUDIO_CUE_ALIASES = {
     "小聲": "soft tone", "大喊": "shouting", "叫ぶ": "shouting",
     "笑": "laughing", "笑う": "laughing", "轻笑": "chuckling",
     "輕笑": "chuckling", "叹气": "sighing", "嘆氣": "sighing",
-    "ため息": "sighing", "哭泣": "sobbing", "すすり泣く": "sobbing",
-    "喘气": "panting", "喘氣": "panting", "あくび": "yawning",
+    "ため息": "sighing", "叹息": "sighing", "嘆息": "sighing",
+    "sigh": "sighing", "哭泣": "sobbing", "すすり泣く": "sobbing",
+    "喘气": "panting", "喘氣": "panting", "喘息": "panting",
+    "喘ぎ": "panting", "breathing": "panting", "heavy breathing": "panting",
+    "gasping": "panting", "呻吟": "groaning", "うめき声": "groaning",
+    "あくび": "yawning",
     "哈欠": "yawning", "停顿": "break", "停頓": "break", "間": "break",
 }
+FISH_AUDIO_AUTO_BLOCKED_EFFECTS = frozenset({"panting", "groaning"})
+FISH_AUDIO_EXPLICIT_SIGH_PATTERN = re.compile(
+    r"叹(?:了)?(?:一口|口)?气|嘆(?:了)?(?:一口|口)?氣|叹息|嘆息|"
+    r"ため息(?:を)?|sigh(?:ed|ing|s)?\b",
+    flags=re.IGNORECASE,
+)
 FISH_AUDIO_S1_ALIAS_OVERRIDES = {
     "happy": "joyful",
     "calm": "relaxed",
@@ -340,6 +355,8 @@ class TtsEnhancementMixin:
         self.tts_voice_language = self._cfg_str(config, "tts_voice_language", "ja", "ja").lower()
         if self.tts_voice_language not in {"ja", "zh", "en"}:
             self.tts_voice_language = "ja"
+        for language, attr in TTS_LANGUAGE_PROVIDER_ATTRS.items():
+            setattr(self, attr, self._cfg_str(config, attr, ""))
         self.tts_delivery_mode = self._cfg_str(config, "tts_delivery_mode", "voice_and_text", "voice_and_text").lower()
         if self.tts_delivery_mode not in {"voice_only", "voice_and_text"}:
             self.tts_delivery_mode = "voice_and_text"
@@ -527,8 +544,66 @@ class TtsEnhancementMixin:
             tool_name=tool_name,
         )
 
+    @staticmethod
+    def _tts_synthesis_provider_id(provider: Any) -> str:
+        if provider is None:
+            return ""
+        config = getattr(provider, "provider_config", None) or getattr(provider, "config", None) or {}
+        if isinstance(config, dict):
+            provider_id = _single_line(config.get("id") or config.get("provider_id"), 160)
+            if provider_id:
+                return provider_id
+        for attr in ("provider_id", "id"):
+            provider_id = _single_line(getattr(provider, attr, ""), 160)
+            if provider_id:
+                return provider_id
+        meta_getter = getattr(provider, "meta", None)
+        if callable(meta_getter):
+            try:
+                metadata = meta_getter()
+                if isinstance(metadata, dict):
+                    return _single_line(metadata.get("id"), 160)
+                return _single_line(getattr(metadata, "id", ""), 160)
+            except Exception:
+                pass
+        return ""
+
+    def _language_tts_provider(self) -> Any:
+        language = self._normalize_tts_voice_language_value(
+            getattr(self, "tts_voice_language", "ja")
+        ) or "ja"
+        attr = TTS_LANGUAGE_PROVIDER_ATTRS.get(language, "")
+        provider_id = _single_line(getattr(self, attr, ""), 160) if attr else ""
+        if not provider_id:
+            return None
+        context = getattr(self, "context", None)
+        get_all = getattr(context, "get_all_tts_providers", None)
+        try:
+            providers = list(get_all() or []) if callable(get_all) else []
+        except Exception:
+            providers = []
+        if not providers:
+            manager = getattr(context, "provider_manager", None)
+            providers = list(getattr(manager, "tts_provider_insts", None) or [])
+        for provider in providers:
+            if self._tts_synthesis_provider_id(provider) == provider_id:
+                return provider
+        warning_key = f"{language}:{provider_id}"
+        if getattr(self, "_tts_language_provider_warning_key", "") != warning_key:
+            self._tts_language_provider_warning_key = warning_key
+            logger.warning(
+                "[PrivateCompanion] 当前语种配置的 TTS Provider 不可用,已回退现有合成链路: language=%s provider=%s",
+                language,
+                provider_id,
+            )
+        return None
+
     def _resolve_tts_synthesis_provider(self, event: Any, astrbot_provider: Any = None) -> Any:
         mode = str(getattr(self, "tts_synthesis_backend", "auto") or "auto").lower()
+        if mode != "mimo_voice_clone":
+            language_provider = self._language_tts_provider()
+            if language_provider is not None:
+                return language_provider
         if mode == "astrbot_provider":
             return astrbot_provider
 
@@ -575,7 +650,18 @@ class TtsEnhancementMixin:
         provider_settings: dict[str, Any] | None = None,
     ) -> str:
         configured = str(getattr(self, "tts_fishaudio_model", "auto") or "auto").strip().lower()
-        if configured in FISH_AUDIO_MODELS:
+        language = self._normalize_tts_voice_language_value(
+            getattr(self, "tts_voice_language", "ja")
+        ) or "ja"
+        language_attr = TTS_LANGUAGE_PROVIDER_ATTRS.get(language, "")
+        language_provider_id = _single_line(getattr(self, language_attr, ""), 160) if language_attr else ""
+        active_provider_id = self._tts_synthesis_provider_id(tts_provider)
+        has_dedicated_language_provider = bool(
+            language_provider_id
+            and active_provider_id
+            and language_provider_id == active_provider_id
+        )
+        if configured in FISH_AUDIO_MODELS and not has_dedicated_language_provider:
             return configured
 
         candidates: list[str] = []
@@ -689,12 +775,16 @@ class TtsEnhancementMixin:
             return base + "仅在情绪明确时使用 1 个主要情绪，必要时再加 1 个语气控制。"
         if provider_kind.startswith("fishaudio"):
             base = (
-                f"Fish Audio S2 在{subject}使用简短方括号自然语言控制，如 {positive}、{negative}、"
-                "[whispering]、[sighing]、[break]；句级情绪通常放句首，语气或音效放在生效位置。"
+                f"Fish Audio S2 在{subject}使用简短方括号自然语言控制，如 {positive}、{negative}；"
+                "控制词优先使用朗读语言，并紧贴放在实际生效的短语前。日语可参考官方写法："
+                "あれ？[くすくす笑い]知らなかった？私が[強調]胡桃だよ！[興奮]これからも頑張るね。"
+                "同一位置只放一个标签，不要在句首连续堆叠多个标签。停顿词、拖音以及“唔、呜、うーん”"
+                "只是口语表达，不代表叹气或喘息；原文没有明确的叹气动作时不要使用 [sighing]，"
+                "不要自动使用喘息、喘气、呼吸急促、呻吟、panting、breathing 或 groaning。"
             )
             if emotion_mode == "expressive":
-                return base + "每句只选一个主要情绪，可组合必要的语气或音效，总数最多 3 个，避免冲突和长描述。"
-            return base + "组合控制最多 3 个；本模式仅在情绪明确时使用 1 个主要情绪，必要时再加 1 个语气控制，中性短句不要硬加标签。"
+                return base + "可随句意在不同短语前稀疏切换表现，但每个短语只选最贴切的一种控制，中性短句不要硬加标签。"
+            return base + "本模式仅在情绪明确时使用控制；一条短回复通常只需 1 个，中性短句不要硬加标签。"
         return f"可以在{subject}插入方括号情绪标签，如 {positive}、{negative}。"
 
     def _tts_language_label(self) -> str:
@@ -1098,10 +1188,13 @@ class TtsEnhancementMixin:
         raw = re.sub(r"\s+", " ", str(label or "").strip())
         if not raw:
             return ""
-        canonical = FISH_AUDIO_CUE_ALIASES.get(raw, raw.lower() if raw.isascii() else raw)
         if s1:
+            canonical = FISH_AUDIO_CUE_ALIASES.get(raw, raw.lower() if raw.isascii() else raw)
             canonical = FISH_AUDIO_S1_ALIAS_OVERRIDES.get(canonical, canonical)
             return canonical if canonical in FISH_AUDIO_S1_CUES else ""
+        # S2 officially accepts concise natural-language controls. Keep CJK labels
+        # in the spoken language instead of needlessly translating them to English.
+        canonical = raw.lower() if raw.isascii() else raw
         if (
             len(canonical) > 40
             or re.fullmatch(r"[\d\W_]+", canonical, flags=re.UNICODE)
@@ -1111,29 +1204,72 @@ class TtsEnhancementMixin:
             return ""
         return canonical
 
+    @staticmethod
+    def _fishaudio_cue_effect_key(label: str) -> str:
+        raw = re.sub(r"\s+", " ", str(label or "").strip())
+        if not raw:
+            return ""
+        return FISH_AUDIO_CUE_ALIASES.get(raw, raw.lower() if raw.isascii() else raw)
+
+    def _fishaudio_auto_cue_allowed(self, label: str, *, context: str) -> tuple[bool, str]:
+        if self._fishaudio_emotion_mode() == "manual":
+            return True, ""
+        effect = self._fishaudio_cue_effect_key(label)
+        if effect in FISH_AUDIO_AUTO_BLOCKED_EFFECTS:
+            return False, "high_impact_breath_effect"
+        if effect == "sighing" and not FISH_AUDIO_EXPLICIT_SIGH_PATTERN.search(str(context or "")):
+            return False, "sigh_without_explicit_action"
+        return True, ""
+
     def _normalize_fishaudio_s2_cues(self, text: str) -> str:
         source = str(text or "")
         segments = re.split(r"([。！？.!?]+)", source)
         normalized: list[str] = []
+        removed_cues: list[str] = []
+        mode = self._fishaudio_emotion_mode()
         for segment in segments:
             if not segment or re.fullmatch(r"[。！？.!?]+", segment):
                 normalized.append(segment)
                 continue
             cue_count = 0
+            last_cue_end = -1
+            cue_run_has_kept = False
+            segment_context = FISH_AUDIO_S2_CUE_PATTERN.sub("", segment)
 
             def repl(match: re.Match[str]) -> str:
-                nonlocal cue_count
+                nonlocal cue_count, last_cue_end, cue_run_has_kept
                 if match.end() < len(segment) and segment[match.end()] == "(":
                     return ""
+                adjacent = last_cue_end >= 0 and not segment[last_cue_end:match.start()].strip()
+                if not adjacent:
+                    cue_run_has_kept = False
+                last_cue_end = match.end()
                 canonical = self._fishaudio_canonical_cue(match.group(1), s1=False)
                 if not canonical or cue_count >= 3:
                     return ""
+                allowed, reason = self._fishaudio_auto_cue_allowed(
+                    canonical,
+                    context=segment_context,
+                )
+                if not allowed:
+                    removed_cues.append(f"{canonical}:{reason}")
+                    return ""
+                if mode != "manual" and adjacent and cue_run_has_kept:
+                    removed_cues.append(f"{canonical}:stacked")
+                    return ""
                 cue_count += 1
+                cue_run_has_kept = True
                 return f"[{canonical}]"
 
             normalized_segment = FISH_AUDIO_S2_CUE_PATTERN.sub(repl, segment)
             normalized_segment = re.sub(r"\[[^\[\]\n]{41,200}\]", "", normalized_segment)
             normalized.append(normalized_segment)
+        if removed_cues:
+            logger.info(
+                "[PrivateCompanion] FishAudio 自动控制已移除高风险或堆叠标签: mode=%s cues=%s",
+                mode,
+                ",".join(removed_cues[:8]),
+            )
         return "".join(normalized)
 
     def _normalize_fishaudio_s1_cues(self, text: str) -> str:
@@ -1189,25 +1325,20 @@ class TtsEnhancementMixin:
         primary = max(primary_candidates, key=lambda cue: (scores[cue], -priority.index(cue))) if primary_candidates else ""
 
         tone_rules = (
-            ("sighing", r"(?:^|[\s，,、。.!！?？…~～])(唉|哎|呜+|嗚+|唔|はぁ|ふぅ|うーん|まったく)(?:[\s，,、。.!！?？…~～]|$)"),
+            ("sighing", FISH_AUDIO_EXPLICIT_SIGH_PATTERN.pattern),
             ("whispering", r"悄悄|小声|小聲|耳边|耳邊|こっそり|囁|小声で"),
             ("laughing", r"哈哈|嘿嘿|嘻嘻|笑死|ふふ|はは|あはは|笑っ"),
             ("sobbing", r"哭了|哭泣|抽泣|泣いて|すすり泣|しくしく"),
             ("soft tone", r"晚安|慢慢说|慢慢說|轻声|輕聲|おやすみ|優しく|そっと"),
         )
         tones = [cue for cue, pattern in tone_rules if re.search(pattern, source, flags=re.IGNORECASE)]
-        if not primary:
+        # This fallback can only prefix the whole utterance, so it deliberately
+        # chooses one control. Rich S2 expression is produced clause by clause by
+        # the conversion model; stacking inferred controls here causes breathing
+        # artefacts and conflicts with Fish Audio's official placement examples.
+        if tones:
             return tones[:1]
-
-        cues = [primary]
-        if primary == "upset" and scores.get("embarrassed", 0) >= 2:
-            cues.append("embarrassed")
-
-        max_cues = 3 if mode == "expressive" else 2
-        for cue in tones:
-            if cue not in cues and len(cues) < max_cues:
-                cues.append(cue)
-        return cues[:max_cues]
+        return [primary] if primary else []
 
     def _apply_fishaudio_emotion_control(
         self,
@@ -1283,17 +1414,44 @@ class TtsEnhancementMixin:
         compact = re.sub(r"\s+", "", str(text or "")).lower()
         if not compact:
             return False
-        markers = (
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", compact)
+        exact_refusals = {
+            "contentpolicyviolation",
+            "safetyfilter",
+            "违反内容安全策略",
+            "违反内容政策",
+            "违反社区准则",
+        }
+        if normalized in exact_refusals:
+            return True
+        policy_markers = (
             "您的请求包含低俗色情内容",
             "不符合公序良俗",
-            "已被平台拒绝",
             "违反内容安全策略",
             "违反内容政策",
             "违反社区准则",
             "contentpolicyviolation",
             "safetyfilter",
         )
-        return any(marker in compact for marker in markers)
+        refusal_markers = (
+            "已被平台拒绝",
+            "请求被拒绝",
+            "无法处理该请求",
+            "无法生成",
+            "无法提供",
+            "不能处理该请求",
+            "不能生成",
+            "不能提供",
+            "requestrejected",
+            "requestwasrejected",
+            "cannotcomply",
+            "unabletocomply",
+            "wasblocked",
+            "hasbeenblocked",
+        )
+        return any(marker in compact for marker in policy_markers) and any(
+            marker in compact for marker in refusal_markers
+        )
 
     def _drop_tts_provider_safety_blocks(self, text: str) -> tuple[str, bool]:
         """Remove only provider safety refusals that were incorrectly wrapped as voice."""
@@ -1848,6 +2006,14 @@ TTS 朗读文本：
             "自动语音概率命中只表示本轮可以考虑语音，不表示必须使用语音。功能性回复默认保持纯文字，包括指令执行结果、帮助或菜单、配置或状态、查询结果、报错或权限说明、清单、教程、代码以及主要由卡片或图片承载的结果；只有用户明确要求语音或朗读，或回复本身主要是适合听见的自然角色表达时，才考虑语音。",
             "URL、域名、邮箱、命令、文件路径、长编号和邀请码不适合朗读：不要放进 <pc_tts>；必须在语音块外保留原文供用户点击或复制。语音里需要承接时，只自然说“链接在文字里”或“我把链接发给你了”，不要念出协议、域名、路径或参数。",
         ]
+        if (
+            voice_lang != "zh"
+            and delivery_mode != "voice_only"
+            and foreign_text_mode != "original"
+        ):
+            rules.append(
+                "非中文语音的结构必须完整：每个 </pc_tts> 后都要紧跟非空、自然、与该语音含义一致的中文可见正文；如果无法同时给出中文正文，就不要使用语音标签，直接用普通中文回复。"
+            )
         if emotion_rule:
             rules.append(emotion_rule)
         return "\n".join(
@@ -2108,8 +2274,11 @@ TTS 朗读文本：
                 )
             return
         text = self._normalize_tts_tags(str(getattr(resp, "completion_text", "") or ""))
+        text_before_safety_drop = text
         text, dropped_safety_voice = self._drop_tts_provider_safety_blocks(text)
         if dropped_safety_voice:
+            if not text:
+                text = self._tts_plain_markup_fallback_text(text_before_safety_drop)
             resp.completion_text = _normalize_outbound_punctuation_flow(text)
             logger.warning(
                 "[PrivateCompanion] 已从模型回复中移除提供商安全回执语音块: session=%s remaining=%s",
@@ -2173,6 +2342,21 @@ TTS 朗读文本：
         plain_parts = [str(getattr(comp, "text", "") or "") for comp in chain if isinstance(comp, Plain)]
         if not plain_parts:
             return
+        source_segments: list[str] = []
+        if len(plain_parts) > 1 and len(plain_parts) == len(chain):
+            source_limit = self._tts_complete_text_limit("".join(plain_parts), minimum=1000)
+            for part in plain_parts:
+                restored_part = self._restore_protected_tts_blocks(part, event)
+                visible_part = self._sanitize_tts_visible_text(restored_part, max_chars=source_limit)
+                if visible_part:
+                    source_segments.append(visible_part)
+        try:
+            if len(source_segments) > 1:
+                setattr(event, "_private_companion_tts_source_plain_segments", tuple(source_segments))
+            elif hasattr(event, "_private_companion_tts_source_plain_segments"):
+                delattr(event, "_private_companion_tts_source_plain_segments")
+        except Exception:
+            pass
         text = self._restore_protected_tts_blocks("".join(plain_parts), event).strip()
         if not text:
             return
@@ -2190,6 +2374,7 @@ TTS 朗读文本：
                     event.set_result(self._build_result_from_chain([]))
                     return
         normalized = self._normalize_tts_tags(text)
+        normalized_before_safety_drop = normalized
         normalized, dropped_safety_voice = self._drop_tts_provider_safety_blocks(normalized)
         if dropped_safety_voice:
             logger.warning(
@@ -2198,7 +2383,14 @@ TTS 朗读文本：
                 _single_line(normalized, 160) or "empty",
             )
             if not normalized:
-                event.set_result(self._build_result_from_chain([]))
+                fallback_text = self._tts_plain_markup_fallback_text(
+                    normalized_before_safety_drop
+                )
+                event.set_result(
+                    self._build_result_from_chain(
+                        [Plain(fallback_text)] if fallback_text else []
+                    )
+                )
                 return
         if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
             # A tag can also arrive from a tool or an extension that bypasses the LLM response hook.
@@ -2226,7 +2418,9 @@ TTS 朗读文本：
                 event.set_result(self._build_result_from_chain([Plain(normalized)]))
                 return
             if PRIVATE_TTS_BLOCK_TOKEN_PATTERN.search("".join(plain_parts)):
-                fallback_text = self._tts_visible_fallback_text(normalized)
+                fallback_text = self._tts_visible_fallback_text(
+                    normalized
+                ) or self._tts_plain_markup_fallback_text(normalized)
                 event.set_result(self._build_result_from_chain([Plain(fallback_text)] if fallback_text else []))
             return
         if len(plain_parts) != len(chain):
@@ -2296,9 +2490,17 @@ TTS 朗读文本：
         if not re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
             return
         normalized = self._normalize_tts_tags(text)
+        normalized_before_safety_drop = normalized
         normalized, dropped_safety_voice = self._drop_tts_provider_safety_blocks(normalized)
         if dropped_safety_voice and not normalized:
-            event.set_result(self._build_result_from_chain([]))
+            fallback_text = self._tts_plain_markup_fallback_text(
+                normalized_before_safety_drop
+            )
+            event.set_result(
+                self._build_result_from_chain(
+                    [Plain(fallback_text)] if fallback_text else []
+                )
+            )
             logger.warning(
                 "[PrivateCompanion] 发送前终检已丢弃仅包含提供商安全回执的语音块: session=%s",
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -2319,8 +2521,9 @@ TTS 朗读文本：
                 fallback_plain=full_scope_fallback,
             )
         if not new_chain:
-            fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
-            fallback_text = self._sanitize_tts_visible_text(fallback_text)
+            fallback_text = self._tts_visible_fallback_text(
+                normalized
+            ) or self._tts_plain_markup_fallback_text(normalized)
             new_chain = [Plain(fallback_text)] if fallback_text else []
         if len(plain_parts) != len(chain):
             non_plain_tail = [comp for comp in chain if not isinstance(comp, Plain)]
@@ -2449,6 +2652,46 @@ TTS 朗读文本：
         return normalized_chain
 
     def _tts_segment_plain_chunk_for_ordered_send(self, event: Any, chunk: list[Any]) -> list[list[Any]]:
+        if not chunk or any(not isinstance(comp, Plain) for comp in chunk):
+            return [chunk]
+        text = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
+        if not text:
+            return []
+
+        source_segments = getattr(event, "_private_companion_tts_source_plain_segments", ())
+        if isinstance(source_segments, (list, tuple)) and len(source_segments) > 1:
+            segment_limit = self._tts_complete_text_limit(
+                "".join(str(item or "") for item in source_segments),
+                minimum=1000,
+            )
+            cleaned_segments = [
+                self._sanitize_tts_visible_text(item, max_chars=segment_limit)
+                for item in source_segments
+            ]
+            cleaned_segments = [item for item in cleaned_segments if item]
+            cleaned_visible = self._sanitize_tts_visible_text(text, max_chars=segment_limit)
+
+            def visible_signature(value: str) -> str:
+                return re.sub(r"\s+", "", str(value or ""))
+
+            if (
+                len(cleaned_segments) > 1
+                and visible_signature("".join(cleaned_segments)) == visible_signature(cleaned_visible)
+            ):
+                logger.info(
+                    "[PrivateCompanion] TTS 完整合成后恢复上游正文分段: session=%s segments=%s first=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    len(cleaned_segments),
+                    _single_line(cleaned_segments[0], 100),
+                )
+                restored_chunks: list[list[Any]] = []
+                for segment in cleaned_segments:
+                    visible_part = self._mark_tts_visible_plain(segment, max_chars=segment_limit)
+                    if visible_part is not None:
+                        restored_chunks.append([visible_part])
+                if restored_chunks:
+                    return restored_chunks
+
         if not (
             bool(getattr(self, "enable_segmented_proactive_reply", False))
             and str(getattr(self, "segmented_proactive_scope", "") or "") == "all_llm"
@@ -2461,11 +2704,6 @@ TTS 朗读文本：
                     return [chunk]
             except Exception:
                 return [chunk]
-        if not chunk or any(not isinstance(comp, Plain) for comp in chunk):
-            return [chunk]
-        text = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
-        if not text:
-            return []
         original_text = text
         tool_cleaner = getattr(self, "_strip_plaintext_tool_call_envelopes", None)
         if callable(tool_cleaner):
@@ -3440,6 +3678,15 @@ Provider 规则：{emotion_rule}
             )
         return ""
 
+    def _tts_plain_markup_fallback_text(self, text: Any) -> str:
+        """Demote a failed TTS structure to its original visible plain text."""
+        normalized = self._normalize_tts_tags(str(text or ""))
+        plain = self._strip_any_tts_markup(normalized)
+        return self._sanitize_tts_visible_text(
+            plain,
+            max_chars=self._tts_complete_text_limit(plain, 800),
+        )
+
     def _enforce_full_tts_scope_markup(self, text: str, *, source_text: str = "") -> tuple[str, str]:
         """Turn any tagged full-scope reply into one structurally complete voice block."""
         normalized = self._normalize_tts_tags(str(text or ""))
@@ -3568,7 +3815,10 @@ Provider 规则：{emotion_rule}
         normalized = self._normalize_tts_tags(text)
         hard_block = self._tts_hard_block_reason(event)
         if hard_block:
-            fallback_text = self._tts_visible_fallback_text(normalized, fallback_plain)
+            fallback_text = self._tts_visible_fallback_text(
+                normalized,
+                fallback_plain,
+            ) or self._tts_plain_markup_fallback_text(normalized)
             logger.info(
                 "[PrivateCompanion] TTS强约束已阻止语音生成: session=%s reason=%s text=%s",
                 _single_line(self._tts_session_key(event), 80) or "unknown",
@@ -3764,8 +4014,10 @@ Provider 规则：{emotion_rule}
             if visible_plain is not None:
                 output.append(visible_plain)
         if not output:
-            fallback_text = self._tts_visible_fallback_text(normalized, fallback_plain)
-            fallback_text = self._sanitize_tts_visible_text(fallback_text)
+            fallback_text = self._tts_visible_fallback_text(
+                normalized,
+                fallback_plain,
+            ) or self._tts_plain_markup_fallback_text(normalized)
             if fallback_text:
                 output.append(Plain(fallback_text))
         return await self._finalize_tts_delivery_chain(

@@ -3755,6 +3755,102 @@ class PrivateImageMixin:
             reply = ""
         return reply, source
 
+    async def _generate_private_image_strict_retry_reply(
+        self,
+        *,
+        vision_text: str,
+        reply_objective: str = "",
+        system_prompt: str = "",
+        user_id: str = "",
+    ) -> tuple[str, str]:
+        source = "strict_retry_llm" if vision_text else "strict_retry_llm_no_vision"
+        prompt = (
+            "用户只发了一张图片，前一次回复为空或清洗后没有可发送内容。\n"
+            "现在必须只输出一条可以直接发给用户的纯文本短回复，不能留空。\n"
+            "不要输出 TTS/XML 标签、占位符、JSON、Markdown 代码块、工具调用、内部错误、处理过程或解释。\n"
+            "保持当前私聊人格和关系语气；不要复述旧聊天、旧主动消息或旧图片摘要。\n"
+            "如果最近上下文明确规定这张/下一张图片只能回复某句话，优先严格照做。\n"
+        )
+        if vision_text:
+            prompt += (
+                "除非用户明确询问图片内容，否则不要逐项汇报画面；自然评价、接梗、回应情绪或追问一个重点。\n"
+                f"{self._private_image_identity_disambiguation_instruction()}\n"
+                f"{reply_objective}\n"
+                f"图片内容摘要：{vision_text}"
+            )
+        else:
+            prompt += (
+                "当前没有可靠视觉摘要，不要猜测画面、人物、文字、天气或场景。"
+                "自然说明这次没看清，并请用户补一句想让你看哪里。"
+            )
+        try:
+            raw_reply = await self._llm_call(
+                prompt,
+                max_tokens=120,
+                task="private_image_only_strict_retry",
+                system_prompt=str(system_prompt or "").strip() or None,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 私聊单图强约束重试失败: user=%s error=%s",
+                user_id,
+                _single_line(exc, 160),
+            )
+            return "", source
+        reply = _single_line(_strip_internal_message_blocks(raw_reply or ""), 300)
+        if reply and self._private_image_reply_is_internal_error(reply):
+            logger.warning(
+                "[PrivateCompanion] 私聊单图强约束重试返回内部错误文本,已丢弃: user=%s preview=%s",
+                user_id,
+                _single_line(reply, 180),
+            )
+            reply = ""
+        return reply, source
+
+    @staticmethod
+    def _private_image_neutral_visible_reply() -> str:
+        return "这张图我收到了，但刚才没能稳稳接住。你想让我重点看哪里？"
+
+    @staticmethod
+    def _private_image_framework_response_text(resp: Any) -> str:
+        if resp is None:
+            return ""
+        completion = str(getattr(resp, "completion_text", "") or "").strip()
+        if completion:
+            return completion
+        result_chain = getattr(resp, "result_chain", None)
+        chain = getattr(result_chain, "chain", None)
+        if chain is None and isinstance(result_chain, list):
+            chain = result_chain
+        if not isinstance(chain, list):
+            return ""
+        parts: list[str] = []
+        for item in chain:
+            if isinstance(item, dict):
+                component_type = str(item.get("type") or item.get("component_type") or "").strip().lower()
+                if component_type and component_type not in {"plain", "text"}:
+                    continue
+                item_text = str(item.get("text") or item.get("content") or "").strip()
+            else:
+                component_type = item.__class__.__name__.strip().lower()
+                if component_type not in {"plain", "text"} and not hasattr(item, "text"):
+                    continue
+                item_text = str(getattr(item, "text", "") or "").strip()
+            if item_text:
+                parts.append(item_text)
+        return "\n".join(parts).strip()
+
+    def _record_private_image_llm_usage_safely(self, **kwargs: Any) -> None:
+        try:
+            self._record_llm_usage(**kwargs)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 私聊单图用量统计失败,不影响回复发送: %s",
+                _single_line(exc, 160),
+            )
+
     def _record_user_recent_group_message_from_observation(
         self,
         *,
@@ -4507,8 +4603,10 @@ class PrivateImageMixin:
             else bool(getattr(self, "enable_private_image_self_recognition", True))
         )
         if not feature_enabled:
-            logger.info("[PrivateCompanion] 私聊单图延迟任务已跳过: 图片转述增强已关闭 user=%s", user_id)
-            return
+            logger.info(
+                "[PrivateCompanion] 私聊单图处理期间图片转述增强已关闭,但原事件已接管,继续完成本轮回复: user=%s",
+                user_id,
+            )
         images = buffer.get("images") if isinstance(buffer.get("images"), list) else []
         vision_task = buffer.get("vision_task")
         image_limit = self._private_image_vision_text_limit(len(images))
@@ -4792,7 +4890,16 @@ class PrivateImageMixin:
                     reply_source = "tool_schema_invalid_fallback"
                     result = None
                 else:
-                    raise
+                    logger.warning(
+                        "[PrivateCompanion] 私聊单图主链异常,已转入人格兜底: user=%s error=%s",
+                        user_id,
+                        _single_line(exc, 180),
+                        exc_info=True,
+                    )
+                    direct_image_mode = False
+                    reply = ""
+                    reply_source = "main_chain_exception_fallback"
+                    result = None
             finally:
                 if selected_provider_changed:
                     try:
@@ -4803,7 +4910,13 @@ class PrivateImageMixin:
             if llm_resp is None:
                 llm_resp = runner.get_final_llm_resp() if runner else None
             if "reply" not in locals():
-                reply = str(getattr(llm_resp, "completion_text", "") or "").strip()
+                reply = self._private_image_framework_response_text(llm_resp)
+                if reply and not str(getattr(llm_resp, "completion_text", "") or "").strip():
+                    logger.info(
+                        "[PrivateCompanion] 私聊单图主链 completion_text 为空,已从 result_chain 恢复可见文本: user=%s preview=%s",
+                        user_id,
+                        _single_line(reply, 180),
+                    )
             if "reply_source" not in locals():
                 reply_source = "main_chain"
             reply = self._restore_private_image_framework_tts_reply(

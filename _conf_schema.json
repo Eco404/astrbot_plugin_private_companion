@@ -3151,13 +3151,13 @@
     "invisible": true
   },
   "external_image_download_proxy": {
-    "description": "Legacy flat config: 在线图片结果下载代理",
+    "description": "Legacy flat config: 在线图片网络代理",
     "type": "string",
     "default": "",
     "invisible": true
   },
   "external_image_download_use_environment_proxy": {
-    "description": "Legacy flat config: 在线图片下载继承环境代理",
+    "description": "Legacy flat config: 在线图片网络继承环境代理",
     "type": "bool",
     "default": false,
     "invisible": true
@@ -3265,6 +3265,18 @@
     "default": 240,
     "invisible": true
   },
+  "enable_goodnight_screen_check": {
+    "description": "Legacy flat config: 晚安识屏提醒",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "goodnight_screen_check_delay_minutes": {
+    "description": "Legacy flat config: 晚安识屏等待分钟",
+    "type": "int",
+    "default": 45,
+    "invisible": true
+  },
   "enable_unanswered_screen_peek_followup": {
     "description": "Legacy flat config: 主动后沉默可额外窥屏",
     "type": "bool",
@@ -3317,6 +3329,24 @@
     "description": "Legacy flat config: TTS语音合成后端",
     "type": "string",
     "default": "astrbot_provider",
+    "invisible": true
+  },
+  "tts_provider_id_zh": {
+    "description": "Legacy flat config: 中文TTS Provider ID",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "tts_provider_id_ja": {
+    "description": "Legacy flat config: 日语TTS Provider ID",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "tts_provider_id_en": {
+    "description": "Legacy flat config: 英语TTS Provider ID",
+    "type": "string",
+    "default": "",
     "invisible": true
   },
   "tts_mimo_tool_name": {
@@ -3565,6 +3595,12 @@
     "default": "",
     "invisible": true
   },
+  "weather_location": {
+    "description": "Legacy flat config: 天气地点（城市/区县/LocationID）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "weather_lat": {
     "description": "Legacy flat config: 天气纬度",
     "type": "float",
@@ -3581,6 +3617,54 @@
     "description": "Legacy flat config: 天气缓存刷新间隔（分钟）",
     "type": "int",
     "default": 90,
+    "invisible": true
+  },
+  "weather_api_host": {
+    "description": "Legacy flat config: 和风天气 API Host",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "weather_token": {
+    "description": "Legacy flat config: 和风天气凭据（JWT / API Key）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "enable_weather_alerts": {
+    "description": "Legacy flat config: 启用气象预警",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "weather_alert_api_host": {
+    "description": "Legacy flat config: 和风天气预警 API Host（旧兼容字段）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "weather_alert_token": {
+    "description": "Legacy flat config: 和风天气预警凭据（旧兼容字段）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "weather_alert_refresh_minutes": {
+    "description": "Legacy flat config: 气象预警刷新间隔（分钟）",
+    "type": "int",
+    "default": 10,
+    "invisible": true
+  },
+  "weather_alert_min_severity": {
+    "description": "Legacy flat config: 最低气象预警级别",
+    "type": "string",
+    "default": "blue",
+    "invisible": true
+  },
+  "weather_alert_api_key": {
+    "description": "Legacy flat config: 和风天气预警 API Key（旧别名）",
+    "type": "string",
+    "default": "",
     "invisible": true
   },
   "enable_environment_change_proactive": {
@@ -3943,7 +4027,6 @@
     "default": "classic",
     "options": [
       "classic",
-      "dark",
       "warm",
       "forest",
       "sakura",
@@ -9010,7 +9093,7 @@
       "COMFYUI_SELFIE_WORKFLOW_NAME": {
         "description": "主动自拍工作流名",
         "type": "string",
-        "hint": "用于自拍/人像类 photo_text 主动行为。开启“人设/穿搭参考图一致性”并配置参考图后，会优先寻找 images=1、texts>=1、videos=0 的 ComfyUI 工作流；找不到则回退到纯文生图工作流。",
+        "hint": "用于自拍、人像和改图工作流。开启参考图一致性并实际选中参考图后，工作流必须支持 images=1、texts>=1、videos=0；找不到可接收图片的工作流时会明确停止，不会静默回退为纯文生图。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -9326,18 +9409,18 @@
         }
       },
       "external_image_download_proxy": {
-        "description": "在线图片结果下载代理",
+        "description": "在线图片网络代理",
         "type": "string",
-        "hint": "可选。仅用于下载在线生图接口返回的图片 URL，格式如 http://127.0.0.1:7890；不影响生图 API 请求或本地 ComfyUI/SDGen。若命令行下载走代理，可填写同一路径。仅支持 HTTP/HTTPS 代理。",
+        "hint": "可选。用于下载在线生图接口返回的图片 URL，也用于 Gemini generateContent 生图请求，格式如 http://127.0.0.1:7890。其他在线生图平台的 API 请求和本地 ComfyUI/SDGen 不受影响。仅支持 HTTP/HTTPS 代理。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
         }
       },
       "external_image_download_use_environment_proxy": {
-        "description": "在线图片下载继承环境代理",
+        "description": "在线图片网络继承环境代理",
         "type": "bool",
-        "hint": "默认关闭。开启后仅下载在线生图结果时读取 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY 环境变量；适合 Bot 与 wget 需要走同一代理路径的部署。",
+        "hint": "默认关闭。开启后，在线生图结果 URL 下载和 Gemini generateContent 生图请求会读取 HTTP_PROXY、HTTPS_PROXY 与 NO_PROXY 环境变量；显式填写的在线图片网络代理优先。",
         "default": false,
         "condition": {
           "enable_photo_text_action": true
@@ -9530,6 +9613,30 @@
           "enable_screen_glance_action": true
         }
       },
+      "enable_goodnight_screen_check": {
+        "description": "晚安识屏提醒",
+        "type": "bool",
+        "hint": "默认关闭。主要用户与 Bot 互道晚安后，等待一段时间进行一次识屏判断；只有明确仍在使用电脑时才轻声提醒，无法判断或已经休息会保持静默。屏幕内容不会进入提醒生成上下文。",
+        "default": false,
+        "condition": {
+          "enable_screen_glance_action": true
+        }
+      },
+      "goodnight_screen_check_delay_minutes": {
+        "description": "晚安识屏等待分钟",
+        "type": "int",
+        "hint": "从 Bot 回应晚安后开始计时。同一次晚安只检查一次；期间用户再次发言会自动取消。",
+        "slider": {
+          "min": 1,
+          "max": 180,
+          "step": 1
+        },
+        "default": 45,
+        "condition": {
+          "enable_screen_glance_action": true,
+          "enable_goodnight_screen_check": true
+        }
+      },
       "enable_unanswered_screen_peek_followup": {
         "description": "主动后沉默可额外窥屏",
         "type": "bool",
@@ -9565,30 +9672,6 @@
         "default": 180,
         "condition": {
           "enable_unanswered_screen_peek_followup": true
-        }
-      },
-      "enable_goodnight_screen_check": {
-        "description": "晚安识屏提醒",
-        "type": "bool",
-        "hint": "互道晚安后等待配置分钟数看一眼屏幕；对方疑似还没睡时按人格轻声提醒，已入睡则不打扰。",
-        "default": false,
-        "condition": {
-          "enable_screen_glance_action": true
-        }
-      },
-      "goodnight_screen_check_delay_minutes": {
-        "description": "晚安识屏等待分钟",
-        "type": "int",
-        "hint": "互道晚安后等待多久再看一次屏幕；对方疑似已入睡时不会发送提醒。",
-        "slider": {
-          "min": 1,
-          "max": 180,
-          "step": 1
-        },
-        "default": 45,
-        "condition": {
-          "enable_screen_glance_action": true,
-          "enable_goodnight_screen_check": true
         }
       }
     }
@@ -9666,6 +9749,24 @@
           "自动：优先 AstrBot，无 Provider 时尝试 MiMo"
         ],
         "hint": "选择真正生成音频的后端，同时作用于 TTS 强化、主动语音和实时共处语音。MiMo 模式通过 AstrBot 工具管理器联动“MiMo TTS Voice Clone for AstrBot”，参考音频、克隆音色和默认风格仍在 MiMo 插件中管理；联动不可用但当前会话有 AstrBot TTS 时会自动回退。建议关闭 MiMo 插件自身的普通回复自动转语音，只保留音色管理和合成服务，避免同一回复生成两次语音。"
+      },
+      "tts_provider_id_zh": {
+        "description": "中文TTS Provider ID",
+        "type": "string",
+        "default": "",
+        "hint": "可在陪伴面板的“模型配置 → 语音合成”中选择。配置后，中文语音优先使用该 AstrBot TTS Provider；留空或 Provider 不可用时回退当前会话 TTS Provider，再沿用既有 MiMo/文字兜底。"
+      },
+      "tts_provider_id_ja": {
+        "description": "日语TTS Provider ID",
+        "type": "string",
+        "default": "",
+        "hint": "可在陪伴面板的“模型配置 → 语音合成”中选择。配置后，日语语音优先使用该 AstrBot TTS Provider；语种指令切换为日语后立即生效。"
+      },
+      "tts_provider_id_en": {
+        "description": "英语TTS Provider ID",
+        "type": "string",
+        "default": "",
+        "hint": "可在陪伴面板的“模型配置 → 语音合成”中选择。配置后，英语语音优先使用该 AstrBot TTS Provider；语种指令切换为英语后立即生效。"
       },
       "tts_mimo_tool_name": {
         "description": "MiMo Voice Clone 工具名",
@@ -9748,7 +9849,7 @@
           "S2 Pro",
           "S1 旧版"
         ],
-        "hint": "只在当前会话使用 Fish Audio TTS provider 时生效。S2/S2.1 使用方括号自然语言控制，S1 使用圆括号固定标签。自动模式读取 provider 模型；官方 Fish Audio 接口未声明模型时按文档使用 s2.1-pro-free，自建兼容接口不会被强制改写。",
+        "hint": "仅当前语种没有绑定专用 TTS Provider 时作为回退。已绑定的中文、日语、英语始终采用各自 Provider 内的模型。S2/S2.1 使用方括号自然语言控制，S1 使用圆括号固定标签。自动模式读取 Provider 模型；官方 Fish Audio 接口未声明模型时按文档使用 s2.1-pro-free。",
         "condition": {
           "enable_tts_enhancement": true
         }
@@ -9767,7 +9868,7 @@
           "更有表现力",
           "手动控制"
         ],
-        "hint": "只在 Fish Audio TTS 下生效。自然平衡会在最终合成前按上下文补 1 个主要情绪，必要时再补 1 个语气控制；更有表现力最多组合 3 个；手动控制不会自动补标，只保留已有合法控制词。无论转换模型是否输出标签，自动模式都会在 get_audio 前兜底，控制词不会显示在聊天正文中。",
+        "hint": "只在 Fish Audio TTS 下生效。自然平衡通常只使用 1 个贴合语义的控制；更有表现力可在不同短语前自然切换控制，但同一位置不会连续堆叠。普通语气词不会被当成叹气，喘息、喘气和呻吟等强呼吸效果不会自动添加；手动控制不会自动补标，并保留已有合法控制词。控制词不会显示在聊天正文中。",
         "condition": {
           "enable_tts_enhancement": true
         }
@@ -10143,7 +10244,7 @@
   "weather_config": {
     "description": "天气上下文与屏幕日记",
     "type": "object",
-    "hint": "推荐先只开启天气上下文：已安装并配置 screen_companion 时会自动复用其天气能力；独立查询可选择 OpenWeatherMap、Open-Meteo 或高德地图 API。",
+    "hint": "天气默认使用和风天气：填写控制台提供的专属 API Host、JWT / API Key 和天气地点即可。地点支持城市、区县、LocationID 或经纬度；气象预警可复用同一组配置。没有完成独立配置时仍会尝试回退 screen_companion，其他天气来源保留为高级兼容选项。",
     "items": {
       "enable_weather_context": {
         "description": "启用天气上下文",
@@ -10155,16 +10256,46 @@
         "description": "天气数据源",
         "type": "string",
         "options": [
+          "qweather",
           "openweathermap",
           "openmeteo",
           "amap"
         ],
         "labels": [
+          "和风天气（推荐）",
           "OpenWeatherMap",
           "Open-Meteo",
           "高德地图 API"
         ],
-        "default": "openweathermap",
+        "hint": "默认使用和风天气。其他来源仅用于兼容已有配置或没有和风凭据的场景。",
+        "default": "qweather",
+        "condition": {
+          "enable_weather_context": true
+        }
+      },
+      "weather_api_host": {
+        "description": "和风天气 API Host",
+        "type": "string",
+        "hint": "获取 Host：https://console.qweather.com/setting?lang=zh 。从和风天气控制台复制专属 API Host，例如 https://abc123.def.qweatherapi.com；只填 HTTPS Host，不要填 /v7/weather/now 或 /weatheralert/v1/current 等完整路径（本机回环代理可使用 http）。公共 api.qweather.com / devapi.qweather.com 可能不再授权。",
+        "default": "",
+        "condition": {
+          "enable_weather_context": true
+        }
+      },
+      "weather_token": {
+        "description": "和风天气凭据（JWT / API Key）",
+        "type": "string",
+        "hint": "获取 API：https://console.qweather.com/project?lang=zh 。粘贴和风天气控制台生成的 JWT 或 API Key，不要手动添加 Bearer 前缀。插件会自动选择对应认证头，凭据只用于后台请求，不会进入提示词或消息。",
+        "default": "",
+        "condition": {
+          "enable_weather_context": true
+        }
+      },
+      "weather_location": {
+        "description": "天气地点（城市/区县/LocationID）",
+        "type": "string",
+        "hint": "支持城市、区县与城市组合、和风 LocationID 或经纬度，例如：北京、朝阳区,北京、101010100、116.41,39.92。",
+        "default": "",
         "condition": {
           "enable_weather_context": true
         }
@@ -10212,7 +10343,7 @@
       "weather_lat": {
         "description": "天气纬度",
         "type": "float",
-        "hint": "使用 Open-Meteo 必须填写，并需与经度成对；OpenWeatherMap 仅在城市留空时使用，例如北京约 39.9042；使用高德地图 API 不需要填写经纬度。",
+        "hint": "高级定位与旧配置兼容字段。请与经度成对填写，例如北京约 39.9042；和风天气优先使用“天气地点”，Open-Meteo 仍需这组经纬度。",
         "default": 0,
         "condition": {
           "enable_weather_context": true
@@ -10221,7 +10352,7 @@
       "weather_lon": {
         "description": "天气经度",
         "type": "float",
-        "hint": "使用 Open-Meteo 必须填写，并需与纬度成对；OpenWeatherMap 仅在城市留空时使用，例如北京约 116.4074；使用高德地图 API 不需要填写经纬度。",
+        "hint": "高级定位与旧配置兼容字段。请与纬度成对填写，例如北京约 116.4074；和风天气优先使用“天气地点”，Open-Meteo 仍需这组经纬度。",
         "default": 0,
         "condition": {
           "enable_weather_context": true
@@ -10239,6 +10370,76 @@
         "default": 90,
         "condition": {
           "enable_weather_context": true
+        }
+      },
+      "enable_weather_alerts": {
+        "description": "气象预警感知",
+        "type": "bool",
+        "hint": "可选开启和风天气官方预警。开启后按天气地点定期查询有效预警，只把达到最低级别的预警注入环境上下文或主动候选；直接复用上面的和风 API Host、凭据和地点。",
+        "default": false,
+        "condition": {
+          "enable_weather_context": true
+        }
+      },
+      "weather_alert_api_host": {
+        "description": "和风天气预警 API Host（旧兼容字段）",
+        "type": "string",
+        "hint": "旧版兼容字段；请改用上面的和风天气 API Host。",
+        "default": "",
+        "invisible": true,
+        "condition": {
+          "enable_weather_context": true,
+          "enable_weather_alerts": true
+        }
+      },
+      "weather_alert_token": {
+        "description": "和风天气预警凭据（旧兼容字段）",
+        "type": "string",
+        "hint": "旧版兼容字段；请改用上面的和风天气凭据。",
+        "default": "",
+        "invisible": true,
+        "condition": {
+          "enable_weather_context": true,
+          "enable_weather_alerts": true
+        }
+      },
+      "weather_alert_refresh_minutes": {
+        "description": "气象预警刷新间隔（分钟）",
+        "type": "int",
+        "hint": "默认每 10 分钟检查一次；间隔越短越及时，也会增加和风天气请求次数。每次请求计入供应商额度，请遵循账号限频。",
+        "slider": {
+          "min": 5,
+          "max": 60,
+          "step": 5
+        },
+        "default": 10,
+        "condition": {
+          "enable_weather_context": true,
+          "enable_weather_alerts": true
+        }
+      },
+      "weather_alert_min_severity": {
+        "description": "最低气象预警级别",
+        "type": "string",
+        "options": [
+          "blue",
+          "yellow",
+          "orange",
+          "red",
+          "all"
+        ],
+        "labels": [
+          "蓝色及以上",
+          "黄色及以上",
+          "橙色及以上",
+          "红色",
+          "全部级别"
+        ],
+        "hint": "只保留达到此颜色级别的有效预警；“全部级别”也包含蓝色预警。普通天气实况不受此筛选影响。",
+        "default": "blue",
+        "condition": {
+          "enable_weather_context": true,
+          "enable_weather_alerts": true
         }
       },
       "enable_environment_change_proactive": {

@@ -151,6 +151,33 @@ PREVIOUS_TECH_DEFAULT_NEWS_SOURCES = "\n".join(
 )
 
 
+_SEGMENTED_COMMON_FILE_SUFFIXES = (
+    r"(?:7z|aac|apk|avif|avi|bmp|bz2|com|css|csv|docx?|dmg|epub|exe|flac|flv|gif|gz|"
+    r"heic|heif|html?|ico|ini|ipa|jar|jpe?g|js|jsonl?|log|m4a|m4v|md|mkv|mobi|mov|"
+    r"mp3|mp4|mpeg|mpg|msi|odt|ogg|opus|pdf|png|pptx?|psd|py|rar|raw|rmvb|rtf|svg|"
+    r"tar|tgz|tiff?|toml|ts|txt|wav|webm|webp|wmv|wma|xlsx?|xml|xz|ya?ml|zip)"
+)
+
+_SEGMENTED_PROTECTED_FILE_SUFFIX_PATTERN = re.compile(
+    r"(?i)\." + _SEGMENTED_COMMON_FILE_SUFFIXES + r"(?![\w])"
+)
+
+# Keep URLs, media markup and common file suffixes intact while applying configured
+# segmentation, cleanup or replacement rules. Protecting only the suffix avoids
+# swallowing adjacent prose when a Chinese filename has no explicit word boundary.
+_SEGMENTED_PROTECTED_LITERAL_PATTERN = re.compile(
+    r"(?is)"
+    r"<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?</(?:image|img|video|record|audio|file)>|/?>)"
+    r"|<tts\b[^>]*>.*?</tts>"
+    r"|<[^>\n]{1,240}\bpath=\"[^\"]{1,500}\"[^>\n]*>"
+    r"|<[^>\n]{1,240}\b(?:url|src)=\"[^\"]{1,500}\"[^>\n]*>"
+    r"|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
+    r"|(?i:(?<=[\w\u3400-\u9fff\u3040-\u30ff])\."
+    + _SEGMENTED_COMMON_FILE_SUFFIXES
+    + r"(?![\w]))"
+)
+
+
 
 _LUNAR_MONTH_NAMES = [
     "正月",
@@ -4033,18 +4060,10 @@ Bot 近期回复：
         pairs = self._segmented_content_replacement_pairs()
         if not pairs:
             return original, 0
-        protected_pattern = re.compile(
-            r"(?is)"
-            r"<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?</(?:image|img|video|record|audio|file)>|/?>)"
-            r"|<tts\b[^>]*>.*?</tts>"
-            r"|<[^>\n]{1,240}\bpath=\"[^\"]{1,500}\"[^>\n]*>"
-            r"|<[^>\n]{1,240}\b(?:url|src)=\"[^\"]{1,500}\"[^>\n]*>"
-            r"|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
-        )
         parts: list[str] = []
         cursor = 0
         replacements = 0
-        for match in protected_pattern.finditer(original):
+        for match in _SEGMENTED_PROTECTED_LITERAL_PATTERN.finditer(original):
             plain = original[cursor:match.start()]
             for old_text, new_text in pairs:
                 count = plain.count(old_text)
@@ -4126,14 +4145,6 @@ Bot 近期回复：
                     logger.warning("[PrivateCompanion] 主动分段内容清理正则无效,跳过清理: %s", e)
 
         def _protected_cleanup_chunks(value: str) -> list[tuple[str, bool]]:
-            protected_pattern = re.compile(
-                r"(?is)"
-                r"<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?</(?:image|img|video|record|audio|file)>|/?>)"
-                r"|<tts\b[^>]*>.*?</tts>"
-                r"|<[^>\n]{1,240}\bpath=\"[^\"]{1,500}\"[^>\n]*>"
-                r"|<[^>\n]{1,240}\b(?:url|src)=\"[^\"]{1,500}\"[^>\n]*>"
-                r"|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
-            )
             bracket_pairs = {
                 "(": ")",
                 "（": "）",
@@ -4195,7 +4206,7 @@ Bot 近期回复：
                             flush()
                             protected = False
 
-            for match in protected_pattern.finditer(text_value):
+            for match in _SEGMENTED_PROTECTED_LITERAL_PATTERN.finditer(text_value):
                 feed_plain(text_value[last_pos:match.start()])
                 flush()
                 chunks.append((match.group(0), True))
@@ -4234,6 +4245,8 @@ Bot 近期回复：
 
             def protected_starts_with_split_word(chunk: str) -> bool:
                 stripped = str(chunk or "").lstrip()
+                if _SEGMENTED_PROTECTED_FILE_SUFFIX_PATTERN.fullmatch(stripped):
+                    return False
                 return any(stripped.startswith(word) for word in sorted_words)
 
             def push_current() -> None:
@@ -4413,6 +4426,8 @@ Bot 近期回复：
                 return right
             if not right:
                 return left
+            if right.startswith(("（", "(")):
+                return _normalize_cjk_chat_spaces(f"{left}{right}")
             if re.search(r"[！？!?]$", left):
                 return _normalize_cjk_chat_spaces(f"{left} {right}".strip())
             softened = re.sub(r"[。…~～]+$", "，", left)

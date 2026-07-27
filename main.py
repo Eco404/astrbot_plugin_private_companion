@@ -79,6 +79,8 @@ from .constants import (
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
+    WORLDBOOK_IMPORTANT_MEMORY_CAPACITY,
+    WORLDBOOK_PENDING_OBSERVATION_CAPACITY,
     _ACTION_TEXT,
     _DATA_STORE_KEYS,
     _DEFAULT_GROUP_TEMPLATE,
@@ -609,6 +611,24 @@ class PrivateCompanionExtensionAPI:
             "target_users": target_users[:30],
         }
 
+    @staticmethod
+    def _new_historical_member_profile(user_id: str, user_name: str) -> dict[str, Any]:
+        return {
+            "user_id": user_id,
+            "identity_type": "qq" if user_id.isdigit() else "external",
+            "name": _single_line(user_name, 80) or user_id,
+            "aliases": [],
+            "observed_names": [],
+            "content": "",
+            "identity_note": "",
+            "boundary_note": "",
+            "important_memories": [],
+            "pending_observations": [],
+            "enabled": True,
+            "priority": 120,
+            "source_entries": ["MemoryCompanion 历史对话导入"],
+        }
+
     async def stage_historical_relationship_observations(
         self,
         *,
@@ -630,21 +650,7 @@ class PrivateCompanionExtensionAPI:
                 plugin.data["worldbook_member_profiles"] = profiles
             profile = profiles.get(normalized_user_id)
             if not isinstance(profile, dict):
-                profile = {
-                    "user_id": normalized_user_id,
-                    "identity_type": "qq" if normalized_user_id.isdigit() else "external",
-                    "name": _single_line(user_name, 80) or normalized_user_id,
-                    "aliases": [],
-                    "observed_names": [],
-                    "content": "",
-                    "identity_note": "",
-                    "boundary_note": "",
-                    "important_memories": [],
-                    "pending_observations": [],
-                    "enabled": True,
-                    "priority": 120,
-                    "source_entries": ["MemoryCompanion 历史对话导入"],
-                }
+                profile = self._new_historical_member_profile(normalized_user_id, user_name)
                 profiles[normalized_user_id] = profile
             pending = profile.setdefault("pending_observations", [])
             if not isinstance(pending, list):
@@ -658,9 +664,9 @@ class PrivateCompanionExtensionAPI:
                 for item in pending
                 if isinstance(item, dict)
             }
-            # 调用方按置信度排好优先级；只接收前 24 条，避免后部低优先候选
+            # 调用方按置信度排好优先级；只接收容量内的候选，避免后部低优先候选
             # 因 insert(0) 反而挤掉前部高优先候选。
-            for raw in observations[:24]:
+            for raw in observations[:WORLDBOOK_PENDING_OBSERVATION_CAPACITY]:
                 if not isinstance(raw, dict):
                     continue
                 content = _single_line(raw.get("content"), 500)
@@ -696,7 +702,7 @@ class PrivateCompanionExtensionAPI:
                 )
                 existing_keys.add((normalized_batch_id, content))
                 staged += 1
-            # 历史批次最多保留 24 条，但不能为了导入历史而删除原有的普通待确认观察。
+            # 历史批次只保留容量内的候选，但不能为了导入历史而删除原有的普通待确认观察。
             # 新历史观察放在前面便于审核；超过上限时只裁掉历史来源自身。
             ordinary_pending: list[dict[str, Any]] = []
             historical_pending: list[dict[str, Any]] = []
@@ -706,7 +712,7 @@ class PrivateCompanionExtensionAPI:
                     continue
                 if _single_line(item.get("source"), 80) == "memory_companion_historical_chat":
                     historical_count += 1
-                    if historical_count > 24:
+                    if historical_count > WORLDBOOK_PENDING_OBSERVATION_CAPACITY:
                         continue
                     historical_pending.append(item)
                     continue
@@ -717,6 +723,237 @@ class PrivateCompanionExtensionAPI:
                 profile["last_pending_observation_at"] = time.time()
                 plugin._save_data_sync()
         return {"staged": staged, "batch_id": normalized_batch_id}
+
+    async def rebind_historical_relationship_observations(
+        self,
+        *,
+        batch_id: str,
+        old_user_id: str,
+        user_id: str,
+        user_name: str = "",
+    ) -> dict[str, Any]:
+        """Move one imported batch of traceable pending and confirmed relationship observations."""
+        plugin = self._plugin
+        normalized_batch_id = _single_line(batch_id, 120)
+        normalized_old_user_id = _single_line(old_user_id, 80)
+        normalized_user_id = _single_line(user_id, 80)
+        base_result = {
+            "batch_id": normalized_batch_id,
+            "old_user_id": normalized_old_user_id,
+            "user_id": normalized_user_id,
+            "matched": 0,
+            "moved": 0,
+            "deduplicated": 0,
+            "trimmed": 0,
+            "target_batch_count": 0,
+            "confirmed_matched": 0,
+            "confirmed_moved": 0,
+            "confirmed_deduplicated": 0,
+            "confirmed_trimmed": 0,
+            "target_confirmed_batch_count": 0,
+            "untraceable_confirmed": 0,
+        }
+        if not normalized_batch_id or not normalized_old_user_id or not normalized_user_id:
+            return {**base_result, "reason": "missing_identity_or_batch"}
+        if normalized_old_user_id == normalized_user_id:
+            return {**base_result, "reason": "same_identity"}
+
+        def is_historical(item: Any) -> bool:
+            return (
+                isinstance(item, dict)
+                and _single_line(item.get("source"), 80) == "memory_companion_historical_chat"
+            )
+
+        def observation_key(item: dict[str, Any]) -> tuple[str, str, str]:
+            item_batch_id = _single_line(item.get("import_batch_id"), 120)
+            content = _single_line(item.get("content"), 500)
+            if content:
+                return item_batch_id, "content", content
+            return item_batch_id, "id", _single_line(item.get("id"), 120)
+
+        def transfer_batch_items(
+            source_items: list[Any],
+            target_items: list[Any],
+            *,
+            available_slots: int,
+        ) -> tuple[list[Any], list[Any], int, int, int, int]:
+            """Append this batch without rewriting target data or dropping deferred source data."""
+            retained_source: list[Any] = []
+            updated_target = deepcopy(target_items)
+            target_batch_keys = {
+                observation_key(item)
+                for item in target_items
+                if is_historical(item)
+                and _single_line(item.get("import_batch_id"), 120) == normalized_batch_id
+            }
+            matched = 0
+            moved = 0
+            deduplicated = 0
+            deferred = 0
+            slots = max(0, int(available_slots))
+
+            for item in source_items:
+                if not (
+                    is_historical(item)
+                    and _single_line(item.get("import_batch_id"), 120) == normalized_batch_id
+                ):
+                    retained_source.append(deepcopy(item))
+                    continue
+
+                matched += 1
+                key = observation_key(item)
+                if key in target_batch_keys:
+                    # 目标中已有同批同内容，源端副本可以安全移除。
+                    deduplicated += 1
+                    continue
+                if moved < slots:
+                    updated_target.append(deepcopy(item))
+                    target_batch_keys.add(key)
+                    moved += 1
+                    continue
+
+                # `trimmed` 是既有返回字段；这里表示延期迁入，记录仍保留在源端。
+                retained_source.append(deepcopy(item))
+                deferred += 1
+
+            return (
+                retained_source,
+                updated_target,
+                matched,
+                moved,
+                deduplicated,
+                deferred,
+            )
+
+        async with plugin._data_lock:
+            profiles = plugin.data.get("worldbook_member_profiles")
+            if not isinstance(profiles, dict):
+                return {**base_result, "reason": "source_profile_not_found"}
+            original_source = profiles.get(normalized_old_user_id)
+            if not isinstance(original_source, dict):
+                return {**base_result, "reason": "source_profile_not_found"}
+            source_pending = original_source.get("pending_observations")
+            if not isinstance(source_pending, list):
+                source_pending = []
+            source_important = original_source.get("important_memories")
+            if not isinstance(source_important, list):
+                source_important = []
+
+            pending_match_count = sum(
+                1
+                for item in source_pending
+                if is_historical(item)
+                and _single_line(item.get("import_batch_id"), 120) == normalized_batch_id
+            )
+            confirmed_match_count = sum(
+                1
+                for item in source_important
+                if is_historical(item)
+                and _single_line(item.get("import_batch_id"), 120) == normalized_batch_id
+            )
+            untraceable_confirmed = sum(
+                1
+                for item in source_important
+                if is_historical(item) and not _single_line(item.get("import_batch_id"), 120)
+            )
+            if not pending_match_count and not confirmed_match_count:
+                return {
+                    **base_result,
+                    "untraceable_confirmed": untraceable_confirmed,
+                    "reason": "batch_not_found",
+                }
+
+            source_profile = deepcopy(original_source)
+
+            target_had_entry = normalized_user_id in profiles
+            original_target = profiles.get(normalized_user_id)
+            target_profile = (
+                deepcopy(original_target)
+                if isinstance(original_target, dict)
+                else self._new_historical_member_profile(normalized_user_id, user_name)
+            )
+            target_pending = target_profile.get("pending_observations")
+            if not isinstance(target_pending, list):
+                target_pending = []
+
+            existing_historical_count = sum(1 for item in target_pending if is_historical(item))
+            (
+                retained_source_pending,
+                updated_target_pending,
+                matched,
+                moved,
+                duplicate_count,
+                trimmed,
+            ) = transfer_batch_items(
+                source_pending,
+                target_pending,
+                available_slots=(
+                    WORLDBOOK_PENDING_OBSERVATION_CAPACITY - existing_historical_count
+                ),
+            )
+            if pending_match_count:
+                source_profile["pending_observations"] = retained_source_pending
+                target_profile["pending_observations"] = updated_target_pending
+                if moved:
+                    target_profile["last_pending_observation_at"] = time.time()
+
+            target_important = target_profile.get("important_memories")
+            if not isinstance(target_important, list):
+                target_important = []
+            (
+                retained_source_important,
+                updated_target_important,
+                confirmed_matched,
+                confirmed_moved,
+                confirmed_duplicate_count,
+                confirmed_trimmed,
+            ) = transfer_batch_items(
+                source_important,
+                target_important,
+                available_slots=(
+                    WORLDBOOK_IMPORTANT_MEMORY_CAPACITY - len(target_important)
+                ),
+            )
+            if confirmed_match_count:
+                source_profile["important_memories"] = retained_source_important
+                target_profile["important_memories"] = updated_target_important
+
+            profiles[normalized_old_user_id] = source_profile
+            profiles[normalized_user_id] = target_profile
+            try:
+                plugin._save_data_sync()
+            except Exception:
+                profiles[normalized_old_user_id] = original_source
+                if target_had_entry:
+                    profiles[normalized_user_id] = original_target
+                else:
+                    profiles.pop(normalized_user_id, None)
+                raise
+
+        return {
+            **base_result,
+            "matched": matched,
+            "moved": moved,
+            "deduplicated": duplicate_count,
+            "trimmed": trimmed,
+            "target_batch_count": sum(
+                1
+                for item in updated_target_pending
+                if is_historical(item)
+                and _single_line(item.get("import_batch_id"), 120) == normalized_batch_id
+            ),
+            "confirmed_matched": confirmed_matched,
+            "confirmed_moved": confirmed_moved,
+            "confirmed_deduplicated": confirmed_duplicate_count,
+            "confirmed_trimmed": confirmed_trimmed,
+            "target_confirmed_batch_count": sum(
+                1
+                for item in updated_target_important
+                if is_historical(item)
+                and _single_line(item.get("import_batch_id"), 120) == normalized_batch_id
+            ),
+            "untraceable_confirmed": untraceable_confirmed,
+        }
 
     async def rollback_historical_relationship_observations(self, batch_id: str) -> dict[str, Any]:
         plugin = self._plugin
@@ -1022,6 +1259,28 @@ class PrivateCompanionPlugin(
         if value != original:
             _set_into_config(config, key, value)
         return value
+
+    @staticmethod
+    def _normalize_weather_alert_min_severity(value: Any) -> str:
+        """Normalize weather alert color thresholds while accepting common aliases."""
+        normalized = str(value or "blue").strip().lower()
+        aliases = {
+            "蓝": "blue",
+            "蓝色": "blue",
+            "黄色": "yellow",
+            "黄": "yellow",
+            "橙": "orange",
+            "橙色": "orange",
+            "红": "red",
+            "红色": "red",
+            "全部": "all",
+            "全部级别": "all",
+            "全部等级": "all",
+            "所有": "all",
+            "any": "all",
+        }
+        normalized = aliases.get(normalized, normalized)
+        return normalized if normalized in {"blue", "yellow", "orange", "red", "all"} else "blue"
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1505,7 +1764,17 @@ class PrivateCompanionPlugin(
         self.comfyui_text2img_workflow_name = self._cfg_str(c, "COMFYUI_TEXT2IMG_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.comfyui_selfie_workflow_name = self._cfg_str(c, "COMFYUI_SELFIE_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.photo_persona_reference_image_path = self._cfg_str(c, "photo_persona_reference_image_path", "")
-        self.photo_reference_library = self._cfg_raw(c, "photo_reference_library", [])
+        raw_reference_library = self._cfg_raw(c, "photo_reference_library", [])
+        if isinstance(raw_reference_library, list):
+            self.photo_reference_library = [
+                (dict(item) if isinstance(item, dict) else str(item).strip())
+                for item in raw_reference_library
+                if (isinstance(item, dict) and bool(item)) or str(item or "").strip()
+            ][:24]
+        else:
+            self.photo_reference_library = [
+                line.strip() for line in str(raw_reference_library or "").splitlines() if line.strip()
+            ][:24]
         self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
         self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
         if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
@@ -1616,16 +1885,38 @@ class PrivateCompanionPlugin(
             else str(raw_natural_photo_extra).strip()
         )
         self.enable_weather_context = self._cfg_bool(c, "enable_weather_context", True)
-        self.weather_source = self._cfg_str(c, "weather_source", "openweathermap").lower()
-        if self.weather_source not in {"openweathermap", "amap", "openmeteo"}:
-            self.weather_source = "openweathermap"
+        self.weather_source = self._cfg_str(c, "weather_source", "qweather").lower()
+        if self.weather_source not in {"qweather", "openweathermap", "amap", "openmeteo"}:
+            self.weather_source = "qweather"
         self.weather_api_key = self._cfg_str(c, "weather_api_key", "")
         self.weather_city = self._cfg_str(c, "weather_city", "")
         self.weather_amap_api_key = self._cfg_str(c, "weather_amap_api_key", "")
         self.weather_amap_city = self._cfg_str(c, "weather_amap_city", "")
+        raw_weather_location = _flat_get(c, "weather_location", "")
+        self.weather_location = str(raw_weather_location or "").strip()
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)
+        self.enable_weather_alerts = self._cfg_bool(c, "enable_weather_alerts", False)
+        configured_weather_host = self._cfg_str(c, "weather_api_host", "").rstrip("/")
+        configured_weather_token = self._cfg_str(c, "weather_token", "")
+        legacy_weather_alert_host = self._cfg_str(c, "weather_alert_api_host", "").rstrip("/")
+        legacy_weather_alert_token = self._cfg_str(c, "weather_alert_api_key", "")
+        configured_alert_token = self._cfg_str(c, "weather_alert_token", "")
+        # The generic QWeather fields are shared by ordinary weather and
+        # alerts.  Keep the old alert names as read-time fallbacks so an
+        # existing installation does not need to be reconfigured at once.
+        self.weather_api_host = configured_weather_host or legacy_weather_alert_host
+        self.weather_token = configured_weather_token or configured_alert_token or legacy_weather_alert_token
+        self.weather_alert_api_host = legacy_weather_alert_host or self.weather_api_host
+        self.weather_alert_token = configured_alert_token or configured_weather_token or legacy_weather_alert_token
+        # Expose the old attribute as a runtime alias for integrations written
+        # against the early api_key draft; the persisted field remains token.
+        self.weather_alert_api_key = legacy_weather_alert_token or self.weather_alert_token
+        self.weather_alert_refresh_minutes = self._cfg_int(c, "weather_alert_refresh_minutes", 10, 5, 60)
+        self.weather_alert_min_severity = self._normalize_weather_alert_min_severity(
+            self._cfg_str(c, "weather_alert_min_severity", "blue", "blue")
+        )
         self.enable_environment_change_proactive = self._cfg_bool(c, "enable_environment_change_proactive", True)
         self.environment_change_check_minutes = self._cfg_int(c, "environment_change_check_minutes", 10, 5, 60)
         self.environment_change_cooldown_minutes = self._cfg_int(c, "environment_change_cooldown_minutes", 90, 20, 360)
@@ -1673,6 +1964,10 @@ class PrivateCompanionPlugin(
         self.proactive_photo_text_probability = self._cfg_int(c, "proactive_photo_text_probability", 18, 0, 100) / 100
         self.screen_peek_max_daily = self._cfg_int(c, "screen_peek_max_daily", 1, 0, 5)
         self.screen_peek_cooldown_minutes = self._cfg_int(c, "screen_peek_cooldown_minutes", 240, 0, 1440)
+        self.enable_goodnight_screen_check = self._cfg_bool(c, "enable_goodnight_screen_check", False)
+        self.goodnight_screen_check_delay_minutes = self._cfg_int(
+            c, "goodnight_screen_check_delay_minutes", 45, 1, 180
+        )
         self.enable_unanswered_screen_peek_followup = self._cfg_bool(c, "enable_unanswered_screen_peek_followup", True)
         self.unanswered_screen_peek_after_minutes = self._cfg_int(c, "unanswered_screen_peek_after_minutes", 45, 10, 240)
         self.unanswered_screen_peek_cooldown_minutes = self._cfg_int(c, "unanswered_screen_peek_cooldown_minutes", 180, 30, 1440)
@@ -4814,7 +5109,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
         Args:
             prompt(string): 画面描述、自拍要求或改图要求。
-            kind(string): text2img/selfie/sticker/edit。自拍、头像、穿搭、COS、人像请用 selfie；角色表情包/贴纸用 sticker；普通场景、物件、风景用 text2img；改图用 edit。
+            kind(string): text2img/selfie/sticker/edit。角色本人以自拍、背影、侧脸或环境人像等任何形式出镜时用 selfie；角色表情包/贴纸用 sticker；不含角色本人的普通场景、物件、风景用 text2img；改图用 edit。
             reference_image_path(string): 可选，本地图片路径或图片 URL；edit 必填，selfie 可留空自动使用人设参考图/今日穿搭图。
             image_size(string): 可选，在线图片 API 尺寸，如 1024x1024。
             send(boolean): 是否生成后直接发送到当前会话，默认 true。
@@ -10372,6 +10667,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 visible_reply_text = _single_line(_strip_internal_message_blocks(working_text), 500)
                 current["last_companion_message"] = visible_reply_text
                 current["last_companion_message_at"] = _now_ts()
+                self._maybe_schedule_goodnight_screen_check(
+                    current,
+                    visible_reply_text,
+                    now=current["last_companion_message_at"],
+                )
                 expression_rule_details = getattr(
                     event,
                     "private_companion_expression_rule_details",
@@ -10653,6 +10953,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "切换备用生图", "启用备用生图", "使用备用生图", "切到备用生图",
             "切换备选生图", "启用备选生图", "使用备选生图", "切到备选生图",
         }
+        qweather_location_bind_actions = {"绑定城市", "设置城市"}
+        qweather_location_view_actions = {"查看城市", "当前城市", "天气城市"}
+        qweather_location_unbind_actions = {"解绑城市", "清除城市"}
+        qweather_location_actions = {
+            *qweather_location_bind_actions,
+            *qweather_location_view_actions,
+            *qweather_location_unbind_actions,
+        }
+        tts_language_actions = {"TTS语种", "tts语种", "语音语种", "TTS", "tts"}
         if action in companion_manual_query_actions:
             inline_value = value.strip()
             if inline_value in {"确认", "应用", "执行", "确认执行", "应用建议"}:
@@ -10712,10 +11021,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
             "测试说说配图", "测试空间配图", "测试QQ空间配图", "测试qzone配图",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报",
-            "TTS语种", "tts语种", "语音语种", "TTS", "tts",
             *companion_manual_query_actions,
             *photo_command_actions,
             *image_api_swap_actions,
+            *qweather_location_actions,
         }
 
         is_private = bool(getattr(event, "is_private_chat", lambda: False)())
@@ -10725,7 +11034,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *companion_manual_cancel_actions,
             *companion_manual_setting_actions,
             *daily_outfit_view_actions,
+            *tts_language_actions,
         }
+        if action in qweather_location_actions and not self._can_manage_sensitive_location(event):
+            await self._reply(event, self._sensitive_location_denied_text())
+            event.stop_event()
+            return
         if self.require_private_opt_in and not is_private and action not in public_safe_actions:
             await self._reply(event, self._private_only_text())
             event.stop_event()
@@ -10745,7 +11059,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
             "测试说说配图", "测试空间配图", "测试QQ空间配图", "测试qzone配图",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI日报", "ai日报", "日报", "AI早报", "ai早报", "早报",
-            "TTS语种", "tts语种", "语音语种", "TTS", "tts",
+            *tts_language_actions,
             "撤回消息", "防撤回", "转述撤回", "撤回转述",
             "日期添加", "添加日期", "重要日期添加",
             "日期删除", "删除日期", "重要日期删除",
@@ -10754,6 +11068,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "参考图", "人设参考图", "自拍参考图", "参考图库",
             *image_api_status_actions,
             *image_api_swap_actions,
+            *qweather_location_actions,
         }
         if (action in management_actions or bookshelf_password_output_requested) and not self._can_manage_private_companion(event):
             await self._reply(event, self._management_denied_text())
@@ -10803,7 +11118,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 else:
                     response = self._format_recalled_messages_for_event(event, limit=5)
                     response_extra_components = self._recalled_message_media_components_for_event(event, limit=5)
-            elif action in {"TTS语种", "tts语种", "语音语种", "TTS", "tts"}:
+            elif action in tts_language_actions:
                 tts_value = value
                 if action in {"TTS", "tts"}:
                     tts_parts = value.split(maxsplit=1)
@@ -10828,6 +11143,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = self._image_api_command_status_text()
             elif action in image_api_swap_actions:
                 response = "正在交换在线生图 API 优先级。"
+            elif action in qweather_location_actions:
+                response = "正在处理天气城市设置。"
             elif action in photo_command_actions:
                 response = "正在准备图片。"
             elif action in {"查看主动判定", "主动判定", "判定"}:
@@ -10965,6 +11282,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         if action in companion_manual_query_actions:
             await self._reply(event, await self._companion_manual_answer(event, value))
+            event.stop_event()
+            return
+        if action in qweather_location_actions:
+            await self._reply(event, await self._qweather_location_command_text(action, value))
             event.stop_event()
             return
         if action in photo_command_actions:

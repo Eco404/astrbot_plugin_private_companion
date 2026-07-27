@@ -50,6 +50,11 @@ class InteractionUtilsMixin:
             ("添加", "日期"): "日期添加",
             ("删除", "未完话头"): "删除未完话头",
             ("删除", "话头"): "删除话头",
+            ("绑定", "城市"): "绑定城市",
+            ("设置", "城市"): "绑定城市",
+            ("查看", "城市"): "查看城市",
+            ("解绑", "城市"): "解绑城市",
+            ("清除", "城市"): "解绑城市",
         }
         targets = sorted(
             (target for alias_verb, target in aliases if alias_verb == verb),
@@ -82,6 +87,8 @@ class InteractionUtilsMixin:
             "陪伴 自拍 [画面要求]\n"
             "陪伴 改图 <修改要求>（带图或回复图片）\n"
             "陪伴 查看生图API / 切换生图API\n"
+            "陪伴 绑定城市 <城市|区县,城市|LocationID>\n"
+            "陪伴 查看城市 / 解绑城市\n"
             "陪伴 能力列表\n"
             "陪伴 答疑 <问题>\n"
             "陪伴 答疑确认 / 答疑取消 / 答疑设置 <配置项|中文名> <值>\n"
@@ -216,6 +223,22 @@ class InteractionUtilsMixin:
         except Exception:
             user_id = ""
         return self._is_plugin_manager_user_id(user_id)
+
+    def _can_manage_sensitive_location(self, event: AstrMessageEvent) -> bool:
+        """Keep the shared weather location inside its owner's private chat."""
+
+        try:
+            if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                return False
+            user_id = self._permission_identity_id(event.get_sender_id())
+        except Exception:
+            return False
+        return bool(user_id and self._is_private_companion_owner_user_id(user_id))
+
+    @staticmethod
+    def _sensitive_location_denied_text() -> str:
+        # Do not reveal whether a location is currently configured.
+        return "城市设置只允许主要用户本人在自己的私聊中管理。"
 
     def _can_manage_group_companion(self, event: AstrMessageEvent) -> bool:
         try:

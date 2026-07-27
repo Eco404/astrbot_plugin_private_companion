@@ -91,6 +91,20 @@ class UserRestGateMixin:
         )
         return bool(no_reply or hard_quiet)
 
+    @staticmethod
+    def _user_rest_text_requests_proactive_quiet(text: str) -> bool:
+        """Keep explicit proactive do-not-disturb intent across morning greetings."""
+        cleaned = re.sub(r"\s+", "", _single_line(text, 260).lower())
+        if not cleaned:
+            return False
+        return bool(
+            re.search(
+                r"(?:别|不要|先别|暂时别|今晚别|今天别|明天别|明早别|早上别)"
+                r".{0,10}(?:打扰|吵我|叫我|主动|发消息|找我)",
+                cleaned,
+            )
+        )
+
     def _user_rest_silence_until(self, user: dict[str, Any], *, now: float | None = None) -> float:
         check_now = _now_ts() if now is None else now
         rest_until = _safe_float(user.get("user_rest_until"), 0)
@@ -204,8 +218,10 @@ class UserRestGateMixin:
         rest_until = self._user_rest_silence_until(user, now=now)
         if normalized_source == "timer":
             return 0.0
-        if normalized_source == "daily_greeting" and normalized_reason == "morning_greeting":
-            return 0.0
+        if normalized_reason == "morning_greeting" and self._user_rest_kind(user) == "sleep":
+            rest_reason = _single_line(user.get("user_rest_reason"), 260)
+            if not self._user_rest_text_requests_proactive_quiet(rest_reason):
+                return 0.0
         return rest_until
 
     def _next_user_rest_morning_ts(self, *, now: float) -> float:

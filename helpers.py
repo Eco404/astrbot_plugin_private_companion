@@ -165,6 +165,11 @@ def _runtime_secret_values(owner: Any) -> list[str]:
         "backup_external_image_api_key",
         "balance_api_key",
         "weather_api_key",
+        "weather_token",
+        "qweather_token",
+        "weather_alert_token",
+        "weather_alert_jwt",
+        "weather_alert_api_key",
         "web_exploration_api_key",
     ):
         add(getattr(owner, attr, ""))

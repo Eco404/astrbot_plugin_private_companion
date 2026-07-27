@@ -277,6 +277,18 @@ class PhotoWardrobeDecision:
     adjustments: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        preset_name = _clean_text(self.preset_name, 80)
+        selected_presets = tuple(
+            _clean_text(value, 80)
+            for value in (self.selected_presets or ())
+            if _clean_text(value, 80)
+        )
+        if preset_name and not selected_presets:
+            selected_presets = (preset_name,)
+        elif selected_presets and not preset_name:
+            preset_name = selected_presets[0]
+        object.__setattr__(self, "preset_name", preset_name)
+        object.__setattr__(self, "selected_presets", selected_presets)
         if self.decision_version != DECISION_VERSION:
             raise ValueError(f"unsupported wardrobe decision version: {self.decision_version}")
         if not _clean_text(self.rule_id, 80):
@@ -290,7 +302,7 @@ class PhotoWardrobeDecision:
         if len(set(self.selected_presets)) != len(self.selected_presets):
             raise ValueError("selected presets must be unique")
         final_preset = self.selected_presets[0] if self.selected_presets else ""
-        if _clean_text(self.preset_name, 80) != final_preset:
+        if self.preset_name != final_preset:
             raise ValueError("preset_name must match the single selected preset")
         non_daily_category = bool(self.category and self.category != "daily_outfit")
         if (self.remove_daily_outfit_context or non_daily_category) and _DAILY_OUTFIT_PATTERN.search(
@@ -425,7 +437,7 @@ def _location_categories(value: str) -> set[str]:
         "school": r"学校|\bschool\b",
         "campus": r"校园|\bcampus\b",
         "classroom": r"教室|\bclassroom\b",
-        "workplace": r"办公室|公司|工位|\boffice\b|\bworkplace\b",
+        "workplace": r"办公室|公司|工位|工作地点|工作场所|\boffice\b|\bworkplace\b",
         "park": r"公园|\bpark\b",
         "street": r"街边|街头|街道|\bstreet\b",
         "mall": r"商场|\bmall\b",
@@ -435,7 +447,7 @@ def _location_categories(value: str) -> set[str]:
         "pool": r"泳池|游泳池|\bpool\b",
         "beach": r"海边|沙滩|\bbeach\b",
         "transit": r"车站|机场|\bstation\b|\bairport\b",
-        "outdoor": r"户外|室外|\boutdoors?\b",
+        "outdoor": r"户外|室外|外出|\boutdoors?\b",
     }
     for category, pattern in patterns.items():
         if re.search(pattern, text, flags=re.I):
@@ -1249,9 +1261,8 @@ def resolve_photo_wardrobe_decision(
             reference_roles=roles,
             effective_reference_roles=roles,
             positive_instruction=(
-                "This is the last image actually sent in the same conversation. Use it as the authoritative continuity source "
-                "for identity, the complete outfit, room or location, lighting, and time of day unless the current request explicitly changes one of them. "
-                "Use the current schedule only to fill details that are missing and non-conflicting."
+                "The last image sent in this conversation is authoritative for identity, complete outfit, room or location, "
+                "lighting, and time unless the current request changes them. Use the schedule only for missing, non-conflicting details."
             ),
             negative_instruction=" ".join(
                 part

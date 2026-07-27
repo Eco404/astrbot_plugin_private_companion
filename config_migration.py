@@ -36,6 +36,9 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "allow_screen_peek_action": ("enable_screen_glance_action",),
     "allow_poke_action": ("enable_poke_action",),
     "allow_voice_action": ("enable_voice_action",),
+    # 和风天气预警早期草案使用 api_key 命名；统一迁移到凭据字段，
+    # 读取层会按格式选择 JWT 或 API Key，避免升级后已配置的凭据失效。
+    "weather_alert_api_key": ("weather_alert_token",),
     "creative_base_chars_per_hour": ("creative_chars_per_session",),
     "enable_hot_trend_sources": ("enable_news_daily_hot_read",),
     "hot_trend_sources": ("news_hot_sources",),
@@ -102,6 +105,29 @@ PRECISION_PROVIDER_MODE_KEYS: tuple[str, ...] = (
     "WEB_EXPLORATION_PROVIDER_ID",
 )
 
+# QWeather is the default for new weather configurations.  Keep the old
+# provider values valid so an explicit legacy choice continues to work.
+QWEATHER_DEFAULT_SOURCE = "qweather"
+_WEATHER_SOURCE_ALIASES: dict[str, str] = {
+    "qweather": "qweather",
+    "q-weather": "qweather",
+    "q weather": "qweather",
+    "和风": "qweather",
+    "和风天气": "qweather",
+    "openweathermap": "openweathermap",
+    "open-weather-map": "openweathermap",
+    "openmeteo": "openmeteo",
+    "open-meteo": "openmeteo",
+    "amap": "amap",
+    "高德": "amap",
+    "高德地图": "amap",
+}
+_WEATHER_SOURCE_VALUES = frozenset(_WEATHER_SOURCE_ALIASES.values())
+_QWEATHER_GENERIC_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "weather_api_host": ("weather_alert_api_host",),
+    "weather_token": ("weather_alert_token", "weather_alert_api_key"),
+}
+
 
 def migrate_flat_config_into_schema_groups(
     config: Any,
@@ -134,6 +160,17 @@ def _migrate_flat_config_into_schema_groups(
         return 0
 
     changed: list[str] = []
+    legacy_group = root.get("legacy_compat_config")
+    legacy_sources = [root]
+    if isinstance(legacy_group, dict):
+        legacy_sources.append(legacy_group)
+
+    # Resolve the weather provider and shared QWeather credentials before the
+    # generic group-authority pass, while both raw grouped and flat values are
+    # still available for the explicit-choice checks.
+    weather_changes = _migrate_qweather_config(root, schema_map, legacy_sources)
+    changed.extend(weather_changes)
+
     for key, item in schema_map.items():
         if key == "provider_config_mode":
             continue
@@ -160,11 +197,6 @@ def _migrate_flat_config_into_schema_groups(
         if _copy_into_schema_group(root, schema_map, key, old_value):
             changed.append(key)
 
-    legacy_group = root.get("legacy_compat_config")
-    legacy_sources = [root]
-    if isinstance(legacy_group, dict):
-        legacy_sources.append(legacy_group)
-
     if _migrate_legacy_group_access_mode(root, schema_map):
         changed.append("require_target_group->group_access_mode")
     action_changes = _migrate_legacy_proactive_actions(root, schema_map, legacy_sources)
@@ -180,6 +212,18 @@ def _migrate_flat_config_into_schema_groups(
             for new_key in new_keys:
                 if _copy_into_schema_group(root, schema_map, new_key, old_value):
                     changed.append(f"{old_key}->{new_key}")
+                # Keep the hidden flat compatibility copy synchronized as well.
+                # Without this, AstrBot may persist an empty default at the root
+                # while integrations that read the flat key miss the migrated
+                # credential (the grouped value remains authoritative for _flat_get).
+                if old_key == "weather_alert_api_key":
+                    target_item = schema_map.get(new_key) or {}
+                    target_group = root.get(str(target_item.get("group") or ""))
+                    if isinstance(target_group, dict) and new_key in target_group:
+                        normalized = _coerce_schema_value(target_group.get(new_key), target_item)
+                        if root.get(new_key) != normalized:
+                            root[new_key] = normalized
+                            changed.append(f"{new_key}~compat-sync")
 
     if _ensure_provider_config_mode(root, schema_map):
         changed.append("provider_config_mode~mode-infer")
@@ -238,6 +282,248 @@ def _migrate_flat_config_into_schema_groups(
     if save:
         _save_config_after_schema_migration(config, logger=logger)
     return len(changed)
+
+
+def _migrate_qweather_config(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    legacy_sources: list[dict[str, Any]],
+) -> list[str]:
+    """Migrate shared QWeather credentials and infer the weather provider.
+
+    The active schema uses ``weather_api_host``/``weather_token`` for both
+    current weather and alerts.  Older releases used alert-specific names, so
+    those fields remain valid fallbacks.  Provider inference only applies when
+    no explicit provider survives; old OpenWeather/Amap credentials then keep
+    their original behavior, while otherwise new configs use QWeather.
+    """
+
+    changed: list[str] = []
+    for target, fallbacks in _QWEATHER_GENERIC_FALLBACKS.items():
+        value = _first_weather_configured_value(root, schema_map, (target, *fallbacks), legacy_sources)
+        if value is None:
+            continue
+        changed.extend(_write_weather_schema_value(root, schema_map, target, value))
+        for legacy_key in fallbacks:
+            changed.extend(
+                _clear_weather_compatibility_value(
+                    root,
+                    schema_map,
+                    legacy_key,
+                    legacy_sources,
+                )
+            )
+
+    source_item = schema_map.get("weather_source")
+    if not source_item:
+        return changed
+    resolved = _resolve_weather_source(root, schema_map, legacy_sources)
+    if not resolved:
+        return changed
+    changed.extend(
+        _write_weather_schema_value(
+            root,
+            schema_map,
+            "weather_source",
+            resolved,
+            force=_is_empty_legacy_openweather_default(root, schema_map, legacy_sources),
+        )
+    )
+    return changed
+
+
+def _clear_weather_compatibility_value(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    key: str,
+    legacy_sources: list[dict[str, Any]],
+) -> list[str]:
+    """Clear a consumed hidden alias so an intentional new-field reset sticks."""
+
+    item = schema_map.get(key) or {}
+    default = _coerce_schema_value(item.get("default", ""), item) if item else ""
+    changed: list[str] = []
+    group = _weather_schema_group(root, schema_map, key)
+    if isinstance(group, dict) and key in group and group.get(key) != default:
+        group[key] = default
+        changed.append(f"{key}~qweather-alias-cleanup")
+    for source in legacy_sources:
+        if key in source and source.get(key) != default:
+            source[key] = default
+            changed.append(f"{key}~compat-cleanup")
+    return changed
+
+
+def _is_empty_legacy_openweather_default(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    legacy_sources: list[dict[str, Any]],
+) -> bool:
+    group = _weather_schema_group(root, schema_map, "weather_source")
+    group_value = _normalize_weather_source(group.get("weather_source")) if isinstance(group, dict) else ""
+    root_value = _normalize_weather_source(root.get("weather_source"))
+    return (
+        group_value == "openweathermap"
+        and root_value in {"", "openweathermap"}
+        and _infer_legacy_weather_source(root, schema_map, legacy_sources) == QWEATHER_DEFAULT_SOURCE
+    )
+
+
+def _resolve_weather_source(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    legacy_sources: list[dict[str, Any]],
+) -> str:
+    """Return the effective provider without overwriting visible choices."""
+
+    item = schema_map.get("weather_source") or {}
+    group = _weather_schema_group(root, schema_map, "weather_source")
+    group_present = isinstance(group, dict) and "weather_source" in group
+    root_present = "weather_source" in root
+    group_value = _normalize_weather_source(group.get("weather_source")) if group_present else ""
+    root_value = _normalize_weather_source(root.get("weather_source")) if root_present else ""
+    schema_default = _normalize_weather_source(item.get("default")) or QWEATHER_DEFAULT_SOURCE
+    inferred = _infer_legacy_weather_source(root, schema_map, legacy_sources)
+
+    # Any visible grouped value is authoritative, including an intentional
+    # reset to the QWeather default.  The one exception is the old
+    # OpenWeatherMap default when both grouped and flat copies agree but no
+    # OpenWeather-specific setting was ever configured; that is an inherited
+    # default rather than a useful provider choice.
+    if group_present and group_value:
+        if (
+            group_value == "openweathermap"
+            and root_value in {"", "openweathermap"}
+            and inferred == QWEATHER_DEFAULT_SOURCE
+        ):
+            return QWEATHER_DEFAULT_SOURCE
+        return group_value
+    if root_value and root_value != QWEATHER_DEFAULT_SOURCE:
+        if root_value == "openweathermap" and inferred == QWEATHER_DEFAULT_SOURCE:
+            return QWEATHER_DEFAULT_SOURCE
+        return root_value
+    if group_present and not group_value and root_value:
+        return root_value
+    if root_present and root_value:
+        # A root-only QWeather value can be a hidden default from an older
+        # config writer.  Legacy provider credentials are a stronger signal.
+        if inferred != QWEATHER_DEFAULT_SOURCE and schema_default == QWEATHER_DEFAULT_SOURCE:
+            return inferred
+        return root_value
+    return inferred
+
+
+def _infer_legacy_weather_source(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    legacy_sources: list[dict[str, Any]],
+) -> str:
+    """Infer a pre-QWeather source from its provider-specific fields."""
+
+    amap_keys = ("weather_amap_api_key", "weather_amap_city")
+    openweather_keys = ("weather_api_key", "weather_city")
+    if _has_weather_configured_value(root, schema_map, amap_keys, legacy_sources):
+        return "amap"
+    if _has_weather_configured_value(root, schema_map, openweather_keys, legacy_sources):
+        return "openweathermap"
+    return QWEATHER_DEFAULT_SOURCE
+
+
+def _first_weather_configured_value(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    keys: tuple[str, ...],
+    legacy_sources: list[dict[str, Any]],
+) -> Any:
+    """Find the first non-empty value, preferring the visible group."""
+
+    for key in keys:
+        for value in _weather_config_values(root, schema_map, key, legacy_sources):
+            if not _is_empty(value):
+                return value
+    return None
+
+
+def _has_weather_configured_value(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    keys: tuple[str, ...],
+    legacy_sources: list[dict[str, Any]],
+) -> bool:
+    return _first_weather_configured_value(root, schema_map, keys, legacy_sources) is not None
+
+
+def _weather_config_values(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    key: str,
+    legacy_sources: list[dict[str, Any]],
+) -> list[Any]:
+    values: list[Any] = []
+    group = _weather_schema_group(root, schema_map, key)
+    if isinstance(group, dict) and key in group:
+        values.append(group.get(key))
+    if key in root:
+        values.append(root.get(key))
+    for source in legacy_sources[1:]:
+        if key in source:
+            values.append(source.get(key))
+    return values
+
+
+def _weather_schema_group(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    key: str,
+) -> dict[str, Any] | None:
+    item = schema_map.get(key) or {}
+    group_key = str(item.get("group") or "")
+    group = root.get(group_key) if group_key else None
+    return group if isinstance(group, dict) else None
+
+
+def _write_weather_schema_value(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    key: str,
+    value: Any,
+    *,
+    force: bool = False,
+) -> list[str]:
+    """Write a migrated value to its group and synchronized flat copy."""
+
+    item = schema_map.get(key)
+    if not item:
+        return []
+    normalized = _coerce_schema_value(value, item)
+    default = _coerce_schema_value(item.get("default"), item)
+    group_key = str(item.get("group") or "")
+    if not group_key:
+        return []
+    group = root.get(group_key)
+    if not isinstance(group, dict):
+        group = {}
+        root[group_key] = group
+
+    changed: list[str] = []
+    existing = group.get(key)
+    if force or key not in group or _is_empty(existing) or existing == default:
+        if existing != normalized:
+            group[key] = normalized
+            changed.append(f"{key}~qweather-migrate")
+    else:
+        # The visible grouped value remains authoritative once configured.
+        normalized = _coerce_schema_value(existing, item)
+
+    if root.get(key) != normalized:
+        root[key] = normalized
+        changed.append(f"{key}~compat-sync")
+    return changed
+
+
+def _normalize_weather_source(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return _WEATHER_SOURCE_ALIASES.get(text, text if text in _WEATHER_SOURCE_VALUES else "")
 
 
 def _ensure_provider_config_mode(root: dict[str, Any], schema_map: dict[str, dict[str, Any]]) -> bool:

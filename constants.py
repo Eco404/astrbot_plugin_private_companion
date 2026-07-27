@@ -4,8 +4,13 @@ import re
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 DATA_VERSION = 1
+
+# 关系网持久化与审核入口共享的容量契约。
+WORLDBOOK_PENDING_OBSERVATION_CAPACITY = 24
+WORLDBOOK_IMPORTANT_MEMORY_CAPACITY = 8
+
 PAGE_THEME_NAMES = frozenset(
-    {"classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"}
+    {"classic", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"}
 )
 PAGE_FONT_NAMES = frozenset(
     {"original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng"}
@@ -239,6 +244,9 @@ _DATA_STORE_KEYS = (
     "inbound_debounce_stats",
     "group_llm_reply_blocks",
     "balance_awareness",
+    "qweather_location",
+    "weather_alerts",
+    "weather_alert_awareness",
     "body_monitor_integration",
     "environment_change_awareness",
     "personal_goal_state",
@@ -265,6 +273,7 @@ _REASON_TEXT = {
     "birthday_afterglow": "接住生日之后的一点余温",
     "background_schedule": "提一句当前日程",
     "insomnia_night": "睡不着，想跟{name}说说话",
+    "goodnight_screen_check": "互道晚安后轻声提醒{name}早点休息",
     "post_goodnight_group_activity": "互道晚安后发现{name}还在群里活跃",
     "group_share": "跟{name}分享群里的有趣片段",
     "bili_video_share": "跟{name}分享一个 B 站视频",
@@ -273,6 +282,7 @@ _REASON_TEXT = {
     "low_balance": "发现自己的零花钱有点不够用了",
     "health_alert": "注意到一项值得温和关心的身体状态变化",
     "environment_change": "注意到外面的环境突然变了",
+    "weather_alert": "收到一条与当前位置有关的气象预警",
     "personal_goal_progress": "自己的一个长期目标有了新进展",
     "meal_care": "惦记{name}有没有按时吃东西",
     "meal_care_followup": "还想把刚才那顿饭问清楚一点",
@@ -395,6 +405,12 @@ _DEFAULT_USER_TEMPLATE = {
     "last_user_message_at": 0,
     "last_companion_message": "",
     "last_companion_message_at": 0,
+    "goodnight_screen_check_due_at": 0,
+    "goodnight_screen_check_episode_at": 0,
+    "goodnight_screen_check_episode_key": "",
+    "goodnight_screen_check_checked_at": 0,
+    "goodnight_screen_check_checked_episode_key": "",
+    "goodnight_screen_check_state": "",
     "last_proactive_reason": "",
     "last_proactive_action": "",
     "last_proactive_behavior_summary": "",

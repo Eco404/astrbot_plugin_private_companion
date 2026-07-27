@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260726-photo-reference-catalog-v1" />
+  <link rel="stylesheet" href="./app.css?v=20260728-model-subnav-motion" />
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
   <link rel="stylesheet" href="./css/polish.css?v=20260715-learning-nav-merged-v1" />
@@ -13,7 +13,7 @@
       try {
         var theme = localStorage.getItem("pc_theme") || "classic";
         var font = localStorage.getItem("pc_font") || "original";
-        var allowedThemes = ["classic", "dark", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"];
+        var allowedThemes = ["classic", "warm", "forest", "sakura", "ocean", "lavender", "ink", "sunset"];
         if (allowedThemes.indexOf(theme) === -1) theme = "classic";
         var allowedFonts = ["original", "yahei", "dengxian", "source_han", "simsun", "kaiti", "fangsong", "cheng"];
         if (allowedFonts.indexOf(font) === -1) font = "original";
@@ -1405,15 +1405,18 @@ QQ空间 = 公开札记
       </section>
 
       <section class="panel" id="panel-models">
-        <div class="section-head">
-          <h2>模型配置</h2>
-          <span class="muted">任务分流与生图后端</span>
+        <div class="section-head models-page-head">
+          <div class="models-page-heading">
+            <h2>模型配置</h2>
+            <span class="muted">任务分流、语音合成与生图后端</span>
+          </div>
+          <nav class="models-subnav" aria-label="模型配置分类" role="tablist">
+            <button id="modelsProvidersTab" type="button" class="active" data-index="01" data-models-section="providers" role="tab" aria-controls="modelsProviderPane" aria-selected="true">任务模型</button>
+            <button id="modelsTtsTab" type="button" data-index="02" data-models-section="tts" role="tab" aria-controls="modelsTtsPane" aria-selected="false">语音合成</button>
+            <button id="modelsImageTab" type="button" data-index="03" data-models-section="image" role="tab" aria-controls="modelsImagePane" aria-selected="false">生图模型</button>
+          </nav>
         </div>
-        <nav class="models-subnav" aria-label="模型配置分类" role="tablist">
-          <button type="button" class="active" data-models-section="providers" role="tab" aria-selected="true">任务模型</button>
-          <button type="button" data-models-section="image" role="tab" aria-selected="false">生图模型</button>
-        </nav>
-        <div id="modelsProviderPane" data-models-pane="providers">
+        <div id="modelsProviderPane" data-models-pane="providers" role="tabpanel" aria-labelledby="modelsProvidersTab">
           <div id="providerSummary" class="provider-summary"></div>
           <div id="deepseekPeakCard"></div>
           <div id="providerFlow" class="provider-flow"></div>
@@ -1444,7 +1447,11 @@ QQ空间 = 公开札记
           </div>
           <form id="providerForm" class="provider-groups"></form>
         </div>
-        <div id="modelsImagePane" class="image-model-pane" data-models-pane="image" hidden>
+        <div id="modelsTtsPane" class="tts-model-pane" data-models-pane="tts" role="tabpanel" aria-labelledby="modelsTtsTab" hidden>
+          <div id="ttsModelSummary" class="tts-model-summary"></div>
+          <div id="ttsModelEditor"></div>
+        </div>
+        <div id="modelsImagePane" class="image-model-pane" data-models-pane="image" role="tabpanel" aria-labelledby="modelsImageTab" hidden>
           <div id="imageModelSummary" class="image-model-summary"></div>
           <div id="imageModelEditor"></div>
           <div class="image-model-actions">
@@ -1580,6 +1587,6 @@ QQ空间 = 公开札记
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260723-provider-filter-immediate"></script>
   <script src="./js/panels/qzone-panel.js?v=20260711-qzone-preview-context"></script>
-  <script src="./app.js?v=20260726-photo-reference-catalog-v2"></script>
+  <script src="./app.js?v=20260728-model-subnav-motion"></script>
 </body>
 </html>

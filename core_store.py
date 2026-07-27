@@ -388,6 +388,9 @@ class CoreStoreMixin:
             "group_llm_reply_blocks": {},
             "cache_metrics": {},
             "balance_awareness": {},
+            "qweather_location": {},
+            "weather_alerts": {},
+            "weather_alert_awareness": {},
             "body_monitor_integration": {},
             "environment_change_awareness": {},
             "personal_goal_state": {},
@@ -454,6 +457,9 @@ class CoreStoreMixin:
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("cache_metrics", {})
         data.setdefault("balance_awareness", {})
+        data.setdefault("qweather_location", {})
+        data.setdefault("weather_alerts", {})
+        data.setdefault("weather_alert_awareness", {})
         data.setdefault("body_monitor_integration", {})
         data.setdefault("environment_change_awareness", {})
         data.setdefault("personal_goal_state", {})
@@ -1525,4 +1531,3 @@ class CoreStoreMixin:
             normalized["group_id"] = _single_line(normalized.get("group_id") or group_id, 80)
             items.append(normalized)
         return sorted(items, key=lambda item: _safe_float(item.get("updated_at"), 0.0), reverse=True)
-

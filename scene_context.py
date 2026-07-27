@@ -125,6 +125,80 @@ class SceneContextMixin:
                 runtime_status = ""
         return current_item, schedule_text, runtime_status
 
+    def _scene_context_weather_alert_snapshot(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Read the already-fetched alert cache without doing network I/O."""
+
+        if not bool(getattr(self, "enable_weather_context", True)) or not bool(getattr(self, "enable_weather_alerts", True)):
+            return {
+                "enabled": False,
+                "stale": False,
+                "fetched_ts": 0,
+                "error": "",
+                "count": 0,
+                "highest_level": "",
+                "alerts": [],
+            }
+        cache = data.get("weather_alerts") if isinstance(data.get("weather_alerts"), dict) else {}
+        raw_alerts = cache.get("alerts") if isinstance(cache.get("alerts"), list) else []
+        config_key_getter = getattr(self, "_weather_alert_config_key", None)
+        if callable(config_key_getter):
+            try:
+                current_config_key = _single_line(config_key_getter(), 96)
+            except Exception:
+                current_config_key = ""
+            cached_config_key = _single_line(cache.get("config_key"), 96)
+            if not current_config_key or cached_config_key != current_config_key:
+                # A failed refresh must not expose an alert from the previous
+                # location or API host as if it belonged to the new one.
+                raw_alerts = []
+        filter_getter = getattr(self, "_filter_weather_alerts", None)
+        try:
+            alerts = filter_getter(raw_alerts, getattr(self, "weather_alert_min_severity", "blue")) if callable(filter_getter) else raw_alerts
+        except Exception:
+            alerts = raw_alerts
+        now = _now_ts()
+        normalized: list[dict[str, Any]] = []
+        for raw in alerts:
+            if not isinstance(raw, dict):
+                continue
+            if bool(raw.get("is_cancelled")):
+                continue
+            expire_ts = 0.0
+            parser = getattr(self, "_weather_alert_time_ts", None)
+            if callable(parser):
+                try:
+                    expire_ts = float(parser(raw.get("expire_time")) or 0)
+                except Exception:
+                    expire_ts = 0.0
+            if expire_ts > 0 and expire_ts <= now:
+                continue
+            normalized.append(
+                {
+                    "id": _single_line(raw.get("id") or raw.get("fingerprint"), 120),
+                    "event": _single_line(raw.get("event") or "天气", 48),
+                    "event_code": _single_line(raw.get("event_code"), 40),
+                    "level": _single_line(raw.get("color") or raw.get("severity"), 24),
+                    "severity": _single_line(raw.get("severity"), 24),
+                    "headline": _single_line(raw.get("headline") or raw.get("description"), 180),
+                    "instruction": _single_line(raw.get("instruction"), 320),
+                    "sender": _single_line(raw.get("sender"), 80),
+                    "issued_time": _single_line(raw.get("issued_time"), 48),
+                    "expire_time": _single_line(raw.get("expire_time"), 48),
+                }
+            )
+        rank_getter = getattr(self, "_qweather_alert_rank", None)
+        if callable(rank_getter):
+            normalized.sort(key=lambda item: rank_getter(item.get("level") or item.get("severity")), reverse=True)
+        return {
+            "enabled": bool(cache) and _single_line(cache.get("source"), 24) == "qweather",
+            "stale": bool(cache.get("stale")),
+            "fetched_ts": cache.get("fetched_ts", 0),
+            "error": _single_line(cache.get("error"), 100),
+            "count": len(normalized),
+            "highest_level": _single_line((normalized[0] if normalized else {}).get("level"), 24),
+            "alerts": normalized[:6],
+        }
+
     @staticmethod
     def _scene_context_condition_labels(state: dict[str, Any]) -> list[str]:
         raw = state.get("conditions")
@@ -226,6 +300,7 @@ class SceneContextMixin:
             )
         if weather == "暂无天气信息":
             weather = ""
+        weather_alerts = self._scene_context_weather_alert_snapshot(data)
 
         today = captured.strftime("%Y-%m-%d")
         outfit_item = data.get("daily_outfit_photo")
@@ -259,6 +334,20 @@ class SceneContextMixin:
                 role_label = _single_line(role_labeler(role), 32) or role
             except Exception:
                 role_label = role
+
+        # Location-specific warnings are private environment context. Keep
+        # them out of secondary-user snapshots even when the shared cache is
+        # present for the primary user.
+        if current_user and role != "owner":
+            weather_alerts = {
+                "enabled": False,
+                "stale": False,
+                "fetched_ts": 0,
+                "error": "",
+                "count": 0,
+                "highest_level": "",
+                "alerts": [],
+            }
 
         energy = _safe_int(state.get("energy"), 70, 0, 100)
         mood = _single_line(
@@ -316,6 +405,7 @@ class SceneContextMixin:
                 "text": weather,
                 "source": _single_line(weather_data.get("source"), 60),
             },
+            "weather_alerts": weather_alerts,
             "outfit": {
                 "date": _single_line(outfit_item.get("date"), 20),
                 "available": outfit_available,
@@ -359,6 +449,7 @@ class SceneContextMixin:
         schedule = scene.get("schedule") if isinstance(scene.get("schedule"), dict) else {}
         location = scene.get("location") if isinstance(scene.get("location"), dict) else {}
         weather = scene.get("weather") if isinstance(scene.get("weather"), dict) else {}
+        weather_alerts = scene.get("weather_alerts") if isinstance(scene.get("weather_alerts"), dict) else {}
         outfit = scene.get("outfit") if isinstance(scene.get("outfit"), dict) else {}
         relationship = scene.get("relationship") if isinstance(scene.get("relationship"), dict) else {}
         visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
@@ -378,6 +469,30 @@ class SceneContextMixin:
             parts.append(f"当前场景：{_single_line(location.get('category_label'), 24)}")
         if _single_line(weather.get("text"), 220):
             parts.append(f"天气背景：{_single_line(weather.get('text'), 220)}")
+        alert_items = weather_alerts.get("alerts") if isinstance(weather_alerts.get("alerts"), list) else []
+        if alert_items:
+            alert_text = "；".join(
+                " ".join(
+                    part
+                    for part in (
+                        _single_line(item.get("level"), 16),
+                        _single_line(item.get("event"), 36),
+                        _single_line(item.get("headline"), 120),
+                    )
+                    if part
+                )
+                for item in alert_items[:3]
+                if isinstance(item, dict)
+            )
+            if alert_text:
+                if purpose in {"image_search", "selfie_scene", "proactive_photo"}:
+                    parts.append(
+                        f"安全环境提示：{alert_text}。优先选择符合防护建议的自然场景，不生成警报牌、文字水印或播报界面。"
+                    )
+                else:
+                    parts.append(
+                        f"气象预警背景：{alert_text}。只用于判断安全、室内外和语气，不要编造警报界面、播报口吻或未给出的影响。"
+                    )
         if bool(outfit.get("available")):
             description = _single_line(outfit.get("description"), 360)
             parts.append(f"今日穿搭：{description or '已有可复用的今日穿搭参考图'}")

@@ -66,7 +66,6 @@ const state = {
   featureDetailParamDraft: {},
   featureDetailSubpage: "",
   photoReferenceManagerDraft: null,
-  photoReferenceFieldErrors: {},
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
   selectedFeatureKey: "",
@@ -104,6 +103,18 @@ const state = {
   providerDraft: {},
   providerTimeoutDraft: {},
   providerFallbackDraft: {},
+  availableTtsProviders: [],
+  ttsProviderDraft: {},
+  ttsProviderConfigs: [],
+  ttsProviderTemplates: [],
+  ttsProviderConfigLoaded: false,
+  selectedTtsLanguage: "",
+  selectedTtsProviderId: "",
+  ttsProviderConfigDrafts: {},
+  ttsProviderCreateOpen: false,
+  ttsProviderCreateType: "",
+  ttsProviderCreateId: "",
+  ttsProviderTestResults: {},
   imageApiStatus: null,
   imageApiEndpointTestResults: {},
   proactiveCandidateFilter: "all",
@@ -137,6 +148,7 @@ const state = {
   lazyLoaded: {
     diagnostics: false,
     providers: false,
+    ttsProviderConfigs: false,
     imageApiStatus: false,
     roleplayPersonas: false,
     tokenStats: false,
@@ -164,6 +176,9 @@ const hiddenCompatibilityConfigKeys = new Set([
   "skill_growth_passive_injection",
   "skill_growth_custom_skills",
   "auto_voice_full_conversion_enabled",
+  "weather_alert_api_host",
+  "weather_alert_token",
+  "weather_alert_api_key",
 ]);
 
 const featureSwitchNotes = {
@@ -626,7 +641,25 @@ function hasUnsavedFeatureChanges() {
 }
 
 function hasUnsavedChanges() {
-  return hasUnsavedFeatureChanges() || hasUnsavedModuleFormChanges();
+  return hasUnsavedFeatureChanges() || hasUnsavedModuleFormChanges() || hasUnsavedTtsProviderChanges();
+}
+
+function hasUnsavedTtsProviderChanges() {
+  const draft = state.ttsProviderDraft || {};
+  const saved = state.overview?.settings || {};
+  const strategyChanged = Object.entries(draft).some(([key, value]) => {
+    const current = saved[key];
+    if (typeof value === "boolean" || typeof current === "boolean") return Boolean(value) !== Boolean(current);
+    return String(value ?? "").trim() !== String(current ?? "").trim();
+  });
+  return strategyChanged || Object.keys(state.ttsProviderConfigDrafts || {}).length > 0;
+}
+
+function discardUnsavedTtsProviderChanges() {
+  state.ttsProviderDraft = {};
+  state.ttsProviderConfigDrafts = {};
+  state.ttsProviderCreateOpen = false;
+  state.ttsProviderCreateId = "";
 }
 
 function markFeatureDetailDirty() {
@@ -1124,6 +1157,7 @@ const featureMeta = {
   enable_private_reading_ask_recommendation: ["征求推荐", "空档或无聊时，低频私聊询问用户有没有合适的私密阅读推荐。"],
   enable_private_reading_preference_influence: ["私密偏好影响", "评分样本足够后，把稳定偏好作为私聊私密互动的弱背景。"],
   enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
+  enable_goodnight_screen_check: ["晚安识屏提醒", "互道晚安后等待一次识屏判断；仅在明确仍活跃时轻声提醒休息。"],
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制、朗读文本清洗和主用户触发。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
@@ -1329,6 +1363,7 @@ const embeddedFeatureParentByKey = {
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
   enable_private_reading_preference_influence: "enable_private_reading_integration",
   enable_unanswered_screen_peek_followup: "enable_screen_glance_action",
+  enable_goodnight_screen_check: "enable_screen_glance_action",
   auto_voice_enabled: "enable_tts_enhancement",
   auto_voice_full_conversion_enabled: "enable_tts_enhancement",
   enable_tts_local_playback: "enable_tts_enhancement",
@@ -1713,6 +1748,9 @@ const configLabels = {
   holiday_country: "节假日地区",
   enable_weather_context: "天气上下文",
   weather_source: "天气数据源",
+  weather_api_host: "和风天气 API Host",
+  weather_token: "和风天气凭据（JWT / API Key）",
+  weather_location: "天气地点（城市/区县/LocationID）",
   weather_api_key: "OpenWeatherMap API Key",
   weather_city: "天气城市（推荐）",
   weather_amap_api_key: "高德地图 API Key",
@@ -1720,6 +1758,11 @@ const configLabels = {
   weather_lat: "天气纬度",
   weather_lon: "天气经度",
   weather_refresh_minutes: "天气刷新间隔（分钟）",
+  enable_weather_alerts: "气象预警感知",
+  weather_alert_api_host: "和风天气预警 API Host（旧兼容字段）",
+  weather_alert_token: "和风天气预警凭据（旧兼容字段）",
+  weather_alert_refresh_minutes: "气象预警刷新间隔（分钟）",
+  weather_alert_min_severity: "最低气象预警级别",
   enable_environment_change_proactive: "环境突变主动消息",
   environment_change_check_minutes: "环境突变检测间隔（分钟）",
   environment_change_cooldown_minutes: "环境突变消息冷却（分钟）",
@@ -1929,6 +1972,7 @@ const configLabels = {
   private_reading_preference_max_terms: "偏好注入最多词条",
   unanswered_screen_peek_after_minutes: "沉默多久后窥屏",
   unanswered_screen_peek_cooldown_minutes: "沉默窥屏冷却",
+  goodnight_screen_check_delay_minutes: "晚安后等待分钟",
   creative_inspiration_probability: "创作灵感概率",
   creative_share_probability: "创作透露概率",
   creative_chars_per_session: "每次创作字数",
@@ -1961,8 +2005,8 @@ const configLabels = {
   group_slang_summary_minutes: "群黑话语义整理间隔",
   max_group_episodes: "群聊片段保留上限",
   max_group_relationship_edges: "群友互动边保留上限",
-  external_image_download_proxy: "在线图片下载代理",
-  external_image_download_use_environment_proxy: "图片下载继承环境代理",
+  external_image_download_proxy: "在线图片网络代理",
+  external_image_download_use_environment_proxy: "图片网络继承环境代理",
   screen_peek_max_daily: "每日主动识屏上限",
   screen_peek_cooldown_minutes: "主动识屏冷却分钟",
   poke_action_max_times: "单次戳一戳上限",
@@ -2095,15 +2139,23 @@ const configDescriptions = {
   advanced_cycle_pms_energy: "未开启强度联动时使用的精力增减值，负数表示精力稍低。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
-  enable_weather_context: "开启后优先使用本插件配置的天气数据源；未完成独立天气配置时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
-  weather_source: "选择 OpenWeatherMap、无需 Key 的 Open-Meteo，或高德地图 Web 服务 API。",
+  enable_weather_context: "开启后默认使用和风天气；未完成独立配置时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
+  weather_source: "默认使用和风天气；OpenWeatherMap、Open-Meteo 和高德地图仅保留给兼容配置。",
+  weather_api_host: "从和风天气控制台复制专属 Host，只填域名，不要填完整接口路径或公共 Host。",
+  weather_token: "粘贴和风天气 JWT 或 API Key，不要手动添加 Bearer 前缀；页面不会回显凭据。",
+  weather_location: "支持城市、区县与城市组合、和风 LocationID 或经纬度，例如：北京、朝阳区,北京、101010100、116.41,39.92。",
   weather_api_key: "仅 OpenWeatherMap 使用。还需填写天气城市，或同时填写一组经纬度。",
   weather_city: "仅 OpenWeatherMap 使用，例如 Beijing,CN、Shanghai,CN。填写城市后优先使用城市定位，并忽略经纬度。",
   weather_amap_api_key: "仅高德地图数据源使用，需填写高德开放平台 Web 服务 API Key。",
   weather_amap_city: "仅高德地图数据源使用，填写城市或区县 adcode，例如东城区 110101。",
-  weather_lat: "Open-Meteo 必须填写，并需与经度成对；OpenWeatherMap 仅在天气城市留空时使用。",
-  weather_lon: "Open-Meteo 必须填写，并需与纬度成对；OpenWeatherMap 仅在天气城市留空时使用。",
+  weather_lat: "高级定位与旧配置兼容字段；请与经度成对填写。和风天气优先使用天气地点，Open-Meteo 仍需经纬度。",
+  weather_lon: "高级定位与旧配置兼容字段；请与纬度成对填写。和风天气优先使用天气地点，Open-Meteo 仍需经纬度。",
   weather_refresh_minutes: "天气缓存的刷新间隔；更换地点或 Key 后会在下一次刷新时使用新配置。",
+  enable_weather_alerts: "可选开启和风天气官方预警；直接复用和风 API Host、凭据和天气地点，不会把普通天气描述当成正式预警。",
+  weather_alert_api_host: "旧版兼容字段；请改用通用的和风天气 API Host。",
+  weather_alert_token: "旧版兼容字段；请改用通用的和风天气凭据。",
+  weather_alert_refresh_minutes: "气象预警查询间隔，默认 10 分钟；间隔越短越及时，也会增加请求次数，请遵循和风天气限频。",
+  weather_alert_min_severity: "仅保留达到所选颜色级别的有效预警；全部级别包含蓝色预警，普通天气实况不受此筛选影响。",
   enable_environment_change_proactive: "独立轮询天气变化，只在开始或停止降水、雷暴、降雪、明显雾风和温差突变时生成短时主动候选。",
   environment_change_check_minutes: "检查实时天气是否出现明显变化的间隔。",
   environment_change_cooldown_minutes: "相同或相近环境变化再次形成主动候选前的最小间隔。",
@@ -2427,6 +2479,7 @@ const configDescriptions = {
   private_reading_preference_max_terms: "每次注入最多参考多少个稳定偏好词，避免上下文太长或风格偏移。",
   unanswered_screen_peek_after_minutes: "主动消息发出后，用户沉默多久才允许尝试识屏观察。",
   unanswered_screen_peek_cooldown_minutes: "沉默识屏触发后的冷却时间。",
+  goodnight_screen_check_delay_minutes: "与主要用户互道晚安后等待多久进行一次状态判断；期间用户再次发言会取消。",
   creative_inspiration_probability: "从生活小事、梦境或日记里长出创作灵感的概率，按百分比填写。",
   creative_share_probability: "创作达到节点后自然透露给用户的概率，按百分比填写。",
   creative_chars_per_session: "每次闲暇创作行为大约写多少字；实际字数会受人格和当天能量影响。",
@@ -2499,8 +2552,8 @@ const configDescriptions = {
   group_slang_summary_minutes: "同一群两次黑话语义整理之间的最小间隔。",
   max_group_episodes: "每个群最多保留多少段群聊片段记忆。",
   max_group_relationship_edges: "每个群最多保留多少组群友近期互动统计。",
-  external_image_download_proxy: "仅用于下载在线生图接口返回的图片 URL，不影响生图请求或本地后端。",
-  external_image_download_use_environment_proxy: "下载在线图片结果时读取 HTTP_PROXY、HTTPS_PROXY 和 NO_PROXY。",
+  external_image_download_proxy: "用于在线生图结果 URL 下载和 Gemini generateContent 生图请求；其他在线平台请求与本地后端不受影响。",
+  external_image_download_use_environment_proxy: "在线结果 URL 下载和 Gemini 生图请求读取 HTTP_PROXY、HTTPS_PROXY 与 NO_PROXY；显式代理优先。",
   screen_peek_max_daily: "按用户计算的每日主动识屏次数；开始识屏即消耗额度。",
   screen_peek_cooldown_minutes: "同一用户两次主动识屏之间的最小间隔。",
   poke_action_max_times: "单次主动戳一戳最多执行几次，通常保持 1。",
@@ -2588,7 +2641,7 @@ const featureSettingGroups = {
   enable_private_image_self_recognition: ["private_image_vision_provider_priority", "private_image_vision_custom_prompt", "private_image_vision_max_chars", "private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "private_image_provider_failure_cooldown_seconds", "enable_context_image_captioning", "context_image_caption_max_items", "context_image_caption_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit", "forward_message_image_vision_timeout_seconds"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
-  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_source", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
+  enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception", "enable_weather_context", "weather_source", "weather_api_host", "weather_token", "weather_location", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_weather_alerts", "weather_alert_refresh_minutes", "weather_alert_min_severity", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes", "enable_balance_awareness", "balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_balance_awareness: ["balance_api_url", "balance_api_key", "balance_api_auth_header", "balance_api_auth_scheme", "balance_api_custom_headers", "balance_json_path", "balance_total_json_path", "balance_used_json_path", "balance_value_divisor", "balance_currency_label", "balance_check_interval_minutes", "balance_request_timeout_seconds", "balance_low_threshold", "balance_critical_threshold", "balance_low_percent_threshold", "balance_critical_percent_threshold", "balance_message_cooldown_hours", "balance_include_amount_in_message"],
   enable_holiday_perception: ["holiday_country"],
   enable_platform_perception: [],
@@ -2596,7 +2649,7 @@ const featureSettingGroups = {
   enable_lunar_perception: ["environment_perception_timezone"],
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
-  enable_weather_context: ["weather_source", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+  enable_weather_context: ["weather_source", "weather_api_host", "weather_token", "weather_location", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_weather_alerts", "weather_alert_refresh_minutes", "weather_alert_min_severity", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_environment_change_proactive: ["environment_change_check_minutes", "environment_change_cooldown_minutes"],
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [],
@@ -2637,7 +2690,7 @@ const featureSettingGroups = {
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
-  enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
+  enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -2645,6 +2698,7 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
+  enable_goodnight_screen_check: ["goodnight_screen_check_delay_minutes"],
   enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
   enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
@@ -2875,8 +2929,13 @@ const featureSettingSections = {
     },
     {
       title: "天气上下文",
-      note: "可选 OpenWeatherMap、Open-Meteo 或高德地图，也可回退复用 screen_companion。",
-      keys: ["enable_weather_context", "weather_source", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city", "weather_lat", "weather_lon", "weather_refresh_minutes", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+      note: "默认使用和风天气；只需填写专属 Host、凭据和天气地点。其他来源与独立经纬度保留为高级配置。",
+      keys: ["enable_weather_context", "weather_source", "weather_api_host", "weather_token", "weather_location", "weather_refresh_minutes", "enable_weather_alerts", "weather_alert_refresh_minutes", "weather_alert_min_severity", "enable_environment_change_proactive", "environment_change_check_minutes", "environment_change_cooldown_minutes"],
+    },
+    {
+      title: "高级定位与兼容来源",
+      note: "保留独立经纬度和其他天气来源；选择对应来源后才显示其凭据与城市字段。",
+      keys: ["weather_lat", "weather_lon", "weather_api_key", "weather_city", "weather_amap_api_key", "weather_amap_city"],
     },
     {
       title: "余额与补给",
@@ -3254,6 +3313,11 @@ const featureSettingSections = {
       keys: ["screen_peek_max_daily", "screen_peek_cooldown_minutes"],
     },
     {
+      title: "晚安后单次提醒",
+      note: "仅主要用户互道晚安后生效；无法确认仍活跃时保持静默，屏幕内容不会进入提醒生成上下文。",
+      keys: ["enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes"],
+    },
+    {
       title: "主动后沉默识屏",
       note: "用户长时间未回复时可额外看一眼屏幕；仍受独立等待与冷却限制。",
       keys: ["enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
@@ -3384,6 +3448,7 @@ const featureSettingTypes = {
   max_group_relationship_edges: { type: "number", min: 10, max: 300, step: 10 },
   screen_peek_max_daily: { type: "number", min: 0, max: 5, step: 1 },
   screen_peek_cooldown_minutes: { type: "number", min: 0, max: 1440, step: 10 },
+  goodnight_screen_check_delay_minutes: { type: "number", min: 1, max: 180, step: 1 },
   poke_action_max_times: { type: "number", min: 1, max: 3, step: 1 },
   poke_action_cooldown_minutes: { type: "number", min: 0, max: 1440, step: 5 },
   voice_action_max_chars: { type: "number", min: 6, max: 80, step: 2 },
@@ -3400,12 +3465,20 @@ const featureSettingTypes = {
   proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴：不省成本"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
   enable_weather_context: { type: "checkbox" },
-  weather_source: { type: "select", options: [["openweathermap", "OpenWeatherMap"], ["openmeteo", "Open-Meteo"], ["amap", "高德地图 API"]] },
+  weather_source: { type: "select", options: [["qweather", "和风天气（推荐）"], ["openweathermap", "OpenWeatherMap"], ["openmeteo", "Open-Meteo"], ["amap", "高德地图 API"]] },
+  weather_api_host: { type: "text" },
+  weather_token: { type: "password" },
+  weather_location: { type: "text" },
   weather_api_key: { type: "password" },
   weather_amap_api_key: { type: "password" },
   weather_lat: { type: "number", min: -90, max: 90, step: 0.0001 },
   weather_lon: { type: "number", min: -180, max: 180, step: 0.0001 },
   weather_refresh_minutes: { type: "number", min: 10, max: 720, step: 10 },
+  enable_weather_alerts: { type: "checkbox" },
+  weather_alert_api_host: { type: "text" },
+  weather_alert_token: { type: "password" },
+  weather_alert_refresh_minutes: { type: "number", min: 5, max: 60, step: 5 },
+  weather_alert_min_severity: { type: "select", options: [["blue", "蓝色及以上"], ["yellow", "黄色及以上"], ["orange", "橙色及以上"], ["red", "红色"], ["all", "全部级别"]] },
   enable_environment_change_proactive: { type: "checkbox" },
   environment_change_check_minutes: { type: "number", min: 5, max: 60, step: 5 },
   environment_change_cooldown_minutes: { type: "number", min: 20, max: 360, step: 10 },
@@ -3994,6 +4067,7 @@ const tokenTaskLabels = {
   group_image_vision: "群聊图片识别",
   private_image_only_framework: "单图回复主链",
   private_image_only_fallback: "单图兜底回复",
+  private_image_only_strict_retry: "单图严格重试",
   voice: "语音文本",
   proactive_framework: "主动主回复",
   proactive_persona_judge: "主动人格判定",
@@ -4289,11 +4363,7 @@ async function fetchJson(path, options = {}) {
   }
 
   payload = normalizeResponse(payload);
-  if (!payload.success) {
-    const error = new Error(payload.error || "请求失败");
-    error.fieldErrors = payload.field_errors || {};
-    throw error;
-  }
+  if (!payload.success) throw new Error(payload.error || "请求失败");
   return payload.data;
 }
 
@@ -4833,6 +4903,7 @@ function applyOverviewData(overview) {
   state.overview = overview;
   // 总览是服务端权威值；旧草稿继续覆盖它会让已切换的模型看起来没有刷新。
   state.providerDraft = {};
+  state.ttsProviderDraft = {};
   hydrateTokenStatsFromOverview(overview);
   syncFeatureDraftFromOverview(overview);
   state.imageApiEndpointDraft = null;
@@ -4878,7 +4949,6 @@ async function savePageFontFamily(value) {
 
 const PAGE_THEMES = [
   { value: "classic", label: "经典蓝", swatch: ["#eef3fb", "#1a4b8c", "#2c6cb0"] },
-  { value: "dark", label: "暗夜深空", swatch: ["#0d1117", "#58a6ff", "#1c2330"] },
   { value: "warm", label: "暖阳书房", swatch: ["#faf5ef", "#b86b2e", "#c0793c"] },
   { value: "forest", label: "森林绿径", swatch: ["#eef4ee", "#2d6a4f", "#40916c"] },
   { value: "sakura", label: "樱粉日记", swatch: ["#fdf0f3", "#d4517a", "#fce8ed"] },
@@ -5131,10 +5201,27 @@ async function loadAvailableProviders(force = false) {
   if (state.lazyLoaded.providers && !force) return state.availableProviders;
   const availableProviders = await fetchJson("/providers/available");
   state.availableProviders = availableProviders.items || [];
+  state.availableTtsProviders = availableProviders.tts_items || [];
   state.lazyLoaded.providers = true;
   if (state.activeTab === "models") renderProviders();
   if (state.activeTab === "config" || state.activeTab === "roleplay") renderModuleSettings();
   return state.availableProviders;
+}
+
+async function loadTtsProviderConfigs(force = false) {
+  if (state.lazyLoaded.ttsProviderConfigs && !force) return state.ttsProviderConfigs;
+  const data = await fetchJson("/tts/providers");
+  state.ttsProviderConfigs = Array.isArray(data.items) ? data.items : [];
+  state.ttsProviderTemplates = Array.isArray(data.templates) ? data.templates : [];
+  state.ttsProviderConfigLoaded = true;
+  state.lazyLoaded.ttsProviderConfigs = true;
+  const selectedExists = state.ttsProviderConfigs.some((item) => item.id === state.selectedTtsProviderId);
+  if (!selectedExists) state.selectedTtsProviderId = state.ttsProviderConfigs[0]?.id || "";
+  if (!state.ttsProviderTemplates.some((item) => item.type === state.ttsProviderCreateType)) {
+    state.ttsProviderCreateType = state.ttsProviderTemplates[0]?.type || "";
+  }
+  if (state.activeTab === "models" && state.modelsSection === "tts") renderProviders();
+  return state.ttsProviderConfigs;
 }
 
 async function loadImageApiStatus(force = false) {
@@ -5179,6 +5266,7 @@ async function ensureTabData(tabName, force = false) {
   } else if (tabName === "models") {
     await Promise.all([
       loadAvailableProviders(force),
+      loadTtsProviderConfigs(force),
       loadImageApiStatus(force),
     ]);
   } else if (tabName === "roleplay") {
@@ -5301,6 +5389,12 @@ const setupGuideDraftDefaults = {
   targetPlatform: "aiocqhttp",
   quietHours: "23:00-08:30",
   requirePrivateOptIn: true,
+  enable_weather_context: true,
+  weather_api_host: "",
+  weather_token: "",
+  weather_location: "",
+  enable_weather_alerts: false,
+  weather_alert_min_severity: "blue",
   modelMode: "quick",
   FAST_RESPONSE_PROVIDER_ID: "",
   COMPLEX_REASONING_PROVIDER_ID: "",
@@ -5411,6 +5505,28 @@ const setupGuideAdvancedItems = {
         { key: "enable_platform_perception", type: "bool", label: "感知平台和私聊/群聊", description: "通常建议开启。" },
         { key: "enable_model_perception", type: "bool", label: "感知当前模型能力", description: "让 Bot 知道自己是否能读图、发图或语音。" },
         { key: "enable_worldview_perception", type: "bool", label: "世界观适配", description: "人设世界观很强时再开，避免重复解释。" },
+      ],
+    },
+    {
+      key: "enable_weather_context",
+      title: "和风天气（推荐）",
+      ask: "是否配置和风天气作为日程、日记和主动消息的天气背景？",
+      description: "默认使用和风天气。填写专属 API Host、JWT / API Key 和天气地点即可；配置完成后，天气预警可按需开启并复用同一组配置。",
+      caution: "Host 请从和风天气控制台复制，不要填公共 Host 或完整接口路径；远程 Host 使用 HTTPS，本机回环代理可使用 HTTP；地点可填写城市、区县、LocationID 或经纬度。留空时仍可回退 screen_companion。",
+      kind: "setting",
+      settings: [
+        { key: "weather_api_host", type: "text", label: "和风专属 API Host", placeholder: "https://abc123.def.qweatherapi.com", description: "远程 Host 使用 HTTPS；只填 Host，不要填 /v7/weather/now 等路径。" },
+        { key: "weather_token", type: "password", label: "和风 API Key / JWT", placeholder: "粘贴凭据", description: "不需要手动添加 Bearer 前缀；页面不会回显凭据。" },
+        { key: "weather_location", type: "text", label: "天气地点（城市/区县/LocationID）", placeholder: "北京 / 朝阳区,北京 / 101010100 / 116.41,39.92", description: "支持城市、区县与城市组合、和风 LocationID 或经纬度。" },
+        { key: "enable_weather_alerts", type: "bool", label: "开启官方气象预警", description: "可选；开启后按天气地点低频查询有效预警。" },
+        {
+          key: "weather_alert_min_severity",
+          type: "select",
+          label: "最低预警级别",
+          options: [["blue", "蓝色及以上"], ["yellow", "黄色及以上"], ["orange", "橙色及以上"], ["red", "红色"], ["all", "全部级别"]],
+          description: "仅在开启官方气象预警时使用。",
+          showWhen: (draft) => Boolean(draft.enable_weather_alerts),
+        },
       ],
     },
     {
@@ -5633,6 +5749,20 @@ const setupGuideAdvancedItems = {
         { key: "episode_memory_refresh_minutes", type: "number", label: "整理最小间隔分钟", placeholder: "30", min: 1 },
         { key: "max_dialogue_episodes", type: "number", label: "最多保留片段", placeholder: "80", min: 1 },
         { key: "enable_open_loop_tracking", type: "bool", kind: "feature", label: "追踪未完话头", description: "例如约好回头看、还没解释完、需要之后关心的事情。" },
+      ],
+    },
+    {
+      key: "enable_goodnight_screen_check",
+      title: "晚安后的休息提醒",
+      ask: "是否允许互道晚安后，等待一次识屏判断再决定要不要轻声提醒休息？",
+      description: "只在主要用户明确仍在使用电脑时提醒一次；锁屏、静止、无法判断或识屏失败都会保持静默。",
+      caution: "这是强隐私功能。屏幕内容不会传入提醒生成，但仍应只在明确接受本机识屏时开启。",
+      dependencies: [
+        { label: "联动", text: "需要安装并启用 astrbot_plugin_screen_companion，且主动识屏总开关已开启。" },
+      ],
+      kind: "feature",
+      settings: [
+        { key: "goodnight_screen_check_delay_minutes", type: "number", label: "晚安后等待分钟", placeholder: "45", min: 1, max: 180 },
       ],
     },
     {
@@ -5950,8 +6080,8 @@ const setupGuideAdvancedItems = {
         { key: "local_photo_cpu_busy_percent", type: "number", label: "CPU 忙碌阈值", placeholder: "85", min: 1, max: 100, showWhen: (draft) => photoSettingVisibleForValues("local_photo_cpu_busy_percent", draft) },
         { key: "local_photo_memory_busy_percent", type: "number", label: "内存忙碌阈值", placeholder: "88", min: 1, max: 100, showWhen: (draft) => photoSettingVisibleForValues("local_photo_memory_busy_percent", draft) },
         { key: "local_photo_defer_minutes", type: "number", label: "忙时延后分钟数", placeholder: "30", min: 1, max: 240, showWhen: (draft) => photoSettingVisibleForValues("local_photo_defer_minutes", draft) },
-        { key: "external_image_download_proxy", type: "text", label: "在线结果下载代理", placeholder: "http://127.0.0.1:7890", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_proxy", draft) },
-        { key: "external_image_download_use_environment_proxy", type: "bool", label: "结果下载使用系统代理", description: "仅影响在线生图结果 URL 的下载。", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_use_environment_proxy", draft) },
+        { key: "external_image_download_proxy", type: "text", label: "在线图片网络代理", placeholder: "http://127.0.0.1:7890", description: "用于结果 URL 下载和 Gemini 生图请求。", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_proxy", draft) },
+        { key: "external_image_download_use_environment_proxy", type: "bool", label: "图片网络使用系统代理", description: "结果 URL 下载和 Gemini 生图请求读取系统代理环境变量。", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_use_environment_proxy", draft) },
         { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。", showWhen: (draft) => photoSettingVisibleForValues("enable_photo_reference_image", draft) },
         { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "setting", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
         { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_timeout_seconds", draft) },
@@ -6728,7 +6858,10 @@ function setupGuideAdvancedItemHtml(item) {
       ${setupGuideAdvancedExtraActionsHtml(item, enabled)}
       ${enabled && visibleSettings.length ? `
         <div class="setup-guide-advanced-settings">
-          ${visibleSettings.map(setupGuideAdvancedSettingHtml).join("")}
+          ${visibleSettings.map((setting) => `
+            ${setupGuideAdvancedSettingHtml(setting)}
+            ${item.key === "enable_weather_context" && setting.key === "weather_api_host" ? qweatherConsoleLinksHtml() : ""}
+          `).join("")}
         </div>
       ` : enabled ? `
         ${setupGuideHint("本步没有必填项；保存板块后按当前全局设置运行。")}
@@ -18348,16 +18481,27 @@ function weatherConfigStatusText(settings = state.overview?.settings || {}) {
   const overview = state.overview || {};
   const cache = overview.cache?.weather || {};
   const enabled = toBool(settings.enable_weather_context);
-  const weatherSource = String(settings.weather_source || "openweathermap").trim().toLowerCase();
+  const weatherSource = String(settings.weather_source || "qweather").trim().toLowerCase();
+  const weatherApiHost = String(settings.weather_api_host || settings.weather_alert_api_host || "").trim();
+  const weatherToken = String(settings.weather_token || settings.weather_alert_token || settings.weather_alert_api_key || "").trim();
+  const weatherLocation = String(settings.weather_location || "").trim();
   const apiKey = String(settings.weather_api_key || "").trim();
   const city = String(settings.weather_city || "").trim();
   const amapApiKey = String(settings.weather_amap_api_key || "").trim();
   const amapCity = String(settings.weather_amap_city || "").trim();
   const lat = Number(settings.weather_lat || 0);
   const lon = Number(settings.weather_lon || 0);
-  const hasCoordinates = Number.isFinite(lat) && Number.isFinite(lon) && lat !== 0 && lon !== 0;
+  const hasCoordinates = Number.isFinite(lat)
+    && Number.isFinite(lon)
+    && lat >= -90
+    && lat <= 90
+    && lon >= -180
+    && lon <= 180
+    && (lat !== 0 || lon !== 0);
+  const hasWeatherLocation = Boolean(weatherLocation) || hasCoordinates;
   const screenAvailable = Boolean(overview.screen_companion?.available);
   const sourceLabels = {
+    qweather: "本插件和风天气",
     private_companion: "本插件 OpenWeatherMap",
     openmeteo: "本插件 Open-Meteo",
     amap: "本插件高德地图",
@@ -18369,12 +18513,21 @@ function weatherConfigStatusText(settings = state.overview?.settings || {}) {
   let status = "";
   if (!enabled) {
     status = "天气上下文已关闭，不会参与日程、日记或主动话题。";
+  } else if (weatherSource === "qweather" && weatherApiHost && weatherToken && hasWeatherLocation) {
+    status = "和风天气已就绪：接口凭据和天气地点均已配置。";
   } else if (weatherSource === "openmeteo" && hasCoordinates) {
     status = "Open-Meteo 已就绪：经纬度定位，无需 API Key。";
   } else if (weatherSource === "amap" && amapApiKey && amapCity) {
     status = `高德地图已就绪：城市编码 ${amapCity}。`;
   } else if (weatherSource === "openweathermap" && apiKey && (city || hasCoordinates)) {
     status = `OpenWeatherMap 已就绪：${city ? `城市 ${city}` : "经纬度定位"}。`;
+  } else if (weatherSource === "qweather") {
+    const missing = [];
+    if (!weatherApiHost) missing.push("专属 API Host");
+    if (!weatherToken) missing.push("JWT / API Key");
+    if (!hasWeatherLocation) missing.push("天气地点");
+    status = `和风天气还缺少${missing.join("、") || "必要配置"}。`;
+    if (screenAvailable) status += " 未完成独立配置时会尝试回退 screen_companion。";
   } else if (screenAvailable) {
     status = "未完成独立天气配置，当前会尝试复用 screen_companion 的天气能力。";
   } else if (weatherSource === "openmeteo") {
@@ -18386,10 +18539,35 @@ function weatherConfigStatusText(settings = state.overview?.settings || {}) {
   } else {
     status = "OpenWeatherMap 还缺少 API Key 和地点；也可改用 Open-Meteo 或高德地图。";
   }
+  const alertsEnabled = toBool(settings.enable_weather_alerts);
+  const alertsHost = weatherApiHost;
+  const alertsToken = weatherToken;
+  if (enabled && alertsEnabled) {
+    if (!hasWeatherLocation) {
+      status += " 气象预警已开启，但还缺少天气地点。";
+    } else if (alertsToken && alertsHost) {
+      status += " 气象预警已启用：和风天气凭据已配置，插件会自动选择认证方式。";
+    } else if (alertsToken) {
+      status += " 气象预警已开启，但还缺少和风天气 API Host。";
+    } else {
+      status += alertsHost
+        ? " 气象预警已开启，但还缺少和风天气 JWT / API Key。"
+        : " 气象预警已开启，但还缺少和风天气 API Host 与 JWT / API Key。";
+    }
+  }
+  const alertAttributions = Array.isArray(cache.alerts_attributions)
+    ? cache.alerts_attributions.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const alertAttributionText = alertAttributions.find((item) => !/^https?:\/\//i.test(item)) || "和风天气";
+  const alertRuntime = Number(cache.alerts_count || 0) > 0
+    ? ` 当前有 ${cache.alerts_count} 条${cache.alerts_highest_level ? `（最高${cache.alerts_highest_level}）` : ""}气象预警${cache.alerts_stale ? "，数据可能已过期" : ""}。数据来源：${alertAttributionText}。`
+    : (cache.alerts_error ? ` 气象预警最近查询失败：${cache.alerts_error}。` : "");
+  const locationLabel = String(cache.location_label || "").trim();
+  const resolvedLocation = enabled && locationLabel ? ` 已解析地点：${locationLabel}。` : "";
   const runtime = source
     ? ` 最近结果：${source}${cache.summary ? `，${cache.summary}` : ""}${cache.age ? `（${cache.age}）` : ""}。`
     : "";
-  return status + runtime;
+  return status + resolvedLocation + runtime + alertRuntime;
 }
 
 function environmentWeatherStatusHtml() {
@@ -18502,6 +18680,7 @@ function renderModuleWorkbench(settings) {
       meta: [
         `强度：${intensityLabel}`,
         `最小间隔 ${proactiveMinInterval ?? 0} 分钟`,
+        toBool(settings.enable_goodnight_screen_check) ? "晚安后可单次识屏提醒" : "晚安后不识屏",
         toBool(settings.enable_unanswered_screen_peek_followup) ? "未回应后可轻窥屏" : "未回应不窥屏",
       ],
       actions: [
@@ -20205,7 +20384,7 @@ function renderFeatureSwitches() {
   const total = visibleDraftKeys.length;
   const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
   const proactiveLocked = visibleDraftKeys.filter((key) => featureLockedByProactiveOnlyMode(key)).length;
-  const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", isPrivateReadingAvailable() ? "enable_private_reading_boredom_read" : "", isPrivateReadingAvailable() ? "enable_private_reading_ask_recommendation" : "", "enable_unanswered_screen_peek_followup"]
+  const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", isPrivateReadingAvailable() ? "enable_private_reading_boredom_read" : "", isPrivateReadingAvailable() ? "enable_private_reading_ask_recommendation" : "", "enable_goodnight_screen_check", "enable_unanswered_screen_peek_followup"]
     .filter((key) => toBool(state.featureDraft[key])).length;
   const activeSafeFeatureKeys = safeFeatureKeys.filter((key) => !featureLockedByProactiveOnlyMode(key));
   $("#featureSwitchSummary").innerHTML = `
@@ -20761,6 +20940,9 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   if (featureKey === "enable_environment_perception") {
     const weatherChildren = new Set([
       "weather_source",
+      "weather_api_host",
+      "weather_token",
+      "weather_location",
       "weather_api_key",
       "weather_city",
       "weather_amap_api_key",
@@ -20768,12 +20950,19 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       "weather_lat",
       "weather_lon",
       "weather_refresh_minutes",
+      "enable_weather_alerts",
+      "weather_alert_api_host",
+      "weather_alert_token",
+      "weather_alert_refresh_minutes",
+      "weather_alert_min_severity",
       "enable_environment_change_proactive",
       "environment_change_check_minutes",
       "environment_change_cooldown_minutes",
     ]);
     if (weatherChildren.has(settingKey) && !boolSetting("enable_weather_context")) return false;
-    const weatherSource = String(valueSetting("weather_source", "openweathermap") || "openweathermap").toLowerCase();
+    const weatherSource = String(valueSetting("weather_source", "qweather") || "qweather").toLowerCase();
+    if (["weather_api_host", "weather_token"].includes(settingKey) && weatherSource !== "qweather" && !boolSetting("enable_weather_alerts")) return false;
+    if (settingKey === "weather_location" && weatherSource !== "qweather" && !boolSetting("enable_weather_alerts")) return false;
     if (["weather_api_key", "weather_city"].includes(settingKey) && weatherSource !== "openweathermap") return false;
     if (["weather_amap_api_key", "weather_amap_city"].includes(settingKey) && weatherSource !== "amap") return false;
     if (["environment_change_check_minutes", "environment_change_cooldown_minutes"].includes(settingKey)) {
@@ -20815,6 +21004,9 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return true;
   }
   if (featureKey === "enable_screen_glance_action") {
+    if (settingKey === "goodnight_screen_check_delay_minutes") {
+      return boolSetting("enable_goodnight_screen_check");
+    }
     if (["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"].includes(settingKey)) {
       return boolSetting("enable_unanswered_screen_peek_followup");
     }
@@ -21022,6 +21214,15 @@ function featureSettingInput(key, value) {
   `;
 }
 
+function qweatherConsoleLinksHtml() {
+  return `
+    <div class="qweather-console-links" aria-label="和风天气配置获取入口">
+      <span><b>获取 Host</b><a href="https://console.qweather.com/setting?lang=zh" target="_blank" rel="noopener noreferrer">https://console.qweather.com/setting?lang=zh</a></span>
+      <span><b>获取 API</b><a href="https://console.qweather.com/project?lang=zh" target="_blank" rel="noopener noreferrer">https://console.qweather.com/project?lang=zh</a></span>
+    </div>
+  `;
+}
+
 function featureProviderSelect(key, value) {
   const current = String(value || "").trim();
   const known = state.availableProviders.some((item) => item.id === current);
@@ -21203,7 +21404,7 @@ function featureDependencyLines(key) {
   }
   if (key.startsWith("enable_private_reading_")) dependencies.push(["依赖", "素材能力可用"]);
   if (key === "enable_private_image_self_recognition") dependencies.push(["依赖", "AstrBot 默认图片转述模型 / 插件识图模型"]);
-  if (["enable_group_interjection", "enable_bilibili_boredom_watch", "enable_news_boredom_read", "enable_web_exploration_boredom_search", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_unanswered_screen_peek_followup"].includes(key)) {
+  if (["enable_group_interjection", "enable_bilibili_boredom_watch", "enable_news_boredom_read", "enable_web_exploration_boredom_search", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_goodnight_screen_check", "enable_unanswered_screen_peek_followup"].includes(key)) {
     dependencies.push(["注意", "高主动项"]);
   }
   return dependencies;
@@ -21768,6 +21969,12 @@ const featureDetailGuides = {
     enabled: "这类识屏不受普通日次数限制，但仍受冷却控制。",
     disabled: "用户不回时不会因此额外识屏。",
   },
+  enable_goodnight_screen_check: {
+    summary: "主要用户与 Bot 互道晚安后，等待一次识屏判断，只在明确仍活跃时轻声提醒休息。",
+    trigger: "Bot 回应晚安后达到配置等待时间；用户期间再次发言会取消。",
+    enabled: "同一次晚安最多识屏一次，无法判断或已经休息时保持静默。",
+    disabled: "互道晚安后不会因此额外识屏或提醒。",
+  },
   enable_proactive_quote_trigger_message: {
     summary: "回复或主动消息能追溯到触发消息时，自动带引用；可按场景拆分，也可避免连续回复同一群友时每条都引用。",
     trigger: "群聊被 @、引用、唤醒、连续对话保持、群主动插话，或模型预约的私聊主动能追溯触发消息时。",
@@ -21875,9 +22082,52 @@ function normalizePhotoReferenceSource(value) {
   return text;
 }
 
-function newPhotoReferenceId(kind = "library") {
+function normalizePhotoReferenceMetadataList(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[,，、/|\s]+/);
+  return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function normalizePhotoReferenceMetadataBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on", "是", "开启", "锁定"].includes(text)) return true;
+  if (["0", "false", "no", "off", "否", "关闭", "不锁定"].includes(text)) return false;
+  return undefined;
+}
+
+function photoReferenceMetadataFromObject(rawItem) {
+  const metadata = { ...(rawItem && typeof rawItem === "object" ? rawItem : {}) };
+  ["source", "path", "url", "note", "description"].forEach((key) => delete metadata[key]);
+  if (Object.prototype.hasOwnProperty.call(metadata, "reference_roles")) {
+    metadata.reference_roles = normalizePhotoReferenceMetadataList(metadata.reference_roles);
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, "scene_categories")) {
+    metadata.scene_categories = normalizePhotoReferenceMetadataList(metadata.scene_categories);
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, "outfit_lock_default")) {
+    const normalizedLock = normalizePhotoReferenceMetadataBoolean(metadata.outfit_lock_default);
+    if (normalizedLock !== undefined) metadata.outfit_lock_default = normalizedLock;
+  }
+  if (!Object.prototype.hasOwnProperty.call(metadata, "preferred_preset") && metadata.preset !== undefined) {
+    metadata.preferred_preset = metadata.preset;
+  }
+  delete metadata.preset;
+  return metadata;
+}
+
+function newPhotoReferenceId() {
   const value = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return kind === "persona" ? "persona" : `library_${value.replaceAll("-", "")}`;
+  return `library_${value.replaceAll("-", "")}`;
+}
+
+function currentPhotoReferenceCatalogValue() {
+  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_reference_catalog")) {
+    return state.featureDetailParamDraft.photo_reference_catalog;
+  }
+  return state.overview?.settings?.photo_reference_catalog || [];
 }
 
 function parsePhotoReferenceCatalog(value) {
@@ -21893,75 +22143,80 @@ function parsePhotoReferenceCatalog(value) {
   return rawItems
     .filter((item) => item && typeof item === "object" && ["persona", "library"].includes(String(item.kind || "")))
     .map((item) => ({
-      id: String(item.id || ""),
-      kind: String(item.kind || ""),
-      source: String(item.source || ""),
-      note: String(item.note || ""),
-      reference_roles: Array.isArray(item.reference_roles) ? [...item.reference_roles] : [],
-      outfit_category: String(item.outfit_category || ""),
-      outfit_lock_default: item.outfit_lock_default === true,
-      scene_categories: Array.isArray(item.scene_categories) ? [...item.scene_categories] : [],
-      preferred_preset: String(item.preferred_preset || ""),
-      metadata_source: String(item.metadata_source || "configured"),
+      id: String(item.id || (item.kind === "persona" ? "persona" : newPhotoReferenceId())),
+      kind: String(item.kind),
+      source: normalizePhotoReferenceSource(item.source),
+      note: String(item.note || "").trim(),
+      metadata: {
+        reference_roles: Array.isArray(item.reference_roles) ? [...item.reference_roles] : [],
+        outfit_category: String(item.outfit_category || ""),
+        outfit_lock_default: item.outfit_lock_default === true,
+        scene_categories: Array.isArray(item.scene_categories) ? [...item.scene_categories] : [],
+        preferred_preset: String(item.preferred_preset || ""),
+        metadata_source: String(item.metadata_source || "configured"),
+      },
     }));
 }
 
-function serializePhotoReferenceCatalog(items) {
-  return JSON.stringify(Array.isArray(items) ? items : []);
+function canonicalPhotoReference(item, kind) {
+  const metadata = photoReferenceMetadataFromObject(item?.metadata);
+  return {
+    id: kind === "persona" ? "persona" : String(item?.id || newPhotoReferenceId()),
+    kind,
+    source: normalizePhotoReferenceSource(item?.source),
+    note: String(item?.note || "").trim(),
+    reference_roles: normalizePhotoReferenceMetadataList(metadata.reference_roles),
+    outfit_category: String(metadata.outfit_category || "").trim(),
+    outfit_lock_default: metadata.outfit_lock_default === true,
+    scene_categories: normalizePhotoReferenceMetadataList(metadata.scene_categories),
+    preferred_preset: String(metadata.preferred_preset || "").trim(),
+    metadata_source: String(metadata.metadata_source || "configured"),
+  };
 }
 
-function currentPhotoReferenceCatalogValue() {
-  if (Object.prototype.hasOwnProperty.call(state.featureDetailParamDraft || {}, "photo_reference_catalog")) {
-    return state.featureDetailParamDraft.photo_reference_catalog;
+function currentPhotoPersonaReference() {
+  return parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue()).find((item) => item.kind === "persona") || null;
+}
+
+function currentPhotoPersonaReferenceValue() {
+  return normalizePhotoReferenceSource(currentPhotoPersonaReference()?.source);
+}
+
+function serializePhotoReferenceCatalog(items, personaSource) {
+  const payload = [];
+  const existingPersona = currentPhotoPersonaReference();
+  const cleanPersonaSource = normalizePhotoReferenceSource(personaSource);
+  if (cleanPersonaSource) {
+    payload.push(canonicalPhotoReference({
+      ...(existingPersona || {}),
+      id: "persona",
+      source: cleanPersonaSource,
+      note: existingPersona?.note || "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
+      metadata: existingPersona?.metadata || { reference_roles: ["identity"] },
+    }, "persona"));
   }
-  return state.overview?.settings?.photo_reference_catalog || [];
+  (Array.isArray(items) ? items : []).slice(0, 24).forEach((item) => {
+    if (normalizePhotoReferenceSource(item?.source)) payload.push(canonicalPhotoReference(item, "library"));
+  });
+  return JSON.stringify(payload);
 }
 
-function photoReferenceManagerCatalog() {
+function photoReferenceManagerItems() {
   if (!Array.isArray(state.photoReferenceManagerDraft)) {
-    state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue());
+    state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue())
+      .filter((item) => item.kind === "library");
   }
   return state.photoReferenceManagerDraft;
 }
 
-function photoReferenceManagerItems() {
-  return photoReferenceManagerCatalog().filter((item) => item.kind === "library");
-}
-
-function photoReferencePersonaDraft(create = false) {
-  const catalog = photoReferenceManagerCatalog();
-  let persona = catalog.find((item) => item.kind === "persona") || null;
-  if (!persona && create) {
-    persona = {
-      id: "persona",
-      kind: "persona",
-      source: "",
-      note: "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
-      reference_roles: ["identity"],
-      outfit_category: "",
-      outfit_lock_default: false,
-      scene_categories: [],
-      preferred_preset: "",
-      metadata_source: "configured",
-    };
-    catalog.unshift(persona);
-  }
-  return persona;
-}
-
-function photoReferenceStatusFor(kind, item) {
+function photoReferenceStatusFor(kind, source) {
   const status = state.photoReferenceLibraryStatus || {};
-  const referenceId = String(item?.id || "");
-  const normalizedSource = normalizePhotoReferenceSource(item?.source);
+  const normalizedSource = normalizePhotoReferenceSource(source);
   if (kind === "persona") {
-    return status.persona && (
-      String(status.persona.id || "") === referenceId
-      || normalizePhotoReferenceSource(status.persona.source) === normalizedSource
-    ) ? status.persona : null;
+    return normalizePhotoReferenceSource(status.persona?.source) === normalizedSource ? status.persona : null;
   }
   return (Array.isArray(status.items) ? status.items : []).find(
-    (statusItem) => String(statusItem.id || "") === referenceId
-      || normalizePhotoReferenceSource(statusItem.source) === normalizedSource,
+    (item) => normalizePhotoReferenceSource(item.source) === normalizedSource,
   ) || null;
 }
 
@@ -21972,9 +22227,8 @@ function photoReferenceSourceKind(source) {
   return "本地文件";
 }
 
-function photoReferencePreviewHtml(kind, item, alt) {
-  const source = String(item?.source || "");
-  const status = photoReferenceStatusFor(kind, item);
+function photoReferencePreviewHtml(kind, source, alt) {
+  const status = photoReferenceStatusFor(kind, source);
   const directUrl = String(status?.direct_url || (/^https?:\/\//i.test(source) || /^data:image\//i.test(source) ? source : ""));
   const endpoint = String(status?.preview_endpoint || "");
   const available = status ? status.available !== false : Boolean(directUrl);
@@ -21992,114 +22246,37 @@ function photoReferencePreviewHtml(kind, item, alt) {
   `;
 }
 
-function photoReferenceOptionData() {
-  const options = state.photoReferenceLibraryStatus?.options || {};
-  return {
-    referenceRoles: Array.isArray(options.reference_roles) ? options.reference_roles : [],
-    outfitCategories: Array.isArray(options.outfit_categories) ? options.outfit_categories : [],
-    sceneCategories: Array.isArray(options.scene_categories) ? options.scene_categories : [],
-    presets: Array.isArray(options.presets) ? options.presets : [],
-  };
-}
-
-function photoReferenceFieldError(item, field) {
-  const catalogIndex = photoReferenceManagerCatalog().indexOf(item);
-  const messages = state.photoReferenceFieldErrors?.[`items.${catalogIndex}.${field}`] || [];
-  return messages.length ? `<small class="photo-reference-field-error">${escapeHtml(messages.join("；"))}</small>` : "";
-}
-
-function photoReferenceMetadataEditor(item, index, kind) {
-  const options = photoReferenceOptionData();
-  const roles = Array.isArray(item.reference_roles) ? item.reference_roles : [];
-  const scenes = Array.isArray(item.scene_categories) ? item.scene_categories : [];
-  const builtInOutfits = new Set(options.outfitCategories.map((option) => String(option.value || "")));
-  const customOutfit = String(item.outfit_category || "").startsWith("custom:")
-    ? String(item.outfit_category).slice(7)
-    : "";
-  const selectedOutfit = customOutfit ? "__custom__" : String(item.outfit_category || "");
-  const builtInScenes = new Set(options.sceneCategories.map((option) => String(option.value || "")));
-  const customScenes = scenes
-    .filter((scene) => String(scene).startsWith("custom:") || !builtInScenes.has(String(scene)))
-    .map((scene) => String(scene).replace(/^custom:/, ""));
-  const target = `data-kind="${escapeHtml(kind)}" data-index="${index}"`;
-  return `
-    <details class="photo-reference-metadata-editor" open>
-      <summary>参考职责与服装裁决</summary>
-      <fieldset class="photo-reference-option-group">
-        <legend>参考职责</legend>
-        <div class="photo-reference-choice-grid">
-          ${options.referenceRoles.map((option) => `
-            <label class="photo-reference-choice">
-              <input type="checkbox" data-photo-reference-role ${target} value="${escapeHtml(option.value)}" ${roles.includes(option.value) ? "checked" : ""} />
-              <span>${escapeHtml(option.label)}</span>
-            </label>
-          `).join("")}
-        </div>
-        ${photoReferenceFieldError(item, "reference_roles")}
-      </fieldset>
-      <label>
-        <span>服装类别</span>
-        <select data-photo-reference-outfit-category ${target}>
-          <option value="" ${selectedOutfit === "" ? "selected" : ""}>不限定</option>
-          ${options.outfitCategories.map((option) => `<option value="${escapeHtml(option.value)}" ${selectedOutfit === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
-          <option value="__custom__" ${selectedOutfit === "__custom__" || (selectedOutfit && !builtInOutfits.has(selectedOutfit)) ? "selected" : ""}>自定义</option>
-        </select>
-      </label>
-      <label ${selectedOutfit === "__custom__" ? "" : "hidden"} data-photo-reference-custom-outfit-wrap>
-        <span>自定义服装</span>
-        <input type="text" data-photo-reference-custom-outfit ${target} value="${escapeHtml(customOutfit)}" maxlength="70" placeholder="例如 礼裙" />
-      </label>
-      ${photoReferenceFieldError(item, "outfit_category")}
-      <label class="photo-reference-switch-row">
-        <span>默认锁定参考图服装</span>
-        <input type="checkbox" role="switch" data-photo-reference-outfit-lock ${target} ${item.outfit_lock_default ? "checked" : ""} />
-      </label>
-      <fieldset class="photo-reference-option-group">
-        <legend>适用场景</legend>
-        <div class="photo-reference-choice-grid">
-          ${options.sceneCategories.map((option) => `
-            <label class="photo-reference-choice">
-              <input type="checkbox" data-photo-reference-scene ${target} value="${escapeHtml(option.value)}" ${scenes.includes(option.value) ? "checked" : ""} />
-              <span>${escapeHtml(option.label)}</span>
-            </label>
-          `).join("")}
-        </div>
-        <label>
-          <span>自定义场景</span>
-          <input type="text" data-photo-reference-custom-scenes ${target} value="${escapeHtml(customScenes.join(", "))}" maxlength="180" placeholder="逗号分隔，例如 舞台" />
-        </label>
-        ${photoReferenceFieldError(item, "scene_categories")}
-      </fieldset>
-      <label>
-        <span>首选预设</span>
-        <select data-photo-reference-preferred-preset ${target}>
-          <option value="" ${!item.preferred_preset ? "selected" : ""}>不指定</option>
-          ${options.presets.map((preset) => `<option value="${escapeHtml(preset)}" ${item.preferred_preset === preset ? "selected" : ""}>${escapeHtml(preset)}</option>`).join("")}
-        </select>
-      </label>
-      ${photoReferenceFieldError(item, "preferred_preset")}
-    </details>
-  `;
-}
-
 function photoReferenceManagerCard(item, index) {
   const source = String(item?.source || "");
   const note = String(item?.note || "");
-  const status = photoReferenceStatusFor("library", item);
+  const status = photoReferenceStatusFor("library", source);
   const availability = status ? (status.available ? "可用" : "文件失效") : (/^https?:\/\//i.test(source) ? "远程图片" : "待保存验证");
   const meta = [photoReferenceSourceKind(source), status?.file_size ? formatBytes(status.file_size) : "", availability].filter(Boolean).join(" · ");
+  const configuredMetadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const roles = Array.isArray(status?.reference_roles) ? status.reference_roles : (Array.isArray(configuredMetadata.reference_roles) ? configuredMetadata.reference_roles : []);
+  const outfitCategory = String(status?.outfit_category || configuredMetadata.outfit_category || "");
+  const preferredPreset = String(status?.preferred_preset || configuredMetadata.preferred_preset || "");
+  const outfitLocked = status ? Boolean(status.outfit_lock_default) : Boolean(configuredMetadata.outfit_lock_default);
+  const configuredRoles = normalizePhotoReferenceMetadataList(configuredMetadata.reference_roles);
+  const configuredScenes = normalizePhotoReferenceMetadataList(configuredMetadata.scene_categories);
+  const configuredCategory = String(configuredMetadata.outfit_category || "");
+  const configuredPreset = String(configuredMetadata.preferred_preset || "");
+  const configuredLock = Object.prototype.hasOwnProperty.call(configuredMetadata, "outfit_lock_default")
+    ? normalizePhotoReferenceMetadataBoolean(configuredMetadata.outfit_lock_default)
+    : undefined;
+  const configuredLockMode = configuredLock === true ? "true" : configuredLock === false ? "false" : "";
   const responsibilityTags = [
-    ...(item.reference_roles || []).map((role) => `职责 ${role}`),
-    item.outfit_category ? `服装 ${item.outfit_category}` : "",
-    item.outfit_lock_default ? "默认锁定服装" : "",
-    item.preferred_preset ? `预设 ${item.preferred_preset}` : "",
+    ...roles.map((role) => `职责 ${role}`),
+    outfitCategory ? `服装 ${outfitCategory}` : "",
+    outfitLocked ? "默认锁定服装" : "",
+    preferredPreset ? `预设 ${preferredPreset}` : "",
   ].filter(Boolean);
   return `
-    <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}" data-reference-id="${escapeHtml(item.id)}">
-      ${photoReferencePreviewHtml("library", item, `参考图 ${index + 1}`)}
+    <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}">
+      ${photoReferencePreviewHtml("library", source, `参考图 ${index + 1}`)}
       <div class="photo-reference-item-body">
         <header>
-          <div><span>参考图 ${index + 1}</span><small>${escapeHtml(meta)} · ID ${escapeHtml(item.id)}</small></div>
+          <div><span>参考图 ${index + 1}</span><small>${escapeHtml(meta)}</small></div>
           <div class="photo-reference-item-tools" role="group" aria-label="调整参考图 ${index + 1}">
             <button type="button" data-photo-reference-move="up" data-index="${index}" title="上移" aria-label="上移" ${index <= 0 ? "disabled" : ""}>↑</button>
             <button type="button" data-photo-reference-move="down" data-index="${index}" title="下移" aria-label="下移" ${index >= photoReferenceManagerItems().length - 1 ? "disabled" : ""}>↓</button>
@@ -22107,10 +22284,41 @@ function photoReferenceManagerCard(item, index) {
           </div>
         </header>
         ${responsibilityTags.length ? `<div class="photo-reference-responsibilities">${responsibilityTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
-        <label><span>图片路径或 URL</span><input type="text" data-photo-reference-source data-kind="library" data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" /></label>
-        ${photoReferenceFieldError(item, "source")}
-        <label><span>用途注释</span><textarea data-photo-reference-note data-kind="library" data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea></label>
-        ${photoReferenceMetadataEditor(item, index, "library")}
+        <label>
+          <span>图片路径或 URL</span>
+          <input type="text" data-photo-reference-source data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" />
+        </label>
+        <label>
+          <span>用途注释</span>
+          <textarea data-photo-reference-note data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea>
+        </label>
+        <details class="photo-reference-metadata-editor">
+          <summary>参考职责与服装裁决</summary>
+          <label>
+            <span>参考职责</span>
+            <input type="text" data-photo-reference-roles data-index="${index}" value="${escapeHtml(configuredRoles.join(", "))}" maxlength="160" placeholder="identity, outfit, scene, continuity" />
+          </label>
+          <label>
+            <span>服装类别</span>
+            <input type="text" data-photo-reference-outfit-category data-index="${index}" value="${escapeHtml(configuredCategory)}" maxlength="40" placeholder="sleepwear / daily_outfit / formal" />
+          </label>
+          <label>
+            <span>默认服装锁</span>
+            <select data-photo-reference-outfit-lock data-index="${index}">
+              <option value="" ${configuredLockMode === "" ? "selected" : ""}>自动推断</option>
+              <option value="true" ${configuredLockMode === "true" ? "selected" : ""}>锁定参考图服装</option>
+              <option value="false" ${configuredLockMode === "false" ? "selected" : ""}>不锁定参考图服装</option>
+            </select>
+          </label>
+          <label>
+            <span>适用场景</span>
+            <input type="text" data-photo-reference-scenes data-index="${index}" value="${escapeHtml(configuredScenes.join(", "))}" maxlength="200" placeholder="home, bedroom, outdoor" />
+          </label>
+          <label>
+            <span>首选预设</span>
+            <input type="text" data-photo-reference-preferred-preset data-index="${index}" value="${escapeHtml(configuredPreset)}" maxlength="60" placeholder="居家睡衣" />
+          </label>
+        </details>
       </div>
     </article>
   `;
@@ -22118,22 +22326,10 @@ function photoReferenceManagerCard(item, index) {
 
 function photoReferenceManagerPageHtml(open) {
   const items = photoReferenceManagerItems();
-  const persona = photoReferencePersonaDraft() || {
-    id: "persona",
-    kind: "persona",
-    source: "",
-    note: "基础人物身份和外貌参考；没有更匹配的服装场景参考图时使用",
-    reference_roles: ["identity"],
-    outfit_category: "",
-    outfit_lock_default: false,
-    scene_categories: [],
-    preferred_preset: "",
-    metadata_source: "configured",
-  };
-  const personaSource = String(persona.source || "");
-  const personaStatus = photoReferenceStatusFor("persona", persona);
+  const personaSource = currentPhotoPersonaReferenceValue();
+  const personaStatus = photoReferenceStatusFor("persona", personaSource);
   const statusLoaded = Boolean(state.photoReferenceLibraryStatus);
-  const availableCount = items.filter((item) => photoReferenceStatusFor("library", item)?.available === true).length;
+  const availableCount = items.filter((item) => photoReferenceStatusFor("library", item.source)?.available === true).length;
   return `
     <section class="photo-reference-manager" data-photo-reference-manager ${open ? "" : "hidden"}>
       <nav class="feature-detail-breadcrumb photo-reference-breadcrumb" aria-label="页面层级">
@@ -22148,7 +22344,7 @@ function photoReferenceManagerPageHtml(open) {
         </div>
         <div class="photo-reference-head-actions">
           <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
-          <button type="button" class="feature-param-save" data-photo-reference-save>保存目录</button>
+          <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
         </div>
       </header>
 
@@ -22158,18 +22354,11 @@ function photoReferenceManagerPageHtml(open) {
           <h3 id="photoReferencePersonaTitle">基础人设参考图</h3>
           <small>${escapeHtml(personaStatus ? (personaStatus.available ? "文件可用" : "文件失效") : personaSource ? "待保存验证" : "未设置")}</small>
         </div>
-        ${photoReferencePreviewHtml("persona", persona, "基础人设参考图")}
+        ${photoReferencePreviewHtml("persona", personaSource, "基础人设参考图")}
         <label>
           <span>图片路径或 URL</span>
-          <input type="text" data-photo-reference-source data-kind="persona" data-index="-1" value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
+          <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
         </label>
-        ${photoReferenceFieldError(persona, "source")}
-        <label>
-          <span>用途注释</span>
-          <textarea data-photo-reference-note data-kind="persona" data-index="-1" maxlength="500" rows="2">${escapeHtml(persona.note || "")}</textarea>
-        </label>
-        ${photoReferenceMetadataEditor(persona, -1, "persona")}
-        ${personaSource ? `<button type="button" class="danger-outline" data-photo-reference-persona-delete title="清空基础人设参考图">清空人设图</button>` : ""}
       </section>
 
       <form class="photo-reference-add-form" data-photo-reference-add-form>
@@ -22219,6 +22408,7 @@ function featureDetailPage(key) {
   const guideRows = featureDetailGuideRows(key)
     .map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`)
     .join("");
+  const weatherSource = String(state.overview?.settings?.weather_source || "qweather").trim().toLowerCase();
   const settingRow = ({ key: name, value, description }) => `
       <section class="feature-param-row">
         <div class="feature-param-main">
@@ -22232,6 +22422,7 @@ function featureDetailPage(key) {
           ${name === "photo_reference_catalog" ? photoReferenceManagerLaunchControl(value) : featureSettingInput(name, value)}
         </div>
       </section>
+      ${key === "enable_environment_perception" && name === "weather_api_host" && weatherSource === "qweather" ? qweatherConsoleLinksHtml() : ""}
     `;
   const sections = featureSettingSections[key] || [];
   const renderedSectionKeys = new Set();
@@ -22266,7 +22457,7 @@ function featureDetailPage(key) {
   const showParamCard = key !== "enable_food_menu_recommendation" || related.length || extraParamPanel;
   const catalogSetting = relatedMap.photo_reference_catalog;
   const libraryDraftInput = catalogSetting
-    ? `<textarea data-feature-param="photo_reference_catalog" hidden aria-hidden="true">${escapeHtml(serializePhotoReferenceCatalog(parsePhotoReferenceCatalog(catalogSetting.value)))}</textarea>`
+    ? `<textarea data-feature-param="photo_reference_catalog" hidden aria-hidden="true">${escapeHtml(featureTextareaValue("photo_reference_catalog", catalogSetting.value))}</textarea>`
     : "";
   const paramCardHtml = showParamCard ? `
         <article class="feature-detail-card feature-detail-card-params">
@@ -22358,7 +22549,7 @@ function bindFeatureDetailActions() {
   const detailPage = document.querySelector(".feature-detail-page");
   const trackFeatureDetailChange = (event) => {
     if (
-      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-role], [data-photo-reference-outfit-category], [data-photo-reference-custom-outfit], [data-photo-reference-outfit-lock], [data-photo-reference-scene], [data-photo-reference-custom-scenes], [data-photo-reference-preferred-preset]")
+      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")
       || event.target?.closest?.("[data-photo-reference-add-form]")
     ) return;
     rememberFeatureParamDraft(event.target);
@@ -22434,8 +22625,11 @@ function bindFeatureDetailActions() {
           if (state.selectedFeatureKey === "enable_forward_message_adaptation" && input.dataset.featureParam === "forward_message_image_vision") {
             syncSettingBackedFeatureParam("forward_message_image_vision", { rerender: true });
           }
-          if (state.selectedFeatureKey === "enable_screen_glance_action" && input.dataset.featureParam === "enable_unanswered_screen_peek_followup") {
-            syncSettingBackedFeatureParam("enable_unanswered_screen_peek_followup", { rerender: true });
+          if (
+            state.selectedFeatureKey === "enable_screen_glance_action"
+            && ["enable_goodnight_screen_check", "enable_unanswered_screen_peek_followup"].includes(input.dataset.featureParam)
+          ) {
+            syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
           if (
             state.selectedFeatureKey === "enable_tts_enhancement"
@@ -22448,7 +22642,7 @@ function bindFeatureDetailActions() {
           }
           if (
             state.selectedFeatureKey === "enable_environment_perception"
-            && ["enable_weather_context", "enable_environment_change_proactive"].includes(input.dataset.featureParam)
+            && ["enable_weather_context", "enable_weather_alerts", "enable_environment_change_proactive"].includes(input.dataset.featureParam)
           ) {
             syncSettingBackedFeatureParam(input.dataset.featureParam, { rerender: true });
           }
@@ -22505,6 +22699,14 @@ function bindFeatureDetailActions() {
               state.featureDraft[key] = toBool(value);
             }
           });
+          renderFeatureSwitches();
+        });
+      }
+      if (state.selectedFeatureKey === "enable_environment_perception" && input.dataset.featureParam === "weather_source") {
+        input.addEventListener("change", () => {
+          state.overview.settings = state.overview.settings || {};
+          state.overview.settings.weather_source = input.value || "qweather";
+          form.querySelectorAll("[data-feature-param]").forEach(rememberFeatureParamDraft);
           renderFeatureSwitches();
         });
       }
@@ -22583,9 +22785,14 @@ function bindFeatureDetailActions() {
 }
 
 function syncPhotoReferenceManagerDraft() {
+  const items = photoReferenceManagerItems();
+  const personaEditor = document.querySelector("[data-photo-reference-persona-source]");
   const catalogInput = document.querySelector('[data-feature-param="photo_reference_catalog"]');
   if (catalogInput) {
-    catalogInput.value = serializePhotoReferenceCatalog(photoReferenceManagerCatalog());
+    catalogInput.value = serializePhotoReferenceCatalog(
+      items,
+      personaEditor ? personaEditor.value.trim() : currentPhotoPersonaReferenceValue(),
+    );
     rememberFeatureParamDraft(catalogInput);
   }
   markFeatureDetailDirty();
@@ -22594,8 +22801,7 @@ function syncPhotoReferenceManagerDraft() {
 function photoReferenceDraftValidationError() {
   const items = photoReferenceManagerItems();
   if (items.length > 24) return "参考图库最多保存 24 张图片";
-  const catalog = photoReferenceManagerCatalog();
-  const sources = catalog.map((item) => String(item?.source || "").trim());
+  const sources = items.map((item) => String(item?.source || "").trim());
   if (sources.some((source) => !source)) return "请补全每张参考图的路径或 URL";
   if (new Set(sources).size !== sources.length) return "同一图片路径或 URL 不能重复添加";
   return "";
@@ -22662,8 +22868,8 @@ function bindPhotoReferenceManagerActions() {
   const openButton = document.querySelector("[data-photo-reference-open]");
   openButton?.addEventListener("click", () => {
     document.querySelectorAll("[data-feature-param]").forEach(rememberFeatureParamDraft);
-    state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue());
-    state.photoReferenceFieldErrors = {};
+    state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue())
+      .filter((item) => item.kind === "library");
     state.featureDetailSubpage = "photo_reference_library";
     renderFeatureSwitches();
   });
@@ -22673,73 +22879,44 @@ function bindPhotoReferenceManagerActions() {
     syncPhotoReferenceManagerDraft();
     state.featureDetailSubpage = "";
     state.photoReferenceManagerDraft = null;
-    state.photoReferenceFieldErrors = {};
     renderFeatureSwitches();
   });
   manager.querySelector("[data-photo-reference-refresh]")?.addEventListener("click", (event) => {
     void refreshPhotoReferenceLibraryStatus(event.currentTarget);
   });
-  const itemForControl = (input) => {
-    if (input.dataset.kind === "persona") return photoReferencePersonaDraft(true);
-    return photoReferenceManagerItems()[Number(input.dataset.index)] || null;
-  };
-  const customValues = (value) => String(value || "")
-    .split(/[,，、;；]+/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => `custom:${part.replace(/^custom:/, "")}`);
-  const selectorFor = (input, attribute) => `[${attribute}][data-kind="${input.dataset.kind}"][data-index="${input.dataset.index}"]`;
-  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-role], [data-photo-reference-outfit-category], [data-photo-reference-custom-outfit], [data-photo-reference-outfit-lock], [data-photo-reference-scene], [data-photo-reference-custom-scenes], [data-photo-reference-preferred-preset]").forEach((input) => {
-    const eventName = input.matches("select, input[type=checkbox]") ? "change" : "input";
-    input.addEventListener(eventName, () => {
-      const item = itemForControl(input);
+  manager.querySelector("[data-photo-reference-persona-source]")?.addEventListener("input", syncPhotoReferenceManagerDraft);
+  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset]").forEach((input) => {
+    input.addEventListener(input.matches("select") ? "change" : "input", () => {
+      const index = Number(input.dataset.index);
+      const item = photoReferenceManagerItems()[index];
       if (!item) return;
       if (input.matches("[data-photo-reference-source]")) item.source = input.value;
       else if (input.matches("[data-photo-reference-note]")) item.note = input.value;
-      else if (input.matches("[data-photo-reference-role]")) {
-        item.reference_roles = [...manager.querySelectorAll(selectorFor(input, "data-photo-reference-role"))]
-          .filter((control) => control.checked)
-          .map((control) => control.value);
-      } else if (input.matches("[data-photo-reference-outfit-category]")) {
-        const customInput = manager.querySelector(selectorFor(input, "data-photo-reference-custom-outfit"));
-        item.outfit_category = input.value === "__custom__"
-          ? (customInput?.value.trim() ? `custom:${customInput.value.trim().replace(/^custom:/, "")}` : "")
-          : input.value;
-        const customWrap = input.closest("details")?.querySelector("[data-photo-reference-custom-outfit-wrap]");
-        if (customWrap) customWrap.hidden = input.value !== "__custom__";
-      } else if (input.matches("[data-photo-reference-custom-outfit]")) {
-        item.outfit_category = input.value.trim() ? `custom:${input.value.trim().replace(/^custom:/, "")}` : "";
-      } else if (input.matches("[data-photo-reference-outfit-lock]")) {
-        item.outfit_lock_default = input.checked;
-        if (input.checked && !item.reference_roles.includes("outfit")) {
-          item.reference_roles.push("outfit");
-          const outfitRole = [...manager.querySelectorAll(selectorFor(input, "data-photo-reference-role"))]
-            .find((control) => control.value === "outfit");
-          if (outfitRole) outfitRole.checked = true;
+      else {
+        item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+        if (input.matches("[data-photo-reference-roles]")) {
+          const value = normalizePhotoReferenceMetadataList(input.value);
+          if (value.length) item.metadata.reference_roles = value;
+          else delete item.metadata.reference_roles;
+        } else if (input.matches("[data-photo-reference-outfit-category]")) {
+          const value = String(input.value || "").trim();
+          if (value) item.metadata.outfit_category = value;
+          else delete item.metadata.outfit_category;
+        } else if (input.matches("[data-photo-reference-outfit-lock]")) {
+          if (input.value === "") delete item.metadata.outfit_lock_default;
+          else item.metadata.outfit_lock_default = input.value === "true";
+        } else if (input.matches("[data-photo-reference-scenes]")) {
+          const value = normalizePhotoReferenceMetadataList(input.value);
+          if (value.length) item.metadata.scene_categories = value;
+          else delete item.metadata.scene_categories;
+        } else if (input.matches("[data-photo-reference-preferred-preset]")) {
+          const value = String(input.value || "").trim();
+          if (value) item.metadata.preferred_preset = value;
+          else delete item.metadata.preferred_preset;
         }
-      } else if (input.matches("[data-photo-reference-scene], [data-photo-reference-custom-scenes]")) {
-        const builtIn = [...manager.querySelectorAll(selectorFor(input, "data-photo-reference-scene"))]
-          .filter((control) => control.checked)
-          .map((control) => control.value);
-        const customInput = manager.querySelector(selectorFor(input, "data-photo-reference-custom-scenes"));
-        item.scene_categories = [...builtIn, ...customValues(customInput?.value)];
-      } else if (input.matches("[data-photo-reference-preferred-preset]")) {
-        item.preferred_preset = input.value;
       }
-      item.metadata_source = "configured";
-      state.photoReferenceFieldErrors = {};
       syncPhotoReferenceManagerDraft();
     });
-  });
-  manager.querySelector("[data-photo-reference-persona-delete]")?.addEventListener("click", (event) => {
-    const button = event.currentTarget;
-    if (!requireSecondClick(button, "photo-reference-delete-persona", "再次点击确认清空基础人设参考图", "确认")) return;
-    const persona = photoReferencePersonaDraft();
-    const index = persona ? photoReferenceManagerCatalog().indexOf(persona) : -1;
-    if (index >= 0) photoReferenceManagerCatalog().splice(index, 1);
-    state.photoReferenceFieldErrors = {};
-    syncPhotoReferenceManagerDraft();
-    renderFeatureSwitches();
   });
   manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -22756,19 +22933,20 @@ function bindPhotoReferenceManagerActions() {
       showToast("这张图片已经在参考图库中", "error");
       return;
     }
-    photoReferenceManagerCatalog().push({
-      id: newPhotoReferenceId("library"),
+    items.push({
+      id: newPhotoReferenceId(),
       kind: "library",
       source,
       note,
-      reference_roles: ["identity"],
-      outfit_category: "",
-      outfit_lock_default: false,
-      scene_categories: [],
-      preferred_preset: "",
-      metadata_source: "configured",
+      metadata: {
+        reference_roles: ["identity"],
+        outfit_category: "",
+        outfit_lock_default: false,
+        scene_categories: [],
+        preferred_preset: "",
+        metadata_source: "configured",
+      },
     });
-    state.photoReferenceFieldErrors = {};
     syncPhotoReferenceManagerDraft();
     renderFeatureSwitches();
   });
@@ -22778,10 +22956,7 @@ function bindPhotoReferenceManagerActions() {
       const target = button.dataset.photoReferenceMove === "up" ? index - 1 : index + 1;
       const items = photoReferenceManagerItems();
       if (!items[index] || !items[target]) return;
-      const catalog = photoReferenceManagerCatalog();
-      const currentIndex = catalog.indexOf(items[index]);
-      const targetIndex = catalog.indexOf(items[target]);
-      [catalog[currentIndex], catalog[targetIndex]] = [catalog[targetIndex], catalog[currentIndex]];
+      [items[index], items[target]] = [items[target], items[index]];
       syncPhotoReferenceManagerDraft();
       renderFeatureSwitches();
     });
@@ -22789,12 +22964,9 @@ function bindPhotoReferenceManagerActions() {
   manager.querySelectorAll("[data-photo-reference-delete]").forEach((button) => {
     button.addEventListener("click", () => {
       const index = Number(button.dataset.index);
-      const item = photoReferenceManagerItems()[index];
-      if (!item) return;
-      if (!requireSecondClick(button, `photo-reference-delete-${item.id}`, "再次点击确认删除这张参考图", "确认")) return;
-      const catalogIndex = photoReferenceManagerCatalog().findIndex((candidate) => candidate.id === item.id);
-      if (catalogIndex >= 0) photoReferenceManagerCatalog().splice(catalogIndex, 1);
-      state.photoReferenceFieldErrors = {};
+      if (!photoReferenceManagerItems()[index]) return;
+      if (!requireSecondClick(button, `photo-reference-delete-${index}`, "再次点击确认删除这张参考图", "确认")) return;
+      photoReferenceManagerItems().splice(index, 1);
       syncPhotoReferenceManagerDraft();
       renderFeatureSwitches();
     });
@@ -22812,29 +22984,11 @@ function bindPhotoReferenceManagerActions() {
       showToast(error, "error");
       return;
     }
-    const control = event.currentTarget;
-    setActionBusy(control, true);
-    try {
-      const result = await promiseWithTimeout(
-        postJson("/settings/update", { settings: { photo_reference_catalog: photoReferenceManagerCatalog() } }),
-        30000,
-        "保存响应超时，请刷新页面确认目录是否已生效",
-      );
-      if (result?.config_saved === false) throw new Error("运行态已更新，但配置未能持久化");
-      state.photoReferenceFieldErrors = {};
-      applyOverviewData(result);
-      state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(result?.settings?.photo_reference_catalog || []);
-      state.featureDetailParamDraft.photo_reference_catalog = serializePhotoReferenceCatalog(state.photoReferenceManagerDraft);
+    const saved = await saveCurrentFeatureDetail(event.currentTarget, "已保存参考图库");
+    if (saved) {
+      state.photoReferenceManagerDraft = null;
       state.photoReferenceLibraryStatus = null;
-      showToast("已保存参考图目录");
-      await refreshPhotoReferenceLibraryStatus();
-    } catch (saveError) {
-      state.photoReferenceFieldErrors = saveError.fieldErrors || {};
-      const firstMessage = Object.values(state.photoReferenceFieldErrors).flat()[0];
-      showToast(`保存失败：${firstMessage || saveError.message}`, "error");
       renderFeatureSwitches();
-    } finally {
-      setActionBusy(control, false);
     }
   });
   void hydratePhotoReferencePreviews(manager);
@@ -22948,24 +23102,501 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
   });
 }
 
+const ttsLanguageProviderMeta = [
+  { language: "zh", key: "tts_provider_id_zh", label: "中文", sample: "你好，今天也请多关照。" },
+  { language: "ja", key: "tts_provider_id_ja", label: "日语", sample: "おはよう。今日もよろしくね。" },
+  { language: "en", key: "tts_provider_id_en", label: "英语", sample: "Hello. I hope you have a good day." },
+];
+
+const ttsStrategyMeta = [
+  { key: "enable_tts_enhancement", label: "TTS 强化", type: "bool", default: false, group: "core", hint: "让聊天回复支持语音块、外语朗读和发送前文本清理。" },
+  { key: "enable_voice_action", label: "允许主动语音", type: "bool", default: false, group: "core", hint: "允许符合条件的主动消息使用当前语音合成链路。" },
+  { key: "tts_synthesis_backend", label: "语音合成后端", type: "select", default: "astrbot_provider", group: "core", options: [["astrbot_provider", "AstrBot TTS Provider"], ["mimo_voice_clone", "MiMo Voice Clone"], ["auto", "自动回退"]], hint: "AstrBot 模式使用下方 Provider；自动模式在没有可用 Provider 时尝试 MiMo。" },
+  { key: "tts_generation_mode", label: "生成路径", type: "select", default: "fast_tag", group: "core", options: [["fast_tag", "快速标签"], ["postprocess", "后处理判断与翻译"]], hint: "快速标签延迟更低；后处理更适合统一判断、翻译和改写。" },
+  { key: "tts_voice_language", label: "当前语音语种", type: "select", default: "ja", group: "core", options: [["zh", "中文"], ["ja", "日语"], ["en", "英语"]], hint: "也可以通过“陪伴 TTS语种”指令即时切换。" },
+  { key: "tts_delivery_mode", label: "发送形态", type: "select", default: "voice_and_text", group: "core", options: [["voice_only", "仅发送语音"], ["voice_and_text", "语音和文字都发送"]], hint: "合成失败时始终保留文字兜底。" },
+  { key: "tts_foreign_text_mode", label: "外语文字显示", type: "select", default: "translation", group: "content", options: [["original", "显示朗读原文"], ["translation", "显示中文译文"], ["bilingual", "原文和中文都显示"]], hint: "仅在日语或英语语音且保留文字时影响显示。" },
+  { key: "tts_conversion_scope", label: "转换范围", type: "select", default: "partial", group: "content", options: [["partial", "局部转换"], ["full", "整条回复"]], hint: "局部转换只选择适合听的一段；全量转换覆盖整条回复。" },
+  { key: "tts_conversion_provider_id", label: "文本转换模型", type: "llm_provider", default: "", group: "content", hint: "用于后处理判断、翻译、语种修正和中文释义，不负责合成音频。" },
+  { key: "tts_fishaudio_model", label: "Fish Audio 回退模型", type: "select", default: "auto", group: "content", options: [["auto", "自动识别"], ["s2.1-pro-free", "S2.1 Pro Free"], ["s2.1-pro", "S2.1 Pro"], ["s2-pro", "S2 Pro"], ["s1", "S1 旧版"]], hint: "仅当前语种没有专用 Provider 时使用；已绑定语种始终采用其 Provider 内的模型。" },
+  { key: "tts_fishaudio_emotion_mode", label: "Fish Audio 情绪控制", type: "select", default: "balanced", group: "content", options: [["balanced", "自然平衡"], ["expressive", "更有表现力"], ["manual", "手动控制"]], hint: "自动情绪标签只送入 TTS，不会显示在聊天正文中。" },
+  { key: "tts_extra_prompt", label: "TTS 补充规则", type: "textarea", default: "", group: "content", hint: "只填写人格或声线的额外要求；基础格式和语种规则会自动生成。" },
+  { key: "tts_frequency_control_mode", label: "频率控制", type: "select", default: "global", group: "frequency", options: [["global", "全局频控"], ["legacy", "旧版行为"]], hint: "全局频控统一约束快速标签和后处理路径。" },
+  { key: "tts_constraint_mode", label: "约束强度", type: "select", default: "weak", group: "frequency", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：发送前拦截"]], hint: "弱约束保留模型决定权；强约束会在冷却或概率未命中时阻止语音。" },
+  { key: "tts_session_min_interval_seconds", label: "会话最小间隔（秒）", type: "number", default: 90, min: 0, group: "frequency" },
+  { key: "tts_private_min_interval_seconds", label: "私聊间隔覆盖（秒）", type: "number", default: -1, min: -1, group: "frequency", hint: "-1 继承会话间隔，0 表示不限制。" },
+  { key: "tts_group_min_interval_seconds", label: "群聊间隔覆盖（秒）", type: "number", default: -1, min: -1, group: "frequency", hint: "-1 继承会话间隔，群聊通常建议更长。" },
+  { key: "tts_trigger_probability", label: "全局触发概率（%）", type: "number", default: 25, min: 0, max: 100, group: "frequency" },
+  { key: "tts_private_trigger_probability", label: "私聊概率覆盖（%）", type: "number", default: -1, min: -1, max: 100, group: "frequency", hint: "-1 继承全局概率。" },
+  { key: "tts_group_trigger_probability", label: "群聊概率覆盖（%）", type: "number", default: -1, min: -1, max: 100, group: "frequency", hint: "-1 继承全局概率。" },
+  { key: "tts_mimo_tool_name", label: "MiMo 工具名", type: "text", default: "mimo_tts_speak", group: "integration", hint: "通常保持默认，仅在 MiMo 插件修改工具名时调整。" },
+  { key: "tts_mimo_voice_name", label: "MiMo 音色", type: "text", default: "", group: "integration", hint: "留空时由 MiMo 插件按会话和默认规则选取音色。" },
+  { key: "tts_mimo_style_prompt", label: "MiMo 临时风格", type: "textarea", default: "", group: "integration", hint: "只影响本插件本次调用，不改动 MiMo 插件的音色默认配置。" },
+];
+
+const ttsStrategyGroups = [
+  { id: "core", label: "合成与发送" },
+  { id: "content", label: "文本与 Fish Audio" },
+  { id: "frequency", label: "频率控制" },
+  { id: "integration", label: "MiMo 联动" },
+];
+
+const ttsProviderFieldGroups = [
+  { id: "connection", label: "连接与鉴权" },
+  { id: "voice", label: "模型与声音" },
+  { id: "advanced", label: "高级参数" },
+];
+
+function ttsSettingValue(meta) {
+  if (Object.prototype.hasOwnProperty.call(state.ttsProviderDraft || {}, meta.key)) {
+    return state.ttsProviderDraft[meta.key];
+  }
+  const settings = state.overview?.settings || {};
+  return Object.prototype.hasOwnProperty.call(settings, meta.key) ? settings[meta.key] : meta.default;
+}
+
+function ttsStrategyValues() {
+  return Object.fromEntries(ttsStrategyMeta.map((meta) => [meta.key, ttsSettingValue(meta)]));
+}
+
+function ttsProviderValues() {
+  const settings = state.overview?.settings || {};
+  return Object.fromEntries(ttsLanguageProviderMeta.map(({ key }) => [
+    key,
+    Object.prototype.hasOwnProperty.call(state.ttsProviderDraft || {}, key)
+      ? String(state.ttsProviderDraft[key] || "").trim()
+      : String(settings[key] || "").trim(),
+  ]));
+}
+
+function ttsProviderChoices() {
+  const choices = new Map();
+  state.ttsProviderConfigs.forEach((item) => choices.set(item.id, {
+    id: item.id,
+    name: item.name || item.id,
+    model: item.model || "",
+    loaded: Boolean(item.loaded),
+    enable: Boolean(item.enable),
+    is_default: Boolean(item.is_default),
+  }));
+  state.availableTtsProviders.forEach((item) => choices.set(item.id, { ...choices.get(item.id), ...item, loaded: true, enable: true }));
+  return [...choices.values()];
+}
+
+function ttsProviderSelectMarkup(meta, value) {
+  const providers = ttsProviderChoices();
+  const known = providers.some((item) => item.id === value);
+  const options = [
+    `<option value="">跟随 AstrBot 当前会话 Provider</option>`,
+    ...providers.map((item) => {
+      const status = item.loaded ? "" : item.enable ? " · 加载失败" : " · 未启用";
+      const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 当前默认" : ""}${status}`;
+      return `<option value="${escapeHtml(item.id)}"${item.id === value ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    }),
+    `<option value="__custom__"${value && !known ? " selected" : ""}>手动输入 Provider ID</option>`,
+  ].join("");
+  return `
+    <select data-tts-provider-select="${escapeHtml(meta.key)}" aria-label="${escapeHtml(meta.label)} TTS Provider">${options}</select>
+    <input data-tts-provider-input="${escapeHtml(meta.key)}" value="${escapeHtml(value)}" placeholder="自定义 TTS Provider ID"${value && !known ? "" : " hidden"} />
+  `;
+}
+
+function ttsStrategyFieldMarkup(meta, values) {
+  const value = values[meta.key];
+  let control = "";
+  if (meta.type === "bool") {
+    control = `<input type="checkbox" data-tts-setting="${escapeHtml(meta.key)}"${value ? " checked" : ""} />`;
+  } else if (meta.type === "select") {
+    control = `<select data-tts-setting="${escapeHtml(meta.key)}">${(meta.options || []).map(([optionValue, label]) => `<option value="${escapeHtml(optionValue)}"${String(value) === optionValue ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
+  } else if (meta.type === "llm_provider") {
+    const known = state.availableProviders.some((item) => item.id === value);
+    control = `<select data-tts-setting="${escapeHtml(meta.key)}"><option value="">不配置</option>${state.availableProviders.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === value ? " selected" : ""}>${escapeHtml(`${item.name || item.id}${item.model ? ` · ${item.model}` : ""}`)}</option>`).join("")}${value && !known ? `<option value="${escapeHtml(value)}" selected>${escapeHtml(`${value} · 当前未加载`)}</option>` : ""}</select>`;
+  } else if (meta.type === "textarea") {
+    control = `<textarea data-tts-setting="${escapeHtml(meta.key)}" rows="3">${escapeHtml(value ?? "")}</textarea>`;
+  } else {
+    const numeric = meta.type === "number";
+    control = `<input type="${numeric ? "number" : "text"}" data-tts-setting="${escapeHtml(meta.key)}" value="${escapeHtml(value ?? "")}"${numeric ? ` step="any"${Number.isFinite(meta.min) ? ` min="${meta.min}"` : ""}${Number.isFinite(meta.max) ? ` max="${meta.max}"` : ""}` : ""} />`;
+  }
+  return `<label class="tts-strategy-field${meta.type === "bool" ? " toggle" : ""}"><span><b>${escapeHtml(meta.label)}</b></span>${control}${meta.hint ? `<small>${escapeHtml(meta.hint)}</small>` : ""}</label>`;
+}
+
+function ttsProviderConfigDraftKey(providerId, language = state.selectedTtsLanguage) {
+  return `${String(language || "ja")}:${String(providerId || "")}`;
+}
+
+function ttsProviderDraft(provider, language = state.selectedTtsLanguage) {
+  return state.ttsProviderConfigDrafts?.[ttsProviderConfigDraftKey(provider?.id, language)] || null;
+}
+
+function ttsProviderSharedLanguages(providerId, language, values = ttsProviderValues()) {
+  if (!providerId) return [];
+  return ttsLanguageProviderMeta.filter((item) => (
+    item.language !== language && String(values[item.key] || "") === String(providerId)
+  ));
+}
+
+function ttsSharedProviderGroups(values = ttsProviderValues()) {
+  const groups = new Map();
+  ttsLanguageProviderMeta.forEach((meta) => {
+    const providerId = String(values[meta.key] || "").trim();
+    if (!providerId) return;
+    groups.set(providerId, [...(groups.get(providerId) || []), meta]);
+  });
+  return [...groups.entries()]
+    .filter(([, languages]) => languages.length > 1)
+    .map(([providerId, languages]) => ({ providerId, languages }));
+}
+
+function ttsProviderFieldValue(provider, field) {
+  const draft = ttsProviderDraft(provider);
+  if (draft && Object.prototype.hasOwnProperty.call(draft.values || {}, field.key)) return draft.values[field.key];
+  return provider?.values?.[field.key] ?? field.default ?? "";
+}
+
+function ttsProviderFieldMarkup(provider, field) {
+  const value = ttsProviderFieldValue(provider, field);
+  const key = String(field.key || "");
+  const type = String(field.type || "string").toLowerCase();
+  const options = Array.isArray(field.options) ? field.options : [];
+  const configured = Boolean(provider.secret_configured?.[key]);
+  let control = "";
+  if (type === "bool") {
+    control = `<input type="checkbox" data-tts-provider-value="${escapeHtml(key)}"${value ? " checked" : ""} />`;
+  } else if (options.length) {
+    const known = options.some((item) => String(item.value) === String(value));
+    control = `<select data-tts-provider-value="${escapeHtml(key)}">${options.map((item) => `<option value="${escapeHtml(item.value)}"${String(item.value) === String(value) ? " selected" : ""}>${escapeHtml(item.label || item.value)}</option>`).join("")}${value !== "" && !known ? `<option value="${escapeHtml(value)}" selected>${escapeHtml(value)}</option>` : ""}</select>`;
+  } else if (type === "object" || type === "list" || type === "text") {
+    const displayValue = type === "object" || type === "list" ? JSON.stringify(value, null, 2) : String(value ?? "");
+    control = `<textarea data-tts-provider-value="${escapeHtml(key)}" rows="${type === "text" ? 3 : 5}" spellcheck="false">${escapeHtml(displayValue)}</textarea>`;
+  } else {
+    const numeric = type === "int" || type === "float";
+    const inputType = field.secret ? "password" : numeric ? "number" : "text";
+    const placeholder = field.secret && configured ? "已配置，留空表示保留" : "";
+    control = `<input type="${inputType}" data-tts-provider-value="${escapeHtml(key)}" value="${escapeHtml(value ?? "")}" placeholder="${escapeHtml(placeholder)}" autocomplete="${field.secret ? "new-password" : "off"}"${numeric ? ` step="${type === "int" ? "1" : "any"}"${Number.isFinite(field.min) ? ` min="${field.min}"` : ""}${Number.isFinite(field.max) ? ` max="${field.max}"` : ""}` : ""} />`;
+  }
+  const hint = field.hint || (field.secret && configured ? "密钥已配置；出于安全考虑不会回显。" : "");
+  return `<label class="tts-provider-field${type === "bool" ? " toggle" : ""}" title="配置字段：${escapeHtml(key)}"><span class="tts-provider-field-title"><b>${escapeHtml(field.label || key)}</b>${field.secret && configured ? `<em>已配置</em>` : ""}</span>${control}${hint ? `<small>${escapeHtml(hint)}</small>` : ""}</label>`;
+}
+
+function ttsProviderFieldRank(field) {
+  const key = String(field?.key || "").toLowerCase();
+  const ranks = {
+    api_base: 0,
+    api_key: 1,
+    proxy: 2,
+    timeout: 3,
+    model: 0,
+    "fishaudio-tts-character": 1,
+    "fishaudio-tts-reference-id": 2,
+  };
+  if (Object.prototype.hasOwnProperty.call(ranks, key)) return ranks[key];
+  if (key.includes("model")) return 4;
+  if (key.includes("voice") || key.includes("character")) return 5;
+  if (key.includes("reference")) return 6;
+  return 20;
+}
+
+function ttsLanguageConfiguratorMarkup(settings, values, language) {
+  if (!state.ttsProviderConfigLoaded) return `<div class="tts-provider-empty">正在读取 AstrBot TTS Provider 配置...</div>`;
+  const meta = ttsLanguageProviderMeta.find((item) => item.language === language) || ttsLanguageProviderMeta[0];
+  const providerId = String(values[meta.key] || "");
+  const selected = state.ttsProviderConfigs.find((item) => item.id === providerId) || null;
+  const draft = ttsProviderDraft(selected);
+  const enabled = draft ? Boolean(draft.enable) : Boolean(selected?.enable);
+  const testResult = selected ? state.ttsProviderTestResults[selected.id] : null;
+  const sharedLanguages = ttsProviderSharedLanguages(providerId, meta.language, values);
+  const sharedLabels = sharedLanguages.map((item) => item.label).join("、");
+  return `
+    <section class="tts-provider-section tts-language-configurator">
+      <header class="tts-section-heading">
+        <div><b>按语种配置 TTS</b><span>中文、日语、英语分别使用独立 Provider；选择语种后编辑对应的 AstrBot 原生配置。</span></div>
+      </header>
+      <div class="tts-language-tabs" role="tablist" aria-label="TTS 配置语种">
+        ${ttsLanguageProviderMeta.map((item) => `<button type="button" role="tab" data-tts-config-language="${item.language}" class="${item.language === meta.language ? "active" : ""}" aria-selected="${item.language === meta.language ? "true" : "false"}"><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.language.toUpperCase())}</span></button>`).join("")}
+      </div>
+      <div class="tts-language-provider-bar">
+        <label class="provider-field"><span>语音合成 Provider</span>${ttsProviderSelectMarkup(meta, providerId)}</label>
+        <span class="tts-route-status ${selected?.loaded ? "ready" : selected?.enable ? "error" : "off"}">${selected?.loaded ? "已加载" : selected?.enable ? "加载失败" : providerId ? "未启用" : "跟随会话"}</span>
+        <button type="button" class="secondary" data-tts-create-toggle>${state.ttsProviderCreateOpen ? "取消新建" : "新建 Provider"}</button>
+      </div>
+      ${state.ttsProviderCreateOpen ? `<form class="tts-provider-create" data-tts-provider-create>
+        <label><span>提供商类型</span><select data-tts-create-type>${state.ttsProviderTemplates.map((item) => `<option value="${escapeHtml(item.type)}"${item.type === state.ttsProviderCreateType ? " selected" : ""}>${escapeHtml(item.name || item.type)}</option>`).join("")}</select></label>
+        <label><span>Provider ID</span><input data-tts-create-id value="${escapeHtml(state.ttsProviderCreateId)}" placeholder="例如 fishaudio-main" autocomplete="off" /></label>
+        <button type="submit">创建并用于${escapeHtml(meta.label)}</button>
+      </form>` : ""}
+      <div class="tts-language-provider-editor">
+        ${selected ? `<div class="tts-provider-editor"><header class="tts-provider-editor-head"><div><b>${escapeHtml(selected.name || selected.type)}</b><span>${escapeHtml(selected.id)} · ${escapeHtml(selected.type)}${selected.is_default ? " · AstrBot 当前默认" : ""}</span></div><label class="tts-provider-enable"><input type="checkbox" data-tts-provider-enable${enabled ? " checked" : ""} /><span>启用</span></label></header>
+          ${sharedLanguages.length ? `<div class="tts-provider-sharing-note"><b>检测到旧版共享绑定</b><span>当前与${escapeHtml(sharedLabels)}共用 Provider。保存任一语种时会自动拆分全部重复绑定，三个语种互不覆盖。</span></div>` : ""}
+          <div class="tts-provider-field-groups">${ttsProviderFieldGroups.map((group) => {
+            const fields = (selected.fields || [])
+              .filter((field) => (field.group || "advanced") === group.id)
+              .sort((left, right) => ttsProviderFieldRank(left) - ttsProviderFieldRank(right));
+            if (!fields.length) return "";
+            return `<section class="tts-provider-field-group"><h4>${escapeHtml(group.label)}</h4><div class="tts-provider-field-grid">${fields.map((field) => ttsProviderFieldMarkup(selected, field)).join("")}</div></section>`;
+          }).join("")}</div></div>` : `<div class="tts-provider-empty">当前${escapeHtml(meta.label)}跟随 AstrBot 会话 TTS；也可以在上方选择或新建专用 Provider。</div>`}
+        <footer class="tts-provider-editor-actions"><span class="tts-provider-test-result ${testResult?.ok ? "ok" : testResult ? "error" : ""}">${testResult ? testResult.ok ? `测试通过 · ${testResult.elapsed_ms || 0} ms` : escapeHtml(testResult.error || "测试失败") : draft ? "有未保存修改" : sharedLanguages.length ? "保存时自动拆分三个语种的重复绑定" : "保存时同时应用语种绑定与语音策略"}</span><button type="button" class="secondary" data-tts-provider-test${!selected?.loaded ? " disabled" : ""}>测试连接</button><button type="button" data-tts-provider-save>${sharedLanguages.length ? "保存并拆分独立配置" : `保存${escapeHtml(meta.label)}配置`}</button></footer>
+      </div>
+    </section>`;
+}
+
+function renderTtsModelConfig() {
+  const summary = document.getElementById("ttsModelSummary");
+  const editor = document.getElementById("ttsModelEditor");
+  if (!summary || !editor) return;
+  const values = ttsProviderValues();
+  const settings = ttsStrategyValues();
+  const currentLanguage = String(settings.tts_voice_language || "ja");
+  const activeLanguage = ttsLanguageProviderMeta.some((item) => item.language === state.selectedTtsLanguage)
+    ? state.selectedTtsLanguage
+    : currentLanguage;
+  state.selectedTtsLanguage = activeLanguage;
+  const backend = String(settings.tts_synthesis_backend || "astrbot_provider");
+  const configured = ttsLanguageProviderMeta.filter(({ key }) => Boolean(values[key])).length;
+  const available = state.ttsProviderConfigs.filter((item) => item.loaded).length;
+  const backendLabel = backend === "mimo_voice_clone" ? "MiMo 插件" : backend === "auto" ? "自动回退" : "AstrBot Provider";
+  summary.innerHTML = `
+    <div><span>当前语种</span><b>${escapeHtml(ttsLanguageProviderMeta.find((item) => item.language === currentLanguage)?.label || currentLanguage)}</b></div>
+    <div><span>专用路由</span><b>${configured}/3</b></div>
+    <div><span>可选 TTS Provider</span><b>${available}</b></div>
+    <div><span>合成后端</span><b>${escapeHtml(backendLabel)}</b></div>
+  `;
+  editor.innerHTML = `
+    ${ttsLanguageConfiguratorMarkup(settings, values, activeLanguage)}
+    <details class="tts-strategy-disclosure">
+      <summary><span><b>语音策略</b><small>生成路径、显示方式、Fish Audio 覆盖与频率控制</small></span><span>展开配置</span></summary>
+      <section class="tts-strategy-section">
+      <div class="tts-strategy-groups">${ttsStrategyGroups.map((group) => {
+        if (group.id === "integration" && backend === "astrbot_provider") return "";
+        const fields = ttsStrategyMeta.filter((item) => item.group === group.id && !(item.key === "tts_constraint_mode" && (settings.tts_generation_mode !== "fast_tag" || settings.tts_frequency_control_mode !== "global")));
+        return `<section class="tts-strategy-group"><h4>${escapeHtml(group.label)}</h4><div class="tts-strategy-grid">${fields.map((meta) => ttsStrategyFieldMarkup(meta, settings)).join("")}</div></section>`;
+      }).join("")}</div>
+      </section>
+    </details>
+  `;
+  editor.querySelectorAll("[data-tts-setting]").forEach((input) => {
+    const eventName = input instanceof HTMLInputElement && input.type === "checkbox" ? "change" : "input";
+    input.addEventListener(eventName, () => {
+      const key = input.dataset.ttsSetting || "";
+      const meta = ttsStrategyMeta.find((item) => item.key === key);
+      if (!meta) return;
+      let value = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value;
+      if (meta.type === "number" && value !== "") value = Number(value);
+      state.ttsProviderDraft = { ...(state.ttsProviderDraft || {}), [key]: value };
+    });
+    if (input instanceof HTMLSelectElement && ["tts_synthesis_backend", "tts_generation_mode", "tts_frequency_control_mode"].includes(input.dataset.ttsSetting || "")) {
+      input.addEventListener("change", () => renderTtsModelConfig());
+    }
+  });
+  editor.querySelectorAll("[data-tts-provider-select]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const key = select.dataset.ttsProviderSelect || "";
+      const input = editor.querySelector(`[data-tts-provider-input="${key}"]`);
+      if (!input) return;
+      if (select.value === "__custom__") {
+        input.hidden = false;
+        input.focus();
+      } else {
+        input.value = select.value;
+        input.hidden = true;
+        state.ttsProviderDraft = { ...(state.ttsProviderDraft || {}), [key]: select.value };
+        renderTtsModelConfig();
+      }
+    });
+  });
+  editor.querySelectorAll("[data-tts-provider-input]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const key = input.dataset.ttsProviderInput || "";
+      state.ttsProviderDraft = { ...(state.ttsProviderDraft || {}), [key]: input.value.trim() };
+    });
+  });
+  editor.querySelectorAll("[data-tts-config-language]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTtsLanguage = button.dataset.ttsConfigLanguage || currentLanguage;
+      state.ttsProviderCreateOpen = false;
+      renderTtsModelConfig();
+    });
+  });
+  editor.querySelector("[data-tts-create-toggle]")?.addEventListener("click", () => {
+    state.ttsProviderCreateOpen = !state.ttsProviderCreateOpen;
+    renderTtsModelConfig();
+  });
+  editor.querySelector("[data-tts-create-type]")?.addEventListener("change", (event) => {
+    state.ttsProviderCreateType = event.currentTarget.value;
+  });
+  editor.querySelector("[data-tts-create-id]")?.addEventListener("input", (event) => {
+    state.ttsProviderCreateId = event.currentTarget.value;
+  });
+  editor.querySelector("[data-tts-provider-create]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    const result = await runAction(() => postJson("/tts/provider/create", {
+      type: state.ttsProviderCreateType,
+      id: state.ttsProviderCreateId.trim(),
+    }), "已创建 TTS Provider，请填写配置后启用", button, { reload: false });
+    if (!result) return;
+    state.ttsProviderConfigs = result.items || [];
+    state.ttsProviderTemplates = result.templates || state.ttsProviderTemplates;
+    state.selectedTtsProviderId = state.ttsProviderCreateId.trim();
+    const activeMeta = ttsLanguageProviderMeta.find((item) => item.language === state.selectedTtsLanguage);
+    if (activeMeta) state.ttsProviderDraft = { ...(state.ttsProviderDraft || {}), [activeMeta.key]: state.ttsProviderCreateId.trim() };
+    state.ttsProviderCreateId = "";
+    state.ttsProviderCreateOpen = false;
+    renderTtsModelConfig();
+  });
+  const activeRouteMeta = ttsLanguageProviderMeta.find((item) => item.language === state.selectedTtsLanguage);
+  const activeProviderId = activeRouteMeta ? String(ttsProviderValues()[activeRouteMeta.key] || "") : "";
+  const selected = state.ttsProviderConfigs.find((item) => item.id === activeProviderId);
+  state.selectedTtsProviderId = selected?.id || "";
+  const selectedDraftKey = selected ? ttsProviderConfigDraftKey(selected.id, state.selectedTtsLanguage) : "";
+  const updateProviderDraft = (key, value, isEnable = false) => {
+    if (!selected) return;
+    const current = state.ttsProviderConfigDrafts[selectedDraftKey] || { provider_id: selected.id, enable: selected.enable, values: {} };
+    state.ttsProviderConfigDrafts = {
+      ...state.ttsProviderConfigDrafts,
+      [selectedDraftKey]: isEnable ? { ...current, enable: value } : { ...current, values: { ...current.values, [key]: value } },
+    };
+    const result = editor.querySelector(".tts-provider-test-result");
+    if (result) {
+      result.textContent = "有未保存修改";
+      result.className = "tts-provider-test-result";
+    }
+  };
+  editor.querySelector("[data-tts-provider-enable]")?.addEventListener("change", (event) => updateProviderDraft("", event.currentTarget.checked, true));
+  editor.querySelectorAll("[data-tts-provider-value]").forEach((input) => {
+    const eventName = input instanceof HTMLInputElement && input.type === "checkbox" ? "change" : "input";
+    input.addEventListener(eventName, () => updateProviderDraft(
+      input.dataset.ttsProviderValue || "",
+      input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value,
+    ));
+  });
+  editor.querySelector("[data-tts-provider-save]")?.addEventListener("click", async (event) => {
+    const draft = selected
+      ? state.ttsProviderConfigDrafts[selectedDraftKey] || { provider_id: selected.id, enable: selected.enable, values: {} }
+      : null;
+    const routeValues = ttsProviderValues();
+    const sharedGroups = ttsSharedProviderGroups(routeValues);
+    const saveMessage = `已保存${activeRouteMeta?.label || "当前语种"} TTS 配置`;
+    let savedRouteValues = { ...routeValues };
+    const consumedDraftKeys = new Set();
+    const result = await runAction(async () => {
+      let providerResult = null;
+      let activeProviderCloned = false;
+      for (const group of sharedGroups) {
+        if (!state.ttsProviderConfigs.some((item) => item.id === group.providerId)) continue;
+        const activeMember = activeRouteMeta && group.languages.find((item) => item.language === activeRouteMeta.language);
+        const remaining = activeMember ? group.languages.filter((item) => item !== activeMember) : [...group.languages];
+        if (activeMember && selected && draft && selected.id === group.providerId) {
+          providerResult = await postJson("/tts/provider/clone", {
+            source_provider_id: group.providerId,
+            language: activeMember.language,
+            config: { enable: draft.enable, values: draft.values || {} },
+          });
+          const clonedProviderId = String(providerResult?.provider_id || "").trim();
+          if (!clonedProviderId) throw new Error("未获取到语种专用 Provider ID");
+          savedRouteValues[activeMember.key] = clonedProviderId;
+          activeProviderCloned = true;
+          consumedDraftKeys.add(selectedDraftKey);
+        }
+        for (const meta of remaining.slice(1)) {
+          const languageDraftKey = ttsProviderConfigDraftKey(group.providerId, meta.language);
+          const languageDraft = state.ttsProviderConfigDrafts[languageDraftKey] || null;
+          providerResult = await postJson("/tts/provider/clone", {
+            source_provider_id: group.providerId,
+            language: meta.language,
+            config: languageDraft
+              ? { enable: languageDraft.enable, values: languageDraft.values || {} }
+              : {},
+          });
+          const clonedProviderId = String(providerResult?.provider_id || "").trim();
+          if (!clonedProviderId) throw new Error("未获取到语种专用 Provider ID");
+          savedRouteValues[meta.key] = clonedProviderId;
+          if (languageDraft) consumedDraftKeys.add(languageDraftKey);
+        }
+      }
+      if (selected && draft && !activeProviderCloned) {
+        providerResult = await postJson("/tts/provider/update", {
+          provider_id: selected.id,
+          config: { enable: draft.enable, values: draft.values || {} },
+        });
+      }
+      await postJson("/settings/update", { settings: { ...ttsStrategyValues(), ...savedRouteValues } });
+      return providerResult || { items: state.ttsProviderConfigs, templates: state.ttsProviderTemplates };
+    }, sharedGroups.length ? `${saveMessage}，三个语种已独立` : saveMessage, event.currentTarget, { reload: false });
+    if (!result) return;
+    if (selectedDraftKey) consumedDraftKeys.add(selectedDraftKey);
+    consumedDraftKeys.forEach((key) => delete state.ttsProviderConfigDrafts[key]);
+    state.overview.settings = { ...(state.overview?.settings || {}), ...ttsStrategyValues(), ...savedRouteValues };
+    state.ttsProviderDraft = {};
+    state.ttsProviderConfigs = result.items || [];
+    state.ttsProviderTemplates = result.templates || state.ttsProviderTemplates;
+    await loadAvailableProviders(true).catch(() => {});
+    renderTtsModelConfig();
+  });
+  editor.querySelector("[data-tts-provider-test]")?.addEventListener("click", async (event) => {
+    if (!selected) return;
+    const button = event.currentTarget;
+    setActionBusy(button, true);
+    try {
+      const result = await postJson("/tts/provider/test", { provider_id: selected.id });
+      state.ttsProviderTestResults = { ...state.ttsProviderTestResults, [selected.id]: result };
+      showToast(result.ok ? `TTS Provider 测试通过（${result.elapsed_ms || 0} ms）` : `测试失败：${result.error || "未知错误"}`, result.ok ? "" : "error");
+    } catch (error) {
+      state.ttsProviderTestResults = { ...state.ttsProviderTestResults, [selected.id]: { ok: false, error: error.message } };
+      showToast(`测试失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(button, false);
+      renderTtsModelConfig();
+    }
+  });
+}
+
 function syncModelsSectionControls() {
-  const section = state.modelsSection === "image" ? "image" : "providers";
+  const sections = ["providers", "tts", "image"];
+  const requested = String(state.modelsSection || "providers");
+  const section = sections.includes(requested) ? requested : "providers";
   state.modelsSection = section;
+  const tablist = document.querySelector(".models-subnav");
+  if (tablist) tablist.dataset.activeSection = section;
   document.querySelectorAll("[data-models-section]").forEach((button) => {
     const active = button.dataset.modelsSection === section;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", active ? "true" : "false");
+    button.tabIndex = active ? 0 : -1;
     if (button.dataset.modelsSectionBound !== "1") {
       button.addEventListener("click", () => {
-        state.modelsSection = button.dataset.modelsSection === "image" ? "image" : "providers";
+        const previousIndex = Math.max(0, sections.indexOf(state.modelsSection));
+        const nextSection = sections.includes(button.dataset.modelsSection) ? button.dataset.modelsSection : "providers";
+        const nextIndex = Math.max(0, sections.indexOf(nextSection));
+        const panel = document.getElementById("panel-models");
+        if (panel && nextSection !== state.modelsSection) {
+          panel.dataset.modelsDirection = nextIndex < previousIndex ? "previous" : "next";
+        }
+        state.modelsSection = nextSection;
         renderProviders();
         if (state.modelsSection === "image" && !state.lazyLoaded.imageApiStatus) {
           loadImageApiStatus().catch((error) => showToast(`读取生图 API 状态失败：${error.message}`, "error"));
+        }
+        if (state.modelsSection === "tts" && !state.lazyLoaded.ttsProviderConfigs) {
+          loadTtsProviderConfigs().catch((error) => showToast(`读取 TTS Provider 配置失败：${error.message}`, "error"));
         }
       });
       button.dataset.modelsSectionBound = "1";
     }
   });
+  if (tablist && tablist.dataset.keyboardBound !== "1") {
+    tablist.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      const tabs = [...tablist.querySelectorAll("[data-models-section]")];
+      const current = Math.max(0, tabs.indexOf(document.activeElement));
+      const next = event.key === "Home" ? 0
+        : event.key === "End" ? tabs.length - 1
+          : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      event.preventDefault();
+      tabs[next]?.focus();
+      tabs[next]?.click();
+    });
+    tablist.dataset.keyboardBound = "1";
+  }
   document.querySelectorAll("[data-models-pane]").forEach((pane) => {
     pane.hidden = pane.dataset.modelsPane !== section;
   });
@@ -23030,6 +23661,10 @@ function renderImageModelConfig() {
 
 function renderProviders() {
   const section = syncModelsSectionControls();
+  if (section === "tts") {
+    renderTtsModelConfig();
+    return;
+  }
   if (section === "image") {
     renderImageModelConfig();
     return;
@@ -26768,13 +27403,17 @@ function switchTab(tabName) {
   if (tabName !== state.activeTab && hasUnsavedChanges()) {
     const featureDirty = hasUnsavedFeatureChanges();
     const moduleDirty = hasUnsavedModuleFormChanges();
+    const ttsDirty = hasUnsavedTtsProviderChanges();
     const warning = moduleDirty
       ? "当前页面还有未保存的配置。离开此页面将放弃这些更改，确定继续吗？"
+      : ttsDirty
+        ? "TTS 还有未保存的 Provider、语种路由或语音策略。离开此页面将放弃这些更改，确定继续吗？"
       : "功能开关还有未保存的更改。离开此页面将放弃这些更改，确定继续吗？";
     const confirmed = window.confirm(warning);
     if (!confirmed) return;
     if (featureDirty) discardAllFeatureChanges();
     if (moduleDirty) discardUnsavedModuleFormChanges();
+    if (ttsDirty) discardUnsavedTtsProviderChanges();
   }
   if (tabName === state.activeTab) {
     if (opensSocialLearning) switchLearningSection("social", { focus: true });

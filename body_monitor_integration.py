@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib
 import inspect
+import logging
 import math
 import re
 import time
@@ -11,9 +12,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
+try:
+    from astrbot.api import logger
+except ImportError:  # Standalone unit tests do not load the AstrBot runtime.
+    logger = logging.getLogger(__name__)
 
 SUPPORTED_API_VERSION = 1
 BODY_MONITOR_MODULE = "data.plugins.astrbot_plugin_body_monitor.main"
+BODY_MONITOR_MODULES = (
+    BODY_MONITOR_MODULE,
+    "astrbot_plugin_body_monitor.main",
+)
 STATE_KEY = "body_monitor_integration"
 CONTEXT_KEY = "body_monitor_health_context"
 
@@ -59,6 +68,56 @@ def _number(value: Any) -> int | float | None:
     if isinstance(value, (int, float)):
         return value if math.isfinite(float(value)) else None
     return None
+
+
+def _unit(value: Any) -> str:
+    normalized = "".join(str(value or "").split()).lower()[:24]
+    aliases = {
+        "bpm": "bpm",
+        "%": "%",
+        "percent": "%",
+        "percentage": "%",
+        "c": "°C",
+        "°c": "°C",
+        "celsius": "°C",
+        "f": "°F",
+        "°f": "°F",
+        "fahrenheit": "°F",
+        "h": "h",
+        "hr": "h",
+        "hour": "h",
+        "hours": "h",
+        "min": "min",
+        "minute": "min",
+        "minutes": "min",
+        "steps": "steps",
+        "step": "steps",
+        "kg": "kg",
+        "g": "g",
+        "cm": "cm",
+        "mmhg": "mmHg",
+        "mmol/l": "mmol/L",
+        "mg/dl": "mg/dL",
+        "score": "score",
+        "次/分": "次/分",
+        "次/分钟": "次/分钟",
+        "小时": "小时",
+        "分钟": "分钟",
+        "步": "步",
+    }
+    return aliases.get(normalized, "")
+
+
+def _error_text(value: Any, limit: int = 180) -> str:
+    text = _text(value, max(limit * 2, 240))
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|access[_-]?token|authorization|password)\b\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+        r"\1=[redacted]",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted]", text)
+    text = re.sub(r"(?i)(https?://[^\s?]+)\?[^\s]+", r"\1?[redacted]", text)
+    return text[:limit]
 
 
 class BodyMonitorIntegration:
@@ -194,21 +253,14 @@ class BodyMonitorIntegration:
             request_generation = int(state.get("generation") or 0)
 
             try:
-                module = importlib.import_module(BODY_MONITOR_MODULE)
-            except ModuleNotFoundError as exc:
-                if str(getattr(exc, "name", "") or "") not in {
-                    "data",
-                    "data.plugins",
-                    "data.plugins.astrbot_plugin_body_monitor",
-                    BODY_MONITOR_MODULE,
-                }:
-                    return self._record_error(state, "error", exc)
+                module = self._load_body_monitor_module()
+            except Exception as exc:
+                return self._record_error(state, "error", exc)
+            if module is None:
                 state["status"] = "not_installed"
                 state["last_error"] = "Body Monitor 未安装或尚未加载"
                 self._save()
                 return self.status_view()
-            except Exception as exc:
-                return self._record_error(state, "error", exc)
 
             getter = getattr(module, "get_body_monitor_api", None)
             if not callable(getter):
@@ -240,6 +292,10 @@ class BodyMonitorIntegration:
                 if state.get("initialized") and _text(feed.get("stream_id"), 80) != _text(state.get("stream_id"), 80):
                     feed = await self._read_feed(api, after_cursor=None)
                     after_cursor = None
+                elif after_cursor is not None and feed["next_cursor"] < after_cursor:
+                    raise RuntimeError("Body Monitor 返回的事件游标发生倒退")
+                elif after_cursor is not None and feed.get("has_more") and feed["next_cursor"] == after_cursor:
+                    raise RuntimeError("Body Monitor 事件批次未推进游标")
             except Exception as exc:
                 if int(self._state().get("generation") or 0) != request_generation:
                     return self.status_view()
@@ -286,6 +342,18 @@ class BodyMonitorIntegration:
                 return self._record_error(state, "error", exc)
             return self.status_view()
 
+    @staticmethod
+    def _load_body_monitor_module() -> Any | None:
+        for module_name in BODY_MONITOR_MODULES:
+            try:
+                return importlib.import_module(module_name)
+            except ModuleNotFoundError as exc:
+                missing = str(getattr(exc, "name", "") or "")
+                if missing and (module_name == missing or module_name.startswith(f"{missing}.")):
+                    continue
+                raise
+        return None
+
     async def _read_feed(self, api: Any, *, after_cursor: int | None) -> dict[str, Any]:
         reader = getattr(api, "read_proactive_events", None)
         if not callable(reader):
@@ -309,6 +377,8 @@ class BodyMonitorIntegration:
             or not isinstance(events, list)
         ):
             raise RuntimeError("Body Monitor 返回的事件批次字段不完整")
+        if latest_cursor < next_cursor:
+            raise RuntimeError("Body Monitor 返回的事件游标顺序无效")
         if after_cursor is None and events:
             events = []
         return {
@@ -418,6 +488,9 @@ class BodyMonitorIntegration:
             "baseline": {"mean": baseline_mean},
             "occurred_at": occurred_at,
         }
+        unit = _unit(context.get("unit"))
+        if unit:
+            clean_context["unit"] = unit
         today = context.get("today")
         if isinstance(today, dict):
             limited_today = {
@@ -519,10 +592,12 @@ class BodyMonitorIntegration:
         if not isinstance(context, dict):
             return ""
         metric = self._metric_label(context.get("metric") or context.get("topic"))
-        current = self._display_value(context.get("value"))
+        unit = _unit(context.get("unit"))
+        current = self._display_measure(context.get("value"), unit)
         baseline_context = context.get("baseline")
-        baseline = self._display_value(
-            baseline_context.get("mean") if isinstance(baseline_context, dict) else None
+        baseline = self._display_measure(
+            baseline_context.get("mean") if isinstance(baseline_context, dict) else None,
+            unit,
         )
         occurred = self._display_time(context.get("occurred_at"))
         facts = []
@@ -567,6 +642,18 @@ class BodyMonitorIntegration:
             return ""
         return _text(value, 60)
 
+    @classmethod
+    def _display_measure(cls, value: Any, unit: str = "") -> str:
+        displayed = cls._display_value(value)
+        if not displayed or not unit:
+            return displayed
+        separator = (
+            ""
+            if unit in {"%", "°C", "°F", "次/分", "次/分钟", "小时", "分钟", "步"}
+            else " "
+        )
+        return f"{displayed}{separator}{unit}"
+
     @staticmethod
     def _display_time(value: Any) -> str:
         ts = _timestamp(value)
@@ -579,7 +666,8 @@ class BodyMonitorIntegration:
 
     def _record_error(self, state: dict[str, Any], status: str, exc: Exception) -> dict[str, Any]:
         state["status"] = status
-        state["last_error"] = _text(exc, 180) or exc.__class__.__name__
+        state["last_error"] = _error_text(exc, 180) or exc.__class__.__name__
+        logger.warning("[PrivateCompanion] Body Monitor 联动失败: %s", state["last_error"])
         self._save()
         return self.status_view()
 
