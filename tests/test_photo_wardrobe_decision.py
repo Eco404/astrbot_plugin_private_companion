@@ -117,6 +117,39 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertTrue(intent.custom_outfit)
         self.assertEqual(intent.excluded_categories, ("school_uniform",))
 
+    def test_explicit_wear_phrase_overrides_a_locked_reference_outfit(self) -> None:
+        for prompt in (
+            "穿铠甲拍照",
+            "穿白色风衣拍照",
+            "wear armor for the photo",
+            "wear a trench coat for the photo",
+        ):
+            with self.subTest(prompt=prompt):
+                intent = analyze_photo_wardrobe(prompt)
+                decision = resolve_photo_wardrobe_decision(
+                    workflow_kind="selfie",
+                    prompt_text=prompt,
+                    intent=intent,
+                    reference={
+                        "id": "sleepwear-reference",
+                        "path": "C:/images/sleepwear.png",
+                        "kind": "library",
+                        "reference_roles": ["identity", "outfit"],
+                        "outfit_category": "sleepwear",
+                        "outfit_lock_default": True,
+                        "preferred_preset": "居家睡衣",
+                    },
+                    available_presets={"角色自拍", "居家睡衣"},
+                )
+
+                self.assertEqual(intent.target_category, "custom_outfit")
+                self.assertEqual(decision.rule_id, "explicit_prompt")
+                self.assertEqual(decision.category, "custom_outfit")
+                self.assertTrue(decision.lock_outfit)
+                self.assertEqual(decision.effective_reference_roles, ("identity",))
+
+        self.assertEqual(analyze_photo_wardrobe("穿过树林拍照").target_category, "")
+
     def test_explicit_exclusion_removes_only_the_reference_outfit_role(self) -> None:
         prompt = "在卧室拍一张照片，不要睡衣"
         intent = analyze_photo_wardrobe(prompt)

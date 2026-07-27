@@ -227,8 +227,9 @@ def _contains_specific_outfit_text(value: Any) -> bool:
     return bool(
         re.search(
             r"连衣裙|裙子|短裙|长裙|吊带|衬衫|外套|夹克|西装|制服|汉服|旗袍|和服|洛丽塔|"
-            r"裤(?:子)?|毛衣|卫衣|T恤|背心|上衣|套装|袜(?:子)?|鞋(?:子)?|"
-            r"\b(?:dress|skirt|shirt|blouse|coat|jacket|suit|uniform|hoodie|sweater|pants|trousers|shorts|top)\b",
+            r"裤(?:子)?|毛衣|卫衣|T恤|背心|上衣|套装|风衣|铠甲|盔甲|甲胄|袜(?:子)?|鞋(?:子)?|"
+            r"\b(?:dress|skirt|shirt|blouse|coat|jacket|suit|uniform|hoodie|sweater|pants|trousers|shorts|top|armor|armour)\b|"
+            r"\btrench\s+coat\b",
             str(value or ""),
             flags=re.I,
         )
