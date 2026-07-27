@@ -4035,8 +4035,16 @@ class ProactiveEngineMixin:
                     if next_at > 0:
                         impulse["window_start_at"] = next_at
                         impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), next_at)
-                        impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_at + 20 * 60)
-                        impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), impulse["best_until_at"] + 40 * 60)
+                        if _single_line(impulse.get("source"), 40) == "body_monitor":
+                            hard_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+                            impulse["best_until_at"] = min(
+                                max(_safe_float(impulse.get("best_until_at"), 0), next_at),
+                                hard_expire_at,
+                            )
+                            impulse["expire_at"] = hard_expire_at
+                        else:
+                            impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_at + 20 * 60)
+                            impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), impulse["best_until_at"] + 40 * 60)
                 else:
                     impulse["state"] = "queued"
                 break

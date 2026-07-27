@@ -131,7 +131,8 @@ class _BusyHarness(BusyReplyGateMixin):
 
 
 class _EngineHarness(ProactiveEngineMixin):
-    pass
+    def __init__(self) -> None:
+        self.data = {"proactive_candidate_pool": []}
 
 
 class BodyMonitorLifecycleTests(unittest.TestCase):
@@ -169,6 +170,36 @@ class BodyMonitorLifecycleTests(unittest.TestCase):
         self.assertEqual(user["next_proactive_at"], 150)
         self.assertEqual(user["planned_proactive_expire_at"], 200)
         self.assertLessEqual(user["planned_proactive_best_until_at"], 200)
+
+    def test_deferred_status_keeps_body_monitor_impulse_hard_expiry(self) -> None:
+        harness = _EngineHarness()
+        user = {
+            "user_id": "10001",
+            "next_proactive_at": 150,
+            "planned_proactive_source": "body_monitor",
+            "planned_proactive_impulse_id": "health-1",
+            "planned_proactive_expire_at": 200,
+            "proactive_impulses": [
+                {
+                    "id": "health-1",
+                    "source": "body_monitor",
+                    "state": "queued",
+                    "created_ts": 100,
+                    "updated_ts": 100,
+                    "window_start_at": 100,
+                    "preferred_ts": 100,
+                    "best_until_at": 180,
+                    "expire_at": 200,
+                }
+            ],
+        }
+
+        harness._mark_planned_candidate_status(user, "deferred", "繁忙顺延")
+
+        impulse = user["proactive_impulses"][0]
+        self.assertEqual(impulse["window_start_at"], 150)
+        self.assertEqual(impulse["best_until_at"], 180)
+        self.assertEqual(impulse["expire_at"], 200)
 
     def test_terminal_body_monitor_impulse_scrubs_health_context(self) -> None:
         user = {
