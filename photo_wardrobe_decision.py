@@ -409,7 +409,7 @@ def _prompt_without_generated_daily_outfit_continuity(prompt_text: str) -> str:
         text = re.sub(pattern, replacement, text, flags=re.I)
     visual_memory_pattern = re.compile(
         r"(visual continuity reference:\s*)(.*?)"
-        r"(?=,\s*(?:additional generation preference:|keep character identity|the user's explicit clothing)|\.\s*Negative prompt:|$)",
+        r"(?=,\s*(?:additional generation preference:|keep character identity|preserve character identity|the user's explicit clothing)|\.\s*Negative prompt:|$)",
         flags=re.I | re.S,
     )
 

@@ -417,6 +417,26 @@ class PhotoWardrobeDecisionTests(unittest.TestCase):
         self.assertEqual(decision.category, "")
         self.assertFalse(decision.lock_outfit)
 
+    def test_context_cleanup_preserves_neutral_identity_continuity(self) -> None:
+        prompt = "换成校服"
+        base_prompt = (
+            "Positive prompt: user request: 换成校服, visual continuity reference: "
+            "今日穿搭：针织衫和长裙, preserve character identity and stable appearance "
+            "from available visual continuity. Negative prompt: watermark."
+        )
+
+        decision = resolve_photo_wardrobe_decision(
+            workflow_kind="selfie",
+            prompt_text=prompt,
+            intent=analyze_photo_wardrobe(prompt),
+            reference=None,
+            base_prompt=base_prompt,
+            available_presets={"校服人像"},
+        )
+
+        self.assertNotIn("今日穿搭", decision.base_prompt)
+        self.assertIn("preserve character identity", decision.base_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
