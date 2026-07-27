@@ -468,6 +468,7 @@ function featureDraftFromOverview(overview = {}) {
     }
   });
   const settingBackedFeatureKeys = [
+    "enable_body_monitor_integration",
     "enable_rest_reply_simulation",
     "enable_busy_reply_gate",
     "enable_segmented_proactive_reply",
@@ -1104,6 +1105,7 @@ const featureMeta = {
   enable_news_boredom_read: ["无聊看新闻", "空档或无聊时扫几条新闻，按人格决定是否私聊提起。"],
   enable_ai_daily_watch: ["AI 日报/早报追踪", "按配置时间读取黑鸦早报和橘鸦日报，到点后当天只尝试一次。"],
   enable_external_event_self_link: ["外界信息自我关联", "让新闻和搜索结果先变成“这和我有什么关系”的内部意愿，再进入主动候选。"],
+  enable_body_monitor_integration: ["健康事件联动", "读取 Body Monitor 提供的健康事件，并在合适时生成低压力的主动关心。"],
   enable_web_exploration: ["主动搜索", "按人格兴趣、最近话题、日程和心情低频使用 AstrBot 网页搜索，形成探索笔记。"],
   enable_web_exploration_boredom_search: ["空档自主搜索", "空闲或无聊时先自行决定搜索主题，再调用网页搜索了解新鲜事物。"],
   enable_qzone_integration: ["QQ 空间动态", "整合查看、点赞、评论和发布说说入口。"],
@@ -1229,6 +1231,7 @@ const featureGroups = [
       "enable_ai_daily_watch",
       "enable_news_boredom_read",
       "enable_external_event_self_link",
+      "enable_body_monitor_integration",
       "enable_web_exploration",
       "enable_web_exploration_boredom_search",
       "enable_qzone_integration",
@@ -17400,11 +17403,17 @@ function bodyMonitorBatchSummary(batch = {}) {
 function renderBodyMonitorIntegration() {
   const root = $("#bodyMonitorIntegrationCard");
   if (!root) return;
+  const key = "enable_body_monitor_integration";
   const status = state.overview?.body_monitor_integration || {};
   const settings = state.overview?.settings || {};
-  const enabled = toBool(status.enabled ?? settings.enable_body_monitor_integration);
-  const stateName = String(status.state || (enabled ? "initializing" : "disabled"));
-  const tone = stateName === "connected" ? "ok" : stateName === "error" || stateName === "incompatible" ? "error" : stateName === "initializing" ? "warn" : "off";
+  const persistedEnabled = toBool(status.enabled ?? settings[key]);
+  const enabled = toBool(state.featureDraft?.[key] ?? persistedEnabled);
+  const dirty = enabled !== persistedEnabled;
+  const stateName = String(status.state || (persistedEnabled ? "initializing" : "disabled"));
+  const tone = dirty ? "warn" : stateName === "connected" ? "ok" : stateName === "error" || stateName === "incompatible" ? "error" : stateName === "initializing" ? "warn" : "off";
+  const stateText = dirty
+    ? `待保存：将${enabled ? "开启" : "关闭"}`
+    : status.state_text || (persistedEnabled ? "正在初始化" : "联动已关闭");
   const lastPull = status.last_pull_text || (Number(status.last_pull_at || 0) > 0 ? formatRecentTime(status.last_pull_at, "-") : "尚未拉取");
   const versionText = Number(status.api_version || 0) > 0
     ? `v${Number(status.api_version)} / v${Number(status.supported_api_version || 1)}`
@@ -17417,7 +17426,7 @@ function renderBodyMonitorIntegration() {
             <span>BODY MONITOR</span>
             <h3>健康事件联动</h3>
           </div>
-          <span class="body-monitor-state ${escapeHtml(tone)}">${escapeHtml(status.state_text || (enabled ? "正在初始化" : "联动已关闭"))}</span>
+          <span class="body-monitor-state ${escapeHtml(tone)}">${escapeHtml(stateText)}</span>
         </div>
         <div class="body-monitor-metrics">
           <span><small>最近拉取</small><b>${escapeHtml(lastPull)}</b></span>
@@ -17429,29 +17438,14 @@ function renderBodyMonitorIntegration() {
       <label class="body-monitor-toggle">
         <input type="checkbox" data-body-monitor-toggle ${enabled ? "checked" : ""}>
         <span class="feature-toggle-visual" aria-hidden="true"></span>
-        <b>${enabled ? "已开启" : "已关闭"}</b>
+        <b>${dirty ? "待保存" : enabled ? "已开启" : "已关闭"}</b>
       </label>
     </section>
   `;
-  root.querySelector("[data-body-monitor-toggle]")?.addEventListener("change", async (event) => {
-    const input = event.currentTarget;
-    const nextEnabled = Boolean(input.checked);
-    input.disabled = true;
-    try {
-      const result = await postJson("/settings/update", {
-        settings: { enable_body_monitor_integration: nextEnabled },
-      });
-      applyOverviewData(result);
-      renderFeatureSwitches();
-      showToast(result?.config_saved === false
-        ? "联动已应用，但配置持久化失败"
-        : nextEnabled ? "Body Monitor 联动已开启" : "Body Monitor 联动已关闭",
-      result?.config_saved === false ? "error" : "success");
-    } catch (error) {
-      input.checked = !nextEnabled;
-      input.disabled = false;
-      showToast(`联动设置保存失败：${error.message}`, "error");
-    }
+  root.querySelector("[data-body-monitor-toggle]")?.addEventListener("change", (event) => {
+    const nextEnabled = Boolean(event.currentTarget.checked);
+    state.featureDraft.enable_body_monitor_integration = nextEnabled;
+    renderFeatureSwitches();
   });
 }
 
@@ -20260,10 +20254,12 @@ function renderFeatureSwitches() {
   const intensity = state.overview?.proactive_intensity || {};
   const intensitySearchText = "主动强度预设 主动触达 proactive_intensity_preset 私聊主动 群聊唤醒 群主动插话";
   const intensityVisible = !filter || intensitySearchText.toLowerCase().includes(filter);
-  const bodyMonitorSearchText = "健康事件联动 身体状态联动 body monitor enable_body_monitor_integration";
-  const bodyMonitorVisible = !filter || bodyMonitorSearchText.toLowerCase().includes(filter);
+  const bodyMonitorKey = "enable_body_monitor_integration";
+  const bodyMonitorSearchText = `${featureSearchText(bodyMonitorKey)} 身体状态联动 body monitor`;
+  const bodyMonitorVisible = !filter || bodyMonitorSearchText.includes(filter);
   const bodyMonitorEnabled = toBool(
-    state.overview?.body_monitor_integration?.enabled
+    state.featureDraft?.[bodyMonitorKey]
+      ?? state.overview?.body_monitor_integration?.enabled
       ?? overviewSettings.enable_body_monitor_integration,
   );
   const visibleDraftKeys = visibleTopLevelFeatureKeys(state.featureDraft || {});
@@ -20315,12 +20311,15 @@ function renderFeatureSwitches() {
 
   const board = groups.map((group) => {
     const visibleKeys = group.keys.filter((key) => {
+      if (key === bodyMonitorKey) return false;
       if (!visibleFeatureSwitchKey(key)) return false;
       if (!filter) return true;
       return featureSearchText(key).includes(filter);
     });
     const hasIntensityCard = group.title === "通用能力" && intensityVisible;
-    const hasBodyMonitorCard = group.title === "长线主动" && bodyMonitorVisible;
+    const hasBodyMonitorCard = group.title === "长线主动"
+      && group.keys.includes(bodyMonitorKey)
+      && bodyMonitorVisible;
     if (!visibleKeys.length && !hasIntensityCard && !hasBodyMonitorCard) return "";
     const visibleSettingCount = visibleKeys.length + (hasBodyMonitorCard ? 1 : 0);
     const groupEnabled = visibleKeys.filter((key) => toBool(state.featureDraft[key])).length

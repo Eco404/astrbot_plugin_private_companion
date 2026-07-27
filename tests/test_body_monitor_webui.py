@@ -39,8 +39,18 @@ class BodyMonitorWebUiPlacementTests(unittest.TestCase):
     def test_toggle_refreshes_config_feature_branch(self) -> None:
         source = _function_source("renderBodyMonitorIntegration")
 
+        self.assertIn(
+            "state.featureDraft.enable_body_monitor_integration = nextEnabled;",
+            source,
+        )
         self.assertIn("renderFeatureSwitches();", source)
         self.assertNotIn("renderProactiveCandidates();", source)
+        self.assertNotIn('postJson("/settings/update"', source)
+
+    def test_health_event_link_uses_the_shared_feature_draft(self) -> None:
+        source = _function_source("featureDraftFromOverview")
+
+        self.assertIn('"enable_body_monitor_integration"', source)
 
 
 if __name__ == "__main__":
