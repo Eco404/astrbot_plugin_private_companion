@@ -4584,6 +4584,7 @@ class CommandHandlersMixin:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
+                request_text=str(intent.get("prompt") or ""),
                 session_key=generation_session_key,
                 continuity_key=continuity_key,
                 reference_image_path=reference_path,
@@ -4822,6 +4823,7 @@ class CommandHandlersMixin:
             backend_name, image_path, note = await self._generate_photo_image(
                 workflow_kind=workflow_kind,
                 prompt_text=prompt_text,
+                request_text=prompt,
                 session_key=generation_session_key,
                 continuity_key=continuity_key,
                 reference_image_path=reference_path,

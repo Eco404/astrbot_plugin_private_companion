@@ -2785,7 +2785,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "wardrobe_category": self._single_line(getattr(generation_output, "wardrobe_category", ""), 40),
                 "outfit_locked": bool(getattr(generation_output, "outfit_locked", False)),
                 "daily_outfit_removed": bool(getattr(generation_output, "daily_outfit_removed", False)),
-                "final_presets": list(getattr(generation_output, "preset_names", ()) or ()),
+                "final_presets": list(getattr(generation_output, "preset_names", ()) or ())[:1],
                 "prompt_hash": self._single_line(getattr(generation_output, "prompt_hash", ""), 80),
                 "prompt_path": _path_text(getattr(generation_output, "prompt_path", ""), 1000),
             }
@@ -2838,7 +2838,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "wardrobe_category": self._single_line(generation_metadata.get("wardrobe_category"), 40),
             "outfit_locked": bool(generation_metadata.get("outfit_locked")),
             "daily_outfit_removed": bool(generation_metadata.get("daily_outfit_removed")),
-            "final_presets": list(generation_metadata.get("final_presets") or [])[:6],
+            "final_presets": list(generation_metadata.get("final_presets") or [])[:1],
             "prompt_hash": self._single_line(generation_metadata.get("prompt_hash"), 80),
             "prompt_path": _path_text(generation_metadata.get("prompt_path"), 1000),
             "image_model": self._single_line(getattr(self.plugin, "external_image_api_model", ""), 80),
@@ -4386,6 +4386,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "sent": bool(item.get("sent")),
                     "caption": self._single_line(item.get("caption"), 120),
                     "scene_preset": self._single_line(item.get("scene_preset"), 80),
+                    "preset_hint": self._single_line(item.get("preset_hint"), 80),
+                    "preset_source": self._single_line(item.get("preset_source"), 40),
+                    "suggestion_status": self._single_line(item.get("suggestion_status"), 60),
                     "wardrobe_mode": self._single_line(item.get("wardrobe_mode"), 40),
                     "wardrobe_source": self._single_line(item.get("wardrobe_source"), 40),
                     "wardrobe_category": self._single_line(item.get("wardrobe_category"), 40),
@@ -4426,7 +4429,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         self._single_line(name, 40)
                         for name in (item.get("presets") if isinstance(item.get("presets"), list) else [])
                         if self._single_line(name, 40)
-                    ][:6],
+                    ][:1],
                 }
             )
         return items
@@ -4650,7 +4653,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 self._single_line(value, 60)
                 for value in (result.get("final_presets") if isinstance(result.get("final_presets"), list) else [])
                 if self._single_line(value, 60)
-            ][:6],
+            ][:1],
             "prompt_hash": self._single_line(result.get("prompt_hash"), 80),
             "prompt_path": self._single_line(result.get("prompt_path"), 1000),
             "provider": self._single_line(result.get("provider"), 100),

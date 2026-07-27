@@ -1724,7 +1724,7 @@ class CreativeMixin:
                             await reference_getter(
                                 "portrait",
                                 allow_daily_outfit=False,
-                                selection_context=json.dumps(project_snapshot, ensure_ascii=False),
+                                request_text=json.dumps(project_snapshot, ensure_ascii=False),
                             ),
                             1000,
                         )

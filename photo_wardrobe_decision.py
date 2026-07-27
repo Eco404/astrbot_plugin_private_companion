@@ -6,20 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 
-_DECISION_VERSION = 1
+DECISION_VERSION = 1
 
 _SELFIE_WORKFLOWS = {"selfie", "portrait", "自拍", "人像"}
 _EDIT_WORKFLOWS = {"edit", "改图", "修图", "重绘", "p图"}
 _DAILY_OUTFIT_PATTERN = re.compile(
     r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)\s*[：:]",
     flags=re.I,
-)
-_SCENE_CONTEXT_FIELD_LABEL = (
-    r"(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|当前场景|场景|"
-    r"天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格|"
-    r"current\s+(?:time|schedule|location|scene|weather)|schedule|location|scene|"
-    r"weather(?:\s+background)?|background|mood|recent\s+selfie|hairstyle|hair\s+color|"
-    r"eye\s+color|expression|style)"
 )
 _OUTFIT_PATTERNS = (
     ("cosplay", r"(?<![a-z0-9])cos(?:play)?(?![a-z0-9])|角色扮演|扮成|女仆装|巫女服|魔法少女|表演服"),
@@ -233,7 +226,7 @@ def _current_user_request_parts(prompt_text: str) -> tuple[str, str]:
 def _contains_specific_outfit_text(value: Any) -> bool:
     return bool(
         re.search(
-            r"裙|吊带|衬衫|外套|夹克|西装|制服|汉服|旗袍|和服|洛丽塔|"
+            r"连衣裙|裙子|短裙|长裙|吊带|衬衫|外套|夹克|西装|制服|汉服|旗袍|和服|洛丽塔|"
             r"裤(?:子)?|毛衣|卫衣|T恤|背心|上衣|套装|袜(?:子)?|鞋(?:子)?|"
             r"\b(?:dress|skirt|shirt|blouse|coat|jacket|suit|uniform|hoodie|sweater|pants|trousers|shorts|top)\b",
             str(value or ""),
@@ -251,13 +244,11 @@ class PhotoWardrobeIntent:
     excluded_categories: tuple[str, ...] = ()
     exclusion_text: str = ""
     positive_text: str = ""
-    requested_scene_preset: str = ""
-    requested_preset_category: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class PhotoWardrobeDecision:
-    decision_version: int = _DECISION_VERSION
+    decision_version: int = DECISION_VERSION
     rule_id: str = "none"
     mode: str = "none"
     source: str = "none"
@@ -265,8 +256,10 @@ class PhotoWardrobeDecision:
     lock_outfit: bool = False
     remove_daily_outfit_context: bool = False
     preset_name: str = ""
-    authoritative_preset: str = ""
     selected_presets: tuple[str, ...] = ()
+    suggested_preset: str = ""
+    preset_source: str = "none"
+    suggestion_status: str = "not_provided"
     reference_image_path: str = ""
     reference_id: str = ""
     reference_kind: str = ""
@@ -283,7 +276,7 @@ class PhotoWardrobeDecision:
     adjustments: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.decision_version != _DECISION_VERSION:
+        if self.decision_version != DECISION_VERSION:
             raise ValueError(f"unsupported wardrobe decision version: {self.decision_version}")
         if not _clean_text(self.rule_id, 80):
             raise ValueError("rule_id must not be empty")
@@ -291,8 +284,13 @@ class PhotoWardrobeDecision:
             raise ValueError("locked wardrobe decision requires a category")
         if not set(self.effective_reference_roles).issubset(self.reference_roles):
             raise ValueError("effective reference roles must be a subset of reference roles")
+        if len(self.selected_presets) > 1:
+            raise ValueError("at most one selected preset is allowed")
         if len(set(self.selected_presets)) != len(self.selected_presets):
             raise ValueError("selected presets must be unique")
+        final_preset = self.selected_presets[0] if self.selected_presets else ""
+        if _clean_text(self.preset_name, 80) != final_preset:
+            raise ValueError("preset_name must match the single selected preset")
         non_daily_category = bool(self.category and self.category != "daily_outfit")
         if (self.remove_daily_outfit_context or non_daily_category) and _DAILY_OUTFIT_PATTERN.search(
             self.scene_context
@@ -315,8 +313,10 @@ class PhotoWardrobeDecision:
             "lock_outfit": self.lock_outfit,
             "remove_daily_outfit_context": self.remove_daily_outfit_context,
             "preset_name": self.preset_name,
-            "authoritative_preset": self.authoritative_preset,
             "selected_presets": list(self.selected_presets),
+            "suggested_preset": self.suggested_preset,
+            "preset_source": self.preset_source,
+            "suggestion_status": self.suggestion_status,
             "reference_image_path": self.reference_image_path,
             "reference_id": self.reference_id,
             "reference_kind": self.reference_kind,
@@ -334,10 +334,7 @@ class PhotoWardrobeDecision:
         }
 
 
-def analyze_photo_wardrobe(
-    prompt_text: str,
-    requested_scene_preset: str = "",
-) -> PhotoWardrobeIntent:
+def analyze_photo_wardrobe(prompt_text: str) -> PhotoWardrobeIntent:
     positive_text, negative_text = _current_user_request_parts(prompt_text)
     positive_matches = _outfit_category_matches(positive_text)
     negative_matches = _outfit_category_matches(negative_text)
@@ -376,7 +373,6 @@ def analyze_photo_wardrobe(
             or re.search(r"衣服|服装|衣着|穿搭|clothes|clothing|outfit|wardrobe", part, flags=re.I)
         )
     ]
-    preset = _clean_text(requested_scene_preset, 80)
     return PhotoWardrobeIntent(
         target_category=target_category or ("custom_outfit" if custom_outfit else ""),
         target_text=_clean_text(positive_text, 360) if target_category or custom_outfit else "",
@@ -385,8 +381,6 @@ def analyze_photo_wardrobe(
         excluded_categories=excluded_categories,
         exclusion_text=_clean_text(", ".join(dict.fromkeys(wardrobe_negative_parts)), 360),
         positive_text=_clean_text(positive_text, 1800),
-        requested_scene_preset=preset,
-        requested_preset_category=_preset_category(preset),
     )
 
 
@@ -396,8 +390,7 @@ def _scene_without_daily_outfit_details(scene_context: str) -> str:
     if not text or not re.search(rf"{outfit_label}\s*[：:]", text, flags=re.I):
         return text
     cleaned = re.sub(
-        rf"(^|[；;,，])\s*{outfit_label}\s*[：:].*?"
-        rf"(?=[；;,，]\s*{_SCENE_CONTEXT_FIELD_LABEL}\s*[：:]|$)",
+        rf"(^|[；;,，])\s*{outfit_label}\s*[：:].*?(?=[；;,，]\s*(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|当前场景|场景|天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格)[：:]|$)",
         lambda match: match.group(1),
         text,
         flags=re.S | re.I,
@@ -406,75 +399,106 @@ def _scene_without_daily_outfit_details(scene_context: str) -> str:
     return _clean_text(cleaned, 2400)
 
 
-def _daily_outfit_details(scene_context: str) -> str:
+def _daily_outfit_categories(scene_context: str) -> set[str]:
+    text = _clean_text(scene_context, 2400)
     match = re.search(
         r"(?:今日穿搭|当天穿搭|日常穿搭|today'?s outfit|daily outfit)\s*[：:]\s*(.*?)"
-        rf"(?=(?:[；;,，]|\n)\s*{_SCENE_CONTEXT_FIELD_LABEL}\s*[：:]|$)",
-        str(scene_context or ""),
+        r"(?=[；;,，]\s*(?:视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|当前场景|场景|天气背景|天气|背景|最近自拍|发型|发色|瞳色|表情|风格)\s*[：:]|$)",
+        text,
         flags=re.I | re.S,
     )
-    return _clean_text(match.group(1), 600) if match else ""
+    if not match:
+        return set()
+    return {category for category, *_ in _outfit_category_matches(match.group(1))}
 
 
-def _normalized_exclusion_phrases(exclusion_text: str) -> tuple[str, ...]:
-    phrases: list[str] = []
-    for raw_phrase in re.split(r"[,，;；]+", str(exclusion_text or "")):
-        phrase = _clean_text(raw_phrase, 360).lower()
-        phrase = re.sub(
-            r"^(?:请)?(?:穿着?|换成|改成|换上|改穿)\s*"
-            r"|^(?:please\s+)?(?:wear(?:ing)?|change\s+into|switch\s+to|put\s+on)\s+",
-            "",
-            phrase,
+def _location_categories(value: str) -> set[str]:
+    text = _clean_text(value, 2400).lower()
+    categories: set[str] = set()
+    patterns = {
+        "home": r"家里|家中|居家|\bat home\b|\bhome\b",
+        "bedroom": r"卧室|床边|\bbedroom\b",
+        "living_room": r"客厅|\bliving room\b",
+        "dorm": r"宿舍|\bdorm(?:itory)?\b",
+        "apartment": r"公寓|\bapartment\b",
+        "school": r"学校|\bschool\b",
+        "campus": r"校园|\bcampus\b",
+        "classroom": r"教室|\bclassroom\b",
+        "workplace": r"办公室|公司|工位|\boffice\b|\bworkplace\b",
+        "park": r"公园|\bpark\b",
+        "street": r"街边|街头|街道|\bstreet\b",
+        "mall": r"商场|\bmall\b",
+        "restaurant": r"餐厅|咖啡馆|咖啡店|\brestaurant\b|\bcafe\b",
+        "library": r"图书馆|\blibrary\b",
+        "gym": r"健身房|\bgym\b",
+        "pool": r"泳池|游泳池|\bpool\b",
+        "beach": r"海边|沙滩|\bbeach\b",
+        "transit": r"车站|机场|\bstation\b|\bairport\b",
+        "outdoor": r"户外|室外|\boutdoors?\b",
+    }
+    for category, pattern in patterns.items():
+        if re.search(pattern, text, flags=re.I):
+            categories.add(category)
+    if categories & {"bedroom", "living_room", "dorm", "apartment"}:
+        categories.add("home")
+    if categories & {"campus", "classroom"}:
+        categories.add("school")
+    if categories & {"park", "street", "beach"}:
+        categories.add("outdoor")
+    return categories
+
+
+def _ambient_location_categories(scene_context: str) -> set[str]:
+    text = _clean_text(scene_context, 2400)
+    labels = (
+        "视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|"
+        "当前场景|场景|天气背景|天气|背景|最近自拍|今日穿搭|当天穿搭|日常穿搭|"
+        "发型|发色|瞳色|表情|风格"
+    )
+    parts = re.split(rf"[；;,，]\s*(?=(?:{labels})\s*[：:])", text, flags=re.I)
+    categories: set[str] = set()
+    for part in parts:
+        if re.match(
+            r"(?:当前日程|日程|当前位置|地点|位置|当前场景|场景)\s*[：:]",
+            part.strip("；;,， "),
+            flags=re.I,
+        ):
+            categories.update(_location_categories(part))
+    return categories
+
+
+def _location_categories_conflict(requested: set[str], ambient: set[str]) -> bool:
+    if not requested or not ambient:
+        return False
+    generic = {"home", "school", "outdoor"}
+    requested_specific = requested - generic
+    ambient_specific = ambient - generic
+    if requested_specific and ambient_specific:
+        return requested_specific.isdisjoint(ambient_specific)
+    return requested.isdisjoint(ambient)
+
+
+def _scene_without_ambient_location_fields(scene_context: str) -> str:
+    text = _clean_text(scene_context, 2400)
+    if not text:
+        return ""
+    labels = (
+        "视觉话题|时间|状态|当前日程|日程|情绪|可分享碎片|当前位置|地点|位置|"
+        "当前场景|场景|天气背景|天气|背景|最近自拍|今日穿搭|当天穿搭|日常穿搭|"
+        "发型|发色|瞳色|表情|风格"
+    )
+    parts = re.split(rf"[；;,，]\s*(?=(?:{labels})\s*[：:])", text, flags=re.I)
+    kept = [
+        part.strip("；;,， ")
+        for part in parts
+        if part.strip("；;,， ")
+        and not re.match(
+            r"(?:当前日程|日程|当前位置|地点|位置|当前场景|场景)\s*[：:]",
+            part.strip("；;,， "),
             flags=re.I,
         )
-        phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.I)
-        normalized = re.sub(r"[\W_]+", "", phrase, flags=re.UNICODE)
-        if normalized:
-            phrases.append(normalized)
-    return tuple(dict.fromkeys(phrases))
-
-
-def _matches_normalized_exclusion(candidate: str, phrase: str) -> bool:
-    if not candidate or not phrase:
-        return False
-    if phrase in candidate:
-        return True
-    phrase_index = 0
-    for character in candidate:
-        if character == phrase[phrase_index]:
-            phrase_index += 1
-            if phrase_index == len(phrase):
-                return True
-    return False
-
-
-def _daily_outfit_matches_custom_exclusion(scene_context: str, exclusion_text: str) -> bool:
-    details = re.sub(r"[\W_]+", "", _daily_outfit_details(scene_context).lower(), flags=re.UNICODE)
-    return bool(details) and any(
-        _matches_normalized_exclusion(details, phrase)
-        for phrase in _normalized_exclusion_phrases(exclusion_text)
-    )
-
-
-def _reference_matches_custom_exclusion(
-    reference: Mapping[str, Any], exclusion_text: str
-) -> bool:
-    phrases = _normalized_exclusion_phrases(exclusion_text)
-    if not phrases:
-        return False
-    reference_texts = (
-        reference.get("outfit_category"),
-        reference.get("note"),
-    )
-    return any(
-        _matches_normalized_exclusion(
-            re.sub(r"[\W_]+", "", _clean_text(value, 600).lower(), flags=re.UNICODE),
-            phrase,
-        )
-        for value in reference_texts
-        for phrase in phrases
-        if value
-    )
+    ]
+    return _clean_text("；".join(kept), 2400)
 
 
 def _prompt_without_generated_daily_outfit_continuity(prompt_text: str) -> str:
@@ -493,7 +517,7 @@ def _prompt_without_generated_daily_outfit_continuity(prompt_text: str) -> str:
         text = re.sub(pattern, replacement, text, flags=re.I)
     visual_memory_pattern = re.compile(
         r"(visual continuity reference:\s*)(.*?)"
-        r"(?=,\s*(?:additional generation preference:|keep character identity|preserve character identity|the user's explicit clothing)|\.\s*Negative prompt:|$)",
+        r"(?=,\s*(?:additional generation preference:|keep character identity|the user's explicit clothing)|\.\s*Negative prompt:|$)",
         flags=re.I | re.S,
     )
 
@@ -570,6 +594,22 @@ def _automatic_presets(
     return ("可拍画面",)
 
 
+def _explicit_prompt_preset(workflow_kind: str, intent: PhotoWardrobeIntent) -> str:
+    kind = _clean_text(workflow_kind, 40).lower()
+    text = intent.positive_text.lower()
+    if any(token in text for token in ("表情包", "贴纸", "sticker", "meme")):
+        return "表情包场景"
+    if kind in _SELFIE_WORKFLOWS:
+        if _explicit_mirror_request(text):
+            return "镜前穿搭"
+        if any(token in text for token in ("头像", "特写", "大头", "avatar", "close-up", "closeup", "profile picture")):
+            return "头像特写"
+        return ""
+    if any(token in text for token in ("房间", "桌", "书", "杯", "床", "窗边", "室内", "room", "desk", "book", "cup", "bed", "window", "indoor")):
+        return "房间日常"
+    return ""
+
+
 def _selected_presets(
     *,
     workflow_kind: str,
@@ -579,77 +619,43 @@ def _selected_presets(
     excluded_categories: Collection[str],
 ) -> tuple[str, ...]:
     available = {_clean_text(name, 80) for name in available_presets if _clean_text(name, 80)}
-    if intent.requested_scene_preset and intent.requested_scene_preset in available:
-        return (intent.requested_scene_preset,)
     if preset_name and preset_name in available:
         return (preset_name,)
     return tuple(
         name
         for name in _automatic_presets(workflow_kind, intent, excluded_categories)
         if name in available
-    )[:3]
+    )[:1]
 
 
-def _clean_decision_context(
+def _validated_reference_preferred_preset(
+    value: Any,
     *,
-    base_prompt: str,
-    prompt_text: str,
-    scene_context: str,
-    remove_daily_outfit: bool,
-) -> tuple[str, str, tuple[str, ...]]:
-    cleaned_prompt = str(base_prompt or prompt_text or "").strip()
-    cleaned_scene = _clean_text(scene_context, 2400)
-    adjustments: list[str] = []
-    if remove_daily_outfit and _DAILY_OUTFIT_PATTERN.search(cleaned_scene):
-        updated_scene = _scene_without_daily_outfit_details(cleaned_scene)
-        if updated_scene != cleaned_scene:
-            cleaned_scene = updated_scene
-            adjustments.append("daily_outfit_context_removed")
-    if remove_daily_outfit:
-        updated_prompt = _prompt_without_generated_daily_outfit_continuity(cleaned_prompt)
-        if updated_prompt != cleaned_prompt:
-            cleaned_prompt = updated_prompt
-            adjustments.append("generated_daily_outfit_continuity_removed")
-    return cleaned_prompt, cleaned_scene, tuple(adjustments)
+    available_presets: set[str],
+    excluded_categories: set[str],
+    outfit_category: str = "",
+    adjustments: list[str],
+) -> str:
+    preferred_preset = _clean_text(value, 60)
+    if not preferred_preset:
+        return ""
+    if preferred_preset not in available_presets:
+        adjustments.append("reference_preferred_preset_unknown")
+        return ""
 
-
-def _daily_outfit_context_is_applicable(prompt_text: str, scene_context: str) -> bool:
-    prompt = _clean_text(prompt_text, 1800)
-    context = _clean_text(scene_context, 2400)
-    blocked_pattern = (
-        r"卧室|在家|家里|居家|睡前|临睡|准备睡|刚起床|刚醒|起床后"
-        r"|\b(?:bedroom|at\s+home|bedtime|before\s+bed|just\s+woke|waking\s+up)\b"
-    )
-    applicable_pattern = (
-        r"外出|出门|通勤|上学|上班|逛街|购物|商场|街头|街边|旅行|旅游|公园|户外|散步"
-        r"|\b(?:outdoors?|going\s+out|commut(?:e|ing)|school|class|work|office|shopping|mall|street|"
-        r"travel|trip|park|walk(?:ing)?)\b"
-    )
-    departing_home_pattern = (
-        r"(?:离开|走出)(?:卧室|家里|家)|从(?:卧室|家里|家).{0,10}(?:出门|外出|去|前往|到)"
-        r"|\b(?:leave|leaving)\s+(?:the\s+)?(?:bedroom|home)\b"
-        r"|\bfrom\s+(?:the\s+)?(?:bedroom|home).{0,30}\b(?:to|for|going\s+out)\b"
-    )
-    if re.search(
-        r"(?:展示|看看|晒|拍).{0,12}(?:今日|今天|当天).{0,8}(?:穿搭|衣服|服装|造型)"
-        r"|(?:今日|今天|当天).{0,8}(?:穿搭|衣服|服装|造型).{0,12}(?:展示|看看|晒|拍)"
-        r"|\b(?:show(?:ing)?\s+off\s+today'?s\s+outfit|show\s+(?:me\s+)?today'?s\s+outfit|outfit\s+check|ootd)\b",
-        prompt,
-        flags=re.I,
-    ):
-        return True
+    preferred_category = _preset_category(preferred_preset)
+    if preferred_category and preferred_category in excluded_categories:
+        adjustments.append("reference_preferred_preset_user_conflict")
+        return ""
     if (
-        re.search(departing_home_pattern, prompt, flags=re.I)
-        and re.search(applicable_pattern, prompt, flags=re.I)
+        outfit_category
+        and outfit_category != "reference_outfit"
+        and preferred_category
+        and preferred_category != outfit_category
     ):
-        return True
-    if re.search(blocked_pattern, prompt, flags=re.I):
-        return False
-    if re.search(applicable_pattern, prompt, flags=re.I):
-        return True
-    if re.search(blocked_pattern, context, flags=re.I):
-        return False
-    return bool(re.search(applicable_pattern, context, flags=re.I))
+        adjustments.append("reference_preferred_preset_conflict")
+        return ""
+    return preferred_preset
 
 
 def resolve_photo_wardrobe_decision(
@@ -658,14 +664,13 @@ def resolve_photo_wardrobe_decision(
     prompt_text: str,
     reference: Mapping[str, Any] | None,
     scene_context: str = "",
-    requested_scene_preset: str = "",
+    suggested_scene_preset: str = "",
+    workflow_default_scene_preset: str = "",
     intent: PhotoWardrobeIntent | None = None,
     base_prompt: str = "",
     available_presets: Collection[str] = (),
 ) -> PhotoWardrobeDecision:
-    resolved_intent = intent or analyze_photo_wardrobe(prompt_text, requested_scene_preset)
-    if requested_scene_preset and resolved_intent.requested_scene_preset != _clean_text(requested_scene_preset, 80):
-        raise ValueError("intent does not match requested_scene_preset")
+    resolved_intent = intent or analyze_photo_wardrobe(prompt_text)
 
     normalized_kind = _clean_text(workflow_kind, 40).lower()
     reference_data = dict(reference or {})
@@ -677,23 +682,99 @@ def resolve_photo_wardrobe_decision(
     adjustments: list[str] = []
     reference_category = _clean_text(reference_data.get("outfit_category"), 40).lower()
     reference_locks = bool(reference_data.get("outfit_lock_default")) and "outfit" in roles
-    preset_category = resolved_intent.requested_preset_category
-    preset_name = resolved_intent.requested_scene_preset if preset_category else ""
-    remove_daily = bool(preset_category and preset_category != "daily_outfit")
+    suggested_preset = _clean_text(suggested_scene_preset, 80)
+    suggested_category = _preset_category(suggested_preset)
+    available = {
+        _clean_text(name, 80)
+        for name in available_presets
+        if _clean_text(name, 80)
+    }
+    excluded_categories = set(resolved_intent.excluded_categories)
+    workflow_default_preset = _clean_text(workflow_default_scene_preset, 80)
+    if (
+        workflow_default_preset not in available
+        or _preset_category(workflow_default_preset) in excluded_categories
+    ):
+        workflow_default_preset = ""
+    requested_locations = _location_categories(resolved_intent.positive_text)
+    ambient_locations = _ambient_location_categories(scene_context)
+    if normalized_kind in _SELFIE_WORKFLOWS and _location_categories_conflict(
+        requested_locations,
+        ambient_locations,
+    ):
+        cleaned_scene = _scene_without_ambient_location_fields(scene_context)
+        if cleaned_scene != _clean_text(scene_context, 2400):
+            scene_context = cleaned_scene
+            adjustments.append("ambient_location_context_removed")
+
     if normalized_kind not in _SELFIE_WORKFLOWS:
-        selected = _selected_presets(
-            workflow_kind=workflow_kind,
-            intent=resolved_intent,
-            preset_name="",
-            available_presets=available_presets,
-            excluded_categories=resolved_intent.excluded_categories,
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        suggestion_conflicts_with_user = bool(
+            suggested_category
+            and suggested_category in excluded_categories
         )
+        if normalized_kind in _EDIT_WORKFLOWS:
+            selected = ()
+            preset_source = "none"
+            suggestion_status = "rejected_workflow" if suggested_preset else "not_provided"
+        elif explicit_prompt_preset and explicit_prompt_preset in available:
+            selected = (explicit_prompt_preset,)
+            preset_source = "user_prompt"
+            suggestion_status = (
+                "not_provided"
+                if not suggested_preset
+                else (
+                    "rejected_user_conflict"
+                    if suggestion_conflicts_with_user
+                    else ("accepted" if suggested_preset in selected else "shadowed_by_user")
+                )
+            )
+        elif suggested_preset and suggested_preset in available and not suggestion_conflicts_with_user:
+            selected = (suggested_preset,)
+            preset_source = "tool_suggestion"
+            suggestion_status = "accepted"
+        elif workflow_default_preset:
+            selected = (workflow_default_preset,)
+            preset_source = "workflow_default"
+            suggestion_status = (
+                "rejected_user_conflict"
+                if suggestion_conflicts_with_user
+                else ("rejected_unknown" if suggested_preset else "not_provided")
+            )
+        elif normalized_kind == "sticker" and "表情包场景" in available:
+            selected = ("表情包场景",)
+            preset_source = "workflow_default"
+            suggestion_status = (
+                "rejected_user_conflict"
+                if suggestion_conflicts_with_user
+                else ("rejected_unknown" if suggested_preset else "not_provided")
+            )
+        else:
+            selected = tuple(
+                name
+                for name in _automatic_presets(
+                    workflow_kind,
+                    resolved_intent,
+                    resolved_intent.excluded_categories,
+                )
+                if name in available
+            )[:1]
+            preset_source = "workflow_default" if selected else "none"
+            suggestion_status = (
+                "rejected_user_conflict"
+                if suggestion_conflicts_with_user
+                else ("rejected_unknown" if suggested_preset else "not_provided")
+            )
+        preset_name = selected[0] if selected else ""
         return PhotoWardrobeDecision(
             rule_id="non_selfie_source_edit" if normalized_kind in _EDIT_WORKFLOWS and reference_path else "non_selfie",
             mode="source_edit" if normalized_kind in _EDIT_WORKFLOWS and reference_path else "none",
             source="explicit_reference" if reference_path else "none",
-            authoritative_preset=resolved_intent.requested_scene_preset,
+            preset_name=preset_name,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=preset_source,
+            suggestion_status=suggestion_status,
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
@@ -704,62 +785,6 @@ def resolve_photo_wardrobe_decision(
             excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
-        )
-
-    if preset_category:
-        if reference_category != preset_category and "outfit" in effective_roles:
-            effective_roles = tuple(role for role in effective_roles if role != "outfit")
-            adjustments.append("reference_outfit_role_removed")
-        effective_exclusions = tuple(
-            category for category in resolved_intent.excluded_categories if category != preset_category
-        )
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=remove_daily,
-        )
-        adjustments.extend(context_adjustments)
-        selected = _selected_presets(
-            workflow_kind=workflow_kind,
-            intent=resolved_intent,
-            preset_name=preset_name,
-            available_presets=available_presets,
-            excluded_categories=effective_exclusions,
-        )
-        category_label = _outfit_label(preset_category)
-        return PhotoWardrobeDecision(
-            rule_id="explicit_scene_preset",
-            mode="explicit_preset",
-            source="requested_scene_preset",
-            category=preset_category,
-            lock_outfit=True,
-            remove_daily_outfit_context=remove_daily,
-            preset_name=preset_name,
-            authoritative_preset=preset_name,
-            selected_presets=selected,
-            reference_image_path=reference_path,
-            reference_id=reference_id,
-            reference_kind=reference_kind,
-            reference_roles=roles,
-            effective_reference_roles=effective_roles,
-            positive_instruction=(
-                f"The explicitly requested scene preset '{preset_name}' is an authoritative wardrobe request. "
-                f"Render exactly one coherent {category_label} outfit; use a matching outfit reference when available, "
-                "and use an incompatible reference only for identity and other compatible details."
-            ),
-            negative_instruction=(
-                "Do not restore clothing from today's outfit, schedule context, an older photo, or an incompatible reference. "
-                "Do not reinterpret the requested preset as a negative prompt or an excluded wardrobe category."
-                if remove_daily
-                else "Do not replace today's requested outfit with an unrelated costume or wardrobe."
-            ),
-            reason="structured scene preset explicitly controls the wardrobe",
-            excluded_categories=effective_exclusions,
-            excluded_outfit_text=resolved_intent.exclusion_text,
-            requested_outfit_text=preset_name,
-            base_prompt=cleaned_prompt,
-            scene_context=cleaned_scene,
             adjustments=tuple(adjustments),
         )
 
@@ -767,19 +792,30 @@ def resolve_photo_wardrobe_decision(
     if explicit_category:
         if (
             explicit_category == "custom_outfit"
-            or reference_category != explicit_category
+            or not reference_category
+            or (reference_category and reference_category != explicit_category)
         ) and "outfit" in effective_roles:
             effective_roles = tuple(role for role in effective_roles if role != "outfit")
             adjustments.append("reference_outfit_role_removed")
         remove_daily = explicit_category != "daily_outfit"
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=remove_daily,
+        cleaned_scene = _clean_text(scene_context, 2400)
+        cleaned_prompt = str(base_prompt or prompt_text or "").strip()
+        if remove_daily and _DAILY_OUTFIT_PATTERN.search(cleaned_scene):
+            updated_scene = _scene_without_daily_outfit_details(cleaned_scene)
+            if updated_scene != cleaned_scene:
+                cleaned_scene = updated_scene
+                adjustments.append("daily_outfit_context_removed")
+        if remove_daily:
+            updated_prompt = _prompt_without_generated_daily_outfit_continuity(cleaned_prompt)
+            if updated_prompt != cleaned_prompt:
+                cleaned_prompt = updated_prompt
+                adjustments.append("generated_daily_outfit_continuity_removed")
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        preset_name = (
+            explicit_prompt_preset
+            if explicit_prompt_preset in available
+            else _CATEGORY_PRESETS.get(explicit_category, "")
         )
-        adjustments.extend(context_adjustments)
-        preset_name = _CATEGORY_PRESETS.get(explicit_category, "")
         selected = _selected_presets(
             workflow_kind=workflow_kind,
             intent=resolved_intent,
@@ -787,6 +823,7 @@ def resolve_photo_wardrobe_decision(
             available_presets=available_presets,
             excluded_categories=resolved_intent.excluded_categories,
         )
+        preset_name = selected[0] if selected else ""
         exclusion_instruction = (
             f"Respect the current request's explicit wardrobe exclusions: {resolved_intent.exclusion_text}."
             if resolved_intent.exclusion_text
@@ -800,8 +837,30 @@ def resolve_photo_wardrobe_decision(
             lock_outfit=True,
             remove_daily_outfit_context=remove_daily,
             preset_name=preset_name,
-            authoritative_preset=resolved_intent.requested_scene_preset,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=(
+                "user_prompt"
+                if explicit_prompt_preset in selected
+                else ("wardrobe_category" if selected else "none")
+            ),
+            suggestion_status=(
+                "not_provided"
+                if not suggested_preset
+                else (
+                    "rejected_unknown"
+                    if suggested_preset not in available
+                    else (
+                        "accepted"
+                        if suggested_preset in selected
+                        else (
+                            "rejected_user_conflict"
+                            if suggested_category and suggested_category != explicit_category
+                            else "shadowed_by_user"
+                        )
+                    )
+                )
+            ),
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
@@ -837,73 +896,90 @@ def resolve_photo_wardrobe_decision(
             adjustments=tuple(adjustments),
         )
 
-    excluded_categories = set(resolved_intent.excluded_categories)
-    reference_outfit_excluded = bool(
-        reference_category and reference_category in excluded_categories
-    ) or bool(
-        "outfit" in roles
-        and _reference_matches_custom_exclusion(
-            reference_data,
-            resolved_intent.exclusion_text,
-        )
+    excluded_daily_context_removed = bool(
+        excluded_categories & _daily_outfit_categories(scene_context)
     )
-    scene_outfit_categories = {
-        category for category, *_ in _outfit_category_matches(scene_context)
-    }
-    scene_daily_outfit_excluded = bool(
-        _DAILY_OUTFIT_PATTERN.search(str(scene_context or ""))
-        and (
-            scene_outfit_categories.intersection(excluded_categories)
-            or _daily_outfit_matches_custom_exclusion(
-                scene_context,
-                resolved_intent.exclusion_text,
-            )
+    if excluded_daily_context_removed:
+        cleaned_scene = _scene_without_daily_outfit_details(scene_context)
+        if cleaned_scene != _clean_text(scene_context, 2400):
+            scene_context = cleaned_scene
+            adjustments.append("daily_outfit_context_removed")
+        cleaned_prompt = _prompt_without_generated_daily_outfit_continuity(
+            str(base_prompt or prompt_text or "").strip()
         )
-    )
-    compatible_locked_reference = bool(
-        reference_locks
-        and reference_category
-        and reference_category not in excluded_categories
-        and reference_kind != "daily_outfit"
-    )
-    unknown_locked_reference = bool(reference_locks and not reference_category and excluded_categories)
-
-    if scene_daily_outfit_excluded and compatible_locked_reference:
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=True,
-        )
+        if cleaned_prompt != str(base_prompt or prompt_text or "").strip():
+            adjustments.append("generated_daily_outfit_continuity_removed")
         base_prompt = cleaned_prompt
-        scene_context = cleaned_scene
-        adjustments.extend(context_adjustments)
-
-    if (
-        reference_outfit_excluded
-        or unknown_locked_reference
-        or (scene_daily_outfit_excluded and not compatible_locked_reference)
-    ):
-        if "outfit" in effective_roles and (
-            reference_outfit_excluded or unknown_locked_reference or reference_kind == "daily_outfit"
-        ):
+        if reference_kind == "daily_outfit" and "outfit" in effective_roles:
             effective_roles = tuple(role for role in effective_roles if role != "outfit")
             adjustments.append("reference_outfit_role_removed")
-        remove_daily = reference_category == "daily_outfit" or scene_daily_outfit_excluded
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=remove_daily,
+            reference_locks = False
+
+    if excluded_categories and reference_locks and not reference_category:
+        effective_roles = tuple(role for role in effective_roles if role != "outfit")
+        adjustments.append("reference_outfit_role_removed")
+        reference_locks = False
+
+    if reference_category and reference_category in excluded_categories:
+        if "outfit" in effective_roles:
+            effective_roles = tuple(role for role in effective_roles if role != "outfit")
+            adjustments.append("reference_outfit_role_removed")
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        preferred_preset = _validated_reference_preferred_preset(
+            reference_data.get("preferred_preset"),
+            available_presets=available,
+            excluded_categories=excluded_categories,
+            outfit_category=reference_category,
+            adjustments=adjustments,
         )
-        adjustments.extend(context_adjustments)
+        suggestion_compatible = bool(
+            suggested_preset
+            and suggested_preset in available
+            and suggested_category not in excluded_categories
+        )
+        if explicit_prompt_preset and explicit_prompt_preset in available:
+            preset_name = explicit_prompt_preset
+            preset_source = "user_prompt"
+        elif preferred_preset:
+            preset_name = preferred_preset
+            preset_source = "reference_preferred"
+        elif suggestion_compatible:
+            preset_name = suggested_preset
+            preset_source = "tool_suggestion"
+        elif workflow_default_preset:
+            preset_name = workflow_default_preset
+            preset_source = "workflow_default"
+        else:
+            preset_name = ""
+            preset_source = "none"
         selected = _selected_presets(
             workflow_kind=workflow_kind,
             intent=resolved_intent,
-            preset_name="",
+            preset_name=preset_name,
             available_presets=available_presets,
             excluded_categories=resolved_intent.excluded_categories,
         )
+        preset_name = selected[0] if selected else ""
+        if preset_name and preset_source == "none":
+            preset_source = "workflow_default"
+        selected_category = _preset_category(preset_name)
+        remove_daily = bool(
+            reference_category == "daily_outfit"
+            or excluded_daily_context_removed
+            or (selected_category and selected_category != "daily_outfit")
+        )
+        cleaned_scene = _clean_text(scene_context, 2400)
+        cleaned_prompt = str(base_prompt or prompt_text or "").strip()
+        if remove_daily and _DAILY_OUTFIT_PATTERN.search(cleaned_scene):
+            updated_scene = _scene_without_daily_outfit_details(cleaned_scene)
+            if updated_scene != cleaned_scene:
+                cleaned_scene = updated_scene
+                adjustments.append("daily_outfit_context_removed")
+        if remove_daily:
+            updated_prompt = _prompt_without_generated_daily_outfit_continuity(cleaned_prompt)
+            if updated_prompt != cleaned_prompt:
+                cleaned_prompt = updated_prompt
+                adjustments.append("generated_daily_outfit_continuity_removed")
         exclusion_instruction = (
             f"Respect the current request's explicit wardrobe exclusions: {resolved_intent.exclusion_text}."
             if resolved_intent.exclusion_text
@@ -913,24 +989,50 @@ def resolve_photo_wardrobe_decision(
             rule_id="explicit_exclusion",
             mode="explicit_exclusion",
             source="user_prompt",
+            category=selected_category,
+            lock_outfit=bool(selected_category),
             remove_daily_outfit_context=remove_daily,
-            authoritative_preset=resolved_intent.requested_scene_preset,
+            preset_name=preset_name,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=preset_source,
+            suggestion_status=(
+                "rejected_user_conflict"
+                if suggested_preset and suggested_category in excluded_categories
+                else (
+                    "rejected_unknown"
+                    if suggested_preset and suggested_preset not in available
+                    else (
+                        "accepted"
+                        if suggested_preset and suggested_preset in selected
+                        else (
+                            "shadowed_by_user"
+                            if suggested_preset and explicit_prompt_preset in selected
+                            else (
+                                "shadowed_by_reference"
+                                if suggested_preset and preferred_preset in selected
+                                else ("rejected_user_conflict" if suggested_preset else "not_provided")
+                            )
+                        )
+                    )
+                )
+            ),
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
             reference_roles=roles,
             effective_reference_roles=effective_roles,
             positive_instruction=(
-                "Use the selected reference and schedule context only for responsibilities compatible with the current request; "
-                "do not use wardrobe details that the current request explicitly excludes."
+                "Use the selected reference for identity and other compatible responsibilities only; "
+                "its outfit is explicitly excluded by the current request."
+                + (
+                    f" Render one coherent {_outfit_label(selected_category)} outfit from the selected preset."
+                    if selected_category
+                    else ""
+                )
             ),
             negative_instruction=exclusion_instruction,
-            reason=(
-                "selected reference outfit is explicitly excluded by the current request"
-                if reference_outfit_excluded or unknown_locked_reference
-                else "daily outfit context conflicts with an explicit wardrobe exclusion"
-            ),
+            reason="selected reference outfit is explicitly excluded by the current request",
             excluded_categories=resolved_intent.excluded_categories,
             excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=cleaned_prompt,
@@ -938,12 +1040,29 @@ def resolve_photo_wardrobe_decision(
             adjustments=tuple(adjustments),
         )
 
-    daily_outfit_reference_removed = False
-    if reference_kind == "daily_outfit" and _daily_outfit_context_is_applicable(
-        resolved_intent.positive_text,
-        scene_context,
-    ):
-        preset_name = "日常穿搭"
+    if reference_kind == "daily_outfit" and not excluded_daily_context_removed:
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        preferred_preset = _validated_reference_preferred_preset(
+            reference_data.get("preferred_preset"),
+            available_presets=available,
+            excluded_categories=excluded_categories,
+            outfit_category="daily_outfit",
+            adjustments=adjustments,
+        )
+        suggestion_compatible = bool(
+            suggested_preset
+            and suggested_preset in available
+            and suggested_category not in excluded_categories
+            and (not suggested_category or suggested_category == "daily_outfit")
+        )
+        if explicit_prompt_preset and explicit_prompt_preset in available:
+            preset_name = explicit_prompt_preset
+        elif preferred_preset:
+            preset_name = preferred_preset
+        elif suggestion_compatible:
+            preset_name = suggested_preset
+        else:
+            preset_name = _CATEGORY_PRESETS["daily_outfit"]
         selected = _selected_presets(
             workflow_kind=workflow_kind,
             intent=resolved_intent,
@@ -951,6 +1070,7 @@ def resolve_photo_wardrobe_decision(
             available_presets=available_presets,
             excluded_categories=resolved_intent.excluded_categories,
         )
+        preset_name = selected[0] if selected else ""
         exclusion_instruction = (
             f"Respect the current request's explicit wardrobe exclusions: {resolved_intent.exclusion_text}."
             if resolved_intent.exclusion_text
@@ -963,8 +1083,38 @@ def resolve_photo_wardrobe_decision(
             category="daily_outfit",
             lock_outfit=True,
             preset_name=preset_name,
-            authoritative_preset=resolved_intent.requested_scene_preset,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=(
+                "user_prompt"
+                if explicit_prompt_preset in selected
+                else (
+                    "reference_preferred"
+                    if preferred_preset in selected
+                    else (
+                        "tool_suggestion"
+                        if suggested_preset in selected
+                        else ("wardrobe_category" if selected else "none")
+                    )
+                )
+            ),
+            suggestion_status=(
+                "accepted"
+                if suggested_preset and suggested_preset in selected
+                else (
+                    "rejected_unknown"
+                    if suggested_preset and suggested_preset not in available
+                    else (
+                        "shadowed_by_user"
+                        if suggested_preset and explicit_prompt_preset in selected
+                        else (
+                            "rejected_reference_conflict"
+                            if suggested_preset and suggested_category and suggested_category != "daily_outfit"
+                            else ("shadowed_by_reference" if suggested_preset else "not_provided")
+                        )
+                    )
+                )
+            ),
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
@@ -987,39 +1137,54 @@ def resolve_photo_wardrobe_decision(
             excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
+            adjustments=tuple(adjustments),
         )
-
-    if reference_kind == "daily_outfit":
-        adjustments.append("daily_outfit_reference_not_applicable")
-        if "outfit" in effective_roles:
-            effective_roles = tuple(role for role in effective_roles if role != "outfit")
-            adjustments.append("reference_outfit_role_removed")
-        reference_locks = False
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=True,
-        )
-        base_prompt = cleaned_prompt
-        scene_context = cleaned_scene
-        adjustments.extend(context_adjustments)
-        daily_outfit_reference_removed = True
 
     if reference_kind == "recent_sent_photo" and reference_locks:
         category = reference_category or "reference_outfit"
-        remove_daily = category != "daily_outfit"
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=remove_daily,
+        remove_daily = category != "daily_outfit" or excluded_daily_context_removed
+        cleaned_scene = _clean_text(scene_context, 2400)
+        cleaned_prompt = str(base_prompt or prompt_text or "").strip()
+        if remove_daily and _DAILY_OUTFIT_PATTERN.search(cleaned_scene):
+            updated_scene = _scene_without_daily_outfit_details(cleaned_scene)
+            if updated_scene != cleaned_scene:
+                cleaned_scene = updated_scene
+                adjustments.append("daily_outfit_context_removed")
+        if remove_daily:
+            updated_prompt = _prompt_without_generated_daily_outfit_continuity(cleaned_prompt)
+            if updated_prompt != cleaned_prompt:
+                cleaned_prompt = updated_prompt
+                adjustments.append("generated_daily_outfit_continuity_removed")
+        available = {
+            _clean_text(name, 80)
+            for name in available_presets
+            if _clean_text(name, 80)
+        }
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        preferred_preset = _validated_reference_preferred_preset(
+            reference_data.get("preferred_preset"),
+            available_presets=available,
+            excluded_categories=excluded_categories,
+            outfit_category=category,
+            adjustments=adjustments,
         )
-        adjustments.extend(context_adjustments)
-        preset_name = _clean_text(reference_data.get("preferred_preset"), 60) or _CATEGORY_PRESETS.get(
-            category,
-            "",
+        suggestion_compatible = bool(
+            suggested_preset
+            and suggested_preset in available
+            and suggested_category not in set(resolved_intent.excluded_categories)
+            and (
+                not suggested_category
+                or (category != "reference_outfit" and suggested_category == category)
+            )
         )
+        if explicit_prompt_preset and explicit_prompt_preset in available:
+            preset_name = explicit_prompt_preset
+        elif preferred_preset and preferred_preset in available:
+            preset_name = preferred_preset
+        elif suggestion_compatible:
+            preset_name = suggested_preset
+        else:
+            preset_name = _CATEGORY_PRESETS.get(category, "")
         selected = _selected_presets(
             workflow_kind=workflow_kind,
             intent=resolved_intent,
@@ -1027,6 +1192,7 @@ def resolve_photo_wardrobe_decision(
             available_presets=available_presets,
             excluded_categories=resolved_intent.excluded_categories,
         )
+        preset_name = selected[0] if selected else ""
         exclusion_instruction = (
             f"Respect the current request's explicit wardrobe exclusions: {resolved_intent.exclusion_text}."
             if resolved_intent.exclusion_text
@@ -1040,8 +1206,42 @@ def resolve_photo_wardrobe_decision(
             lock_outfit=True,
             remove_daily_outfit_context=remove_daily,
             preset_name=preset_name,
-            authoritative_preset=resolved_intent.requested_scene_preset,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=(
+                "user_prompt"
+                if explicit_prompt_preset in selected
+                else (
+                    "reference_preferred"
+                    if preferred_preset in selected
+                    else (
+                        "tool_suggestion"
+                        if suggested_preset in selected
+                        else ("wardrobe_category" if selected else "none")
+                    )
+                )
+            ),
+            suggestion_status=(
+                "accepted"
+                if suggested_preset and suggested_preset in selected
+                else (
+                    "rejected_unknown"
+                    if suggested_preset and suggested_preset not in available
+                    else (
+                        "rejected_reference_conflict"
+                        if (
+                            suggested_preset
+                            and suggested_category
+                            and (category == "reference_outfit" or suggested_category != category)
+                        )
+                        else (
+                            "shadowed_by_user"
+                            if suggested_preset and explicit_prompt_preset in selected
+                            else ("shadowed_by_reference" if suggested_preset else "not_provided")
+                        )
+                    )
+                )
+            ),
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
@@ -1070,18 +1270,49 @@ def resolve_photo_wardrobe_decision(
 
     if reference_locks:
         category = reference_category or "reference_outfit"
-        remove_daily = category != "daily_outfit"
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=remove_daily,
+        remove_daily = category != "daily_outfit" or excluded_daily_context_removed
+        cleaned_scene = _clean_text(scene_context, 2400)
+        cleaned_prompt = str(base_prompt or prompt_text or "").strip()
+        if remove_daily and _DAILY_OUTFIT_PATTERN.search(cleaned_scene):
+            updated_scene = _scene_without_daily_outfit_details(cleaned_scene)
+            if updated_scene != cleaned_scene:
+                cleaned_scene = updated_scene
+                adjustments.append("daily_outfit_context_removed")
+        if remove_daily:
+            updated_prompt = _prompt_without_generated_daily_outfit_continuity(cleaned_prompt)
+            if updated_prompt != cleaned_prompt:
+                cleaned_prompt = updated_prompt
+                adjustments.append("generated_daily_outfit_continuity_removed")
+        available = {
+            _clean_text(name, 80)
+            for name in available_presets
+            if _clean_text(name, 80)
+        }
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        preferred_preset = _validated_reference_preferred_preset(
+            reference_data.get("preferred_preset"),
+            available_presets=available,
+            excluded_categories=excluded_categories,
+            outfit_category=category,
+            adjustments=adjustments,
         )
-        adjustments.extend(context_adjustments)
-        preset_name = _clean_text(reference_data.get("preferred_preset"), 60) or _CATEGORY_PRESETS.get(
-            category,
-            "",
+        suggestion_compatible = bool(
+            suggested_preset
+            and suggested_preset in available
+            and suggested_category not in set(resolved_intent.excluded_categories)
+            and (
+                not suggested_category
+                or (category != "reference_outfit" and suggested_category == category)
+            )
         )
+        if explicit_prompt_preset and explicit_prompt_preset in available:
+            preset_name = explicit_prompt_preset
+        elif preferred_preset and preferred_preset in available:
+            preset_name = preferred_preset
+        elif suggestion_compatible:
+            preset_name = suggested_preset
+        else:
+            preset_name = _CATEGORY_PRESETS.get(category, "")
         selected = _selected_presets(
             workflow_kind=workflow_kind,
             intent=resolved_intent,
@@ -1089,6 +1320,7 @@ def resolve_photo_wardrobe_decision(
             available_presets=available_presets,
             excluded_categories=resolved_intent.excluded_categories,
         )
+        preset_name = selected[0] if selected else ""
         exclusion_instruction = (
             f"Respect the current request's explicit wardrobe exclusions: {resolved_intent.exclusion_text}."
             if resolved_intent.exclusion_text
@@ -1102,8 +1334,42 @@ def resolve_photo_wardrobe_decision(
             lock_outfit=True,
             remove_daily_outfit_context=remove_daily,
             preset_name=preset_name,
-            authoritative_preset=resolved_intent.requested_scene_preset,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=(
+                "user_prompt"
+                if explicit_prompt_preset in selected
+                else (
+                    "reference_preferred"
+                    if preferred_preset in selected
+                    else (
+                        "tool_suggestion"
+                        if suggested_preset in selected
+                        else ("wardrobe_category" if selected else "none")
+                    )
+                )
+            ),
+            suggestion_status=(
+                "accepted"
+                if suggested_preset and suggested_preset in selected
+                else (
+                    "rejected_unknown"
+                    if suggested_preset and suggested_preset not in available
+                    else (
+                        "rejected_reference_conflict"
+                        if (
+                            suggested_preset
+                            and suggested_category
+                            and (category == "reference_outfit" or suggested_category != category)
+                        )
+                        else (
+                            "shadowed_by_user"
+                            if suggested_preset and explicit_prompt_preset in selected
+                            else ("shadowed_by_reference" if suggested_preset else "not_provided")
+                        )
+                    )
+                )
+            ),
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
@@ -1134,34 +1400,97 @@ def resolve_photo_wardrobe_decision(
             adjustments=tuple(adjustments),
         )
 
-    daily_outfit_context_removed = daily_outfit_reference_removed
-    daily_outfit_context_available = bool(
-        _DAILY_OUTFIT_PATTERN.search(str(scene_context or ""))
+    identity_reference_preferred = _validated_reference_preferred_preset(
+        reference_data.get("preferred_preset"),
+        available_presets=available,
+        excluded_categories=excluded_categories,
+        adjustments=adjustments,
     )
-    if daily_outfit_context_available and not _daily_outfit_context_is_applicable(
-        resolved_intent.positive_text, scene_context
+    if (
+        suggested_preset
+        and suggested_preset in available
+        and suggested_category
+        and suggested_category not in set(resolved_intent.excluded_categories)
+        and not (identity_reference_preferred and identity_reference_preferred in available)
     ):
-        adjustments.append("daily_outfit_context_not_applicable")
-        cleaned_prompt, cleaned_scene, context_adjustments = _clean_decision_context(
-            base_prompt=base_prompt,
-            prompt_text=prompt_text,
-            scene_context=scene_context,
-            remove_daily_outfit=True,
+        remove_daily = suggested_category != "daily_outfit" or excluded_daily_context_removed
+        cleaned_scene = _clean_text(scene_context, 2400)
+        cleaned_prompt = str(base_prompt or prompt_text or "").strip()
+        if remove_daily and _DAILY_OUTFIT_PATTERN.search(cleaned_scene):
+            updated_scene = _scene_without_daily_outfit_details(cleaned_scene)
+            if updated_scene != cleaned_scene:
+                cleaned_scene = updated_scene
+                adjustments.append("daily_outfit_context_removed")
+        if remove_daily:
+            updated_prompt = _prompt_without_generated_daily_outfit_continuity(cleaned_prompt)
+            if updated_prompt != cleaned_prompt:
+                cleaned_prompt = updated_prompt
+                adjustments.append("generated_daily_outfit_continuity_removed")
+        return PhotoWardrobeDecision(
+            rule_id="suggested_scene_preset",
+            mode="suggested_preset",
+            source="tool_suggestion",
+            category=suggested_category,
+            lock_outfit=True,
+            remove_daily_outfit_context=remove_daily,
+            preset_name=suggested_preset,
+            selected_presets=(suggested_preset,),
+            suggested_preset=suggested_preset,
+            preset_source="tool_suggestion",
+            suggestion_status="accepted",
+            reference_image_path=reference_path,
+            reference_id=reference_id,
+            reference_kind=reference_kind,
+            reference_roles=roles,
+            effective_reference_roles=effective_roles,
+            positive_instruction=(
+                f"Use the compatible suggested scene preset '{suggested_preset}' as the wardrobe source because the user "
+                "and selected reference do not provide a stronger outfit requirement. Render one coherent outfit."
+            ),
+            negative_instruction="Do not restore a conflicting outfit from schedule context or today's outfit.",
+            reason="compatible tool suggestion fills an otherwise unspecified wardrobe",
+            excluded_categories=resolved_intent.excluded_categories,
+            excluded_outfit_text=resolved_intent.exclusion_text,
+            base_prompt=cleaned_prompt,
+            scene_context=cleaned_scene,
+            adjustments=tuple(adjustments),
         )
-        base_prompt = cleaned_prompt
-        scene_context = cleaned_scene
-        adjustments.extend(context_adjustments)
-        daily_outfit_context_removed = True
 
     if _DAILY_OUTFIT_PATTERN.search(str(scene_context or "")):
-        preset_name = "日常穿搭"
-        selected = _selected_presets(
-            workflow_kind=workflow_kind,
-            intent=resolved_intent,
-            preset_name=preset_name,
-            available_presets=available_presets,
-            excluded_categories=resolved_intent.excluded_categories,
+        explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+        suggestion_allowed = bool(
+            suggested_preset
+            and suggested_preset in available
+            and not suggested_category
         )
+        if explicit_prompt_preset and explicit_prompt_preset in available:
+            selected = (explicit_prompt_preset,)
+            preset_source = "user_prompt"
+        elif identity_reference_preferred and identity_reference_preferred in available:
+            selected = (identity_reference_preferred,)
+            preset_source = "reference_preferred"
+        elif suggestion_allowed:
+            selected = (suggested_preset,)
+            preset_source = "tool_suggestion"
+        elif "日常穿搭" in available:
+            selected = ("日常穿搭",)
+            preset_source = "wardrobe_category"
+        else:
+            selected = ()
+            preset_source = "none"
+        if not suggested_preset:
+            suggestion_status = "not_provided"
+        elif suggested_preset not in available:
+            suggestion_status = "rejected_unknown"
+        elif suggested_preset in selected:
+            suggestion_status = "accepted"
+        elif explicit_prompt_preset in selected:
+            suggestion_status = "shadowed_by_user"
+        elif identity_reference_preferred in selected:
+            suggestion_status = "shadowed_by_reference"
+        else:
+            suggestion_status = "rejected_user_conflict"
+        preset_name = selected[0] if selected else ""
         return PhotoWardrobeDecision(
             rule_id="daily_outfit_context",
             mode="daily_outfit_context",
@@ -1169,13 +1498,15 @@ def resolve_photo_wardrobe_decision(
             category="daily_outfit",
             lock_outfit=False,
             preset_name=preset_name,
-            authoritative_preset=resolved_intent.requested_scene_preset,
             selected_presets=selected,
+            suggested_preset=suggested_preset,
+            preset_source=preset_source,
+            suggestion_status=suggestion_status,
             reference_image_path=reference_path,
             reference_id=reference_id,
             reference_kind=reference_kind,
             reference_roles=roles,
-            effective_reference_roles=roles,
+            effective_reference_roles=effective_roles,
             positive_instruction=(
                 "The selected reference, if present, controls identity only. Since the user did not request a clothing change, "
                 "today's outfit context may provide wardrobe continuity."
@@ -1186,22 +1517,70 @@ def resolve_photo_wardrobe_decision(
             excluded_outfit_text=resolved_intent.exclusion_text,
             base_prompt=str(base_prompt or prompt_text or "").strip(),
             scene_context=_clean_text(scene_context, 2400),
+            adjustments=tuple(adjustments),
         )
 
-    selected = _selected_presets(
-        workflow_kind=workflow_kind,
-        intent=resolved_intent,
-        preset_name="",
-        available_presets=available_presets,
-        excluded_categories=resolved_intent.excluded_categories,
+    explicit_prompt_preset = _explicit_prompt_preset(workflow_kind, resolved_intent)
+    suggestion_allowed = bool(
+        suggested_preset
+        and suggested_preset in available
+        and suggested_category not in set(resolved_intent.excluded_categories)
     )
+    if explicit_prompt_preset and explicit_prompt_preset in available:
+        selected = (explicit_prompt_preset,)
+        preset_source = "user_prompt"
+    elif identity_reference_preferred and identity_reference_preferred in available:
+        selected = (identity_reference_preferred,)
+        preset_source = "reference_preferred"
+    elif suggestion_allowed:
+        selected = (suggested_preset,)
+        preset_source = "tool_suggestion"
+    else:
+        selected = (
+            (workflow_default_preset,)
+            if workflow_default_preset
+            else tuple(
+                name
+                for name in _automatic_presets(
+                    workflow_kind,
+                    resolved_intent,
+                    resolved_intent.excluded_categories,
+                )
+                if name in available
+            )[:1]
+        )
+        preset_source = (
+            "user_prompt"
+            if selected
+            and not workflow_default_preset
+            and selected[0] not in {"角色自拍", "可拍画面"}
+            else ("workflow_default" if selected else "none")
+        )
+    preset_name = selected[0] if selected else ""
+    if not suggested_preset:
+        suggestion_status = "not_provided"
+    elif suggested_preset not in available:
+        suggestion_status = "rejected_unknown"
+    elif suggested_category in set(resolved_intent.excluded_categories):
+        suggestion_status = "rejected_user_conflict"
+    elif suggested_preset in selected:
+        suggestion_status = "accepted"
+    elif explicit_prompt_preset in selected:
+        suggestion_status = "shadowed_by_user"
+    elif identity_reference_preferred in selected:
+        suggestion_status = "shadowed_by_reference"
+    else:
+        suggestion_status = "rejected_user_conflict"
     return PhotoWardrobeDecision(
         rule_id="identity_only" if reference_path else "no_wardrobe_source",
         mode="identity_only" if reference_path else "none",
         source="selected_reference" if reference_path else "none",
-        remove_daily_outfit_context=daily_outfit_context_removed,
-        authoritative_preset=resolved_intent.requested_scene_preset,
+        remove_daily_outfit_context=excluded_daily_context_removed,
+        preset_name=preset_name,
         selected_presets=selected,
+        suggested_preset=suggested_preset,
+        preset_source=preset_source,
+        suggestion_status=suggestion_status,
         reference_image_path=reference_path,
         reference_id=reference_id,
         reference_kind=reference_kind,

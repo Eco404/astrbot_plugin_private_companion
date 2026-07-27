@@ -54,7 +54,7 @@ class PhotoWardrobeIntegrationTests(unittest.TestCase):
         self.assertEqual(select_intent.id, "wardrobe_intent")
         self.assertEqual(resolve_intent.id, "wardrobe_intent")
 
-    def test_structured_preset_category_is_not_penalized_as_an_exclusion(self) -> None:
+    def test_selection_score_only_treats_outfit_roles_as_clothing_constraints(self) -> None:
         score_function = _function(
             _module_tree("proactive_message.py"),
             "_photo_reference_candidate_score",
@@ -76,12 +76,11 @@ class PhotoWardrobeIntegrationTests(unittest.TestCase):
         exec(compile(module, "proactive_message.py", "exec"), namespace)
         score = namespace["ScoreHarness"]._photo_reference_candidate_score
         intent = PhotoWardrobeIntent(
+            target_category="school_uniform",
             excluded_categories=("sleepwear",),
-            requested_scene_preset="居家睡衣",
-            requested_preset_category="sleepwear",
         )
 
-        matching_score = score(
+        outfit_score = score(
             {
                 "kind": "library",
                 "note": "卧室睡衣参考",
@@ -89,24 +88,26 @@ class PhotoWardrobeIntegrationTests(unittest.TestCase):
                 "reference_roles": ["identity", "outfit"],
                 "outfit_lock_default": True,
             },
-            "在卧室拍照，不要睡衣",
+            "穿校服拍照，不要睡衣",
+            "",
             wardrobe_intent=intent,
-            requested_outfit_category="sleepwear",
+            requested_outfit_category="school_uniform",
         )
-        persona_score = score(
+        identity_score = score(
             {
                 "kind": "persona",
-                "note": "基础身份图",
-                "outfit_category": "",
+                "note": "基础身份图，文件标签沿用睡衣分类",
+                "outfit_category": "sleepwear",
                 "reference_roles": ["identity"],
                 "outfit_lock_default": False,
             },
-            "在卧室拍照，不要睡衣",
+            "穿校服拍照，不要睡衣",
+            "",
             wardrobe_intent=intent,
-            requested_outfit_category="sleepwear",
+            requested_outfit_category="school_uniform",
         )
 
-        self.assertGreater(matching_score, persona_score)
+        self.assertGreater(identity_score, outfit_score)
 
     def test_only_wardrobe_module_constructs_production_decisions(self) -> None:
         offenders: list[str] = []
