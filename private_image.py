@@ -3657,6 +3657,26 @@ class PrivateImageMixin:
             cleaned = re.sub(r"(?<=[\u4e00-\u9fff…！？?！~～])\s+(?=[\u4e00-\u9fff])", "\n", cleaned)
         return cleaned.strip()
 
+    def _restore_private_image_framework_tts_reply(
+        self,
+        reply: str,
+        framework_event: AstrMessageEvent,
+    ) -> str:
+        source = str(reply or "").strip()
+        if "[[PCTTS:" not in source:
+            return source
+        restorer = getattr(self, "_restore_protected_tts_blocks", None)
+        if not callable(restorer):
+            return source
+        try:
+            return str(restorer(source, framework_event) or source).strip()
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 私聊单图主链 TTS 占位符恢复失败: %s",
+                _single_line(exc, 120),
+            )
+            return source
+
     def _private_image_reply_ignores_vision_summary(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", str(text or ""))
         if not compact:
@@ -4786,6 +4806,10 @@ class PrivateImageMixin:
                 reply = str(getattr(llm_resp, "completion_text", "") or "").strip()
             if "reply_source" not in locals():
                 reply_source = "main_chain"
+            reply = self._restore_private_image_framework_tts_reply(
+                reply,
+                framework_event,
+            )
             if reply and self._private_image_reply_is_internal_error(reply):
                 logger.warning(
                     "[PrivateCompanion] 私聊单图主链返回内部错误文本,已拦截转入兜底: user=%s preview=%s",
