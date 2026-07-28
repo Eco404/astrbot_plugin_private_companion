@@ -3025,6 +3025,12 @@
     "default": 0,
     "invisible": true
   },
+  "photo_reference_catalog_user_cleared": {
+    "description": "Canonical photo reference catalog was explicitly cleared by the user",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "enable_daily_outfit_photo": {
     "description": "Legacy flat config: 每日穿搭照片",
     "type": "bool",
@@ -9143,6 +9149,12 @@
         "description": "规范参考图目录版本",
         "type": "int",
         "default": 0,
+        "invisible": true
+      },
+      "photo_reference_catalog_user_cleared": {
+        "description": "用户主动清空规范参考图目录",
+        "type": "bool",
+        "default": false,
         "invisible": true
       },
       "photo_persona_reference_image_path": {

@@ -165,6 +165,15 @@ def _migrate_flat_config_into_schema_groups(
     if isinstance(legacy_group, dict):
         legacy_sources.append(legacy_group)
 
+    # 参考图目录升级需要先于通用的“分组值优先”处理。AstrBot 会为新版
+    # 分组补上空默认值；这不代表用户主动清空，不能覆盖仍然非空的旧字段。
+    photo_reference_changes = _preserve_legacy_photo_reference_config(
+        root,
+        schema_map,
+        legacy_sources,
+    )
+    changed.extend(photo_reference_changes)
+
     # Resolve the weather provider and shared QWeather credentials before the
     # generic group-authority pass, while both raw grouped and flat values are
     # still available for the explicit-choice checks.
@@ -282,6 +291,69 @@ def _migrate_flat_config_into_schema_groups(
     if save:
         _save_config_after_schema_migration(config, logger=logger)
     return len(changed)
+
+
+def _preserve_legacy_photo_reference_config(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+    legacy_sources: list[dict[str, Any]],
+) -> list[str]:
+    """Keep non-empty legacy reference fields when the canonical catalog was lost."""
+    catalog_item = schema_map.get("photo_reference_catalog") or {}
+    group_key = str(catalog_item.get("group") or "")
+    group = root.get(group_key)
+    if not isinstance(group, dict):
+        group = {}
+
+    user_cleared = any(
+        _coerce_bool(source.get("photo_reference_catalog_user_cleared"))
+        for source in (group, *legacy_sources)
+        if isinstance(source, dict) and "photo_reference_catalog_user_cleared" in source
+    )
+    if user_cleared:
+        return []
+
+    changed: list[str] = []
+    flat_catalog = next(
+        (
+            source.get("photo_reference_catalog")
+            for source in legacy_sources
+            if isinstance(source, dict) and not _is_empty(source.get("photo_reference_catalog"))
+        ),
+        None,
+    )
+    if flat_catalog is not None and _is_empty(group.get("photo_reference_catalog")):
+        if group_key and root.get(group_key) is not group:
+            root[group_key] = group
+        group["photo_reference_catalog"] = _coerce_schema_value(flat_catalog, catalog_item)
+        changed.append("photo_reference_catalog~flat-canonical-preserve")
+
+    if not _is_empty(group.get("photo_reference_catalog")):
+        return changed
+
+    for key in ("photo_persona_reference_image_path", "photo_reference_library"):
+        item = schema_map.get(key)
+        if not item:
+            continue
+        legacy_value = next(
+            (
+                source.get(key)
+                for source in legacy_sources
+                if isinstance(source, dict) and not _is_empty(source.get(key))
+            ),
+            None,
+        )
+        if legacy_value is None:
+            continue
+        target_group_key = str(item.get("group") or "")
+        target_group = root.get(target_group_key)
+        if not isinstance(target_group, dict):
+            target_group = {}
+            root[target_group_key] = target_group
+        if _is_empty(target_group.get(key)):
+            target_group[key] = _coerce_schema_value(legacy_value, item)
+            changed.append(f"{key}~legacy-reference-preserve")
+    return changed
 
 
 def _migrate_qweather_config(

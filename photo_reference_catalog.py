@@ -880,6 +880,7 @@ def load_catalog(
     catalog_version: Any,
     legacy_persona: Any = "",
     legacy_library: Any = None,
+    user_cleared: bool = False,
     preset_names: Iterable[str] = (),
 ) -> CatalogLoadResult:
     presets = {_clean_text(item, 80) for item in preset_names if _clean_text(item, 80)}
@@ -890,6 +891,15 @@ def load_catalog(
     warnings: list[str] = []
     canonical_references = _load_canonical_references(raw_catalog, presets, warnings)
     if version >= CATALOG_VERSION:
+        if (
+            not user_cleared
+            and canonical_references == ()
+            and _canonical_catalog_is_strictly_persistable(raw_catalog, presets)
+        ):
+            legacy_references = _migrate_legacy_catalog(legacy_persona, legacy_library, presets, warnings)
+            if legacy_references:
+                warnings.append("规范参考图目录异常为空，已从残留旧配置恢复并等待重新保存")
+                return CatalogLoadResult(legacy_references, True, tuple(warnings))
         if canonical_references is None:
             warnings.append("规范参考图目录不是数组，已按空目录加载")
             canonical_references = ()

@@ -3751,6 +3751,7 @@ class CommandHandlersMixin:
             return False
         previous = tuple(getattr(self, "photo_reference_catalog", ()) or ())
         previous_version = _safe_int(getattr(self, "photo_reference_catalog_version", 0), 0, 0)
+        previous_user_cleared = bool(getattr(self, "photo_reference_catalog_user_cleared", False))
         preset_names = self._photo_generation_scene_presets().keys()
         try:
             serialized = validate_and_serialize(items, preset_names=preset_names)
@@ -3758,18 +3759,27 @@ class CommandHandlersMixin:
             previous_serialized = validate_and_serialize(previous, preset_names=preset_names)
             self.photo_reference_catalog = loaded.references
             self.photo_reference_catalog_version = CATALOG_VERSION
+            self.photo_reference_catalog_user_cleared = not bool(loaded.references)
             catalog_set = _set_into_config(self.config, "photo_reference_catalog", serialized)
             version_set = _set_into_config(self.config, "photo_reference_catalog_version", CATALOG_VERSION)
-            if not catalog_set or not version_set or not await self._save_config_if_possible():
+            cleared_set = _set_into_config(
+                self.config,
+                "photo_reference_catalog_user_cleared",
+                self.photo_reference_catalog_user_cleared,
+            )
+            if not catalog_set or not version_set or not cleared_set or not await self._save_config_if_possible():
                 self.photo_reference_catalog = previous
                 self.photo_reference_catalog_version = previous_version
+                self.photo_reference_catalog_user_cleared = previous_user_cleared
                 _set_into_config(self.config, "photo_reference_catalog", previous_serialized)
                 _set_into_config(self.config, "photo_reference_catalog_version", previous_version)
+                _set_into_config(self.config, "photo_reference_catalog_user_cleared", previous_user_cleared)
                 return False
             return True
         except Exception as exc:
             self.photo_reference_catalog = previous
             self.photo_reference_catalog_version = previous_version
+            self.photo_reference_catalog_user_cleared = previous_user_cleared
             try:
                 _set_into_config(
                     self.config,
@@ -3777,6 +3787,7 @@ class CommandHandlersMixin:
                     validate_and_serialize(previous, preset_names=preset_names),
                 )
                 _set_into_config(self.config, "photo_reference_catalog_version", previous_version)
+                _set_into_config(self.config, "photo_reference_catalog_user_cleared", previous_user_cleared)
             except Exception:
                 pass
             logger.warning("[PrivateCompanion] 保存规范参考图目录失败: %s", _single_line(exc, 180))

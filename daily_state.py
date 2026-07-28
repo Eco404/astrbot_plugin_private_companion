@@ -1876,6 +1876,32 @@ class DailyStateMixin:
         now = self._environment_now()
         return now.hour * 60 + now.minute >= diary_minutes
 
+    def _next_daily_diary_due_in_seconds(self, now: float | None = None) -> float | None:
+        """Return the next diary maintenance deadline without creating another timer."""
+        if not self.enable_daily_diary:
+            return None
+        check_now = _safe_float(now, _now_ts())
+        now_dt = self._environment_fromtimestamp(check_now)
+        today = now_dt.strftime("%Y-%m-%d")
+        if _single_line(self.data.get("diary_generated_day"), 16) == today:
+            return None
+
+        diary_minutes = self._parse_hhmm_to_minutes(self.daily_diary_time)
+        if diary_minutes is None:
+            diary_minutes = 23 * 60 + 10
+        due_dt = datetime.combine(
+            now_dt.date(),
+            datetime.min.time(),
+            tzinfo=now_dt.tzinfo,
+        ) + timedelta(minutes=diary_minutes)
+        due_at = due_dt.timestamp()
+
+        if _single_line(self.data.get("daily_diary_failed_day"), 16) == today:
+            failed_at = _safe_float(self.data.get("daily_diary_failed_at"), 0, 0)
+            if failed_at > 0:
+                due_at = max(due_at, failed_at + 30 * 60)
+        return max(0.0, due_at - check_now)
+
     async def _generate_daily_diary(self) -> dict[str, Any]:
         await self._ensure_yesterday_conversation_summary()
         return await generate_daily_diary(self)

@@ -1212,9 +1212,53 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         payload = f"{kind}\0{source}".encode("utf-8", errors="ignore")
         return hashlib.sha256(payload).hexdigest()[:24]
 
+    def _photo_reference_catalog_snapshot(self, *, sync_runtime: bool = False) -> tuple[PhotoReference, ...]:
+        runtime_catalog = tuple(
+            reference
+            for reference in (getattr(self.plugin, "photo_reference_catalog", None) or ())
+            if isinstance(reference, PhotoReference) and reference.kind in {"persona", "library"}
+        )
+        if runtime_catalog:
+            return runtime_catalog
+
+        if self._normalize_bool_value(
+            self._config_get_raw("photo_reference_catalog_user_cleared", False),
+        ):
+            return runtime_catalog
+        persisted_catalog = self._config_get_raw("photo_reference_catalog", None)
+        if persisted_catalog in (None, "", []):
+            return runtime_catalog
+        try:
+            loaded = load_catalog(
+                persisted_catalog,
+                catalog_version=_safe_int(
+                    self._config_get_raw("photo_reference_catalog_version", CATALOG_VERSION),
+                    CATALOG_VERSION,
+                    0,
+                ),
+                preset_names=self._photo_reference_preset_names(),
+            )
+        except CatalogValidationError as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 已保存的参考图目录读取失败: %s",
+                self._single_line(exc, 180),
+            )
+            return runtime_catalog
+
+        if loaded.references and sync_runtime:
+            self.plugin.photo_reference_catalog = loaded.references
+            self.plugin.photo_reference_catalog_version = CATALOG_VERSION
+            self.plugin.photo_reference_catalog_read_only = loaded.read_only
+            self.plugin.photo_reference_catalog_user_cleared = False
+            logger.info(
+                "[PrivateCompanionPage] 已从保存配置恢复运行时参考图目录: %s 项",
+                len(loaded.references),
+            )
+        return loaded.references
+
     def _photo_reference_page_items(self) -> list[dict[str, Any]]:
-        catalog = getattr(self.plugin, "photo_reference_catalog", None)
-        if catalog is not None:
+        catalog = self._photo_reference_catalog_snapshot(sync_runtime=True)
+        if catalog:
             entries = [
                 project_reference_candidate(reference)
                 for reference in (catalog or ())
@@ -14255,11 +14299,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if "photo_reference_catalog" in values:
             try:
                 values["photo_reference_catalog"] = validate_and_serialize(
-                    getattr(self.plugin, "photo_reference_catalog", ()) or (),
+                    self._photo_reference_catalog_snapshot(sync_runtime=True),
                     preset_names=self._photo_reference_preset_names(),
                 )
-            except CatalogValidationError:
-                values["photo_reference_catalog"] = []
+            except CatalogValidationError as exc:
+                logger.warning(
+                    "[PrivateCompanionPage] 总览参考图目录序列化失败: %s",
+                    self._single_line(exc, 180),
+                )
+                persisted_catalog = self._config_get_raw("photo_reference_catalog", [])
+                values["photo_reference_catalog"] = persisted_catalog if isinstance(persisted_catalog, list) else []
         for key in self._schema_bool_keys():
             if key not in values:
                 continue
@@ -15629,8 +15678,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 preset_names=self._photo_reference_preset_names(),
             )
             self._set_config_value("photo_reference_catalog_version", CATALOG_VERSION)
+            self._set_config_value("photo_reference_catalog_user_cleared", not bool(loaded.references))
             self.plugin.photo_reference_catalog = loaded.references
             self.plugin.photo_reference_catalog_version = CATALOG_VERSION
+            self.plugin.photo_reference_catalog_user_cleared = not bool(loaded.references)
             self.plugin.photo_reference_catalog_read_only = loaded.read_only
             return
         if key == "external_image_api_endpoints":

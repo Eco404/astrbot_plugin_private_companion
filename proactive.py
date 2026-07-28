@@ -2929,6 +2929,37 @@ class ProactiveMixin:
         if isinstance(state, dict):
             state.pop(label, None)
 
+    def _scheduler_maintenance_tasks(self) -> tuple[tuple[str, Any], ...]:
+        tasks = (
+            ("日常状态", self._ensure_daily_state),
+            ("今日日程", self._ensure_daily_plan),
+            ("当前细化", self._ensure_detail_enhancement),
+            ("当前在线感", self._ensure_current_detail_presence_status),
+            ("日记", self._ensure_daily_diary),
+            ("每日穿搭", self._ensure_daily_outfit_photo),
+            ("创作推进", self._maybe_advance_creative_projects),
+            ("个人目标", self._maybe_settle_personal_goals),
+            ("备忘便签", self._maybe_process_memo_notes),
+            ("天气预警", self._maybe_refresh_weather_alerts),
+            ("环境突变", self._maybe_refresh_environment_change),
+            ("余额感知", self._maybe_refresh_balance_awareness),
+            ("晚安识屏", self._maybe_process_goodnight_screen_checks),
+            ("被动注入缓存", self._refresh_passive_injection_cache),
+        )
+        if not self._proactive_generation_disabled():
+            return tasks
+        passive_labels = {
+            "日常状态",
+            "今日日程",
+            "当前细化",
+            "当前在线感",
+            "日记",
+            "天气预警",
+            "晚安识屏",
+            "被动注入缓存",
+        }
+        return tuple(item for item in tasks if item[0] in passive_labels)
+
     async def _scheduler_loop(self):
         while not self._stop_event.is_set():
             try:
@@ -2938,26 +2969,7 @@ class ProactiveMixin:
                 )
             except asyncio.TimeoutError:
                 await self._tick()
-                maintenance_tasks = (
-                    ("日常状态", self._ensure_daily_state),
-                    ("今日日程", self._ensure_daily_plan),
-                    ("当前细化", self._ensure_detail_enhancement),
-                    ("当前在线感", self._ensure_current_detail_presence_status),
-                    ("日记", self._ensure_daily_diary),
-                    ("每日穿搭", self._ensure_daily_outfit_photo),
-                    ("创作推进", self._maybe_advance_creative_projects),
-                    ("个人目标", self._maybe_settle_personal_goals),
-                    ("备忘便签", self._maybe_process_memo_notes),
-                    ("天气预警", self._maybe_refresh_weather_alerts),
-                    ("环境突变", self._maybe_refresh_environment_change),
-                    ("余额感知", self._maybe_refresh_balance_awareness),
-                    ("晚安识屏", self._maybe_process_goodnight_screen_checks),
-                    ("被动注入缓存", self._refresh_passive_injection_cache),
-                )
-                if self._proactive_generation_disabled():
-                    passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "天气预警", "晚安识屏", "被动注入缓存"}
-                    maintenance_tasks = tuple(item for item in maintenance_tasks if item[0] in passive_labels)
-                for label, task_factory in maintenance_tasks:
+                for label, task_factory in self._scheduler_maintenance_tasks():
                     try:
                         if self._maintenance_task_blocked_by_failure(label):
                             continue
@@ -2974,26 +2986,7 @@ class ProactiveMixin:
     async def _kick_proactive_loop_once(self) -> None:
         try:
             await self._tick()
-            maintenance_tasks = (
-                ("日常状态", self._ensure_daily_state),
-                ("今日日程", self._ensure_daily_plan),
-                ("当前细化", self._ensure_detail_enhancement),
-                ("当前在线感", self._ensure_current_detail_presence_status),
-                ("日记", self._ensure_daily_diary),
-                ("每日穿搭", self._ensure_daily_outfit_photo),
-                ("创作推进", self._maybe_advance_creative_projects),
-                ("个人目标", self._maybe_settle_personal_goals),
-                ("备忘便签", self._maybe_process_memo_notes),
-                ("天气预警", self._maybe_refresh_weather_alerts),
-                ("环境突变", self._maybe_refresh_environment_change),
-                ("余额感知", self._maybe_refresh_balance_awareness),
-                ("晚安识屏", self._maybe_process_goodnight_screen_checks),
-                ("被动注入缓存", self._refresh_passive_injection_cache),
-            )
-            if self._proactive_generation_disabled():
-                passive_labels = {"日常状态", "今日日程", "当前细化", "当前在线感", "日记", "天气预警", "晚安识屏", "被动注入缓存"}
-                maintenance_tasks = tuple(item for item in maintenance_tasks if item[0] in passive_labels)
-            for label, task_factory in maintenance_tasks:
+            for label, task_factory in self._scheduler_maintenance_tasks():
                 try:
                     if self._maintenance_task_blocked_by_failure(label):
                         continue
@@ -3040,6 +3033,11 @@ class ProactiveMixin:
             detail_due_in = self._next_detail_due_in_seconds(now)
             if detail_due_in is not None and detail_due_in < nearest_due_in:
                 nearest_due_in = detail_due_in
+
+        diary_due_getter = getattr(self, "_next_daily_diary_due_in_seconds", None)
+        diary_due_in = diary_due_getter(now) if callable(diary_due_getter) else None
+        if diary_due_in is not None and (nearest_due_in is None or diary_due_in < nearest_due_in):
+            nearest_due_in = diary_due_in
 
         if nearest_due_in is None:
             return max(35.0, min(base, random.uniform(base * 0.55, base * 0.95)))

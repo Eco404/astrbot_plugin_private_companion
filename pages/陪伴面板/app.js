@@ -19,6 +19,7 @@ const state = {
   tokenStatsPartial: false,
   bookshelfUnlocked: null,
   bookshelfAccessToken: "",
+  memoNotes: null,
   selectedBook: null,
   bookshelfPage: "shelf",
   creativeEditing: false,
@@ -68,6 +69,7 @@ const state = {
   photoReferenceManagerDraft: null,
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
+  photoReferenceLibraryError: "",
   selectedFeatureKey: "",
   imageApiEndpointDraft: null,
   imageApiEndpointSavedFingerprints: [],
@@ -154,6 +156,7 @@ const state = {
     tokenStats: false,
     configBackups: false,
     userGroupLists: false,
+    memoNotes: false,
   },
   lazyScripts: {},
   userGroupListPromise: null,
@@ -4901,6 +4904,11 @@ async function loadTroubleshooting(options = {}) {
 
 function applyOverviewData(overview) {
   state.overview = overview;
+  const overviewMemoNotes = overview?.bookshelf?.memo_notes;
+  if (overviewMemoNotes && typeof overviewMemoNotes === "object") {
+    state.memoNotes = overviewMemoNotes;
+    state.lazyLoaded.memoNotes = true;
+  }
   // 总览是服务端权威值；旧草稿继续覆盖它会让已切换的模型看起来没有刷新。
   state.providerDraft = {};
   state.ttsProviderDraft = {};
@@ -5254,6 +5262,14 @@ async function loadConfigBackups(force = false) {
   return state.configBackups;
 }
 
+async function loadMemoNotes(force = false) {
+  if (state.lazyLoaded.memoNotes && !force && state.memoNotes) return state.memoNotes;
+  const result = await fetchJson("/memo/list");
+  applyMemoPayload(result.memo_notes || {});
+  if (state.activeTab === "bookshelf") renderBookshelf();
+  return state.memoNotes;
+}
+
 async function ensureTabData(tabName, force = false) {
   if (tabName === "dashboard") {
     return;
@@ -5263,6 +5279,8 @@ async function ensureTabData(tabName, force = false) {
   }
   if (tabName === "tokens") {
     await loadTokenStats(force);
+  } else if (tabName === "bookshelf") {
+    await loadMemoNotes(force);
   } else if (tabName === "models") {
     await Promise.all([
       loadAvailableProviders(force),
@@ -15852,7 +15870,7 @@ function renderBookshelf() {
   $("#bookshelfSecretCount").textContent = bookshelf.secret_count ?? 0;
   $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
   $("#bookshelfJmCount").textContent = bookshelf.jm_album_count ?? 0;
-  const memoNotes = bookshelf.memo_notes || {};
+  const memoNotes = currentMemoPayload();
   $("#bookshelfMemoCount").textContent = memoNotes.active ?? 0;
   $("#bookshelfMemoSummary").textContent = memoNotes.overdue
     ? `${memoNotes.overdue} 张已逾期`
@@ -16002,14 +16020,23 @@ function renderMemoNotes(memoNotes = {}) {
 }
 
 function currentMemoNotes() {
-  const shelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
-  return Array.isArray(shelf.memo_notes?.items) ? shelf.memo_notes.items : [];
+  const payload = currentMemoPayload();
+  return Array.isArray(payload.items) ? payload.items : [];
 }
 
 function applyMemoPayload(payload) {
   if (!payload || typeof payload !== "object") return;
+  state.memoNotes = payload;
+  state.lazyLoaded.memoNotes = true;
   if (state.overview?.bookshelf) state.overview.bookshelf.memo_notes = payload;
   if (state.bookshelfUnlocked) state.bookshelfUnlocked.memo_notes = payload;
+}
+
+function currentMemoPayload() {
+  return state.memoNotes
+    || state.overview?.bookshelf?.memo_notes
+    || state.bookshelfUnlocked?.memo_notes
+    || {};
 }
 
 function openMemoEditor(note = null) {
@@ -22158,6 +22185,28 @@ function parsePhotoReferenceCatalog(value) {
     }));
 }
 
+function photoReferenceCatalogFromStatus(status) {
+  const rawItems = [status?.persona, ...(Array.isArray(status?.items) ? status.items : [])]
+    .filter((item) => item && ["persona", "library"].includes(String(item.kind || "")));
+  return parsePhotoReferenceCatalog(rawItems)
+    .map((item) => canonicalPhotoReference(item, item.kind));
+}
+
+function hydratePhotoReferenceDraftFromStatus(status) {
+  const currentCatalog = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue());
+  const statusCatalog = photoReferenceCatalogFromStatus(status);
+  if (currentCatalog.length || !statusCatalog.length || state.featureDetailDirty) return false;
+  const serialized = JSON.stringify(statusCatalog);
+  state.featureDetailParamDraft = {
+    ...(state.featureDetailParamDraft || {}),
+    photo_reference_catalog: serialized,
+  };
+  if (state.overview?.settings) state.overview.settings.photo_reference_catalog = statusCatalog;
+  state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(statusCatalog)
+    .filter((item) => item.kind === "library");
+  return true;
+}
+
 function canonicalPhotoReference(item, kind) {
   const metadata = photoReferenceMetadataFromObject(item?.metadata);
   return {
@@ -22329,6 +22378,7 @@ function photoReferenceManagerPageHtml(open) {
   const personaSource = currentPhotoPersonaReferenceValue();
   const personaStatus = photoReferenceStatusFor("persona", personaSource);
   const statusLoaded = Boolean(state.photoReferenceLibraryStatus);
+  const statusError = String(state.photoReferenceLibraryError || "");
   const availableCount = items.filter((item) => photoReferenceStatusFor("library", item.source)?.available === true).length;
   return `
     <section class="photo-reference-manager" data-photo-reference-manager ${open ? "" : "hidden"}>
@@ -22340,7 +22390,7 @@ function photoReferenceManagerPageHtml(open) {
         <div>
           <span class="module-badge">REFERENCE LIBRARY</span>
           <h2>参考图库</h2>
-          <p><b>${items.length} / 24</b> 张图库参考图 · ${statusLoaded ? `${availableCount} 张可用` : "状态读取中"}</p>
+          <p><b>${items.length} / 24</b> 张附加参考图 · ${personaSource ? "基础人设已设置" : "基础人设未设置"} · ${statusError ? "状态读取失败" : statusLoaded ? `${availableCount} 张附加图可用` : "状态读取中"}</p>
         </div>
         <div class="photo-reference-head-actions">
           <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
@@ -22352,7 +22402,7 @@ function photoReferenceManagerPageHtml(open) {
         <div>
           <span>默认身份锚点</span>
           <h3 id="photoReferencePersonaTitle">基础人设参考图</h3>
-          <small>${escapeHtml(personaStatus ? (personaStatus.available ? "文件可用" : "文件失效") : personaSource ? "待保存验证" : "未设置")}</small>
+          <small>${escapeHtml(personaStatus ? (personaStatus.available ? "文件可用" : "文件失效") : personaSource ? "待保存验证" : statusError ? "读取失败，未判定为空" : "未设置")}</small>
         </div>
         ${photoReferencePreviewHtml("persona", personaSource, "基础人设参考图")}
         <label>
@@ -22371,13 +22421,13 @@ function photoReferenceManagerPageHtml(open) {
 
       <div class="photo-reference-toolbar">
         <label><span>筛选图库</span><input type="search" data-photo-reference-filter placeholder="搜索路径或用途注释" /></label>
-        <span>${items.length ? `当前显示 ${items.length} 张` : "图库为空"}</span>
+        <span>${items.length ? `当前显示 ${items.length} 张附加图` : statusError ? "状态读取失败" : "暂无附加参考图"}</span>
       </div>
       <div class="photo-reference-grid" data-photo-reference-grid>
         ${items.length ? items.map(photoReferenceManagerCard).join("") : `
           <div class="photo-reference-empty">
-            <b>图库为空</b>
-            <span>0 / 24</span>
+            <b>${statusError ? "暂时无法读取图库" : "暂无附加参考图"}</b>
+            <span>${statusError ? escapeHtml(statusError) : "0 / 24"}</span>
           </div>
         `}
       </div>
@@ -22812,9 +22862,12 @@ async function refreshPhotoReferenceLibraryStatus(control = null) {
   state.photoReferenceLibraryLoading = true;
   setActionBusy(control, true);
   try {
-    state.photoReferenceLibraryStatus = await fetchJson("/photo_reference/list");
+    const status = await fetchJson("/photo_reference/list");
+    state.photoReferenceLibraryStatus = status;
+    state.photoReferenceLibraryError = "";
+    hydratePhotoReferenceDraftFromStatus(status);
   } catch (error) {
-    state.photoReferenceLibraryStatus = { items: [], persona: null };
+    state.photoReferenceLibraryError = String(error?.message || "未知错误");
     showToast(`参考图状态读取失败：${error.message}`, "error");
   } finally {
     state.photoReferenceLibraryLoading = false;
@@ -23573,6 +23626,7 @@ function syncModelsSectionControls() {
         }
         state.modelsSection = nextSection;
         renderProviders();
+        resetActiveWorkspaceScroll();
         if (state.modelsSection === "image" && !state.lazyLoaded.imageApiStatus) {
           loadImageApiStatus().catch((error) => showToast(`读取生图 API 状态失败：${error.message}`, "error"));
         }
@@ -27379,6 +27433,20 @@ async function saveExperimentalSettings(key, form, successMessage) {
 }
 
 let activeTabTransition = null;
+let activeTabScrollFrame = null;
+
+function resetActiveWorkspaceScroll() {
+  if (activeTabScrollFrame !== null) window.cancelAnimationFrame(activeTabScrollFrame);
+  activeTabScrollFrame = window.requestAnimationFrame(() => {
+    activeTabScrollFrame = null;
+    const layout = document.querySelector(".layout");
+    if (!layout) return;
+    const top = Math.max(0, Math.round(layout.getBoundingClientRect().top + window.scrollY));
+    if (Math.abs(window.scrollY - top) > 1) {
+      window.scrollTo({ top, behavior: "auto" });
+    }
+  });
+}
 
 function revealActiveTab(tabButton, reduceMotion = false) {
   const nav = tabButton?.closest(".annotations");
@@ -27442,6 +27510,7 @@ function switchTab(tabName) {
       activePanel.addEventListener("animationend", () => activePanel.classList.remove("is-entering"), { once: true });
     }
     renderActiveTab(state.activeTab);
+    resetActiveWorkspaceScroll();
   };
 
   if (!reduceMotion && typeof document.startViewTransition === "function") {
@@ -28537,6 +28606,7 @@ $("#bookshelfUnlockForm").addEventListener("submit", async (event) => {
     const result = await postJson("/bookshelf/unlock", { password });
     state.bookshelfUnlocked = result.bookshelf || null;
     state.bookshelfAccessToken = result.bookshelf?.access_token || "";
+    if (result.bookshelf?.memo_notes) applyMemoPayload(result.bookshelf.memo_notes);
     state.selectedBook = null;
     state.bookshelfPage = "shelf";
     renderBookshelf();
@@ -28556,7 +28626,7 @@ $("#memoCancelBtn")?.addEventListener("click", closeMemoEditor);
 document.querySelectorAll("[data-memo-filter]").forEach((button) => {
   button.addEventListener("click", () => {
     state.memoFilter = button.dataset.memoFilter || "active";
-    renderMemoNotes((state.bookshelfUnlocked || state.overview?.bookshelf || {}).memo_notes || {});
+    renderMemoNotes(currentMemoPayload());
   });
 });
 $("#memoDueAt")?.addEventListener("change", (event) => {

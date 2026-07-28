@@ -1829,11 +1829,17 @@ class PrivateCompanionPlugin(
         self.photo_generation_scene_presets = self._cfg_raw(c, "photo_generation_scene_presets", "")
         raw_reference_catalog = self._cfg_raw(c, "photo_reference_catalog", [])
         raw_reference_catalog_version = self._cfg_raw(c, "photo_reference_catalog_version", 0)
+        raw_reference_catalog_user_cleared = self._cfg_bool(
+            c,
+            "photo_reference_catalog_user_cleared",
+            False,
+        )
         loaded_reference_catalog = load_catalog(
             raw_reference_catalog,
             catalog_version=raw_reference_catalog_version,
             legacy_persona=self.photo_persona_reference_image_path,
             legacy_library=self.photo_reference_library,
+            user_cleared=raw_reference_catalog_user_cleared,
             preset_names=self._photo_generation_scene_presets().keys(),
         )
         self.photo_reference_catalog = loaded_reference_catalog.references
@@ -1842,6 +1848,7 @@ class PrivateCompanionPlugin(
             self.photo_reference_catalog_version = int(raw_reference_catalog_version or 0)
         except (TypeError, ValueError):
             self.photo_reference_catalog_version = 0
+        self.photo_reference_catalog_user_cleared = raw_reference_catalog_user_cleared
         self._startup_photo_reference_catalog_migration_pending = False
         for warning in loaded_reference_catalog.warnings:
             logger.warning("[PrivateCompanion] 参考图目录加载警告: %s", warning)
@@ -1853,6 +1860,8 @@ class PrivateCompanionPlugin(
                     preset_names=self._photo_generation_scene_presets().keys(),
                 )
                 if _set_into_config(c, "photo_reference_catalog", serialized_reference_catalog):
+                    _set_into_config(c, "photo_reference_catalog_user_cleared", False)
+                    self.photo_reference_catalog_user_cleared = False
                     self._startup_photo_reference_catalog_migration_pending = True
                     self._startup_config_migration_changes += 1
                 else:
