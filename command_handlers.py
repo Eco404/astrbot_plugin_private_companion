@@ -3461,11 +3461,41 @@ class CommandHandlersMixin:
             clean = "reference"
         return f"{clean}_{int(_now_ts() * 1000)}_{uuid.uuid4().hex[:8]}"
 
-    def _photo_reference_copy_local_file(self, source_path: Path, *, stem: str = "reference") -> str:
+    def _photo_reference_path_within_data_dir(self, path: Path) -> bool:
+        """Return whether a reference path is inside this plugin's data tree."""
+        try:
+            root = Path(self.data_dir).resolve()
+            resolved = path.resolve()
+        except Exception:
+            return False
+        try:
+            return resolved.is_relative_to(root)
+        except AttributeError:  # Python < 3.9
+            return str(resolved) == str(root) or str(resolved).startswith(str(root) + os.sep)
+
+    def _photo_reference_copy_local_file(
+        self,
+        source_path: Path,
+        *,
+        stem: str = "reference",
+        trusted: bool = True,
+    ) -> str:
+        """Copy a reference image into the plugin-owned reference directory.
+
+        Untrusted/model-controlled sources may only read files below the plugin
+        data directory. Explicit administrator configuration keeps the legacy
+        trusted behavior for paths outside that directory.
+        """
         try:
             resolved = source_path.resolve()
         except Exception:
             resolved = source_path
+        if not trusted and not self._photo_reference_path_within_data_dir(resolved):
+            logger.warning(
+                "[PrivateCompanion] 参考图越权本地路径已拒绝: %s",
+                _single_line(str(resolved), 200),
+            )
+            return ""
         if not resolved.exists() or not resolved.is_file():
             return ""
         suffix = resolved.suffix.lower()
@@ -3498,7 +3528,20 @@ class CommandHandlersMixin:
         except Exception:
             return ""
 
-    async def _photo_reference_source_to_stable_path(self, source: str, *, stem: str = "reference", event: AstrMessageEvent | None = None) -> str:
+    async def _photo_reference_source_to_stable_path(
+        self,
+        source: str,
+        *,
+        stem: str = "reference",
+        event: AstrMessageEvent | None = None,
+        trusted: bool = True,
+    ) -> str:
+        """Normalize a reference source into a stable plugin-local path.
+
+        Model-controlled sources are restricted to plugin data paths and public
+        remote hosts; administrator-configured sources retain the legacy trust
+        boundary.
+        """
         text = str(source or "").strip()
         if not text:
             return ""
@@ -3509,15 +3552,45 @@ class CommandHandlersMixin:
             downloader = getattr(self, "_persist_private_remote_image_source", None)
             if callable(downloader):
                 try:
-                    downloaded = await downloader(text, self._photo_reference_image_dir(), self._photo_reference_stem(f"{stem}_remote"))
+                    downloaded = await downloader(
+                        text,
+                        self._photo_reference_image_dir(),
+                        self._photo_reference_stem(f"{stem}_remote"),
+                        public_hosts_only=not trusted,
+                    )
+                except TypeError:
+                    # Older mixins may not accept the security keyword; reject
+                    # untrusted input instead of silently downgrading it.
+                    if not trusted:
+                        return ""
+                    try:
+                        downloaded = await downloader(
+                            text,
+                            self._photo_reference_image_dir(),
+                            self._photo_reference_stem(f"{stem}_remote"),
+                        )
+                    except Exception:
+                        downloaded = ""
                 except Exception:
                     downloaded = ""
                 if downloaded:
-                    return self._photo_reference_copy_local_file(Path(downloaded), stem=stem) or downloaded
+                    copied = self._photo_reference_copy_local_file(
+                        Path(downloaded),
+                        stem=stem,
+                        trusted=trusted,
+                    )
+                    if copied:
+                        return copied
+                    if trusted:
+                        return str(downloaded)
             return ""
         local_text = text[len("file://"):] if text.startswith("file://") else text
         try:
-            copied = self._photo_reference_copy_local_file(Path(local_text), stem=stem)
+            copied = self._photo_reference_copy_local_file(
+                Path(local_text),
+                stem=stem,
+                trusted=trusted,
+            )
             if copied:
                 return copied
         except (OSError, ValueError):
@@ -3529,7 +3602,12 @@ class CommandHandlersMixin:
             except Exception:
                 resolved = ""
             if resolved and resolved != text:
-                return await self._photo_reference_source_to_stable_path(resolved, stem=stem, event=event)
+                return await self._photo_reference_source_to_stable_path(
+                    resolved,
+                    stem=stem,
+                    event=event,
+                    trusted=trusted,
+                )
         return ""
 
     async def _photo_reference_sources_from_current_event(self, event: AstrMessageEvent, user_id: str) -> list[str]:

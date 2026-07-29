@@ -2635,18 +2635,34 @@ class LlmToolActionsMixin:
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
         resolved_reference_paths: list[str] = []
         for index, source in enumerate(reference_sources):
-            resolved = source
+            stable = ""
             if callable(resolver):
                 try:
-                    stable = await resolver(source, stem=f"tool_{index + 1}", event=event)
-                    if stable:
-                        resolved = stable
+                    stable = await resolver(source, stem=f"tool_{index + 1}", event=event, trusted=False)
                 except Exception as exc:
                     logger.info(
-                        "[PrivateCompanion] 第 %s 张工具参考图解析失败，交由参考计划记录缺失职责: %s",
+                        "[PrivateCompanion] tool reference %s rejected: %s",
                         index + 1,
                         _single_line(exc, 160),
                     )
+            if not stable:
+                logger.warning(
+                    "[PrivateCompanion] model-controlled image reference rejected: source=%s",
+                    _single_line(source, 200),
+                )
+                return public_receipt(
+                    {
+                        "status": "invalid_reference",
+                        "success": False,
+                        "generated": False,
+                        "sent": False,
+                        "message": "这张参考图不能使用。参考图只支持当前消息里的图片、插件数据目录内的图片，或公网图片链接。",
+                        "must_not_claim_sent": True,
+                        "retryable": False,
+                    },
+                    ensure_ascii=False,
+                )
+            resolved = stable
             if resolved and resolved not in resolved_reference_paths:
                 resolved_reference_paths.append(resolved)
         reference_path = resolved_reference_paths[0] if resolved_reference_paths else ""
@@ -6296,6 +6312,9 @@ class LlmToolActionsMixin:
     async def _pc_relay_message_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return json.dumps({"status": "disabled", "message": "跨会话转述工具未启用"}, ensure_ascii=False)
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return json.dumps({"status": "forbidden", "message": "跨会话转述仅允许主人使用"}, ensure_ascii=False)
         destination_raw = _single_line(
             kwargs.get("destination")
             or kwargs.get("target_scope")
@@ -6385,6 +6404,9 @@ class LlmToolActionsMixin:
             if group_result.get("status") != "success":
                 return json.dumps(group_result, ensure_ascii=False)
             group_id = _single_line(group_result.get("group_id"), 40)
+            group_guard = self._atrelay_target_group_allowed(group_id, event)
+            if group_guard:
+                return json.dumps({"status": "forbidden", "message": group_guard}, ensure_ascii=False)
             send_text = await self._rewrite_atrelay_message_with_llm(
                 event,
                 destination="group",
@@ -6532,6 +6554,9 @@ class LlmToolActionsMixin:
     async def _pc_send_to_group_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return "发送失败：跨群转述工具未启用"
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return "发送失败：跨会话转述仅允许主人使用"
         group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
         at_user = kwargs.get("at_user") or kwargs.get("at") or kwargs.get("target_user") or kwargs.get("user_id") or ""
@@ -6541,6 +6566,9 @@ class LlmToolActionsMixin:
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         target_group = self._normalize_atrelay_group_target_id(group_id)
+        group_guard = self._atrelay_target_group_allowed(target_group, event)
+        if group_guard:
+            return group_guard
         text = self._normalize_atrelay_text(message, limit=800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
         if not target_group:
@@ -6605,6 +6633,9 @@ class LlmToolActionsMixin:
     async def _pc_send_to_private_user_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return "发送失败：跨群转述工具未启用"
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return "发送失败：跨会话转述仅允许主人使用"
         user_id = kwargs.get("user_id") or kwargs.get("qq") or kwargs.get("target_user") or kwargs.get("target") or ""
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
@@ -6723,6 +6754,9 @@ class LlmToolActionsMixin:
     async def _pc_schedule_group_relay_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return "挂起失败：跨群转述工具未启用"
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return "挂起失败：跨会话转述仅允许主人使用"
         group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
         at_user = kwargs.get("at_user") or kwargs.get("target_user") or kwargs.get("user_id") or kwargs.get("name") or kwargs.get("nickname") or ""
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
@@ -6730,6 +6764,9 @@ class LlmToolActionsMixin:
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
         target_group = self._normalize_atrelay_group_target_id(group_id) or self._extract_group_id_from_event(event)
+        group_guard = self._atrelay_target_group_allowed(target_group, event)
+        if group_guard:
+            return group_guard.replace("发送失败", "挂起失败", 1)
         text = self._normalize_atrelay_text(message, limit=800)
         if not target_group:
             return "挂起失败：群 ID 格式不正确"

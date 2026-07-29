@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
+import ipaddress
+import socket
 import time
 import unicodedata
 import zoneinfo
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 _today_key_timezone = ""
 
@@ -132,6 +135,49 @@ def _safe_float(
 def _single_line(text: Any, limit: int = 80) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     return normalized[:limit]
+
+
+def _url_host_is_public(url: Any) -> bool:
+    """Accept only HTTP(S) URLs whose DNS results are all public addresses."""
+    text = str(url or "").strip()
+    if not re.match(r"^https?://", text, flags=re.I):
+        return False
+    try:
+        host = urlparse(text).hostname or ""
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, OSError, ValueError):
+        return False
+    addresses = {
+        info[4][0]
+        for info in infos
+        if isinstance(info, tuple) and len(info) >= 5 and info[4]
+    }
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+        except ValueError:
+            return False
+        mapped = getattr(ip, "ipv4_mapped", None)
+        for candidate in (ip, mapped):
+            if candidate is None:
+                continue
+            if (
+                candidate.is_private
+                or candidate.is_loopback
+                or candidate.is_link_local
+                or candidate.is_reserved
+                or candidate.is_multicast
+                or candidate.is_unspecified
+            ):
+                return False
+    return True
 
 
 def normalize_bot_relationship_cards(value: Any, *, limit: int = 16) -> list[str]:

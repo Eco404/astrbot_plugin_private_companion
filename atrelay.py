@@ -1065,6 +1065,68 @@ class AtRelayMixin:
             + "\n这些只用于理解对方为什么接话或道谢；不要主动复述工具名、内部记录或没必要说明来源。"
         )
 
+    def _atrelay_tool_authorization(self, event: AstrMessageEvent | None) -> tuple[bool, str]:
+        """Require the configured private-companion owner for relay actions."""
+        requester_id = ""
+        if event is not None:
+            try:
+                requester_id = self._permission_identity_id(event.get_sender_id())
+            except Exception:
+                requester_id = ""
+        checker = getattr(self, "_is_private_companion_owner_user_id", None)
+        allowed = bool(requester_id and callable(checker) and checker(requester_id))
+        if not allowed:
+            logger.info(
+                "[PrivateCompanion] relay authorization denied: sender=%s umo=%s",
+                requester_id or "-",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120),
+            )
+        return allowed, requester_id
+
+    def _atrelay_known_group_ids(self) -> set[str]:
+        known: set[str] = set()
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return known
+        for key in ("groups", "worldbook_group_profiles"):
+            section = data.get(key)
+            if not isinstance(section, dict):
+                continue
+            for raw_id, item in section.items():
+                gid = _single_line(item.get("group_id"), 40) if isinstance(item, dict) else ""
+                gid = gid or _single_line(raw_id, 40)
+                if gid:
+                    known.add(gid)
+        return known
+
+    def _atrelay_target_group_allowed(self, group_id: Any, event: AstrMessageEvent | None = None) -> str:
+        target = _single_line(group_id, 40)
+        if not target:
+            return "发送失败：群号格式不正确"
+        blacklist_getter = getattr(self, "_configured_group_blacklist_ids", None)
+        blacklist = set(blacklist_getter()) if callable(blacklist_getter) else set()
+        if target in blacklist:
+            logger.info("[PrivateCompanion] relay group denied by blacklist: group=%s", target)
+            return "发送失败：目标群不在允许转述范围内"
+        whitelist_getter = getattr(self, "_configured_group_ids", None)
+        allowed = set(whitelist_getter()) if callable(whitelist_getter) else set()
+        allowed |= self._atrelay_known_group_ids()
+        extractor = getattr(self, "_extract_group_id_from_event", None)
+        if event is not None and callable(extractor):
+            try:
+                current_group = _single_line(extractor(event), 40)
+            except Exception:
+                current_group = ""
+            if current_group:
+                allowed.add(current_group)
+        if not allowed:
+            logger.warning("[PrivateCompanion] relay group allow-set empty; compatibility pass: group=%s", target)
+            return ""
+        if target not in allowed:
+            logger.info("[PrivateCompanion] relay group denied: group=%s", target)
+            return "发送失败：目标群不在允许转述范围内"
+        return ""
+
     def _note_atrelay_send(
         self,
         kind: str,
