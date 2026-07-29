@@ -130,6 +130,17 @@ from .helpers import (
 )
 from .config_migration import migrate_flat_config_into_schema_groups
 from .bot_personal_contract import capability_descriptor, contract_self_check
+from .person_context_contract import (
+    CONTRACT_NAME as PERSON_CONTRACT_NAME,
+    CONTRACT_VERSION as PERSON_CONTRACT_VERSION,
+    P3_CONTRACT_NAME,
+    P3_CONTRACT_VERSION,
+    build_identity_key,
+    contract_self_check as person_contract_self_check,
+)
+from .unified_person_registry import UnifiedPersonRegistry
+from .context_orchestration import build_context, project_context
+from .p4_shadow import build_p4_shadow
 from .plugin_identity import (
     PLUGIN_ID,
     PLUGIN_VERSION,
@@ -406,6 +417,27 @@ class PrivateCompanionExtensionAPI:
                 "remote_url": f"https://q1.qlogo.cn/g?b=qq&nk={qq_id}&s=640" if qq_id else "",
             },
         }
+
+    def get_unified_person_contract(self) -> dict[str, Any]:
+        return self._plugin.unified_person_contract_status()
+
+    def resolve_unified_person(self, identity: dict[str, Any]) -> dict[str, Any]:
+        return self._plugin.resolve_unified_person_identity(identity)
+
+    def create_unified_person(
+        self,
+        identity: dict[str, Any],
+        *,
+        profile: dict[str, Any] | None = None,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        return self._plugin.create_unified_person(identity, profile=profile, operation_id=operation_id)
+
+    def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
+        return self._plugin.get_unified_person_projection(person_id)
+
+    def get_unified_person_context(self, event: Any | None = None) -> dict[str, Any]:
+        return self._plugin.build_unified_person_context(event)
 
     def get_scene_context(self, user_id: str = "") -> dict[str, Any]:
         """Return the current structured Bot-life context for plugin integrations."""
@@ -1804,6 +1836,7 @@ class PrivateCompanionPlugin(
             logger.warning("[PrivateCompanion] Bot Personal contract self-check degraded: %s", ";".join(contract_issues))
         initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
+        self.unified_person_registry = UnifiedPersonRegistry(self.data)
 
     async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
         integration = getattr(self, "_body_monitor_integration", None)
@@ -1835,6 +1868,211 @@ class PrivateCompanionPlugin(
 
     def bot_personal_capability_status(self) -> dict[str, Any]:
         return dict(self.bot_personal_capabilities)
+
+    def unified_person_contract_status(self) -> dict[str, Any]:
+        issues = list(person_contract_self_check())
+        return {
+            "available": not issues,
+            "state": "ready" if not issues else "degraded",
+            "degraded": bool(issues),
+            "contract_name": PERSON_CONTRACT_NAME,
+            "contract_version": PERSON_CONTRACT_VERSION,
+            "p3_contract_name": P3_CONTRACT_NAME,
+            "p3_contract_version": P3_CONTRACT_VERSION,
+            "warnings": issues,
+            "registry": self.unified_person_registry.status(),
+        }
+
+    def _unified_person_event_identity(
+        self,
+        event: Any | None = None,
+        *,
+        subject_id: str = "",
+        subject_namespace: str = "",
+    ) -> dict[str, str]:
+        sender_id = _single_line(subject_id, 160)
+        if not sender_id and event is not None:
+            sender_getter = getattr(self, "_event_sender_id", None)
+            if callable(sender_getter):
+                try:
+                    sender_id = _single_line(sender_getter(event), 160)
+                except Exception:
+                    sender_id = ""
+            if not sender_id:
+                try:
+                    sender_id = _single_line(event.get_sender_id(), 160)
+                except Exception:
+                    sender_id = ""
+        platform = ""
+        if event is not None:
+            try:
+                platform = _single_line(event.get_platform_name(), 80)
+            except Exception:
+                platform = ""
+            if not platform:
+                platform = _single_line(str(getattr(event, "unified_msg_origin", "") or "").split(":", 1)[0], 80)
+        platform = platform or _single_line(getattr(self, "target_platform", ""), 80) or "unknown"
+        self_id = ""
+        if event is not None:
+            self_getter = getattr(self, "_event_self_id", None)
+            if callable(self_getter):
+                try:
+                    self_id = _single_line(self_getter(event), 160)
+                except Exception:
+                    self_id = ""
+        if not self_id:
+            ids = sorted(_single_line(item, 160) for item in self._known_bot_self_ids() if _single_line(item, 160))
+            if len(ids) == 1:
+                self_id = ids[0]
+        if not sender_id or not self_id:
+            return {}
+        namespace = _single_line(subject_namespace, 160).lower()
+        if not namespace:
+            namespace = f"{platform}:bot" if sender_id == self_id else f"{platform}:user"
+        adapter_instance = _single_line(
+            getattr(event, "adapter_instance_id", "") if event is not None else "",
+            160,
+        ) or f"{platform}:{_single_line(getattr(self, 'target_platform', ''), 80) or platform}"
+        return {
+            "companion_instance_id": PLUGIN_ID,
+            "bot_account_id": f"{platform}:{self_id}",
+            "adapter_instance_id": adapter_instance,
+            "subject_namespace": namespace,
+            "platform_subject_id": sender_id,
+        }
+
+    def resolve_unified_person_identity(self, identity: dict[str, Any]) -> dict[str, Any]:
+        return self.unified_person_registry.resolve(identity)
+
+    def create_unified_person(
+        self,
+        identity: dict[str, Any],
+        *,
+        profile: dict[str, Any] | None = None,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        return self.unified_person_registry.create_or_link(
+            identity,
+            profile=profile,
+            operation_id=operation_id,
+            actor_id="companion",
+        )
+
+    def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
+        return self.unified_person_registry.read_projection(person_id)
+
+    def resolve_unified_person_for_event(self, event: Any | None = None) -> dict[str, Any]:
+        identity = self._unified_person_event_identity(event)
+        if not identity:
+            return {"state": "pending", "identity_key": "", "person_id": "", "errors": ["event_identity_missing"]}
+        return self.resolve_unified_person_identity(identity)
+
+    def create_unified_person_for_event(
+        self,
+        event: Any | None = None,
+        *,
+        operation_id: str = "",
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        identity = self._unified_person_event_identity(event)
+        if not identity:
+            return {"ok": False, "state": "pending", "code": "event_identity_missing", "person_id": ""}
+        try:
+            identity_key = build_identity_key(identity)
+        except (TypeError, ValueError):
+            return {"ok": False, "state": "invalid", "code": "identity_invalid", "person_id": ""}
+        user_profile = dict(profile) if isinstance(profile, dict) else {}
+        if event is not None and not user_profile.get("display_name"):
+            name_getter = getattr(self, "_sender_display_name", None)
+            if callable(name_getter):
+                try:
+                    user_profile["display_name"] = _single_line(name_getter(event), 80)
+                except Exception:
+                    pass
+        return self.create_unified_person(
+            identity,
+            profile=user_profile,
+            operation_id=operation_id or f"companion.person.create:{identity_key[-24:]}",
+        )
+
+    def build_unified_person_context(self, event: Any | None = None) -> dict[str, Any]:
+        identity = self._unified_person_event_identity(event)
+        resolution = self.resolve_unified_person_identity(identity) if identity else {
+            "state": "pending", "identity_key": "", "person_id": "", "errors": ["event_identity_missing"],
+        }
+        state = str(resolution.get("state") or "pending")
+        projection = resolution.get("projection") if isinstance(resolution.get("projection"), dict) else None
+        scope = "unknown"
+        if event is not None:
+            try:
+                scope = "private" if bool(event.is_private_chat()) else "group"
+            except Exception:
+                scope = "unknown"
+        platform = str(identity.get("subject_namespace") or "").split(":", 1)[0] if identity else ""
+        group_id = ""
+        if scope == "group":
+            group_getter = getattr(self, "_extract_group_id_from_event", None)
+            if callable(group_getter):
+                try:
+                    group_id = _single_line(group_getter(event), 160)
+                except Exception:
+                    group_id = ""
+        group_scope = f"{platform}:group:{group_id}" if platform and group_id else ""
+        group_overlay = None
+        if state == "resolved" and group_scope and resolution.get("person_id"):
+            group_overlay = self.unified_person_registry.read_group_overlay(
+                str(resolution.get("person_id") or ""), group_scope
+            )
+        person_payload = {
+            key: projection.get(key)
+            for key in (
+                "person_id", "identity_assurance", "profile_status", "relation_policy_id",
+                "relation_label", "owner_mode", "affinity_band", "projection_revision",
+                "group_overlay_ref",
+            )
+            if projection is not None and projection.get(key) not in (None, "", [], {})
+        }
+        p3 = build_context(
+            persona={"companion_instance_id": PLUGIN_ID},
+            runtime={"platform": platform, "scope": scope, "adapter_instance_id": identity.get("adapter_instance_id", "")},
+            person=person_payload,
+            scene={
+                "scope": scope,
+                "group_scope": group_scope,
+                "group_id_present": bool(group_id),
+                "group_overlay_revision": group_overlay.get("revision") if isinstance(group_overlay, dict) else 0,
+            },
+            bridge_available=True,
+        )
+        if state != "resolved":
+            p3["state"] = state if state in {"pending", "invalid", "degraded", "legacy_local"} else "degraded"
+            p3["warnings"] = list(p3.get("warnings") or []) + list(resolution.get("errors") or [f"person_{state}"])[:8]
+            person_slot = p3.get("slots", {}).get("person")
+            if isinstance(person_slot, dict):
+                person_slot["state"] = p3["state"]
+        p3 = project_context(p3)
+        p4 = build_p4_shadow(
+            source_kind="companion",
+            target_kind="memory_bridge",
+            authority="companion",
+            reason_code="projection_ready" if state == "resolved" else f"person_{state}",
+            safe_reference=str(resolution.get("person_id") or ""),
+            operation_id=f"person.context:{str(resolution.get('identity_key') or 'pending')[-24:]}",
+            status="shadow" if state == "resolved" else "degraded",
+        )
+        return {
+            "contract_name": PERSON_CONTRACT_NAME,
+            "contract_version": PERSON_CONTRACT_VERSION,
+            "p3_contract_name": P3_CONTRACT_NAME,
+            "p3_contract_version": P3_CONTRACT_VERSION,
+            "state": state,
+            "identity": {"identity_key": str(resolution.get("identity_key") or ""), "person_id": str(resolution.get("person_id") or "")},
+            "projection": projection,
+            "p3": p3,
+            "p4_shadow": p4,
+            "scope": scope,
+            "group_scope": group_scope,
+        }
 
     def _sqlite_wal_candidate_paths(self) -> list[Path]:
         data_root = Path(get_astrbot_data_path())

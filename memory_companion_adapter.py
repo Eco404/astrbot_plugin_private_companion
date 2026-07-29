@@ -1109,6 +1109,7 @@ class MemoryCompanionAdapterMixin:
     ) -> None:
         payload = self._memory_companion_build_private_context(user_id=user_id, user=user, text=text, event=event)
         self._memory_companion_attach_context(event, payload)
+        self._memory_companion_attach_person_context(event)
 
     def _memory_companion_attach_group_context(
         self,
@@ -1129,6 +1130,61 @@ class MemoryCompanionAdapterMixin:
             event=event,
         )
         self._memory_companion_attach_context(event, payload)
+        self._memory_companion_attach_person_context(event)
+
+    def _memory_companion_attach_person_context(self, event: Any | None) -> None:
+        """Attach only validated person/P3 references to the event carrier."""
+        if event is None:
+            return
+        builder = getattr(self, "build_unified_person_context", None)
+        if not callable(builder):
+            return
+        try:
+            context = builder(event)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Unified Person 上下文生成失败: %s", _single_line(exc, 160))
+            return
+        if not isinstance(context, dict):
+            return
+        identity = context.get("identity") if isinstance(context.get("identity"), dict) else {}
+        projection = context.get("projection") if isinstance(context.get("projection"), dict) else None
+        p3 = dict(context.get("p3")) if isinstance(context.get("p3"), dict) else None
+        if p3 is not None:
+            p3["person_id"] = _single_line(identity.get("person_id"), 120)
+            p3["scope"] = _single_line(context.get("scope"), 40)
+        bridge = self._memory_companion_bridge()
+        person_result: dict[str, Any] = {"state": context.get("state", "pending"), "read_only": True}
+        context_result: dict[str, Any] = {"state": "legacy_local", "read_only": True}
+        if bridge is not None:
+            consumer = getattr(bridge, "consume_person_projection", None)
+            if callable(consumer) and projection is not None:
+                person_result = consumer(
+                    projection,
+                    expected_identity_key=_single_line(identity.get("identity_key"), 180),
+                    expected_person_id=_single_line(identity.get("person_id"), 120),
+                )
+            context_consumer = getattr(bridge, "consume_context_projection", None)
+            if callable(context_consumer) and p3 is not None:
+                context_result = context_consumer(
+                    p3,
+                    expected_person_id=_single_line(identity.get("person_id"), 120),
+                    expected_scope=_single_line(context.get("scope"), 40),
+                )
+        safe_payload = {
+            "state": _single_line(context.get("state"), 40) or "pending",
+            "identity": {
+                "identity_key": _single_line(identity.get("identity_key"), 180),
+                "person_id": _single_line(identity.get("person_id"), 120),
+            },
+            "projection": person_result.get("projection_ref") if isinstance(person_result, dict) else None,
+            "context": context_result.get("context_ref") if isinstance(context_result, dict) else None,
+            "p4_shadow": context.get("p4_shadow") if isinstance(context.get("p4_shadow"), dict) else {},
+        }
+        try:
+            setattr(event, "person_context_projection", safe_payload)
+        except Exception:
+            pass
+        self._memory_companion_attach_context(event, {"unified_person": safe_payload})
 
     async def _memory_companion_record_proactive_message(
         self,

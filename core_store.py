@@ -125,6 +125,7 @@ from .relationship_ledger import (
     normalize_relationship_positive_stage_cap_key,
 )
 from .storage.store_manager import StoreManager
+from .person_context_contract import empty_person_store, ensure_person_store
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -440,6 +441,7 @@ class CoreStoreMixin:
             "daily_review_last_attempt": {},
             "daily_review_completed_day": "",
             "daily_review_case_audit": [],
+            "unified_person": empty_person_store(),
         }
 
     @staticmethod
@@ -518,6 +520,7 @@ class CoreStoreMixin:
         data.setdefault("daily_review_last_attempt", {})
         data.setdefault("daily_review_completed_day", "")
         data.setdefault("daily_review_case_audit", [])
+        ensure_person_store(data)
         return data
 
     @staticmethod
