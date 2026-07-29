@@ -10,6 +10,7 @@ import gc
 import hashlib
 import html
 import importlib
+import inspect
 import json
 import math
 import os
@@ -2987,6 +2988,7 @@ class ProactiveMixin(UserRestGateMixin):
         tasks = (
             ("日常状态", self._ensure_daily_state),
             ("今日日程", self._ensure_daily_plan),
+            ("日程归档", self._run_agenda_maintenance_tick),
             ("当前细化", self._ensure_detail_enhancement),
             ("当前在线感", self._ensure_current_detail_presence_status),
             ("日记", self._ensure_daily_diary),
@@ -3006,6 +3008,7 @@ class ProactiveMixin(UserRestGateMixin):
         passive_labels = {
             "日常状态",
             "今日日程",
+            "日程归档",
             "当前细化",
             "当前在线感",
             "日记",
@@ -3015,6 +3018,47 @@ class ProactiveMixin(UserRestGateMixin):
             "被动注入缓存",
         }
         return tuple(item for item in tasks if item[0] in passive_labels)
+
+    async def _run_agenda_maintenance_tick(self) -> list[dict[str, Any]]:
+        """Settle local windows, archive compact projections, then drain outbox."""
+        tick = getattr(self, "_agenda_maintenance_tick", None)
+        settled: Any = []
+        if callable(tick):
+            settled = tick()
+            if inspect.isawaitable(settled):
+                settled = await settled
+        snapshots = [item for item in settled if isinstance(item, dict)] if isinstance(settled, list) else []
+        snapshot_recorder = getattr(self, "_memory_companion_record_agenda_snapshot", None)
+        reconciliation_recorder = getattr(self, "_memory_companion_record_agenda_reconciliation", None)
+        history = self.data.get("agenda_reconciliation_history") if isinstance(getattr(self, "data", None), dict) else []
+        for snapshot in snapshots:
+            if callable(snapshot_recorder):
+                try:
+                    await snapshot_recorder(snapshot)
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] C3 agenda snapshot archival failed: %s", _single_line(exc, 160))
+            if callable(reconciliation_recorder) and isinstance(history, list):
+                snapshot_id = _single_line(snapshot.get("snapshot_id"), 160)
+                for reconciliation in reversed(history):
+                    if not isinstance(reconciliation, dict):
+                        continue
+                    refs = reconciliation.get("source_refs") if isinstance(reconciliation.get("source_refs"), list) else []
+                    if snapshot_id and snapshot_id not in refs:
+                        continue
+                    try:
+                        await reconciliation_recorder(reconciliation)
+                    except Exception as exc:
+                        logger.debug("[PrivateCompanion] C3 agenda reconciliation archival failed: %s", _single_line(exc, 160))
+                    break
+        flusher = getattr(self, "_memory_companion_flush_bot_personal_outbox", None)
+        if callable(flusher):
+            try:
+                await flusher(limit=24)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] C3 Bot Personal outbox delivery failed: %s", _single_line(exc, 160))
+        if snapshots and callable(getattr(self, "_schedule_data_save", None)):
+            self._schedule_data_save(delay=0.5)
+        return snapshots
 
     def _scheduler_persona_ids(self) -> list[str]:
         active_getter = getattr(self, "_active_persona_scope", None)

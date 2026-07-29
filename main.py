@@ -130,6 +130,7 @@ from .helpers import (
 )
 from .config_migration import migrate_flat_config_into_schema_groups
 from .bot_personal_contract import capability_descriptor, contract_self_check
+from .bot_personal_outbox import BotPersonalOutbox
 from .person_context_contract import (
     CONTRACT_NAME as PERSON_CONTRACT_NAME,
     CONTRACT_VERSION as PERSON_CONTRACT_VERSION,
@@ -319,6 +320,7 @@ from .plugin_bootstrap import (
     initialize_plugin_runtime,
 )
 from .daily_state import DailyStateMixin
+from .agenda_runtime import AgendaRuntimeMixin
 from .daily_review import DailyReviewMixin
 from .scene_context import SceneContextMixin
 from .state_views import StateViewsMixin
@@ -1279,6 +1281,7 @@ class PrivateCompanionPlugin(
     SceneContextMixin,
     ProactiveMessageMixin,
     DailyStateMixin,
+    AgendaRuntimeMixin,
     DailyReviewMixin,
     StateViewsMixin,
     InteractionUtilsMixin,
@@ -1836,6 +1839,10 @@ class PrivateCompanionPlugin(
             logger.warning("[PrivateCompanion] Bot Personal contract self-check degraded: %s", ";".join(contract_issues))
         initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
+        self._bot_personal_outbox = BotPersonalOutbox(
+            self.data,
+            save=lambda: self._schedule_data_save(delay=0.5),
+        )
         self.unified_person_registry = UnifiedPersonRegistry(self.data)
 
     async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
@@ -2254,6 +2261,10 @@ class PrivateCompanionPlugin(
         self._schedule_default_persona_prompt_refresh()
         await self._body_monitor_integration.set_enabled(self.enable_body_monitor_integration)
         needs_startup_save = False
+        agenda_before = bool(getattr(self, "_agenda_migration_dirty", False))
+        self._agenda_prepare_store()
+        if getattr(self, "_agenda_migration_dirty", False) and not agenda_before:
+            needs_startup_save = True
         async with self._data_lock:
             changed = False
             raw_users = self.data.get("users") if isinstance(self.data, dict) else None
@@ -11953,6 +11964,61 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         return await handle_private_message(self, event, *args, **kwargs)
 
+    def _record_c3_inbound_activity(
+        self,
+        event: AstrMessageEvent,
+        *,
+        text: str,
+        received_ts: float,
+        user_id: str = "",
+        group_id: str = "",
+        sender_id: str = "",
+        sender_name: str = "",
+    ) -> dict[str, Any] | None:
+        """Feed the local C3 activity aggregator without changing the reply path."""
+        if not _single_line(text, 400):
+            return None
+        capture = getattr(self, "_agenda_capture_inbound_message", None)
+        if not callable(capture):
+            return None
+        scope = "group" if _single_line(group_id, 80) else "private"
+        subject_id = _single_line(group_id or user_id, 120)
+        conversation_id = f"{scope}:{subject_id}" if subject_id else scope
+        source_ref = _single_line(self._event_message_id(event), 160)
+        if not source_ref:
+            source_ref = _single_line(getattr(event, "unified_msg_origin", ""), 180)
+        if not source_ref:
+            source_ref = f"{conversation_id}:{int(received_ts)}"
+        try:
+            event_time = self._environment_fromtimestamp(received_ts)
+        except Exception:
+            event_time = datetime.fromtimestamp(received_ts).astimezone()
+        try:
+            result = capture(
+                text=_single_line(text, 400),
+                event_time=event_time,
+                source_ref=source_ref,
+                conversation_id=conversation_id,
+                participant=_single_line(sender_name or sender_id or "user", 120),
+                message_count=1,
+                visibility="group" if scope == "group" else "private",
+            )
+            if isinstance(result, dict):
+                result["scope"] = scope
+            if result is not None and scope == "private":
+                recorder = getattr(self, "_memory_companion_record_observed_activity", None)
+                if callable(recorder):
+                    asyncio.create_task(recorder(result))
+            return result
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] C3 activity capture skipped: scope=%s id=%s error=%s",
+                scope,
+                subject_id or "-",
+                _single_line(exc, 160),
+            )
+            return None
+
     async def _capture_group_observation_event(
         self,
         event: AstrMessageEvent,
@@ -11985,6 +12051,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
             if captured:
                 self._schedule_data_save()
+        self._record_c3_inbound_activity(
+            event,
+            text=text,
+            received_ts=_now_ts(),
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+        )
         if (
             self._group_role_context_requested(text)
             and not bool(getattr(event, "_private_companion_group_role_refreshed", False))

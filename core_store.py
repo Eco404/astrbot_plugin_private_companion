@@ -375,6 +375,10 @@ class CoreStoreMixin:
             "groups": {},
             "daily_plan": {},
             "daily_plan_history": [],
+            "agenda_version": 1,
+            "observed_activities": [],
+            "window_snapshots": [],
+            "agenda_reconciliation_history": [],
             "daily_state": {},
             "state_conditions": [],
             "state_generated_day": "",
@@ -393,6 +397,7 @@ class CoreStoreMixin:
             "recent_photo_continuity": {},
             "daily_story_plan": {},
             "daily_story_plan_history": [],
+            "bot_personal_outbox": [],
             "skill_growth": {},
             "detail_enhanced_day": "",
             "detail_enhanced_segments": {},
@@ -452,6 +457,10 @@ class CoreStoreMixin:
         data.setdefault("groups", {})
         data.setdefault("daily_plan", {})
         data.setdefault("daily_plan_history", [])
+        data.setdefault("agenda_version", 1)
+        data.setdefault("observed_activities", [])
+        data.setdefault("window_snapshots", [])
+        data.setdefault("agenda_reconciliation_history", [])
         data.setdefault("daily_state", {})
         data.setdefault("state_conditions", [])
         data.setdefault("state_generated_day", "")
@@ -470,6 +479,7 @@ class CoreStoreMixin:
         data.setdefault("recent_photo_continuity", {})
         data.setdefault("daily_story_plan", {})
         data.setdefault("daily_story_plan_history", [])
+        data.setdefault("bot_personal_outbox", [])
         data.setdefault("skill_growth", {})
         data.setdefault("detail_enhanced_day", "")
         data.setdefault("detail_enhanced_segments", {})

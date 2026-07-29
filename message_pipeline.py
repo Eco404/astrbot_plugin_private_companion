@@ -79,6 +79,14 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             "disabled" if existing_user_disabled else "not_target",
         )
         return
+    self._record_c3_inbound_activity(
+        event,
+        text=text,
+        received_ts=received_ts,
+        user_id=canonical_user_id or user_id,
+        sender_id=user_id,
+        sender_name=sender_display_name,
+    )
     await self._cancel_activity_followup_on_user_return(
         canonical_user_id or user_id,
         trigger_message_id=self._event_message_id(event),

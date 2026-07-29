@@ -680,6 +680,12 @@ class DailyStateMixin(DailyStateTickMixin):
             if isinstance(story_plan, dict):
                 self.data["daily_story_plan"] = story_plan
             self._save_data_sync()
+        diary_recorder = getattr(self, "_memory_companion_record_daily_diary", None)
+        if callable(diary_recorder):
+            try:
+                await diary_recorder(diary)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] Bot Personal 日记归档失败: %s", _single_line(exc, 160))
         if memory_payload:
             try:
                 await self._memory_companion_record_dream_fragment(**memory_payload)

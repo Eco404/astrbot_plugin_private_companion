@@ -220,6 +220,10 @@ _DATA_STORE_KEYS = (
     "users",
     "daily_plan",
     "daily_plan_history",
+    "agenda_version",
+    "observed_activities",
+    "window_snapshots",
+    "agenda_reconciliation_history",
     "daily_state",
     "state_conditions",
     "state_generated_day",
@@ -264,6 +268,7 @@ _DATA_STORE_KEYS = (
     "daily_review_last_attempt",
     "daily_review_completed_day",
     "daily_review_case_audit",
+    "bot_personal_outbox",
 )
 
 # 触发原因 - 真人化表达

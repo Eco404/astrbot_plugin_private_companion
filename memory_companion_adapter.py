@@ -19,7 +19,9 @@ from .bot_personal_contract import (
     CONTRACT_FINGERPRINT,
     CONTRACT_REVISION,
     WINDOW_SLUGS,
+    window_for_minutes,
 )
+from .bot_personal_outbox import BotPersonalOutbox
 from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
 
 
@@ -181,6 +183,140 @@ class MemoryCompanionAdapterMixin:
             if bridge is not None:
                 return bridge
         return None
+
+    def _memory_companion_outbox(self) -> BotPersonalOutbox | None:
+        current = getattr(self, "_bot_personal_outbox", None)
+        if isinstance(current, BotPersonalOutbox):
+            return current
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return None
+        try:
+            current = BotPersonalOutbox(
+                data,
+                save=lambda: self._schedule_data_save(delay=0.5),
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Bot Personal outbox 初始化失败: %s", _single_line(exc, 120))
+            return None
+        try:
+            setattr(self, "_bot_personal_outbox", current)
+        except Exception:
+            pass
+        return current
+
+    def _memory_companion_bot_personal_sender(self) -> Any | None:
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_bot_personal_archive", None) if bridge is not None else None
+        if not callable(recorder):
+            return None
+
+        async def _send(envelope: dict[str, Any]) -> dict[str, Any]:
+            result = recorder(envelope)
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+            return result if isinstance(result, dict) else {"ok": False, "state": "retry", "error_code": "invalid_bridge_response"}
+
+        return _send
+
+    async def _memory_companion_record_bot_personal(
+        self,
+        *,
+        memory_type: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        occurred_at: str = "",
+        version: int = 1,
+        source_refs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        outbox = self._memory_companion_outbox()
+        if outbox is None:
+            return {
+                "ok": False,
+                "state": "local_only",
+                "record_id": "",
+                "deduplicated": False,
+                "version": int(version or 1),
+                "error_code": "outbox_unavailable",
+            }
+        try:
+            result = await outbox.enqueue(
+                memory_type=memory_type,
+                payload=payload,
+                idempotency_key=idempotency_key,
+                occurred_at=occurred_at or self._memory_companion_now_iso(),
+                version=max(1, int(version or 1)),
+                source_refs=source_refs,
+                sender=self._memory_companion_bot_personal_sender(),
+            )
+            self._bridge_last_status = {
+                **getattr(self, "_bridge_last_status", {}),
+                "bot_personal_outbox": outbox.status(),
+            }
+            return result
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Bot Personal 本地归档失败: %s", _single_line(exc, 160))
+            return {
+                "ok": False,
+                "state": "local_only",
+                "record_id": "",
+                "deduplicated": False,
+                "version": int(version or 1),
+                "error_code": "outbox_enqueue_failed",
+            }
+
+    async def _memory_companion_flush_bot_personal_outbox(self, *, limit: int = 16) -> list[dict[str, Any]]:
+        outbox = self._memory_companion_outbox()
+        sender = self._memory_companion_bot_personal_sender()
+        if outbox is None or sender is None:
+            return []
+        try:
+            results = await outbox.drain(sender, limit=max(1, int(limit or 16)))
+            self._bridge_last_status = {
+                **getattr(self, "_bridge_last_status", {}),
+                "bot_personal_outbox": outbox.status(),
+            }
+            return results
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Bot Personal outbox 补投失败: %s", _single_line(exc, 160))
+            return []
+
+    async def _memory_companion_record_observed_activity(self, activity: dict[str, Any]) -> dict[str, Any]:
+        """Archive only private observed activity; group observations stay local/group-scoped."""
+        if not isinstance(activity, dict) or _single_line(activity.get("visibility"), 32) != "private":
+            return {"ok": False, "state": "local_only", "error_code": "non_private_activity"}
+        activity_id = _single_line(activity.get("activity_id"), 160)
+        title = _single_line(activity.get("title") or activity.get("summary"), 180)
+        if not activity_id or not title:
+            return {"ok": False, "state": "invalid", "error_code": "invalid_activity"}
+        payload = {
+            "date": _single_line(activity.get("start_at"), 10),
+            "window": window_for_minutes(0),
+            "summary": title,
+            "activity_id": activity_id,
+            "kind": _single_line(activity.get("kind"), 48),
+            "participants": [_single_line(item, 80) for item in (activity.get("participants") or []) if _single_line(item, 80)][:8],
+            "message_count": int(activity.get("message_count") or len(activity.get("source_refs") or []) or 1),
+        }
+        try:
+            occurred_at = _single_line(activity.get("start_at"), 80) or self._memory_companion_now_iso()
+            if "+" in occurred_at or occurred_at.endswith("Z"):
+                parsed = occurred_at.replace("Z", "+00:00")
+                from datetime import datetime
+
+                moment = datetime.fromisoformat(parsed)
+                payload["window"] = window_for_minutes(moment.hour * 60 + moment.minute)
+        except Exception:
+            occurred_at = self._memory_companion_now_iso()
+        source_refs = [_single_line(item, 160) for item in (activity.get("source_refs") or []) if _single_line(item, 160)]
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_observed_activity",
+            payload=payload,
+            idempotency_key=f"observed:{activity_id}",
+            occurred_at=occurred_at,
+            version=int(activity.get("version") or 1),
+            source_refs=source_refs or [f"companion:observed:{activity_id}"],
+        )
 
     def _memory_companion_bridge_from_module(self, module: Any | None) -> Any | None:
         module_vars = getattr(module, "__dict__", {}) if module is not None else {}
@@ -849,12 +985,107 @@ class MemoryCompanionAdapterMixin:
             "只在与本轮直接相关时自然接住；不要主动列举记忆、不要提及检索过程，也不要把它当作其他用户的信息。"
         )
 
+    async def _memory_companion_record_agenda_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(snapshot, dict):
+            return {"ok": False, "state": "invalid", "error_code": "invalid_snapshot"}
+        date_text = _single_line(snapshot.get("window_date") or snapshot.get("date"), 20)
+        window = _single_line(snapshot.get("window") or snapshot.get("slug"), 32)
+        snapshot_id = _single_line(snapshot.get("snapshot_id"), 160) or f"agenda_snapshot:{date_text}:{window}"
+
+        def _compact(items: Any, field: str) -> list[dict[str, Any]]:
+            result: list[dict[str, Any]] = []
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                value = _single_line(item.get("title") or item.get("summary") or item.get(field), 180)
+                if not value:
+                    continue
+                result.append({
+                    "id": _single_line(item.get("plan_id") or item.get("activity_id") or item.get("entry_id"), 120),
+                    "summary": value,
+                    "status": _single_line(item.get("status"), 32),
+                })
+            return result[:16]
+
+        payload = {
+            "date": date_text,
+            "window": window,
+            "summary": f"{date_text} {window} 窗口快照",
+            "planned": _compact(snapshot.get("planned"), "title"),
+            "observed": _compact(snapshot.get("observed"), "summary"),
+            "reconciled": _compact(snapshot.get("reconciled"), "reason"),
+            "open_items": [_single_line(item, 160) for item in (snapshot.get("open_items") or []) if _single_line(item, 160)][:12],
+        }
+        refs = [snapshot_id]
+        refs.extend(_single_line(item, 160) for item in (snapshot.get("source_refs") or []) if _single_line(item, 160))
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_window_snapshot",
+            payload=payload,
+            idempotency_key=snapshot_id,
+            occurred_at=_single_line(snapshot.get("generated_at"), 80) or self._memory_companion_now_iso(),
+            version=int(snapshot.get("version") or 1),
+            source_refs=list(dict.fromkeys(refs)),
+        )
+
+    async def _memory_companion_record_agenda_reconciliation(self, reconciliation: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(reconciliation, dict):
+            return {"ok": False, "state": "invalid", "error_code": "invalid_reconciliation"}
+        date_text = _single_line(reconciliation.get("window_date") or reconciliation.get("date"), 20)
+        window = _single_line(reconciliation.get("window") or reconciliation.get("slug"), 32)
+        record_id = _single_line(reconciliation.get("reconciliation_id"), 160) or f"reconciliation:{date_text}:{window}"
+        plans = []
+        for item in reconciliation.get("plans") if isinstance(reconciliation.get("plans"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            plans.append({
+                "plan_id": _single_line(item.get("plan_id"), 120),
+                "status": _single_line(item.get("status"), 32),
+                "reason": _single_line(item.get("reason") or item.get("reconciliation_reason"), 180),
+                "activity_ids": [_single_line(value, 120) for value in (item.get("activity_ids") or item.get("reconciled_activity_ids") or []) if _single_line(value, 120)][:12],
+            })
+        payload = {
+            "date": date_text,
+            "window": window,
+            "summary": f"{date_text} {window} 计划与实际对账",
+            "plans": plans[:16],
+            "observed_activity_ids": [_single_line(value, 120) for value in (reconciliation.get("observed_activity_ids") or []) if _single_line(value, 120)][:16],
+        }
+        refs = [record_id]
+        refs.extend(_single_line(item, 160) for item in (reconciliation.get("source_refs") or []) if _single_line(item, 160))
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_schedule_reconciliation",
+            payload=payload,
+            idempotency_key=record_id,
+            occurred_at=_single_line(reconciliation.get("generated_at"), 80) or self._memory_companion_now_iso(),
+            version=int(reconciliation.get("version") or 1),
+            source_refs=list(dict.fromkeys(refs)),
+        )
+
+    async def _memory_companion_record_daily_diary(self, diary: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(diary, dict):
+            return {"ok": False, "state": "invalid", "error_code": "invalid_diary"}
+        date_text = _single_line(diary.get("date"), 20)
+        summary = _single_line(diary.get("summary") or diary.get("share_seed") or diary.get("body"), 360)
+        if not date_text or not summary:
+            return {"ok": False, "state": "invalid", "error_code": "empty_diary"}
+        payload = {
+            "date": date_text,
+            "summary": summary,
+            "mood": _single_line(diary.get("mood") or diary.get("emotion"), 60),
+            "tags": [_single_line(item, 60) for item in (diary.get("tags") or []) if _single_line(item, 60)][:12],
+            "dream_summary": _single_line(diary.get("dream_summary") or diary.get("dream"), 160),
+        }
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_daily_diary",
+            payload=payload,
+            idempotency_key=f"diary:{date_text}",
+            occurred_at=self._memory_companion_now_iso(),
+            version=int(diary.get("version") or 1),
+            source_refs=[f"companion:diary:{date_text}"],
+        )
+
     async def _memory_companion_record_daily_plan(self, plan: dict[str, Any]) -> None:
         if not isinstance(plan, dict):
-            return
-        bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
-        if not callable(recorder):
             return
         date_text = _single_line(plan.get("date"), 40)
         items = plan.get("items")
@@ -880,6 +1111,30 @@ class MemoryCompanionAdapterMixin:
             if line:
                 lines.append(line)
         if not lines:
+            return
+        try:
+            now = self._environment_now()
+            window = window_for_minutes(now.hour * 60 + now.minute)
+        except Exception:
+            window = ""
+        await self._memory_companion_record_bot_personal(
+            memory_type="bot_schedule_plan",
+            payload={
+                "date": date_text,
+                "window": window,
+                "summary": f"{date_text} 的 Bot 当日生活日程已生成",
+                "items": lines,
+                "source": _single_line(plan.get("source"), 40),
+                "item_count": len(lines),
+            },
+            idempotency_key=f"daily_plan:{date_text}",
+            occurred_at=_single_line(plan.get("generated_at"), 80) or self._memory_companion_now_iso(),
+            version=int(plan.get("version") or 1),
+            source_refs=[f"companion:daily_plan:{date_text}"],
+        )
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
+        if not callable(recorder):
             return
         content = f"{date_text} 的 Bot 当日生活日程已生成：\n" + "\n".join(f"- {line}" for line in lines)
         try:
@@ -912,10 +1167,6 @@ class MemoryCompanionAdapterMixin:
         detail: dict[str, Any],
     ) -> None:
         if not isinstance(segment, dict) or not isinstance(detail, dict):
-            return
-        bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
-        if not callable(recorder):
             return
         date_text = _single_line(plan.get("date") if isinstance(plan, dict) else "", 40)
         start = 0
@@ -950,6 +1201,25 @@ class MemoryCompanionAdapterMixin:
                 if text:
                     proactive.append(text)
         if not summary and not events and not proactive:
+            return
+        await self._memory_companion_record_bot_personal(
+            memory_type="bot_detail_fragment",
+            payload={
+                "date": date_text,
+                "window": window_for_minutes(start % (24 * 60)),
+                "summary": summary or "日程细化",
+                "events": events[:4],
+                "proactive_events": proactive[:3],
+                "start": start_text,
+                "end": end_text,
+            },
+            idempotency_key=f"detail:{date_text}:{start}:{end}",
+            occurred_at=self._memory_companion_now_iso(),
+            source_refs=[f"companion:detail:{date_text}:{start}:{end}"],
+        )
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
+        if not callable(recorder):
             return
         parts = [f"{date_text} {start_text}-{end_text} 的 Bot 日程细化："]
         if summary:
