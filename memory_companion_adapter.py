@@ -703,6 +703,39 @@ class MemoryCompanionAdapterMixin:
                 known_ids.add(value)
         return next(iter(known_ids)) if len(known_ids) == 1 else ""
 
+    def _memory_companion_p5_gate_kwargs(self, *, event: Any | None = None, sink: str) -> dict[str, Any]:
+        """Mint a fresh opaque handle for one Bridge call when P5 is enabled."""
+        if not bool(getattr(self, "enable_p5_source_observer", False)):
+            return {}
+        issuer = getattr(event, "private_companion_p5_issue_attestation", None) if event is not None else None
+        if not callable(issuer):
+            issuer = getattr(self, "_p5_issue_attestation_for_event", None)
+            if callable(issuer):
+                try:
+                    issued = issuer(
+                        event=event,
+                        request=getattr(event, "private_companion_p5_request_carrier", None) if event is not None else None,
+                        sink=sink,
+                    )
+                except Exception:
+                    issued = None
+            else:
+                issued = None
+        else:
+            try:
+                issued = issuer(sink)
+            except Exception:
+                issued = None
+        if not isinstance(issued, tuple) or len(issued) != 2:
+            return {}
+        handle, consumer = issued
+        if handle is None or not callable(consumer):
+            return {}
+        return {
+            "p5_attestation": handle,
+            "p5_attestation_consumer": consumer,
+        }
+
     def _memory_companion_schedule_session_context(self, *, message_text: str = "") -> dict[str, Any]:
         user_id, user = self._memory_companion_schedule_owner_context()
         umo = _single_line(user.get("umo"), 200) if isinstance(user, dict) else ""
@@ -782,6 +815,7 @@ class MemoryCompanionAdapterMixin:
                 "companion_bot_mood": bot_mood,
                 "companion_bot_energy": bot_energy,
             }
+            compose_kwargs.update(self._memory_companion_p5_gate_kwargs(event=None, sink="bridge_serialization"))
             if self._memory_companion_coordination_status().get("schedule_fast_context") is True:
                 compose_kwargs["retrieval_profile"] = "schedule_fast"
             text = await asyncio.wait_for(
@@ -931,6 +965,7 @@ class MemoryCompanionAdapterMixin:
                 "companion_bot_mood": bot_mood,
                 "companion_bot_energy": bot_energy,
             }
+            compose_kwargs.update(self._memory_companion_p5_gate_kwargs(event=event, sink="bridge_serialization"))
             if (
                 kind == "daily_outfit_photo"
                 and self._memory_companion_coordination_status().get("outfit_fast_context") is True

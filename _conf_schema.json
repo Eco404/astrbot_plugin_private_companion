@@ -6684,6 +6684,33 @@
         "hint": "仅控制 MemoryCompanion Bridge；关闭后陪伴侧本地聊天和本地记忆继续工作。缺失时按开启兼容旧配置。",
         "default": true
       },
+      "enable_p5_source_observer": {
+        "description": "启用 P5 来源观察",
+        "type": "bool",
+        "hint": "默认关闭。开启后仅记录来源类型、信任级别、受控引用哈希和原因码，不保存原始消息、Prompt、媒体或凭据。",
+        "default": false,
+        "condition": {
+          "enable_memory_companion_bridge": true
+        }
+      },
+      "enable_p5_b1_recall_gate": {
+        "description": "启用 P5-B1 召回闸门",
+        "type": "bool",
+        "hint": "默认关闭。开启后 MemoryCompanion 只接受当前请求的一次性陪伴侧 attestation；缺失或失效时明确降级，不扩大召回。",
+        "default": false,
+        "condition": {
+          "enable_p5_source_observer": true
+        }
+      },
+      "enable_p5_b1_bridge_gate": {
+        "description": "启用 P5-B1 Bridge 闸门",
+        "type": "bool",
+        "hint": "默认关闭。开启后 Bridge 的搜索、上下文和序列化入口需要一次性 attestation；高风险来源继续 fail closed。",
+        "default": false,
+        "condition": {
+          "enable_p5_source_observer": true
+        }
+      },
       "livingmemory_tool_name": {
         "description": "记忆召回工具名",
         "type": "string",
