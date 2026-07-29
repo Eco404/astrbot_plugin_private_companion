@@ -380,6 +380,81 @@ class MemoryCompanionAdapterMixin:
         self._bridge_last_status = status
         return status
 
+    async def _memory_companion_read_profile(
+        self,
+        profile: str,
+        *,
+        query: str = "",
+        limit: int = 10,
+        current_date: str = "",
+        current_window: str = "",
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Select one named Bot Profile without sending storage filters downstream."""
+
+        safe_profile = _single_line(profile, 80)
+        base = {
+            "ok": False,
+            "read_only": True,
+            "state": "degraded",
+            "degraded": True,
+            "pending": True,
+            "profile": safe_profile,
+            "items": [],
+            "warnings": [],
+        }
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            return {**base, "state": self._bridge_last_status.get("state", "degraded"), "error_code": "bridge_unavailable"}
+        getter = getattr(bridge, "read_bot_profile", None)
+        if not callable(getter):
+            return {**base, "error_code": "profile_method_missing"}
+        try:
+            result = getter(
+                safe_profile,
+                query=_single_line(query, 240),
+                limit=max(1, min(100, int(limit or 10))),
+                current_date=_single_line(current_date, 20),
+                current_window=_single_line(current_window, 40),
+                authorized=bool(authorized),
+            )
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="read_profile"):
+                return dict(self._bridge_last_status)
+            return {**base, "error_code": "profile_bridge_exception"}
+        if not isinstance(result, dict):
+            return {**base, "error_code": "invalid_profile_response"}
+        safe_item_keys = {
+            "record_id", "memory_domain", "memory_type", "subject", "date", "window",
+            "occurred_at", "source_kind", "source_refs", "evidence_level", "status",
+            "version", "summary", "reference",
+        }
+        safe_items: list[dict[str, Any]] = []
+        for item in result.get("items", []) if isinstance(result.get("items"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            safe_items.append({key: item[key] for key in safe_item_keys if key in item})
+        self._bridge_last_status = {
+            **getattr(self, "_bridge_last_status", {}),
+            "last_profile": safe_profile,
+        }
+        return {
+            "ok": bool(result.get("ok", True)),
+            "read_only": True,
+            "state": _single_line(result.get("state"), 40) or "ready",
+            "degraded": bool(result.get("degraded", False)),
+            "pending": bool(result.get("pending", False)),
+            "profile": _single_line(result.get("profile") or safe_profile, 80),
+            "items": safe_items,
+            "warnings": [
+                _single_line(item, 160)
+                for item in (result.get("warnings") or [])
+                if _single_line(item, 160)
+            ][:8],
+        }
+
     def _memory_companion_coordination_status(self) -> dict[str, Any]:
         bridge = self._memory_companion_bridge()
         if bridge is None:
