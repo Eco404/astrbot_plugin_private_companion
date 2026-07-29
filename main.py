@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import contextvars
 import functools
 import gc
@@ -2479,9 +2480,43 @@ class PrivateCompanionPlugin(
         def discard_finished_task(finished: asyncio.Task) -> None:
             if self._startup_background_tasks.get(label) is finished:
                 self._startup_background_tasks.pop(label, None)
+            if finished.cancelled():
+                return
+            try:
+                error = finished.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                logger.warning(
+                    "[PrivateCompanion] startup background task failed: task=%s error=%s",
+                    _single_line(label, 100) or "startup",
+                    _single_line(error, 180),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
 
         task.add_done_callback(discard_finished_task)
         return task
+
+    @asynccontextmanager
+    async def _temporarily_release_data_lock(self):
+        """Release the data lock for an external await, then reacquire it safely."""
+        lock = getattr(self, "_data_lock", None)
+        if lock is None or not lock.locked():
+            yield
+            return
+        lock.release()
+        reacquire_cancelled = False
+        try:
+            yield
+        finally:
+            while True:
+                try:
+                    await lock.acquire()
+                    break
+                except asyncio.CancelledError:
+                    reacquire_cancelled = True
+            if reacquire_cancelled:
+                raise asyncio.CancelledError
 
     def _create_lifecycle_background_task(
         self,
@@ -12190,7 +12225,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if result is not None and scope == "private":
                 recorder = getattr(self, "_memory_companion_record_observed_activity", None)
                 if callable(recorder):
-                    asyncio.create_task(recorder(result))
+                    self._create_lifecycle_background_task(
+                        recorder(result),
+                        label="record_observed_activity",
+                    )
             return result
         except Exception as exc:
             logger.debug(

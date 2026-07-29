@@ -13,12 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from typing import Any, Awaitable, Callable, Mapping
 
 from .bot_personal_dto import BotPersonalArchiveDTO, build_bot_personal_dto
 
 
 OUTBOX_STATES = frozenset({"pending", "retry", "sent", "deduplicated", "dead_letter", "invalid"})
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -80,6 +82,7 @@ class BotPersonalOutbox:
         max_attempts: int = 5,
         base_backoff_seconds: float = 30.0,
         max_backoff_seconds: float = 3600.0,
+        background_task: Callable[[Awaitable[Any], str], Any] | None = None,
     ) -> None:
         self.data = data
         self.save = save
@@ -87,6 +90,8 @@ class BotPersonalOutbox:
         self.max_attempts = max(1, int(max_attempts or 5))
         self.base_backoff_seconds = max(0.0, float(base_backoff_seconds or 30.0))
         self.max_backoff_seconds = max(self.base_backoff_seconds, float(max_backoff_seconds or 3600.0))
+        self.background_task = background_task
+        self._persist_tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         entries = self.data.setdefault("bot_personal_outbox", [])
         if not isinstance(entries, list):
@@ -109,11 +114,33 @@ class BotPersonalOutbox:
         try:
             result = self.save()
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
-                asyncio.create_task(result)
+                if callable(self.background_task):
+                    self.background_task(result, "bot_personal_outbox_save")
+                    return
+                try:
+                    task = asyncio.create_task(result)
+                except RuntimeError:
+                    closer = getattr(result, "close", None)
+                    if callable(closer):
+                        closer()
+                    return
+                self._persist_tasks.add(task)
+                task.add_done_callback(self._collect_persist_task)
         except Exception:
             # The in-memory queue remains authoritative for this process; the
             # next normal store save can still persist the already-mutated data.
             return
+
+    def _collect_persist_task(self, task: asyncio.Task) -> None:
+        self._persist_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.warning("Bot Personal outbox save task failed: %s", error, exc_info=error)
 
     @staticmethod
     def _key(memory_type: str, idempotency_key: str) -> str:

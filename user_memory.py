@@ -8350,12 +8350,13 @@ Bot 主动后用户回复次数：{reply_count}
                 preference,
             )
             if followup_user is not None:
-                asyncio.create_task(
+                self._create_lifecycle_background_task(
                     self._refresh_persona_relationship(
                         user_id,
                         followup_user,
                         trigger="pending_boundary",
-                    )
+                    ),
+                    label="refresh_persona_relationship_pending_boundary",
                 )
             return True
         except Exception as exc:

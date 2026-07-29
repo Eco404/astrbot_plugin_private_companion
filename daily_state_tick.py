@@ -1797,6 +1797,7 @@ class DailyStateTickMixin:
                 }
         if memory_companion_proactive_payload:
             await self._memory_companion_record_proactive_message(**memory_companion_proactive_payload)
-        asyncio.create_task(
-            self._refresh_persona_relationship(user_id, current_snapshot, trigger="proactive")
+        self._create_lifecycle_background_task(
+            self._refresh_persona_relationship(user_id, current_snapshot, trigger="proactive"),
+            label="refresh_persona_relationship_proactive",
         )
