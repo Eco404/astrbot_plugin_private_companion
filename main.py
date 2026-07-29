@@ -129,6 +129,14 @@ from .helpers import (
     _resolve_timezone_setting,
 )
 from .config_migration import migrate_flat_config_into_schema_groups
+from .bot_personal_contract import capability_descriptor, contract_self_check
+from .plugin_identity import (
+    PLUGIN_ID,
+    PLUGIN_VERSION,
+    is_module_path_for_package,
+    plugin_identity_snapshot,
+)
+from .runtime_compat import probe_runtime_capabilities
 from .companion_interaction_expression import build_expression_decision, content_intent_from_text, expression_decision_prompt
 from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
@@ -1777,6 +1785,23 @@ class PrivateCompanionPlugin(
         self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
         self._external_realtime_activities: dict[str, dict[str, Any]] = {}
         self.config = config
+        self.plugin_identity = plugin_identity_snapshot()
+        self.runtime_capabilities = probe_runtime_capabilities(
+            context=context,
+            plugin_name=PLUGIN_ID,
+            plugin_version=PLUGIN_VERSION,
+        )
+        contract_issues = tuple(contract_self_check())
+        self.bot_personal_capabilities = capability_descriptor(available=not contract_issues, read_only=False)
+        self.bot_personal_capabilities.update(
+            {
+                "state": "ready" if not contract_issues else "degraded",
+                "degraded": bool(contract_issues),
+                "warnings": list(contract_issues),
+            }
+        )
+        if contract_issues:
+            logger.warning("[PrivateCompanion] Bot Personal contract self-check degraded: %s", ";".join(contract_issues))
         initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
 
@@ -1801,6 +1826,15 @@ class PrivateCompanionPlugin(
         if integration is None:
             return ""
         return integration.format_health_prompt(user, reason=reason)
+
+    def plugin_identity_status(self) -> dict[str, Any]:
+        return dict(self.plugin_identity)
+
+    def runtime_compatibility_status(self) -> dict[str, Any]:
+        return self.runtime_capabilities.to_dict()
+
+    def bot_personal_capability_status(self) -> dict[str, Any]:
+        return dict(self.bot_personal_capabilities)
 
     def _sqlite_wal_candidate_paths(self) -> list[Path]:
         data_root = Path(get_astrbot_data_path())
@@ -1955,7 +1989,7 @@ class PrivateCompanionPlugin(
             repaired = 0
             for handler in list(star_handlers_registry):
                 handler_module_path = str(getattr(handler, "handler_module_path", "") or "")
-                if not handler_module_path.startswith(package_prefix):
+                if not is_module_path_for_package(handler_module_path, package_prefix):
                     continue
                 handler_name = str(getattr(handler, "handler_name", "") or "")
                 if not handler_name:

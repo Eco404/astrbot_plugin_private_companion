@@ -67,6 +67,9 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "response_review_mode": ("passive_review_mode",),
 }
 
+# Independent from the legacy LivingMemory compatibility switch.
+MEMORY_COMPANION_BRIDGE_KEY = "enable_memory_companion_bridge"
+
 LEGACY_PROACTIVE_ACTION_FLAG_KEYS: dict[str, str] = {
     "photo_text": "enable_photo_text_action",
     "screen_peek": "enable_screen_glance_action",

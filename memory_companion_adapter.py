@@ -11,6 +11,15 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .bot_personal_contract import (
+    BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
+    BOT_PERSONAL_MEMORY_DOMAIN,
+    BOT_PERSONAL_MEMORY_TYPES,
+    BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
+    CONTRACT_FINGERPRINT,
+    CONTRACT_REVISION,
+    WINDOW_SLUGS,
+)
 from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
 
 
@@ -33,6 +42,62 @@ class MemoryCompanionAdapterMixin:
     _BRIDGE_CACHE_TTL: float = 30.0
     _bridge_dependency_failure_until: float = 0.0
     _bridge_dependency_failure_module: str = ""
+    _bridge_last_status: dict[str, Any] = {}
+
+    @staticmethod
+    def _memory_companion_coerce_bool(value: Any, default: bool = True) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "enabled"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "disabled"}:
+                return False
+        if value is None:
+            return default
+        return bool(value)
+
+    def _memory_companion_bridge_enabled(self) -> bool:
+        """Read the Bridge switch without consulting the legacy LivingMemory switch."""
+        for attr in ("enable_memory_companion_bridge", "memory_companion_bridge_enabled"):
+            if hasattr(self, attr):
+                return self._memory_companion_coerce_bool(getattr(self, attr), True)
+        config = getattr(self, "config", None)
+        marker = object()
+        for key in (
+            "enable_memory_companion_bridge",
+            "memory_companion_bridge.enabled",
+            "private_companion_bridge.enabled",
+        ):
+            value: Any = marker
+            if isinstance(config, dict):
+                current: Any = config
+                for part in key.split("."):
+                    if not isinstance(current, dict) or part not in current:
+                        current = marker
+                        break
+                    current = current[part]
+                value = current
+            else:
+                getter = getattr(config, "get", None)
+                if callable(getter):
+                    try:
+                        value = getter(key, marker)
+                    except Exception:
+                        value = marker
+            if value is not marker:
+                return self._memory_companion_coerce_bool(value, True)
+        return True
+
+    def _memory_companion_degraded_status(self, reason: str, **extra: Any) -> dict[str, Any]:
+        status = {
+            "available": False,
+            "state": "local_only" if reason == "bridge_disabled" else "degraded",
+            "degraded": reason != "bridge_disabled",
+            "reason": reason,
+        }
+        status.update({key: value for key, value in extra.items() if value is not None})
+        self._bridge_last_status = status
+        return status
 
     def _memory_companion_filter_internal_error_context(self, value: Any) -> str:
         """Keep recalled Provider failures out of downstream generation prompts."""
@@ -56,6 +121,11 @@ class MemoryCompanionAdapterMixin:
         self._bridge_cache_ts = 0.0
         self._bridge_dependency_failure_until = time.monotonic() + 300.0
         self._bridge_dependency_failure_module = module
+        self._memory_companion_degraded_status(
+            "optional_dependency_missing",
+            module=module,
+            where=_single_line(where, 80) or "-",
+        )
         logger.warning(
             "[PrivateCompanion] 记忆插件可选模型依赖缺失，已临时降级 MemoryCompanion 桥接: module=%s where=%s err=%s",
             module,
@@ -65,16 +135,38 @@ class MemoryCompanionAdapterMixin:
         return True
 
     def _memory_companion_bridge(self) -> Any | None:
-        if not getattr(self, "enable_livingmemory_integration", True):
+        if not self._memory_companion_bridge_enabled():
+            self._memory_companion_degraded_status("bridge_disabled")
             return None
         now = time.monotonic()
         if now < self._bridge_dependency_failure_until:
             return None
         if self._bridge_cache is not None and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL:
             return self._bridge_cache
+        if (
+            self._bridge_cache is None
+            and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL
+            and self._bridge_last_status.get("reason")
+            in {
+                "bridge_missing",
+                "capability_probe_missing",
+                "capability_probe_exception",
+                "capability_probe_invalid",
+                "capability_contract_mismatch",
+            }
+        ):
+            return None
+        self._bridge_last_status = {}
         bridge = self._memory_companion_bridge_uncached()
+        if bridge is not None:
+            capability_status = self._memory_companion_probe_capabilities(bridge)
+            self._bridge_last_status = capability_status
+            if not capability_status.get("available", False):
+                bridge = None
         self._bridge_cache = bridge
         self._bridge_cache_ts = now
+        if bridge is None and not self._bridge_last_status:
+            self._memory_companion_degraded_status("bridge_missing")
         return bridge
 
     def _memory_companion_bridge_uncached(self) -> Any | None:
@@ -85,15 +177,6 @@ class MemoryCompanionAdapterMixin:
             "astrbot_plugin_memory_companion.main",
         ):
             module = sys.modules.get(module_name)
-            bridge = self._memory_companion_bridge_from_module(module)
-            if bridge is not None:
-                return bridge
-        for module in list(sys.modules.values()):
-            module_vars = getattr(module, "__dict__", {}) if module is not None else {}
-            if not isinstance(module_vars, dict):
-                continue
-            if module_vars.get("PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "我会牢牢记住你", "RememberYou"}:
-                continue
             bridge = self._memory_companion_bridge_from_module(module)
             if bridge is not None:
                 return bridge
@@ -110,21 +193,89 @@ class MemoryCompanionAdapterMixin:
             self._memory_companion_optional_dependency_failed(exc, where="get_active_bridge")
             return None
 
+    def _memory_companion_probe_capabilities(self, bridge: Any) -> dict[str, Any]:
+        try:
+            getter = getattr(bridge, "probe_bot_personal_memory_capabilities", None)
+        except Exception:
+            return self._memory_companion_degraded_status("capability_probe_exception")
+        if not callable(getter):
+            return self._memory_companion_degraded_status("capability_probe_missing")
+        try:
+            result = getter()
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="capability_probe"):
+                return dict(self._bridge_last_status)
+            return self._memory_companion_degraded_status("capability_probe_exception")
+        if not isinstance(result, dict):
+            return self._memory_companion_degraded_status("capability_probe_invalid")
+
+        expected_windows = list(WINDOW_SLUGS)
+        expected_memory_types = list(BOT_PERSONAL_MEMORY_TYPES)
+        observed_windows = result.get("windows")
+        observed_memory_types = result.get("memory_types")
+        observed_domain = result.get("memory_domain", result.get("domain", ""))
+        mismatches: list[str] = []
+        if result.get("contract_fingerprint") != CONTRACT_FINGERPRINT:
+            mismatches.append("contract_fingerprint")
+        if result.get("contract_revision") != CONTRACT_REVISION:
+            mismatches.append("contract_revision")
+        if result.get("capability_schema_version") != BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION:
+            mismatches.append("capability_schema_version")
+        if result.get("payload_schema_version") != BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION:
+            mismatches.append("payload_schema_version")
+        if observed_domain != BOT_PERSONAL_MEMORY_DOMAIN:
+            mismatches.append("memory_domain")
+        if observed_windows != expected_windows:
+            mismatches.append("windows")
+        if observed_memory_types != expected_memory_types:
+            mismatches.append("memory_types")
+        if result.get("available") is not True:
+            mismatches.append("available")
+        if mismatches:
+            return self._memory_companion_degraded_status(
+                "capability_contract_mismatch",
+                mismatches=tuple(mismatches),
+            )
+
+        status = dict(result)
+        status.setdefault("state", "ready")
+        status.setdefault("degraded", False)
+        status.setdefault("available", True)
+        self._bridge_last_status = status
+        return status
+
     def _memory_companion_coordination_status(self) -> dict[str, Any]:
         bridge = self._memory_companion_bridge()
         if bridge is None:
-            return {"available": False}
-        getter = getattr(bridge, "coordination_status", None)
+            return dict(self._bridge_last_status or self._memory_companion_degraded_status("bridge_missing"))
+        if self._bridge_last_status.get("reason") in {
+            "capability_probe_missing",
+            "capability_probe_exception",
+            "capability_probe_invalid",
+            "capability_contract_mismatch",
+        }:
+            return dict(self._bridge_last_status)
+        try:
+            getter = getattr(bridge, "coordination_status", None)
+        except Exception:
+            return self._memory_companion_degraded_status("bridge_exception")
         if not callable(getter):
-            return {"available": True}
+            return self._memory_companion_degraded_status("method_missing", method="coordination_status")
         try:
             status = getter()
         except Exception as exc:
             if self._memory_companion_optional_dependency_failed(exc, where="coordination_status"):
-                return {"available": False, "error": f"missing optional dependency: {self._bridge_dependency_failure_module}"}
+                return dict(self._bridge_last_status)
             logger.debug("[PrivateCompanion] MemoryCompanion 协同状态读取失败: %s", _single_line(exc, 120))
-            return {"available": True, "error": _single_line(exc, 120)}
-        return status if isinstance(status, dict) else {"available": True}
+            return self._memory_companion_degraded_status("bridge_exception", error=_single_line(exc, 120))
+        if not isinstance(status, dict):
+            return self._memory_companion_degraded_status("invalid_status", status_type=type(status).__name__)
+        result = dict(status)
+        result.setdefault("available", True)
+        result.setdefault("state", "ready")
+        result.setdefault("degraded", False)
+        self._bridge_last_status = result
+        return result
 
     def _memory_companion_token_usage_summary(self) -> dict[str, Any]:
         bridge = self._memory_companion_bridge()

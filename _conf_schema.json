@@ -6678,6 +6678,12 @@
         "hint": "统一控制已适配的外部记忆插件协同，不只对应 LivingMemory。检测到“我会牢牢记住你”/MemoryCompanion 或 LivingMemory 时，在私聊和群聊提示词中按各自能力使用记忆上下文或召回工具；本插件继续负责人格、状态、关系和群聊气氛。",
         "default": true
       },
+      "enable_memory_companion_bridge": {
+        "description": "独立启用 MemoryCompanion Bridge",
+        "type": "bool",
+        "hint": "仅控制 MemoryCompanion Bridge；关闭后陪伴侧本地聊天和本地记忆继续工作。缺失时按开启兼容旧配置。",
+        "default": true
+      },
       "livingmemory_tool_name": {
         "description": "记忆召回工具名",
         "type": "string",
@@ -6698,7 +6704,7 @@
           "step": 0.1
         },
         "condition": {
-          "enable_livingmemory_integration": true
+          "enable_memory_companion_bridge": true
         }
       },
       "enable_memory_companion_emotional_drift": {
@@ -6707,7 +6713,7 @@
         "hint": "从“我会牢牢记住你”拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀应用到 Bot 当前能量和心情底色。每次私聊和主动消息生成前触发。",
         "default": true,
         "condition": {
-          "enable_livingmemory_integration": true
+          "enable_memory_companion_bridge": true
         }
       },
       "enable_memory_companion_cross_window_emotion": {
@@ -6725,7 +6731,7 @@
         "hint": "日记生成后将首条梦境碎片写入“我会牢牢记住你”，带上 dream_fragment 标签和查询锚点，支持跨会话梦境连续性。",
         "default": true,
         "condition": {
-          "enable_livingmemory_integration": true
+          "enable_memory_companion_bridge": true
         }
       },
       "enable_memory_companion_open_loop_search": {
@@ -6734,7 +6740,7 @@
         "hint": "主动消息生成前从“我会牢牢记住你”检索未完成的承诺和话题，注入到主动消息提示词中，形成承诺兑现闭环。",
         "default": true,
         "condition": {
-          "enable_livingmemory_integration": true
+          "enable_memory_companion_bridge": true
         }
       },
       "enable_memory_companion_feature_context": {
@@ -6743,7 +6749,7 @@
         "hint": "主动消息生成/复核、当前状态问答、每日穿搭、自然语言生图、QQ 空间互动、群聊主动插话、私下创作和陪伴答疑等链路按需读取“我会牢牢记住你”的结构化上下文。关闭后这些链路不会主动召回记忆。",
         "default": true,
         "condition": {
-          "enable_livingmemory_integration": true
+          "enable_memory_companion_bridge": true
         }
       },
       "enable_memory_companion_private_recall": {
