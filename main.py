@@ -2175,10 +2175,10 @@ class PrivateCompanionPlugin(
         if self.group_member_safety_review_mode not in {"directed", "suspicious", "all"}:
             self.group_member_safety_review_mode = "directed"
         self.group_member_safety_hidden_marker_mode = self._cfg_str(
-            c, "group_member_safety_hidden_marker_mode", "supplement", "supplement"
+            c, "group_member_safety_hidden_marker_mode", "reply_only", "reply_only"
         ).lower()
         if self.group_member_safety_hidden_marker_mode not in {"supplement", "reply_only", "disabled"}:
-            self.group_member_safety_hidden_marker_mode = "supplement"
+            self.group_member_safety_hidden_marker_mode = "reply_only"
         self.group_member_safety_strike_threshold = self._cfg_int(
             c, "group_member_safety_strike_threshold", 3, 1, 20
         )

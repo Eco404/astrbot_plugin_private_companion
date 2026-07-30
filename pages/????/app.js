@@ -2305,7 +2305,7 @@ const configDescriptions = {
   group_conversation_followup_max_turns: "一次群聊连续对话最多自动续接几轮，防止 Bot 一直卷进对话。",
   enable_group_member_safety: "开启后，模型会保守审核配置范围内明确针对 Bot 的持续骚扰、威胁和重复攻击；达到次数后只静默当前群里的该成员。普通批评、玩笑、争论、偶发脏话和不确定内容应放行。",
   group_member_safety_review_mode: "directed 只审核明确对 Bot 的消息；suspicious 还包含同一成员的 Bot 对话续接窗口；all 会审核全部群消息并显著增加模型调用量。",
-  group_member_safety_hidden_marker_mode: "supplement 会让独立审核与回复模型标签互相补充且同一消息最多计数一次；reply_only 可节省独立审核调用，但没有生成回复的消息不会新增风险次数；disabled 只使用原独立审核。内部标签会在 TTS、分段和发送前移除。",
+  group_member_safety_hidden_marker_mode: "reply_only 默认复用正常回复模型的内部标签，不额外调用风控模型；没有生成回复的消息不会新增风险次数。supplement 会再运行独立审核模型；disabled 只使用独立审核。内部标签会在 TTS、分段和发送前移除。",
   group_member_safety_strike_threshold: "同一成员在统计窗口内累计到该次数后自动静默。每条消息最多累计一次，建议至少 3 次。",
   group_member_safety_strike_window_days: "只统计最近这段时间内、且晚于最近一次解除或豁免的风险记录。",
   group_member_safety_block_hours: "自动静默持续小时数；0 表示直到人工解除。三级管理页中的手动静默始终需要人工解除。",
@@ -5988,7 +5988,7 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "group_member_safety_review_mode", type: "select", label: "审核范围", options: [["directed", "只审核对 Bot 的消息"], ["suspicious", "包含对话续接窗口"], ["all", "全部群消息"]] },
-        { key: "group_member_safety_hidden_marker_mode", type: "select", label: "隐性标签模式", options: [["supplement", "补充独立审核（推荐）"], ["reply_only", "仅使用回复模型标签"], ["disabled", "关闭隐性标签"]] },
+        { key: "group_member_safety_hidden_marker_mode", type: "select", label: "隐性标签模式", options: [["reply_only", "仅使用回复模型标签（推荐）"], ["supplement", "补充独立审核（额外模型调用）"], ["disabled", "关闭隐性标签"]] },
         { key: "group_member_safety_strike_threshold", type: "number", label: "自动静默次数", placeholder: "3", min: 1, max: 20 },
         { key: "group_member_safety_strike_window_days", type: "number", label: "统计窗口天数", placeholder: "30", min: 1, max: 365 },
         { key: "group_member_safety_block_hours", type: "number", label: "静默小时数", placeholder: "168", min: 0 },
