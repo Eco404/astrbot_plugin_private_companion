@@ -107,8 +107,8 @@
       "environment_perception_timezone": {
         "description": "环境感知时区",
         "type": "string",
-        "hint": "默认 Asia/Shanghai。用于发送时间、时段和日期语境判断。",
-        "default": "Asia/Shanghai",
+        "hint": "填写 global 跟随 AstrBot 全局时区，也可填写 Asia/Shanghai 等 IANA 时区。旧配置中已明确保存的时区继续按自定义值生效。",
+        "default": "global",
         "condition": "enable_environment_perception"
       },
       "enable_holiday_perception": {
@@ -330,7 +330,7 @@
   "environment_perception_timezone": {
     "description": "Legacy flat config: 环境感知时区",
     "type": "string",
-    "default": "Asia/Shanghai",
+    "default": "global",
     "invisible": true
   },
   "enable_holiday_perception": {

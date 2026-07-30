@@ -9,6 +9,7 @@ import re
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -1715,7 +1716,8 @@ class ForwardMessageMixin:
                     return True
                 # QQ 图床(NTQQ multimedia / qpic)的下载直链不带扩展名, 只能按域名识别;
                 # 同一域名也会下发语音等非图片文件, 按 format 参数排除。
-                if any(host in lowered for host in ("multimedia.nt.qq.com", "qpic.cn")):
+                hostname = (urlparse(text).hostname or "").lower().rstrip(".")
+                if hostname in {"multimedia.nt.qq.com", "multimedia.nt.qq.com.cn", "qpic.cn"} or hostname.endswith(".qpic.cn"):
                     return not re.search(r"[?&]format=(?:amr|silk|mp3|m4a|wav|ogg|mp4)\b", lowered)
                 return False
             return bool(
