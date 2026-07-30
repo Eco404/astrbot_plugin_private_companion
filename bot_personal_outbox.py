@@ -115,7 +115,17 @@ class BotPersonalOutbox:
             result = self.save()
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 if callable(self.background_task):
-                    self.background_task(result, "bot_personal_outbox_save")
+                    try:
+                        task = self.background_task(result, "bot_personal_outbox_save")
+                    except Exception:
+                        closer = getattr(result, "close", None)
+                        if callable(closer):
+                            closer()
+                        raise
+                    if task is None:
+                        closer = getattr(result, "close", None)
+                        if callable(closer):
+                            closer()
                     return
                 try:
                     task = asyncio.create_task(result)

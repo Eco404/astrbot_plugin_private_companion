@@ -3062,17 +3062,32 @@ class PrivateImageMixin:
             except Exception:
                 pass
             return existing_task
-        task = asyncio.create_task(
-            self._run_group_image_understanding(
-                task_key=task_key,
-                group_id=group_id,
-                sender_id=sender_id,
-                text=text,
-                message_id=message_id,
-                umo=_single_line(getattr(event, "unified_msg_origin", ""), 160),
-                sources=sources,
-            )
+        operation = self._run_group_image_understanding(
+            task_key=task_key,
+            group_id=group_id,
+            sender_id=sender_id,
+            text=text,
+            message_id=message_id,
+            umo=_single_line(getattr(event, "unified_msg_origin", ""), 160),
+            sources=sources,
         )
+        creator = getattr(self, "_create_lifecycle_background_task", None)
+        try:
+            task = (
+                creator(operation, label="group_image_understanding")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-group-image-understanding")
+            )
+        except RuntimeError:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
+        if task is None:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
         store[task_key] = {
             "task": task,
             "created_ts": _now_ts(),
@@ -4306,9 +4321,33 @@ class PrivateImageMixin:
         )
         task_creator = getattr(self, "_create_lifecycle_background_task", None)
         if callable(task_creator):
-            task_creator(remainder, label="private_image_reply_remainder")
+            task = task_creator(remainder, label="private_image_reply_remainder")
+            if task is None:
+                close = getattr(remainder, "close", None)
+                if callable(close):
+                    close()
         else:
-            asyncio.create_task(remainder)
+            task = asyncio.create_task(remainder, name="private-companion-private-image-remainder")
+            tasks = getattr(self, "_private_image_background_tasks", None)
+            if not isinstance(tasks, set):
+                tasks = set()
+                self._private_image_background_tasks = tasks
+            tasks.add(task)
+
+            def consume(done_task: asyncio.Task) -> None:
+                try:
+                    done_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] private image remainder task failed: %s",
+                        _single_line(exc, 160),
+                    )
+                finally:
+                    tasks.discard(done_task)
+
+            task.add_done_callback(consume)
         return first_text or self._private_image_context_assistant_message(text)
 
     async def _private_image_reply_chain(self, text: str, event: AstrMessageEvent) -> list[Any]:

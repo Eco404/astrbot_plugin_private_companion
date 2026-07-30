@@ -9446,12 +9446,38 @@ class DailyStateMixin(DailyStateTickMixin):
                 if isinstance(current_tasks, dict):
                     current_tasks.pop(scope, None)
 
+        operation = _runner()
+        creator = getattr(self, "_create_lifecycle_background_task", None)
         try:
-            task = asyncio.create_task(_runner())
-            tasks[scope] = task
-            self._default_persona_prompt_refresh_task = task
+            task = (
+                creator(operation, label="default_persona_prompt_refresh")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-persona-prompt-refresh")
+            )
+            if task is not None:
+                tasks[scope] = task
+                self._default_persona_prompt_refresh_task = task
+                if not callable(creator):
+                    def consume(done_task: asyncio.Task) -> None:
+                        try:
+                            done_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "[PrivateCompanion] 默认人格后台刷新失败: %s",
+                                _single_line(exc, 160),
+                            )
+
+                    task.add_done_callback(consume)
+            else:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
         except RuntimeError:
-            pass
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
 
     def _format_plugin_persona_request_injection(self) -> str:
         specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
@@ -13447,6 +13473,10 @@ class DailyStateMixin(DailyStateTickMixin):
             timer_event.pop("cancel_requested_at", None)
             return False
         if task is None:
+            try:
+                operation.close()
+            except Exception:
+                pass
             timer_event.pop("cancel_requested_at", None)
             return False
         return True

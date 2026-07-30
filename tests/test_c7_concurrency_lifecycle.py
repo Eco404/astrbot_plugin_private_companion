@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 import sys
 import types
@@ -19,10 +20,11 @@ from c7_companion_test_package.bot_personal_outbox import BotPersonalOutbox
 class OutboxLifecycleTests(unittest.TestCase):
     def test_async_save_uses_lifecycle_callback_when_provided(self):
         labels: list[str] = []
+        operations = []
 
         def create_task(operation, label):
             labels.append(label)
-            operation.close()
+            operations.append(operation)
             return None
 
         async def save():
@@ -31,6 +33,8 @@ class OutboxLifecycleTests(unittest.TestCase):
         outbox = BotPersonalOutbox({}, save=save, background_task=create_task)
         asyncio.run(asyncio.to_thread(outbox._persist))
         self.assertEqual(["bot_personal_outbox_save"], labels)
+        self.assertEqual(1, len(operations))
+        self.assertEqual(inspect.CORO_CLOSED, inspect.getcoroutinestate(operations[0]))
 
 
 class CompanionConcurrencyStaticTests(unittest.TestCase):
@@ -55,6 +59,36 @@ class CompanionConcurrencyStaticTests(unittest.TestCase):
             "asyncio.create_task(self._kick_proactive_loop_once",
         ):
             self.assertNotIn(marker, source)
+
+    def test_chat_side_background_boundaries_consume_failures_and_keep_http_errors(self):
+        sources = {
+            name: (ROOT / name).read_text(encoding="utf-8")
+            for name in (
+                "config_migration.py",
+                "news_exploration.py",
+                "page_api.py",
+                "private_image.py",
+                "tts_enhancement.py",
+                "user_memory.py",
+            )
+        }
+        config_source = sources["config_migration.py"]
+        self.assertIn("_private_companion_config_save_tasks", config_source)
+        self.assertIn("done_task.result()", config_source)
+        self.assertIn("except asyncio.CancelledError", config_source)
+        for name in ("news_exploration.py", "private_image.py", "tts_enhancement.py", "user_memory.py"):
+            self.assertIn("_create_lifecycle_background_task", sources[name])
+
+        page_source = sources["page_api.py"]
+        self.assertIn("def _exception_error", page_source)
+        self.assertIn("status_code=500", page_source)
+
+    def test_page_error_response_is_non_success_status_without_changing_success_payload_shape(self):
+        source = (ROOT / "page_api.py").read_text(encoding="utf-8")
+        self.assertIn('return {"success": True, "data": data, "ts": int(time.time())}', source)
+        self.assertIn("def _safe_error_message", source)
+        self.assertIn('"success": False', source)
+        self.assertIn("status_code=500", source)
 
 
 if __name__ == "__main__":

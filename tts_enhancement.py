@@ -309,6 +309,38 @@ class TtsEnhancementMixin:
     behavior surface but maps identity and prompts to private_companion concepts.
     """
 
+    def _create_tts_background_task(self, operation: Any, *, label: str) -> asyncio.Task | None:
+        creator = getattr(self, "_create_lifecycle_background_task", None)
+        if callable(creator):
+            task = creator(operation, label=label)
+            if task is None:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+            return task
+        try:
+            task = asyncio.create_task(operation, name=f"private-companion-tts-{label}")
+        except RuntimeError:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
+
+        def consume(done_task: asyncio.Task) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] TTS background task failed: label=%s error=%s",
+                    label,
+                    _single_line(exc, 160),
+                )
+
+        task.add_done_callback(consume)
+        return task
+
     def _load_tts_enhancement_config(self, config: Any) -> None:
         self.enable_tts_enhancement = self._cfg_bool(config, "enable_tts_enhancement", False)
         raw_synthesis_backend = self._cfg_str(
@@ -2844,11 +2876,7 @@ TTS 朗读文本：
                     pending["chunks"],
                     started_at=remainder_started_at,
                 )
-                task_creator = getattr(self, "_create_lifecycle_background_task", None)
-                if callable(task_creator):
-                    task_creator(remainder, label="tts_reply_remainder")
-                else:
-                    asyncio.create_task(remainder)
+                self._create_tts_background_task(remainder, label="tts_reply_remainder")
             else:
                 setattr(
                     event,
@@ -4392,7 +4420,10 @@ Provider 规则：{emotion_rule}
         is_live_reply = source == "bili_live_auto_reply"
         visible_text = subtitle_text or spoken_text
         subtitle_task = (
-            asyncio.create_task(self._post_tts_live_subtitle(visible_text))
+            self._create_tts_background_task(
+                self._post_tts_live_subtitle(visible_text),
+                label="tts_live_subtitle",
+            )
             if is_live_reply
             else None
         )
@@ -5041,13 +5072,14 @@ Provider 规则：{emotion_rule}
             return result
 
         result["audio_path"] = str(audio_file)
-        asyncio.create_task(
+        self._create_tts_background_task(
             self._after_tts_audio_generated(
                 str(audio_file),
                 sanitized,
                 source=source or "external_realtime",
                 allow_local_playback=play_local,
-            )
+            ),
+            label="tts_audio_postprocess",
         )
         return result
 
@@ -5255,12 +5287,13 @@ Provider 规则：{emotion_rule}
             return None
         final_ref = str(audio_path)
         if not defer_delivery_effects:
-            asyncio.create_task(
+            self._create_tts_background_task(
                 self._after_tts_audio_generated(
                     str(audio_path),
                     sanitized,
                     source=source or "private_companion",
-                )
+                ),
+                label="tts_audio_postprocess",
             )
         if provider_settings.get("use_file_service", False):
             callback_api_base = str((config or {}).get("callback_api_base", "") or "").strip()

@@ -4653,9 +4653,33 @@ class UserMemoryMixin:
         if not user_id:
             return
         habit["memory_synced_at"] = now
+        operation = recorder(user=user, user_id=user_id, habit=dict(habit))
         try:
-            asyncio.create_task(recorder(user=user, user_id=user_id, habit=dict(habit)))
+            creator = getattr(self, "_create_lifecycle_background_task", None)
+            task = (
+                creator(operation, label="user_habit_memory_sync")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-user-habit-memory-sync")
+            )
+            if task is None:
+                raise RuntimeError("background task unavailable")
+            if not callable(creator):
+                def consume(done_task: asyncio.Task) -> None:
+                    try:
+                        done_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 用户习惯记忆同步后台任务失败: %s",
+                            _single_line(exc, 160),
+                        )
+
+                task.add_done_callback(consume)
         except Exception:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
             habit["memory_synced_at"] = 0
 
     def _format_user_habit_time(self, minute_value: Any) -> str:
@@ -5838,9 +5862,37 @@ Local classifier result:
                 return
             vent = getattr(self, "_maybe_publish_qzone_emotional_vent", None)
             if callable(vent):
+                operation = vent(
+                    user_snapshot=deepcopy(user),
+                    relationship_state=deepcopy(state),
+                    intent=deepcopy(intent),
+                )
                 try:
-                    asyncio.create_task(vent(user_snapshot=deepcopy(user), relationship_state=deepcopy(state), intent=deepcopy(intent)))
+                    creator = getattr(self, "_create_lifecycle_background_task", None)
+                    task = (
+                        creator(operation, label="qzone_emotional_vent")
+                        if callable(creator)
+                        else asyncio.create_task(operation, name="private-companion-qzone-emotional-vent")
+                    )
+                    if task is None:
+                        raise RuntimeError("background task unavailable")
+                    if not callable(creator):
+                        def consume(done_task: asyncio.Task) -> None:
+                            try:
+                                done_task.result()
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as exc:
+                                logger.warning(
+                                    "[PrivateCompanion] QQ 空间情绪动态后台任务失败: %s",
+                                    _single_line(exc, 160),
+                                )
+
+                        task.add_done_callback(consume)
                 except Exception as exc:
+                    close = getattr(operation, "close", None)
+                    if callable(close):
+                        close()
                     logger.debug("[PrivateCompanion] 公开心情动态任务创建失败: %s", _single_line(exc, 120))
 
     def _remember_passive_reply_topic(self, user: dict[str, Any], text: str, inbound_text: str = "") -> None:
