@@ -13972,6 +13972,7 @@ async function renderUserDetail(forceFetch = false) {
       ${miniStat("习惯", detail.habit_count || detail.behavior_habits?.items?.length || 0)}
     </div>
     <div class="detail-grid">
+      ${renderRelationshipPanel(detail.relationship_panel)}
       ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
@@ -13985,6 +13986,22 @@ async function renderUserDetail(forceFetch = false) {
     </div>
   `;
   bindUserActions(detail);
+}
+
+function renderRelationshipPanel(panel) {
+  const data = panel && typeof panel === "object" ? panel : {};
+  const basis = data.relationship_basis && typeof data.relationship_basis === "object" ? data.relationship_basis : {};
+  const interaction = data.interaction && typeof data.interaction === "object" ? data.interaction : {};
+  const memory = data.memory_phase && typeof data.memory_phase === "object" ? data.memory_phase : {};
+  const network = data.network && typeof data.network === "object" ? data.network : {};
+  return detailBlock("Relationship", "Read-only local projection", [
+    ["Basis", basis.band || "initial"],
+    ["Stage", data.relationship_stage || "unclassified"],
+    ["Interaction", `${interaction.inbound_count || 0} inbound, ${interaction.reply_count || 0} replies (${interaction.reply_band || "unknown"})`],
+    ["Memory phase", `${memory.phase || "unknown"} (${memory.status || "unavailable"})`],
+    ["Worldbook", `${network.status || "not_registered"}, ${network.pending_observation_count || 0} pending`],
+    ["Reply temperature", data.reply_temperature?.status || "live_chat_only"],
+  ]);
 }
 
 function renderPrivateDeliveryRoute(detail) {

@@ -59,9 +59,15 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             if not isinstance(user, dict):
                 return self._error("用户不存在")
             detail = self._user_summary(user_id, user)
-            detail["relationship_panel"] = self._relationship_panel(user)
-            detail["current_interaction"] = detail["relationship_panel"]["current_interaction"]
-            detail["expression_decision"] = detail["relationship_panel"]["expression_decision"]
+            relationship_panel = self._relationship_panel(
+                user_id,
+                user,
+                relationship_stage=str(detail.get("relationship_stage") or ""),
+                worldbook_member=worldbook_member,
+            )
+            detail["relationship_panel"] = relationship_panel
+            detail["current_interaction"] = relationship_panel["current_interaction"]
+            detail["expression_decision"] = relationship_panel["expression_decision"]
             route_status_getter = getattr(self.plugin, "_private_delivery_route_status", None)
             delivery_route = route_status_getter(user_id, user) if callable(route_status_getter) else {}
             detail.update(

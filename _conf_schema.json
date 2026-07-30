@@ -10,6 +10,12 @@
         "hint": "默认关闭。开启后，本插件只保留主动私聊的日程、生成和发送链路；普通私聊/群聊消息不会再进入本插件的被动增强、图片/转发处理、防抖、群聊观察、TTS 后处理或提示词注入，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复本插件主动消息时仍会轻量记录为已回应。适合只想使用主动陪伴，或担心本插件被动链路误接管、误识别的场景。",
         "default": false
       },
+      "enable_p4_b_legacy_score_isolation": {
+        "description": "Isolate legacy relationship score writes",
+        "type": "bool",
+        "hint": "Disabled by default for compatibility. When enabled, legacy relationship_score writes are suppressed and never become P4 authority.",
+        "default": false
+      },
       "bot_name": {
         "description": "Bot 名字 / 页面展示名",
         "type": "string",

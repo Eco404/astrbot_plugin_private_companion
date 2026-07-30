@@ -270,7 +270,16 @@ class PrivateCompanionPageApi(
         )
         return relationship_stage_for_score(value, policy)
 
-    def _relationship_panel(self, user: dict[str, Any]) -> dict[str, Any]:
+    def _relationship_panel(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        relationship_stage: str,
+        worldbook_member: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return a user-scoped display DTO without authority or private content."""
+        del user_id
         role = self.plugin._private_user_role(user, str(user.get("user_id") or "")) if hasattr(self.plugin, "_private_user_role") else str(user.get("relationship_role") or "friend")
         mode = normalize_relationship_mode(user.get("relationship_mode"), role)
         intimacy = self._relationship_intimacy_projection(self._int(user.get("relationship_score")))
@@ -293,6 +302,45 @@ class PrivateCompanionPageApi(
                 expression = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
             except Exception:
                 expression = {}
+        inbound = max(0, self._int(user.get("inbound_count")))
+        proactive = max(0, self._int(user.get("proactive_sent_count")))
+        replies = max(0, self._int(user.get("reply_count")))
+        if not proactive:
+            reply_band = "no_proactive_sample"
+        elif replies / proactive >= 0.65:
+            reply_band = "steady"
+        elif replies / proactive >= 0.30:
+            reply_band = "some"
+        else:
+            reply_band = "low"
+
+        score = self._int(user.get("relationship_score"))
+        basis = "close" if score >= 55 else "familiar" if score >= 3 else "initial"
+        memory_phase = {"status": "unavailable", "phase": "unknown", "momentum_band": "unknown"}
+        getter = getattr(self.plugin, "_memory_companion_peek_relationship_phase", None)
+        session_id = self._single_line(user.get("umo"), 200)
+        if session_id and callable(getter):
+            try:
+                raw = getter(session_id=session_id)
+            except Exception:
+                raw = {}
+            if isinstance(raw, dict):
+                observed = raw.get("observed") is True and raw.get("status") == "observed"
+                phase = self._single_line(raw.get("phase"), 32)
+                memory_phase = {
+                    "status": "observed" if observed and phase else "not_observed",
+                    "phase": phase if observed and phase else "unknown",
+                    "momentum_band": self._single_line(raw.get("momentum_band"), 20) if observed else "unknown",
+                }
+
+        network = {
+            "status": "registered" if isinstance(worldbook_member, dict) else "not_registered",
+            "pending_observation_count": (
+                max(0, self._int(worldbook_member.get("pending_observation_count")))
+                if isinstance(worldbook_member, dict)
+                else 0
+            ),
+        }
         return {
             "relationship_mode": mode,
             "relationship_intimacy": intimacy,
@@ -301,6 +349,12 @@ class PrivateCompanionPageApi(
             "expression_decision": expression,
             "relationship_positive_stage_cap_key": getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded"),
             "normal_interaction_band_cap": getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+            "relationship_basis": {"band": basis},
+            "relationship_stage": self._single_line(relationship_stage, 24) or "unclassified",
+            "interaction": {"inbound_count": inbound, "reply_count": replies, "reply_band": reply_band},
+            "memory_phase": memory_phase,
+            "network": network,
+            "reply_temperature": {"status": "live_chat_only"},
         }
 
     def _photo_reference_preset_names(self) -> tuple[str, ...]:

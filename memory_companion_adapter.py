@@ -2333,3 +2333,55 @@ class MemoryCompanionAdapterMixin:
         except Exception as exc:
             self._memory_companion_optional_dependency_failed(exc, where="get_relationship_phase")
             return {"phase": "unknown", "momentum": 0.0}
+
+    def _memory_companion_peek_relationship_phase(self, *, session_id: str = "") -> dict[str, Any]:
+        """Read an existing Memory relationship phase without creating state."""
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unavailable"}
+        try:
+            getter = getattr(bridge, "peek_relationship_phase", None)
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="peek_relationship_phase")
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unavailable"}
+        if not callable(getter):
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unsupported"}
+        try:
+            result = getter(session_id=session_id, scope="private")
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="peek_relationship_phase")
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unavailable"}
+        if type(result) is not dict:
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "invalid"}
+        for key in result:
+            if type(key) is not str:
+                return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "invalid"}
+        phase = result.get("phase")
+        momentum_band = result.get("momentum_band")
+        observed = result.get("observed")
+        phase_allowlist = {"acquaintance", "familiar", "close", "intimate", "deeply_bonded"}
+        momentum_allowlist = {"rising", "cooling", "steady"}
+        if (
+            type(observed) is not bool
+            or observed is not True
+            or type(phase) is not str
+            or phase not in phase_allowlist
+            or type(momentum_band) is not str
+            or momentum_band not in momentum_allowlist
+        ):
+            return {
+                "observed": False,
+                "phase": "unknown",
+                "momentum_band": "unknown",
+                "touch_count": 0,
+                "status": "not_observed",
+            }
+        touch_value = result.get("touch_count", 0)
+        touch_count = touch_value if type(touch_value) is int else 0
+        return {
+            "observed": True,
+            "phase": phase,
+            "momentum_band": momentum_band,
+            "touch_count": max(0, min(256, touch_count)),
+            "status": "observed",
+        }

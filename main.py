@@ -143,6 +143,11 @@ from .person_context_contract import (
 from .unified_person_registry import UnifiedPersonRegistry
 from .context_orchestration import build_context, project_context
 from .p4_shadow import build_p4_shadow
+from .p4_affinity_confinement import apply_legacy_relationship_delta
+from .p4_live_runtime import decide_live_request
+from .p4_runtime_gate import SAFE_CONFINEMENT_REPLY
+from .p6_readonly_projection import build_p6_readonly_status
+from .reply_temperature import compose_reply_temperature
 from .plugin_identity import (
     PLUGIN_ID,
     PLUGIN_VERSION,
@@ -440,6 +445,13 @@ class PrivateCompanionExtensionAPI:
 
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self._plugin.get_unified_person_projection(person_id)
+
+    def get_p6_readonly_status(self) -> dict[str, Any]:
+        """Expose bounded Unified Person counts without an authority surface."""
+        try:
+            return build_p6_readonly_status(self._plugin._unified_person_registry_status())
+        except Exception:
+            return build_p6_readonly_status(None)
 
     def get_unified_person_context(self, event: Any | None = None) -> dict[str, Any]:
         return self._plugin.build_unified_person_context(event)
@@ -1988,6 +2000,11 @@ class PrivateCompanionPlugin(
         if contract_issues:
             logger.warning("[PrivateCompanion] Bot Personal contract self-check degraded: %s", ";".join(contract_issues))
         initialize_plugin_config(self, config)
+        self.enable_p4_b_legacy_score_isolation = self._cfg_bool(
+            config,
+            "enable_p4_b_legacy_score_isolation",
+            False,
+        )
         initialize_plugin_runtime(self)
         self.enable_p5_source_observer = self._cfg_bool(config, "enable_p5_source_observer", False)
         self.enable_p5_b1_recall_gate = self._cfg_bool(config, "enable_p5_b1_recall_gate", False)
@@ -1996,6 +2013,10 @@ class PrivateCompanionPlugin(
         self._bot_personal_outbox = BotPersonalOutbox(
             self.data,
             save=lambda: self._schedule_data_save(delay=0.5),
+            background_task=lambda operation, label: self._create_lifecycle_background_task(
+                operation,
+                label=label,
+            ),
         )
         self.unified_person_registry = UnifiedPersonRegistry(self.data)
 
@@ -2043,6 +2064,9 @@ class PrivateCompanionPlugin(
             "warnings": issues,
             "registry": self.unified_person_registry.status(),
         }
+
+    def _unified_person_registry_status(self) -> dict[str, Any]:
+        return self.unified_person_registry.status()
 
     def _unified_person_event_identity(
         self,
@@ -2121,6 +2145,112 @@ class PrivateCompanionPlugin(
 
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self.unified_person_registry.read_projection(person_id)
+
+    def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
+        return self.unified_person_registry.read_p4_effect_state(person_id)
+
+    def read_p4_live_state(self, person_id: str) -> dict[str, Any]:
+        return self.unified_person_registry.read_p4_live_state(person_id)
+
+    def _p4_b_apply_legacy_relationship_delta(
+        self,
+        user: dict[str, Any],
+        delta: int,
+        *,
+        reason_code: str = "",
+    ) -> bool:
+        del reason_code
+        return apply_legacy_relationship_delta(
+            user,
+            delta,
+            isolate=bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)),
+        )
+
+    def _p4_live_state_for_event(self, event: Any) -> dict[str, Any] | None:
+        try:
+            if not bool(event.is_private_chat()):
+                return None
+        except Exception:
+            return None
+        resolution = self.resolve_unified_person_for_event(event)
+        if resolution.get("state") != "resolved":
+            return None
+        person_id = _single_line(resolution.get("person_id"), 160)
+        if not person_id:
+            return None
+        result = self.read_p4_live_state(person_id)
+        if result.get("ok") is not True:
+            return {"_p4_live_invalid": True}
+        return result.get("state")
+
+    def _bounded_p4_reply_temperature_signals(self, event: Any) -> dict[str, Any]:
+        """Return transient, bounded advisory inputs for the P4 reply projection."""
+        data = getattr(self, "data", None)
+        daily_state = data.get("daily_state") if isinstance(data, dict) else None
+        energy = daily_state.get("energy") if isinstance(daily_state, dict) else None
+        if (
+            isinstance(energy, bool)
+            or not isinstance(energy, (int, float))
+            or not math.isfinite(float(energy))
+        ):
+            energy = None
+        else:
+            energy = max(0, min(100, energy))
+        mood = ""
+        if isinstance(daily_state, dict):
+            mood = _single_line(daily_state.get("mood_bias") or daily_state.get("mood"), 64)
+
+        schedule_parts: list[str] = []
+        segment_getter = getattr(self, "_current_detail_segment_for_update", None)
+        if callable(segment_getter):
+            try:
+                segment = segment_getter()
+            except Exception:
+                segment = None
+            if isinstance(segment, dict):
+                schedule_parts.extend(
+                    _single_line(segment.get(key), 80)
+                    for key in ("title", "name", "summary", "activity", "location")
+                    if _single_line(segment.get(key), 80)
+                )
+        if not schedule_parts and isinstance(data, dict):
+            try:
+                current_item = self._get_current_plan_item(data.get("daily_plan", {}))
+            except Exception:
+                current_item = None
+            if isinstance(current_item, dict):
+                schedule_parts.extend(
+                    _single_line(current_item.get(key), 80)
+                    for key in ("title", "name", "summary", "activity", "location")
+                    if _single_line(current_item.get(key), 80)
+                )
+
+        return {
+            "energy": energy,
+            "mood": mood or None,
+            "schedule": " ".join(schedule_parts)[:240] or None,
+            "context": _single_line(getattr(event, "message_str", ""), 280) or None,
+        }
+
+    def record_p4_effect_event(
+        self,
+        person_id: str,
+        event: dict[str, Any],
+        *,
+        operation_id: str,
+        actor_id: str = "system",
+    ) -> dict[str, Any]:
+        result = self.unified_person_registry.record_p4_effect_event(
+            person_id,
+            event,
+            operation_id=operation_id,
+            actor_id=actor_id,
+        )
+        if result.get("ok") and result.get("changed"):
+            saver = getattr(self, "_schedule_data_save", None)
+            if callable(saver):
+                saver()
+        return result
 
     def resolve_unified_person_for_event(self, event: Any | None = None) -> dict[str, Any]:
         identity = self._unified_person_event_identity(event)
@@ -10532,6 +10662,58 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         except Exception:
             return False
+
+    @filter.on_llm_request(priority=-30000)
+    async def enforce_p4_live_confinement_before_enrichment(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Block only an already-resolved private person with an invalid or active P4 state."""
+        if self is None or req is None or not bool(getattr(self, "enabled", False)):
+            return
+        state = self._p4_live_state_for_event(event)
+        decision = decide_live_request(state)
+        if decision.get("decision") == "skip":
+            return
+        if decision.get("decision") == "block":
+            # This runs before P5/Memory and the enrichment collectors. Leave
+            # no request route to original prompt, tool, bridge, or context data.
+            for attribute, value in (
+                ("system_prompt", SAFE_CONFINEMENT_REPLY),
+                ("prompt", ""),
+                ("contexts", []),
+                ("extra_user_content_parts", []),
+                ("func_tool", None),
+                ("tools", []),
+                ("images", []),
+                ("image_urls", []),
+            ):
+                try:
+                    setattr(req, attribute, value)
+                except Exception:
+                    pass
+            try:
+                setattr(event, "private_companion_p4_blocked", True)
+                setattr(event, "private_companion_p4_block_code", decision.get("code", "p4_state_invalid"))
+            except Exception:
+                pass
+            await self._reply(event, SAFE_CONFINEMENT_REPLY)
+            event.stop_event()
+            return
+        temperature = compose_reply_temperature(
+            decision.get("warmth_projection", {}).get("tier"),
+            **self._bounded_p4_reply_temperature_signals(event),
+        )
+        try:
+            setattr(req, "_private_companion_reply_temperature", temperature)
+        except Exception:
+            pass
+        instruction = _single_line(temperature.get("instruction"), 240)
+        if instruction and hasattr(req, "system_prompt"):
+            req.system_prompt = f"{str(getattr(req, 'system_prompt', '') or '').rstrip()}\n\n[Reply boundary]\n{instruction}"
 
     @filter.on_llm_request(priority=-30000)
     @_multi_persona_event_context

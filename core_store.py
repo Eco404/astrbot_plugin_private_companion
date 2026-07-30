@@ -2129,6 +2129,12 @@ class CoreStoreMixin:
         event_id: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
+        if bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)):
+            return {
+                "changed": False,
+                "code": "p4_legacy_score_isolated",
+                "score": user.get("relationship_score"),
+            }
         score_migration = migrate_legacy_relationship_score(
             user,
             created=False,
