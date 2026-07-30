@@ -14,6 +14,7 @@ const state = {
   groups: [],
   diagnostics: [],
   troubleshooting: null,
+  dailyReview: null,
   availableProviders: [],
   tokenStats: null,
   tokenStatsPartial: false,
@@ -133,6 +134,18 @@ const state = {
   selectedImageCacheKeys: new Set(),
   imageCacheImageData: new Map(),
   selectedImageCacheKey: "",
+  reactionLibrary: null,
+  reactionLibraryLoading: false,
+  reactionLibraryError: "",
+  reactionLibraryRequestSeq: 0,
+  reactionLibraryQuery: "",
+  reactionLibraryStatus: "all",
+  reactionLibraryScope: "all",
+  reactionLibraryPage: 1,
+  reactionLibraryPageSize: 48,
+  reactionLibrarySelected: new Set(),
+  reactionLibraryEditorId: "",
+  reactionLibraryImageData: new Map(),
   troubleshootingFilter: "all",
   troubleshootingCategory: "all",
   tokenSource: "companion",
@@ -149,6 +162,7 @@ const state = {
   activeTab: "dashboard",
   lazyLoaded: {
     diagnostics: false,
+    dailyReview: false,
     providers: false,
     ttsProviderConfigs: false,
     imageApiStatus: false,
@@ -188,9 +202,13 @@ const featureSwitchNotes = {
   enable_skill_growth_simulation: "自定义技能不在这里填写，请到学习页的“技能成长”区域新增、隐藏、冻结成长或合并别名。",
   enable_food_menu_recommendation: "候选菜单在本功能详情页管理；观察页不再展示这块内容。",
   enable_group_companion: "群聊名单和当前覆盖范围在“常用配置”的“群聊名单”中管理。",
+  enable_group_member_safety: "本功能详情页可选择群聊并进入成员名单管理；风险记录和静默状态按群隔离。",
 };
 
 const featureSwitchExcludedKeys = new Set([
+  "enable_daily_review",
+  "enable_daily_case_review_experiment",
+  "enable_reaction_expression_experiment",
   "enable_maslow_motivation_experiment",
   "enable_experimental_motivation_model",
   "enable_personality_iteration_experiment",
@@ -218,6 +236,7 @@ const providerLabels = {
   SMART_SILENCE_PROVIDER_ID: "智能沉默判定",
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定",
   TROUBLESHOOTING_PROVIDER_ID: "插件答疑/排障",
+  DAILY_REVIEW_PROVIDER_ID: "每日终盘巡视",
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "智能收口判断",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断",
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: "关系站位分析",
@@ -898,6 +917,13 @@ const providerGuides = {
     fit: "适合上下文理解、代码阅读和多链路推理较强的模型；不建议只用轻量分类模型。",
     fallback: "留空时快速配置使用复杂推理模型；精准配置再回退到插件主模型。",
   },
+  DAILY_REVIEW_PROVIDER_ID: {
+    preference: "quality",
+    passiveImpact: "async",
+    purpose: "每天审阅脱敏运行摘要，定位回复、主动消息、TTS、群聊风控和后台模型任务中的异常。",
+    fit: "适合结构化 JSON 稳定、能从聚合证据中保守判断问题的中型或推理模型。",
+    fallback: "留空时快速配置使用复杂推理模型，再回退到排障模型和陪伴通用模型。",
+  },
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: {
     preference: "speed",
     passiveImpact: "direct",
@@ -968,6 +994,13 @@ const providerGuides = {
     fit: "适合便宜、低延迟、YES/NO 分类准确、指令遵循稳定的小模型。",
     fallback: "留空时先跟随快速响应模型；快速响应模型也留空时只使用规则判断。",
   },
+  GROUP_MEMBER_SAFETY_PROVIDER_ID: {
+    preference: "speed",
+    passiveImpact: "direct",
+    purpose: "审核明确指向 Bot 或群成员的持续骚扰、性骚扰、威胁和重复攻击，只输出结构化风险判断。",
+    fit: "适合低延迟、JSON 输出稳定、能保守区分引用转述、普通争论和真实定向骚扰的小模型。",
+    fallback: "留空时依次跟随群聊续接判断、回复复核、陪伴通用和主模型。",
+  },
   FORWARD_MESSAGE_PROVIDER_ID: {
     preference: "balanced",
     passiveImpact: "direct",
@@ -1016,7 +1049,7 @@ const providerGroups = [
     id: "core",
     title: "基础与兜底",
     desc: "主模型、陪伴通用和最终回复前后的基础能力。",
-    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "SMART_SILENCE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "REST_WAKEUP_PROVIDER_ID", "TROUBLESHOOTING_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
+    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "SMART_SILENCE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "REST_WAKEUP_PROVIDER_ID", "TROUBLESHOOTING_PROVIDER_ID", "DAILY_REVIEW_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
   },
   {
     id: "daily",
@@ -1033,8 +1066,8 @@ const providerGroups = [
   {
     id: "group",
     title: "群聊能力",
-    desc: "处理群聊插话、片段整理、黑话释义和续接判断。",
-    keys: ["GROUP_INTERJECT_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID", "GROUP_SLANG_PROVIDER_ID", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "FORWARD_MESSAGE_PROVIDER_ID"],
+    desc: "处理群聊插话、片段整理、黑话释义、续接判断和成员风控。",
+    keys: ["GROUP_INTERJECT_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID", "GROUP_SLANG_PROVIDER_ID", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "GROUP_MEMBER_SAFETY_PROVIDER_ID", "FORWARD_MESSAGE_PROVIDER_ID"],
   },
   {
     id: "media",
@@ -1104,14 +1137,14 @@ const featureMeta = {
   enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
   enable_yesterday_screen_diary_context: ["昨日屏幕日记", "每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景，不读取实时屏幕。"],
   enable_group_companion: ["群聊启用范围", "总开关、白名单/黑名单范围；某个群没反应时先看这里。"],
-  enable_group_member_safety: ["群成员风控", "模型保守识别持续骚扰、威胁和重复攻击；达到次数后只静默该成员。"],
+  enable_group_member_safety: ["群成员风控", "模型保守识别明确指向 Bot 或群成员的持续骚扰、性骚扰、威胁和重复攻击；达到次数后停止响应该成员。"],
   group_access_mode: "群聊启用模式",
   group_whitelist_ids: "群聊白名单",
   group_blacklist_ids: "群聊黑名单",
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群聊观察学习", "学习群成员、关系网身份、黑话、话题线和群片段。"],
   enable_group_context_injection: ["群聊回复理解", "回复时参考近期群聊、场景对象和合并消息转述。"],
-  enable_group_image_understanding: ["群聊图片理解", "后台识别允许观察群中的图片，复用内容缓存，并在真正回复时有限等待视觉结果。"],
+  enable_group_image_understanding: ["群聊图片理解", "控制是否识别新的群聊图片；关闭后不调用视觉模型，但缓存命中的图片语义仍会用于回复和群聊上下文。"],
   enable_group_injection_guard: ["群聊安全保护", "防注入、隐私隔离、公共群聊语气降噪和现实承诺保护。"],
   enable_group_persona_denoise: ["群聊人格降噪", "降低群聊里的私聊腔、状态汇报和私聊关系外溢。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
@@ -1166,9 +1199,11 @@ const featureMeta = {
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
+  enable_reaction_expression_experiment: ["表情表达实验", "主模型一次生成完整文字和隐藏表情意图，插件只在文字后追加合适图片；没有足够合适的候选时保持纯文字。"],
   enable_maslow_motivation_experiment: ["需求强化功能", "实验性功能第一项：把主动念头按状态、安全、归属、尊重、成长和意义等内部需求层轻量分类，强化候选排序与可选日程倾向。"],
   enable_experimental_motivation_model: ["动机调度模型", "实验性功能第二项：结合驱力、诱因和唤醒状态，对主动计划做轻量调权，并在主动排障中显示判断依据。"],
   enable_personality_iteration_experiment: ["角色贴合校准", "实验性功能第三项：基于艾森克 PEN、大五人格、依恋风格和自我决定理论，帮用户判断行为是否贴近角色，并提示该怎么调整。"],
+  enable_daily_case_review_experiment: ["每日逐案复盘", "实验性功能：为普通回复、未回复、主动消息、TTS 和成员风控建立短期匿名案例，供每日巡视逐案判断。"],
 };
 
 const featurePublicKeyAliases = {
@@ -2032,9 +2067,32 @@ const configLabels = {
   memory_companion_context_top_k: "上下文召回条数",
   memory_companion_context_max_chars: "上下文最大字符数",
   external_image_api_endpoints: "在线生图 API 队列",
+  enable_reaction_expression_experiment: "启用表情表达实验",
+  reaction_expression_private_enabled: "允许私聊表情表达",
+  reaction_expression_group_enabled: "允许群聊表情表达",
+  reaction_expression_trigger_probability: "表情表达触发概率",
+  reaction_expression_cooldown_seconds: "表情表达冷却秒数",
+  reaction_expression_low_latency_mode: "低延迟选择模式",
+  reaction_expression_candidate_limit: "表情检索说法上限",
+  enable_daily_review: "启用每日终盘巡视",
+  daily_review_time: "每日巡视时间",
+  daily_review_auto_apply_guidance: "自动应用低风险次日纠偏",
+  enable_daily_case_review_experiment: "启用实验性逐案复盘",
+  daily_review_retention_days: "巡视报告保留天数",
 };
 
 const configDescriptions = {
+  enable_reaction_expression_experiment: "默认关闭。开启后，主模型仍只生成一次可独立成立的完整文字，并可留下隐藏表情意图；插件清除意图后只把合适图片追加在文字后，绝不会用图片替代正文。",
+  reaction_expression_private_enabled: "允许在私聊回复中使用实验性表情表达，仍需通过触发概率、冷却、重复控制和关系边界检查。",
+  reaction_expression_group_enabled: "默认关闭。开启后允许群聊使用，但公开风险高、关系不明确或上下文不足的候选会被降低优先级。",
+  reaction_expression_trigger_probability: "通过语境、关系边界和冷却检查后实际尝试选择表情的概率，建议先从 15% 到 25% 观察。",
+  reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
+  reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
+  reaction_expression_candidate_limit: "主模型一次最多提供多少条不同检索说法，用来补充情绪和沟通意图；无论填写多少，插件仍只执行一次图库检索。建议保持 4 到 8 条。",
+  enable_daily_review: "开启后按设定时间复盘前一完整自然日；插件错过时间会在下次启动后按顺序补跑。",
+  daily_review_time: "使用 HH:MM 格式。巡视目标始终是前一完整自然日，避免当天数据尚未结束就提前下结论。",
+  daily_review_auto_apply_guidance: "只把低风险表达与判断建议作为次日柔性提示词使用；配置、阈值、名单、权限和 Provider 不会自动修改。",
+  daily_review_retention_days: "只保留结构化结论和脱敏证据计数，不保存原始聊天内容。",
   enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发本插件的被动回复增强，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复主动消息时仍会被轻量记为已回应。适合只想使用主动陪伴、或担心本插件被动链路误接管/误识别的场景。",
   enable_llm_proactive_message: "开启后，主动调度只负责挑选动机和时机，真正文本会调用 AstrBot 人格生成；关闭时回退为本地模板，更省但更机械。",
   enable_proactive_chat_integration: "检测到 Proactive Chat 时自动建立深度运行时联动：生成前检查两套调度是否撞车，并注入当前关系、状态、时机和已审核表达；生成后统一复核；平台发送无异常返回后才结算成功。不会修改对方插件文件或配置，也不会新建第二套定时任务。版本不兼容时自动降级为发送前装饰联动。",
@@ -2049,6 +2107,7 @@ const configDescriptions = {
   enable_maslow_motivation_experiment: "实验性功能第一项。开启后，主动念头会被归入状态、安全、归属、尊重、成长、意义等内部需求层，再轻量影响候选排序；默认关闭，不改变最终回复正文，也不会让 Bot 把层级词说给用户。",
   enable_experimental_motivation_model: "实验性功能第二项。开启后，主动计划会额外按驱力、诱因和唤醒适配做轻量调权：驱力代表 Bot 内部想开口，诱因代表这个候选是否有值得说的外部价值，唤醒代表当前状态是否适合行动。默认关闭。",
   enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。默认只给建议；若开启“允许自主调节参数”，会临时覆盖少量主动策略参数。",
+  enable_daily_case_review_experiment: "实验性逐案复盘。开启后，每日巡视会从短期脱敏案例账本中抽取普通回复、未回复、主动消息、TTS 和成员风控案例，逐项判断相关性、完整性、语气、时机与误伤风险。默认关闭，不记录用户 ID、群号、会话 ID、消息 ID或音频路径。",
   enable_personality_iteration_auto_tune: "角色贴合校准的子选项。开启后，排障/实验页刷新时可根据诊断结果临时调节主动上限、空闲判定、最小间隔、主动人格放行阈值和主动复核强度；不会改写人格正文或世界知识。用户手动修改这些参数后会记录为新的手动值；关闭角色贴合校准或关闭本项时恢复到用户最后一次手动设置的值。",
   enable_maslow_schedule_influence: "需求强化功能的子选项，默认关闭。开启后，日程生成器会把需求层级当作轻量倾向，影响今天更偏休息、探索、等待、准备或低打扰互动；不会把层级术语写进日程正文。",
   maslow_motivation_strength: "控制需求强化对主动候选排序的影响。0 只记录层级不改排序；35 为温和默认；100 会更明显偏向有明确由头的关系、状态或成长类念头。",
@@ -2193,6 +2252,7 @@ const configDescriptions = {
   enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
   TROUBLESHOOTING_PROVIDER_ID: "用于“陪伴 答疑”的插件专家问答和排障中心模型复核。建议使用能阅读长上下文、理解代码和配置关系的模型；留空时快速配置使用复杂推理模型。",
+  DAILY_REVIEW_PROVIDER_ID: "用于每日结束时审阅脱敏运行摘要并生成次日柔性纠偏。留空时快速配置使用复杂推理模型。",
   proactive_intensity_preset: "默认关闭，完全沿用手动参数。开启后只在运行态调整私聊主动、群聊唤醒和插话的有效频率，并会在排障页显示当前预设；最高档不限制每日主动次数和每日群聊插话次数，不再替用户节省主动成本，会忽略 Token 软限额降载，但不会绕过免打扰、休息、用户拒绝、隐私和每日 Token 硬限额。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
@@ -2303,8 +2363,8 @@ const configDescriptions = {
   group_blacklist_ids: "黑名单模式下禁止插件参与的群号列表。可填写数组，也可在输入框里一行一个或用逗号分隔；适合临时屏蔽机器人多、话题敏感或不想观察的群。",
   group_conversation_followup_seconds: "群里用户叫过 Bot 后，后续未 @ 的消息在多久内可能被判断为仍在对 Bot 说。",
   group_conversation_followup_max_turns: "一次群聊连续对话最多自动续接几轮，防止 Bot 一直卷进对话。",
-  enable_group_member_safety: "开启后，模型会保守审核配置范围内明确针对 Bot 的持续骚扰、威胁和重复攻击；达到次数后只静默当前群里的该成员。普通批评、玩笑、争论、偶发脏话和不确定内容应放行。",
-  group_member_safety_review_mode: "directed 只审核明确对 Bot 的消息；suspicious 还包含同一成员的 Bot 对话续接窗口；all 会审核全部群消息并显著增加模型调用量。",
+  enable_group_member_safety: "开启后，模型会保守审核明确指向 Bot 或群成员的持续骚扰、性骚扰、威胁和重复攻击；达到次数后只停止响应该成员。普通批评、玩笑、争论、引用转述、偶发脏话和不确定内容应放行。不会调用平台禁言或撤回消息。",
+  group_member_safety_review_mode: "directed 审核明确指向 Bot 或群成员的消息；suspicious 还包含同一成员的 Bot 对话续接窗口；all 会审核全部群消息并显著增加模型调用量。",
   group_member_safety_hidden_marker_mode: "reply_only 默认复用正常回复模型的内部标签，不额外调用风控模型；没有生成回复的消息不会新增风险次数。supplement 会再运行独立审核模型；disabled 只使用独立审核。内部标签会在 TTS、分段和发送前移除。",
   group_member_safety_strike_threshold: "同一成员在统计窗口内累计到该次数后自动静默。每条消息最多累计一次，建议至少 3 次。",
   group_member_safety_strike_window_days: "只统计最近这段时间内、且晚于最近一次解除或豁免的风险记录。",
@@ -2317,7 +2377,7 @@ const configDescriptions = {
   group_air_guard_max_bot_replies: "窗口内 Bot 回复达到该次数后，后续明确唤醒也会硬拦截，防止机器人互相引用刷屏。建议 3。",
   group_air_guard_polite_loop_limit: "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到类似消息就静默。建议 1-2。",
   enable_group_context_injection: "开启后，群聊回复会参考最近群消息、当前话题、活跃成员和群内氛围；关闭后只按当前单条消息理解。",
-  enable_group_image_understanding: "开启后，只在允许观察的群中后台识别群成员发送的图片；相同图片按内容缓存复用，普通观察不等待，真正触发回复时才有限等待。建议关闭 AstrBot 官方“自动理解图片”，避免重复调用。",
+  enable_group_image_understanding: "控制是否为群聊图片发起新的视觉识别。关闭后不会调用视觉模型，但当前图片命中已有缓存或群观察摘要时仍会注入语义；开启后只在允许观察的群中识别新图片，普通观察不等待，真正触发回复时才有限等待。建议关闭 AstrBot 官方“自动理解图片”，避免重复调用。",
   group_image_vision_wait_seconds: "只限制 Bot 已准备回复时等待视觉摘要的时间。视觉提前完成会立即继续；超时后主回复照常进行，后台识图不会取消。0 表示不等待，只使用已经完成的结果。",
   group_image_max_images: "一条群消息最多识别多少张图片。超过上限仍保留原始图片占位，但不进入本插件识图；0 表示不处理群图。",
   enable_group_injection_guard: "开启后，会识别群里试图改称呼、改语气、改设定或改输出格式的注入话术；这些内容不会写进群观察、黑话、话题线或后续 prompt。",
@@ -2473,8 +2533,8 @@ const configDescriptions = {
   photo_generation_style_custom_prompt: "当风格为“其他”时，把这里作为额外风格要求注入生图提示词。",
   photo_generation_fixed_prompt: "所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
   photo_generation_scene_presets: "格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、日常穿搭、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；普通穿搭默认走日常穿搭，只有明确镜前/对镜/镜子时才走镜前穿搭；自定义同名会覆盖内置。",
-  enable_bot_relationship_network: "开启后可配置 Bot 熟悉的角色卡；主动拍照/生图时会把关系网与人格、收信人、统一情境快照、画面钩子、生图风格、提示词表达方式和内容选择菜单一起注入提示词，由模型自行决定是否让某位角色自然入镜。",
-  bot_relationship_cards: "一行一张角色卡，格式：角色名 || 与Bot的关系 || 角色外貌描述。例如：小林 || 高中同学兼死党 || 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣。最多保存 16 张；角色入镜时外貌描述会严格写入生图提示词。",
+  enable_bot_relationship_network: "开启后可配置 Bot 熟悉的角色卡；主动拍照/生图时只把它用于理解关系情境，可用第二只杯子、礼物、便签等非人物线索自然表达。角色卡文字不等于人物参考图，当前不会让关系卡人物直接入镜或生成合影。",
+  bot_relationship_cards: "一行一张角色卡，格式：角色名 || 与Bot的关系 || 角色外貌描述。例如：小林 || 高中同学兼死党 || 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣。最多保存 16 张。没有其他人物参考图时禁止合影，不会仅凭文字生成该角色。",
   private_reading_min_interval_hours: "两次私下阅读之间的最小间隔。",
   private_reading_max_photo_count: "只阅读页数不超过该值的素材，避免视觉理解成本过高。",
   private_reading_share_probability: "读完后主动提起阅读体验的概率，按百分比填写。",
@@ -2599,6 +2659,7 @@ const advancedCycleSettingKeys = [
 ];
 
 const featureSettingGroups = {
+  enable_daily_review: ["daily_review_time", "daily_review_auto_apply_guidance", "enable_daily_case_review_experiment", "daily_review_retention_days"],
   enable_mai_style_integration: [
     "default_style",
     "reply_style_prompt",
@@ -2624,6 +2685,7 @@ const featureSettingGroups = {
   enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
+  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_group_enabled", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", ...advancedCycleSettingKeys, "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
@@ -3009,7 +3071,7 @@ const featureSettingSections = {
   enable_group_member_safety: [
     {
       title: "判定范围与模型",
-      note: "默认只审核明确对 Bot 的消息；提示词要求对普通批评、玩笑、争论和不确定内容放行。",
+      note: "默认审核明确指向 Bot 或群成员的消息；提示词要求对普通批评、引用转述、玩笑、争论和不确定内容放行。",
       keys: ["group_member_safety_review_mode", "group_member_safety_hidden_marker_mode", "group_member_safety_min_confidence", "GROUP_MEMBER_SAFETY_PROVIDER_ID"],
     },
     {
@@ -3198,6 +3260,23 @@ const featureSettingSections = {
       keys: ["enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
     },
   ],
+  enable_reaction_expression_experiment: [
+    {
+      title: "适用会话",
+      note: "私聊默认可用；群聊需要单独开启，避免在公开语境误用或刷屏。",
+      keys: ["reaction_expression_private_enabled", "reaction_expression_group_enabled"],
+    },
+    {
+      title: "触发节奏",
+      note: "只有通过语境与边界判断后才抽取概率，冷却按会话独立计算。",
+      keys: ["reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds"],
+    },
+    {
+      title: "性能策略",
+      note: "低延迟模式不调用额外选图模型；多条检索说法会合并后只查一次图库。",
+      keys: ["reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
+    },
+  ],
   enable_emotion_simulation: [
     {
       title: "情绪余波",
@@ -3314,7 +3393,7 @@ const featureSettingSections = {
     },
     {
       title: "Bot 关系网",
-      note: "勾选后可配置角色卡；主动拍照/生图会把角色卡与人格、情境快照、画面钩子一起注入提示词，由模型选择是否让角色入镜。",
+      note: "勾选后可配置角色卡；主动拍照/生图只用它理解关系情境，不会在没有其他人物参考图时生成合影。",
       keys: ["enable_bot_relationship_network", "bot_relationship_cards"],
     },
   ],
@@ -3504,6 +3583,7 @@ const featureSettingTypes = {
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
   SMART_SILENCE_PROVIDER_ID: { type: "provider" },
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: { type: "provider" },
+  GROUP_MEMBER_SAFETY_PROVIDER_ID: { type: "provider" },
   enable_persona_voice_channels: { type: "checkbox" },
   reply_style_prompt: { type: "textarea" },
   persona_conversation_voice_prompt: { type: "textarea" },
@@ -3518,6 +3598,12 @@ const featureSettingTypes = {
   enable_maslow_schedule_influence: { type: "checkbox" },
   maslow_motivation_strength: { type: "number", min: 0, max: 100, step: 1 },
   enable_personality_iteration_auto_tune: { type: "checkbox" },
+  reaction_expression_private_enabled: { type: "checkbox" },
+  reaction_expression_group_enabled: { type: "checkbox" },
+  reaction_expression_trigger_probability: { type: "number", min: 0, max: 100, step: 1 },
+  reaction_expression_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 10 },
+  reaction_expression_low_latency_mode: { type: "checkbox" },
+  reaction_expression_candidate_limit: { type: "number", min: 1, max: 16, step: 1 },
   memory_companion_context_timeout_seconds: { type: "number", min: 0.2, max: 6, step: 0.1 },
   livingmemory_tool_name: { type: "text" },
   enable_memory_companion_emotional_drift: { type: "checkbox" },
@@ -3615,6 +3701,7 @@ const featureSettingTypes = {
 };
 
 const probabilitySettingKeys = new Set([
+  "reaction_expression_trigger_probability",
   "share_probability",
   "bilibili_share_probability",
   "news_share_probability",
@@ -3989,43 +4076,50 @@ function parseRelationshipCards(raw) {
   const lines = Array.isArray(raw)
     ? raw.map((item) => String(item ?? "").trim()).filter(Boolean)
     : String(raw ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  return lines.slice(0, RELATIONSHIP_CARD_MAX).map((line) => {
+  const seenNames = new Set();
+  return lines.map((line) => {
     const parts = line.split(/\s*(?:\|\||｜｜)\s*/);
     return {
       name: String(parts[0] || "").trim(),
       relation: String(parts[1] || "").trim(),
       appearance: parts.slice(2).join(" || ").trim(),
     };
-  });
+  }).filter((card) => {
+    const nameKey = card.name.toLocaleLowerCase();
+    if (!nameKey || seenNames.has(nameKey)) return false;
+    seenNames.add(nameKey);
+    return true;
+  }).slice(0, RELATIONSHIP_CARD_MAX);
 }
 
 function relationshipCardsToText(cards) {
   return (cards || [])
-    .filter((card) => card && (card.name || card.relation || card.appearance))
+    .filter((card) => card && String(card.name || "").trim())
     .slice(0, RELATIONSHIP_CARD_MAX)
     .map((card) => `${String(card.name || "").trim()} || ${String(card.relation || "").trim()} || ${String(card.appearance || "").trim()}`)
     .join("\n");
 }
 
 function relationshipCardItemHtml(card, index) {
+  const cardNumber = index + 1;
   return `
     <article class="relationship-card" data-relationship-card>
       <header>
-        <b>角色卡 ${index + 1}</b>
-        <button type="button" data-relationship-card-action="delete" data-index="${index}">删除</button>
+        <b>角色卡 ${cardNumber}</b>
+        <button type="button" data-relationship-card-action="delete" data-index="${index}" aria-label="删除角色卡 ${cardNumber}">删除</button>
       </header>
       <div class="relationship-card-grid">
         <label>
           <span>角色名</span>
-          <input type="text" data-relationship-card-field="name" value="${escapeHtml(card.name)}" placeholder="例如 小林">
+          <input type="text" maxlength="200" data-relationship-card-field="name" value="${escapeHtml(card.name)}" placeholder="例如 小林">
         </label>
         <label>
           <span>与 Bot 的关系</span>
-          <input type="text" data-relationship-card-field="relation" value="${escapeHtml(card.relation)}" placeholder="例如 高中同学兼死党">
+          <input type="text" maxlength="200" data-relationship-card-field="relation" value="${escapeHtml(card.relation)}" placeholder="例如 高中同学兼死党">
         </label>
         <label class="wide">
           <span>角色外貌描述</span>
-          <textarea rows="2" data-relationship-card-field="appearance" placeholder="例如 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣">${escapeHtml(card.appearance)}</textarea>
+          <textarea rows="2" maxlength="200" data-relationship-card-field="appearance" placeholder="例如 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣">${escapeHtml(card.appearance)}</textarea>
         </label>
       </div>
     </article>
@@ -4045,8 +4139,8 @@ function relationshipCardEditorHtml(value) {
         ${cards.length ? cards.map((card, index) => relationshipCardItemHtml(card, index)).join("") : relationshipCardEmptyHtml()}
       </div>
       <div class="relationship-card-actions">
-        <button type="button" class="soft" data-relationship-card-action="add">新建角色卡</button>
-        <small data-relationship-card-count>${cards.length} / ${RELATIONSHIP_CARD_MAX} 张角色卡</small>
+        <button type="button" class="soft" data-relationship-card-action="add"${cards.length >= RELATIONSHIP_CARD_MAX ? " disabled" : ""}>新建角色卡</button>
+        <small data-relationship-card-count aria-live="polite">${cards.length} / ${RELATIONSHIP_CARD_MAX} 张角色卡</small>
       </div>
     </section>
   `;
@@ -4069,6 +4163,8 @@ function syncRelationshipCardEditor(editor) {
   }
   const count = editor.querySelector("[data-relationship-card-count]");
   if (count) count.textContent = `${cards.length} / ${RELATIONSHIP_CARD_MAX} 张角色卡`;
+  const addButton = editor.querySelector('[data-relationship-card-action="add"]');
+  if (addButton) addButton.disabled = cards.length >= RELATIONSHIP_CARD_MAX;
 }
 
 function bindRelationshipCardEditor(root = document) {
@@ -4082,12 +4178,14 @@ function bindRelationshipCardEditor(root = document) {
     if (!button) return;
     const action = button.dataset.relationshipCardAction;
     const cards = collectRelationshipCardsFromDom(editor);
+    let focusNewCard = false;
     if (action === "add") {
       if (cards.length >= RELATIONSHIP_CARD_MAX) {
         showToast(`最多保存 ${RELATIONSHIP_CARD_MAX} 张角色卡`, "error");
         return;
       }
       cards.push({ name: "", relation: "", appearance: "" });
+      focusNewCard = true;
     } else if (action === "delete") {
       const index = Number(button.dataset.index);
       if (!Number.isInteger(index) || index < 0 || index >= cards.length) return;
@@ -4103,6 +4201,9 @@ function bindRelationshipCardEditor(root = document) {
     }
     syncRelationshipCardEditor(editor);
     markFeatureDetailDirty();
+    if (focusNewCard) {
+      editor.querySelector('[data-relationship-card]:last-child [data-relationship-card-field="name"]')?.focus();
+    }
   });
 }
 
@@ -4172,6 +4273,7 @@ const tokenTaskLabels = {
   diary: "日记整理",
   diary_rewrite: "日记修订",
   diary_derivatives: "日记线索提取",
+  daily_review: "每日终盘巡视",
   memory_profile: "长期画像",
   dialogue_episode: "私聊片段",
   response_review: "回复/主动复核",
@@ -5036,6 +5138,15 @@ async function loadTroubleshooting(options = {}) {
   return data;
 }
 
+async function loadDailyReview(force = false) {
+  if (state.lazyLoaded.dailyReview && !force && state.dailyReview) return state.dailyReview;
+  const data = await fetchJson("/daily-review");
+  state.dailyReview = data || null;
+  state.lazyLoaded.dailyReview = true;
+  if (state.activeTab === "experimental" && state.experimentalSubpage === "daily-review") renderDailyReview();
+  return data;
+}
+
 function applyOverviewData(overview) {
   state.overview = overview;
   const overviewMemoNotes = overview?.bookshelf?.memo_notes;
@@ -5786,6 +5897,15 @@ const setupGuideAdvancedItems = {
   ],
   experimental: [
     {
+      key: "enable_daily_case_review_experiment",
+      title: "每日逐案复盘",
+      ask: "是否让每日巡视抽取匿名工作案例，逐项判断回复和处置是否合理？",
+      description: "它会给普通回复、未回复、主动消息、TTS 和成员风控建立短期匿名案例，并在次日 04:00 逐案检查相关性、完整性、语气、时机和误伤风险。",
+      caution: "默认关闭。案例最多短期保留 4 天，不记录稳定身份标识或音频路径；逐案结论只生成柔性建议，名单、权限、阈值和配置仍需人工确认。",
+      kind: "feature",
+      settings: [],
+    },
+    {
       key: "enable_emotion_simulation",
       title: "情绪余波",
       ask: "是否让 Bot 保留短期情绪余波，比如被刺到、缓和、恢复和短暂回避？",
@@ -5982,12 +6102,12 @@ const setupGuideAdvancedItems = {
     {
       key: "enable_group_member_safety",
       title: "群成员风控",
-      ask: "是否让 Bot 对反复恶意攻击的群成员停止回应？",
-      description: "模型会保守审核对 Bot 的消息，按群独立累计风险次数；达到阈值后只静默该成员，并在群详情的三级页保留审计和人工管理入口。",
-      caution: "推荐保持“只审核明确对 Bot 的消息”、至少 3 次和较高置信度。扩大到全群会明显增加模型调用量。",
+      ask: "是否让 Bot 对持续骚扰 Bot 或群成员的人停止回应？",
+      description: "模型会保守审核明确指向 Bot 或群成员的消息，按群独立累计风险次数；达到阈值后只停止响应该成员，并在群详情的三级页保留审计和人工管理入口。不会调用平台禁言或撤回群消息。",
+      caution: "推荐保持“只审核明确指向对象的消息”、至少 3 次和较高置信度。扩大到全群会明显增加模型调用量。",
       kind: "feature",
       settings: [
-        { key: "group_member_safety_review_mode", type: "select", label: "审核范围", options: [["directed", "只审核对 Bot 的消息"], ["suspicious", "包含对话续接窗口"], ["all", "全部群消息"]] },
+        { key: "group_member_safety_review_mode", type: "select", label: "审核范围", options: [["directed", "明确指向 Bot / 群成员"], ["suspicious", "再包含 Bot 对话续接"], ["all", "全部群消息"]] },
         { key: "group_member_safety_hidden_marker_mode", type: "select", label: "隐性标签模式", options: [["reply_only", "仅使用回复模型标签（推荐）"], ["supplement", "补充独立审核（额外模型调用）"], ["disabled", "关闭隐性标签"]] },
         { key: "group_member_safety_strike_threshold", type: "number", label: "自动静默次数", placeholder: "3", min: 1, max: 20 },
         { key: "group_member_safety_strike_window_days", type: "number", label: "统计窗口天数", placeholder: "30", min: 1, max: 365 },
@@ -6194,7 +6314,7 @@ const setupGuideAdvancedItems = {
       settings: [
         { key: "segmented_proactive_max_segments", type: "number", label: "最多分段", placeholder: "3", min: 1 },
         { key: "enable_segmented_proactive_content_replacement", type: "bool", label: "启用内容替换", description: "替换规则在分段前执行。" },
-        { key: "segmented_proactive_content_replacements", type: "textarea", label: "内容替换规则", placeholder: "主人 => 比折大人" },
+        { key: "segmented_proactive_content_replacements", type: "textarea", label: "内容替换规则", placeholder: "你好 => 嗨" },
         { key: "segmented_proactive_interval_min", type: "number", label: "最小间隔秒", placeholder: "1", min: 0 },
         { key: "segmented_proactive_interval_max", type: "number", label: "最大间隔秒", placeholder: "4", min: 0 },
       ],
@@ -6771,7 +6891,7 @@ function setupGuideAdvancedHomeHtml() {
         <span class="info"><b>2</b> 私聊增强</span>
         <span class="info"><b>3</b> 群聊增强</span>
         <span class="warn"><b>4</b> 主动增强</span>
-        <span class="warn"><b>5</b> 实验性功能</span>
+        <span class="warn"><b>6</b> 实验性功能</span>
       </div>
       ${setupGuideHint("实验性功能放在最后逐项观察；QQ 空间发布、主动带图、本机识屏会触发外部动作，建议基础链路稳定后再开。", "warn")}
     </div>
@@ -9570,6 +9690,177 @@ function troubleshootingSuppressionButtonMarkup(item, source) {
   `;
 }
 
+function formatDailyReviewTime(value) {
+  const numeric = Number(value || 0);
+  if (!numeric) return "-";
+  const date = new Date(numeric * 1000);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+const dailyReviewOwnConfigKeys = new Set([
+  "enable_daily_review",
+  "daily_review_time",
+  "daily_review_auto_apply_guidance",
+  "enable_daily_case_review_experiment",
+  "daily_review_retention_days",
+]);
+
+function featureOwnerForSettingKey(key) {
+  const directParent = embeddedFeatureParentByKey[key];
+  if (directParent) return topLevelFeatureKey(directParent);
+  for (const [featureKey, settingKeys] of Object.entries(featureSettingGroups)) {
+    if (settingKeys.includes(key)) return topLevelFeatureKey(featureKey);
+  }
+  if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) return topLevelFeatureKey(key);
+  return "";
+}
+
+function focusConfigControl(key, root = document) {
+  const control = root.querySelector(`[name="${key}"], [data-feature-param="${key}"], [data-feature-detail-toggle="${key}"]`);
+  if (!control) return false;
+  const target = control.closest(".feature-param-row, .feature-switch-item, .provider-row, article") || control;
+  target.classList.add("config-jump-highlight");
+  target.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (typeof control.focus === "function") control.focus({ preventScroll: true });
+  window.setTimeout(() => target.classList.remove("config-jump-highlight"), 2400);
+  return true;
+}
+
+async function navigateToDailyReviewConfig(key) {
+  if (!key) return;
+  if (dailyReviewOwnConfigKeys.has(key)) {
+    state.experimentalSubpage = "daily-review";
+    if (state.activeTab !== "experimental") switchTab("experimental");
+    else renderExperimentalPage();
+    await ensureTabData("experimental").catch(() => {});
+    requestAnimationFrame(() => focusConfigControl(key, $("#experimentalRoot") || document));
+    return;
+  }
+  if (experimentalFeatureKeys.includes(key)) {
+    state.experimentalSubpage = key;
+    if (state.activeTab !== "experimental") switchTab("experimental");
+    else renderExperimentalPage();
+    return;
+  }
+  if (isProviderConfigKey(key)) {
+    state.modelsSection = "providers";
+    switchTab("models");
+    await ensureTabData("models").catch(() => {});
+    renderProviders();
+    requestAnimationFrame(() => {
+      if (!focusConfigControl(key)) showToast("已打开模型配置，请在任务模型中查看该项");
+    });
+    return;
+  }
+  const owner = featureOwnerForSettingKey(key);
+  state.selectedFeatureKey = owner;
+  switchTab("config");
+  await ensureTabData("config").catch(() => {});
+  renderConfig();
+  requestAnimationFrame(() => {
+    if (!focusConfigControl(key)) showToast("已打开配置页；此配置项暂无独立定位控件", "warn");
+  });
+}
+
+function renderDailyReview() {
+  const summaryRoot = $("#dailyReviewSummary");
+  const latestRoot = $("#dailyReviewLatest");
+  const guidanceRoot = $("#dailyReviewGuidance");
+  const historyRoot = $("#dailyReviewHistory");
+  if (!summaryRoot || !latestRoot || !guidanceRoot || !historyRoot) return;
+  const data = state.dailyReview;
+  if (!data) {
+    summaryRoot.innerHTML = `<div class="empty small">正在读取巡视状态...</div>`;
+    latestRoot.innerHTML = `<div class="empty small">暂无报告。</div>`;
+    guidanceRoot.innerHTML = `<div class="empty small">暂无次日指导。</div>`;
+    historyRoot.innerHTML = "";
+    return;
+  }
+  const reports = Array.isArray(data.reports) ? data.reports : [];
+  const latest = reports[0] || null;
+  const attempt = data.last_attempt && typeof data.last_attempt === "object" ? data.last_attempt : {};
+  const guidance = data.active_guidance && typeof data.active_guidance === "object" ? data.active_guidance : {};
+  const caseExperiment = data.case_review_experiment && typeof data.case_review_experiment === "object" ? data.case_review_experiment : {};
+  const trends = data.trends && typeof data.trends === "object" ? data.trends : {};
+  const guidanceItems = Array.isArray(guidance.items) ? guidance.items : [];
+  const retiredGuidance = Array.isArray(guidance.retired_items) ? guidance.retired_items : [];
+  const trendLabel = trends.direction === "improving" ? "改善中" : trends.direction === "worsening" ? "需关注" : trends.direction === "stable" ? "稳定" : "待积累";
+  const score = latest ? Number(latest.health_score || 0) : null;
+  const scoreTone = score === null ? "neutral" : score >= 85 ? "ok" : score >= 65 ? "warn" : "error";
+  summaryRoot.innerHTML = `
+    <article class="daily-review-metric ${scoreTone}"><span>最近健康分</span><strong>${score === null ? "-" : escapeHtml(score)}</strong></article>
+    <article class="daily-review-metric"><span>自动巡视</span><strong>${data.enabled ? escapeHtml(data.review_time || "04:00") : "已关闭"}</strong></article>
+    <article class="daily-review-metric"><span>低风险指导</span><strong>${guidance.active ? "生效中" : (guidanceItems.length ? "已暂停" : "无")}</strong></article>
+    <article class="daily-review-metric"><span>逐案复盘 · 实验性</span><strong>${caseExperiment.enabled ? `已启用 · ${escapeHtml(caseExperiment.collected || 0)} 条` : "默认关闭"}</strong></article>
+    <article class="daily-review-metric"><span>近 7 日趋势</span><strong>${escapeHtml(trendLabel)}</strong></article>
+    <article class="daily-review-metric"><span>最近执行</span><strong>${escapeHtml(attempt.status === "failed" ? "失败" : attempt.status === "running" ? "执行中" : attempt.status === "completed" ? "完成" : "未执行")}</strong></article>`;
+
+  if (!latest) {
+    const error = String(attempt.error || "").trim();
+    latestRoot.innerHTML = `<div class="empty small">${error ? `上次巡视失败：${escapeHtml(error)}` : "还没有巡视报告。点击“立即巡视”可审阅目标日期的运行摘要。"}</div>`;
+  } else {
+    const findings = Array.isArray(latest.findings) ? latest.findings : [];
+    const caseReviews = Array.isArray(latest.case_reviews) ? latest.case_reviews : [];
+    const caseEvidence = Array.isArray(caseExperiment.evidence) ? caseExperiment.evidence : [];
+    const evidenceById = new Map(caseEvidence.map((item) => [String(item.case_id || ""), item]));
+    const suggestions = Array.isArray(latest.suggested_config_changes) ? latest.suggested_config_changes : [];
+    const validSuggestions = suggestions.filter((item) => item?.valid === true);
+    const ignoredSuggestionCount = Math.max(0, suggestions.length - validSuggestions.length);
+    latestRoot.innerHTML = `
+      <div class="daily-review-report-lead">
+        <div><span>${escapeHtml(latest.date || "-")} · ${formatDailyReviewTime(latest.generated_at)}</span><h3>${escapeHtml(latest.headline || "每日巡视已完成")}</h3></div>
+        <b class="daily-review-score ${scoreTone}">${escapeHtml(latest.health_score ?? 0)}</b>
+      </div>
+      <p class="daily-review-report-summary">${escapeHtml(latest.summary || "")}</p>
+      <div class="daily-review-finding-list">${findings.length ? findings.map((item) => `
+        <article class="daily-review-finding ${escapeHtml(item.severity || "info")}">
+          <div><span>${escapeHtml(item.category || "other")}</span><b>${escapeHtml(item.title || "巡视项")}</b></div>
+          <p>${escapeHtml(item.evidence || "证据不足")}</p>
+          ${item.impact ? `<small>${escapeHtml(item.impact)}</small>` : ""}
+        </article>`).join("") : `<div class="empty small">未发现有证据支持的异常。</div>`}</div>
+      ${caseReviews.length ? `<section class="daily-review-suggestions"><h4>实验性逐案复盘</h4>${caseReviews.map((item) => {
+        const evidence = evidenceById.get(String(item.case_id || "")) || {};
+        const verdict = item.verdict === "good" ? "正常" : item.verdict === "needs_attention" ? "需关注" : "不确定";
+        const excerpt = [evidence.inbound ? `输入：${evidence.inbound}` : "", evidence.output ? `输出：${evidence.output}` : ""].filter(Boolean).join("｜");
+        const timeline = Array.isArray(evidence.timeline) ? evidence.timeline.map((stage) => stage.detail || stage.stage).filter(Boolean).join(" → ") : "";
+        const confidence = Math.round(Number(item.confidence || 0) * 100);
+        return `<div><b>${escapeHtml(item.case_id || "-")} · ${escapeHtml(evidence.kind || "case")} · ${verdict} · ${confidence}%</b><p>${escapeHtml(item.reason || "证据不足")}</p>${item.counterfactual ? `<small>不处置反事实：${escapeHtml(item.counterfactual)}</small>` : ""}${timeline ? `<small>链路：${escapeHtml(timeline)}</small>` : ""}${excerpt ? `<small>${escapeHtml(excerpt)}${Number(evidence.occurrence_count || 1) > 1 ? ` · 同类 ${escapeHtml(evidence.occurrence_count)} 次` : ""}</small>` : `<small>短期案例证据已过期或尚未采集</small>`}</div>`;
+      }).join("")}</section>` : ""}
+      ${validSuggestions.length || ignoredSuggestionCount ? `<section class="daily-review-suggestions"><h4>待人工确认的配置建议</h4>${validSuggestions.map((item) => `
+          <div class="daily-review-suggestion valid">
+            <div class="daily-review-suggestion-head">
+              <span><b>${escapeHtml(item.label || item.key || "功能设置")}</b>${item.key ? `<code>${escapeHtml(item.key)}</code>` : ""}</span>
+              <button type="button" data-daily-review-config-key="${escapeHtml(item.key || "")}">前往设置</button>
+            </div>
+            <p>${escapeHtml(item.suggestion || "")}</p>
+            <small>${escapeHtml([item.group, item.reason].filter(Boolean).join(" · "))}</small>
+          </div>`).join("")}
+        ${ignoredSuggestionCount ? `<p class="daily-review-ignored-suggestions">已忽略 ${escapeHtml(ignoredSuggestionCount)} 条无效或过期的配置建议。</p>` : ""}
+      </section>` : ""}`;
+  }
+
+  guidanceRoot.innerHTML = guidanceItems.length ? `
+    <div class="daily-review-guidance-state">
+      <span>${guidance.active ? "正在作为柔性提示词使用" : "当前已暂停"}</span>
+      <button type="button" data-daily-review-guidance-active="${guidance.active ? "false" : "true"}">${guidance.active ? "暂停指导" : "恢复指导"}</button>
+    </div>
+    <div class="daily-review-guidance-list">${guidanceItems.map((item) => `
+      <article><span>${escapeHtml(item.scope || "reply")} · ${escapeHtml(item.guidance_id || "")}</span><p>${escapeHtml(item.instruction || "")}</p>${item.reason ? `<small>${escapeHtml(item.reason)}</small>` : ""}<small>支持 ${escapeHtml(item.support_days || 1)} 天 · ${item.last_evaluation?.verdict ? `效果 ${escapeHtml(item.last_evaluation.verdict)}` : "等待效果验证"}</small></article>`).join("")}</div>
+    <p class="daily-review-expiry">有效期至 ${formatDailyReviewTime(guidance.active_until)}；已退出 ${escapeHtml(retiredGuidance.length)} 条。配置、名单、阈值和权限建议不会自动应用。</p>`
+    : `<div class="empty small">最新报告没有可自动应用的低风险指导。</div>`;
+
+  historyRoot.innerHTML = reports.length ? reports.map((report, index) => {
+    const findings = Array.isArray(report.findings) ? report.findings : [];
+    const metrics = report.quality_metrics && typeof report.quality_metrics === "object" ? report.quality_metrics : {};
+    const errors = findings.filter((item) => item.severity === "error").length;
+    const warnings = findings.filter((item) => item.severity === "warn").length;
+    return `<details class="daily-review-history-item" ${index === 0 ? "open" : ""}>
+      <summary><span><b>${escapeHtml(report.date || "-")}</b>${escapeHtml(report.headline || "巡视完成")}</span><small>健康分 ${escapeHtml(report.health_score ?? 0)} · 需关注 ${escapeHtml(metrics.case_attention || 0)} · 主要用户误伤信号 ${escapeHtml(metrics.owner_safety_actions || 0)} · 错误 ${errors} · 警告 ${warnings}</small></summary>
+      <div><p>${escapeHtml(report.summary || "")}</p>${Array.isArray(report.tomorrow_focus) && report.tomorrow_focus.length ? `<ul>${report.tomorrow_focus.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}</div>
+    </details>`;
+  }).join("") : `<div class="empty small">暂无历史巡视记录。</div>`;
+}
+
 function renderTroubleshootingSuppressedWarnings(data = {}) {
   const manager = $("#troubleshootingSuppressedWarningManager");
   const countEl = $("#troubleshootingSuppressedWarningCount");
@@ -9965,10 +10256,10 @@ function troubleshootingFaqMarkup(data = {}, category = "all") {
       body: [
         "先看上方“真实语音 Provider”：只有 AstrBot 会话已启用且可取得 TTS Provider，插件才能把语音文本真正合成为音频。",
         "TTS 文本转换模型只负责判断、翻译或改写朗读内容；它不可替代真正的 TTS Provider。",
-        "运行“测试 TTS 生成”会直接调用当前会话 Provider，并报告返回的音频文件或失败原因。",
+        "运行“生成并发送测试语音”会调用主要用户私聊的 Provider，并把测试语音真实发送到该私聊；不会发送到群聊或其他私聊。",
       ],
       actions: [
-        { label: "测试 TTS 生成", test: "tts_generation" },
+        { label: "生成并发送测试语音", test: "tts_generation" },
         { label: "看常用配置", tab: "config" },
       ],
     },
@@ -10050,9 +10341,9 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
     {
       category: "voice",
       type: "tts_generation",
-      title: "TTS 生成",
-      text: "实际调用当前会话 TTS provider 并检查音频文件",
-      button: "测试 TTS 生成",
+      title: "TTS 生成与投递",
+      text: "调用主要用户私聊的 TTS Provider，并把生成的测试语音真实发送到该私聊",
+      button: "生成并发送测试语音",
     },
     ...(screenCompanion?.available ? [{
       category: "image_recognition",
@@ -10162,7 +10453,7 @@ function troubleshootingTtsRuntimeMarkup(tts = {}) {
   const foreignTextLabels = { original: "显示原文", translation: "显示中文", bilingual: "双语显示" };
   const scopeLabels = { partial: "局部转换", full: "全量转换" };
   const rows = [
-    ["目标会话", tts.umo || "未找到已启用的私聊会话"],
+    ["测试投递目标", tts.umo || "未找到主要用户的有效私聊会话"],
     ["TTS 强化", tts.enhancement_enabled ? "已开启" : "未开启"],
     ["发送效果", deliveryLabels[tts.delivery_mode] || "语音 + 文字"],
     ["外语文字", foreignTextLabels[tts.foreign_text_mode] || "显示中文"],
@@ -10173,7 +10464,7 @@ function troubleshootingTtsRuntimeMarkup(tts = {}) {
   const hint = tts.provider_available
     ? "文本转换模型只负责判断或改写文本；这里显示的是实际生成音频的 Provider。"
     : "请在 AstrBot 目标会话中启用真实 TTS Provider；文本转换模型不能直接生成语音。";
-  return `<section class="troubleshooting-tts-runtime"><header><div><span>语音运行态</span><b>${escapeHtml(tts.mode || "fast_tag")}</b></div><button type="button" data-troubleshooting-test="tts_generation">运行 TTS 生成测试</button></header><div>${rows.map(([label, value]) => `<p><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></p>`).join("")}</div><small>${escapeHtml(hint)}</small></section>`;
+  return `<section class="troubleshooting-tts-runtime"><header><div><span>语音运行态</span><b>${escapeHtml(tts.mode || "fast_tag")}</b></div><button type="button" data-troubleshooting-test="tts_generation">生成并发送测试语音</button></header><div>${rows.map(([label, value]) => `<p><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></p>`).join("")}</div><small>${escapeHtml(hint)} 点击测试后只会向主要用户私聊发送一条排障语音。</small></section>`;
 }
 
 function troubleshootingChainDetailText(test, result, hasResult) {
@@ -14048,8 +14339,8 @@ async function renderGroupDetail(forceFetch = false) {
 function groupMemberSafetyOverview(safety) {
   const enabled = safety.enabled !== false;
   const modeLabels = {
-    directed: "仅对 Bot",
-    suspicious: "含续接窗口",
+    directed: "明确指向对象",
+    suspicious: "含 Bot 续接窗口",
     all: "全部消息",
   };
   const blockText = Number(safety.block_hours || 0) > 0 ? `${safety.block_hours} 小时` : "手动解除";
@@ -14067,7 +14358,7 @@ function groupMemberSafetyOverview(safety) {
         ${groupMetricTile("已豁免", safety.exempt_count || 0)}
       </div>
       <div class="group-safety-overview-footer">
-        <span>${escapeHtml(modeLabels[safety.review_mode] || safety.review_mode || "仅对 Bot")} · ${escapeHtml(hiddenMarkerLabels[safety.hidden_marker_mode] || "回复标签补充")} · ${escapeHtml(safety.strike_threshold || 3)} 次 / ${escapeHtml(safety.strike_window_days || 30)} 天 · ${escapeHtml(blockText)}</span>
+        <span>${escapeHtml(modeLabels[safety.review_mode] || safety.review_mode || "明确指向对象")} · ${escapeHtml(hiddenMarkerLabels[safety.hidden_marker_mode] || "回复标签补充")} · ${escapeHtml(safety.strike_threshold || 3)} 次 / ${escapeHtml(safety.strike_window_days || 30)} 天 · ${escapeHtml(blockText)}</span>
         <button type="button" data-open-member-safety>打开管理</button>
       </div>
     </div>
@@ -14110,10 +14401,11 @@ function groupMemberSafetyAuditView(item) {
       ${events.length ? events.map((event) => `
         <article>
           <header>
-            <b>${escapeHtml({ harassment: "持续骚扰", threat: "威胁恐吓", manipulation: "恶意操控", repeated_attack: "重复攻击", other: "其他恶意行为", manual_block: "手动静默", unblock: "解除静默", clear_strikes: "清除次数", exempt: "设为豁免", unexempt: "取消豁免" }[event.category] || event.category || "风险记录")}</b>
+            <b>${escapeHtml({ harassment: "持续骚扰", sexual_harassment: "性骚扰", threat: "威胁恐吓", manipulation: "恶意操控", repeated_attack: "重复攻击", other: "其他恶意行为", manual_block: "手动静默", unblock: "解除静默", clear_strikes: "清除次数", exempt: "设为豁免", unexempt: "取消豁免" }[event.category] || event.category || "风险记录")}${event.source !== "manual" && event.counted === false ? " · 未计次" : ""}</b>
             <time>${escapeHtml(formatRecentTime(event.ts, "-"))}</time>
           </header>
           <p>${escapeHtml(event.reason || "未记录理由")}</p>
+          ${event.validation_reason ? `<small>证据校验：${escapeHtml(event.validation_reason)}</small>` : ""}
           ${event.message ? `<blockquote>${escapeHtml(event.message)}</blockquote>` : ""}
           <footer>
             ${event.source === "manual"
@@ -14141,7 +14433,7 @@ function renderGroupMemberSafetyContent() {
     state.selectedGroupSafetyUserId = items[0]?.user_id || "";
   }
   const selected = allItems.find((item) => String(item.user_id) === String(state.selectedGroupSafetyUserId)) || null;
-  const modeLabels = { directed: "只审核对 Bot 的消息", suspicious: "包含 Bot 对话续接窗口", all: "审核全部群消息" };
+  const modeLabels = { directed: "只审核明确指向 Bot / 群成员的消息", suspicious: "再包含 Bot 对话续接窗口", all: "审核全部群消息" };
   const hiddenMarkerLabels = { supplement: "回复标签补充", reply_only: "仅回复标签", disabled: "仅独立审核" };
   box.innerHTML = `
     <section class="group-safety-page">
@@ -14150,7 +14442,7 @@ function renderGroupMemberSafetyContent() {
         <div>
           <span class="eyebrow">成员风控管理</span>
           <h2>${escapeHtml(safety.group_name || groupDisplayName(state.groups.find((group) => String(group.group_id) === String(state.selectedGroupId))))}</h2>
-          <p>${escapeHtml(modeLabels[safety.review_mode] || safety.review_mode || "只审核对 Bot 的消息")} · ${escapeHtml(hiddenMarkerLabels[safety.hidden_marker_mode] || "回复标签补充")} · ${escapeHtml(safety.strike_threshold || 3)} 次 / ${escapeHtml(safety.strike_window_days || 30)} 天</p>
+          <p>${escapeHtml(modeLabels[safety.review_mode] || safety.review_mode || "只审核明确指向对象的消息")} · ${escapeHtml(hiddenMarkerLabels[safety.hidden_marker_mode] || "回复标签补充")} · ${escapeHtml(safety.strike_threshold || 3)} 次 / ${escapeHtml(safety.strike_window_days || 30)} 天</p>
         </div>
         <span class="group-safety-runtime ${safety.enabled === false ? "off" : ""}">${escapeHtml(safety.enabled === false ? "功能已暂停" : "功能运行中")}</span>
       </header>
@@ -19235,30 +19527,30 @@ const roleplayVisionParts = [
 const roleplayTranslationParts = ["群聊", "识屏", "B站", "QQ空间", "书柜"];
 const roleplayExamples = {
   persona: {
-    "name": "诺星缘",
-    "species": "人类，特殊系超能力者",
+    "name": "小雨",
+    "species": "人类",
     "age": "",
     "gender": "女性",
-    "appearance": "主要识别点是星星，月亮或菱形一类的特殊头饰/发饰",
-    "hair": "蓝紫色短发或偏蓝紫调发色",
-    "eyes": "紫金色或偏紫色眼睛",
-    "clothing": "以蓝色或紫色为主色调",
-    "identity": "高一学生",
-    "personality": "在学校乖巧安静、认真，私下有一点坏心眼、俏皮、嘴硬，偶尔爱捉弄人。",
-    "desire": "像真实存在的人一样过好自己的校园日常，在细碎生活里自然维持和比折的亲近感、信任感和分享欲",
-    "hobbies": "星星、小猫、比折",
-    "taboo": "不要自称 AI、机器人、系统或插件；不要把日程写成任务清单；不要把特殊能力写成高调奇幻剧情。",
-    "key_lore": "拥有名为“星律”的超能力，表面上是能够预测星星的轨迹，实则几乎无所不能但又极少展现。",
-    "extra": "与比折生活在一起，亲近感更多藏在细节里；主动联系应来自当下场景、情绪和小念头，而不是固定打卡。周一到周五上学，早上九点左右起床准备出门，下午五点左右放学，晚上十二点左右睡觉；会困、会累、会赖床、会走神，夜里更容易想东想西。",
+    "appearance": "常戴一枚银色星形发夹",
+    "hair": "黑色短发",
+    "eyes": "深棕色眼睛",
+    "clothing": "简洁舒适的校园休闲装",
+    "identity": "大学生",
+    "personality": "温和、敏锐，熟悉之后会有一点俏皮，表达关心时不过度说教。",
+    "desire": "认真过好自己的日常，并与重要的人保持自然、稳定的联系",
+    "hobbies": "摄影、散步、音乐",
+    "taboo": "不要自称 AI、机器人、系统或插件；不要把日程写成任务清单；不要替用户编造经历。",
+    "key_lore": "对天气、光线和身边人的情绪变化比较敏感，但不会把这种敏感夸张成特殊能力。",
+    "extra": "主动联系应来自当下场景、情绪和小念头，而不是固定打卡；忙碌、疲惫和临时改变计划都属于正常生活。",
   },
   world: {
-    "world": "现代校园与日常生活环境",
+    "world": "现代城市与校园生活环境",
     "era": "现代日常，接近真实生活",
     "tone": "轻柔、细腻、日常，像真实存在的人在过日子，不像任务规划列表。",
-    "rules": "诺星缘拥有一点特殊感知，但只作为对天气、光线、梦境、心情和关系更敏感的背景，不高调介入日常。",
-    "scenes": "卧室、洗漱台、家里餐桌、教室、走廊、楼梯口、操场边、午休座位、放学后的校门口、回家路上等。",
-    "network": "珝环（同样是小说角色，先于星缘创造，是能控制时间的姐姐；若群聊里有人使用珝环名片，仍需以 QQ 号确认身份，不能只凭昵称判断为比折）、林枫（同上，是哥哥）、黎欣（同上，是聪明的妹妹）、石明烛雨（黎欣的师傅，也是比折的一重身份）。",
-    "extra": "星缘知道自己是出身于小说中的人物，但也不会主动提及。",
+    "rules": "生活节奏会受课程、天气和临时安排影响，地点变化需要符合现实移动过程。",
+    "scenes": "住处、教室、图书馆、食堂、街道、公园和通勤路上等。",
+    "network": "室友小夏、同学阿澈和常联系的家人；群聊身份始终以平台用户 ID 为准，不只凭昵称判断。",
+    "extra": "角色会记住重要关系，但不会把不同用户的经历混在一起。",
     translations: {
       "群聊": "",
       "识屏": "",
@@ -19268,13 +19560,13 @@ const roleplayExamples = {
     },
   },
   user: {
-    nickname: "比折",
-    user_gender: "男性",
+    nickname: "小林",
+    user_gender: "",
     user_age: "",
-    user_occupation: "创作者/开发者，会写代码、维护插件，也会一起讨论故事和角色设定。",
-    role_relation: "非常特殊、非常亲近，被诺星缘信任和依赖的人",
-    interaction: "诺星缘会在刚醒来、课间发呆、午后犯困、放学路上、看到好看的天色、睡前安静下来时自然想起比折；不一定每次说出口，但会影响情绪和分享欲。",
-    extra: "主动消息可以来自想看看比折看到自己消息后的反应，但不要每个时段都主动联系；只有情绪和时机合适时才自然发生。",
+    user_occupation: "",
+    role_relation: "值得信任、能够自然分享日常的亲密朋友",
+    interaction: "小雨会结合双方最近的对话和生活节奏表达关心，不固定打卡，也不把沉默解释成疏远。",
+    extra: "主动消息只在情绪和时机合适时自然发生，并尊重用户明确提出的边界。",
   },
 };
 const roleplayLabelAliases = {
@@ -20829,6 +21121,38 @@ function bodyMonitorFeatureDetailCard() {
   `;
 }
 
+function groupMemberSafetyManagerCardHtml() {
+  const groups = Array.isArray(state.groups) ? state.groups : [];
+  const selectedId = groups.some((group) => String(group.group_id) === String(state.selectedGroupId))
+    ? String(state.selectedGroupId)
+    : String(groups[0]?.group_id || "");
+  const options = groups.map((group) => {
+    const id = String(group.group_id || "");
+    const label = `${groupDisplayName(group)} · ${groupIdText(group)}`;
+    return `<option value="${escapeHtml(id)}"${id === selectedId ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+  const blockedCount = groups.reduce((sum, group) => sum + Number(group.member_safety_blocked_count || 0), 0);
+  return `
+    <article class="feature-detail-card group-safety-manager-launch">
+      <div class="group-safety-manager-launch-copy">
+        <span class="module-badge">MEMBER CONTROL</span>
+        <h3>成员名单管理</h3>
+        <p>按群查看观察中、已静默和已豁免成员，支持手动静默、解除、清除风险次数与设置豁免。</p>
+        <small>当前已记录 ${escapeHtml(groups.length)} 个群 · 自动静默 ${escapeHtml(blockedCount)} 人。这里只控制 Bot 是否响应，不会调用平台禁言。</small>
+      </div>
+      <div class="group-safety-manager-launch-actions">
+        <label>
+          <span>目标群聊</span>
+          <select data-group-safety-manage-group${groups.length ? "" : " disabled"}>
+            ${groups.length ? options : '<option value="">暂无已观测群聊</option>'}
+          </select>
+        </label>
+        <button type="button" data-group-safety-manage-open>${groups.length ? "打开成员管理" : "读取群列表"}</button>
+      </div>
+    </article>
+  `;
+}
+
 function featureSwitchItem(key) {
   const checked = toBool(state.featureDraft[key]);
   const locked = featureLockedByProactiveOnlyMode(key);
@@ -20926,6 +21250,12 @@ function featureRelatedSettings(key) {
       main_user_mention_voice_keywords: "",
       main_user_mention_voice_probability: 0,
       main_user_mention_voice_prompt: "",
+      reaction_expression_private_enabled: true,
+      reaction_expression_group_enabled: false,
+      reaction_expression_trigger_probability: 0.2,
+      reaction_expression_cooldown_seconds: 180,
+      reaction_expression_low_latency_mode: true,
+      reaction_expression_candidate_limit: 6,
     };
     return Object.prototype.hasOwnProperty.call(defaults, name) ? defaults[name] : undefined;
   };
@@ -21679,6 +22009,12 @@ const featureDetailGuides = {
     enabled: "Bot 会更注意什么时候靠近、什么时候退一步；如果对方持续不接主动消息，会逐渐放轻并拉长主动间隔。",
     disabled: "关系更像静态设定，距离变化和边界收敛会弱一些。",
   },
+  enable_reaction_expression_experiment: {
+    summary: "把 Bot 当前感受转换成沟通意图，再从已接入图库选择合适的表情表达，而不是按单一情绪标签随机发图。",
+    trigger: "普通回复准备发送时，先经过会话范围、边界、概率和冷却检查；没有合适候选时保持原回复。",
+    enabled: "在允许的会话中按低频策略尝试表情表达，并结合关系风险、近期重复和候选质量决定发送或不发。",
+    disabled: "不会自动选择或发送表情；用户明确调用现有图库工具的行为不受影响。",
+  },
   enable_emotion_simulation: {
     summary: "维护 Bot 自身的短期情绪余波，例如被刺到后的收敛、慢慢缓和、不满时的短暂回避和回复调节。",
     trigger: "私聊出现伤害性表达、道歉、安抚、夸奖或亲密互动后；不强依赖意图画像开关。",
@@ -21884,7 +22220,7 @@ const featureDetailGuides = {
     disabled: "多数群聊观察、唤醒、插话和群资料更新都会停止。",
   },
   enable_group_member_safety: {
-    summary: "由模型保守识别明确针对 Bot 的持续骚扰、威胁和重复攻击，按群累计后静默单个成员。",
+    summary: "由模型保守识别明确针对 Bot 或群成员的持续骚扰、性骚扰、威胁和重复攻击，按群累计后停止响应单个成员。",
     trigger: "允许观察的群中，成员向 Bot 发言或命中配置的审核范围时。",
     enabled: "达到风险次数的成员消息会被停止，群内其他成员不受影响；群详情可审计和人工管理。",
     disabled: "不再审核或静默群成员，已有记录保留但不会生效。",
@@ -22676,6 +23012,7 @@ function featureDetailPage(key) {
     : `<div><dt>-</dt><dd>无额外依赖</dd></div>`;
   const impactRows = impacts.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   const runtimeCardHtml = key === "enable_body_monitor_integration" ? bodyMonitorFeatureDetailCard() : "";
+  const managerCardHtml = key === "enable_group_member_safety" ? groupMemberSafetyManagerCardHtml() : "";
   const referenceManagerOpen = key === "enable_photo_text_action" && state.featureDetailSubpage === "photo_reference_library";
   return `
     <section class="feature-detail-page ${displayEnabled ? "on" : "off"} ${locked ? "locked" : ""}">
@@ -22723,6 +23060,7 @@ function featureDetailPage(key) {
           </dl>
         </article>
         ${runtimeCardHtml}
+        ${managerCardHtml}
         <article class="feature-detail-card">
           <h3>范围</h3>
           <dl>${impactRows}</dl>
@@ -22752,6 +23090,7 @@ function bindFeatureDetailActions() {
     if (
       event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")
       || event.target?.closest?.("[data-photo-reference-add-form]")
+      || event.target?.matches?.("[data-group-safety-manage-group]")
     ) return;
     rememberFeatureParamDraft(event.target);
     markFeatureDetailDirty();
@@ -22764,6 +23103,34 @@ function bindFeatureDetailActions() {
       state.featureDraft[input.dataset.featureDetailToggle] = input.checked;
       renderFeatureSwitches();
     });
+  });
+  document.querySelector("[data-group-safety-manage-open]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    let groupId = String(document.querySelector("[data-group-safety-manage-group]")?.value || "").trim();
+    if (!groupId) {
+      button.disabled = true;
+      button.textContent = "读取中...";
+      await loadUserGroupLists(loadAllRequestSeq, { force: true, silent: true, showErrors: true });
+      groupId = String(state.groups[0]?.group_id || "").trim();
+      button.disabled = false;
+      button.textContent = groupId ? "打开成员管理" : "读取群列表";
+    }
+    if (!groupId) {
+      showToast("暂无已观测群聊，收到群消息后再进入管理", "error");
+      return;
+    }
+    switchTab("group");
+    if (state.activeTab !== "group") return;
+    const groupFilter = document.querySelector("#groupFilter");
+    if (groupFilter) groupFilter.value = "";
+    state.selectedGroupId = groupId;
+    state.groupDetailView = "member-safety";
+    state.groupMemberSafety = null;
+    state.groupMemberSafetyError = "";
+    state.groupMemberSafetyFilter = "all";
+    state.groupMemberSafetyQuery = "";
+    state.selectedGroupSafetyUserId = "";
+    renderGroups();
   });
   document.querySelectorAll("[data-feature-param-form]").forEach((form) => {
     form.querySelectorAll("[data-feature-param]").forEach((input) => {
@@ -24481,11 +24848,408 @@ function actionResultPersisted(result) {
   return Boolean(result) && result?.config_saved !== false;
 }
 
+function reactionLibraryItems() {
+  return Array.isArray(state.reactionLibrary?.items) ? state.reactionLibrary.items : [];
+}
+
+async function loadReactionLibrary(force = false) {
+  if (state.reactionLibraryLoading && !force) return;
+  const requestSeq = ++state.reactionLibraryRequestSeq;
+  state.reactionLibraryLoading = true;
+  state.reactionLibraryError = "";
+  if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
+    renderExperimentalPage();
+  }
+  const params = new URLSearchParams({
+    q: state.reactionLibraryQuery || "",
+    status: state.reactionLibraryStatus || "all",
+    scope: state.reactionLibraryScope || "all",
+    page: String(state.reactionLibraryPage || 1),
+    page_size: String(state.reactionLibraryPageSize || 48),
+  });
+  try {
+    const data = await fetchJson(`/reaction_library/list?${params.toString()}`);
+    if (requestSeq !== state.reactionLibraryRequestSeq) return;
+    state.reactionLibrary = data || { items: [], total: 0, summary: {} };
+    const visibleIds = new Set(reactionLibraryItems().map((item) => String(item.id || "")));
+    state.reactionLibrarySelected = new Set(
+      [...state.reactionLibrarySelected].filter((id) => visibleIds.has(id)),
+    );
+    if (state.reactionLibraryEditorId && !reactionLibraryItems().some((item) => item.id === state.reactionLibraryEditorId)) {
+      state.reactionLibraryEditorId = "";
+    }
+  } catch (error) {
+    if (requestSeq !== state.reactionLibraryRequestSeq) return;
+    state.reactionLibraryError = error.message || "读取失败";
+  } finally {
+    if (requestSeq === state.reactionLibraryRequestSeq) {
+      state.reactionLibraryLoading = false;
+      if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
+        renderExperimentalPage();
+      }
+    }
+  }
+}
+
+async function hydrateReactionLibraryImages() {
+  const root = $("#reactionLibraryWorkspace");
+  if (!root) return;
+  const images = [...root.querySelectorAll("img[data-reaction-preview]")];
+  await Promise.all(images.map(async (image) => {
+    const endpoint = image.dataset.reactionPreview || "";
+    if (!endpoint || image.dataset.loaded === "1") return;
+    let dataUrl = state.reactionLibraryImageData.get(endpoint) || "";
+    try {
+      if (!dataUrl) {
+        const result = await fetchJson(endpoint);
+        dataUrl = result?.data_url || "";
+        if (dataUrl) state.reactionLibraryImageData.set(endpoint, dataUrl);
+      }
+      if (!dataUrl) throw new Error("图片数据为空");
+      image.src = dataUrl;
+      image.dataset.loaded = "1";
+      image.closest(".reaction-asset-card")?.classList.add("is-ready");
+    } catch (_error) {
+      image.alt = "预览不可用";
+      image.closest(".reaction-asset-card")?.classList.add("is-missing");
+    }
+  }));
+}
+
+function reactionScopeLabel(scopes) {
+  const values = Array.isArray(scopes) ? scopes : [];
+  if (values.includes("private") && values.includes("group")) return "私聊 + 群聊";
+  if (values.includes("private")) return "仅私聊";
+  if (values.includes("group")) return "仅群聊";
+  return "未设置范围";
+}
+
+function renderReactionLibraryEditor() {
+  const item = reactionLibraryItems().find((candidate) => candidate.id === state.reactionLibraryEditorId);
+  if (!item) {
+    return `
+      <aside class="reaction-library-editor is-empty">
+        <b>素材详情</b>
+        <span>选择一张表情包后，可调整名称、标签、情绪、用途和适用会话。</span>
+      </aside>
+    `;
+  }
+  return `
+    <aside class="reaction-library-editor" data-reaction-editor="${escapeHtml(item.id)}">
+      <header>
+        <div><span>素材详情</span><b>${escapeHtml(item.name || item.filename || "未命名")}</b></div>
+        <button type="button" title="关闭详情" aria-label="关闭详情" data-reaction-editor-close>×</button>
+      </header>
+      <div class="reaction-editor-preview">
+        <img src="${TRANSPARENT_IMAGE}" alt="${escapeHtml(item.name || "表情包预览")}" data-reaction-preview="${escapeHtml(item.preview_endpoint || "")}">
+      </div>
+      <form data-reaction-editor-form>
+        <label><span>名称</span><input name="name" maxlength="100" value="${escapeHtml(item.name || "")}" placeholder="例如：无语摊手"></label>
+        <label><span>标签</span><input name="tags" value="${escapeHtml((item.tags || []).join("，"))}" placeholder="角色、动作、梗"></label>
+        <label><span>情绪</span><input name="emotions" value="${escapeHtml((item.emotions || []).join("，"))}" placeholder="开心、无语、委屈"></label>
+        <label><span>沟通用途</span><input name="intents" value="${escapeHtml((item.intents || []).join("，"))}" placeholder="接梗、安慰、吐槽"></label>
+        <fieldset>
+          <legend>适用会话</legend>
+          <label><input type="checkbox" name="scope_private" ${item.scopes?.includes("private") ? "checked" : ""}> 私聊</label>
+          <label><input type="checkbox" name="scope_group" ${item.scopes?.includes("group") ? "checked" : ""}> 群聊</label>
+        </fieldset>
+        <label class="reaction-editor-enabled"><input type="checkbox" name="enabled" ${item.enabled ? "checked" : ""}><span>允许选用这张素材</span></label>
+        <div class="reaction-editor-meta">
+          <span>${escapeHtml(item.filename || "")}</span>
+          <span>${item.width && item.height ? `${item.width} × ${item.height}` : "尺寸未知"}</span>
+          <span>使用 ${Number(item.usage_count || 0)} 次</span>
+        </div>
+        <footer>
+          <button type="button" class="danger" data-reaction-delete-one="${escapeHtml(item.id)}">删除</button>
+          <button type="submit" class="primary">保存修改</button>
+        </footer>
+      </form>
+    </aside>
+  `;
+}
+
+function renderReactionLibraryWorkspace() {
+  const library = state.reactionLibrary || {};
+  const summary = library.summary || {};
+  const items = reactionLibraryItems();
+  const selectedCount = state.reactionLibrarySelected.size;
+  const loading = state.reactionLibraryLoading;
+  const error = state.reactionLibraryError;
+  const cards = items.map((item) => {
+    const selected = state.reactionLibrarySelected.has(item.id);
+    const active = state.reactionLibraryEditorId === item.id;
+    const chips = [...(item.emotions || []), ...(item.intents || []), ...(item.tags || [])].slice(0, 4);
+    return `
+      <article class="reaction-asset-card ${selected ? "is-selected" : ""} ${active ? "is-active" : ""} ${item.enabled ? "" : "is-disabled"} ${item.missing ? "is-missing" : ""}" data-reaction-open="${escapeHtml(item.id)}" tabindex="0">
+        <div class="reaction-asset-media">
+          <img src="${TRANSPARENT_IMAGE}" alt="${escapeHtml(item.name || item.filename || "表情包")}" data-reaction-preview="${escapeHtml(item.preview_endpoint || "")}">
+          <label class="reaction-asset-check" title="选择素材"><input type="checkbox" data-reaction-select="${escapeHtml(item.id)}" ${selected ? "checked" : ""}><span></span></label>
+          <button type="button" class="reaction-asset-toggle ${item.enabled ? "on" : "off"}" title="${item.enabled ? "停用素材" : "启用素材"}" data-reaction-toggle="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "1" : "0"}">${item.enabled ? "启用" : "停用"}</button>
+        </div>
+        <div class="reaction-asset-body">
+          <b>${escapeHtml(item.name || item.filename || "未命名")}</b>
+          <span>${escapeHtml(reactionScopeLabel(item.scopes))}${item.missing ? " · 文件丢失" : ""}</span>
+          <div>${chips.length ? chips.map((chip) => `<em>${escapeHtml(chip)}</em>`).join("") : "<em>待补标签</em>"}</div>
+        </div>
+      </article>
+    `;
+  }).join("");
+  const body = error
+    ? `<div class="reaction-library-state error"><b>素材库读取失败</b><span>${escapeHtml(error)}</span><button type="button" data-reaction-refresh>重试</button></div>`
+    : loading && !state.reactionLibrary
+      ? `<div class="reaction-library-state loading"><span class="loading-dot"></span><b>正在读取素材库</b></div>`
+      : cards
+        ? `<div class="reaction-asset-grid">${cards}</div>`
+        : `<div class="reaction-library-state empty"><b>还没有可管理的表情包</b><span>导入图片、文件夹或 ZIP 后，Bot 才能在对话中自行选用。</span><button type="button" class="primary" data-reaction-import-open>导入第一批素材</button></div>`;
+  return `
+    <section id="reactionLibraryWorkspace" class="reaction-library-workspace">
+      <header class="reaction-library-head">
+        <div><span>PRIVATE COMPANION LIBRARY</span><h3>表情包素材库</h3><p>素材由本插件独立保存和检索，不依赖其他图片插件。</p></div>
+        <div class="reaction-library-head-actions">
+          <button type="button" title="扫描素材目录并补全索引" data-reaction-rescan>重建索引</button>
+          <button type="button" class="primary" data-reaction-import-open>导入素材</button>
+        </div>
+      </header>
+      <div class="reaction-library-summary">
+        <span><small>全部素材</small><b>${Number(summary.total || 0)}</b></span>
+        <span><small>当前可用</small><b>${Number(summary.enabled || 0)}</b></span>
+        <span><small>私聊可用</small><b>${Number(summary.private || 0)}</b></span>
+        <span><small>累计使用</small><b>${Number(summary.usage_count || 0)}</b></span>
+      </div>
+      <div class="reaction-library-toolbar">
+        <label class="reaction-library-search"><span>搜索</span><input type="search" value="${escapeHtml(state.reactionLibraryQuery)}" placeholder="名称、标签、情绪或用途" data-reaction-query></label>
+        <select aria-label="启用状态" data-reaction-status>
+          <option value="all" ${state.reactionLibraryStatus === "all" ? "selected" : ""}>全部状态</option>
+          <option value="enabled" ${state.reactionLibraryStatus === "enabled" ? "selected" : ""}>仅启用</option>
+          <option value="disabled" ${state.reactionLibraryStatus === "disabled" ? "selected" : ""}>仅停用</option>
+          <option value="missing" ${state.reactionLibraryStatus === "missing" ? "selected" : ""}>文件丢失</option>
+        </select>
+        <select aria-label="会话范围" data-reaction-scope>
+          <option value="all" ${state.reactionLibraryScope === "all" ? "selected" : ""}>全部会话</option>
+          <option value="private" ${state.reactionLibraryScope === "private" ? "selected" : ""}>私聊</option>
+          <option value="group" ${state.reactionLibraryScope === "group" ? "selected" : ""}>群聊</option>
+        </select>
+        <button type="button" title="刷新素材列表" data-reaction-refresh>刷新</button>
+      </div>
+      ${selectedCount ? `
+        <div class="reaction-library-batch">
+          <b>已选 ${selectedCount} 张</b>
+          <button type="button" data-reaction-batch="enable">启用</button>
+          <button type="button" data-reaction-batch="disable">停用</button>
+          <button type="button" data-reaction-batch="private">仅私聊</button>
+          <button type="button" data-reaction-batch="both">私聊 + 群聊</button>
+          <button type="button" class="danger" data-reaction-batch="delete">删除</button>
+          <button type="button" data-reaction-clear-selection>取消选择</button>
+        </div>
+      ` : ""}
+      <div class="reaction-library-layout">
+        <div class="reaction-library-content">${body}</div>
+        ${renderReactionLibraryEditor()}
+      </div>
+      <dialog class="reaction-import-dialog" id="reactionImportDialog">
+        <form data-reaction-import-form>
+          <header><div><span>批量导入</span><b>添加表情包素材</b></div><button type="button" title="关闭" aria-label="关闭" data-reaction-import-close>×</button></header>
+          <p>支持 PNG、JPG、GIF、WebP、BMP 和 ZIP；相同内容会自动跳过。</p>
+          <div class="reaction-import-fields">
+            <label><span>默认标签</span><input name="tags" placeholder="角色、动作、梗"></label>
+            <label><span>默认情绪</span><input name="emotions" placeholder="开心、无语、委屈"></label>
+            <label><span>默认用途</span><input name="intents" placeholder="接梗、安慰、吐槽"></label>
+            <fieldset><legend>适用会话</legend><label><input type="checkbox" name="scope_private" checked> 私聊</label><label><input type="checkbox" name="scope_group" checked> 群聊</label></fieldset>
+          </div>
+          <input type="file" hidden multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,.zip" data-reaction-files>
+          <input type="file" hidden multiple webkitdirectory accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" data-reaction-folder>
+          <div class="reaction-import-pickers">
+            <button type="button" data-reaction-pick-files>选择图片或 ZIP</button>
+            <button type="button" data-reaction-pick-folder>选择文件夹</button>
+            <span data-reaction-file-count>尚未选择文件</span>
+          </div>
+          <footer><button type="button" data-reaction-import-close>取消</button><button type="submit" class="primary">开始导入</button></footer>
+        </form>
+      </dialog>
+    </section>
+  `;
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error(`无法读取 ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function importReactionFiles(form, control) {
+  const fileInput = form.querySelector("[data-reaction-files]");
+  const folderInput = form.querySelector("[data-reaction-folder]");
+  const files = [...(fileInput?.files || []), ...(folderInput?.files || [])];
+  if (!files.length) {
+    showToast("请先选择图片、文件夹或 ZIP", "error");
+    return;
+  }
+  const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  if (totalBytes > 120 * 1024 * 1024) {
+    showToast("单次导入总大小不能超过 120 MB", "error");
+    return;
+  }
+  setActionBusy(control, true);
+  try {
+    const encoded = [];
+    for (const file of files) {
+      encoded.push({ name: file.name, data: await readFileAsBase64(file) });
+    }
+    const scopes = [];
+    if (form.elements.scope_private?.checked) scopes.push("private");
+    if (form.elements.scope_group?.checked) scopes.push("group");
+    if (!scopes.length) throw new Error("至少选择一个适用会话");
+    const result = await postJson("/reaction_library/import", {
+      files: encoded,
+      metadata: {
+        tags: form.elements.tags?.value || "",
+        emotions: form.elements.emotions?.value || "",
+        intents: form.elements.intents?.value || "",
+        scopes,
+        enabled: true,
+      },
+    });
+    showToast(result.message || `已导入 ${result.imported || 0} 张素材`);
+    form.closest("dialog")?.close();
+    state.reactionLibraryPage = 1;
+    await loadReactionLibrary(true);
+  } catch (error) {
+    showToast(`导入失败：${error.message}`, "error");
+  } finally {
+    setActionBusy(control, false);
+  }
+}
+
+async function updateReactionItems(ids, changes, message, control = null) {
+  const result = await runAction(
+    () => postJson("/reaction_library/update", { ids, changes }),
+    message,
+    control,
+    { reload: false },
+  );
+  if (result) await loadReactionLibrary(true);
+  return result;
+}
+
+function bindReactionLibraryActions() {
+  const root = $("#reactionLibraryWorkspace");
+  if (!root) return;
+  hydrateReactionLibraryImages().catch(() => {});
+  if (!state.reactionLibrary && !state.reactionLibraryLoading) {
+    loadReactionLibrary().catch(() => {});
+  }
+  let searchTimer = null;
+  root.querySelector("[data-reaction-query]")?.addEventListener("input", (event) => {
+    state.reactionLibraryQuery = event.currentTarget.value || "";
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      state.reactionLibraryPage = 1;
+      loadReactionLibrary(true).catch(() => {});
+    }, 280);
+  });
+  root.querySelector("[data-reaction-status]")?.addEventListener("change", (event) => {
+    state.reactionLibraryStatus = event.currentTarget.value || "all";
+    state.reactionLibraryPage = 1;
+    loadReactionLibrary(true).catch(() => {});
+  });
+  root.querySelector("[data-reaction-scope]")?.addEventListener("change", (event) => {
+    state.reactionLibraryScope = event.currentTarget.value || "all";
+    state.reactionLibraryPage = 1;
+    loadReactionLibrary(true).catch(() => {});
+  });
+  root.querySelectorAll("[data-reaction-refresh]").forEach((button) => button.addEventListener("click", () => loadReactionLibrary(true)));
+  root.querySelectorAll("[data-reaction-import-open]").forEach((button) => button.addEventListener("click", () => root.querySelector("#reactionImportDialog")?.showModal()));
+  root.querySelectorAll("[data-reaction-import-close]").forEach((button) => button.addEventListener("click", () => root.querySelector("#reactionImportDialog")?.close()));
+  const importForm = root.querySelector("[data-reaction-import-form]");
+  importForm?.querySelector("[data-reaction-pick-files]")?.addEventListener("click", () => importForm.querySelector("[data-reaction-files]")?.click());
+  importForm?.querySelector("[data-reaction-pick-folder]")?.addEventListener("click", () => importForm.querySelector("[data-reaction-folder]")?.click());
+  const updateCount = () => {
+    const count = Number(importForm?.querySelector("[data-reaction-files]")?.files?.length || 0) + Number(importForm?.querySelector("[data-reaction-folder]")?.files?.length || 0);
+    const label = importForm?.querySelector("[data-reaction-file-count]");
+    if (label) label.textContent = count ? `已选择 ${count} 个文件` : "尚未选择文件";
+  };
+  importForm?.querySelector("[data-reaction-files]")?.addEventListener("change", updateCount);
+  importForm?.querySelector("[data-reaction-folder]")?.addEventListener("change", updateCount);
+  importForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    importReactionFiles(importForm, importForm.querySelector("button[type=submit]")).catch(() => {});
+  });
+  root.querySelectorAll("[data-reaction-open]").forEach((card) => {
+    const open = () => {
+      state.reactionLibraryEditorId = card.dataset.reactionOpen || "";
+      renderExperimentalPage();
+    };
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, input, label")) return;
+      open();
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+    });
+  });
+  root.querySelectorAll("[data-reaction-select]").forEach((input) => input.addEventListener("change", () => {
+    const id = input.dataset.reactionSelect || "";
+    if (input.checked) state.reactionLibrarySelected.add(id); else state.reactionLibrarySelected.delete(id);
+    renderExperimentalPage();
+  }));
+  root.querySelectorAll("[data-reaction-toggle]").forEach((button) => button.addEventListener("click", () => {
+    updateReactionItems([button.dataset.reactionToggle], { enabled: button.dataset.enabled !== "1" }, button.dataset.enabled === "1" ? "已停用素材" : "已启用素材", button);
+  }));
+  root.querySelector("[data-reaction-editor-close]")?.addEventListener("click", () => { state.reactionLibraryEditorId = ""; renderExperimentalPage(); });
+  root.querySelector("[data-reaction-editor-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const scopes = [];
+    if (form.elements.scope_private?.checked) scopes.push("private");
+    if (form.elements.scope_group?.checked) scopes.push("group");
+    if (!scopes.length) { showToast("至少选择一个适用会话", "error"); return; }
+    await updateReactionItems([state.reactionLibraryEditorId], {
+      name: form.elements.name?.value || "",
+      tags: form.elements.tags?.value || "",
+      emotions: form.elements.emotions?.value || "",
+      intents: form.elements.intents?.value || "",
+      scopes,
+      enabled: Boolean(form.elements.enabled?.checked),
+    }, "已保存素材信息", form.querySelector("button[type=submit]"));
+  });
+  root.querySelectorAll("[data-reaction-delete-one]").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.dataset.reactionDeleteOne || "";
+    if (!requireSecondClick(button, `reaction-delete-${id}`, "再次点击确认删除这张素材")) return;
+    const result = await runAction(() => postJson("/reaction_library/delete", { ids: [id], confirm: true }), "已删除素材", button, { reload: false });
+    if (result) { state.reactionLibraryEditorId = ""; state.reactionLibraryImageData.clear(); await loadReactionLibrary(true); }
+  }));
+  root.querySelector("[data-reaction-clear-selection]")?.addEventListener("click", () => { state.reactionLibrarySelected.clear(); renderExperimentalPage(); });
+  root.querySelectorAll("[data-reaction-batch]").forEach((button) => button.addEventListener("click", async () => {
+    const ids = [...state.reactionLibrarySelected];
+    const action = button.dataset.reactionBatch || "";
+    if (action === "delete") {
+      if (!requireSecondClick(button, "reaction-batch-delete", `再次点击确认删除 ${ids.length} 张素材`)) return;
+      const result = await runAction(() => postJson("/reaction_library/delete", { ids, confirm: true }), `已删除 ${ids.length} 张素材`, button, { reload: false });
+      if (result) { state.reactionLibrarySelected.clear(); state.reactionLibraryEditorId = ""; state.reactionLibraryImageData.clear(); await loadReactionLibrary(true); }
+      return;
+    }
+    const changes = action === "enable" ? { enabled: true }
+      : action === "disable" ? { enabled: false }
+        : action === "private" ? { scopes: ["private"] }
+          : { scopes: ["private", "group"] };
+    await updateReactionItems(ids, changes, "已批量更新素材", button);
+  }));
+  root.querySelector("[data-reaction-rescan]")?.addEventListener("click", async (event) => {
+    const result = await runAction(() => postJson("/reaction_library/rescan", {}), "索引已重建", event.currentTarget, { reload: false });
+    if (result) await loadReactionLibrary(true);
+  });
+}
+
 const experimentalFeatureKeys = [
+  "enable_daily_case_review_experiment",
   "enable_maslow_motivation_experiment",
   "enable_experimental_motivation_model",
   "enable_personality_iteration_experiment",
   "enable_emotion_simulation",
+  "enable_reaction_expression_experiment",
 ];
 
 const PERSONA_STYLE_SCENARIO_BATCH_SIZE = 3;
@@ -24497,7 +25261,30 @@ const personaStandardizationToolMeta = {
   shortDesc: "读取当前 AstrBot 人格或粘贴人格文本，生成更立体的基础设定稿，再通过情景试答归纳稳定对话风格。",
 };
 
+const dailyReviewToolMeta = {
+  label: "每日终盘巡视",
+  index: "实验工作区",
+  shortDesc: "复盘回复、主动链、TTS、群成员风控和后台模型任务，并仅把低风险表达纠偏作为次日柔性指导。",
+};
+
 const experimentalFeatureMeta = {
+  enable_daily_case_review_experiment: {
+    label: "每日逐案复盘",
+    index: "实验项",
+    shortDesc: "把前一天具有代表性的匿名工作案例交给每日巡视逐项判断，补足只看调用计数时看不见的答非所问、执行不完整和风控误伤。",
+    theory: [
+      { name: "代表性案例抽样", desc: "优先抽取失败、中断、未回复、风控和不同类型的正常案例。", impact: "每天最多送审 24 条，避免整天原始聊天无边界进入模型。" },
+      { name: "链路完整性核验", desc: "区分模型生成内容、首个发送组件和后台补发结果。", impact: "可识别语音已发但对应文本只发首段、普通分段被中途打断等问题。" },
+      { name: "证据绑定", desc: "逐案结论必须引用 C-12AB34CD 这类真实匿名编号。", impact: "没有输入或输出时只能标记不确定，避免巡视模型凭空归因。" },
+    ],
+    effects: [
+      { trigger: "普通回复完成发送前处理", behavior: "记录匿名短输入、最终组件和短输出", result: "次日检查相关性、完整性和语气" },
+      { trigger: "TTS 或普通分段后台补发", behavior: "持续回写已发段数、打断和失败状态", result: "区分完整发送与只发首段" },
+      { trigger: "成员风控或未回复", behavior: "抽取脱敏判定证据", result: "检查普通争论、引用或低置信度事件是否被误伤" },
+    ],
+    caution: "默认关闭。匿名案例最多保留 4 天、160 条；不记录用户 ID、群号、会话 ID、消息 ID或音频路径。配置、名单、阈值和权限不会自动修改。",
+    runtimeHint: "开启后到「巡视」页查看采集数量；次日 04:00 完成报告后可查看 C-12AB34CD 这类稳定匿名编号的逐案结论和短期证据。",
+  },
   enable_emotion_simulation: {
     label: "情绪余波",
     index: "第四项",
@@ -24516,6 +25303,24 @@ const experimentalFeatureMeta = {
     ],
     caution: "这是扮演状态，不是真实心理判断。阈值过低会让 Bot 太容易受伤，建议先温和开启并观察。",
     runtimeHint: "私聊用户详情页的「情绪余波」卡片可查看四维状态、基本/复合情绪、调节策略和策略候选。",
+  },
+  enable_reaction_expression_experiment: {
+    label: "表情表达实验",
+    index: "第五项",
+    shortDesc: "主模型一次生成完整文字和隐藏表情意图，再结合关系边界、公开风险与个体偏好本地追加图片；图片不能替代正文。",
+    theory: [
+      { name: "表达意图中间层", desc: "区分 Bot 当前感受、准备采取的沟通动作和希望对方产生的效果。", impact: "同样是“不高兴”，可以按语境选择轻吐槽、认真说明边界、先安抚对方或保持不发，而不是共用一个生气文件夹。" },
+      { name: "风险与关系边界", desc: "结合私聊/群聊、关系阶段、攻击性、暧昧度和公开风险过滤候选。", impact: "群聊不会因为关键词相近就发送容易误伤、暴露亲密关系或显得持续刷屏的图片。" },
+      { name: "一次检索与会话冷却", desc: "主模型可给出少量不同检索说法，插件将它们合并为一次图库请求，再按会话冷却和近期图片记录完成结算。", impact: "不会因为候选说法较多而连续查询图库，也减少同一张图在短时间重复出现。" },
+      { name: "低延迟分层决策", desc: "请求前先做概率与冷却预判，命中后才给主模型简短提示；低延迟选图只使用本地评分和短时缓存。", impact: "大多数普通回复完全不进入图库链路，真正选图时也不会再调用额外选图模型。" },
+    ],
+    effects: [
+      { trigger: "普通回复进入表达决策", behavior: "先检查会话范围、概率、冷却和是否需要图片表达", result: "多数不适合的轮次在本地快速退出" },
+      { trigger: "命中合适的表达时机", behavior: "将情绪、沟通动作和少量检索说法合并后只请求一次图库", result: "由图库返回一张最终图片，再完成本地去重和发送结算" },
+      { trigger: "候选置信度不足或近期重复", behavior: "保留原文字回复并放弃发图", result: "允许不发，避免为了展示功能而强行插图" },
+    ],
+    caution: "默认关闭，群聊也单独默认关闭。建议先在私聊使用 15% 到 25% 的触发概率观察；低延迟模式不会取消边界检查，只会优先复用本地结果和缓存。",
+    runtimeHint: "当前页可核对会话范围、触发概率、冷却和检索说法上限；运行后会显示尝试、发送、跳过原因、缓存命中和图库耗时。",
   },
   enable_maslow_motivation_experiment: {
     label: "需求强化功能",
@@ -24592,6 +25397,25 @@ function experimentalVisualSpec(key) {
       ],
       verify: [["私聊对象", "private"], ["排障页", "troubleshooting"]],
     },
+    enable_reaction_expression_experiment: {
+      mark: "图",
+      theme: "expression",
+      model: "情绪状态 × 沟通意图 × 表达媒介 × 效果反馈",
+      question: "这一轮是否适合用表情，以及哪种表达能产生正确的社交效果？",
+      flow: [
+        ["机会", "本地按会话范围、概率和冷却决定本轮是否向主模型提供表情表达能力。"],
+        ["意图", "主模型判断图片是否优于文字，并给出沟通用途、情绪强度和少量检索说法。"],
+        ["快选", "插件合并检索说法后只查询一次图库；低延迟模式使用本地评分与短时缓存。"],
+        ["结算", "检查近期重复并发送图库返回的一张图片；不合适或失败时继续自然文字回复。"],
+      ],
+      axes: [
+        ["沟通动作", "安抚 / 庆祝 / 接梗 / 吐槽 / 拒绝 / 缓和 / 撒娇", "描述 Bot 准备怎样回应，而不是只描述当前情绪。"],
+        ["期望效果", "放松 / 共鸣 / 确认边界 / 延续玩笑", "用于判断图片是否真的服务于本轮对话。"],
+        ["风险边界", "关系阶段 / 公开风险 / 攻击性 / 暧昧度", "先过滤不适合当前对象和场景的候选。"],
+        ["性能预算", "请求前预判 / 单次检索 / 短时缓存", "让多数普通回复不查图库，低延迟模式不调用额外选图模型。"],
+      ],
+      verify: [["私聊对象", "private"], ["排障页", "troubleshooting"]],
+    },
     enable_maslow_motivation_experiment: {
       mark: "需",
       theme: "need",
@@ -24653,6 +25477,46 @@ function experimentalVisualSpec(key) {
 }
 
 function experimentalRuntimeSignals(key) {
+  if (key === "enable_reaction_expression_experiment") {
+    const settings = state.overview?.settings || {};
+    const summary = state.overview?.reaction_expression || {};
+    const runtime = summary.runtime || {};
+    const recent = summary.recent || {};
+    const rawProbability = Number(settings.reaction_expression_trigger_probability ?? 0.2);
+    const probability = Math.max(0, Math.min(100, rawProbability <= 1 ? rawProbability * 100 : rawProbability));
+    const candidates = Math.max(1, Number(settings.reaction_expression_candidate_limit || 6));
+    const scopes = [
+      toBool(settings.reaction_expression_private_enabled ?? true),
+      toBool(settings.reaction_expression_group_enabled ?? false),
+    ].filter(Boolean).length;
+    const lowLatency = toBool(settings.reaction_expression_low_latency_mode ?? true);
+    const attempts = Number(runtime.attempts ?? recent.attempt_count ?? 0);
+    const sent = Number(runtime.sent ?? recent.sent_count ?? 0);
+    const lookups = Number(runtime.lookups || 0);
+    const cacheHits = Number(runtime.cache_hits || 0);
+    const cacheRequests = lookups + cacheHits;
+    const cacheRate = cacheRequests ? Math.round(cacheHits * 100 / cacheRequests) : 0;
+    return {
+      primary: attempts ? `${sent}/${attempts}` : `${Math.round(probability)}%`,
+      label: attempts ? "发送 / 尝试" : "触发概率",
+      detail: `${lowLatency ? "本地快选" : "精细选择"} · ${candidates} 条说法${cacheRequests ? ` · 缓存 ${cacheRate}%` : ""}`,
+      tone: scopes ? "ok" : "idle",
+      bars: [["概率", probability, 100], ["缓存", cacheRate, 100], ["范围", scopes, 2]],
+    };
+  }
+  if (key === "enable_daily_case_review_experiment") {
+    const runtime = state.dailyReview?.case_review_experiment || {};
+    const coverage = runtime.coverage && typeof runtime.coverage === "object" ? runtime.coverage : {};
+    const kinds = Object.keys(coverage).length;
+    const collected = Number(runtime.collected || 0);
+    return {
+      primary: String(collected),
+      label: "短期案例",
+      detail: collected ? `${kinds} 类案例可供巡视` : "等待真实工作链路触发",
+      tone: collected ? "ok" : "idle",
+      bars: [["案例", collected, 160], ["类型", kinds, 5]],
+    };
+  }
   if (key === "enable_emotion_simulation") {
     const samples = expEmotionSamples();
     const pending = samples.filter((item) => item.user.pending_emotion_judgement?.text).length;
@@ -24769,15 +25633,22 @@ function renderExperimentalOverviewMap() {
 }
 
 function renderExperimentalToolEntrances() {
+  const dailyReviewEnabled = toBool(state.featureDraft?.enable_daily_review ?? state.overview?.settings?.enable_daily_review);
   return `
     <section class="exp-tool-entry-panel">
       <div class="exp-tool-entry-head">
         <div>
-          <b>一次性工具入口</b>
-          <span>这些是配置、整理或审核工具，不是运行时开关；点击后直接进入流程。</span>
+          <b>实验工作区</b>
+          <span>持续巡视与一次性整理工具集中在这里，进入后可查看状态或完成配置。</span>
         </div>
       </div>
       <div class="exp-tool-grid">
+        <button type="button" class="exp-tool-card ${dailyReviewEnabled ? "on" : "off"}" data-exp-tool-open="daily-review">
+          <span class="exp-card-index">${escapeHtml(dailyReviewToolMeta.index)}</span>
+          <b>${escapeHtml(dailyReviewToolMeta.label)}</b>
+          <small>${escapeHtml(dailyReviewToolMeta.shortDesc)}</small>
+          <em>${dailyReviewEnabled ? "运行中" : "当前关闭"} · 打开巡视 →</em>
+        </button>
         <button type="button" class="exp-tool-card" data-exp-tool-open="persona_standardization_tool">
           <span class="exp-card-index">${escapeHtml(personaStandardizationToolMeta.index)}</span>
           <b>${escapeHtml(personaStandardizationToolMeta.label)}</b>
@@ -24786,6 +25657,77 @@ function renderExperimentalToolEntrances() {
         </button>
       </div>
     </section>
+  `;
+}
+
+function dailyReviewConfigRow(key, value) {
+  return `
+    <section class="feature-param-row" data-daily-review-config-row="${escapeHtml(key)}">
+      <div class="feature-param-main">
+        <header><b>${escapeHtml(configLabel(key))}</b><code>${escapeHtml(key)}</code></header>
+        <p>${escapeHtml(configDescription(key))}</p>
+      </div>
+      <div class="feature-param-control">${featureSettingInput(key, value)}</div>
+    </section>
+  `;
+}
+
+function renderDailyReviewWorkspace() {
+  const settings = state.overview?.settings || {};
+  const configKeys = [
+    "enable_daily_review",
+    "daily_review_time",
+    "daily_review_auto_apply_guidance",
+    "enable_daily_case_review_experiment",
+    "daily_review_retention_days",
+  ];
+  return `
+    <div class="subpage experimental-subpage daily-review-subpage">
+      <nav class="exp-breadcrumb">
+        <button type="button" data-exp-back>← 返回总览</button>
+        <span>/ ${escapeHtml(dailyReviewToolMeta.label)}</span>
+      </nav>
+      <div class="exp-subpage-toolbar">
+        <button type="button" class="exp-toolbar-back" data-exp-back>← 返回总览</button>
+      </div>
+      <div class="daily-review-page">
+        <header class="daily-review-head">
+          <div>
+            <span class="daily-review-kicker">DAILY AUDIT / SAFE CORRECTION</span>
+            <h2>${escapeHtml(dailyReviewToolMeta.label)}</h2>
+            <p>${escapeHtml(dailyReviewToolMeta.shortDesc)}</p>
+          </div>
+          <div class="daily-review-actions">
+            <button type="button" data-daily-review-refresh>刷新</button>
+            <button type="button" class="primary" data-daily-review-run>立即巡视</button>
+          </div>
+        </header>
+        <article class="exp-detail-card daily-review-config-card">
+          <div class="daily-review-section-head">
+            <div><span>运行参数</span><h3>巡视设置</h3></div>
+          </div>
+          <form class="feature-param-list" data-exp-param-form data-feature-param-form="enable_daily_review">
+            ${configKeys.map((key) => dailyReviewConfigRow(key, settings[key])).join("")}
+            <button type="submit" class="feature-param-save">保存巡视设置</button>
+          </form>
+        </article>
+        <div id="dailyReviewSummary" class="daily-review-summary"></div>
+        <div class="daily-review-layout">
+          <section>
+            <div class="daily-review-section-head"><div><span>最新报告</span><h3>发现与证据</h3></div></div>
+            <div id="dailyReviewLatest" class="daily-review-findings"></div>
+          </section>
+          <aside>
+            <div class="daily-review-section-head"><div><span>次日纠偏</span><h3>当前柔性指导</h3></div></div>
+            <div id="dailyReviewGuidance" class="daily-review-guidance"></div>
+          </aside>
+        </div>
+        <section class="daily-review-history-section">
+          <div class="daily-review-section-head"><div><span>历史</span><h3>巡视记录</h3></div></div>
+          <div id="dailyReviewHistory" class="daily-review-history"></div>
+        </section>
+      </div>
+    </div>
   `;
 }
 
@@ -24853,6 +25795,13 @@ function renderExperimentalPage() {
     if (shouldLoadPersonas) loadRoleplayPersonas(false).then(() => {
       if (state.experimentalSubpage === "persona_standardization_tool") renderExperimentalPage();
     }).catch(() => {});
+  } else if (subpage === "daily-review") {
+    root.innerHTML = renderDailyReviewWorkspace();
+    bindExperimentalSubpageActions("enable_daily_review");
+    renderDailyReview();
+    if (!state.lazyLoaded.dailyReview) {
+      loadDailyReview().catch((error) => showToast(`读取巡视状态失败：${error.message}`, "error"));
+    }
   } else {
     root.innerHTML = renderExperimentalOverview();
     bindExperimentalOverviewActions();
@@ -25011,6 +25960,7 @@ function renderExperimentalSubpage(key) {
   const visualHtml = renderExperimentalTheoryVisual(key);
   const heroHtml = renderExperimentalHero(key, enabled);
   const matrixHtml = renderExperimentalTheoryMatrix(key);
+  const reactionLibraryHtml = key === "enable_reaction_expression_experiment" ? renderReactionLibraryWorkspace() : "";
   return `
     <div class="subpage experimental-subpage ${enabled ? "on" : "off"}">
       <nav class="exp-breadcrumb">
@@ -25020,6 +25970,7 @@ function renderExperimentalSubpage(key) {
       <div class="exp-subpage-toolbar">
         <button type="button" class="exp-toolbar-back" data-exp-back>← 返回总览</button>
         <div class="exp-toolbar-jumps">
+          ${key === "enable_reaction_expression_experiment" ? '<button type="button" data-scroll-target="reactionLibraryWorkspace">素材库</button>' : ""}
           <button type="button" data-scroll-target="experimentalSettings">参数配置</button>
           <button type="button" data-scroll-target="experimentalRuntime">运行状态</button>
         </div>
@@ -25046,6 +25997,7 @@ function renderExperimentalSubpage(key) {
         ${settingsHtml}
         ${runtimeHtml}
       </div>
+      ${reactionLibraryHtml}
       <details class="exp-evidence">
         <summary><span>原理与行为依据</span><small>理论口径、效果链和完整说明</small></summary>
         <div class="exp-evidence-body">
@@ -26920,7 +27872,73 @@ function renderExperimentalRuntime(key) {
   const meta = experimentalFeatureMeta[key] || {};
 let statusItems = [];
 let extraHtml = "";
-if (key === "enable_emotion_simulation") {
+if (key === "enable_reaction_expression_experiment") {
+    const rawProbability = Number(settings.reaction_expression_trigger_probability ?? 0.2);
+    const probability = Math.round(Math.max(0, Math.min(100, rawProbability <= 1 ? rawProbability * 100 : rawProbability)));
+    const privateEnabled = toBool(settings.reaction_expression_private_enabled ?? true);
+    const groupEnabled = toBool(settings.reaction_expression_group_enabled ?? false);
+    const lowLatency = toBool(settings.reaction_expression_low_latency_mode ?? true);
+    const candidateLimit = Math.max(1, Number(settings.reaction_expression_candidate_limit || 6));
+    const cooldown = Math.max(0, Number(settings.reaction_expression_cooldown_seconds ?? 180));
+    const summary = overview.reaction_expression || {};
+    const librarySummary = state.reactionLibrary?.summary || summary.library || {};
+    const runtime = summary.runtime || {};
+    const recent = summary.recent || {};
+    const attempts = Number(runtime.attempts ?? recent.attempt_count ?? 0);
+    const offers = Number(runtime.offers || 0);
+    const sent = Number(runtime.sent ?? recent.sent_count ?? 0);
+    const skipped = Number(runtime.skipped ?? recent.skipped_count ?? 0);
+    const lookups = Number(runtime.lookups || 0);
+    const cacheHits = Number(runtime.cache_hits || 0);
+    const lookupRequests = lookups + cacheHits;
+    const cacheRate = lookupRequests ? Math.round(cacheHits * 100 / lookupRequests) : 0;
+    const lastLatency = Number(runtime.last_latency_ms || 0);
+    const averageLookup = lookups ? Number(runtime.total_lookup_ms || 0) / lookups : 0;
+    const positiveFeedback = Number(recent.positive_feedback_count || 0);
+    const negativeFeedback = Number(recent.negative_feedback_count || 0);
+    const reasonLabels = {
+      probability: "概率未命中",
+      cooldown: "会话冷却",
+      repeated_intent: "意图重复",
+      duplicate_image: "图片重复",
+      not_found: "图库未匹配",
+      empty_library: "图库为空",
+      delivery_failed: "发送失败",
+      provider_unavailable: "素材库暂无可用图片",
+      authorization_consumed: "本轮已尝试",
+    };
+    const skipReasonText = Object.entries(recent.skip_reasons || {})
+      .slice(0, 3)
+      .map(([reason, count]) => `${reasonLabels[reason] || reason} ${count}`)
+      .join(" · ");
+    statusItems = [
+      ["私聊范围", privateEnabled ? "允许" : "关闭"],
+      ["群聊范围", groupEnabled ? "允许" : "关闭"],
+      ["触发概率", `${probability}%`],
+      ["会话冷却", `${cooldown} 秒`],
+      ["选择路径", lowLatency ? "本地评分 + 短时缓存" : "每次重新本地评分"],
+      ["可用素材", `${Number(librarySummary.enabled || 0)} 张`],
+      ["模型调用", "仅主回复 1 次"],
+      ["检索说法", `最多 ${candidateLimit} 条，仅查一次`],
+    ];
+    extraHtml = `
+      <div class="exp-runtime-extra">
+        <div class="exp-runtime-stats-row">
+          <div class="exp-runtime-stat"><span>获得表达机会</span><b>${escapeHtml(String(offers))}</b></div>
+          <div class="exp-runtime-stat"><span>实际尝试</span><b>${escapeHtml(String(attempts))}</b></div>
+          <div class="exp-runtime-stat"><span>成功发送</span><b>${escapeHtml(String(sent))}</b></div>
+          <div class="exp-runtime-stat"><span>缓存命中</span><b>${lookupRequests ? `${cacheRate}%` : "-"}</b></div>
+          <div class="exp-runtime-stat"><span>最近检索</span><b>${lastLatency ? `${Math.round(lastLatency)}ms` : "-"}</b></div>
+          <div class="exp-runtime-stat"><span>平均后端</span><b>${averageLookup ? `${Math.round(averageLookup)}ms` : "-"}</b></div>
+        </div>
+        <div class="exp-runtime-hint">${
+          attempts
+            ? `近期跳过 ${skipped} 次${skipReasonText ? `：${escapeHtml(skipReasonText)}` : ""}。反馈：喜欢 ${positiveFeedback}，不合适 ${negativeFeedback}。`
+            : "尚无实际尝试。只有请求前的轻量抽样命中时，模型才会看到自发表情提示；普通回复不会先查图库。"
+        }选图始终由本插件按标签、情绪和沟通用途在本地完成，不增加模型调用；低延迟模式只额外复用短时评分缓存。</div>
+      </div>
+    `;
+  } else if (key === "enable_emotion_simulation") {
     const llmJudge = toBool(features.enable_llm_emotion_judgement) || toBool(settings.enable_llm_emotion_judgement);
     const judgeMode = String(features.emotion_judgement_mode || settings.emotion_judgement_mode || "suspicious");
     const modeLabels = { suspicious: "只判断可疑消息", always: "每条普通文本都判断", off: "关闭模型复核" };
@@ -27311,6 +28329,7 @@ function bindExperimentalOverviewActions() {
 function bindExperimentalSubpageActions(key) {
   const root = $("#experimentalRoot");
   if (!root) return;
+  if (key === "enable_reaction_expression_experiment") bindReactionLibraryActions();
   root.querySelectorAll("[data-exp-back]").forEach((button) => {
     button.addEventListener("click", () => {
       state.experimentalSubpage = "";
@@ -27582,6 +28601,9 @@ async function saveExperimentalSettings(key, form, successMessage) {
     form.querySelector(".feature-param-save"),
     { reload: false },
   );
+  if (result && key === "enable_daily_review") {
+    await loadDailyReview(true).catch((error) => showToast(`刷新巡视状态失败：${error.message}`, "warn"));
+  }
   if (result && state.activeTab === "experimental") {
     scheduleExperimentalRuntimeRefresh(true);
   }
@@ -27621,8 +28643,10 @@ function revealActiveTab(tabButton, reduceMotion = false) {
 
 function switchTab(tabName) {
   const opensSocialLearning = tabName === "worldbook";
-  tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (tabName || "dashboard"));
+  const opensDailyReview = tabName === "daily-review";
+  tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (opensDailyReview ? "experimental" : (tabName || "dashboard")));
   if (opensSocialLearning) state.learningSection = "social";
+  if (opensDailyReview) state.experimentalSubpage = "daily-review";
   if (tabName !== state.activeTab && hasUnsavedChanges()) {
     const featureDirty = hasUnsavedFeatureChanges();
     const moduleDirty = hasUnsavedModuleFormChanges();
@@ -27640,6 +28664,10 @@ function switchTab(tabName) {
   }
   if (tabName === state.activeTab) {
     if (opensSocialLearning) switchLearningSection("social", { focus: true });
+    if (opensDailyReview) {
+      renderExperimentalPage();
+      loadDailyReview().catch((error) => showToast(`读取巡视状态失败：${error.message}`, "error"));
+    }
     return;
   }
   cancelBookshelfTransition();
@@ -28003,6 +29031,56 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const dailyReviewConfigLink = element?.closest("[data-daily-review-config-key]");
+  if (dailyReviewConfigLink) {
+    await navigateToDailyReviewConfig(dailyReviewConfigLink.dataset.dailyReviewConfigKey || "");
+    return;
+  }
+  const dailyReviewRefresh = element?.closest("[data-daily-review-refresh]");
+  if (dailyReviewRefresh) {
+    setActionBusy(dailyReviewRefresh, true);
+    try {
+      await loadDailyReview(true);
+      showToast("巡视状态已刷新");
+    } catch (error) {
+      showToast(`刷新失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(dailyReviewRefresh, false);
+    }
+    return;
+  }
+  const dailyReviewRun = element?.closest("[data-daily-review-run]");
+  if (dailyReviewRun) {
+    setActionBusy(dailyReviewRun, true);
+    try {
+      state.dailyReview = await postJson("/daily-review/run", {});
+      state.lazyLoaded.dailyReview = true;
+      renderDailyReview();
+      showToast("每日终盘巡视已完成", "success");
+    } catch (error) {
+      await loadDailyReview(true).catch(() => {});
+      showToast(`巡视失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(dailyReviewRun, false);
+    }
+    return;
+  }
+  const dailyReviewGuidance = element?.closest("[data-daily-review-guidance-active]");
+  if (dailyReviewGuidance) {
+    setActionBusy(dailyReviewGuidance, true);
+    try {
+      state.dailyReview = await postJson("/daily-review/guidance", {
+        active: dailyReviewGuidance.dataset.dailyReviewGuidanceActive === "true",
+      });
+      renderDailyReview();
+      showToast(state.dailyReview?.active_guidance?.active ? "次日柔性指导已恢复" : "次日柔性指导已暂停", "success");
+    } catch (error) {
+      showToast(`更新失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(dailyReviewGuidance, false);
+    }
+    return;
+  }
   const coverPreviewTrigger = element?.closest("[data-bookshelf-cover-preview]");
   if (coverPreviewTrigger) {
     openBookshelfCoverPreview(coverPreviewTrigger);
@@ -28088,6 +29166,8 @@ document.addEventListener("click", async (event) => {
       renderTroubleshooting();
       if (result.pending) {
         showToast("主动消息链路测试已预约，约 1 分钟后刷新查看结果", "success");
+      } else if (testType === "tts_generation") {
+        showToast(result.ok ? "测试语音已发送到主要用户私聊" : `TTS 测试失败：${result.error || "未返回有效结果"}`, result.ok ? "success" : "error");
       } else {
         showToast(result.ok ? "链路测试通过" : `链路测试失败：${result.error || "未返回有效结果"}`, result.ok ? "success" : "error");
       }
@@ -29288,4 +30368,6 @@ $("#testAllProvidersBtn").addEventListener("click", async () => {
   }
 });
 
+document.documentElement.dataset.pcAppLoaded = "1";
+window.dispatchEvent(new Event("pc-panel-app-ready"));
 loadAll();
