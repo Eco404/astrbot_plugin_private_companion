@@ -115,7 +115,7 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
         self.data: dict = {}
         self.photo_generation_backend = "comfyui"
         self.photo_generation_prompt_format = "traditional"
-        self.photo_generation_fixed_prompt = "pajamas; fine film grain"
+        self.photo_generation_fixed_prompt = "fine film grain"
         self.photo_generation_scene_presets = ""
         self.comfyui_selfie_workflow_name = "selfie-workflow"
         self.comfyui_text2img_workflow_name = ""
@@ -314,17 +314,19 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
                 .read_text(encoding="utf-8")
                 .splitlines()
             ]
-            trace_prompt = next(
-                event["data"]["prompt"]
+            trace_prompt_event = next(
+                event
                 for event in trace_events
                 if event["stage"] == "prompt_composed"
             )
+            trace_prompt = trace_prompt_event["data"]["prompt"]
             recent_prompt = harness.data["recent_photo_generations"][0]["prompt"]
 
             self.assertIn("[section compacted]", backend_prompt)
             self.assertNotIn("[section compacted]", logged_prompt)
             self.assertIn(complete_preset, logged_prompt)
             self.assertEqual(trace_prompt, logged_prompt)
+            self.assertEqual(trace_prompt_event["data"]["submitted_prompt"], backend_prompt)
             self.assertEqual(recent_prompt, logged_prompt)
             self.assertEqual(
                 debug_payload["final_prompt_sha256"],
@@ -411,14 +413,16 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded["prompt_sections"]["duplicate_context#2"], "second neutral detail")
         self.assertNotIn("recent_continuity", recorded["prompt_sections"])
 
-    async def test_protected_fixed_rules_reach_backend_without_compaction(self) -> None:
+    async def test_protected_fixed_rules_reach_backend_in_full(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "generated.png"
             output.write_bytes(b"generated")
             harness = _PhotoGenerationHarness(str(output))
             fixed_prompt = (
                 "Overall Physique: preserve complete body proportions and stable facial structure; "
-                "Lip Color: preserve the exact natural lip color without simplification or substitution."
+                "Lip Color: preserve the exact natural lip color without simplification or substitution; "
+                "Her attire and posture remain modest and unassuming, with no overt exposure or "
+                "suggestive cues—keeping the impression innocent and understated."
             )
             harness.photo_generation_fixed_prompt = fixed_prompt
             _composition_positive, composition_negative = (
@@ -430,7 +434,7 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
 
             backend, image_path, _note = await harness._generate_photo_image(
                 workflow_kind="selfie",
-                prompt_text="拍一张自然自拍",
+                prompt_text="Take a natural selfie wearing pajamas.",
                 session_key="protected-fixed-rules",
             )
 
@@ -442,11 +446,15 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             submitted_prompt,
         )
         self.assertIn(
-            "Lip Color: preserve the exact natural lip color without simplification or substitution.",
+            "Lip Color: preserve the exact natural lip color without simplification or substitution",
+            submitted_prompt,
+        )
+        self.assertIn(
+            "Her attire and posture remain modest and unassuming, with no overt exposure or "
+            "suggestive cues—keeping the impression innocent and understated.",
             submitted_prompt,
         )
         self.assertIn(composition_negative, submitted_prompt)
-        self.assertNotIn("[section compacted]", submitted_prompt)
 
     def test_prompt_clip_never_returns_a_partial_word(self) -> None:
         self.assertEqual(

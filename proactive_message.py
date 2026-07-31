@@ -8476,7 +8476,7 @@ Output:
             redacted = _redact_outbound_secrets(value, self)
             if normalized_key.endswith("path") or normalized_key.endswith("_path"):
                 return _path_text(redacted, 1000)
-            if normalized_key == "prompt":
+            if normalized_key in {"prompt", "submitted_prompt"}:
                 return redacted
             return _single_line(redacted, 1200)
         if value is None or isinstance(value, (bool, int, float)):
@@ -10427,6 +10427,7 @@ Output:
                 name="global_fixed_prompt",
                 source="fixed_prompt",
                 positive=f"Additional fixed prompt: {fixed_prompt}" if fixed_prompt else "",
+                protected=True,
             ),
             PhotoPromptSection(
                 name="edit_contract",
@@ -10581,6 +10582,7 @@ Output:
             "prompt_composed",
             data={
                 "prompt": complete_prompt_text,
+                "submitted_prompt": prompt_text,
                 "prompt_hash": prompt_hash,
                 "submitted_prompt_hash": hashlib.sha256(
                     str(prompt_text or "").encode("utf-8", "ignore")
