@@ -51,7 +51,8 @@ class LlmToolReservedParameterTests(unittest.TestCase):
         self.assertIn("search_context", argument_names)
         self.assertIn("search_context(string)", docstring)
         self.assertNotRegex(docstring, r"(?m)^\s*context\(string\):")
-        self.assertGreaterEqual(function_source.count("context=search_context"), 2)
+        self.assertIn("context=search_context", function_source)
+        self.assertIn("search_context=search_context", function_source)
 
 
 if __name__ == "__main__":

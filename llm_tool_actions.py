@@ -4515,7 +4515,7 @@ class LlmToolActionsMixin:
         raw_lookup = await self._pc_find_reaction_image_impl(
             event,
             query=_single_line(intent.get("provider_query"), 500),
-            context=lookup_context,
+            search_context=lookup_context,
             meme_only=meme_only,
             send=False,
             caption="",
@@ -5139,7 +5139,7 @@ class LlmToolActionsMixin:
         self,
         event: AstrMessageEvent,
         query: str = "",
-        context: str = "",
+        search_context: str = "",
         meme_only: bool = True,
         send: bool = True,
         caption: str = "",
@@ -5206,7 +5206,7 @@ class LlmToolActionsMixin:
             )
         if send_image:
             caption = visible_caption
-        lookup_context = _single_line(context, 1000)
+        lookup_context = _single_line(search_context, 1000)
         snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
         snapshot_formatter = getattr(self, "_format_companion_scene_snapshot", None)
         if callable(snapshot_builder) and callable(snapshot_formatter):

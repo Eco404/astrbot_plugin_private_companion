@@ -6115,6 +6115,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         intensity: int = 0,
         spontaneous: bool = False,
         candidate_queries: str = "",
+        **kwargs: Any,
     ) -> str:
         """从 Private Companion 自有表情包素材库检索并发送一张已有图片。
 
@@ -6152,6 +6153,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 },
                 ensure_ascii=False,
             )
+        # AstrBot may inject a host-owned ``context`` keyword. Keep the public
+        # schema on ``search_context`` so host context objects never become
+        # model-controlled search text; only a direct legacy string can fill an
+        # absent search_context value.
+        legacy_context = kwargs.get("context")
+        if not search_context and isinstance(legacy_context, str):
+            search_context = legacy_context
         inbound_text = str(getattr(event, "message_str", "") or "")
         if (
             self._reaction_expression_opt_out_requested(inbound_text)
@@ -6221,7 +6229,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_find_reaction_image_impl(
             event,
             query=query,
-            context=search_context,
+            search_context=search_context,
             meme_only=meme_only,
             send=send,
             caption=caption,
