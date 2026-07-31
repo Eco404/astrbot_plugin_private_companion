@@ -988,17 +988,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "unable to submit request",
             "invalid_request",
             "invalid request error",
-            "functiondeclaration",
-            "function declaration",
-            "schema didn't specify",
-            "tool schema",
-            "tool has no return value",
-            "status disabled",
             "主动消息专用模式下",
             "普通被动回复不可使用 private companion 工具",
             "主动渲染阶段不可使用 private companion 工具",
             "has sent the result directly to the user",
-            "traceback",
             "error code: 400",
             "error code 400",
             "400 bad request",
@@ -1031,13 +1024,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "providerapierror",
             "unabletosubmitrequest",
             "invalid_request",
-            "invalidrequest",
             "invalidrequesterror",
-            "functiondeclaration",
-            "schemadidntspecify",
-            "toolschema",
-            "toolhasnoreturnvalue",
-            "statusdisabled",
             "主动消息专用模式下",
             "普通被动回复不可使用privatecompanion工具",
             "主动渲染阶段不可使用privatecompanion工具",
@@ -1055,6 +1042,21 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return True
         if any(marker in compact for marker in compact_markers):
             return True
+        provider_error_context = any(
+            token in compact
+            for token in (
+                "providerapierror",
+                "errorcode",
+                "statuscode",
+                "badrequest",
+                "invalidrequest",
+                "requestfailed",
+                "请求失败",
+                "调用失败",
+                "模型调用失败",
+                "工具调用失败",
+            )
+        )
         if "errorcode" in compact and any(
             token in compact
             for token in (
@@ -1066,9 +1068,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
         ):
             return True
-        if "functiondeclaration" in compact and any(
+        if "functiondeclaration" in compact and provider_error_context and any(
             token in compact for token in ("schema", "properties", "parameters", "tool", "tools", "badrequest", "invalidrequest")
         ):
+            return True
+        if any(token in compact for token in ("schemadidntspecify", "toolschema", "image_url", "invalidparameter")) and provider_error_context:
             return True
         if "aisearch" in cleaned and any(
             marker in cleaned
@@ -3217,8 +3221,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         cleaned = _single_line(text, 500).lower()
         if not cleaned:
             return False
-        if self._looks_like_internal_provider_error_text(text):
-            return True
         normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", cleaned).strip()
         compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", cleaned)
         if self._is_proactive_delivery_receipt_text(text):
@@ -17832,6 +17834,49 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 return False
             return self._onebot_forward_action_result_ok(result)
         return False
+
+    @staticmethod
+    def _looks_like_python_traceback_text(text: Any) -> bool:
+        """Only treat a complete Python stack trace as an outbound error leak.
+
+        Technical conversations commonly mention ``traceback`` or explain a
+        schema.  Those words alone are not an error.  A real Python traceback
+        has the header, at least one frame, and a terminating exception line.
+        """
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw:
+            return False
+        has_header = bool(re.search(r"(?im)^\s*traceback \(most recent call last\):\s*$", raw))
+        has_frame = bool(re.search(r"(?im)^\s*file \"[^\n\"]+\", line \d+(?:, in .+)?\s*$", raw))
+        has_exception = bool(
+            re.search(
+                r"(?im)^\s*(?:[a-z_][\w.]*(?:error|exception|warning)|assertionerror|keyboardinterrupt|systemexit)(?::|$)",
+                raw,
+            )
+        )
+        return has_header and has_frame and has_exception
+
+    def _framework_error_leak_kind(self, text: Any) -> str:
+        """Return a safe classifier code for a real framework leak, if any."""
+        if self._looks_like_python_traceback_text(text):
+            return "python_traceback"
+        if self._looks_like_internal_provider_error_text(text):
+            return "provider_error"
+        cleaned = _single_line(text, 1000).lower()
+        if any(
+            marker in cleaned
+            for marker in (
+                "error occurred while processing agent request",
+                "sqlite3.operationalerror",
+                "database is locked",
+                "sqlalche.me/e/20/e3q8",
+                "model do not support image input",
+            )
+        ):
+            return "framework_error"
+        if self._framework_agent_meta_summary_leak(str(text or "")):
+            return "tool_loop"
+        return ""
 
     async def _send_segmented_forward_message(
         self,

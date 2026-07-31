@@ -4363,25 +4363,6 @@ class PrivateCompanionPlugin(
             return
         if not bool(getattr(self, "enable_framework_error_leak_guard", True)):
             return
-        error_markers = (
-            "error occurred while processing agent request",
-            "all chat models failed",
-            "badrequesterror",
-            "provider api error",
-            "unable to submit request",
-            "invalid_request",
-            "functiondeclaration",
-            "function declaration",
-            "schema didn't specify",
-            "tool schema",
-            "aisearch",
-            "sqlite3.operationalerror",
-            "database is locked",
-            "sqlalche.me/e/20/e3q8",
-            "model do not support image input",
-            "image_url",
-            "invalidparameter",
-        )
         tool_loop_markers = (
             "trying to send messages",
             "sent 20",
@@ -4399,35 +4380,22 @@ class PrivateCompanionPlugin(
             "发了差不多20条",
             "还没收到回复",
         )
-        marker_kind = "framework_error" if any(marker in compact for marker in error_markers) else ""
-        provider_error_checker = getattr(self, "_looks_like_internal_provider_error_text", None)
-        if not marker_kind and callable(provider_error_checker):
-            try:
-                if provider_error_checker(text):
-                    marker_kind = "provider_error"
-            except Exception as exc:
-                logger.debug(
-                    "[PrivateCompanion] Provider 错误正文检测失败，保留其他发送前检查: error_type=%s",
-                    type(exc).__name__,
-                )
-        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
-        if not marker_kind and callable(meta_leak_checker) and meta_leak_checker(text):
-            marker_kind = "tool_loop_summary"
+        error_kind_checker = getattr(self, "_framework_error_leak_kind", None)
+        marker_kind = error_kind_checker(text) if callable(error_kind_checker) else ""
         if not marker_kind and any(marker in compact for marker in tool_loop_markers):
-            marker_kind = "tool_loop_summary"
+            marker_kind = "tool_loop"
         if not marker_kind:
             return
         logger.warning(
-            "[PrivateCompanion] 已拦截框架异常文本外发: kind=%s session=%s preview=%s",
+            "[PrivateCompanion] 已拦截框架异常文本外发: kind=%s session=%s",
             marker_kind,
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-            _single_line(text, 180),
         )
         self._record_passive_no_reply(
             event,
             source="发送前拦截",
             reason=f"框架异常文本外发被拦截:{marker_kind}",
-            reply_preview=text,
+            reply_preview="",
             level="warn",
         )
         empty_result = self._build_result_from_chain([])
