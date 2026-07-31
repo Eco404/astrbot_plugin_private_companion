@@ -240,6 +240,7 @@ from .creative import CreativeMixin
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
+from .group_cycle_boundary import build_group_cycle_boundary
 try:
     from .group_member_safety import GroupMemberSafetyMixin
 except ModuleNotFoundError as exc:
@@ -10889,6 +10890,53 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             stats.get("removed_tool_results", 0),
             stats.get("removed_orphans", 0),
         )
+
+    @filter.on_llm_request(priority=-20400)
+    async def append_group_cycle_privacy_boundary(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Add a default-off, request-only Bot cycle privacy boundary for allowed groups."""
+        if self is None or req is None or not bool(getattr(self, "enable_group_cycle_awareness", False)):
+            return
+        try:
+            if bool(getattr(event, "is_private_chat", lambda: False)()):
+                return
+        except Exception:
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id or not self._group_enabled_for_event(group_id):
+            return
+        daily_state = self.data.get("daily_state") if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(daily_state, dict):
+            return
+        inbound_text = getattr(event, "private_companion_group_text", "") or getattr(event, "message_str", "") or ""
+        boundary = build_group_cycle_boundary(
+            enabled=True,
+            group_allowed=True,
+            cycle_label=daily_state.get("body_cycle"),
+            inbound_text=inbound_text,
+        )
+        boundary_text = str(boundary.get("prompt") or "")
+        if not boundary.get("active") or not boundary_text:
+            return
+        marker = "<!-- private_companion_group_cycle_boundary_v1 -->"
+        current_prompt = str(getattr(req, "system_prompt", "") or "")
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        if marker in current_prompt or marker in current_turn_prompt:
+            return
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            boundary_text,
+            priority=59,
+            source="safety",
+        ) else "system_prompt"
+        if placement == "system_prompt" and hasattr(req, "system_prompt"):
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary_text}".strip()
 
     @filter.on_llm_request(priority=-20000)
     @_multi_persona_event_context

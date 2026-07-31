@@ -9186,6 +9186,15 @@
           "enable_humanized_states": true
         }
       },
+      "enable_group_cycle_awareness": {
+        "description": "Allow minimal Bot cycle tone boundary in permitted groups",
+        "hint": "Default off. Reads only the Bot simulated state for reply pacing. It never records user health facts or group-private body details.",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "enable_cycle_state": true
+        }
+      },
       "enable_advanced_cycle_strategy": {
         "description": "启用六阶段周期策略",
         "type": "bool",

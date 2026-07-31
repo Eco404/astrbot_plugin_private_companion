@@ -379,6 +379,7 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.enable_health_state = self._cfg_bool(c, "enable_health_state", True)
     self.enable_hunger_state = self._cfg_bool(c, "enable_hunger_state", True)
     self.enable_cycle_state = self._cfg_bool(c, "enable_cycle_state", True)
+    self.enable_group_cycle_awareness = self._cfg_bool(c, "enable_group_cycle_awareness", False)
     self.humanized_state_intensity = self._cfg_int(c, "humanized_state_intensity", 50, 0, 100)
     self.enable_advanced_cycle_strategy = self._cfg_bool(c, "enable_advanced_cycle_strategy", False)
     self.advanced_cycle_link_intensity = self._cfg_bool(c, "advanced_cycle_link_intensity", False)
