@@ -456,6 +456,10 @@ class WorldbookMixin:
         profile = profiles.get(user_id)
         if not isinstance(profile, dict):
             return
+        if bool(profile.get("observation_only")):
+            # Group cards belong to their group scope and must not become a
+            # global alias that can be injected into another conversation.
+            return
         observed = profile.setdefault("observed_names", [])
         if not isinstance(observed, list):
             observed = []
@@ -464,7 +468,127 @@ class WorldbookMixin:
             observed.append(name)
             del observed[:-8]
 
-    def _worldbook_profile_by_user_id(self, user_id: str) -> dict[str, Any] | None:
+    def _ensure_worldbook_group_observation_profile(
+        self,
+        *,
+        group_id: str,
+        sender_id: str,
+        qq_nickname: str = "",
+        group_card: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Create the non-authoritative role card for an observed group speaker."""
+        sender_id = _single_line(sender_id, 40)
+        group_id = _single_line(group_id, 80)
+        if not sender_id or not group_id:
+            return None
+        qq_nickname = _single_line(qq_nickname, 40)
+        group_card = _single_line(group_card, 40)
+        display_name = qq_nickname or group_card or sender_id
+        now = float(now or _now_ts())
+        profiles = self.data.setdefault("worldbook_member_profiles", {})
+        if not isinstance(profiles, dict):
+            profiles = {}
+            self.data["worldbook_member_profiles"] = profiles
+        profile = profiles.get(sender_id)
+        if not isinstance(profile, dict):
+            profile = {
+                "user_id": sender_id,
+                "name": display_name,
+                "gender": "",
+                "aliases": [],
+                "observed_names": [],
+                "content": "白名单群内实际发言自动建立的仅观察角色档案。",
+                "identity_note": f"QQ {sender_id}，仅观察角色档案。",
+                "boundary_note": "仅用于当前群观察和关系展示；不用于私聊、主动触达、跨群记忆、P4 计分或黑屋。",
+                "important_memories": [],
+                "enabled": True,
+                "priority": 0,
+                "source_entries": ["白名单群观察"],
+                "profile_origin": "group_observation",
+                "observation_only": True,
+                "proactive_contact_enabled": False,
+                "private_memory_enabled": False,
+                "cross_group_memory_enabled": False,
+                "p4_eligible": False,
+                "affinity_score": 0,
+                "relationship_state": "neutral",
+                "auto_registered_ts": now,
+            }
+            profiles[sender_id] = profile
+        if not bool(profile.get("observation_only")):
+            # An explicit profile keeps its own identity and permissions. We
+            # only retain the group-scoped alias below.
+            return profile
+        profile["user_id"] = sender_id
+        profile["proactive_contact_enabled"] = False
+        profile["private_memory_enabled"] = False
+        profile["cross_group_memory_enabled"] = False
+        profile["p4_eligible"] = False
+        profile.setdefault("affinity_score", 0)
+        profile.setdefault("relationship_state", "neutral")
+        profile.setdefault("profile_origin", "group_observation")
+        profile.setdefault("source_entries", ["白名单群观察"])
+        profile.setdefault("observation_only", True)
+        aliases_by_group = profile.setdefault("group_aliases", {})
+        if not isinstance(aliases_by_group, dict):
+            aliases_by_group = {}
+            profile["group_aliases"] = aliases_by_group
+        aliases = aliases_by_group.setdefault(group_id, [])
+        if not isinstance(aliases, list):
+            aliases = []
+            aliases_by_group[group_id] = aliases
+        if group_card and group_card not in aliases and group_card != profile.get("name"):
+            aliases.append(group_card)
+            del aliases[:-8]
+        scopes = profile.setdefault("group_observation_scope_ids", [])
+        if not isinstance(scopes, list):
+            scopes = []
+            profile["group_observation_scope_ids"] = scopes
+        if group_id not in scopes:
+            scopes.append(group_id)
+            del scopes[:-32]
+        profile["last_observed_at"] = now
+        return profile
+
+    def _confirm_worldbook_observation_profile_name(
+        self,
+        profile: dict[str, Any],
+        *,
+        sender_id: str,
+        name: str,
+        aliases: list[str],
+    ) -> bool:
+        """Apply an explicit @Bot name confirmation without granting authority."""
+        if not isinstance(profile, dict) or not bool(profile.get("observation_only")):
+            return False
+        sender_id = _single_line(sender_id, 40)
+        name = _single_line(name, 40)
+        if not sender_id or not name:
+            return False
+        previous_name = _single_line(profile.get("name"), 40)
+        existing_aliases = profile.get("aliases") if isinstance(profile.get("aliases"), list) else []
+        merged_aliases = [
+            _single_line(item, 40)
+            for item in [*existing_aliases, previous_name, *aliases]
+            if _single_line(item, 40) and _single_line(item, 40) != name and _single_line(item, 40) != sender_id
+        ]
+        profile["name"] = name
+        profile["aliases"] = list(dict.fromkeys(merged_aliases))[:8]
+        profile["name_source"] = "self_registration"
+        profile["name_confirmed_at"] = _now_ts()
+        profile["proactive_contact_enabled"] = False
+        profile["private_memory_enabled"] = False
+        profile["cross_group_memory_enabled"] = False
+        profile["p4_eligible"] = False
+        return True
+
+    def _worldbook_profile_by_user_id(
+        self,
+        user_id: str,
+        *,
+        include_observation: bool = False,
+    ) -> dict[str, Any] | None:
         if not self.enable_worldbook_member_recognition:
             return None
         user_id = str(user_id or "").strip()
@@ -474,12 +598,18 @@ class WorldbookMixin:
         if not isinstance(profiles, dict):
             return None
         profile = profiles.get(user_id)
-        if isinstance(profile, dict) and profile.get("enabled", True):
+        if isinstance(profile, dict) and profile.get("enabled", True) and (
+            include_observation or not profile.get("observation_only")
+        ):
             view = dict(profile)
             view["user_id"] = _single_line(profile.get("linked_qq_user_id") or profile.get("user_id") or user_id, 40)
             return view
         for profile_key, item in profiles.items():
-            if not isinstance(item, dict) or not item.get("enabled", True):
+            if (
+                not isinstance(item, dict)
+                or not item.get("enabled", True)
+                or (item.get("observation_only") and not include_observation)
+            ):
                 continue
             linked_id = _single_line(item.get("linked_qq_user_id") or item.get("user_id") or profile_key, 40)
             if linked_id == user_id:
@@ -489,7 +619,7 @@ class WorldbookMixin:
         return None
 
     def _group_member_identity_name(self, user_id: str, fallback: str = "", *, limit: int = 30) -> str:
-        profile = self._worldbook_profile_by_user_id(user_id)
+        profile = self._worldbook_profile_by_user_id(user_id, include_observation=True)
         if isinstance(profile, dict):
             name = _single_line(profile.get("name"), limit)
             if name and name != str(user_id or ""):
@@ -529,7 +659,7 @@ class WorldbookMixin:
         return "；".join(lines)
 
     def _group_member_identity_note(self, user_id: str, *, limit: int = 120) -> str:
-        profile = self._worldbook_profile_by_user_id(user_id)
+        profile = self._worldbook_profile_by_user_id(user_id, include_observation=True)
         if not isinstance(profile, dict):
             return ""
         gender = _single_line(profile.get("gender"), 40)
@@ -562,7 +692,7 @@ class WorldbookMixin:
             return []
         matches: list[dict[str, Any]] = []
         for user_id, profile in profiles.items():
-            if not isinstance(profile, dict) or not profile.get("enabled", True):
+            if not isinstance(profile, dict) or not profile.get("enabled", True) or profile.get("observation_only"):
                 continue
             profile_uid = _single_line(profile.get("linked_qq_user_id") or profile.get("user_id") or user_id, 40)
             if str(user_id) == query or profile_uid == query or self._worldbook_member_matches_name(profile, query):
@@ -933,7 +1063,8 @@ class WorldbookMixin:
                 payload["confirm_reply"] = f"好，那我记住你是{name}。"
                 return payload
         existing_profiles = self.data.get("worldbook_member_profiles")
-        if isinstance(existing_profiles, dict) and isinstance(existing_profiles.get(sender_id), dict):
+        existing_profile = existing_profiles.get(sender_id) if isinstance(existing_profiles, dict) else None
+        if isinstance(existing_profile, dict) and not bool(existing_profile.get("observation_only")):
             return None
         if not self._group_message_explicitly_ats_bot(event):
             return None
@@ -973,6 +1104,14 @@ class WorldbookMixin:
                 conflict,
             )
             return {"blocked_reply": self._worldbook_self_registration_block_reply_text()}
+        if isinstance(existing_profile, dict):
+            if self._confirm_worldbook_observation_profile_name(
+                existing_profile,
+                sender_id=sender_id,
+                name=name,
+                aliases=aliases,
+            ):
+                return {"confirm_reply": f"好，以后我叫你{name}。", "updated_observation_profile": True}
         profiles = self.data.setdefault("worldbook_member_profiles", {})
         if not isinstance(profiles, dict):
             profiles = {}

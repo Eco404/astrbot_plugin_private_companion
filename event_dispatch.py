@@ -3738,6 +3738,33 @@ Bot 近期回复：
             return session_id
         return ""
 
+    def _sender_qq_nickname(self, event: AstrMessageEvent) -> str:
+        """Read the account nickname without treating a group card as global identity."""
+        message_obj = getattr(event, "message_obj", None)
+        sender = getattr(message_obj, "sender", None) if message_obj is not None else None
+        raw_message = getattr(message_obj, "raw_message", None) if message_obj is not None else None
+        sources = [sender]
+        if isinstance(raw_message, dict):
+            sources.append(raw_message.get("sender"))
+        event_raw = getattr(event, "raw_message", None)
+        if isinstance(event_raw, dict):
+            sources.append(event_raw.get("sender"))
+        for source in sources:
+            if isinstance(source, dict):
+                value = source.get("nickname")
+            else:
+                value = getattr(source, "nickname", None) if source is not None else None
+            value = _single_line(value, 30)
+            if value:
+                return value
+        getter = getattr(event, "get_sender_nickname", None)
+        if callable(getter):
+            try:
+                return _single_line(getter(), 30)
+            except Exception:
+                pass
+        return ""
+
     def _sender_display_name(self, event: AstrMessageEvent) -> str:
         for name in ("get_sender_name", "get_sender_nickname"):
             func = getattr(event, name, None)

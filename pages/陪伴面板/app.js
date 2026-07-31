@@ -16298,6 +16298,7 @@ function worldbookMemberCard(item) {
   const detailId = `worldbook-editor-${String(item.user_id || "").replace(/[^A-Za-z0-9_-]/g, "_")}`;
   const previewItems = worldbookMemberPreviewItems(item, memories);
   const isExternal = item.identity_type === "external" || !/^\d+$/.test(String(item.user_id || ""));
+  const observationOnly = Boolean(item.observation_only);
   const identityLabel = isExternal ? "外部身份" : "身份 QQ";
   const genderText = String(item.gender || "").trim();
   const bindLine = item.linked_qq_user_id
@@ -16311,7 +16312,7 @@ function worldbookMemberCard(item) {
           <span>${identityLabel} ${escapeHtml(item.user_id || "-")} · 优先级 ${escapeHtml(item.priority ?? "-")}${bindLine}</span>
         </div>
         <div class="worldbook-card-actions">
-          <button type="button" data-worldbook-living-memory="${escapeHtml(item.user_id || "")}">长期记忆</button>
+          ${observationOnly ? "" : `<button type="button" data-worldbook-living-memory="${escapeHtml(item.user_id || "")}">长期记忆</button>`}
           <button type="button" data-worldbook-edit="${escapeHtml(detailId)}">编辑</button>
           <button type="button" data-worldbook-member="${escapeHtml(item.user_id || "")}" data-enabled="${item.enabled ? "0" : "1"}">
             ${escapeHtml(item.enabled ? "停用" : "启用")}
@@ -16327,6 +16328,7 @@ function worldbookMemberCard(item) {
         <span>${escapeHtml((item.important_memories || []).length)} 条记忆</span>
         ${pending.length ? `<span>${escapeHtml(pending.length)} 条待确认观察</span>` : ""}
         ${sourceEntries.length ? `<span>${escapeHtml(sourceEntries.slice(0, 2).join(" / "))}</span>` : ""}
+        ${observationOnly ? `<span>仅观察 · ${escapeHtml(item.observed_group_count || 0)} 个白名单群</span><span>亲密度：中性</span><span>不主动触达</span>` : ""}
       </div>
       ${previewItems.length ? `
         <div class="worldbook-member-preview-list">

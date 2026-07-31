@@ -20756,6 +20756,16 @@ class PrivateCompanionPageApi(
                     "linked_qq_user_id": self._single_line(item.get("linked_qq_user_id") or item.get("merged_into_user_id"), 40),
                     "linked_bili_profile_id": self._single_line(item.get("linked_bili_profile_id"), 80),
                     "auto_registration_pending": bool(item.get("auto_registration_pending", False)),
+                    "profile_origin": self._single_line(item.get("profile_origin"), 40),
+                    "observation_only": bool(item.get("observation_only", False)),
+                    "proactive_contact_enabled": bool(item.get("proactive_contact_enabled", False)),
+                    "relationship_state": self._single_line(item.get("relationship_state"), 24) or "neutral",
+                    "affinity_score": self._int(item.get("affinity_score")),
+                    "observed_group_count": len(
+                        item.get("group_observation_scope_ids")
+                        if isinstance(item.get("group_observation_scope_ids"), list)
+                        else []
+                    ),
                     "content": self._single_line(item.get("content"), 260),
                     "identity_note": self._single_line(item.get("identity_note") or item.get("note") or item.get("content"), 500),
                     "boundary_note": self._single_line(item.get("boundary_note"), 500),
