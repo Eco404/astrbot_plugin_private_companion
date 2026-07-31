@@ -715,6 +715,17 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         self.photo_reference_library = [
             line.strip() for line in str(raw_reference_library or "").splitlines() if line.strip()
         ][:24]
+    self.enable_p5_structured_reference_assets = self._cfg_bool(
+        c,
+        "enable_p5_structured_reference_assets",
+        False,
+    )
+    raw_structured_assets = self._cfg_raw(c, "photo_structured_reference_assets", [])
+    self.photo_structured_reference_assets = (
+        [dict(item) for item in raw_structured_assets if isinstance(item, dict)][:16]
+        if isinstance(raw_structured_assets, list)
+        else []
+    )
     self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
     self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
     if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:

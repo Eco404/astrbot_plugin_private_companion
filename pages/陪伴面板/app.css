@@ -21578,6 +21578,65 @@ textarea {
   color: var(--ink);
 }
 
+.structured-reference-status {
+  display: grid;
+  gap: 12px;
+  margin: 2px 16px 16px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line-soft));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-soft) 52%, #fff 48%);
+}
+
+.structured-reference-status > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.structured-reference-status header span:first-child,
+.structured-reference-status header small,
+.structured-reference-note,
+.structured-reference-empty {
+  color: var(--muted);
+}
+
+.structured-reference-status h3 {
+  margin: 3px 0;
+  font-size: 15px;
+}
+
+.structured-reference-backend {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent);
+  font: 600 12px/1 var(--font-mono, monospace);
+}
+
+.structured-reference-assets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.structured-reference-assets > div {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.structured-reference-assets b { overflow-wrap: anywhere; }
+.structured-reference-assets span { color: var(--muted); font-size: 12px; }
+.structured-reference-assets small { font-size: 12px; }
+.structured-reference-assets .is-ok { color: var(--green, #23845b); }
+.structured-reference-assets .is-error { color: var(--red, #c34b57); }
+.structured-reference-note,
+.structured-reference-empty { margin: 0; font-size: 12px; }
+
 .photo-reference-head-actions {
   display: flex;
   flex-wrap: wrap;

@@ -23134,6 +23134,9 @@ function photoSettingVisibleForValues(settingKey, values = {}) {
     return onlineBackends.has(backend);
   }
   if (settingKey === "enable_photo_reference_image") return backend !== "sdgen";
+  if (settingKey === "enable_p5_structured_reference_assets") {
+    return backend !== "sdgen" && enabled("enable_photo_reference_image");
+  }
   if (settingKey === "photo_reference_catalog") {
     return backend !== "sdgen" && enabled("enable_photo_reference_image");
   }
@@ -25119,6 +25122,33 @@ function photoReferenceManagerCard(item, index) {
   `;
 }
 
+function structuredReferenceAssetStatusHtml() {
+  const structured = state.photoReferenceLibraryStatus?.structured_assets || {};
+  const items = Array.isArray(structured.items) ? structured.items : [];
+  const enabled = Boolean(structured.enabled);
+  const capacity = Number.isFinite(Number(structured.backend_capacity)) ? Number(structured.backend_capacity) : 0;
+  const backend = String(structured.backend || "auto");
+  const summary = enabled
+    ? `${items.filter((item) => item.valid).length} / ${items.length} 项通过校验 · 当前后端容量 ${capacity}`
+    : "功能关闭；不会向任何生图后端提交受管素材";
+  return `
+    <section class="structured-reference-status" aria-labelledby="structuredReferenceTitle">
+      <header>
+        <div>
+          <span>Q5 受管素材</span>
+          <h3 id="structuredReferenceTitle">结构化参考输入状态</h3>
+          <small>${escapeHtml(summary)}</small>
+        </div>
+        <span class="structured-reference-backend">${escapeHtml(backend)}</span>
+      </header>
+      ${items.length ? `<div class="structured-reference-assets">${items.map((item) => `
+        <div><b>${escapeHtml(String(item.id || "未命名素材"))}</b><span>${escapeHtml(String(item.role || "未知职责"))}</span><small class="${item.valid ? "is-ok" : "is-error"}">${escapeHtml(item.valid ? "校验通过" : String(item.status || "校验失败"))}</small></div>
+      `).join("")}</div>` : `<p class="structured-reference-empty">尚未登记受管素材。</p>`}
+      <p class="structured-reference-note">此处不会显示文件路径、URL、SHA-256 或一次性授权票据。</p>
+    </section>
+  `;
+}
+
 function photoReferenceManagerPageHtml(open) {
   const items = photoReferenceManagerItems();
   const personaSource = currentPhotoPersonaReferenceValue();
@@ -25143,6 +25173,8 @@ function photoReferenceManagerPageHtml(open) {
           <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
         </div>
       </header>
+
+      ${structuredReferenceAssetStatusHtml()}
 
       <section class="photo-reference-persona" aria-labelledby="photoReferencePersonaTitle">
         <div>

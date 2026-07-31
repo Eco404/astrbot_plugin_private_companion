@@ -3341,6 +3341,18 @@
     "default": false,
     "invisible": true
   },
+  "enable_p5_structured_reference_assets": {
+    "description": "Legacy flat config: 启用 Q5 受管结构化参考素材",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "photo_structured_reference_assets": {
+    "description": "Legacy flat config: Q5 受管结构化参考素材配置",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
   "enable_group_nsfw_private_fallback": {
     "description": "Legacy flat config: 群聊成图安全审核与私聊回退",
     "type": "bool",
@@ -9776,6 +9788,27 @@
         "default": false,
         "condition": {
           "enable_photo_text_action": true
+        }
+      },
+      "enable_p5_structured_reference_assets": {
+        "description": "Q5 受管结构化参考素材（多图）",
+        "type": "bool",
+        "hint": "默认关闭。开启后，只有管理员放入插件数据目录 photo_reference_assets 并登记文件相对路径、SHA-256、职责的本地图片，才可能作为生图参考输入。旧参考图库、聊天图、引用图、URL 不会被升级为多图输入。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_photo_reference_image": true
+        }
+      },
+      "photo_structured_reference_assets": {
+        "description": "Q5 受管素材清单",
+        "type": "list",
+        "hint": "仅管理员配置。每项为 JSON 对象：id、role(identity/outfit/pose/scene/style)、file（photo_reference_assets 下的相对路径）、sha256，及可选的 outfit_lock_default、continuation_match、new_topic_enabled、edit_enabled。面板只显示校验状态，不显示路径或哈希。",
+        "default": [],
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_photo_reference_image": true,
+          "enable_p5_structured_reference_assets": true
         }
       },
       "enable_group_nsfw_private_fallback": {

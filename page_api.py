@@ -63,6 +63,7 @@ from .constants import (
 from .config_migration import _ensure_config_parent_dir
 from .diagnostic_envelope import DIAGNOSTIC_ENVELOPE_VERSION, diagnostic_test_id, normalize_diagnostic_result
 from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
+from .reference_asset_gate import ReferenceAssetGate
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
 from .relationship_ledger import (
     migrate_legacy_relationship_score,
@@ -2050,6 +2051,19 @@ class PrivateCompanionPageApi(
             )
         return loaded.references
 
+    def _q5_structured_reference_asset_projection(self) -> dict[str, Any]:
+        enabled = bool(getattr(self.plugin, "enable_p5_structured_reference_assets", False))
+        backend = self._single_line(getattr(self.plugin, "photo_generation_backend", "auto"), 30).lower()
+        capacity = 4 if backend in {"auto", "comfyui"} else 0
+        gate = ReferenceAssetGate(getattr(self.plugin, "data_dir", ""))
+        projection = gate.public_projection(
+            getattr(self.plugin, "photo_structured_reference_assets", []),
+            backend_capacity=capacity,
+        )
+        projection["enabled"] = enabled
+        projection["backend"] = backend or "auto"
+        return projection
+
     def _photo_reference_page_items(self) -> list[dict[str, Any]]:
         catalog = self._photo_reference_catalog_snapshot(sync_runtime=True)
         if catalog:
@@ -2178,6 +2192,7 @@ class PrivateCompanionPageApi(
                 "items": library,
                 "total": len(library),
                 "available": sum(1 for item in library if item.get("available")),
+                "structured_assets": self._q5_structured_reference_asset_projection(),
                 "options": {
                     "reference_roles": [
                         {"value": "identity", "label": "身份"},
@@ -19279,6 +19294,9 @@ class PrivateCompanionPageApi(
         reference_enabled = self._config_get("enable_photo_reference_image")
         if reference_enabled not in ("", None):
             self.plugin.enable_photo_reference_image = self._normalize_bool_value(reference_enabled)
+        structured_enabled = self._config_get("enable_p5_structured_reference_assets")
+        if structured_enabled not in ("", None):
+            self.plugin.enable_p5_structured_reference_assets = self._normalize_bool_value(structured_enabled)
         relationship_enabled = self._config_get("enable_bot_relationship_network")
         if relationship_enabled not in ("", None):
             self.plugin.enable_bot_relationship_network = self._normalize_bool_value(relationship_enabled)
