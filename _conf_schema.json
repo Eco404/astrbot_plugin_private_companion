@@ -3353,6 +3353,18 @@
     "default": [],
     "invisible": true
   },
+  "enable_owned_reaction_asset_workbench": {
+    "description": "Legacy flat config: 启用 Q6 自有反应图素材工作台",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "owned_reaction_assets": {
+    "description": "Legacy flat config: Q6 自有反应图素材清单",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
   "enable_group_nsfw_private_fallback": {
     "description": "Legacy flat config: 群聊成图安全审核与私聊回退",
     "type": "bool",
@@ -9809,6 +9821,25 @@
           "enable_photo_text_action": true,
           "enable_photo_reference_image": true,
           "enable_p5_structured_reference_assets": true
+        }
+      },
+      "enable_owned_reaction_asset_workbench": {
+        "description": "Q6 自有反应图素材工作台",
+        "type": "bool",
+        "hint": "默认关闭。开启后，pc_find_reaction_image 会先检索管理员登记且哈希校验通过的本地自有反应图；聊天图片、引用图片、视觉缓存和外部 URL 不会自动加入。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "owned_reaction_assets": {
+        "description": "Q6 自有反应图素材清单",
+        "type": "list",
+        "hint": "仅管理员配置。每项为 JSON 对象：id、file（owned_reaction_assets 下的相对路径）、sha256、tags 和可选 meme_only。页面工作台只展示素材 ID、标签、表情包标记、校验状态和缩略图，不显示路径或哈希。",
+        "default": [],
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_owned_reaction_asset_workbench": true
         }
       },
       "enable_group_nsfw_private_fallback": {

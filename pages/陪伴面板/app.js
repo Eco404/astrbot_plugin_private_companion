@@ -142,6 +142,7 @@ const state = {
   imageCacheBatchMode: false,
   selectedImageCacheKeys: new Set(),
   imageCacheImageData: new Map(),
+  ownedReactionAssets: null,
   selectedImageCacheKey: "",
   reactionLibrary: null,
   reactionLibraryLoading: false,
@@ -5746,6 +5747,13 @@ async function loadImageCache({ clampPage = true } = {}) {
   return data;
 }
 
+async function loadOwnedReactionAssets() {
+  const data = await fetchJson("/reaction_assets/list");
+  state.ownedReactionAssets = data || { items: [] };
+  if (state.activeTab === "image-cache") renderOwnedReactionAssets();
+  return data;
+}
+
 async function goToImageCachePage(targetPage) {
   const pageSize = Math.max(1, Number(state.imageCachePageSize || 36));
   const pages = Math.max(1, Math.ceil(Number(state.imageCacheTotal || 0) / pageSize));
@@ -6210,7 +6218,7 @@ async function ensureTabData(tabName, force = false) {
     await Promise.all([loadConfigBackups(force), loadRoleplayPersonas(force)]);
   } else if (tabName === "image-cache") {
     renderImageCache();
-    await loadImageCache();
+    await Promise.all([loadImageCache(), loadOwnedReactionAssets()]);
   } else if (tabName === "troubleshooting") {
     renderTroubleshooting();
     loadDiagnostics(force).catch(() => {});
@@ -11892,6 +11900,40 @@ function renderImageCache() {
   renderImageCachePager();
   void hydrateImageCacheImages(listEl);
   void hydrateImageCacheImages(detailEl);
+  renderOwnedReactionAssets();
+}
+
+function renderOwnedReactionAssets() {
+  const root = $("#ownedReactionAssets");
+  if (!root) return;
+  const catalog = state.ownedReactionAssets;
+  if (!catalog) {
+    root.innerHTML = `<div class="empty small">正在读取管理员登记的自有反应图素材…</div>`;
+    return;
+  }
+  const items = Array.isArray(catalog.items) ? catalog.items : [];
+  const enabled = Boolean(catalog.enabled);
+  root.innerHTML = `
+    <div class="owned-reaction-assets-summary">
+      <span class="badge ${enabled ? "ok" : "off"}">${enabled ? "检索已启用" : "检索关闭"}</span>
+      <small>受管目录：${escapeHtml(catalog.managed_directory || "owned_reaction_assets")} · ${escapeHtml(items.filter((item) => item.valid).length)}/${escapeHtml(items.length)} 校验通过</small>
+    </div>
+    ${items.length ? items.map((item) => {
+      const assetId = String(item?.id || "");
+      const previewEndpoint = item?.valid && assetId ? `/reaction_assets/image_data?id=${encodeURIComponent(assetId)}` : "";
+      return `
+        <article class="owned-reaction-asset ${item?.valid ? "is-valid" : "is-invalid"}">
+          ${previewEndpoint ? `<span class="owned-reaction-thumb"><img src="${TRANSPARENT_IMAGE}" data-image-cache-src="${escapeHtml(previewEndpoint)}" alt="${escapeHtml(assetId || "自有反应图")}" loading="lazy" /></span>` : `<span class="owned-reaction-thumb placeholder">!</span>`}
+          <div>
+            <header><b>${escapeHtml(assetId || "未命名素材")}</b><span class="badge ${item?.valid ? "ok" : "off"}">${item?.valid ? "校验通过" : "不可用"}</span></header>
+            <p>${Array.isArray(item?.tags) && item.tags.length ? item.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : "不显示路径、哈希或来源"}</p>
+            <small>${item?.meme_only === false ? "允许普通图片检索" : "仅表情包检索"}${item?.valid ? "" : ` · ${escapeHtml(item?.status || "校验失败")}`}</small>
+          </div>
+        </article>
+      `;
+    }).join("") : `<div class="empty small">还没有登记素材。请在 Q6 配置清单中填写素材 ID、相对文件名、SHA-256 和标签；不会自动收集聊天图片。</div>`}
+  `;
+  void hydrateImageCacheImages(root);
 }
 
 function renderImageCacheBatchControls() {
@@ -32512,6 +32554,16 @@ document.getElementById("appearanceThemeGrid")?.addEventListener("keydown", (eve
 $("#refreshImageCacheBtn")?.addEventListener("click", () => {
   state.imageCacheImageData.clear();
   loadImageCache().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
+});
+$("#refreshImageCacheBtn")?.addEventListener("click", () => {
+  state.imageCacheImageData.clear();
+  loadOwnedReactionAssets().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
+});
+$("#refreshOwnedReactionAssetsBtn")?.addEventListener("click", () => {
+  state.imageCacheImageData.clear();
+  loadOwnedReactionAssets()
+    .then(() => showToast("自有反应图素材状态已刷新"))
+    .catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });
 $("#refreshTroubleshootingBtn")?.addEventListener("click", () => {
   Promise.all([loadTroubleshooting(), loadDiagnostics(true)])

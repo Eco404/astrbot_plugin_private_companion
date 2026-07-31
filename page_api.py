@@ -64,6 +64,7 @@ from .config_migration import _ensure_config_parent_dir
 from .diagnostic_envelope import DIAGNOSTIC_ENVELOPE_VERSION, diagnostic_test_id, normalize_diagnostic_result
 from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
 from .reference_asset_gate import ReferenceAssetGate
+from .owned_reaction_asset_catalog import MAX_ASSET_BYTES, OwnedReactionAssetCatalog
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
 from .relationship_ledger import (
     migrate_legacy_relationship_score,
@@ -548,6 +549,8 @@ class PrivateCompanionPageApi(
             ("/reaction_library/update", self.update_reaction_library, ["POST"], "Private Companion Page reaction library update"),
             ("/reaction_library/delete", self.delete_reaction_library, ["POST"], "Private Companion Page reaction library delete"),
             ("/reaction_library/rescan", self.rescan_reaction_library, ["POST"], "Private Companion Page reaction library rescan"),
+            ("/reaction_assets/list", self.list_owned_reaction_assets, ["GET"], "Private Companion Page owned reaction assets"),
+            ("/reaction_assets/image_data", self.get_owned_reaction_asset_image_data, ["GET"], "Private Companion Page owned reaction asset image"),
             ("/photo_reference/list", self.list_photo_references, ["GET"], "Private Companion Page photo reference list"),
             ("/photo_reference/image_data", self.get_photo_reference_image_data, ["GET"], "Private Companion Page photo reference image data"),
             ("/reference_asset/list", self.list_reference_assets, ["GET"], "Private Companion Page scoped visual reference assets"),
@@ -2285,6 +2288,60 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取参考图预览失败: {exc}", exc_info=True)
             return self._exception_error(str(exc))
+
+    def _owned_reaction_asset_catalog(self) -> OwnedReactionAssetCatalog:
+        return OwnedReactionAssetCatalog(getattr(self.plugin, "data_dir", ""))
+
+    def _owned_reaction_asset_entries(self) -> list[dict[str, Any]]:
+        entries = getattr(self.plugin, "owned_reaction_assets", [])
+        if not isinstance(entries, list):
+            return []
+        return [dict(entry) for entry in entries if isinstance(entry, dict)][:96]
+
+    async def list_owned_reaction_assets(self) -> dict[str, Any]:
+        try:
+            catalog = self._owned_reaction_asset_catalog()
+            projection = catalog.public_projection(self._owned_reaction_asset_entries())
+            return self._ok(
+                {
+                    "enabled": bool(
+                        getattr(
+                            self.plugin,
+                            "enable_owned_reaction_asset_workbench",
+                            False,
+                        )
+                    ),
+                    **projection,
+                }
+            )
+        except Exception:
+            logger.error("[PrivateCompanionPage] owned reaction asset status failed")
+            return self._exception_error("无法读取自有反应图素材状态")
+
+    async def get_owned_reaction_asset_image_data(self) -> dict[str, Any]:
+        asset_id = self._single_line(request.args.get("id"), 80)
+        if not asset_id:
+            return self._error("缺少素材 id")
+        try:
+            asset = self._owned_reaction_asset_catalog().resolve(
+                self._owned_reaction_asset_entries(),
+                asset_id,
+            )
+            if asset is None:
+                return self._error("素材不存在、未登记或校验失败")
+            mime = mimetypes.guess_type(str(asset.path))[0] or ""
+            if not mime.startswith("image/"):
+                return self._error("素材文件类型不受支持")
+            return self._ok(
+                await self._encode_image_cache_file_data_url(
+                    asset.path,
+                    mime,
+                    max_bytes=MAX_ASSET_BYTES,
+                )
+            )
+        except Exception:
+            logger.error("[PrivateCompanionPage] owned reaction asset preview failed")
+            return self._exception_error("无法读取自有反应图预览")
 
     def _reference_asset_records(self) -> list[dict[str, Any]]:
         data = getattr(self.plugin, "data", None)

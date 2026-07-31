@@ -34,6 +34,7 @@ from .helpers import (
     _strip_internal_message_blocks,
 )
 from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_memo_note
+from .owned_reaction_asset_catalog import OwnedReactionAssetCatalog
 from .qzone_selection import parse_qzone_post_selection
 from .reaction_expression import (
     append_reaction_expression_outcome,
@@ -360,9 +361,48 @@ class LlmToolActionsMixin:
     def _reaction_asset_library(self):
         return get_reaction_asset_library(self)
 
+    def _find_owned_reaction_asset(
+        self,
+        query: str,
+        *,
+        search_context: str = "",
+        meme_only: bool = True,
+    ) -> dict[str, Any] | None:
+        if not bool(getattr(self, "enable_owned_reaction_asset_workbench", False)):
+            return None
+        catalog = OwnedReactionAssetCatalog(getattr(self, "data_dir", ""))
+        asset, status, confidence = catalog.find(
+            getattr(self, "owned_reaction_assets", []),
+            query=query,
+            search_context=search_context,
+            meme_only=bool(meme_only),
+        )
+        if asset is None:
+            logger.debug(
+                "[PrivateCompanion] Q6 自有反应图未命中: status=%s",
+                status,
+            )
+            return None
+        return {
+            "success": True,
+            "status": "success",
+            "source": "owned_reaction_assets",
+            "path": str(asset.path),
+            "image_id": asset.asset_id,
+            "tags": list(asset.tags),
+            "need": _single_line(query, 220),
+            "reason": "管理员登记的受管自有反应图标签命中",
+            "confidence": confidence,
+        }
+
     def _reaction_image_provider_available(self) -> bool:
         library = self._reaction_asset_library()
-        return bool(library and library.has_enabled_assets())
+        return bool(
+            library and library.has_enabled_assets()
+        ) or bool(
+            getattr(self, "enable_owned_reaction_asset_workbench", False)
+            and getattr(self, "owned_reaction_assets", [])
+        )
 
     @staticmethod
     def _reaction_expression_opt_out_requested(text: Any) -> bool:
@@ -4520,6 +4560,7 @@ class LlmToolActionsMixin:
             send=False,
             caption="",
             low_latency=low_latency,
+            internal_attachment=True,
         )
         try:
             lookup = json.loads(raw_lookup)
@@ -5144,6 +5185,7 @@ class LlmToolActionsMixin:
         send: bool = True,
         caption: str = "",
         low_latency: bool = False,
+        internal_attachment: bool = False,
     ) -> str:
         scope = self._reaction_expression_scope(event)
         query_text = _single_line(query, 500)
@@ -5241,8 +5283,21 @@ class LlmToolActionsMixin:
                     error_type=type(exc).__name__,
                 )
 
+        # Q6 is an optional, hash-locked local source. A hit wins before the
+        # editable reaction library, while every miss preserves its existing
+        # lookup, authorization, reservation and delivery behavior.
+        owned_lookup_finder = getattr(self, "_find_owned_reaction_asset", None)
+        owned_lookup = (
+            owned_lookup_finder(
+                query_text,
+                search_context=lookup_context,
+                meme_only=meme_filter,
+            )
+            if callable(owned_lookup_finder)
+            else None
+        )
         library = self._reaction_asset_library()
-        if library is None or not library.has_enabled_assets():
+        if owned_lookup is None and (library is None or not library.has_enabled_assets()):
             self._log_reaction_expression_event(
                 event,
                 stage="lookup",
@@ -5268,22 +5323,24 @@ class LlmToolActionsMixin:
         lookup_started = time.perf_counter()
         cache_hit = False
         lookup_error_type = ""
-        cache_key = self._reaction_expression_lookup_cache_key(
-            library,
-            query_text,
-            lookup_context,
-            meme_filter,
-            scope,
-            self._reaction_expression_lookup_cache_revision(library),
-        )
-        lookup = (
-            self._reaction_expression_lookup_cache_get(cache_key)
-            if low_latency
-            else None
-        )
-        if isinstance(lookup, dict):
-            cache_hit = True
-        else:
+        lookup = dict(owned_lookup) if isinstance(owned_lookup, dict) else None
+        if lookup is None:
+            cache_key = self._reaction_expression_lookup_cache_key(
+                library,
+                query_text,
+                lookup_context,
+                meme_filter,
+                scope,
+                self._reaction_expression_lookup_cache_revision(library),
+            )
+            lookup = (
+                self._reaction_expression_lookup_cache_get(cache_key)
+                if low_latency
+                else None
+            )
+            if isinstance(lookup, dict):
+                cache_hit = True
+        if lookup is None:
             try:
                 lookup = await asyncio.to_thread(
                     library.find,
@@ -5308,7 +5365,7 @@ class LlmToolActionsMixin:
                     "status": "error",
                     "message": f"图库检索失败：{_single_line(exc, 160)}",
                 }
-            if low_latency and isinstance(lookup, dict):
+            if low_latency and isinstance(lookup, dict) and owned_lookup is None:
                 self._reaction_expression_lookup_cache_put(cache_key, lookup)
         lookup_latency_ms = round(
             max(0.0, (time.perf_counter() - lookup_started) * 1000.0), 2
@@ -5506,43 +5563,45 @@ class LlmToolActionsMixin:
                 delivery=delivery.get("destination"),
                 match_basis=self._reaction_expression_match_basis(lookup),
             )
-        return json.dumps(
-            {
-                "status": (
-                    "success"
-                    if success
-                    else "delivery_uncertain"
-                    if delivery_uncertain
-                    else "delivery_failed"
-                ),
-                "success": success,
-                "found": True,
-                "send_requested": send_image,
-                "sent": sent,
-                "delivery_uncertain": delivery_uncertain,
-                "message": (
-                    _single_line(delivery.get("message"), 220)
-                    if send_image
-                    else "已找到图库图片，但按请求未发送"
-                ),
-                "path": image_path,
-                "image_id": _single_line(lookup.get("image_id"), 120),
-                "tags": tags,
-                "need": need,
-                "reason": match_reason,
-                "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
-                "delivery": _single_line(delivery.get("destination"), 40),
-                "cache_hit": cache_hit,
-                "lookup_latency_ms": lookup_latency_ms,
-                "must_not_claim_sent": not sent,
-                "final_response_instruction": (
-                    f"完整正文 caption 与图片已一并发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
-                    if sent
-                    else ""
-                ),
-            },
-            ensure_ascii=False,
-        )
+        result_payload = {
+            "status": (
+                "success"
+                if success
+                else "delivery_uncertain"
+                if delivery_uncertain
+                else "delivery_failed"
+            ),
+            "success": success,
+            "found": True,
+            "send_requested": send_image,
+            "sent": sent,
+            "delivery_uncertain": delivery_uncertain,
+            "message": (
+                _single_line(delivery.get("message"), 220)
+                if send_image
+                else "已找到图库图片，但按请求未发送"
+            ),
+            "image_id": _single_line(lookup.get("image_id"), 120),
+            "tags": tags,
+            "need": need,
+            "reason": match_reason,
+            "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
+            "delivery": _single_line(delivery.get("destination"), 40),
+            "cache_hit": cache_hit,
+            "lookup_latency_ms": lookup_latency_ms,
+            "must_not_claim_sent": not sent,
+            "final_response_instruction": (
+                f"完整正文 caption 与图片已一并发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                if sent
+                else ""
+            ),
+        }
+        if (
+            _single_line(lookup.get("source"), 60) != "owned_reaction_assets"
+            or internal_attachment
+        ):
+            result_payload["path"] = image_path
+        return json.dumps(result_payload, ensure_ascii=False)
 
     async def _pc_qzone_view_feed_impl(
         self,

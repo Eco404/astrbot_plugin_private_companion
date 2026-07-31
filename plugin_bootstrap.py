@@ -726,6 +726,17 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         if isinstance(raw_structured_assets, list)
         else []
     )
+    self.enable_owned_reaction_asset_workbench = self._cfg_bool(
+        c,
+        "enable_owned_reaction_asset_workbench",
+        False,
+    )
+    raw_owned_reaction_assets = self._cfg_raw(c, "owned_reaction_assets", [])
+    self.owned_reaction_assets = (
+        [dict(item) for item in raw_owned_reaction_assets if isinstance(item, dict)][:96]
+        if isinstance(raw_owned_reaction_assets, list)
+        else []
+    )
     self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
     self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
     if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
