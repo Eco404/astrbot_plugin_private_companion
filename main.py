@@ -217,6 +217,7 @@ from .memory_companion_adapter import MemoryCompanionAdapterMixin
 from .p5_attestation import P5AttestationError, P5AttestationRegistry, REASON_CODES as P5_ATTESTATION_REASON_CODES
 from .p5_source_observer import evaluate_source
 from .message_pipeline import handle_group_message, handle_private_message
+from .tool_history_sanitizer import sanitize_openai_tool_history
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
 from .prompt_surface import PromptSurface
@@ -10547,6 +10548,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
         return "deepseek" in identity
 
+    def _llm_request_uses_deepseek_openai_compatible_provider(
+        self,
+        event: AstrMessageEvent | None,
+        req: ProviderRequest | None,
+    ) -> bool:
+        """Limit history cleanup to DeepSeek's OpenAI-compatible endpoint."""
+        identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
+        return "deepseek" in identity
+
     def _append_deepseek_tool_protocol_guard(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
         if getattr(req, "func_tool", None) is None:
             return False
@@ -10850,6 +10860,35 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         removed = self._remove_sensitive_screen_tools_from_request(event, req)
         if removed:
             await self._append_sensitive_screen_tool_guard_to_request(event, req, removed)
+
+    @filter.on_llm_request(priority=-20500)
+    async def sanitize_deepseek_tool_call_history(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Drop only malformed tool-call groups before a DeepSeek provider request."""
+        if self is None or req is None:
+            return
+        if not self._llm_request_uses_deepseek_openai_compatible_provider(event, req):
+            return
+        contexts = getattr(req, "contexts", None)
+        cleaned, stats = sanitize_openai_tool_history(contexts)
+        if not stats.get("changed"):
+            return
+        try:
+            req.contexts = cleaned
+        except Exception:
+            return
+        logger.info(
+            "[PrivateCompanion] Cleaned malformed DeepSeek tool history: groups=%s assistants=%s tool_results=%s orphans=%s",
+            stats.get("removed_groups", 0),
+            stats.get("removed_assistants", 0),
+            stats.get("removed_tool_results", 0),
+            stats.get("removed_orphans", 0),
+        )
 
     @filter.on_llm_request(priority=-20000)
     @_multi_persona_event_context
