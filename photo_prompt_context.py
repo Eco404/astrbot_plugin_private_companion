@@ -80,6 +80,7 @@ class PhotoPromptSection:
 @dataclass(frozen=True, slots=True)
 class ResolvedPhotoPromptContext:
     final_prompt: str
+    complete_prompt: str
     prompt_sections: tuple[PhotoPromptSection, ...]
     reference: Any
     detected_conflicts: tuple[dict[str, Any], ...]
@@ -861,10 +862,12 @@ def resolve_photo_prompt_context(
     sanitized, section_detected, section_removed, residual = _sanitize_sections(tuple(prepared), wardrobe)
     detected.extend(section_detected)
     removed.extend(section_removed)
+    complete_prompt = _assemble(sanitized, prompt_format)
     budgeted = _budget_sections(sanitized)
     residual.extend(_scan_residual_conflicts(budgeted, wardrobe))
     return ResolvedPhotoPromptContext(
         final_prompt=_assemble(budgeted, prompt_format),
+        complete_prompt=complete_prompt,
         prompt_sections=tuple(budgeted),
         reference=clean_reference,
         detected_conflicts=tuple(detected),
