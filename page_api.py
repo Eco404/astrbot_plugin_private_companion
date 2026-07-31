@@ -61,6 +61,7 @@ from .constants import (
     _REASON_TEXT,
 )
 from .config_migration import _ensure_config_parent_dir
+from .diagnostic_envelope import DIAGNOSTIC_ENVELOPE_VERSION, diagnostic_test_id, normalize_diagnostic_result
 from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
 from .relationship_ledger import (
@@ -4361,6 +4362,12 @@ class PrivateCompanionPageApi(
         result["ran_at_text"] = self.plugin._format_timestamp_elapsed(result["ran_at"])
         result.setdefault("request_id", request_id)
         result = self._finalize_test_diagnostics(test_type, result, start, finished_at=result["ran_at"])
+        result = self._diagnostic_envelope(
+            result,
+            test_type=test_type,
+            duration_ms=self._int(result.get("elapsed_ms")),
+            test_id=diagnostic_test_id(test_type),
+        )
         await self._remember_troubleshooting_test_result(result_key, result)
         logger.info(
             "[PrivateCompanionPage][test:%s][type:%s] 测试结束: status=%s elapsed_ms=%s",
@@ -4585,6 +4592,12 @@ class PrivateCompanionPageApi(
             started,
             title="在线图片 API 单独测试",
             finished_at=result["ran_at"],
+        )
+        result = self._diagnostic_envelope(
+            result,
+            test_type="image_api_endpoint",
+            duration_ms=self._int(result.get("elapsed_ms")),
+            test_id=diagnostic_test_id("image_api_endpoint"),
         )
         result_key = self._single_line(result.get("test_key"), 80) or "image_api_endpoint"
         await self._remember_troubleshooting_test_result(result_key, result)
@@ -7171,141 +7184,33 @@ class PrivateCompanionPageApi(
         )
         return result
 
+    def _diagnostic_envelope(
+        self,
+        result: dict[str, Any] | None,
+        *,
+        test_type: str = "",
+        duration_ms: int = 0,
+        test_id: str = "",
+    ) -> dict[str, Any]:
+        contract_version = DIAGNOSTIC_ENVELOPE_VERSION
+        getter = getattr(self.plugin, "_diagnostic_operations_contract", None)
+        if callable(getter):
+            try:
+                contract = getter()
+                if isinstance(contract, dict):
+                    contract_version = self._single_line(contract.get("version"), 60) or contract_version
+            except Exception:
+                pass
+        return normalize_diagnostic_result(
+            result,
+            test_type=test_type,
+            duration_ms=duration_ms,
+            test_id=test_id,
+            contract_version=contract_version,
+        )
+
     def _sanitize_troubleshooting_test_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        safe = self._safe_test_diagnostic_text
-        return {
-            "type": self._single_line(result.get("type"), 40),
-            "test_key": self._single_line(result.get("test_key"), 80),
-            "diagnostic_version": self._int(result.get("diagnostic_version")),
-            "request_id": self._single_line(result.get("request_id") or result.get("trace_id"), 32),
-            "trace_id": self._single_line(result.get("trace_id") or result.get("request_id"), 32),
-            "test_status": self._single_line(result.get("test_status"), 16),
-            "error_code": self._single_line(result.get("error_code"), 40),
-            "error_category": self._single_line(result.get("error_category"), 60),
-            "retryable": bool(result.get("retryable")),
-            "suggestion": safe(result.get("suggestion"), 600),
-            "exception_type": self._single_line(result.get("exception_type"), 120),
-            "ok": bool(result.get("ok")),
-            "pending": bool(result.get("pending")),
-            "outcome_type": self._single_line(result.get("outcome_type"), 40),
-            "title": self._single_line(result.get("title"), 60),
-            "backend": self._single_line(result.get("backend"), 80),
-            "image_model": self._single_line(result.get("image_model"), 80),
-            "image_size": self._single_line(result.get("image_size"), 40),
-            "endpoint_index": self._int(result.get("endpoint_index"), -1),
-            "endpoint_name": self._single_line(result.get("endpoint_name"), 80),
-            "endpoint_platform": self._single_line(result.get("endpoint_platform"), 60),
-            "endpoint_url": self._single_line(result.get("endpoint_url"), 180),
-            "endpoint_status": self._single_line(result.get("endpoint_status"), 20),
-            "endpoint_timeout_seconds": self._int(result.get("endpoint_timeout_seconds")),
-            "queue_wait_ms": self._int(result.get("queue_wait_ms")),
-            "workflow_kind": self._single_line(result.get("workflow_kind"), 20),
-            "reference_image": self._single_line(result.get("reference_image"), 1000),
-            "used_reference": bool(result.get("used_reference")),
-            "reference_id": self._single_line(result.get("reference_id"), 60),
-            "reference_kind": self._single_line(result.get("reference_kind"), 40),
-            "reference_roles": [
-                self._single_line(value, 40)
-                for value in (result.get("reference_roles") if isinstance(result.get("reference_roles"), list) else [])
-                if self._single_line(value, 40)
-            ][:8],
-            "wardrobe_mode": self._single_line(result.get("wardrobe_mode"), 40),
-            "wardrobe_category": self._single_line(result.get("wardrobe_category"), 40),
-            "outfit_locked": bool(result.get("outfit_locked")),
-            "daily_outfit_removed": bool(result.get("daily_outfit_removed")),
-            "final_presets": [
-                self._single_line(value, 60)
-                for value in (result.get("final_presets") if isinstance(result.get("final_presets"), list) else [])
-                if self._single_line(value, 60)
-            ][:1],
-            "prompt_hash": self._single_line(result.get("prompt_hash"), 80),
-            "prompt_path": self._single_line(result.get("prompt_path"), 1000),
-            "provider": self._single_line(result.get("provider"), 100),
-            "umo": self._single_line(result.get("umo"), 180),
-            "path": self._single_line(result.get("path"), 1000),
-            "file_size": self._int(result.get("file_size")),
-            "generated": bool(result.get("generated")),
-            "delivered": bool(result.get("delivered")),
-            "delivery_umo": self._single_line(result.get("delivery_umo"), 180),
-            "delivery_error": safe(result.get("delivery_error"), 1200),
-            "detail": safe(result.get("detail"), 1200),
-            "error": safe(result.get("error"), 1600),
-            "diagnostic_detail": safe(result.get("diagnostic_detail"), 4000),
-            "prompt": self._single_line(result.get("prompt"), 500),
-            "text": self._single_line(result.get("text"), 600),
-            "timeout_seconds": self._int(result.get("timeout_seconds")),
-            "test_timeout_seconds": self._int(result.get("test_timeout_seconds")),
-            "estimated_timeout_seconds": self._int(result.get("estimated_timeout_seconds")),
-            "timeout_budget": self._single_line(result.get("timeout_budget"), 220),
-            "backend_preference": self._single_line(result.get("backend_preference"), 30),
-            "external_timeout_seconds": self._int(result.get("external_timeout_seconds")),
-            "backup_external_timeout_seconds": self._int(result.get("backup_external_timeout_seconds")),
-            "comfyui_wait_seconds": self._int(result.get("comfyui_wait_seconds")),
-            "backup_external": bool(result.get("backup_external")),
-            "external_queue_lock": bool(result.get("external_queue_lock")),
-            "tool_call_timeout_seconds": self._int(result.get("tool_call_timeout_seconds")),
-            "warnings": [
-                safe(item, 800)
-                for item in (result.get("warnings") if isinstance(result.get("warnings"), list) else [])[:8]
-                if safe(item, 800)
-            ],
-            "text_preview": self._single_line(result.get("text_preview"), 220),
-            "original_text_preview": self._single_line(result.get("original_text_preview"), 220),
-            "final_text_preview": self._single_line(result.get("final_text_preview"), 220),
-            "context_chars": self._int(result.get("context_chars")),
-            "action": self._single_line(result.get("action"), 60),
-            "reason": self._single_line(result.get("reason"), 40),
-            "extra_count": self._int(result.get("extra_count")),
-            "local_count": self._int(result.get("local_count")),
-            "model_count": self._int(result.get("model_count")),
-            "suggestion_count": self._int(result.get("suggestion_count")),
-            "suggestions": [
-                self._single_line(item, 220)
-                for item in (result.get("suggestions") if isinstance(result.get("suggestions"), list) else [])[:12]
-                if self._single_line(item, 220)
-            ],
-            "sections": [
-                {
-                    "key": self._single_line(section.get("key"), 40),
-                    "title": self._single_line(section.get("title"), 60),
-                    "local_count": self._int(section.get("local_count")),
-                    "model_count": self._int(section.get("model_count")),
-                    "suggestions": [
-                        self._single_line(item, 220)
-                        for item in (section.get("suggestions") if isinstance(section.get("suggestions"), list) else [])[:8]
-                        if self._single_line(item, 220)
-                    ],
-                }
-                for section in (result.get("sections") if isinstance(result.get("sections"), list) else [])[:6]
-                if isinstance(section, dict)
-            ],
-            "steps": [
-                {
-                    "key": self._single_line(step.get("key"), 40),
-                    "name": self._single_line(step.get("name"), 60),
-                    "status": self._single_line(step.get("status"), 16),
-                    "detail": safe(step.get("detail"), 800),
-                    "elapsed_ms": self._int(step.get("elapsed_ms")),
-                }
-                for step in (result.get("steps") if isinstance(result.get("steps"), list) else [])[:24]
-                if isinstance(step, dict)
-            ],
-            "diagnostic_entries": [
-                {
-                    "elapsed_ms": self._int(entry.get("elapsed_ms")),
-                    "level": self._single_line(entry.get("level"), 16),
-                    "stage": self._single_line(entry.get("stage"), 60),
-                    "message": safe(entry.get("message"), 1200),
-                }
-                for entry in (result.get("diagnostic_entries") if isinstance(result.get("diagnostic_entries"), list) else [])[:32]
-                if isinstance(entry, dict)
-            ],
-            "started_at": self._float(result.get("started_at")),
-            "finished_at": self._float(result.get("finished_at")),
-            "elapsed_ms": self._int(result.get("elapsed_ms")),
-            "ran_at": self._float(result.get("ran_at")),
-            "ran_at_text": self._single_line(result.get("ran_at_text"), 40),
-        }
+        return self._diagnostic_envelope(result)
 
     @staticmethod
     def _troubleshooting_test_title(test_type: str) -> str:
@@ -12595,6 +12500,12 @@ class PrivateCompanionPageApi(
             result,
             start,
             title="模型 Provider 连接测试",
+        )
+        result = self._diagnostic_envelope(
+            result,
+            test_type="provider",
+            duration_ms=self._int(result.get("elapsed_ms")),
+            test_id=diagnostic_test_id("provider"),
         )
         logger.info(
             "[PrivateCompanionPage][test:%s][type:provider_connection] 测试结束: status=%s elapsed_ms=%s",

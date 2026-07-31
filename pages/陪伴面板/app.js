@@ -11346,7 +11346,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       result.timeout_seconds ? `等待上限 ${result.timeout_seconds}s` : "",
       result.timeout_budget ? `预算 ${result.timeout_budget}` : "",
       result.context_chars ? `摘要 ${result.context_chars} 字` : "",
-      result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
+      (result.duration_ms || result.elapsed_ms) ? `${result.duration_ms || result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
       result.error_category ? `错误 ${result.error_category}` : "",
       result.request_id || result.trace_id ? `编号 ${result.request_id || result.trace_id}` : "",
@@ -11355,6 +11355,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
     const stepsMarkup = troubleshootingChainStepsMarkup(result.steps);
     const previewMarkup = troubleshootingChainPreviewMarkup(test.type, result);
     const diagnosticMarkup = proactiveDiagnosticDetailsMarkup(result.diagnostic_detail);
+    const envelopeMarkup = troubleshootingDiagnosticEnvelopeMarkup(result);
     const detailText = troubleshootingChainDetailText(test, result, hasResult);
     return `
       <section class="troubleshooting-chain-test ${escapeHtml(status)}">
@@ -11362,11 +11363,9 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
           <b>${escapeHtml(test.title)}</b>
           <p>${escapeHtml(detailText)}</p>
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
-          ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
-          ${result.prompt_path ? `<small class="path">完整调试文件：${escapeHtml(result.prompt_path)}</small>` : ""}
-          ${result.suggestion ? `<small class="test-result-suggestion">${escapeHtml(result.suggestion)}</small>` : ""}
           ${previewMarkup}
           ${diagnosticMarkup}
+          ${envelopeMarkup}
           ${stepsMarkup}
         </div>
         <div class="troubleshooting-chain-test-actions">
@@ -11411,6 +11410,25 @@ function troubleshootingChainDetailText(test, result, hasResult) {
     return result.detail || `本地发现 ${localCount} 条候选，模型给出 ${modelCount} 条建议`;
   }
   return result.detail || test.text;
+}
+
+function troubleshootingDiagnosticEnvelopeMarkup(result = {}) {
+  if (!result.test_id) return "";
+  const duration = Number(result.duration_ms || result.elapsed_ms || 0);
+  const retry = result.retryable ? "可重试" : "请先按建议处理";
+  const category = result.error_category && result.error_category !== "none"
+    ? troubleshootingDiagnosticCategoryLabel(result.error_category)
+    : "未发现诊断错误";
+  return `
+    <details class="chain-test-steps diagnostic-envelope">
+      <summary>查看安全诊断详情</summary>
+      <div class="chain-test-step info"><b>测试标识</b><span>${escapeHtml(result.test_id)}</span></div>
+      <div class="chain-test-step info"><b>执行阶段</b><span>${escapeHtml(result.phase || "unknown")}</span></div>
+      <div class="chain-test-step info"><b>错误分类</b><span>${escapeHtml(category)}</span></div>
+      <div class="chain-test-step info"><b>耗时 / 重试</b><span>${escapeHtml(`${duration}ms · ${retry}`)}</span></div>
+      ${result.next_step ? `<div class="chain-test-step info"><b>下一步</b><span>${escapeHtml(result.next_step)}</span></div>` : ""}
+    </details>
+  `;
 }
 
 function troubleshootingChainStepsMarkup(stepsRaw) {
