@@ -66,10 +66,21 @@ class _PhotoToolHarness(LlmToolActionsMixin):
 
 
 class _StructuredPhotoToolHarness(_PhotoToolHarness):
-    def __init__(self, *, reference_used: bool, note: str) -> None:
+    def __init__(
+        self,
+        *,
+        reference_used: bool,
+        note: str,
+        reference_plan: tuple[dict, ...] = (),
+        prompt_path: str = "",
+        reference_fallback_message: str = "",
+    ) -> None:
         super().__init__()
         self.structured_reference_used = reference_used
         self.structured_note = note
+        self.structured_reference_plan = reference_plan
+        self.structured_prompt_path = prompt_path
+        self.structured_reference_fallback_message = reference_fallback_message
 
     async def _generate_photo_image_result(self, **kwargs):
         self.workflow_kind = str(kwargs.get("workflow_kind") or "")
@@ -79,6 +90,9 @@ class _StructuredPhotoToolHarness(_PhotoToolHarness):
             note=self.structured_note,
             reference_selected_path=str(kwargs.get("reference_image_path") or ""),
             reference_used=self.structured_reference_used,
+            reference_plan=self.structured_reference_plan,
+            prompt_path=self.structured_prompt_path,
+            reference_fallback_message=self.structured_reference_fallback_message,
         )
 
 
@@ -199,6 +213,52 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["sent"])
         self.assertTrue(payload["must_not_claim_sent"])
         self.assertEqual(payload["failure_stage"], "delivery")
+
+    async def test_provider_policy_refusal_is_not_exposed_to_the_reply_model(self) -> None:
+        provider_error = (
+            "The prompt could not be submitted. The prompt contains sensitive words "
+            "that violate Google's Generative AI Prohibited Use Policy "
+            "(https://policies.google.com/terms/generative-ai/use-policy). "
+            "Try rephrasing the prompt."
+        )
+        harness = _StructuredPhotoToolHarness(
+            reference_used=False,
+            note=provider_error,
+        )
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="拍一张测试图片",
+                send=True,
+            )
+        )
+        serialized = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual("error", payload["status"])
+        self.assertEqual("provider_policy_refusal", payload["error_code"])
+        self.assertFalse(payload["generated"])
+        self.assertFalse(payload["sent"])
+        self.assertTrue(payload["retryable"])
+        self.assertIn("没有生成或发送图片", payload["message"])
+        self.assertIn("不要复述", payload["final_response_instruction"])
+        self.assertNotIn("The prompt", serialized)
+        self.assertNotIn("sensitive words", serialized)
+        self.assertNotIn("policies.google.com", serialized)
+
+    def test_policy_refusal_detection_requires_both_refusal_and_policy_signals(self) -> None:
+        harness = _PhotoToolHarness()
+
+        self.assertTrue(
+            harness._photo_generation_policy_refusal(
+                "The prompt could not be submitted because it contains sensitive words."
+            )
+        )
+        self.assertFalse(
+            harness._photo_generation_policy_refusal(
+                "The phrase content policy violation can appear in an error log, but the request succeeded."
+            )
+        )
 
     async def test_send_false_reports_generated_but_not_sent(self) -> None:
         harness = _PhotoToolHarness()
@@ -413,7 +473,9 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.workflow_kind, "edit")
         self.assertEqual(payload["kind"], "edit")
         self.assertEqual(payload["intent_kind"], "edit")
-        self.assertEqual(payload["reference_image_path"], self.image_path)
+        self.assertNotIn("path", payload)
+        self.assertNotIn("reference_image_path", payload)
+        self.assertNotIn("prompt_path", payload)
         self.assertIsNone(harness.memory_calls[0]["reference_used"])
 
     async def test_explicit_tool_reference_preserves_double_spaces(self) -> None:
@@ -435,8 +497,7 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(harness.generation_kwargs["reference_image_path"], reference)
-        self.assertEqual(payload["reference_image_path"], reference)
-        self.assertIn("persona  original.png", payload["reference_image_path"])
+        self.assertNotIn(reference, json.dumps(payload, ensure_ascii=False))
 
     async def test_scene_preset_is_forwarded_structurally_without_mutating_prompt(self) -> None:
         harness = _PhotoToolHarness()
@@ -480,6 +541,117 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(payload["used_reference"], expected)
                 self.assertEqual(harness.memory_calls[0]["reference_used"], expected)
+
+    async def test_reference_plan_payload_does_not_expose_binding_paths(self) -> None:
+        hidden_reference = "C:/private/reference library/persona.png"
+        harness = _StructuredPhotoToolHarness(
+            reference_used=True,
+            note="ok",
+            reference_plan=(
+                {
+                    "reference_id": "persona",
+                    "path": hidden_reference,
+                    "resolved_path": hidden_reference,
+                    "roles": ["identity"],
+                    "priority": 100,
+                    "preserve": ["face", "hair"],
+                    "ignore": ["outfit"],
+                    "submitted": True,
+                },
+            ),
+        )
+        harness.image_path = self.image_path
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="拍一张日常自拍",
+                kind="selfie",
+                send=False,
+            )
+        )
+
+        self.assertEqual(
+            payload["reference_plan"],
+            [
+                {
+                    "reference_id": "persona",
+                    "roles": ["identity"],
+                    "priority": 100,
+                    "preserve": ["face", "hair"],
+                    "ignore": ["outfit"],
+                    "submitted": True,
+                }
+            ],
+        )
+        self.assertNotIn(hidden_reference, json.dumps(payload, ensure_ascii=False))
+
+    async def test_model_visible_receipt_redacts_paths_from_all_text_fields(self) -> None:
+        generated_path = self.image_path
+        windows_path = r"C:\Users\99505\AppData\Local\Temp\prompt trace.json"
+        unc_path = r"\\private-server\reference library\persona.png"
+        posix_path = "/var/lib/private-companion/prompts/trace.json"
+        relative_path = "data/photo_prompt_debug/trace.json"
+        public_url = "https://api.example.com/v1/images/output.png"
+        harness = _StructuredPhotoToolHarness(
+            reference_used=True,
+            note=f"后端 {public_url} 记录写入 {windows_path}",
+            prompt_path=windows_path,
+            reference_fallback_message=f"参考图读取自 {unc_path}，调试记录位于 {relative_path}",
+            reference_plan=(
+                {
+                    "reference_id": f"source:{posix_path}",
+                    "path": unc_path,
+                    "roles": ["identity"],
+                    "submitted": True,
+                },
+            ),
+        )
+        harness.image_path = generated_path
+        harness.delivery = {
+            "sent": False,
+            "destination": "current",
+            "message": f"图片发送失败，临时文件位于 {generated_path}",
+        }
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="拍一张日常自拍",
+                kind="selfie",
+            )
+        )
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        for hidden_path in (generated_path, windows_path, unc_path, posix_path, relative_path):
+            self.assertNotIn(hidden_path, serialized)
+        self.assertNotIn("path", payload)
+        self.assertNotIn("reference_image_path", payload)
+        self.assertNotIn("prompt_path", payload)
+        self.assertIn("[本地路径已隐藏]", serialized)
+        self.assertIn(public_url, serialized)
+
+    async def test_reference_resolution_error_receipt_redacts_local_path(self) -> None:
+        hidden_path = r"C:\Users\99505\Pictures\private reference.png"
+        harness = _PhotoToolHarness()
+
+        async def fail_to_resolve(_event, _user_id):
+            raise RuntimeError(f"cannot open {hidden_path}")
+
+        harness._photo_reference_image_from_command_context = fail_to_resolve
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="把这张图的背景换成海边",
+                kind="edit",
+                send=False,
+            )
+        )
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["status"], "error")
+        self.assertNotIn(hidden_path, serialized)
+        self.assertIn("[本地路径已隐藏]", serialized)
 
     def test_photo_caption_short_repeat_is_suppressed_but_new_information_is_kept(self) -> None:
         harness = _PhotoToolHarness()
@@ -546,6 +718,7 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要把最终回复留空", instruction)
         self.assertIn("不要再写承接句", instruction)
         self.assertIn("不要写 `&&shy&&`", instruction)
+        self.assertIn("不要复述或翻译 Provider 的英文原文", instruction)
         self.assertIn("画面中不出现角色本人", instruction)
         self.assertIn("背影、侧脸、环境人像", instruction)
         self.assertIn("合影、合照、双人或多人同框", instruction)

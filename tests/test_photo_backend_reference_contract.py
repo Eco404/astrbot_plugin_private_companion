@@ -238,7 +238,7 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(len(long_reference), 260)
         self.assertEqual(path, str(generated))
-        self.assertIn("已使用本地人设参考图", note)
+        self.assertIn("已使用 1 张本地参考图", note)
         self.assertEqual(_FakeWorkflow.latest.input_images, [long_reference])
 
     async def test_nonexistent_backend_output_is_not_reported_as_success(self) -> None:

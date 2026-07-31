@@ -82,7 +82,12 @@ def _outfit_category_matches(value: Any) -> list[tuple[str, int, int, str]]:
     matches: list[tuple[str, int, int, str]] = []
     for category, pattern in _OUTFIT_PATTERNS:
         for match in re.finditer(pattern, text, flags=re.I):
-            matches.append((category, match.start(), match.end(), match.group(0)))
+            resolved_category = category
+            if category == "homewear" and match.group(0).lower() == "loungewear":
+                context = text[max(0, match.start() - 40) : match.end() + 40]
+                if "bedtime" in context:
+                    resolved_category = "sleepwear"
+            matches.append((resolved_category, match.start(), match.end(), match.group(0)))
     matches.sort(key=lambda item: (item[1], item[2]))
     return matches
 

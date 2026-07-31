@@ -56,6 +56,27 @@ from .reaction_asset_library import get_reaction_asset_library
 
 
 PHOTO_TOOL_SILENT_SENTINEL = "[[PC_PHOTO_SENT_NO_FOLLOWUP]]"
+_PHOTO_TOOL_REDACTED_LOCAL_PATH = "[本地路径已隐藏]"
+_PHOTO_TOOL_WINDOWS_PATH_START_RE = re.compile(
+    r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\(?=[^\\/]))"
+)
+_PHOTO_TOOL_POSIX_PATH_START_RE = re.compile(
+    r"(?<![\w/])/(?=(?:"
+    r"(?:Users|home|tmp|var|etc|opt|srv|root|mnt|run|private|usr|workspace|workspaces|app|data)/"
+    r"|(?:[^/\s]+/){2,}[^/\s]+"
+    r"|[^/\s]+/[^/\s]+\.[A-Za-z0-9]{1,12}(?:\s|$|[),;，；。])"
+    r"))",
+    flags=re.I,
+)
+_PHOTO_TOOL_RELATIVE_PATH_START_RE = re.compile(
+    r"(?<![A-Za-z0-9.:/\\])(?:\.{1,2}[\\/])?(?:[^\\/\s,，;；]+[\\/]){2,}"
+    r"[^\\/\s,，;；]+\.[A-Za-z0-9]{1,12}",
+    flags=re.I,
+)
+_PHOTO_TOOL_HTTP_URL_RE = re.compile(
+    r"https?://[^\s<>\[\]{}\"']+",
+    flags=re.I,
+)
 
 
 class LlmToolActionsMixin:
@@ -282,7 +303,7 @@ class LlmToolActionsMixin:
             if not spontaneous_only:
                 lines.extend(
                     [
-                        "- 用户要“找/发/来一张已有表情包”、要用现成反应图回应当前语境时，优先使用 `pc_find_reaction_image`，把需求和当前语境写进 `query/context`。",
+                        "- 用户要“找/发/来一张已有表情包”、要用现成反应图回应当前语境时，优先使用 `pc_find_reaction_image`，把需求和当前语境写进 `query/search_context`。",
                         "- 图库未匹配时可以自然改用文字回应，不要擅自声称已发图。",
                     ]
                 )
@@ -315,7 +336,7 @@ class LlmToolActionsMixin:
                     '- 如果前几轮文字剧情已经明确让角色换装，而本轮只说“继续、再拍一张、保持刚才的穿搭”等，不要把它理解成恢复今日穿搭。必须把仍有效的具体服装展开写进 prompt，例如“角色当前仍穿 JK 校服，保持本轮地点和人物连续性”；当前对话已发生的换装高于日程、人格默认衣着、每日穿搭参考图和旧图片。',
                     '- “JK”在服装语境下请规范写成“JK 校服/JK 制服”；只有用户明确改变服装时才替换连续状态，提问、假设或用户自己换衣不算角色已换装。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
-                    '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。',
+                    '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。多图职责组合可传 `reference_image_paths` 数组，并在 prompt 中说明每张图承担的脸、衣服、姿势等职责。',
                 ]
             )
         lines.extend(
@@ -324,6 +345,7 @@ class LlmToolActionsMixin:
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
                 f"- `caption` 会和图片一起作为可见消息发送，只能填写用户应当直接看到的自然正文；不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
+                "- 如果工具返回 `error_code=provider_policy_refusal`，不要复述或翻译 Provider 的英文原文、政策名称、敏感词判断和链接；只用符合当前人格的一句简短中文说明这次没有生成出来，再自然询问是否换一种画面描述重试。",
             ]
         )
         return "\n".join(lines)
@@ -353,6 +375,119 @@ class LlmToolActionsMixin:
         if callable(cue_cleaner):
             cleaned = cue_cleaner(cleaned)
         return _single_line(cleaned, max(1, int(limit or 120)))
+
+    @staticmethod
+    def _photo_generation_policy_refusal(value: Any) -> bool:
+        """Recognize a provider refusal without judging the user's prompt locally."""
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+        if not normalized:
+            return False
+        refusal_markers = (
+            "prompt could not be submitted",
+            "prompt was not submitted",
+            "try rephrasing the prompt",
+            "request was rejected",
+            "request was blocked",
+            "内容政策拒绝",
+            "内容策略拒绝",
+            "安全策略拒绝",
+            "请求被安全策略拦截",
+        )
+        policy_markers = (
+            "generative ai prohibited use policy",
+            "content policy violation",
+            "sensitive words",
+            "violates google's",
+            "violates the policy",
+            "policy violation",
+            "不符合内容政策",
+            "违反内容政策",
+            "敏感词",
+        )
+        return any(marker in normalized for marker in refusal_markers) and any(
+            marker in normalized for marker in policy_markers
+        )
+
+    def _sanitize_photo_tool_result_payload(
+        self,
+        value: Any,
+        *,
+        known_paths: tuple[Any, ...] = (),
+    ) -> Any:
+        """Remove local filesystem details from the model-visible tool receipt."""
+
+        absolute_known_paths: list[str] = []
+        for candidate in known_paths:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if text.lower().startswith(("http://", "https://", "data:")):
+                continue
+            if (
+                _PHOTO_TOOL_WINDOWS_PATH_START_RE.match(text)
+                or _PHOTO_TOOL_POSIX_PATH_START_RE.match(text)
+                or (len(text) >= 3 and ("/" in text or "\\" in text))
+            ):
+                absolute_known_paths.append(text)
+        absolute_known_paths.sort(key=len, reverse=True)
+
+        def redact_text(raw: Any) -> str:
+            cleaned = _redact_outbound_secrets(raw, self)
+            protected_urls: dict[str, str] = {}
+
+            def protect_url(match: re.Match[str]) -> str:
+                token = f"PCPHOTOURL{uuid.uuid4().hex}TOKEN"
+                protected_urls[token] = match.group(0)
+                return token
+
+            cleaned = _PHOTO_TOOL_HTTP_URL_RE.sub(protect_url, cleaned)
+            for path in absolute_known_paths:
+                cleaned = cleaned.replace(path, _PHOTO_TOOL_REDACTED_LOCAL_PATH)
+            starts = [
+                match.start()
+                for pattern in (
+                    _PHOTO_TOOL_WINDOWS_PATH_START_RE,
+                    _PHOTO_TOOL_POSIX_PATH_START_RE,
+                    _PHOTO_TOOL_RELATIVE_PATH_START_RE,
+                )
+                if (match := pattern.search(cleaned)) is not None
+            ]
+            if starts:
+                prefix = cleaned[: min(starts)].rstrip()
+                cleaned = f"{prefix} {_PHOTO_TOOL_REDACTED_LOCAL_PATH}".strip()
+            for token, url in protected_urls.items():
+                cleaned = cleaned.replace(token, url)
+            return cleaned
+
+        sensitive_path_keys = {
+            "path",
+            "paths",
+            "image_path",
+            "image_paths",
+            "reference_path",
+            "reference_paths",
+            "reference_image_path",
+            "reference_image_paths",
+            "resolved_path",
+            "prompt_path",
+        }
+
+        def sanitize(item: Any) -> Any:
+            if isinstance(item, dict):
+                cleaned_dict: dict[Any, Any] = {}
+                for key, child in item.items():
+                    normalized_key = re.sub(r"[^a-z0-9]+", "_", str(key or "").lower()).strip("_")
+                    if normalized_key in sensitive_path_keys or normalized_key.endswith("_local_path"):
+                        continue
+                    cleaned_dict[key] = sanitize(child)
+                return cleaned_dict
+            if isinstance(item, (list, tuple, set)):
+                return [sanitize(child) for child in item]
+            if isinstance(item, str):
+                return redact_text(item)
+            return item
+
+        return sanitize(value)
 
     @staticmethod
     def _reaction_expression_has_visible_text(value: Any) -> bool:
@@ -1109,6 +1244,7 @@ class LlmToolActionsMixin:
             "prompt",
             "kind",
             "reference_image_path",
+            "reference_image_paths",
             "image_size",
             "caption",
             "scene_preset",
@@ -1871,24 +2007,39 @@ class LlmToolActionsMixin:
         prompt: str = "",
         kind: str = "text2img",
         reference_image_path: str = "",
+        reference_image_paths: Any = None,
         image_size: str = "",
         send: bool = True,
         caption: str = "",
         scene_preset: str = "",
         **kwargs,
     ) -> str:
+        def public_receipt(
+            payload: dict[str, Any],
+            *,
+            ensure_ascii: bool = False,
+            known_paths: tuple[Any, ...] = (),
+        ) -> str:
+            return json.dumps(
+                self._sanitize_photo_tool_result_payload(
+                    payload,
+                    known_paths=known_paths,
+                ),
+                ensure_ascii=ensure_ascii,
+            )
+
         tool_started_at = time.monotonic()
         mode = _single_line(getattr(self, "natural_language_photo_generation_mode", "tool_first"), 40).lower()
         if mode == "off":
-            return json.dumps({"status": "disabled", "message": "非指令生图/改图已关闭；显式指令仍可使用“陪伴 生图/自拍/改图”。"}, ensure_ascii=False)
+            return public_receipt({"status": "disabled", "message": "非指令生图/改图已关闭；显式指令仍可使用“陪伴 生图/自拍/改图”。"}, ensure_ascii=False)
         if not getattr(self, "enable_photo_text_action", False):
-            return json.dumps({"status": "disabled", "message": "主动拍照/生图能力未启用"}, ensure_ascii=False)
+            return public_receipt({"status": "disabled", "message": "主动拍照/生图能力未启用"}, ensure_ascii=False)
         structured_generator = getattr(self, "_generate_photo_image_result", None)
         legacy_generator = getattr(self, "_generate_photo_image", None)
         if not callable(structured_generator) and not callable(legacy_generator):
-            return json.dumps({"status": "disabled", "message": "缺少生图入口 _generate_photo_image"}, ensure_ascii=False)
+            return public_receipt({"status": "disabled", "message": "缺少生图入口 _generate_photo_image"}, ensure_ascii=False)
         if not self._photo_text_available():
-            return json.dumps({"status": "unavailable", "message": "当前没有可用生图后端，或已被负载/token 保护临时延后"}, ensure_ascii=False)
+            return public_receipt({"status": "unavailable", "message": "当前没有可用生图后端，或已被负载/token 保护临时延后"}, ensure_ascii=False)
 
         content = _single_line(prompt or kwargs.get("text") or kwargs.get("description") or kwargs.get("prompt_text"), 900)
         visible_caption = self._sanitize_photo_tool_caption(caption, limit=120)
@@ -1906,7 +2057,7 @@ class LlmToolActionsMixin:
             workflow_kind = "text2img"
             intent_kind = "text2img"
         if not content:
-            return json.dumps(
+            return public_receipt(
                 {
                     "status": "need_prompt",
                     "message": "缺少 prompt。请把要生成的画面或修改要求传入 prompt。",
@@ -1960,7 +2111,7 @@ class LlmToolActionsMixin:
         target_checker = getattr(self, "_is_target_private_user", None)
         if callable(user_getter) and callable(target_checker):
             if not requester_id:
-                return json.dumps(
+                return public_receipt(
                     {
                         "status": "unauthorized",
                         "success": False,
@@ -1989,7 +2140,7 @@ class LlmToolActionsMixin:
                     and requester.get("enabled", True)
                 )
             if not requester_authorized:
-                return json.dumps(
+                return public_receipt(
                     {
                         "status": "unauthorized",
                         "success": False,
@@ -2019,7 +2170,7 @@ class LlmToolActionsMixin:
             else:
                 quota_left = None
             if quota_left is not None and quota_left <= 0:
-                return json.dumps(
+                return public_receipt(
                     {
                         "status": "quota_exhausted",
                         "success": False,
@@ -2045,17 +2196,41 @@ class LlmToolActionsMixin:
             return default
 
         send_image = bool_arg(send, True)
-        reference_path = _path_text(
+        if send_image:
+            marker = getattr(self, "_mark_smart_imagechat_skip_proactive_emoji", None)
+            if callable(marker):
+                marker(event)
+        reference_sources: list[str] = []
+
+        def add_reference_source(value: Any) -> None:
+            if isinstance(value, dict):
+                value = value.get("path") or value.get("source") or value.get("url")
+            path = _path_text(value, 1000)
+            if path and path not in reference_sources:
+                reference_sources.append(path)
+
+        add_reference_source(
             reference_image_path
             or kwargs.get("reference")
             or kwargs.get("image")
             or kwargs.get("image_path")
-            or kwargs.get("image_url"),
-            1000,
+            or kwargs.get("image_url")
         )
+        raw_multi_references = (
+            reference_image_paths
+            if reference_image_paths is not None
+            else kwargs.get("reference_images", kwargs.get("images"))
+        )
+        if isinstance(raw_multi_references, (list, tuple, set)):
+            for raw_reference in raw_multi_references:
+                add_reference_source(raw_reference)
+        elif raw_multi_references:
+            add_reference_source(raw_multi_references)
+
         if group_photo_requested:
             # 合影只能由本轮用户携带或引用的图片授权。工具参数可能来自模型，
             # 不能让配置的人设图、今日穿搭图或臆造路径绕过这一能力边界。
+            reference_sources.clear()
             reference_path = ""
             context_resolver = getattr(self, "_photo_reference_image_from_command_context", None)
             saw_image = False
@@ -2070,7 +2245,7 @@ class LlmToolActionsMixin:
                         if missing
                         else f"合影参考图解析失败：{_single_line(exc, 160)}"
                     )
-                    return json.dumps(
+                    return public_receipt(
                         {
                             "status": "need_reference",
                             "success": False,
@@ -2083,7 +2258,7 @@ class LlmToolActionsMixin:
                         ensure_ascii=False,
                     )
             if not reference_path:
-                return json.dumps(
+                return public_receipt(
                     {
                         "status": "need_reference",
                         "success": False,
@@ -2099,18 +2274,26 @@ class LlmToolActionsMixin:
                     },
                     ensure_ascii=False,
                 )
-        elif reference_path:
-            resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
+            add_reference_source(reference_path)
+
+        resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
+        resolved_reference_paths: list[str] = []
+        for index, source in enumerate(reference_sources):
+            resolved = source
             if callable(resolver):
                 try:
-                    stable = await resolver(reference_path, stem="tool", event=event)
+                    stable = await resolver(source, stem=f"tool_{index + 1}", event=event)
                     if stable:
-                        reference_path = stable
+                        resolved = stable
                 except Exception as exc:
-                    return json.dumps(
-                        {"status": "error", "message": f"参考图解析失败：{_single_line(exc, 160)}"},
-                        ensure_ascii=False,
+                    logger.info(
+                        "[PrivateCompanion] 第 %s 张工具参考图解析失败，交由参考计划记录缺失职责: %s",
+                        index + 1,
+                        _single_line(exc, 160),
                     )
+            if resolved and resolved not in resolved_reference_paths:
+                resolved_reference_paths.append(resolved)
+        reference_path = resolved_reference_paths[0] if resolved_reference_paths else ""
         if intent_kind == "edit" and not reference_path:
             context_resolver = getattr(self, "_photo_reference_image_from_command_context", None)
             if callable(context_resolver):
@@ -2122,8 +2305,9 @@ class LlmToolActionsMixin:
                     resolved_path, resolved_label, saw_image = await context_resolver(event, user_id)
                     if resolved_path:
                         reference_path = resolved_path
+                        resolved_reference_paths = [resolved_path]
                     elif saw_image:
-                        return json.dumps(
+                        return public_receipt(
                             {
                                 "status": "need_reference",
                                 "message": "看到了图片，但没能保存成可用参考图；请让用户重新发送图片，或用“陪伴 参考图 查看”检查平台是否能取到原图。",
@@ -2133,19 +2317,19 @@ class LlmToolActionsMixin:
                 except Exception as exc:
                     missing = _missing_optional_model_dependency(exc)
                     if missing:
-                        return json.dumps(
+                        return public_receipt(
                             {
                                 "status": "need_reference",
                                 "message": f"改图参考图解析缺少可选依赖 {missing}，请让用户直接提供本地图片路径或图片 URL。",
                             },
                             ensure_ascii=False,
                         )
-                    return json.dumps(
+                    return public_receipt(
                         {"status": "error", "message": f"改图参考图解析失败：{_single_line(exc, 160)}"},
                         ensure_ascii=False,
                     )
             if not reference_path:
-                return json.dumps(
+                return public_receipt(
                     {
                         "status": "need_reference",
                         "message": "改图/重绘需要参考图。可以让用户把图片和要求一起发，或引用近期图片再说“改成……”。",
@@ -2153,55 +2337,84 @@ class LlmToolActionsMixin:
                     ensure_ascii=False,
                 )
         if not reference_path and intent_kind in {"selfie", "sticker"}:
-            wants_context_reference = any(
+            wants_indexed_references = bool(
+                re.search(
+                    r"(?:第(?:[一二三四五六七八九十\d]+)张|"
+                    r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth)\s+"
+                    r"(?:image|photo|picture))",
+                    compact_prompt,
+                    flags=re.I,
+                )
+            )
+            wants_context_reference = wants_indexed_references or any(
                 token in compact_prompt
                 for token in ("这张", "这图", "这幅", "这份", "参考图", "用图", "按图", "照着", "根据图", "根据这张", "用这张")
             ) or group_photo_requested
             if wants_context_reference:
-                context_resolver = getattr(self, "_photo_reference_image_from_command_context", None)
-                if callable(context_resolver):
+                try:
                     try:
-                        try:
-                            user_id = str(event.get_sender_id())
-                        except Exception:
-                            user_id = ""
-                        resolved_path, resolved_label, saw_image = await context_resolver(event, user_id)
-                        if resolved_path:
-                            reference_path = resolved_path
-                        elif saw_image:
-                            return json.dumps(
-                                {
-                                    "status": "need_reference",
-                                    "message": "看到了图片，但没能保存成可用参考图；请让用户重新发送图片，或用“陪伴 参考图 查看”检查平台是否能取到原图。",
-                                },
-                                ensure_ascii=False,
-                            )
-                    except Exception as exc:
-                        missing = _missing_optional_model_dependency(exc)
-                        if missing:
-                            return json.dumps(
-                                {
-                                    "status": "need_reference",
-                                    "message": f"参考图解析缺少可选依赖 {missing}；如已开启参考图一致性，会改用已配置的人设参考图或今日穿搭图。",
-                                },
-                                ensure_ascii=False,
-                            )
-                        return json.dumps(
-                            {"status": "error", "message": f"参考图解析失败：{_single_line(exc, 160)}"},
+                        user_id = str(event.get_sender_id())
+                    except Exception:
+                        user_id = ""
+                    saw_image = False
+                    if wants_indexed_references:
+                        multi_resolver = getattr(
+                            self,
+                            "_photo_reference_images_from_command_context",
+                            None,
+                        )
+                    else:
+                        multi_resolver = None
+                    if callable(multi_resolver):
+                        images, saw_image = await multi_resolver(event, user_id, limit=8)
+                        resolved_reference_paths = [
+                            _path_text(item[0], 1000)
+                            for item in images
+                            if isinstance(item, (list, tuple))
+                            and item
+                            and _path_text(item[0], 1000)
+                        ]
+                        if resolved_reference_paths:
+                            reference_path = resolved_reference_paths[0]
+                    else:
+                        context_resolver = getattr(
+                            self,
+                            "_photo_reference_image_from_command_context",
+                            None,
+                        )
+                        if callable(context_resolver):
+                            resolved_path, resolved_label, saw_image = await context_resolver(event, user_id)
+                            if resolved_path:
+                                reference_path = resolved_path
+                                resolved_reference_paths = [resolved_path]
+                    if saw_image and not resolved_reference_paths:
+                        return public_receipt(
+                            {
+                                "status": "need_reference",
+                                "message": "看到了图片，但没能保存成可用参考图；请让用户重新发送图片，或用“陪伴 参考图 查看”检查平台是否能取到原图。",
+                            },
                             ensure_ascii=False,
                         )
-        if reference_path and not os.path.exists(reference_path):
-            return json.dumps(
-                {"status": "error", "message": f"参考图路径不可用：{_single_line(reference_path, 180)}"},
-                ensure_ascii=False,
-            )
-
+                except Exception as exc:
+                    missing = _missing_optional_model_dependency(exc)
+                    if missing:
+                        return public_receipt(
+                            {
+                                "status": "need_reference",
+                                "message": f"参考图解析缺少可选依赖 {missing}；如已开启参考图一致性，会改用已配置的人设参考图或今日穿搭图。",
+                            },
+                            ensure_ascii=False,
+                        )
+                    return public_receipt(
+                        {"status": "error", "message": f"参考图解析失败：{_single_line(exc, 160)}"},
+                        ensure_ascii=False,
+                    )
         prompt_builder = getattr(self, "_build_natural_language_photo_prompt", None)
         if callable(prompt_builder):
             prompt_sections = prompt_builder(
                 prompt=content,
                 kind="selfie" if intent_kind == "sticker" else intent_kind,
-                has_reference=bool(reference_path),
+                has_reference=bool(resolved_reference_paths),
                 memory_context="",
                 structured=True,
             )
@@ -2237,8 +2450,10 @@ class LlmToolActionsMixin:
                 (getattr(event, "is_private_chat", lambda: False)() if callable(getattr(event, "is_private_chat", None)) else getattr(event, "is_private_chat", False))
             ),
             "reference_image_path": reference_path,
+            "reference_image_paths": list(resolved_reference_paths),
             "image_size": _single_line(image_size or kwargs.get("size"), 40),
             "requested_scene_preset": preset_text,
+            "suggested_scene_preset": preset_text,
             "workflow_default_scene_preset": workflow_default_preset,
             "prompt_sections": prompt_sections,
         }
@@ -2260,7 +2475,7 @@ class LlmToolActionsMixin:
                 outer_timeout,
                 generation_timeout,
             )
-            return json.dumps(
+            return public_receipt(
                 {
                     "status": "timeout",
                     "success": False,
@@ -2279,6 +2494,7 @@ class LlmToolActionsMixin:
         if hasattr(generation_output, "as_legacy_tuple"):
             backend_name, image_path, note = generation_output.as_legacy_tuple()
             generation_metadata = {
+                "trace_id": _single_line(getattr(generation_output, "trace_id", ""), 80),
                 "reference_used": bool(getattr(generation_output, "reference_used", False)),
                 "reference_path": _path_text(getattr(generation_output, "reference_selected_path", ""), 1000),
                 "reference_id": _single_line(getattr(generation_output, "reference_id", ""), 60),
@@ -2294,6 +2510,14 @@ class LlmToolActionsMixin:
                 "suggestion_status": _single_line(getattr(generation_output, "suggestion_status", ""), 60),
                 "prompt_hash": _single_line(getattr(generation_output, "prompt_hash", ""), 80),
                 "prompt_path": _single_line(getattr(generation_output, "prompt_path", ""), 1000),
+                "reference_requested_roles": list(getattr(generation_output, "reference_requested_roles", ()) or ()),
+                "reference_excluded_roles": list(getattr(generation_output, "reference_excluded_roles", ()) or ()),
+                "continuity_mode": _single_line(getattr(generation_output, "continuity_mode", ""), 30),
+                "reference_confidence": getattr(generation_output, "reference_confidence", 0.0),
+                "reference_plan": list(getattr(generation_output, "reference_plan", ()) or ()),
+                "reference_fulfilled_roles": list(getattr(generation_output, "reference_fulfilled_roles", ()) or ()),
+                "reference_missing_roles": list(getattr(generation_output, "reference_missing_roles", ()) or ()),
+                "reference_fallback_message": _single_line(getattr(generation_output, "reference_fallback_message", ""), 260),
             }
         else:
             backend_name, image_path, note = generation_output
@@ -2345,8 +2569,22 @@ class LlmToolActionsMixin:
                         self._save_data_sync()
         sent = False
         delivery: dict[str, Any] = {}
+        generation_trace_id = _single_line(generation_metadata.get("trace_id"), 80)
         if ok and send_image:
             message = visible_caption or ("" if intent_kind == "sticker" else "生成好了。")
+            fallback_message = _single_line(
+                generation_metadata.get("reference_fallback_message"),
+                260,
+            )
+            if fallback_message:
+                message = f"{message}\n{fallback_message}".strip()
+            trace_writer = getattr(self, "_append_photo_generation_trace_event", None)
+            if callable(trace_writer):
+                trace_writer(
+                    generation_trace_id,
+                    "delivery_started",
+                    data={"caption": message, "image_path": image_path},
+                )
             try:
                 delivery = await self._deliver_generated_image_to_event(
                     event,
@@ -2365,6 +2603,18 @@ class LlmToolActionsMixin:
                     _single_line(exc, 180),
                 )
             sent = bool(delivery.get("sent"))
+            if callable(trace_writer):
+                trace_writer(
+                    generation_trace_id,
+                    "delivery_completed" if sent else "delivery_failed",
+                    status="ok" if sent else "error",
+                    data={
+                        "sent": sent,
+                        "destination": delivery.get("destination"),
+                        "message": delivery.get("message"),
+                        "review_label": delivery.get("review_label"),
+                    },
+                )
             if sent:
                 try:
                     setattr(event, "_private_companion_photo_tool_sent", True)
@@ -2401,6 +2651,15 @@ class LlmToolActionsMixin:
                 )
         delivery_uncertain = bool(delivery.get("uncertain"))
         overall_success = bool(ok and (not send_image or sent))
+        public_reference_plan = [
+            {
+                key: value
+                for key, value in binding.items()
+                if key in {"reference_id", "roles", "priority", "preserve", "ignore", "submitted"}
+            }
+            for binding in (generation_metadata.get("reference_plan") or [])[:8]
+            if isinstance(binding, dict)
+        ]
         result_payload = {
             "status": (
                 "success"
@@ -2420,14 +2679,22 @@ class LlmToolActionsMixin:
                 else ("图片已生成但按请求未发送" if ok and not send_image else (_single_line(note, 220) or "生图失败"))
             ),
             "backend": _single_line(backend_name, 80),
-            "path": _path_text(image_path, 1000),
             "kind": workflow_kind,
             "intent_kind": intent_kind,
             "used_reference": used_reference,
-            "reference_image_path": _path_text(actual_reference_path, 1000),
             "reference_id": _single_line(generation_metadata.get("reference_id"), 60),
             "reference_kind": _single_line(generation_metadata.get("reference_kind"), 40),
             "reference_roles": list(generation_metadata.get("reference_roles") or [])[:8],
+            "reference_intent": {
+                "requested_roles": list(generation_metadata.get("reference_requested_roles") or [])[:8],
+                "excluded_roles": list(generation_metadata.get("reference_excluded_roles") or [])[:8],
+                "continuity_mode": _single_line(generation_metadata.get("continuity_mode"), 30),
+                "confidence": generation_metadata.get("reference_confidence", 0.0),
+            },
+            "reference_plan": public_reference_plan,
+            "reference_fulfilled_roles": list(generation_metadata.get("reference_fulfilled_roles") or [])[:8],
+            "reference_missing_roles": list(generation_metadata.get("reference_missing_roles") or [])[:8],
+            "reference_fallback_message": _single_line(generation_metadata.get("reference_fallback_message"), 260),
             "wardrobe_mode": _single_line(generation_metadata.get("wardrobe_mode"), 40),
             "wardrobe_category": _single_line(generation_metadata.get("wardrobe_category"), 40),
             "outfit_locked": bool(generation_metadata.get("outfit_locked")),
@@ -2437,7 +2704,6 @@ class LlmToolActionsMixin:
             "suggestion_status": _single_line(generation_metadata.get("suggestion_status"), 60),
             "final_presets": final_presets,
             "prompt_hash": _single_line(generation_metadata.get("prompt_hash"), 80),
-            "prompt_path": _single_line(generation_metadata.get("prompt_path"), 1000),
             "sent": sent,
             "delivery_uncertain": delivery_uncertain,
             "delivery": _single_line(delivery.get("destination"), 30),
@@ -2470,22 +2736,63 @@ class LlmToolActionsMixin:
             note_text = _single_line(note, 360) or "生图失败"
             lowered_note = note_text.lower()
             hint = "请按 actual_error 里的真实原因回复用户，不要改写成未出现的超时、排队或权限问题。"
-            if "404" in note_text or "not found" in lowered_note or "未找到" in note_text:
+            policy_refusal = self._photo_generation_policy_refusal(note_text)
+            if policy_refusal:
+                public_error = "图片服务拒绝了这次画面描述，本次没有生成或发送图片。"
+                logger.warning(
+                    "[PrivateCompanion] pc_generate_photo 被图片服务策略拒绝: backend=%s error=%s",
+                    _single_line(backend_name, 80),
+                    note_text,
+                )
+                result_payload.update(
+                    {
+                        "message": public_error,
+                        "note": public_error,
+                        "error_code": "provider_policy_refusal",
+                        "failure_reason": public_error,
+                        "actual_error": public_error,
+                        "actionable_hint": "请用当前人格简短说明这次没有生成出来，并自然询问用户是否换一种画面描述重试；不要复述 Provider 原文、政策名称、敏感词判断或链接。",
+                        "do_not_claim_timeout": True,
+                        "must_not_claim_sent": True,
+                        "retryable": True,
+                        "final_response_instruction": "不要复述或翻译 Provider 的英文原文、政策名称、敏感词判断和链接。只用符合当前人格的一句简短中文说明这次没有生成出来，再自然询问是否换一种画面描述重试。",
+                    }
+                )
+            elif "404" in note_text or "not found" in lowered_note or "未找到" in note_text:
                 hint = "在线生图接口返回 404，通常是 API 地址端点不对或缺少 /v1；请让用户检查在线图片 API 地址是否支持 /images/generations。"
             elif "图片模型" in note_text or "image model" in lowered_note:
                 hint = "当前模型可能不是生图模型；请让用户把在线图片模型改成对应平台的图片模型。"
             elif "api key" in lowered_note or "unauthorized" in lowered_note or "401" in note_text or "403" in note_text:
                 hint = "请让用户检查在线图片 API Key、权限和额度。"
-            result_payload.update(
-                {
-                    "failure_reason": note_text,
-                    "actual_error": note_text,
-                    "actionable_hint": hint,
-                    "do_not_claim_timeout": "超时" not in note_text and "timeout" not in lowered_note,
-                    "must_not_claim_sent": True,
-                }
+            if not policy_refusal:
+                result_payload.update(
+                    {
+                        "failure_reason": note_text,
+                        "actual_error": note_text,
+                        "actionable_hint": hint,
+                        "do_not_claim_timeout": "超时" not in note_text and "timeout" not in lowered_note,
+                        "must_not_claim_sent": True,
+                    }
+                )
+        known_private_paths: list[Any] = [
+            image_path,
+            actual_reference_path,
+            generation_metadata.get("prompt_path"),
+            *resolved_reference_paths,
+        ]
+        for binding in generation_metadata.get("reference_plan") or []:
+            if not isinstance(binding, dict):
+                continue
+            known_private_paths.extend(
+                value
+                for key, value in binding.items()
+                if "path" in str(key or "").lower()
             )
-        return json.dumps(result_payload, ensure_ascii=False)
+        return public_receipt(
+            result_payload,
+            ensure_ascii=False,
+            known_paths=tuple(known_private_paths),
+        )
 
     @staticmethod
     def _reaction_expression_bool_arg(value: Any, default: bool) -> bool:

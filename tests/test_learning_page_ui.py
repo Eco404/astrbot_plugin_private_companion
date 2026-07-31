@@ -170,9 +170,30 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn("grid-column: 1 / -1;", narrow)
 
     def test_learning_page_assets_use_current_cache_versions(self) -> None:
-        self.assertIn('./app.css?v=20260730-panel-asset-guard-v1', self.html)
-        self.assertIn('./css/polish.css?v=20260730-panel-asset-guard-v1', self.html)
-        self.assertIn('./app.js?v=20260730-panel-asset-guard-v1', self.html)
+        self.assertIn('./app.css?v=20260731-test-diagnostics-v1', self.html)
+        self.assertIn('./css/polish.css?v=20260731-folio-cascade-v1', self.html)
+        self.assertIn('./app.js?v=20260731-test-diagnostics-v1', self.html)
+        self.assertIn(
+            './js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1',
+            self.html,
+        )
+
+    def test_compact_folio_overrides_follow_legacy_cover_rules(self) -> None:
+        marker = "/* Keep the compact utility header after all legacy folio rules"
+        legacy_marker = "/* Keep unified-timeline overrides after the base life-desk component rules. */"
+        self.assertEqual(self.polish_css.count(marker), 1)
+        self.assertGreater(self.polish_css.index(marker), self.polish_css.index(legacy_marker))
+        compact_tail = self.polish_css[self.polish_css.index(marker):]
+        self.assertIn("grid-template-columns: minmax(0, 1fr) auto auto;", compact_tail)
+
+    def test_panel_hides_unstyled_markup_until_css_and_app_are_ready(self) -> None:
+        self.assertIn('id="panel-asset-guard"', self.html)
+        self.assertIn('html:not(.pc-assets-ready) body > :not(.asset-load-fallback)', self.html)
+        self.assertIn('--pc-panel-css-ready: 1;', self.css)
+        self.assertIn('document.documentElement.dataset.pcAppLoaded = "1";', self.script)
+        self.assertIn('window.dispatchEvent(new Event("pc-panel-app-ready"));', self.script)
+        self.assertNotIn('class="vitruvian"', self.html)
+        self.assertIn('id="dailyOutfitLogo" class="daily-outfit-logo" alt=""', self.html)
 
 
 if __name__ == "__main__":

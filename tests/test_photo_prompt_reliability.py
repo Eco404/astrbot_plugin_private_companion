@@ -34,6 +34,7 @@ class _PhotoReliabilityHarness(CommandHandlersMixin, ProactiveMessageMixin):
         self.photo_generation_prompt_format = "traditional"
         self.photo_generation_scene_presets: list = []
         self.photo_generation_fixed_prompt = ""
+        self.photo_generation_trace_max_size_kb = 2048
         self.natural_language_photo_extra_prompt = ""
         self.reference = deepcopy(reference or {})
         self.generated_path = root / "generated.png"
@@ -219,7 +220,7 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             call = harness.external_calls[0]
             self.assertEqual(call["reference_image_path"], str(reference_path))
             final_prompt = call["prompt_text"]
-            self.assertIn("exactly one coherent sleepwear outfit", final_prompt)
+            self.assertIn("outfit category=sleepwear", final_prompt)
             self.assertIn("authoritative source for identity and the complete visible outfit", final_prompt)
             self.assertNotIn("今日穿搭：", final_prompt)
             self.assertNotIn("navy vest", final_prompt)
@@ -296,8 +297,8 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call["reference_image_path"], str(sleepwear_path))
             final_prompt = call["prompt_text"]
             positive, negative = harness._photo_prompt_split_formatted(final_prompt)
-            self.assertIn("exactly one coherent sleepwear outfit", positive)
-            self.assertNotIn("exactly one coherent sleepwear outfit", negative)
+            self.assertIn("outfit category=sleepwear", positive)
+            self.assertNotIn("outfit category=sleepwear", negative)
             self.assertNotIn("white shirt", final_prompt)
             self.assertNotIn("navy vest", final_prompt)
 
@@ -360,7 +361,7 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("navy vest", final_prompt)
                     self.assertNotIn("keep today's outfit and character appearance", final_prompt)
                     self.assertIn("visual continuity reference: 地点：卧室", final_prompt)
-                    self.assertIn("exactly one coherent sleepwear outfit", final_prompt)
+                    self.assertIn("outfit category=sleepwear", final_prompt)
                     self.assertIn("generated_daily_outfit_continuity_removed", record["removed_conflicts"])
                     self.assertNotIn("conflicting_wardrobe:daily_outfit", record["conflicts"])
 
@@ -581,7 +582,7 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("watermark", resolved.final_prompt)
             self.assertEqual(resolved.residual_conflicts, ())
 
-    def test_sleepwear_and_homewear_wording_are_compatible(self) -> None:
+    def test_bedtime_loungewear_wording_remains_compatible_with_sleepwear(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             harness = _PhotoReliabilityHarness(Path(directory))
             wardrobe = PhotoWardrobeDecision(
@@ -612,8 +613,9 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertIn("watermark", resolved.final_prompt)
-            self.assertTrue(resolved.detected_conflicts)
-            self.assertTrue(resolved.removed_conflicts)
+            self.assertIn("soft bedtime loungewear", resolved.final_prompt)
+            self.assertEqual(resolved.detected_conflicts, ())
+            self.assertEqual(resolved.removed_conflicts, ())
             self.assertEqual(resolved.residual_conflicts, ())
 
     def test_negative_outfit_request_is_separated_and_cannot_choose_forbidden_preset(self) -> None:
@@ -694,6 +696,24 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("sleepwear", positive_prompt)
             self.assertIn("sleepwear", sections["negative"].lower())
             self.assertIn("Avoid ", final_prompt)
+
+    async def test_nai_natural_exclusion_reaches_negative_user_section(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            harness = _PhotoReliabilityHarness(Path(directory))
+            harness.photo_generation_prompt_format = "nai"
+
+            await harness._generate_photo_image(
+                workflow_kind="text2img",
+                prompt_text="一个女孩，不要水印",
+                session_key="default:FriendMessage:10001",
+            )
+
+            record = harness.data["recent_photo_generations"][0]
+            debug_payload = json.loads(Path(record["prompt_path"]).read_text(encoding="utf-8"))
+            user_section = debug_payload["prompt_sections_after"]["user_request"]
+            self.assertEqual(user_section["positive"], "一个女孩")
+            self.assertEqual(user_section["negative"], "水印")
+            self.assertNotIn("不要水印", harness.external_calls[0]["prompt_text"])
 
     async def test_edit_reference_path_keeps_source_role_even_when_it_matches_library(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -940,6 +960,42 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["wardrobe_decision"]["category"], "sleepwear")
             for path in debug_files:
                 json.loads(path.read_text(encoding="utf-8"))
+
+    def test_prompt_debug_file_is_not_written_when_trace_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = _PhotoReliabilityHarness(root)
+            harness.photo_generation_trace_max_size_kb = 0
+            path, prompt_hash = harness._write_photo_prompt_debug_file(
+                trace_id="trace-disabled",
+                session_key="default:FriendMessage:test-user",
+                workflow_kind="selfie",
+                base_prompt="base prompt",
+                scene_context_before="before",
+                scene_context_after="after",
+                reference=None,
+                wardrobe=PhotoWardrobeDecision(),
+                presets=[],
+                prompt_sections_before={},
+                prompt_sections={},
+                prompt_sections_after={},
+                final_prompt="private full prompt",
+                conflicts=[],
+                removed_conflicts=[],
+                residual_conflicts=[],
+                detected_conflict_details=[],
+                removed_conflict_details=[],
+                residual_conflict_details=[],
+                reference_removed=None,
+                sanitizer_version=2,
+            )
+
+            self.assertEqual(path, "")
+            self.assertEqual(
+                prompt_hash,
+                hashlib.sha256("private full prompt".encode("utf-8")).hexdigest(),
+            )
+            self.assertFalse((root / "photo_prompt_debug").exists())
 
     async def test_structured_result_marks_automatic_reference_used_and_keeps_legacy_tuple(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

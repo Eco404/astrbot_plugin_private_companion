@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot_plugin_private_companion.helpers import _flat_get
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
+from astrbot_plugin_private_companion.reaction_asset_library import ReactionAssetLibrary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -208,6 +209,85 @@ class ReactionLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
             with patch("astrbot_plugin_private_companion.page_api.request", delete_request):
                 deleted = await api.delete_reaction_library()
             self.assertEqual(1, deleted["data"]["deleted"])
+
+    def test_analysis_parser_accepts_fenced_json_and_maps_indexes_to_ids(self) -> None:
+        parsed = PrivateCompanionPageApi._parse_reaction_library_analysis(
+            """```json
+            [{"image_index": 1, "name": "无语摊手", "description": "角色摊手", "visible_text": "？", "tags": ["摊手"], "emotions": ["无语"], "intents": ["吐槽"]}]
+            ```""",
+            [{"id": "asset-a", "filename": "a.png"}],
+        )
+
+        self.assertEqual(1, len(parsed))
+        self.assertEqual("asset-a", parsed[0]["id"])
+        self.assertEqual(["吐槽"], parsed[0]["intents"])
+
+    async def test_background_analysis_uses_visual_provider_and_completes_item(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            library = ReactionAssetLibrary(folder)
+            item = library.import_blobs([("001.png", self.PNG_BYTES)])["items"][0]
+            provider = SimpleNamespace(
+                text_chat=AsyncMock(
+                    return_value=SimpleNamespace(
+                        completion_text=json.dumps(
+                            [
+                                {
+                                    "image_index": 1,
+                                    "name": "开心点头",
+                                    "description": "角色笑着点头",
+                                    "visible_text": "好",
+                                    "tags": ["点头"],
+                                    "emotions": ["开心"],
+                                    "intents": ["赞同"],
+                                }
+                            ],
+                            ensure_ascii=False,
+                        )
+                    )
+                )
+            )
+            plugin = SimpleNamespace(data_dir=folder)
+            plugin._private_image_visual_provider_candidates = lambda _umo: [
+                ("vision-test", "plugin_vision", "")
+            ]
+            plugin._private_image_provider_by_id = lambda provider_id: provider if provider_id == "vision-test" else None
+            plugin._provider_supports_image = lambda _provider: True
+            plugin._private_image_provider_timeout_seconds = lambda *_args: 0.0
+            plugin._can_run_llm_task = lambda *_args, **_kwargs: True
+            api = PrivateCompanionPageApi(plugin)
+
+            await api._run_reaction_library_analysis_queue()
+
+            analyzed = library.list_items()["items"][0]
+            self.assertEqual(item["id"], analyzed["id"])
+            self.assertEqual("complete", analyzed["analysis_status"])
+            self.assertEqual("开心点头", analyzed["name"])
+            self.assertEqual("vision-test", analyzed["analysis_provider"])
+            provider.text_chat.assert_awaited_once()
+            call_kwargs = provider.text_chat.await_args.kwargs
+            self.assertEqual(1, len(call_kwargs["image_urls"]))
+            self.assertIn("只输出一个 JSON 数组", call_kwargs["prompt"])
+
+    async def test_analyze_endpoint_requeues_completed_item(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            library = ReactionAssetLibrary(folder)
+            item = library.import_blobs(
+                [("停用自动识别.png", self.PNG_BYTES)],
+                metadata={"auto_analyze": False},
+            )["items"][0]
+            plugin = SimpleNamespace(data_dir=folder)
+            api = PrivateCompanionPageApi(plugin)
+            api._schedule_reaction_library_analysis = lambda: None
+            fake_request = SimpleNamespace(
+                get_json=AsyncMock(return_value={"ids": [item["id"]], "force": True})
+            )
+
+            with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
+                result = await api.analyze_reaction_library()
+
+            self.assertTrue(result["success"])
+            self.assertEqual(1, result["data"]["queued"])
+            self.assertEqual("pending", library.list_items()["items"][0]["analysis_status"])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 import unicodedata
 import uuid
@@ -32,6 +33,8 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from xml.etree import ElementTree as ET
+
+_PHOTO_GENERATION_TRACE_FILE_LOCK = threading.Lock()
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -146,7 +149,23 @@ from .photo_reference_catalog import (
 )
 from .photo_prompt_context import (
     PhotoPromptSection,
+    _clip as _clip_photo_prompt_text,
     resolve_photo_prompt_context,
+)
+from .photo_reference_feedback import analyze_photo_reference_feedback
+from .photo_reference_intent import (
+    CONTINUITY_MODES,
+    REFERENCE_ROLES,
+    ReferenceIntent,
+    analyze_indexed_reference_roles,
+    analyze_reference_intent,
+)
+from .photo_reference_plan import (
+    PhotoReferencePlan,
+    ReferenceFallback,
+    build_photo_reference_plan,
+    evaluate_reference_fallback,
+    project_reference_plan_for_backend,
 )
 from .photo_wardrobe_decision import (
     PhotoWardrobeDecision,
@@ -308,6 +327,14 @@ class PhotoGenerationResult:
     suggestion_status: str = ""
     prompt_hash: str = ""
     prompt_path: str = ""
+    reference_requested_roles: tuple[str, ...] = ()
+    reference_excluded_roles: tuple[str, ...] = ()
+    continuity_mode: str = "ambiguous"
+    reference_confidence: float = 0.0
+    reference_plan: tuple[dict[str, Any], ...] = ()
+    reference_fulfilled_roles: tuple[str, ...] = ()
+    reference_missing_roles: tuple[str, ...] = ()
+    reference_fallback_message: str = ""
 
     @property
     def success(self) -> bool:
@@ -8383,6 +8410,150 @@ Output:
             f"tool_name={_single_line(getattr(self, 'custom_photo_tool_name', ''), 80) or '-'}"
         )
 
+    def _photo_generation_trace_max_bytes(self) -> int:
+        max_kb = _safe_int(
+            getattr(self, "photo_generation_trace_max_size_kb", 0),
+            0,
+        )
+        return max(0, min(102400, max_kb)) * 1024
+
+    def _photo_generation_trace_backup_count(self) -> int:
+        return max(
+            0,
+            min(
+                20,
+                _safe_int(getattr(self, "photo_generation_trace_backup_count", 5), 5),
+            ),
+        )
+
+    def _photo_generation_trace_file_path(self) -> Path:
+        return Path(self.data_dir) / "photo_generation_trace.txt"
+
+    def _rotate_photo_generation_trace_files(self, path: Path) -> None:
+        backup_count = self._photo_generation_trace_backup_count()
+        if backup_count <= 0:
+            path.unlink(missing_ok=True)
+            return
+        for index in range(backup_count, 0, -1):
+            source = path if index == 1 else path.with_name(
+                f"{path.stem}.{index - 1}{path.suffix}"
+            )
+            target = path.with_name(f"{path.stem}.{index}{path.suffix}")
+            if source.exists():
+                os.replace(source, target)
+
+    def _sanitize_photo_generation_trace_value(
+        self,
+        value: Any,
+        *,
+        key: str = "",
+        depth: int = 0,
+    ) -> Any:
+        if depth > 5:
+            return "[truncated]"
+        normalized_key = str(key or "").strip().lower()
+        if any(
+            token in normalized_key
+            for token in ("api_key", "apikey", "authorization", "access_token", "secret", "password")
+        ):
+            return "***"
+        if isinstance(value, dict):
+            return {
+                _single_line(item_key, 80): self._sanitize_photo_generation_trace_value(
+                    item_value,
+                    key=str(item_key),
+                    depth=depth + 1,
+                )
+                for item_key, item_value in list(value.items())[:48]
+                if _single_line(item_key, 80)
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [
+                self._sanitize_photo_generation_trace_value(item, depth=depth + 1)
+                for item in list(value)[:48]
+            ]
+        if isinstance(value, str):
+            redacted = _redact_outbound_secrets(value, self)
+            if normalized_key.endswith("path") or normalized_key.endswith("_path"):
+                return _path_text(redacted, 1000)
+            return _single_line(redacted, 1200)
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return _single_line(value, 500)
+
+    def _append_photo_generation_trace_event(
+        self,
+        trace_id: str,
+        stage: str,
+        *,
+        status: str = "ok",
+        data: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            max_bytes = self._photo_generation_trace_max_bytes()
+            if max_bytes <= 0:
+                return
+            normalized_trace = _single_line(trace_id, 80)
+            normalized_stage = _single_line(stage, 80)
+            if not normalized_trace or not normalized_stage:
+                return
+            now = _now_ts()
+            states = getattr(self, "_photo_generation_trace_states", None)
+            if not isinstance(states, dict):
+                states = {}
+                self._photo_generation_trace_states = states
+            if normalized_trace not in states and len(states) >= 128:
+                states.pop(next(iter(states)), None)
+            state = states.setdefault(
+                normalized_trace,
+                {"started_at": now, "seq": 0, "context": {}},
+            )
+            state["seq"] = _safe_int(state.get("seq"), 0, 0) + 1
+            if context:
+                state["context"].update(self._sanitize_photo_generation_trace_value(context))
+            payload = {
+                "schema_version": 1,
+                "ts": now,
+                "time": datetime.fromtimestamp(now).astimezone().isoformat(timespec="milliseconds"),
+                "trace": normalized_trace,
+                "seq": state["seq"],
+                "stage": normalized_stage,
+                "status": _single_line(status, 30) or "ok",
+                "elapsed_ms": max(0, int((now - _safe_float(state.get("started_at"), now, 0.0)) * 1000)),
+                "context": dict(state["context"]),
+                "data": self._sanitize_photo_generation_trace_value(data or {}),
+            }
+            line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            encoded_size = len(line.encode("utf-8"))
+            if encoded_size > max_bytes:
+                payload["context"] = {
+                    "truncated": True,
+                    "reason": "event_exceeds_max_size",
+                }
+                payload["data"] = {
+                    "truncated": True,
+                    "reason": "event_exceeds_max_size",
+                    "original_bytes": encoded_size,
+                }
+                line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+                encoded_size = len(line.encode("utf-8"))
+            path = self._photo_generation_trace_file_path()
+            with _PHOTO_GENERATION_TRACE_FILE_LOCK:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                current_size = path.stat().st_size if path.exists() else 0
+                if current_size and current_size + encoded_size > max_bytes:
+                    self._rotate_photo_generation_trace_files(path)
+                with path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(line)
+            if normalized_stage in {"delivery_completed", "delivery_failed", "failed"}:
+                states.pop(normalized_trace, None)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 记录生图可观测 trace 失败: %s",
+                _single_line(exc, 120),
+            )
+
     def _record_recent_photo_generation(
         self,
         *,
@@ -8401,6 +8572,10 @@ Output:
         presets: list[str] | None = None,
         reference_used: bool = False,
         reference_candidate: dict[str, Any] | None = None,
+        reference_intent: ReferenceIntent | None = None,
+        reference_plan: PhotoReferencePlan | None = None,
+        reference_fallback: ReferenceFallback | None = None,
+        submitted_reference_ids: tuple[str, ...] = (),
         wardrobe: PhotoWardrobeDecision | None = None,
         prompt_hash: str = "",
         prompt_path: str = "",
@@ -8418,6 +8593,9 @@ Output:
         try:
             reference_candidate = reference_candidate or {}
             wardrobe_payload = wardrobe.as_dict() if wardrobe is not None else {}
+            intent_payload = reference_intent or ReferenceIntent((), (), "ambiguous", 0.0, "none")
+            plan_payload = reference_plan or PhotoReferencePlan((), "", "", "")
+            fallback_payload = reference_fallback or ReferenceFallback((), (), (), "")
             final_presets = [
                 _single_line(name, 40)
                 for name in (presets or [])
@@ -8458,6 +8636,41 @@ Output:
                 "reference_kind": _single_line(reference_candidate.get("kind"), 40),
                 "reference_roles": list(reference_candidate.get("reference_roles") or [])[:8],
                 "reference_outfit_category": _single_line(reference_candidate.get("outfit_category"), 40),
+                "reference_intent": {
+                    "requested_roles": list(intent_payload.requested_roles),
+                    "excluded_roles": list(intent_payload.excluded_roles),
+                    "continuity_mode": _single_line(intent_payload.continuity_mode, 30),
+                    "confidence": round(float(intent_payload.confidence), 3),
+                    "source": _single_line(intent_payload.source, 40),
+                },
+                "reference_plan": {
+                    "bindings": [
+                        {
+                            "reference_id": _single_line(binding.reference_id, 80),
+                            "path": _path_text(binding.path, 1000),
+                            "roles": list(binding.roles),
+                            "priority": int(binding.priority),
+                            "preserve": list(binding.preserve),
+                            "ignore": list(binding.ignore),
+                            "submitted": binding.reference_id in submitted_reference_ids,
+                        }
+                        for binding in plan_payload.bindings
+                    ],
+                    "primary_reference_id": _single_line(plan_payload.primary_reference_id, 80),
+                    "selection_reason": _single_line(plan_payload.selection_reason, 80),
+                    "fallback_reason": _single_line(plan_payload.fallback_reason, 80),
+                    "submitted_reference_ids": [
+                        _single_line(reference_id, 80)
+                        for reference_id in submitted_reference_ids
+                        if _single_line(reference_id, 80)
+                    ],
+                },
+                "reference_fallback": {
+                    "requested_roles": list(fallback_payload.requested_roles),
+                    "fulfilled_roles": list(fallback_payload.fulfilled_roles),
+                    "missing_roles": list(fallback_payload.missing_roles),
+                    "message": _single_line(fallback_payload.message, 260),
+                },
                 "image_size": _single_line(image_size, 40),
                 "elapsed_ms": int(max(0, elapsed_ms or 0)),
                 "presets": final_presets,
@@ -8519,6 +8732,103 @@ Output:
         except Exception as exc:
             logger.debug("[PrivateCompanion] 记录最近生图提示词失败: %s", _single_line(exc, 120))
 
+    def _record_photo_reference_feedback(
+        self,
+        feedback_text: Any,
+        *,
+        continuity_key: str = "",
+        session_key: str = "",
+    ) -> dict[str, Any]:
+        feedback = analyze_photo_reference_feedback(feedback_text)
+        if not feedback.issues and not feedback.regenerate_requested:
+            return {}
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        generations = data.get("recent_photo_generations")
+        if not isinstance(generations, list):
+            return {}
+        normalized_continuity = self._normalize_photo_continuity_key(continuity_key)
+        normalized_session = _single_line(session_key, 340)
+        if not normalized_continuity and not normalized_session:
+            return {}
+        linked: dict[str, Any] | None = None
+        now = _now_ts()
+        for candidate in generations:
+            if not isinstance(candidate, dict):
+                continue
+            if normalized_continuity and self._normalize_photo_continuity_key(
+                candidate.get("continuity_key")
+            ) != normalized_continuity:
+                continue
+            if normalized_session and _single_line(candidate.get("session"), 340) != normalized_session:
+                continue
+            generated_at = _safe_float(candidate.get("ts"), 0.0, 0.0)
+            if generated_at and now - generated_at > 6 * 3600:
+                continue
+            linked = candidate
+            break
+        if linked is None:
+            return {}
+
+        issues = list(dict.fromkeys((*linked.get("reference_feedback_issues", []), *feedback.issues)))
+        linked["regeneration_requested"] = bool(
+            linked.get("regeneration_requested") or feedback.regenerate_requested
+        )
+        linked["reference_feedback_issues"] = issues
+        linked["reference_feedback_count"] = _safe_int(
+            linked.get("reference_feedback_count"), 0, 0
+        ) + 1
+        record = {
+            "schema_version": 1,
+            "ts": now,
+            "feedback": _single_line(feedback_text, 500),
+            "regenerate_requested": feedback.regenerate_requested,
+            "issues": list(feedback.issues),
+            "confidence": feedback.confidence,
+            "source": feedback.source,
+            "generation_trace": _single_line(linked.get("trace"), 40),
+            "generation_ts": linked.get("ts"),
+            "continuity_key": self._normalize_photo_continuity_key(linked.get("continuity_key")),
+            "session": _single_line(linked.get("session"), 340),
+            "backend": _single_line(linked.get("backend"), 80),
+            "final_prompt": _single_line(linked.get("prompt"), 900),
+            "prompt_hash": _single_line(linked.get("prompt_hash"), 80),
+            "prompt_path": _path_text(linked.get("prompt_path"), 1000),
+            "reference_intent": deepcopy(linked.get("reference_intent") or {}),
+            "reference_plan": deepcopy(linked.get("reference_plan") or {}),
+            "reference_fallback": deepcopy(linked.get("reference_fallback") or {}),
+        }
+        records = data.setdefault("photo_reference_feedback", [])
+        if not isinstance(records, list):
+            records = []
+            data["photo_reference_feedback"] = records
+        records.insert(0, record)
+        del records[96:]
+        self._save_data_sync()
+        return record
+
+    def _record_photo_reference_feedback_from_event(self, event: Any) -> dict[str, Any]:
+        if event is None or bool(getattr(event, "_private_companion_photo_feedback_recorded", False)):
+            return {}
+        try:
+            setattr(event, "_private_companion_photo_feedback_recorded", True)
+        except Exception:
+            pass
+        text = str(getattr(event, "message_str", "") or "")
+        try:
+            user_id = str(event.get_sender_id())
+        except Exception:
+            user_id = ""
+        session = _single_line(getattr(event, "unified_msg_origin", ""), 340)
+        continuity_key = self._compose_photo_continuity_key(session, user_id)
+        if not continuity_key:
+            return {}
+        return self._record_photo_reference_feedback(
+            text,
+            continuity_key=continuity_key,
+        )
+
     def _write_photo_prompt_debug_file(
         self,
         *,
@@ -8543,9 +8853,14 @@ Output:
         residual_conflict_details: list[dict[str, Any]],
         reference_removed: dict[str, Any] | None,
         sanitizer_version: int,
+        reference_intent: ReferenceIntent | None = None,
+        reference_plan: PhotoReferencePlan | None = None,
+        reference_fallback: ReferenceFallback | None = None,
         suggested_scene_preset: str = "",
     ) -> tuple[str, str]:
         prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
+        if self._photo_generation_trace_max_bytes() <= 0:
+            return "", prompt_hash
         try:
             root = Path(self.data_dir) / "photo_prompt_debug"
             root.mkdir(parents=True, exist_ok=True)
@@ -8572,6 +8887,9 @@ Output:
                 "preferred_preset": _single_line((reference or {}).get("preferred_preset"), 60),
                 "metadata_source": _single_line((reference or {}).get("metadata_source"), 30),
             }
+            intent_payload = reference_intent or ReferenceIntent((), (), "ambiguous", 0.0, "none")
+            plan_payload = reference_plan or PhotoReferencePlan((), "", "", "")
+            fallback_payload = reference_fallback or ReferenceFallback((), (), (), "")
             payload = redact(
                 {
                     "schema_version": 3,
@@ -8586,6 +8904,35 @@ Output:
                     "scene_context_before": scene_context_before,
                     "scene_context_after": scene_context_after,
                     "reference": reference_payload,
+                    "reference_intent": {
+                        "requested_roles": list(intent_payload.requested_roles),
+                        "excluded_roles": list(intent_payload.excluded_roles),
+                        "continuity_mode": intent_payload.continuity_mode,
+                        "confidence": intent_payload.confidence,
+                        "source": intent_payload.source,
+                    },
+                    "reference_plan": {
+                        "bindings": [
+                            {
+                                "reference_id": binding.reference_id,
+                                "path": binding.path,
+                                "roles": list(binding.roles),
+                                "priority": binding.priority,
+                                "preserve": list(binding.preserve),
+                                "ignore": list(binding.ignore),
+                            }
+                            for binding in plan_payload.bindings
+                        ],
+                        "primary_reference_id": plan_payload.primary_reference_id,
+                        "selection_reason": plan_payload.selection_reason,
+                        "fallback_reason": plan_payload.fallback_reason,
+                    },
+                    "reference_fallback": {
+                        "requested_roles": list(fallback_payload.requested_roles),
+                        "fulfilled_roles": list(fallback_payload.fulfilled_roles),
+                        "missing_roles": list(fallback_payload.missing_roles),
+                        "message": fallback_payload.message,
+                    },
                     "wardrobe_decision": wardrobe.as_dict(),
                     "presets": list(presets)[:1],
                     "prompt_sections_before": prompt_sections_before,
@@ -9015,11 +9362,11 @@ Output:
             natural = f"Create a single coherent image showing {positive}."
             if negative:
                 natural += f" Avoid {negative}."
-            return self._photo_prompt_clip(natural, 2400, preserve_tail=True)
+            return self._photo_prompt_clip(natural, 6000, preserve_tail=True)
         formatted = f"Positive prompt: {positive}."
         if negative:
             formatted += f" Negative prompt: {negative}."
-        return self._photo_prompt_clip(formatted, 2400, preserve_tail=True)
+        return self._photo_prompt_clip(formatted, 6000, preserve_tail=True)
 
     def _photo_generation_selfie_schedule_scene_hint(
         self,
@@ -9105,6 +9452,53 @@ Output:
             parts.append(f"当前场景：{scene_category_label}")
         return _single_line("；".join(parts), 460)
 
+    def _photo_reference_schedule_history_context(self) -> str:
+        """Format today's started schedule items for reference selection only."""
+
+        snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
+        if not callable(snapshot_builder):
+            return ""
+        try:
+            snapshot = snapshot_builder()
+        except Exception:
+            return ""
+        schedule = snapshot.get("schedule") if isinstance(snapshot, dict) else {}
+        history = schedule.get("history") if isinstance(schedule, dict) else []
+        if not isinstance(history, list):
+            return ""
+        labels = {
+            "active": "进行中",
+            "completed": "已完成",
+            "changed": "已变更",
+        }
+        lines: list[str] = []
+        for item in history[:24]:
+            if not isinstance(item, dict):
+                continue
+            status = _single_line(item.get("status"), 20).lower()
+            if status not in labels:
+                continue
+            start = _single_line(item.get("time"), 12)
+            end = _single_line(item.get("end"), 12)
+            activity = _single_line(item.get("activity"), 160)
+            mood = _single_line(item.get("mood"), 32)
+            if not activity:
+                continue
+            window = "-".join(part for part in (start, end) if part)
+            lines.append(
+                "｜".join(
+                    part
+                    for part in (
+                        window,
+                        labels[status],
+                        activity,
+                        f"情绪：{mood}" if mood else "",
+                    )
+                    if part
+                )
+            )
+        return self._photo_prompt_clip("\n".join(lines), 2400)
+
     @staticmethod
     def _photo_reference_paths_equal(left: str, right: str) -> bool:
         left_text = str(left or "").strip()
@@ -9117,6 +9511,21 @@ Output:
         except (OSError, ValueError):
             pass
         return os.path.normcase(left_text) == os.path.normcase(right_text)
+
+    @staticmethod
+    def _photo_persona_fallback_allowed(
+        workflow_kind: str,
+        reference_intent: ReferenceIntent,
+    ) -> bool:
+        requested_roles = set(reference_intent.requested_roles or ())
+        excluded_roles = set(reference_intent.excluded_roles or ())
+        return (
+            str(workflow_kind or "").strip().lower()
+            in {"selfie", "portrait", "自拍", "人像"}
+            and reference_intent.continuity_mode != "new_topic"
+            and "identity" in requested_roles
+            and "identity" not in excluded_roles
+        )
 
     def _photo_generation_recent_continuity_constraint(
         self,
@@ -9151,18 +9560,7 @@ Output:
 
     @staticmethod
     def _photo_prompt_clip(value: Any, limit: int, *, preserve_tail: bool = False) -> str:
-        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        if limit <= 0 or len(text) <= limit:
-            return text
-        marker = " ... [section compacted] ... "
-        if not preserve_tail or limit <= len(marker) + 40:
-            return text[:limit].rstrip()
-        available = limit - len(marker)
-        head_size = max(20, int(available * 0.62))
-        tail_size = max(20, available - head_size)
-        return f"{text[:head_size].rstrip()}{marker}{text[-tail_size:].lstrip()}"
+        return _clip_photo_prompt_text(value, limit, preserve_tail=preserve_tail)
 
     @staticmethod
     def _photo_prompt_split_formatted(prompt_text: str) -> tuple[str, str]:
@@ -9365,9 +9763,9 @@ Output:
             return "", ""
         return (
             "Image edit contract: use the user-provided image as the sole source canvas and visual identity reference. "
-            "This is not a selfie or a new character portrait. Preserve every subject, face, body, outfit, pose, composition, camera angle, and background detail unless the user explicitly asks to change it. "
+            "Treat the request strictly as a constrained edit of that supplied canvas. Preserve every subject, face, body, outfit, pose, composition, camera angle, and background detail unless the user explicitly asks to change it. "
             "Apply only the requested edit and keep unrelated pixels and details as close to the source as possible.",
-            "replacing the source person with the assistant persona, restoring today's outfit, unrelated redesigns",
+            "a selfie or a new character portrait, replacing the source person with the assistant persona, restoring today's outfit, unrelated redesigns",
         )
 
     @staticmethod
@@ -9673,6 +10071,7 @@ Output:
         requester_user_id: str = "",
         requester_is_private: bool | None = None,
         reference_image_path: str = "",
+        reference_image_paths: Any = (),
         image_size: str = "",
         allow_daily_outfit_reference: bool = True,
         requested_scene_preset: str = "",
@@ -9689,8 +10088,31 @@ Output:
             requester_is_private = bool(
                 re.search(r"(?:friendmessage|privatemessage|private)", str(session_key or ""), flags=re.I)
             )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "request_received",
+            data={
+                "request_text": request_text,
+                "prompt_text": original_prompt_text,
+                "image_size": image_size,
+            },
+            context={
+                "session": session_key,
+                "continuity_key": continuity_key,
+                "workflow_kind": workflow_kind,
+                "request_text": request_text,
+            },
+        )
         reference_image_path = _path_text(reference_image_path, 1000)
-        explicit_reference_supplied = bool(reference_image_path)
+        explicit_reference_paths: list[str] = []
+        raw_reference_paths = reference_image_paths
+        if isinstance(raw_reference_paths, str):
+            raw_reference_paths = (raw_reference_paths,)
+        for raw_path in (reference_image_path, *(raw_reference_paths or ())):
+            path = _path_text(raw_path, 1000)
+            if path and path not in explicit_reference_paths:
+                explicit_reference_paths.append(path)
+        explicit_reference_supplied = bool(explicit_reference_paths)
         # requested_scene_preset is the documented tool/generator contract.
         # Keep the short-lived suggested_scene_preset name as a compatibility alias.
         suggested_scene_preset = _single_line(
@@ -9699,28 +10121,47 @@ Output:
         )
         workflow_default_scene_preset = _single_line(workflow_default_scene_preset, 80)
         wardrobe_intent = analyze_photo_wardrobe(request_text)
+        reference_intent = await self._analyze_photo_reference_intent_async(
+            request_text,
+            has_explicit_reference=bool(explicit_reference_paths),
+            workflow_kind=workflow_kind,
+        )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "reference_intent_analyzed",
+            data={
+                "requested_roles": list(reference_intent.requested_roles),
+                "excluded_roles": list(reference_intent.excluded_roles),
+                "continuity_mode": reference_intent.continuity_mode,
+                "confidence": reference_intent.confidence,
+                "source": reference_intent.source,
+            },
+        )
         base_prompt = self._apply_photo_generation_prompt_format(original_prompt_text)
         current_user_request = wardrobe_intent.positive_text
         current_user_exclusions = wardrobe_intent.exclusion_text
         normalized_kind = str(workflow_kind or "").strip().lower()
         scene_context_before = ""
-        if normalized_kind in {"selfie", "portrait", "自拍", "人像"} and allow_daily_outfit_reference:
-            if not requester_user_id:
-                try:
-                    scene_context_before = self._photo_generation_selfie_schedule_scene_hint(
-                        "",
-                        include_dialogue_outfit=bool(requester_is_private),
-                    )
-                except TypeError:
-                    scene_context_before = self._photo_generation_selfie_schedule_scene_hint()
-            else:
-                try:
-                    scene_context_before = self._photo_generation_selfie_schedule_scene_hint(
-                        requester_user_id,
-                        include_dialogue_outfit=bool(requester_is_private),
-                    )
-                except TypeError:
-                    scene_context_before = self._photo_generation_selfie_schedule_scene_hint()
+        schedule_history_context = ""
+        if normalized_kind in {"selfie", "portrait", "自拍", "人像"}:
+            schedule_history_context = self._photo_reference_schedule_history_context()
+            if allow_daily_outfit_reference:
+                if not requester_user_id:
+                    try:
+                        scene_context_before = self._photo_generation_selfie_schedule_scene_hint(
+                            "",
+                            include_dialogue_outfit=bool(requester_is_private),
+                        )
+                    except TypeError:
+                        scene_context_before = self._photo_generation_selfie_schedule_scene_hint()
+                else:
+                    try:
+                        scene_context_before = self._photo_generation_selfie_schedule_scene_hint(
+                            requester_user_id,
+                            include_dialogue_outfit=bool(requester_is_private),
+                        )
+                    except TypeError:
+                        scene_context_before = self._photo_generation_selfie_schedule_scene_hint()
         dialogue_outfit_match = re.search(
             r"对话最新服装\s*[：:]\s*(.+?)(?=；|;|$)",
             scene_context_before,
@@ -9761,24 +10202,126 @@ Output:
             1800,
             preserve_tail=True,
         )
-        if reference_image_path:
-            reference_candidate = await self._photo_reference_candidate_for_path_async(
-                reference_image_path,
+        reference_plan = await self._select_photo_reference_plan_async(
+            workflow_kind,
+            reference_intent=reference_intent,
+            wardrobe_intent=wardrobe_intent,
+            allow_daily_outfit=allow_daily_outfit_reference,
+            request_text=selection_request,
+            ambient_context=scene_context_before,
+            schedule_history_context=schedule_history_context,
+            suggested_scene_preset=suggested_scene_preset,
+            continuity_key=continuity_key,
+            explicit_reference_paths=explicit_reference_paths,
+            require_existing_paths=True,
+            trace_id=trace_id,
+        )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "reference_plan_built",
+            data={
+                "primary_reference_id": reference_plan.primary_reference_id,
+                "selection_reason": reference_plan.selection_reason,
+                "fallback_reason": reference_plan.fallback_reason,
+                "bindings": [
+                    {
+                        "reference_id": binding.reference_id,
+                        "path": binding.path,
+                        "roles": list(binding.roles),
+                        "priority": binding.priority,
+                        "preserve": list(binding.preserve),
+                        "ignore": list(binding.ignore),
+                    }
+                    for binding in reference_plan.bindings
+                ],
+            },
+        )
+        backend_reference_capacity = self._photo_reference_backend_max_images(
+            workflow_kind,
+            requested_images=len(reference_plan.bindings),
+        )
+        submitted_bindings, plan_text_fallback = project_reference_plan_for_backend(
+            reference_plan,
+            max_images=backend_reference_capacity,
+        )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "reference_plan_projected",
+            data={
+                "backend_capacity": backend_reference_capacity,
+                "submitted_reference_ids": [binding.reference_id for binding in submitted_bindings],
+                "text_fallback": plan_text_fallback,
+            },
+        )
+        reference_candidate: dict[str, Any] = {}
+        reference_image_path = ""
+        submitted_reference_entries: list[tuple[Any, dict[str, Any], str]] = []
+        for binding in submitted_bindings:
+            candidate = await self._photo_reference_candidate_from_plan_binding_async(
+                binding,
                 workflow_kind=workflow_kind,
                 allow_daily_outfit=allow_daily_outfit_reference,
                 continuity_key=continuity_key,
             )
-        else:
-            reference_candidate = await self._select_photo_reference_candidate_async(
+            candidate_path = _path_text(candidate.get("path"), 1000)
+            if candidate and candidate_path:
+                submitted_reference_entries.append((binding, candidate, candidate_path))
+        submitted_bindings = tuple(entry[0] for entry in submitted_reference_entries)
+        reference_image_paths = [entry[2] for entry in submitted_reference_entries]
+        if submitted_reference_entries:
+            reference_candidate = submitted_reference_entries[0][1]
+            reference_image_path = submitted_reference_entries[0][2]
+        if (
+            not reference_candidate
+            and self._photo_persona_fallback_allowed(
                 workflow_kind,
-                allow_daily_outfit=allow_daily_outfit_reference,
-                request_text=selection_request,
-                ambient_context=scene_context_before,
-                suggested_scene_preset=suggested_scene_preset,
-                continuity_key=continuity_key,
-                wardrobe_intent=wardrobe_intent,
+                reference_intent,
             )
-            reference_image_path = _path_text(reference_candidate.get("path"), 1000)
+        ):
+            fallback_path = await self._photo_persona_reference_image_path_async()
+            if fallback_path:
+                fallback_candidate = {
+                    "id": "persona",
+                    "kind": "persona",
+                    "path": fallback_path,
+                    "source": fallback_path,
+                    "reference_roles": ["identity"],
+                    "outfit_lock_default": False,
+                }
+                fallback_plan = build_photo_reference_plan(
+                    reference_intent,
+                    (fallback_candidate,),
+                )
+                fallback_bindings, fallback_text = project_reference_plan_for_backend(
+                    fallback_plan,
+                    max_images=backend_reference_capacity,
+                )
+                if fallback_bindings:
+                    reference_plan = fallback_plan
+                    submitted_bindings = fallback_bindings
+                    plan_text_fallback = fallback_text
+                    reference_candidate = fallback_candidate
+                    reference_image_path = fallback_path
+                    submitted_reference_entries = [
+                        (fallback_bindings[0], fallback_candidate, fallback_path)
+                    ]
+                    reference_image_paths = [fallback_path]
+        if len(submitted_reference_entries) > 1:
+            responsibilities = "; ".join(
+                f"reference image {index}: {', '.join(binding.roles)}"
+                for index, (binding, _candidate, _path) in enumerate(
+                    submitted_reference_entries,
+                    start=1,
+                )
+            )
+            multi_reference_instruction = (
+                "Submitted visual reference responsibilities: "
+                f"{responsibilities}. Use each image only for its assigned roles; "
+                "do not copy unrelated clothing, pose, scene, or style details."
+            )
+            plan_text_fallback = "\n".join(
+                part for part in (multi_reference_instruction, plan_text_fallback) if part
+            )
 
         wardrobe = resolve_photo_wardrobe_decision(
             workflow_kind=workflow_kind,
@@ -9790,6 +10333,11 @@ Output:
             workflow_default_scene_preset=workflow_default_scene_preset,
             base_prompt=base_prompt,
             available_presets=self._photo_generation_scene_presets().keys(),
+        )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "wardrobe_resolved",
+            data=wardrobe.as_dict(),
         )
         base_prompt = wardrobe.base_prompt
         scene_context_after = wardrobe.scene_context
@@ -9808,7 +10356,12 @@ Output:
         )
         initial_sections = list(prompt_sections or ())
         if not initial_sections:
-            user_positive, user_negative = self._photo_prompt_split_formatted(base_prompt)
+            # Keep natural NAI exclusions negative without restoring context removed from base_prompt.
+            user_positive, user_negative = self._photo_generation_semantic_prompt_parts(
+                base_prompt
+            )
+            if not user_positive and not user_negative:
+                user_positive, user_negative = self._photo_prompt_split_formatted(base_prompt)
             initial_sections.append(
                 PhotoPromptSection(
                     name="user_request",
@@ -9846,6 +10399,11 @@ Output:
                 source="wardrobe_decision",
                 positive=wardrobe_positive,
                 negative=wardrobe_negative,
+            ),
+            PhotoPromptSection(
+                name="reference_plan_fallback",
+                source="reference_fallback",
+                positive=plan_text_fallback,
             ),
             PhotoPromptSection(
                 name="scene_context",
@@ -9897,6 +10455,40 @@ Output:
         prompt_text = resolved_context.final_prompt
         reference_candidate = dict(resolved_context.reference or {})
         reference_image_path = _path_text(reference_candidate.get("path"), 1000)
+        if not reference_candidate:
+            submitted_reference_entries = []
+            reference_image_paths = []
+            submitted_bindings = ()
+        elif submitted_reference_entries:
+            submitted_reference_entries[0] = (
+                submitted_reference_entries[0][0],
+                reference_candidate,
+                reference_image_path,
+            )
+            reference_image_paths = [entry[2] for entry in submitted_reference_entries]
+        try:
+            reference_exists = bool(reference_image_path and Path(reference_image_path).is_file())
+        except (OSError, ValueError):
+            reference_exists = False
+        valid_submitted_entries: list[tuple[Any, dict[str, Any], str]] = []
+        for entry in submitted_reference_entries:
+            try:
+                if Path(entry[2]).is_file():
+                    valid_submitted_entries.append(entry)
+            except (OSError, ValueError):
+                continue
+        submitted_reference_entries = valid_submitted_entries
+        submitted_bindings = tuple(entry[0] for entry in submitted_reference_entries)
+        reference_image_paths = [entry[2] for entry in submitted_reference_entries]
+        reference_image_path = reference_image_paths[0] if reference_image_paths else ""
+        submitted_reference_ids = tuple(
+            binding.reference_id for binding in submitted_bindings
+        )
+        reference_fallback = evaluate_reference_fallback(
+            reference_intent,
+            reference_plan,
+            submitted_reference_ids=submitted_reference_ids,
+        )
         def section_log_key(section: PhotoPromptSection, used: dict[str, int]) -> str:
             base = _single_line(section.name, 80) or section.source
             used[base] = used.get(base, 0) + 1
@@ -9955,6 +10547,9 @@ Output:
             scene_context_before=scene_context_before,
             scene_context_after=scene_context_after,
             reference=reference_candidate,
+            reference_intent=reference_intent,
+            reference_plan=reference_plan,
+            reference_fallback=reference_fallback,
             wardrobe=wardrobe,
             presets=preset_names,
             prompt_sections_before=prompt_sections_before,
@@ -9971,6 +10566,20 @@ Output:
             sanitizer_version=resolved_context.sanitizer_version,
             suggested_scene_preset=suggested_scene_preset,
         )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "prompt_composed",
+            data={
+                "prompt": prompt_text,
+                "prompt_hash": prompt_hash,
+                "prompt_path": prompt_path,
+                "sections": prompt_sections_for_log,
+                "conflicts": conflicts,
+                "removed_conflicts": removed_conflicts,
+                "residual_conflicts": residual_conflicts,
+                "sanitizer_version": resolved_context.sanitizer_version,
+            },
+        )
         if scene_context_after:
             logger.info(
                 "[PrivateCompanion] 自拍生图已加入当前日程地点约束: trace=%s session=%s hint=%s reference=%s",
@@ -9980,10 +10589,15 @@ Output:
                 bool(reference_image_path),
             )
         preferred = self.photo_generation_backend
-        try:
-            reference_exists = bool(reference_image_path and Path(reference_image_path).is_file())
-        except (OSError, ValueError):
-            reference_exists = False
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "backend_selected",
+            data={
+                "preferred": preferred,
+                "reference_count": len(reference_image_paths),
+                "image_size": image_size,
+            },
+        )
         logger.info(
             "[PrivateCompanion] 生图开始: trace=%s session=%s kind=%s presets=%s prompt_chars=%s prompt_hash=%s prompt_debug=%s "
             "reference=%s reference_exists=%s reference_id=%s reference_kind=%s reference_roles=%s "
@@ -10035,6 +10649,8 @@ Output:
         ) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
             image_path = _path_text(image_path, 1000)
+            if reference_fallback.message and reference_fallback.message not in str(note or ""):
+                note = f"{_single_line(note, 260)}；{reference_fallback.message}".strip("；")
             output_exists = False
             if image_path:
                 try:
@@ -10058,6 +10674,19 @@ Output:
                 and reference_exists
                 and reference_submitted
             )
+            self._append_photo_generation_trace_event(
+                trace_id,
+                "output_validated",
+                status="ok" if ok else "error",
+                data={
+                    "backend": backend,
+                    "image_path": image_path,
+                    "note": note,
+                    "output_exists": output_exists,
+                    "reference_submitted": reference_submitted,
+                    "reference_used": reference_used,
+                },
+            )
             self._record_recent_photo_generation(
                 trace_id=trace_id,
                 session_key=session_key,
@@ -10074,6 +10703,10 @@ Output:
                 presets=preset_names,
                 reference_used=reference_used,
                 reference_candidate=reference_candidate,
+                reference_intent=reference_intent,
+                reference_plan=reference_plan,
+                reference_fallback=reference_fallback,
+                submitted_reference_ids=submitted_reference_ids if reference_used else (),
                 wardrobe=wardrobe,
                 prompt_hash=prompt_hash,
                 prompt_path=prompt_path,
@@ -10087,6 +10720,20 @@ Output:
                 removed_conflict_details=removed_conflict_details,
                 residual_conflict_details=residual_conflict_details,
                 suggested_scene_preset=suggested_scene_preset,
+            )
+            self._append_photo_generation_trace_event(
+                trace_id,
+                "completed" if ok else "failed",
+                status="ok" if ok else "error",
+                data={
+                    "backend": backend,
+                    "image_path": image_path,
+                    "note": note,
+                    "elapsed_ms": elapsed_ms,
+                    "reference_used": reference_used,
+                    "output_exists": output_exists,
+                },
+                context={"backend": backend},
             )
             logger.info(
                 "[PrivateCompanion] 生图结束: trace=%s ok=%s backend=%s elapsed=%sms reference_used=%s note=%s %s",
@@ -10112,6 +10759,9 @@ Output:
                 "生图上下文仍存在未能安全清理的服装冲突，已停止调用后端",
             )
 
+        if "source" in reference_fallback.missing_roles:
+            return finish("参考图", "", reference_fallback.message)
+
         if reference_image_path and not reference_exists:
             return finish("参考图", "", f"参考图路径不可用或文件不存在：{_single_line(reference_image_path, 160)}")
 
@@ -10129,12 +10779,13 @@ Output:
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
             )
             return finish(
                 "ComfyUI",
                 image_path,
                 note,
-                reference_submitted=bool(reference_image_path),
+                reference_submitted=bool(reference_image_paths),
             )
         if preferred == "sdgen":
             if not self._sdgen_photo_available():
@@ -10225,13 +10876,14 @@ Output:
                         prompt_text,
                         session_key=session_key,
                         reference_image_path=reference_image_path,
+                        reference_image_paths=reference_image_paths,
                     )
                     if image_path:
                         return finish(
                             "ComfyUI",
                             image_path,
                             note,
-                            reference_submitted=bool(reference_image_path),
+                            reference_submitted=bool(reference_image_paths),
                         )
                     comfyui_note = note
                     logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=comfyui note=%s", trace_id, _single_line(note, 180))
@@ -10273,6 +10925,9 @@ Output:
             metadata.get("reference_path") or kwargs.get("reference_image_path"),
             1000,
         )
+        intent_metadata = metadata.get("reference_intent") if isinstance(metadata.get("reference_intent"), dict) else {}
+        plan_metadata = metadata.get("reference_plan") if isinstance(metadata.get("reference_plan"), dict) else {}
+        fallback_metadata = metadata.get("reference_fallback") if isinstance(metadata.get("reference_fallback"), dict) else {}
         return PhotoGenerationResult(
             backend=_single_line(backend, 80),
             image_path=_path_text(image_path, 1000),
@@ -10301,6 +10956,34 @@ Output:
             suggestion_status=_single_line(metadata.get("suggestion_status"), 60),
             prompt_hash=_single_line(metadata.get("prompt_hash"), 80),
             prompt_path=_path_text(metadata.get("prompt_path"), 1000),
+            reference_requested_roles=tuple(
+                _single_line(role, 40)
+                for role in (intent_metadata.get("requested_roles") or [])
+                if _single_line(role, 40)
+            ),
+            reference_excluded_roles=tuple(
+                _single_line(role, 40)
+                for role in (intent_metadata.get("excluded_roles") or [])
+                if _single_line(role, 40)
+            ),
+            continuity_mode=_single_line(intent_metadata.get("continuity_mode"), 30) or "ambiguous",
+            reference_confidence=_safe_float(intent_metadata.get("confidence"), 0.0, 0.0, 1.0),
+            reference_plan=tuple(
+                dict(binding)
+                for binding in (plan_metadata.get("bindings") or [])
+                if isinstance(binding, dict)
+            ),
+            reference_fulfilled_roles=tuple(
+                _single_line(role, 40)
+                for role in (fallback_metadata.get("fulfilled_roles") or [])
+                if _single_line(role, 40)
+            ),
+            reference_missing_roles=tuple(
+                _single_line(role, 40)
+                for role in (fallback_metadata.get("missing_roles") or [])
+                if _single_line(role, 40)
+            ),
+            reference_fallback_message=_single_line(fallback_metadata.get("message"), 260),
         )
 
     async def _build_photo_scene_prompt(
@@ -10618,7 +11301,12 @@ Output:
         matches: list[tuple[str, int, int, str]] = []
         for category, pattern in patterns:
             for match in re.finditer(pattern, text, flags=re.I):
-                matches.append((category, match.start(), match.end(), match.group(0)))
+                resolved_category = category
+                if category == "homewear" and match.group(0).lower() == "loungewear":
+                    context = text[max(0, match.start() - 40) : match.end() + 40]
+                    if "bedtime" in context:
+                        resolved_category = "sleepwear"
+                matches.append((resolved_category, match.start(), match.end(), match.group(0)))
         matches.sort(key=lambda item: (item[1], item[2]))
         return matches
 
@@ -10704,6 +11392,19 @@ Output:
             ]
         else:
             scene_categories = self._photo_reference_scene_categories_from_text(scene_values or note)
+        time_values = normalized.get("time_categories", normalized.get("time_tags"))
+        if isinstance(time_values, (list, tuple, set)):
+            time_categories = [
+                _single_line(value, 40).lower()
+                for value in time_values
+                if _single_line(value, 40)
+            ]
+        else:
+            time_categories = [
+                _single_line(value, 40).lower()
+                for value in re.split(r"[,，、/|\s]+", str(time_values or ""))
+                if _single_line(value, 40)
+            ]
         lock_default = self._photo_reference_bool(
             normalized.get("outfit_lock_default"),
             default=bool("outfit" in roles and (category or kind in {"daily_outfit", "recent_sent_photo"})),
@@ -10720,6 +11421,7 @@ Output:
                 "outfit_category": category,
                 "outfit_lock_default": lock_default,
                 "scene_categories": list(dict.fromkeys(scene_categories)),
+                "time_categories": list(dict.fromkeys(time_categories)),
                 "preferred_preset": preferred_preset,
                 "metadata_source": _single_line(normalized.get("metadata_source"), 30)
                 or ("configured" if explicit_roles is not None or normalized.get("outfit_category") else "inferred_note"),
@@ -10960,11 +11662,13 @@ Output:
         request_text: str,
         ambient_context: str,
         *,
+        schedule_history_context: str = "",
         wardrobe_intent: PhotoWardrobeIntent,
         requested_outfit_category: str = "",
     ) -> float:
         request_context = re.sub(r"\s+", "", str(request_text or "")).lower()
         ambient = re.sub(r"\s+", "", str(ambient_context or "")).lower()
+        schedule_history = re.sub(r"\s+", "", str(schedule_history_context or "")).lower()
         note = re.sub(r"\s+", "", str(candidate.get("note") or "")).lower()
         kind = candidate.get("kind")
         score = 2.0 if kind == "persona" else (0.5 if kind == "recent_sent_photo" else 1.0)
@@ -10979,6 +11683,7 @@ Output:
         for name, words in categories:
             request_hit = any(word in request_context for word in words)
             ambient_hit = any(word in ambient for word in words)
+            history_hit = any(word in schedule_history for word in words)
             note_hit = any(word in note for word in words)
             if (request_hit or ambient_hit) and candidate.get("kind") == "daily_outfit" and name in {"home", "sleep"}:
                 score -= 20.0
@@ -10987,6 +11692,8 @@ Output:
                     score += 12.0
                 if ambient_hit:
                     score += 6.0
+                if history_hit:
+                    score += 2.0
         candidate_category = str(candidate.get("outfit_category") or "").strip().lower()
         outfit_bearing = "outfit" in set(candidate.get("reference_roles") or ())
         if not outfit_bearing:
@@ -11019,17 +11726,56 @@ Output:
                 scenes.add("school")
             if any(token in text for token in ("外出", "通勤", "逛街", "街头", "旅行")):
                 scenes.add("outdoor")
+            if any(token in text for token in ("办公室", "办公", "公司", "工作场所", "office", "workplace")):
+                scenes.add("office")
+            if any(token in text for token in ("正式场合", "宴会", "婚礼", "舞会", "典礼", "formal event", "banquet")):
+                scenes.add("formal_event")
+            if any(token in text for token in ("运动", "健身", "跑步", "瑜伽", "球场", "体育馆", "gym", "sport")):
+                scenes.add("sport")
+            if any(token in text for token in ("海边", "海滩", "沙滩", "泳池", "beach", "seaside", "pool")):
+                scenes.add("beach")
             return scenes
 
         if structured_scenes & scene_categories(request_context):
             score += 10.0
         if structured_scenes & scene_categories(ambient):
             score += 4.0
+        if structured_scenes & scene_categories(schedule_history):
+            score += 2.0
+        structured_times = {
+            str(value or "").strip().lower()
+            for value in (candidate.get("time_categories") or [])
+            if str(value or "").strip()
+        }
+
+        def time_categories(text: str) -> set[str]:
+            times: set[str] = set()
+            mappings = (
+                ("morning", ("清晨", "早晨", "早上", "晨间", "morning", "sunrise")),
+                ("daytime", ("白天", "日间", "daytime", "daylight")),
+                ("afternoon", ("下午", "午后", "afternoon")),
+                ("evening", ("傍晚", "黄昏", "日落", "evening", "sunset")),
+                ("night", ("夜晚", "晚上", "深夜", "夜景", "night")),
+                ("bedtime", ("睡前", "临睡", "bedtime")),
+            )
+            for category, tokens in mappings:
+                if any(token in text for token in tokens):
+                    times.add(category)
+            return times
+
+        if structured_times & time_categories(request_context):
+            score += 8.0
+        if structured_times & time_categories(ambient):
+            score += 3.0
+        if structured_times & time_categories(schedule_history):
+            score += 1.0
         for token in re.split(r"[，,。；;、/|：:\s]+", note):
             if len(token) >= 2 and token in request_context:
                 score += min(6.0, float(len(token)))
             elif len(token) >= 2 and token in ambient:
                 score += min(3.0, float(len(token)) / 2.0)
+            elif len(token) >= 2 and token in schedule_history:
+                score += min(1.0, float(len(token)) / 4.0)
         return score
 
     async def _select_photo_reference_candidate_async(
@@ -11039,10 +11785,12 @@ Output:
         allow_daily_outfit: bool = True,
         request_text: str = "",
         ambient_context: str = "",
+        schedule_history_context: str = "",
         selection_context: str = "",
         suggested_scene_preset: str = "",
         continuity_key: str = "",
         wardrobe_intent: PhotoWardrobeIntent | None = None,
+        trace_id: str = "",
     ) -> dict[str, Any]:
         if not bool(getattr(self, "enable_photo_reference_image", False)):
             return {}
@@ -11086,7 +11834,9 @@ Output:
             and suggested_scene_preset
             and suggested_scene_preset in available_presets
         ):
-            suggested_category = self._photo_outfit_category_from_text(suggested_scene_preset)
+            suggested_category = self._photo_outfit_category_from_text(
+                suggested_scene_preset
+            )
         requested_category = wardrobe_intent.target_category or suggested_category
         excluded_categories = set(wardrobe_intent.excluded_categories)
         scored_candidates = [
@@ -11096,6 +11846,7 @@ Output:
                     item,
                     request_text,
                     ambient_context,
+                    schedule_history_context=schedule_history_context,
                     wardrobe_intent=wardrobe_intent,
                     requested_outfit_category=requested_category,
                 ),
@@ -11142,12 +11893,13 @@ Output:
             for item in candidates
         )
         needs_model_choice = len(candidates) > 1 or bool(recent_candidate) or specialized_candidate
-        if (request_text or ambient_context) and needs_model_choice and callable(llm_call):
+        if (request_text or ambient_context or schedule_history_context) and needs_model_choice and callable(llm_call):
             selection_reason = "model_invalid_response"
             options = "\n".join(
                 f"{index}. id={item['id']}；职责={','.join(item.get('reference_roles') or []) or 'identity'}；"
                 f"服装类别={_single_line(item.get('outfit_category'), 40) or 'none'}；"
                 f"场景类别={','.join(sorted(str(value) for value in (item.get('scene_categories') or []) if str(value).strip())) or 'none'}；"
+                f"时间类别={','.join(sorted(str(value) for value in (item.get('time_categories') or []) if str(value).strip())) or 'none'}；"
                 f"默认锁服装={bool(item.get('outfit_lock_default'))}；注释={_single_line(item.get('note'), 360)}"
                 for index, item in enumerate(candidates, start=1)
             )
@@ -11159,6 +11911,7 @@ Output:
 当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。
 用户原始要求高于环境上下文；两者冲突时必须按用户原始要求选图，不能让日程或位置覆盖用户明确要求。
 若用户没有明确服装要求，但结构化场景预设给出了服装类别，且候选中存在同类别服装参考，优先选择该服装参考，不要改选基础身份图。结构化预设只用于补足空白，不得覆盖用户明确要求。
+当天已发生日程只可作为较弱的经历、服装和连续性线索，不代表当前位置或当前活动。不得用历史中的旧地点覆盖当前环境；用户原始要求和当前环境始终优先于历史日程。
 不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
 候选 id=recent_sent_photo 是同一会话刚刚已发送的上一张成图。若用户是在自然续拍，主要只要求改变动作、表情、视线、拍摄角度或近似构图，应优先选择它来保持人物、服装和环境连续；若用户明确换人物、换装、换地点、换时间、换整体场景或另起主题，则选择更合适的其他参考图。只有所有候选都不适合新画面时才输出 0。
 只输出候选编号，不要解释。
@@ -11171,6 +11924,9 @@ Output:
 
 【结构化场景预设】
 {suggested_scene_preset or "无"}
+
+【当天已发生日程】
+{_single_line(schedule_history_context, 1200) or "无"}
 
 【候选参考图】
 {options}{none_option}
@@ -11228,7 +11984,7 @@ Output:
         elif len(candidates) == 1 and not recent_candidate and not specialized_candidate:
             selection_source = "single_candidate"
             selection_reason = "only_one_candidate"
-        elif not (request_text or ambient_context):
+        elif not (request_text or ambient_context or schedule_history_context):
             selection_reason = "empty_selection_context"
         elif not callable(llm_call):
             selection_reason = "model_unavailable"
@@ -11257,7 +12013,390 @@ Output:
             _single_line(selected.get("note"), 160) if isinstance(selected, dict) else "-",
             len(candidates),
         )
+        self._append_photo_generation_trace_event(
+            trace_id,
+            "reference_candidates",
+            data={
+                "candidates": [
+                    {
+                        "id": item.get("id"),
+                        "kind": item.get("kind"),
+                        "path": item.get("path"),
+                        "roles": list(item.get("reference_roles") or ()),
+                        "outfit_category": item.get("outfit_category"),
+                        "outfit_lock_default": bool(item.get("outfit_lock_default")),
+                        "scene_categories": list(item.get("scene_categories") or ()),
+                        "time_categories": list(item.get("time_categories") or ()),
+                        "metadata_source": item.get("metadata_source"),
+                        "score": score,
+                    }
+                    for item, score in scored_candidates
+                ],
+                "rule_fallback_id": fallback.get("id") if isinstance(fallback, dict) else "",
+                "selected_id": selected.get("id") if isinstance(selected, dict) else "",
+                "model_reply": model_reply,
+                "selection_source": selection_source,
+                "selection_reason": selection_reason,
+                "schedule_history_context": _single_line(schedule_history_context, 800),
+                "schedule_history_used": bool(str(schedule_history_context or "").strip()),
+            },
+        )
         return self._normalize_photo_reference_candidate_metadata(selected) if isinstance(selected, dict) else {}
+
+    async def _analyze_photo_reference_intent_async(
+        self,
+        request_text: str,
+        *,
+        workflow_kind: str,
+        has_explicit_reference: bool,
+    ) -> ReferenceIntent:
+        rule_intent = analyze_reference_intent(
+            request_text,
+            has_explicit_reference=has_explicit_reference,
+            workflow_kind=workflow_kind,
+        )
+        llm_call = getattr(self, "_llm_call", None)
+        if (
+            not has_explicit_reference
+            or rule_intent.source != "conservative"
+            or not callable(llm_call)
+        ):
+            return rule_intent
+        compact_request = _single_line(request_text, 1200).lower().strip(" ，,。.!！?？；;")
+        if re.fullmatch(
+            r"(?:参考(?:一下|下)?|参考(?:这个|这张|这张图)(?:一下)?|"
+            r"照着(?:这个|这张|这张图)(?:来|画)?|按(?:照)?(?:这个|这张|这张图)(?:来|画)?)",
+            compact_request,
+        ):
+            return rule_intent
+
+        provider_selector = getattr(self, "_task_provider", None)
+        provider_id = ""
+        if callable(provider_selector):
+            provider_id = provider_selector(
+                getattr(self, "photo_prompt_provider_id", ""),
+                getattr(self, "fast_response_provider_id", ""),
+                getattr(self, "llm_provider_id", ""),
+                getattr(self, "mai_style_provider_id", ""),
+            )
+
+        prompt = f"""
+分析用户对显式参考图的职责要求，只输出一个 JSON 对象：
+{{"requested_roles":[],"excluded_roles":[],"continuity_mode":"ambiguous","confidence":0.0}}
+roles 只能是 identity、outfit、pose、scene、style、continuity、source。
+continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
+否定表达放进 excluded_roles，不能同时作为 requested_roles。
+无法确定时 confidence 必须低于 0.7；不要猜测服装、场景或连续性。
+
+用户要求：{_single_line(request_text, 1200)}
+        """.strip()
+        try:
+            raw = await llm_call(
+                prompt,
+                max_tokens=180,
+                provider_id=provider_id or None,
+                task="photo_reference_intent",
+            )
+            match = re.search(r"\{[\s\S]*\}", str(raw or ""))
+            payload = json.loads(match.group(0)) if match else {}
+            if not isinstance(payload, dict):
+                return rule_intent
+            requested_set = {
+                str(role or "").strip().lower()
+                for role in (payload.get("requested_roles") or [])
+            }
+            excluded_set = {
+                str(role or "").strip().lower()
+                for role in (payload.get("excluded_roles") or [])
+            }
+            requested = tuple(
+                role
+                for role in REFERENCE_ROLES
+                if role in requested_set and role not in excluded_set
+            )
+            excluded = tuple(role for role in REFERENCE_ROLES if role in excluded_set)
+            mode = _single_line(payload.get("continuity_mode"), 30).lower()
+            if mode not in CONTINUITY_MODES:
+                mode = "ambiguous"
+            confidence = _safe_float(payload.get("confidence"), 0.0, 0.0, 1.0)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 参考职责模型解析失败，使用保守规则: %s",
+                _single_line(exc, 120),
+            )
+            return rule_intent
+        if confidence < 0.7:
+            return ReferenceIntent(("identity",), (), "ambiguous", confidence, "model_conservative")
+        return ReferenceIntent(requested or ("identity",), excluded, mode, confidence, "model")
+
+    async def _select_photo_reference_plan_async(
+        self,
+        workflow_kind: str,
+        *,
+        reference_intent: ReferenceIntent,
+        wardrobe_intent: PhotoWardrobeIntent | None = None,
+        allow_daily_outfit: bool = True,
+        request_text: str = "",
+        ambient_context: str = "",
+        schedule_history_context: str = "",
+        suggested_scene_preset: str = "",
+        continuity_key: str = "",
+        explicit_reference_paths: Any = (),
+        require_existing_paths: bool = False,
+        trace_id: str = "",
+    ) -> PhotoReferencePlan:
+        if reference_intent.continuity_mode == "new_topic":
+            return build_photo_reference_plan(reference_intent, ())
+
+        paths: list[str] = []
+        raw_paths = explicit_reference_paths
+        if isinstance(raw_paths, str):
+            raw_paths = (raw_paths,)
+        for raw_path in raw_paths or ():
+            path = _path_text(raw_path, 1000)
+            if path and path not in paths:
+                paths.append(path)
+
+        candidates: list[dict[str, Any]] = []
+        indexed_roles = analyze_indexed_reference_roles(
+            request_text,
+            image_count=len(paths),
+        )
+        has_indexed_roles = any(indexed_roles)
+        indexed_edit_has_source = any(
+            "source" in roles for roles in indexed_roles
+        )
+        for index, path in enumerate(paths):
+            if require_existing_paths and not os.path.isfile(path):
+                continue
+            candidate = await self._photo_reference_candidate_for_path_async(
+                path,
+                workflow_kind=workflow_kind,
+                allow_daily_outfit=allow_daily_outfit,
+                continuity_key=continuity_key,
+            )
+            if candidate:
+                candidate = dict(candidate)
+                candidate["available_reference_roles"] = list(
+                    candidate.get("reference_roles") or ()
+                )
+                candidate["id"] = f"explicit_reference_{index + 1}" if len(paths) > 1 else "explicit_reference"
+                if reference_intent.continuity_mode == "edit":
+                    assigned_roles = list(indexed_roles[index]) if has_indexed_roles else ["source"]
+                    if has_indexed_roles and index == 0 and not indexed_edit_has_source:
+                        assigned_roles.insert(0, "source")
+                    candidate["kind"] = "source" if "source" in assigned_roles else "explicit"
+                    candidate["reference_roles"] = list(dict.fromkeys(assigned_roles))
+                else:
+                    candidate["kind"] = "explicit"
+                    if has_indexed_roles:
+                        candidate["reference_roles"] = list(indexed_roles[index])
+                    else:
+                        candidate["reference_roles"] = [
+                            role
+                            for role in reference_intent.requested_roles
+                            if role not in {"continuity", "source"}
+                        ]
+                candidates.append(candidate)
+
+        if (
+            not candidates
+            and not paths
+            and "source" not in reference_intent.requested_roles
+        ):
+            selected: dict[str, Any] = {}
+            if reference_intent.continuity_mode == "continuation":
+                selected = self._recent_sent_photo_continuity_candidate(continuity_key)
+            if not selected:
+                selected = await self._select_photo_reference_candidate_async(
+                    workflow_kind,
+                    allow_daily_outfit=allow_daily_outfit,
+                    request_text=request_text,
+                    ambient_context=ambient_context,
+                    schedule_history_context=schedule_history_context,
+                    suggested_scene_preset=suggested_scene_preset,
+                    continuity_key=continuity_key,
+                    wardrobe_intent=wardrobe_intent,
+                    trace_id=trace_id,
+                )
+            if (
+                selected.get("kind") == "recent_sent_photo"
+                and reference_intent.continuity_mode != "continuation"
+            ):
+                selected = {}
+            if selected:
+                candidates.append(selected)
+        plan_intent = reference_intent
+        if reference_intent.continuity_mode == "edit" and has_indexed_roles:
+            requested_roles = set(reference_intent.requested_roles)
+            for candidate in candidates:
+                requested_roles.update(candidate.get("reference_roles") or ())
+            plan_intent = ReferenceIntent(
+                tuple(role for role in REFERENCE_ROLES if role in requested_roles),
+                reference_intent.excluded_roles,
+                reference_intent.continuity_mode,
+                reference_intent.confidence,
+                reference_intent.source,
+            )
+        if reference_intent.source == "workflow_default" and candidates and not paths:
+            requested_roles = set(reference_intent.requested_roles)
+            for candidate in candidates:
+                candidate_roles = {
+                    str(role or "").strip().lower()
+                    for role in (candidate.get("reference_roles") or ())
+                }
+                if (
+                    bool(candidate.get("outfit_lock_default"))
+                    and "outfit" in candidate_roles
+                    and "outfit" not in reference_intent.excluded_roles
+                ):
+                    requested_roles.add("outfit")
+            if requested_roles != set(reference_intent.requested_roles):
+                plan_intent = ReferenceIntent(
+                    tuple(role for role in REFERENCE_ROLES if role in requested_roles),
+                    reference_intent.excluded_roles,
+                    reference_intent.continuity_mode,
+                    reference_intent.confidence,
+                    reference_intent.source,
+                )
+        plan = build_photo_reference_plan(plan_intent, candidates)
+        if (
+            not plan.bindings
+            and self._photo_persona_fallback_allowed(
+                workflow_kind,
+                reference_intent,
+            )
+        ):
+            persona_path = await self._photo_persona_reference_image_path_async()
+            if persona_path:
+                fallback_plan = build_photo_reference_plan(
+                    reference_intent,
+                    (
+                        {
+                            "id": "persona",
+                            "kind": "persona",
+                            "path": persona_path,
+                            "reference_roles": ["identity"],
+                        },
+                    ),
+                )
+                if fallback_plan.bindings:
+                    plan = fallback_plan
+        return plan
+
+    async def _photo_reference_candidate_from_plan_binding_async(
+        self,
+        binding: Any,
+        *,
+        workflow_kind: str,
+        allow_daily_outfit: bool,
+        continuity_key: str,
+    ) -> dict[str, Any]:
+        path = _path_text(getattr(binding, "path", ""), 1000)
+        if not path:
+            return {}
+        snapshot = getattr(binding, "candidate", None)
+        candidate = dict(snapshot) if isinstance(snapshot, dict) else {}
+        if not candidate:
+            candidate = await self._photo_reference_candidate_for_path_async(
+                path,
+                workflow_kind=workflow_kind,
+                allow_daily_outfit=allow_daily_outfit,
+                continuity_key=continuity_key,
+            )
+        if not candidate:
+            return {}
+        normalized = dict(candidate)
+        normalized["reference_roles"] = list(getattr(binding, "roles", ()) or ())
+        normalized["ignored_reference_roles"] = list(getattr(binding, "ignore", ()) or ())
+        normalized["outfit_lock_default"] = bool(
+            normalized.get("outfit_lock_default") and "outfit" in normalized["reference_roles"]
+        )
+        return self._normalize_photo_reference_candidate_metadata(normalized)
+
+    def _comfyui_photo_reference_capacity(
+        self,
+        workflow_kind: str,
+        *,
+        requested_images: int,
+    ) -> int:
+        requested = max(1, _safe_int(requested_images, 1, 1))
+        module = self._get_comfyui_module()
+        workflow_name = self._choose_photo_workflow_name(workflow_kind)
+        if module is None or not workflow_name:
+            return 1
+        try:
+            workflow_dir = module._get_workflow_dir()
+        except Exception:
+            return 1
+        for image_count in range(requested, 0, -1):
+            try:
+                workflow_file = module.find_workflow_file(
+                    workflow_name,
+                    1,
+                    image_count,
+                    0,
+                    workflow_dir,
+                )
+            except Exception:
+                workflow_file = ""
+            if not workflow_file:
+                workflow_file, _text_count, _matched_images = (
+                    self._find_photo_workflow_with_text_count(
+                        module,
+                        workflow_dir,
+                        workflow_name,
+                        image_count=image_count,
+                    )
+                )
+            if workflow_file:
+                return image_count
+        # Keep the historical single-image contract when workflow metadata cannot
+        # be inspected. The adapter still refuses to silently drop a reference.
+        return 1
+
+    def _photo_reference_backend_max_images(
+        self,
+        workflow_kind: str,
+        *,
+        requested_images: int = 0,
+    ) -> int:
+        preferred = _single_line(
+            getattr(self, "photo_generation_backend", ""),
+            40,
+        ).lower()
+        if preferred == "sdgen":
+            return 0
+        if preferred == "comfyui":
+            return self._comfyui_photo_reference_capacity(
+                workflow_kind,
+                requested_images=requested_images,
+            )
+        if preferred in {"external", "tool_call"}:
+            return 1
+
+        availability = (
+            ("_external_photo_available", 1),
+            ("_comfyui_photo_available", None),
+            ("_custom_tool_photo_available", 1),
+            ("_sdgen_photo_available", 0),
+        )
+        for method_name, capacity in availability:
+            checker = getattr(self, method_name, None)
+            if not callable(checker):
+                continue
+            try:
+                if checker():
+                    if capacity is None:
+                        return self._comfyui_photo_reference_capacity(
+                            workflow_kind,
+                            requested_images=requested_images,
+                        )
+                    return capacity
+            except Exception:
+                continue
+        # Current reference-capable adapters accept one reference_image_path.
+        return 1
 
     async def _select_photo_reference_image_async(
         self,
@@ -11316,7 +12455,8 @@ Output:
             if self._photo_reference_paths_equal(path, candidate.get("path", "")):
                 return self._normalize_photo_reference_candidate_metadata(candidate)
         kind = "explicit"
-        roles = ["identity", "outfit"]
+        # An otherwise unclassified user image establishes identity only.
+        roles = ["identity"]
         return self._normalize_photo_reference_candidate_metadata(
             {
                 "id": "explicit_reference",
@@ -11325,7 +12465,7 @@ Output:
                 "kind": kind,
                 "note": "用户本轮明确提供或引用的参考图",
                 "reference_roles": roles,
-                "outfit_lock_default": kind == "explicit",
+                "outfit_lock_default": False,
                 "metadata_source": "runtime",
             }
         )
@@ -11358,6 +12498,7 @@ Output:
         session_key: str,
         reference_image_path: str = "",
         image_size: str = "",
+        reference_image_paths: Any = (),
     ) -> tuple[str, str]:
         module = self._get_comfyui_module()
         if module is None:
@@ -11368,33 +12509,46 @@ Output:
         try:
             server_ip, client_id = module._get_server_config(config)
             workflow_dir = module._get_workflow_dir()
-            reference_image_path = _path_text(reference_image_path, 1000)
-            use_reference_image = bool(reference_image_path and os.path.isfile(reference_image_path))
-            if reference_image_path and not use_reference_image:
+            raw_reference_paths = reference_image_paths
+            if isinstance(raw_reference_paths, str):
+                raw_reference_paths = (raw_reference_paths,)
+            requested_reference_paths: list[str] = []
+            valid_reference_paths: list[str] = []
+            for raw_path in (reference_image_path, *(raw_reference_paths or ())):
+                path = _path_text(raw_path, 1000)
+                if not path or path in requested_reference_paths:
+                    continue
+                requested_reference_paths.append(path)
+                if os.path.isfile(path):
+                    valid_reference_paths.append(path)
+            use_reference_image = bool(valid_reference_paths)
+            if requested_reference_paths and not use_reference_image:
                 return "", "ComfyUI 提交前参考图已不可用，已停止纯文工作流回退"
             workflow_file = ""
             text_count = 1
             image_count = 0
             if use_reference_image:
+                required_images = len(valid_reference_paths)
                 workflow_file = module.find_workflow_file(
                     workflow_name,
                     1,
-                    1,
+                    required_images,
                     0,
                     workflow_dir,
                 )
-                image_count = 1 if workflow_file else 0
+                image_count = required_images if workflow_file else 0
                 if not workflow_file:
                     workflow_file, text_count, image_count = self._find_photo_workflow_with_text_count(
                         module,
                         workflow_dir,
                         workflow_name,
-                        image_count=1,
+                        image_count=required_images,
                     )
                 if not workflow_file:
                     return "", (
-                        f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 不接收图片输入。"
-                        "请配置 images=1 的自拍/改图工作流，避免回退成不使用参考图的纯文生图。"
+                        f"已找到 {required_images} 张参考图，但 ComfyUI 工作流 {workflow_name} "
+                        f"没有匹配的 images={required_images} 输入。请配置对应数量的自拍/改图工作流，"
+                        "避免回退成不使用参考图的纯文生图。"
                     )
             if not workflow_file:
                 workflow_file = module.find_workflow_file(
@@ -11413,7 +12567,7 @@ Output:
                     image_count=0,
                 )
             if not workflow_file:
-                need = "images=1 或 images=0" if use_reference_image else "images=0"
+                need = f"images={len(valid_reference_paths)}" if use_reference_image else "images=0"
                 return "", f"未找到匹配工作流 {workflow_name}（需要 texts>=1、{need}、videos=0）"
             logger.info(
                 "[PrivateCompanion] ComfyUI 生图提交准备: workflow=%s file=%s text_count=%s image_count=%s reference=%s wait=%ss prompt_preview=%s",
@@ -11432,10 +12586,10 @@ Output:
             )
             workflow = module.ComfyUIWorkflow(server_ip, client_id)
             workflow.load_workflow_api(workflow_file)
-            input_images = [reference_image_path] if image_count > 0 and use_reference_image else []
+            input_images = list(valid_reference_paths) if image_count > 0 and use_reference_image else []
             reference_note = ""
             if input_images:
-                reference_note = "；已使用本地人设参考图"
+                reference_note = f"；已使用 {len(input_images)} 张本地参考图"
             elif use_reference_image:
                 return "", (
                     f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 实际没有接收图片输入。"

@@ -175,12 +175,23 @@ window.PrivateCompanionProviderTree = (() => {
     return complex || "";
   }
 
-  function setProviderStatus(context, key, message, level = "info") {
+  function setProviderStatus(context, key, message, level = "info", details = false) {
     const { document } = context;
     const status = document.querySelector(`[data-provider-status="${key}"]`);
     if (!status) return;
     status.className = `provider-status ${level}`;
-    status.textContent = message;
+    status.replaceChildren();
+    const text = document.createElement("span");
+    text.textContent = message;
+    status.appendChild(text);
+    if (details) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "查看诊断";
+      button.dataset.testResultSource = "provider";
+      button.dataset.testResultKey = key;
+      status.appendChild(button);
+    }
   }
 
   function rememberProviderDraft(context, key) {
@@ -239,7 +250,7 @@ window.PrivateCompanionProviderTree = (() => {
   }
 
   async function testProvider(context, key) {
-    const { optionalNoFallbackProviderKeys, noFallbackProviderKeys, postJson } = context;
+    const { optionalNoFallbackProviderKeys, noFallbackProviderKeys, postJson, state } = context;
     const providerId = resolveProviderId(context, key);
     setProviderStatus(context, key, "测试中...", "info");
     if (!providerId && (noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key))) {
@@ -249,14 +260,17 @@ window.PrivateCompanionProviderTree = (() => {
     try {
       const timeoutSeconds = currentProviderTimeoutValues(context)[key] || null;
       const result = await postJson("/provider/test", { key, provider_id: providerId, timeout_seconds: timeoutSeconds });
+      state.providerTestResults = { ...(state.providerTestResults || {}), [key]: result };
       if (result.ok) {
         const suffix = result.sample ? ` · ${result.sample}` : "";
-        setProviderStatus(context, key, `正常 ${result.elapsed_ms}ms${suffix}`, "ok");
+        setProviderStatus(context, key, `正常 ${result.elapsed_ms}ms${suffix}`, "ok", true);
       } else {
-        setProviderStatus(context, key, result.error || "未返回内容", "warn");
+        setProviderStatus(context, key, result.error || "未返回内容", "warn", true);
       }
     } catch (error) {
-      setProviderStatus(context, key, error.message, "warn");
+      const result = { ok: false, error: error.message, test_status: "failed", error_category: "请求失败" };
+      state.providerTestResults = { ...(state.providerTestResults || {}), [key]: result };
+      setProviderStatus(context, key, error.message, "warn", true);
     }
   }
 

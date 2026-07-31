@@ -34,7 +34,10 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertIn("rerenderProviders: renderProviders", self.script)
         self.assertNotIn("renderProviders(context);", toolbar_binding)
         self.assertIn('button.setAttribute("aria-pressed"', self.script)
-        self.assertIn("provider-filter-immediate", self.html)
+        self.assertIn(
+            './js/panels/provider-tree.js?v=20260731-test-diagnostics-v1',
+            self.html,
+        )
 
     def test_authoritative_overview_clears_saved_provider_drafts(self) -> None:
         apply_overview = self.script.split("function applyOverviewData", 1)[1].split(

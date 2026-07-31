@@ -1933,6 +1933,20 @@ class PrivateCompanionPlugin(
         if self.natural_language_photo_generation_mode not in {"tool_first", "rule_fast", "off"}:
             self.natural_language_photo_generation_mode = "tool_first"
         self.command_photo_generation_max_daily = self._cfg_int(c, "command_photo_generation_max_daily", 0, 0, 100)
+        self.photo_generation_trace_max_size_kb = self._cfg_int(
+            c,
+            "photo_generation_trace_max_size_kb",
+            0,
+            0,
+            102400,
+        )
+        self.photo_generation_trace_backup_count = self._cfg_int(
+            c,
+            "photo_generation_trace_backup_count",
+            5,
+            0,
+            20,
+        )
         self.natural_language_photo_generation_max_daily = self._cfg_int(c, "natural_language_photo_generation_max_daily", 2, 0, 100)
         raw_natural_photo_extra = _flat_get(c, "natural_language_photo_extra_prompt", None)
         self.natural_language_photo_extra_prompt = (
@@ -5437,7 +5451,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         self,
         event: AstrMessageEvent,
         query: str = "",
-        context: str = "",
+        search_context: str = "",
         meme_only: bool = True,
         send: bool = True,
         caption: str = "",
@@ -5451,7 +5465,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
         Args:
             query(string): 表情或图片需求，例如“震惊又无语的反应图”。
-            context(string): 可选，当前对话语境或希望表达的情绪。
+            search_context(string): 可选，当前对话语境或希望表达的情绪。
             meme_only(boolean): 是否只检索标记为表情包的图片，默认 true。
             send(boolean): 是否直接发送到当前会话，默认 true。
             caption(string): 可选，随图片发送的短文字。
@@ -5507,7 +5521,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return await self._pc_reaction_expression_impl(
                 event,
                 query=query,
-                context=context,
+                context=search_context,
                 meme_only=meme_only,
                 send=send,
                 caption=visible_caption,
@@ -5519,7 +5533,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_find_reaction_image_impl(
             event,
             query=query,
-            context=context,
+            context=search_context,
             meme_only=meme_only,
             send=send,
             caption=caption,
@@ -6542,12 +6556,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return False
         try:
             marker = _single_line(marker, 120) or "<!-- private_companion_turn_fragment -->"
-            current = self._request_prompt_context_surface(req)
             fragments = getattr(req, "_private_companion_turn_prompt_fragments", None)
             if not isinstance(fragments, list):
                 fragments = []
                 setattr(req, "_private_companion_turn_prompt_fragments", fragments)
-            if marker in current or any(isinstance(item, dict) and item.get("marker") == marker for item in fragments):
+            if self._request_has_managed_prompt_marker(req, marker):
                 return True
             fragments.append(
                 {
@@ -6564,6 +6577,31 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception as exc:
             logger.debug("[PrivateCompanion] 指定位置 prompt 注入失败,回退 system_prompt: %s", _single_line(exc, 120))
             return False
+
+    @staticmethod
+    def _request_has_managed_prompt_marker(req: ProviderRequest, marker: str) -> bool:
+        """Only trust markers placed by the plugin, never raw user prompt text."""
+        marker_text = _single_line(marker, 120)
+        if not marker_text:
+            return False
+        if marker_text in str(getattr(req, "system_prompt", "") or ""):
+            return True
+        fragments = getattr(req, "_private_companion_turn_prompt_fragments", None)
+        if isinstance(fragments, list) and any(
+            isinstance(item, dict) and item.get("marker") == marker_text
+            for item in fragments
+        ):
+            return True
+        extra_parts = getattr(req, "extra_user_content_parts", None)
+        if not isinstance(extra_parts, list):
+            return False
+        for part in extra_parts:
+            if not bool(getattr(part, "_private_companion_turn_fragments", False)):
+                continue
+            text = str(getattr(part, "text", "") or getattr(part, "content", "") or "")
+            if marker_text in text:
+                return True
+        return False
 
     def _request_prompt_context_surface(self, req: ProviderRequest) -> str:
         parts = [str(getattr(req, "prompt", "") or ""), str(getattr(req, "system_prompt", "") or "")]
@@ -6612,6 +6650,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "group_injection_guard",
             "reply_chain",
             "media_delivery_truth",
+            "tool_protocol",
+            "period_boundary",
         )
         marker_pattern = "|".join(re.escape(f"private_companion_{name}_v1") for name in block_markers)
         cleaned = re.sub(
@@ -6676,6 +6716,103 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "[PrivateCompanion] 已清理请求历史里的插件动态注入残留: session=%s contexts_changed=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             changed,
+        )
+
+    @staticmethod
+    def _request_context_role(item: Any) -> str:
+        if isinstance(item, dict):
+            return str(item.get("role") or "").strip().lower()
+        return str(getattr(item, "role", "") or "").strip().lower()
+
+    @staticmethod
+    def _request_context_tool_calls(item: Any) -> list[Any]:
+        raw = item.get("tool_calls") if isinstance(item, dict) else getattr(item, "tool_calls", None)
+        return list(raw) if isinstance(raw, (list, tuple)) else []
+
+    @staticmethod
+    def _request_context_tool_call_id(item: Any) -> str:
+        value = item.get("tool_call_id") if isinstance(item, dict) else getattr(item, "tool_call_id", None)
+        return str(value or "").strip()
+
+    @staticmethod
+    def _request_context_declared_tool_call_id(item: Any) -> str:
+        value = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+        return str(value or "").strip()
+
+    def _repair_incomplete_tool_context_groups(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """Drop broken tool-call groups atomically before strict providers see them."""
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list) or not contexts:
+            return
+
+        repaired: list[Any] = []
+        removed_groups = 0
+        removed_messages = 0
+        index = 0
+        while index < len(contexts):
+            item = contexts[index]
+            role = self._request_context_role(item)
+            declared_calls = self._request_context_tool_calls(item) if role == "assistant" else []
+            if declared_calls:
+                declared_ids = [
+                    self._request_context_declared_tool_call_id(call)
+                    for call in declared_calls
+                ]
+                next_index = index + 1
+                tool_messages: list[Any] = []
+                while (
+                    next_index < len(contexts)
+                    and self._request_context_role(contexts[next_index]) == "tool"
+                ):
+                    tool_messages.append(contexts[next_index])
+                    next_index += 1
+
+                expected_ids = set(declared_ids)
+                result_ids = {
+                    self._request_context_tool_call_id(tool_message)
+                    for tool_message in tool_messages
+                    if self._request_context_tool_call_id(tool_message)
+                }
+                complete = (
+                    bool(expected_ids)
+                    and len(expected_ids) == len(declared_ids)
+                    and expected_ids.issubset(result_ids)
+                )
+                if complete:
+                    repaired.append(item)
+                    kept_ids: set[str] = set()
+                    for tool_message in tool_messages:
+                        tool_call_id = self._request_context_tool_call_id(tool_message)
+                        if tool_call_id in expected_ids and tool_call_id not in kept_ids:
+                            repaired.append(tool_message)
+                            kept_ids.add(tool_call_id)
+                        else:
+                            removed_messages += 1
+                else:
+                    removed_groups += 1
+                    removed_messages += 1 + len(tool_messages)
+                index = next_index
+                continue
+
+            if role == "tool":
+                removed_messages += 1
+            else:
+                repaired.append(item)
+            index += 1
+
+        if removed_messages <= 0:
+            return
+        try:
+            req.contexts = repaired
+        except Exception:
+            return
+        logger.warning(
+            "[PrivateCompanion] 已修复不完整工具调用历史: session=%s groups=%s messages=%s contexts=%s->%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            removed_groups,
+            removed_messages,
+            len(contexts),
+            len(repaired),
         )
 
     def _remove_managed_turn_prompt_extra_part(self, req: ProviderRequest) -> None:
@@ -7630,6 +7767,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 label = _single_line(cond.get("label") or cond.get("title") or cond.get("kind"), 18)
                 if label and label not in conditions:
                     conditions.append(label)
+        cycle_profile = self._active_body_cycle_profile(state)
         return {
             "date": _today_key(),
             "time_label": time_label,
@@ -7639,6 +7777,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "detail": detail_key or detail_summary,
             "weather": weather if weather and weather != "暂无天气信息" else "",
             "conditions": conditions[:2],
+            "body_cycle": _single_line(state.get("body_cycle"), 120) if cycle_profile else "",
+            "body_cycle_phase": _single_line(cycle_profile.get("phase"), 24),
         }
 
     def _format_private_passive_state_snapshot(
@@ -7681,6 +7821,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     conditions.append(label)
         if conditions:
             pieces.append("身体感素材：" + "、".join(conditions[:2]))
+        cycle_profile = self._active_body_cycle_profile(state)
+        if cycle_profile:
+            pieces.append(f"周期状态：Bot 当前{cycle_profile['stage']}")
         usage = (
             "用户这轮在问 Bot 近况或状态，可以把下面内容当作 Bot 自身近况简短承接。"
             if direct
@@ -7733,6 +7876,104 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if changed:
             return self._format_private_passive_state_snapshot(state, current_user, direct=False), True, "changed"
         return "", False, "unchanged_light" if lightweight else "unchanged"
+
+    async def _append_group_active_period_boundary_to_request(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        group_id: str,
+    ) -> str:
+        if not group_id:
+            return ""
+        try:
+            state = await self._ensure_daily_state(
+                skip_conversation_summary=True,
+                passive_fast=True,
+            )
+            boundary = self._format_active_period_boundary_for_prompt(state, public=True)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 群聊读取经期互动边界失败，已跳过: group=%s error=%s",
+                _single_line(group_id, 40) or "-",
+                _single_line(exc, 120),
+            )
+            return ""
+        if not boundary:
+            return ""
+
+        marker = "<!-- private_companion_period_boundary_v1 -->"
+        current_prompt = str(getattr(req, "system_prompt", "") or "")
+        if self._request_has_managed_prompt_marker(req, marker):
+            return boundary
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            boundary,
+            priority=89,
+            source="daily_state",
+        ) else "system_prompt"
+        if placement == "system_prompt":
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="群聊经期互动边界",
+            key="state.period_boundary",
+            text=boundary,
+            source="daily_state",
+            mode="group",
+            priority=89,
+            metadata={"注入位置": placement, "群号": _single_line(group_id, 40)},
+        )
+        return boundary
+
+    async def _append_private_active_period_boundary_to_request(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        state: dict[str, Any],
+    ) -> str:
+        boundary = self._format_active_period_boundary_for_prompt(state, public=False)
+        if not boundary:
+            return ""
+        marker = "<!-- private_companion_period_boundary_v1 -->"
+        if self._request_has_managed_prompt_marker(req, marker):
+            return boundary
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            boundary,
+            priority=89,
+            source="daily_state",
+        ) else "system_prompt"
+        if placement == "system_prompt":
+            current_prompt = str(getattr(req, "system_prompt", "") or "")
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
+        await self._record_request_prompt_fragment(
+            event,
+            title="私聊经期互动边界",
+            key="state.period_boundary",
+            text=boundary,
+            source="daily_state",
+            mode="private",
+            priority=89,
+            metadata={"注入位置": placement},
+        )
+        return boundary
+
+    def _add_private_active_period_boundary_to_surface(
+        self,
+        prompt_surface: PromptSurface,
+        state: dict[str, Any],
+    ) -> str:
+        boundary = self._format_active_period_boundary_for_prompt(state, public=False)
+        if boundary:
+            prompt_surface.add(
+                "state.period_boundary",
+                boundary,
+                priority=89,
+                source="daily_state",
+            )
+        return boundary
 
     def _format_group_persona_denoise_prompt(self, event: AstrMessageEvent | None = None) -> str:
         if not bool(getattr(self, "enable_group_persona_denoise", True)):
@@ -9387,6 +9628,27 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         )
 
+    def _llm_request_uses_deepseek_family_provider(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> bool:
+        identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
+        return "deepseek" in identity
+
+    def _append_deepseek_tool_protocol_guard(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
+        if getattr(req, "func_tool", None) is None:
+            return False
+        if not self._llm_request_uses_deepseek_family_provider(event, req):
+            return False
+        marker = "<!-- private_companion_tool_protocol_v1 -->"
+        current_prompt = str(getattr(req, "system_prompt", "") or "")
+        if marker in current_prompt:
+            return False
+        instruction = (
+            "【工具调用协议】当前模型兼容接口会严格核对每个 tool_call_id 与工具结果。"
+            "需要使用多个工具时，请按顺序逐个调用：每条 assistant 消息只发起一个工具调用，"
+            "拿到该工具结果后再决定是否调用下一个；不要并行或批量发起 tool_calls。"
+        )
+        req.system_prompt = f"{current_prompt}\n\n{marker}\n{instruction}".strip()
+        return True
+
     @staticmethod
     def _tool_set_has_named_tool(tool_set: Any, tool_name: str) -> bool:
         get_tool = getattr(tool_set, "get_tool", None)
@@ -9597,13 +9859,24 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
         if not self.enabled:
             return
+        feedback_recorder = getattr(self, "_record_photo_reference_feedback_from_event", None)
+        if callable(feedback_recorder):
+            try:
+                feedback_recorder(event)
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 记录参考图效果反馈失败: %s",
+                    _single_line(exc, 120),
+                )
         if self._stop_group_llm_reply_if_blocked(event, source="llm_request"):
             return
         if not hasattr(req, "system_prompt"):
             log_bookshelf_secret_skip("llm_request_no_system_prompt")
             return
         self._sanitize_request_context_new_conversation_boundary(event, req)
+        self._repair_incomplete_tool_context_groups(event, req)
         self._sanitize_private_companion_prompt_artifacts_in_request(event, req)
+        self._append_deepseek_tool_protocol_guard(event, req)
         self._remember_external_llm_request_for_token_stats(event, req)
         proactive_only_limited = self._proactive_only_limited_passive_event(event)
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
@@ -9879,6 +10152,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             mode="group",
                             metadata={"注入位置": placement},
                         )
+            await self._append_group_active_period_boundary_to_request(
+                event,
+                req,
+                group_id if isinstance(group, dict) else "",
+            )
             group_recall_text = _single_line(
                 getattr(event, "private_companion_group_text", "") or getattr(event, "message_str", ""),
                 260,
@@ -9943,7 +10221,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             log_bookshelf_secret_skip("group_chat")
             return
         try:
-            user_id = str(event.get_sender_id())
+            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
         except Exception:
             log_bookshelf_secret_skip("private_sender_missing")
             return
@@ -9959,6 +10237,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._start_passive_input_status_loop(event, user_id)
 
         state = await self._ensure_daily_state(skip_conversation_summary=True, passive_fast=True)
+        await self._append_private_active_period_boundary_to_request(event, req, state)
         inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
         lightweight_passive = self._is_lightweight_private_passive_inbound(inbound_text)
         memo_query = self._memo_management_instruction_matches(inbound_text)
@@ -10551,8 +10830,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         static_marker = "<!-- private_companion_static_v1 -->"
         marker = "<!-- private_companion_state_v1 -->"
         current_prompt = req.system_prompt or ""
-        current_turn_prompt = str(getattr(req, "prompt", "") or "")
-        if marker in current_prompt or marker in current_turn_prompt:
+        if self._request_has_managed_prompt_marker(req, marker):
             log_bookshelf_secret_skip("state_marker_already_present", current_user, inbound_text)
             await self._append_conditional_tool_instructions_to_request(event, req)
             return
@@ -10563,7 +10841,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         static_placement = ""
         dynamic_placement = ""
-        if static_injection and static_marker not in current_prompt and static_marker not in current_turn_prompt:
+        if static_injection and not self._request_has_managed_prompt_marker(req, static_marker):
             current_prompt = req.system_prompt or ""
             req.system_prompt = f"{current_prompt}\n\n{static_marker}\n{static_injection}".strip()
             static_placement = "system_prompt"

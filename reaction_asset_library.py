@@ -18,11 +18,12 @@ from typing import Any, Iterable
 from .helpers import _safe_float, _safe_int, _single_line
 
 
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 MAX_SINGLE_FILE_BYTES = 20 * 1024 * 1024
 MAX_BATCH_BYTES = 120 * 1024 * 1024
 MAX_ZIP_MEMBERS = 1000
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+ANALYSIS_STATUSES = {"unprocessed", "pending", "running", "complete", "failed"}
 MIME_BY_EXTENSION = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -110,10 +111,37 @@ class ReactionAssetLibrary:
             return self._empty_catalog()
         if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
             return self._empty_catalog()
+        migrated_items: list[dict[str, Any]] = []
+        for original in raw["items"]:
+            if not isinstance(original, dict) or not original.get("id"):
+                continue
+            item = dict(original)
+            if "manual_fields" not in item and "analysis_status" not in item:
+                manual_fields: list[str] = []
+                filename = _safe_filename(item.get("filename"))
+                filename_stem = Path(filename).stem[:100]
+                name = _single_line(item.get("name"), 100)
+                if name and name != filename_stem:
+                    manual_fields.append("name")
+                derived_tags = set(
+                    _text_list(re.sub(r"[_\-.]+", " ", filename_stem), limit=8)
+                )
+                existing_tags = set(_text_list(item.get("tags"), limit=20))
+                if existing_tags - derived_tags:
+                    manual_fields.append("tags")
+                for key in ("emotions", "intents", "description", "visible_text"):
+                    value_present = bool(
+                        _text_list(item.get(key), limit=12)
+                        if key in {"emotions", "intents"}
+                        else _single_line(item.get(key), 500)
+                    )
+                    if value_present:
+                        manual_fields.append(key)
+                item["manual_fields"] = manual_fields
+                item["analysis_status"] = "unprocessed"
+            migrated_items.append(item)
         raw["version"] = CATALOG_VERSION
-        raw["items"] = [
-            item for item in raw["items"] if isinstance(item, dict) and item.get("id")
-        ]
+        raw["items"] = migrated_items
         return raw
 
     def _save(self, catalog: dict[str, Any]) -> None:
@@ -129,6 +157,14 @@ class ReactionAssetLibrary:
 
     def _normalize_item(self, item: dict[str, Any]) -> dict[str, Any]:
         scopes = [scope for scope in _text_list(item.get("scopes"), limit=2) if scope in {"private", "group"}]
+        analysis_status = _single_line(item.get("analysis_status"), 20).lower()
+        if analysis_status not in ANALYSIS_STATUSES:
+            analysis_status = "unprocessed"
+        manual_fields = [
+            field
+            for field in _text_list(item.get("manual_fields"), limit=8, item_limit=24)
+            if field in {"name", "tags", "emotions", "intents", "description", "visible_text"}
+        ]
         return {
             "id": _single_line(item.get("id"), 64),
             "filename": _safe_filename(item.get("filename")),
@@ -138,6 +174,8 @@ class ReactionAssetLibrary:
             "tags": _text_list(item.get("tags"), limit=20),
             "emotions": _text_list(item.get("emotions"), limit=12),
             "intents": _text_list(item.get("intents"), limit=12),
+            "description": _single_line(item.get("description"), 500),
+            "visible_text": _single_line(item.get("visible_text"), 300),
             "scopes": scopes or ["private", "group"],
             "enabled": _safe_bool(item.get("enabled", True), True),
             "source": _single_line(item.get("source"), 40) or "upload",
@@ -148,6 +186,11 @@ class ReactionAssetLibrary:
             "last_used_at": _safe_float(item.get("last_used_at"), 0.0, 0.0),
             "created_at": _safe_float(item.get("created_at"), time.time(), 0.0),
             "updated_at": _safe_float(item.get("updated_at"), time.time(), 0.0),
+            "analysis_status": analysis_status,
+            "analysis_error": _single_line(item.get("analysis_error"), 240),
+            "analysis_provider": _single_line(item.get("analysis_provider"), 160),
+            "analyzed_at": _safe_float(item.get("analyzed_at"), 0.0, 0.0),
+            "manual_fields": manual_fields,
         }
 
     def _path_for(self, item: dict[str, Any]) -> Path | None:
@@ -196,6 +239,10 @@ class ReactionAssetLibrary:
             "private": sum(1 for item in available if item["enabled"] and "private" in item["scopes"]),
             "group": sum(1 for item in available if item["enabled"] and "group" in item["scopes"]),
             "usage_count": sum(item["usage_count"] for item in items),
+            "analyzed": sum(1 for item in items if item["analysis_status"] == "complete"),
+            "analysis_pending": sum(1 for item in items if item["analysis_status"] in {"pending", "running"}),
+            "analysis_failed": sum(1 for item in items if item["analysis_status"] == "failed"),
+            "analysis_unprocessed": sum(1 for item in items if item["analysis_status"] == "unprocessed"),
         }
 
     def list_items(
@@ -204,12 +251,14 @@ class ReactionAssetLibrary:
         query: Any = "",
         status: Any = "all",
         scope: Any = "all",
+        analysis: Any = "all",
         page: int = 1,
         page_size: int = 48,
     ) -> dict[str, Any]:
         query_text = _single_line(query, 160).casefold()
         status_text = _single_line(status, 20).lower() or "all"
         scope_text = _single_line(scope, 20).lower() or "all"
+        analysis_text = _single_line(analysis, 20).lower() or "all"
         page = max(1, _safe_int(page, 1, 1))
         page_size = _safe_int(page_size, 48, 1, 120)
         with self._lock:
@@ -227,8 +276,20 @@ class ReactionAssetLibrary:
                 continue
             if scope_text in {"private", "group"} and scope_text not in item["scopes"]:
                 continue
+            if analysis_text == "pending" and item["analysis_status"] not in {"pending", "running"}:
+                continue
+            if analysis_text in {"complete", "failed", "unprocessed"} and item["analysis_status"] != analysis_text:
+                continue
             haystack = " ".join(
-                [item["name"], item["filename"], *item["tags"], *item["emotions"], *item["intents"]]
+                [
+                    item["name"],
+                    item["filename"],
+                    item["description"],
+                    item["visible_text"],
+                    *item["tags"],
+                    *item["emotions"],
+                    *item["intents"],
+                ]
             ).casefold()
             if query_text and query_text not in haystack:
                 query_parts = [part for part in re.split(r"\s+", query_text) if part]
@@ -252,12 +313,21 @@ class ReactionAssetLibrary:
 
     def _metadata_defaults(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
         metadata = metadata if isinstance(metadata, dict) else {}
+        tags = _text_list(metadata.get("tags"), limit=20)
+        emotions = _text_list(metadata.get("emotions"), limit=12)
+        intents = _text_list(metadata.get("intents"), limit=12)
         return {
-            "tags": _text_list(metadata.get("tags"), limit=20),
-            "emotions": _text_list(metadata.get("emotions"), limit=12),
-            "intents": _text_list(metadata.get("intents"), limit=12),
+            "tags": tags,
+            "emotions": emotions,
+            "intents": intents,
             "scopes": [scope for scope in _text_list(metadata.get("scopes"), limit=2) if scope in {"private", "group"}] or ["private", "group"],
             "enabled": _safe_bool(metadata.get("enabled", True), True),
+            "auto_analyze": _safe_bool(metadata.get("auto_analyze", True), True),
+            "manual_fields": [
+                key
+                for key, value in (("tags", tags), ("emotions", emotions), ("intents", intents))
+                if value
+            ],
         }
 
     def import_blobs(
@@ -314,7 +384,7 @@ class ReactionAssetLibrary:
                         "stored_name": stored_name,
                         "sha256": digest,
                         "name": Path(filename).stem[:100],
-                        "tags": [*defaults["tags"], *filename_tags],
+                        "tags": defaults["tags"] if defaults["tags"] else filename_tags,
                         "emotions": defaults["emotions"],
                         "intents": defaults["intents"],
                         "scopes": defaults["scopes"],
@@ -323,6 +393,8 @@ class ReactionAssetLibrary:
                         "size": len(data),
                         "width": width,
                         "height": height,
+                        "analysis_status": "pending" if defaults["auto_analyze"] else "unprocessed",
+                        "manual_fields": defaults["manual_fields"],
                         "created_at": now,
                         "updated_at": now,
                     }
@@ -337,6 +409,7 @@ class ReactionAssetLibrary:
             "duplicates": duplicates,
             "rejected": rejected,
             "items": imported,
+            "analysis_queued": sum(1 for item in imported if item["analysis_status"] == "pending"),
             "summary": self.summary(),
         }
 
@@ -415,6 +488,200 @@ class ReactionAssetLibrary:
         mime = MIME_BY_EXTENSION.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return {"data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", "mime": mime, "name": item["filename"]}
 
+    def get_analysis_image_data(self, item_id: Any, *, max_edge: int = 1024) -> dict[str, Any] | None:
+        """Return a bounded still image for visual metadata extraction."""
+        item_key = _single_line(item_id, 64)
+        with self._lock:
+            item = next(
+                (
+                    self._normalize_item(raw)
+                    for raw in self._load()["items"]
+                    if _single_line(raw.get("id"), 64) == item_key
+                ),
+                None,
+            )
+            path = self._path_for(item) if item else None
+            if item is None or path is None or not path.is_file():
+                return None
+            data = path.read_bytes()
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(io.BytesIO(data)) as image:
+                frame_count = max(1, int(getattr(image, "n_frames", 1) or 1))
+                if frame_count > 1:
+                    sample_count = min(4, frame_count)
+                    sample_indexes = sorted(
+                        {round(index * (frame_count - 1) / max(1, sample_count - 1)) for index in range(sample_count)}
+                    )
+                    cell_edge = max(128, int(max_edge) // 2)
+                    frames = []
+                    for frame_index in sample_indexes:
+                        image.seek(frame_index)
+                        sampled = image.convert("RGBA")
+                        sampled.thumbnail((cell_edge, cell_edge))
+                        frames.append(sampled.copy())
+                    columns = 2 if len(frames) > 1 else 1
+                    rows = (len(frames) + columns - 1) // columns
+                    frame = Image.new("RGBA", (cell_edge * columns, cell_edge * rows), (255, 255, 255, 255))
+                    for frame_index, sampled in enumerate(frames):
+                        left = (frame_index % columns) * cell_edge + (cell_edge - sampled.width) // 2
+                        top = (frame_index // columns) * cell_edge + (cell_edge - sampled.height) // 2
+                        frame.alpha_composite(sampled, (left, top))
+                else:
+                    image.seek(0)
+                    frame = ImageOps.exif_transpose(image).copy()
+                frame.thumbnail((max(128, int(max_edge)), max(128, int(max_edge))))
+                output = io.BytesIO()
+                if frame.mode in {"RGBA", "LA"} or "transparency" in frame.info:
+                    frame = frame.convert("RGBA")
+                    frame.save(output, format="PNG", optimize=True)
+                    mime = "image/png"
+                else:
+                    frame = frame.convert("RGB")
+                    frame.save(output, format="JPEG", quality=86, optimize=True)
+                    mime = "image/jpeg"
+                data = output.getvalue()
+        except Exception:
+            mime = MIME_BY_EXTENSION.get(path.suffix.lower()) or "application/octet-stream"
+        return {
+            "id": item["id"],
+            "name": item["filename"],
+            "data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}",
+        }
+
+    def analysis_candidates(
+        self,
+        ids: Any = None,
+        *,
+        statuses: Iterable[str] = ("pending",),
+        limit: int = 4,
+    ) -> list[dict[str, Any]]:
+        item_ids = set(_text_list(ids, limit=500, item_limit=64)) if ids is not None else set()
+        allowed = {str(status or "").strip().lower() for status in statuses}
+        maximum = _safe_int(limit, 4, 1, 20)
+        with self._lock:
+            items = [self._normalize_item(raw) for raw in self._load()["items"]]
+        result: list[dict[str, Any]] = []
+        for item in items:
+            if item_ids and item["id"] not in item_ids:
+                continue
+            if item["analysis_status"] not in allowed:
+                continue
+            path = self._path_for(item)
+            if path is None or not path.is_file():
+                continue
+            result.append(item)
+            if len(result) >= maximum:
+                break
+        return result
+
+    def queue_analysis(self, ids: Any, *, include_complete: bool = False) -> dict[str, Any]:
+        item_ids = set(_text_list(ids, limit=500, item_limit=64))
+        queued: list[str] = []
+        now = time.time()
+        with self._lock:
+            catalog = self._load()
+            for index, raw in enumerate(catalog["items"]):
+                item = self._normalize_item(raw)
+                if item["id"] not in item_ids:
+                    continue
+                if item["analysis_status"] == "complete" and not include_complete:
+                    continue
+                item["analysis_status"] = "pending"
+                item["analysis_error"] = ""
+                item["updated_at"] = now
+                catalog["items"][index] = item
+                queued.append(item["id"])
+            if queued:
+                self._save(catalog)
+        return {"queued": len(queued), "ids": queued, "summary": self.summary()}
+
+    def mark_analysis_running(self, ids: Any) -> int:
+        item_ids = set(_text_list(ids, limit=20, item_limit=64))
+        changed = 0
+        with self._lock:
+            catalog = self._load()
+            for index, raw in enumerate(catalog["items"]):
+                item = self._normalize_item(raw)
+                if item["id"] not in item_ids or item["analysis_status"] != "pending":
+                    continue
+                item["analysis_status"] = "running"
+                item["analysis_error"] = ""
+                catalog["items"][index] = item
+                changed += 1
+            if changed:
+                self._save(catalog)
+        return changed
+
+    def mark_analysis_failed(self, ids: Any, error: Any) -> int:
+        item_ids = set(_text_list(ids, limit=500, item_limit=64))
+        error_text = _single_line(error, 240) or "视觉模型未返回可用结果"
+        changed = 0
+        now = time.time()
+        with self._lock:
+            catalog = self._load()
+            for index, raw in enumerate(catalog["items"]):
+                item = self._normalize_item(raw)
+                if item["id"] not in item_ids:
+                    continue
+                item["analysis_status"] = "failed"
+                item["analysis_error"] = error_text
+                item["analyzed_at"] = now
+                item["updated_at"] = now
+                catalog["items"][index] = item
+                changed += 1
+            if changed:
+                self._save(catalog)
+        return changed
+
+    def apply_analysis_results(
+        self,
+        results: Any,
+        *,
+        provider_id: Any = "",
+    ) -> dict[str, Any]:
+        rows = results if isinstance(results, list) else []
+        by_id = {
+            _single_line(row.get("id"), 64): row
+            for row in rows
+            if isinstance(row, dict) and _single_line(row.get("id"), 64)
+        }
+        completed: list[str] = []
+        now = time.time()
+
+        def merge_values(existing: list[str], generated: Any, limit: int) -> list[str]:
+            return _text_list([*existing, *_text_list(generated, limit=limit)], limit=limit)
+
+        with self._lock:
+            catalog = self._load()
+            for index, raw in enumerate(catalog["items"]):
+                item = self._normalize_item(raw)
+                row = by_id.get(item["id"])
+                if row is None:
+                    continue
+                manual = set(item["manual_fields"])
+                if "name" not in manual:
+                    generated_name = _single_line(row.get("name"), 100)
+                    if generated_name:
+                        item["name"] = generated_name
+                for key, limit in (("tags", 20), ("emotions", 12), ("intents", 12)):
+                    item[key] = merge_values(item[key] if key in manual else [], row.get(key), limit)
+                if "description" not in manual:
+                    item["description"] = _single_line(row.get("description"), 500)
+                if "visible_text" not in manual:
+                    item["visible_text"] = _single_line(row.get("visible_text"), 300)
+                item["analysis_status"] = "complete"
+                item["analysis_error"] = ""
+                item["analysis_provider"] = _single_line(provider_id, 160)
+                item["analyzed_at"] = now
+                item["updated_at"] = now
+                catalog["items"][index] = item
+                completed.append(item["id"])
+            if completed:
+                self._save(catalog)
+        return {"completed": len(completed), "ids": completed, "summary": self.summary()}
+
     def update_items(self, ids: Any, changes: Any) -> dict[str, Any]:
         item_ids = set(_text_list(ids, limit=500, item_limit=64))
         changes = changes if isinstance(changes, dict) else {}
@@ -428,9 +695,18 @@ class ReactionAssetLibrary:
                     continue
                 if "name" in changes:
                     item["name"] = _single_line(changes.get("name"), 100) or item["name"]
+                    if "name" not in item["manual_fields"]:
+                        item["manual_fields"].append("name")
                 for key, limit in (("tags", 20), ("emotions", 12), ("intents", 12)):
                     if key in changes:
                         item[key] = _text_list(changes.get(key), limit=limit)
+                        if key not in item["manual_fields"]:
+                            item["manual_fields"].append(key)
+                for key, limit in (("description", 500), ("visible_text", 300)):
+                    if key in changes:
+                        item[key] = _single_line(changes.get(key), limit)
+                        if key not in item["manual_fields"]:
+                            item["manual_fields"].append(key)
                 if "scopes" in changes:
                     scopes = [scope for scope in _text_list(changes.get("scopes"), limit=2) if scope in {"private", "group"}]
                     if scopes:
@@ -484,7 +760,16 @@ class ReactionAssetLibrary:
             path = self._path_for(item)
             if not item["enabled"] or scope not in item["scopes"] or path is None or not path.is_file():
                 continue
-            primary = " ".join([item["name"], *item["tags"], *item["emotions"], *item["intents"]]).casefold()
+            primary = " ".join(
+                [
+                    item["name"],
+                    item["description"],
+                    item["visible_text"],
+                    *item["tags"],
+                    *item["emotions"],
+                    *item["intents"],
+                ]
+            ).casefold()
             secondary = item["filename"].casefold()
             score = 0.0
             matched: list[str] = []
@@ -590,6 +875,8 @@ class ReactionAssetLibrary:
                         "size": len(data),
                         "width": width,
                         "height": height,
+                        "analysis_status": "pending",
+                        "manual_fields": [],
                         "created_at": now,
                         "updated_at": now,
                     }
@@ -605,6 +892,7 @@ class ReactionAssetLibrary:
             "duplicates": [],
             "rejected": rejected,
             "items": imported,
+            "analysis_queued": sum(1 for item in imported if item["analysis_status"] == "pending"),
             "summary": self.summary(),
         }
 
@@ -613,9 +901,13 @@ def get_reaction_asset_library(plugin: Any) -> ReactionAssetLibrary | None:
     data_dir = str(getattr(plugin, "data_dir", "") or "").strip()
     if not data_dir:
         return None
-    current = getattr(plugin, "_reaction_asset_library", None)
+    current = getattr(plugin, "_reaction_asset_library_instance", None)
     if isinstance(current, ReactionAssetLibrary):
         return current
+    legacy = getattr(plugin, "_reaction_asset_library", None)
+    if isinstance(legacy, ReactionAssetLibrary):
+        setattr(plugin, "_reaction_asset_library_instance", legacy)
+        return legacy
     library = ReactionAssetLibrary(data_dir)
-    setattr(plugin, "_reaction_asset_library", library)
+    setattr(plugin, "_reaction_asset_library_instance", library)
     return library

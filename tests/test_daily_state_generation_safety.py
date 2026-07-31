@@ -14,6 +14,7 @@ class _StateHarness(DailyStateMixin):
         self._data_lock = asyncio.Lock()
         self._daily_state_generation_lock = asyncio.Lock()
         self.enable_humanized_states = True
+        self.enable_cycle_state = True
         self.data = {
             "state_conditions": [{"id": "old", "kind": "sleep"}],
             "state_generated_day": "2026-07-22",
@@ -25,6 +26,9 @@ class _StateHarness(DailyStateMixin):
         self.generation_release = asyncio.Event()
         self.block_generation = False
         self.save_count = 0
+
+    def _get_default_persona_prompt(self, _umo: str = "") -> str:
+        return "人类女性角色"
 
     async def _ensure_weather_context(self, force: bool = False):
         return {"date": "2026-07-23", "prompt": "晴", "source": "test"}
@@ -112,6 +116,31 @@ class _DiaryHarness(DailyStateMixin):
 
 
 class DailyStateGenerationSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_passive_fast_discards_cached_period_when_humanized_states_disabled(self) -> None:
+        harness = _StateHarness()
+        harness.enable_humanized_states = False
+        harness.data["daily_state"] = {
+            "date": "2026-07-23",
+            "energy": 42,
+            "mood_bias": "疲惫",
+            "body_cycle": "处于生理期,身体舒适度与能量偏低",
+            "conditions": [
+                {
+                    "kind": "body_cycle",
+                    "phase": "period",
+                    "label": "处于生理期",
+                    "energy_delta": -10,
+                }
+            ],
+        }
+
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            state = await harness._ensure_daily_state_once(passive_fast=True)
+
+        self.assertEqual(state.get("body_cycle"), "不处于生理期")
+        self.assertEqual(state.get("conditions", []), [])
+        self.assertEqual(harness._format_active_period_boundary_for_prompt(state), "")
+
     async def test_force_state_failure_preserves_previous_state(self) -> None:
         harness = _StateHarness()
         harness.generate_error = RuntimeError("dream provider failed")

@@ -9,6 +9,7 @@ from astrbot_plugin_private_companion.proactive import ProactiveMixin
 
 class _CycleInjectionHarness(DailyStateMixin):
     def __init__(self, body_cycle: str) -> None:
+        self.enable_cycle_state = True
         self.data = {
             "daily_state": {
                 "energy": 42,
@@ -76,6 +77,73 @@ class CycleInjectionTests(unittest.TestCase):
         self.assertEqual(recovery._cycle_proactive_frequency_profile()["phase"], "recovery")
         neutral = _CycleFrequencyHarness("不处于生理期")
         self.assertEqual(neutral._cycle_proactive_frequency_profile()["private_interval_multiplier"], 1.0)
+
+    def test_active_period_adds_contextual_intimacy_boundary(self) -> None:
+        harness = _CycleInjectionHarness("处于生理期,身体舒适度与能量偏低")
+        boundary = harness._format_active_period_boundary_for_prompt(
+            harness.data["daily_state"]
+        )
+
+        self.assertIn("Bot 当前经期与互动边界", boundary)
+        self.assertIn("自然、明确地拒绝或推迟这一次互动", boundary)
+        self.assertIn("不要因为关系亲密、用户偏好、催促或迎合压力而答应", boundary)
+        self.assertIn("温和拥抱不需要机械拒绝", boundary)
+        self.assertIn("休息、聊天、陪伴或改天再说", boundary)
+
+    def test_advanced_menstrual_phase_survives_custom_prompt_text(self) -> None:
+        harness = _CycleInjectionHarness("想把动作放轻一些")
+        harness.data["daily_state"]["conditions"] = [
+            {
+                "kind": "body_cycle",
+                "phase": "menstrual",
+                "label": "想把动作放轻一些",
+                "energy_delta": -10,
+            }
+        ]
+
+        boundary = harness._format_active_period_boundary_for_prompt(
+            harness.data["daily_state"],
+            public=True,
+        )
+
+        self.assertIn("处于月经期阶段", boundary)
+        self.assertIn("无人直接且合宜地询问时，不要主动公开具体周期", boundary)
+        self.assertIn("不要否认或说不知道", boundary)
+
+    def test_non_menstrual_phases_do_not_force_intimacy_refusal(self) -> None:
+        for cycle_text in (
+            "处于 PMS 期，精力有所下降",
+            "处于卵泡期早，精力平稳回升",
+            "处于排卵期，精力较充足",
+            "生理期后，慢慢回到稳定状态",
+            "不处于生理期",
+        ):
+            with self.subTest(cycle_text=cycle_text):
+                harness = _CycleInjectionHarness(cycle_text)
+                boundary = harness._format_active_period_boundary_for_prompt(
+                    harness.data["daily_state"]
+                )
+                self.assertEqual(boundary, "")
+
+    def test_disabled_cycle_never_reuses_stale_period_state(self) -> None:
+        harness = _CycleInjectionHarness("处于生理期,身体舒适度与能量偏低")
+        harness.enable_cycle_state = False
+
+        self.assertEqual(
+            harness._format_active_period_boundary_for_prompt(harness.data["daily_state"]),
+            "",
+        )
+        prompt = harness._format_state_for_prompt(harness.data["daily_state"])
+        self.assertNotIn("周期状态：Bot 当前", prompt)
+
+    def test_disabled_status_text_is_not_mistaken_for_active_period(self) -> None:
+        harness = _CycleInjectionHarness("生理期模拟未开启")
+
+        prompt = harness._format_state_for_prompt(harness.data["daily_state"])
+        hint = harness._format_passive_state_style_hint(harness.data["daily_state"])
+
+        self.assertNotIn("周期状态：Bot 当前", prompt)
+        self.assertNotIn("Bot 处于女性生理期", hint)
 
 
 if __name__ == "__main__":

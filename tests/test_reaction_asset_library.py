@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import asyncio
 import json
+import hashlib
 import zipfile
 from pathlib import Path
 
@@ -47,6 +48,106 @@ class ReactionAssetLibraryTests(unittest.TestCase):
         self.assertIn("无语", item["emotions"])
         self.assertEqual(["private"], item["scopes"])
         self.assertTrue(Path(self.temp_dir.name, "reaction_expression_library", "catalog.json").read_text(encoding="utf-8").startswith("{"))
+
+    def test_import_queues_analysis_and_applies_structured_metadata(self) -> None:
+        item = self.library.import_blobs([("001.png", PNG_BYTES)])["items"][0]
+
+        self.assertEqual("pending", item["analysis_status"])
+        self.assertEqual([item["id"]], [row["id"] for row in self.library.analysis_candidates()])
+        self.assertEqual(1, self.library.mark_analysis_running([item["id"]]))
+        self.assertEqual(
+            [item["id"]],
+            [
+                row["id"]
+                for row in self.library.analysis_candidates(statuses=("pending", "running"))
+            ],
+        )
+
+        result = self.library.apply_analysis_results(
+            [
+                {
+                    "id": item["id"],
+                    "name": "无语看镜头",
+                    "description": "角色无语地看向镜头",
+                    "visible_text": "你认真的？",
+                    "tags": ["角色", "看镜头"],
+                    "emotions": ["无语"],
+                    "intents": ["吐槽", "质疑"],
+                }
+            ],
+            provider_id="vision-test",
+        )
+
+        self.assertEqual(1, result["completed"])
+        analyzed = self.library.list_items()["items"][0]
+        self.assertEqual("complete", analyzed["analysis_status"])
+        self.assertEqual("无语看镜头", analyzed["name"])
+        self.assertEqual("你认真的？", analyzed["visible_text"])
+        self.assertIn("吐槽", analyzed["intents"])
+        self.assertEqual("vision-test", analyzed["analysis_provider"])
+
+    def test_analysis_preserves_manual_fields_and_merges_generated_lists(self) -> None:
+        item = self.library.import_blobs(
+            [("角色.png", PNG_BYTES)],
+            metadata={"tags": ["自定义角色"], "emotions": ["用户校准情绪"]},
+        )["items"][0]
+
+        self.library.update_items([item["id"]], {"name": "人工名称"})
+        self.library.apply_analysis_results(
+            [
+                {
+                    "id": item["id"],
+                    "name": "模型名称",
+                    "tags": ["摊手"],
+                    "emotions": ["无语"],
+                    "intents": ["吐槽"],
+                }
+            ]
+        )
+
+        analyzed = self.library.list_items()["items"][0]
+        self.assertEqual("人工名称", analyzed["name"])
+        self.assertEqual(["自定义角色", "摊手"], analyzed["tags"])
+        self.assertEqual(["用户校准情绪", "无语"], analyzed["emotions"])
+
+    def test_legacy_catalog_metadata_is_conservatively_protected(self) -> None:
+        item_id = "legacy-item"
+        stored_name = f"{item_id}.png"
+        (self.library.images_dir / stored_name).write_bytes(PNG_BYTES)
+        self.library.catalog_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "items": [
+                        {
+                            "id": item_id,
+                            "filename": "原文件.png",
+                            "stored_name": stored_name,
+                            "sha256": hashlib.sha256(PNG_BYTES).hexdigest(),
+                            "name": "人工旧名称",
+                            "tags": ["人工旧标签"],
+                            "emotions": ["无语"],
+                            "intents": ["吐槽"],
+                            "scopes": ["private"],
+                            "enabled": True,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        legacy = self.library.list_items()["items"][0]
+        self.assertEqual("unprocessed", legacy["analysis_status"])
+        self.assertTrue({"name", "tags", "emotions", "intents"} <= set(legacy["manual_fields"]))
+        self.library.apply_analysis_results(
+            [{"id": item_id, "name": "模型名称", "tags": ["新标签"], "emotions": ["惊讶"], "intents": ["接梗"]}]
+        )
+        analyzed = self.library.list_items()["items"][0]
+        self.assertEqual("人工旧名称", analyzed["name"])
+        self.assertIn("人工旧标签", analyzed["tags"])
+        self.assertIn("新标签", analyzed["tags"])
 
     def test_find_uses_own_catalog_and_respects_scope(self) -> None:
         item = self.library.import_blobs(
@@ -162,6 +263,17 @@ class _RuntimeHarness(LlmToolActionsMixin):
 
 
 class ReactionAssetRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_cached_library_does_not_shadow_runtime_accessor(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            harness = _RuntimeHarness(folder)
+
+            first = harness._reaction_asset_library()
+            second = harness._reaction_asset_library()
+
+            self.assertIs(first, second)
+            self.assertTrue(callable(harness._reaction_asset_library))
+            self.assertIs(first, harness._reaction_asset_library_instance)
+
     async def test_runtime_lookup_uses_plugin_owned_catalog_without_extra_provider(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             library = ReactionAssetLibrary(folder)

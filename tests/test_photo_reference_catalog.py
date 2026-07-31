@@ -32,6 +32,36 @@ from astrbot_plugin_private_companion.photo_reference_catalog import (
 
 
 class PhotoReferenceCatalogTests(unittest.TestCase):
+    def test_time_categories_round_trip_with_backward_compatible_default(self) -> None:
+        serialized = validate_and_serialize(
+            [
+                {
+                    "id": "library-night",
+                    "kind": "library",
+                    "source": "C:/images/night.png",
+                    "reference_roles": ["identity", "scene"],
+                    "outfit_lock_default": False,
+                    "scene_categories": ["outdoor"],
+                    "time_categories": ["night", "custom:blue_hour"],
+                },
+                {
+                    "id": "library-any-time",
+                    "kind": "library",
+                    "source": "C:/images/any.png",
+                    "reference_roles": ["identity"],
+                    "outfit_lock_default": False,
+                },
+            ]
+        )
+        loaded = load_catalog(serialized, catalog_version=1)
+
+        self.assertEqual(
+            loaded.references[0].time_categories,
+            ("night", "custom:blue_hour"),
+        )
+        self.assertEqual(loaded.references[1].time_categories, ())
+        self.assertEqual(serialized[0]["time_categories"], ["night", "custom:blue_hour"])
+
     def test_unversioned_legacy_config_is_migrated_to_canonical_references(self) -> None:
         loaded = load_catalog(
             raw_catalog=[],
@@ -57,6 +87,17 @@ class PhotoReferenceCatalogTests(unittest.TestCase):
         self.assertEqual(loaded.references[1].scene_categories, ("home", "bedroom"))
         self.assertEqual(loaded.references[2].reference_roles, ("identity", "outfit"))
         self.assertEqual(loaded.references[2].outfit_category, "school_uniform")
+
+    def test_plain_loungewear_is_migrated_as_homewear(self) -> None:
+        loaded = load_catalog(
+            raw_catalog=[],
+            catalog_version=0,
+            legacy_library=["C:/images/lounge.png || soft loungewear for relaxing at home"],
+            preset_names={"居家服", "居家睡衣"},
+        )
+
+        self.assertEqual(loaded.references[0].outfit_category, "homewear")
+        self.assertEqual(loaded.references[0].preferred_preset, "居家服")
 
     def test_legacy_delimited_metadata_is_tolerantly_normalized_with_warnings(self) -> None:
         loaded = load_catalog(

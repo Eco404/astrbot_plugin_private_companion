@@ -162,7 +162,11 @@ class PhotoReferenceLibraryTests(unittest.IsolatedAsyncioTestCase):
             prompt = harness.external_calls[0]["prompt_text"]
             self.assertIn("Image edit contract", prompt)
             self.assertIn("sole source canvas", prompt)
-            self.assertIn("not a selfie", prompt)
+            positive, separator, negative = prompt.partition("\n\nNegative prompt:\n")
+            self.assertTrue(separator)
+            self.assertIn("constrained edit of that supplied canvas", positive)
+            self.assertNotIn("This is,", positive)
+            self.assertIn("a selfie or a new character portrait", negative)
             self.assertNotIn("当前位置：家里", prompt)
             self.assertNotIn("角色自拍", prompt)
             long_prompt = harness._apply_photo_generation_edit_guard("x" * 4000, "edit")
@@ -410,7 +414,9 @@ class PhotoReferenceLibraryTests(unittest.IsolatedAsyncioTestCase):
             call = harness.external_calls[0]
             self.assertEqual(call["reference_image_path"], str(sleepwear.resolve()))
             self.assertIn("explicit clothing request in this prompt has highest priority", call["prompt_text"])
-            self.assertIn("exactly one coherent sleepwear outfit", call["prompt_text"])
+            self.assertIn("outfit category=sleepwear", call["prompt_text"])
+            self.assertIn("Render one coherent sleepwear outfit exactly as requested", call["prompt_text"])
+            self.assertIn("Do not restore clothing from today's outfit", call["prompt_text"])
             self.assertNotIn("use today's outfit reference image", call["prompt_text"])
             self.assertNotIn("cream sweatshirt with a collared shirt", call["prompt_text"])
 

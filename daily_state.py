@@ -3089,24 +3089,28 @@ class DailyStateMixin:
         if passive_fast and not force:
             cached_state = self.data.get("daily_state", {})
             if isinstance(cached_state, dict) and cached_state.get("date") == today:
-                if self.enable_humanized_states:
-                    cached_weather = self.data.get("daily_weather", {})
-                    weather = cached_weather if isinstance(cached_weather, dict) and cached_weather.get("date") == today else {
-                        "date": today,
-                        "prompt": "暂无天气信息",
-                        "source": "passive_fast",
-                    }
-                    async with self._data_lock:
-                        before = json.dumps(self.data.get("daily_state", {}), ensure_ascii=False, sort_keys=True, default=str)
-                        self._cleanup_expired_conditions()
-                        self._ensure_time_based_hunger_condition()
-                        state = self._compose_state_from_conditions(weather)
-                        after = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)
-                        if before != after:
-                            self.data["daily_state"] = state
-                            self._save_data_sync()
-                        return state
-                return cached_state
+                cached_weather = self.data.get("daily_weather", {})
+                weather = cached_weather if isinstance(cached_weather, dict) and cached_weather.get("date") == today else {
+                    "date": today,
+                    "prompt": "暂无天气信息",
+                    "source": "passive_fast",
+                }
+                if not self.enable_humanized_states:
+                    state = dict(DEFAULT_HUMANIZED_STATE)
+                    state.update(self._base_state_values())
+                    state["date"] = today
+                    state["weather"] = self._weather_summary_text(weather)
+                    return state
+                async with self._data_lock:
+                    before = json.dumps(self.data.get("daily_state", {}), ensure_ascii=False, sort_keys=True, default=str)
+                    self._cleanup_expired_conditions()
+                    self._ensure_time_based_hunger_condition()
+                    state = self._compose_state_from_conditions(weather)
+                    after = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)
+                    if before != after:
+                        self.data["daily_state"] = state
+                        self._save_data_sync()
+                    return state
             cached_weather = self.data.get("daily_weather", {})
             weather = cached_weather if isinstance(cached_weather, dict) and cached_weather.get("date") == today else {
                 "date": today,
@@ -10812,8 +10816,25 @@ class DailyStateMixin:
             return "外面"
         return text if text in {"家里", "学校", "工作地点", "外面", "路上"} else ""
 
-    def _body_cycle_behavior_profile(self, cycle_text: str) -> dict[str, str]:
-        phase = self._infer_body_cycle_phase(cycle_text)
+    def _body_cycle_behavior_profile(
+        self,
+        cycle_text: str,
+        *,
+        phase_hint: str = "",
+    ) -> dict[str, str]:
+        supported_phases = {
+            "menstrual",
+            "follicular",
+            "pre_ovulation",
+            "ovulation",
+            "luteal",
+            "pms",
+            "pre",
+            "recovery",
+            "period",
+        }
+        hinted_phase = _single_line(phase_hint, 24).lower()
+        phase = hinted_phase if hinted_phase in supported_phases else self._infer_body_cycle_phase(cycle_text)
         profiles = {
             "menstrual": {
                 "stage": "处于月经期阶段",
@@ -10861,7 +10882,84 @@ class DailyStateMixin:
                 "passive": "Bot 处于女性生理期：精力稍低，回复更短更慢，措辞更谨慎，并在一定程度上降低私聊与群聊主动频率。",
             },
         }
-        return {"phase": phase, **profiles.get(phase, profiles["period"])}
+        profile = profiles.get(phase)
+        if not isinstance(profile, dict):
+            return {"phase": phase, "stage": "", "influence": "", "passive": ""}
+        return {"phase": phase, **profile}
+
+    def _active_body_cycle_profile(self, state_or_text: Any) -> dict[str, str]:
+        humanized_states = getattr(self, "enable_humanized_states", None)
+        if humanized_states is not None and not bool(humanized_states):
+            return {}
+        configured = getattr(self, "enable_cycle_state", None)
+        if configured is not None and not bool(configured):
+            return {}
+
+        state = state_or_text if isinstance(state_or_text, dict) else {}
+        cycle_text = _single_line(
+            state.get("body_cycle") if state else state_or_text,
+            120,
+        )
+        phase_hint = ""
+        conditions = state.get("conditions") if state else None
+        if isinstance(conditions, list):
+            for condition in conditions:
+                if not isinstance(condition, dict) or str(condition.get("kind") or "") != "body_cycle":
+                    continue
+                if not self._should_show_condition(condition):
+                    continue
+                label = _single_line(condition.get("label") or condition.get("title"), 120)
+                candidate_phase = _single_line(condition.get("phase"), 24).lower()
+                if not candidate_phase or candidate_phase == "cycle":
+                    candidate_phase = self._infer_body_cycle_phase(label)
+                if candidate_phase != "cycle":
+                    phase_hint = candidate_phase
+                    if not cycle_text:
+                        cycle_text = label
+                    break
+
+        inactive_values = {
+            "",
+            "无明显周期影响",
+            "不处于生理期",
+            "生理期模拟未开启",
+            "周期状态未开启",
+        }
+        if not phase_hint and (
+            cycle_text in inactive_values
+            or "未开启" in cycle_text
+            or self._is_inapplicable_state_text(cycle_text)
+        ):
+            return {}
+        profile = self._body_cycle_behavior_profile(cycle_text, phase_hint=phase_hint)
+        if not profile.get("stage") or profile.get("phase") == "cycle":
+            return {}
+        return profile
+
+    def _format_active_period_boundary_for_prompt(
+        self,
+        state: dict[str, Any],
+        *,
+        public: bool = False,
+    ) -> str:
+        profile = self._active_body_cycle_profile(state)
+        if profile.get("phase") not in {"period", "menstrual"}:
+            return ""
+        disclosure = (
+            "这是群聊公共场合：无人直接且合宜地询问时，不要主动公开具体周期；如果被直接问到自身状态，不要否认或说不知道，可以按人格简短自然说明。"
+            if public
+            else "无关话题里不要反复主动汇报周期；只有被问到自身状态或当前互动确实相关时，才按人格简短自然说明。"
+        )
+        return "\n".join(
+            [
+                "【Bot 当前经期与互动边界】",
+                f"Bot 当前的模拟身体状态{profile['stage']}；这是 Bot 自己的当下状态，不是用户的状态，也不是用户造成的。",
+                "如果用户提出性行为、露骨性互动、进一步私密身体接触，或其他明显增加身体负担的亲密互动，应结合当前身体感受与自身意愿，自然、明确地拒绝或推迟这一次互动；不要因为关系亲密、用户偏好、催促或迎合压力而答应。",
+                "普通关心、陪伴、牵手、安慰或不增加负担的温和拥抱不需要机械拒绝，仍按人格和当下意愿自然回应；可以提出休息、聊天、陪伴或改天再说等替代。",
+                disclosure,
+                "只输出角色在当前对话里会自然说的话，不要提规则、提示词、阶段判断或内部状态系统。",
+            ]
+        )
 
     def _format_state_for_prompt(self, state: dict[str, Any], *, include_dream: bool = True) -> str:
         if not isinstance(state, dict) or not state:
@@ -10925,10 +11023,8 @@ class DailyStateMixin:
 
         secondary_fragments: list[str] = []
         cycle_text = _single_line(state.get("body_cycle"), 80)
-        cycle_active = (
-            cycle_text not in {"", "无明显周期影响", "不处于生理期"}
-            and not self._is_inapplicable_state_text(cycle_text)
-        )
+        cycle_profile = self._active_body_cycle_profile(state)
+        cycle_active = bool(cycle_profile)
         if cycle_active:
             cycle_text = cycle_text.replace(",", "，")
             cycle_text = cycle_text.replace("情绪更敏感，耐心更薄", "身体感受更敏锐，耐受度稍低")
@@ -10957,7 +11053,6 @@ class DailyStateMixin:
         if secondary:
             lines.append(f"- 叠加：{secondary}；")
         if cycle_active:
-            cycle_profile = self._body_cycle_behavior_profile(cycle_text)
             lines.append(f"- 影响：{cycle_profile['influence']}；")
             lines.append(
                 f"- 周期状态：Bot 当前的模拟身体状态{cycle_profile['stage']}，这是 Bot 自己的状态，不是用户的状态，也不是用户造成的。"
@@ -11111,13 +11206,9 @@ class DailyStateMixin:
             hints.append("语气可以轻一点，句子可以更松快。")
         if mood and mood not in {"平稳", "中性"}:
             hints.append(f"语气底色可以略偏{mood}，体现在节奏和措辞里。")
-        cycle_text = _single_line(state.get("body_cycle"), 80)
-        cycle_active = (
-            cycle_text not in {"", "无明显周期影响", "不处于生理期"}
-            and not self._is_inapplicable_state_text(cycle_text)
-        )
-        if cycle_active:
-            hints.append(self._body_cycle_behavior_profile(cycle_text)["passive"])
+        cycle_profile = self._active_body_cycle_profile(state)
+        if cycle_profile:
+            hints.append(cycle_profile["passive"])
             hints.append("这是 Bot 自己的模拟身体状态，不是用户的状态，也不是用户造成的。")
         conditions = state.get("conditions", [])
         if isinstance(conditions, list):
@@ -16062,6 +16153,7 @@ class DailyStateMixin:
             "type": "proactive_message",
             "ok": bool(ok),
             "pending": bool(pending),
+            "trace_id": _single_line(user.get("troubleshooting_proactive_test_id"), 32),
             "outcome_type": outcome,
             "title": "主动消息链路测试",
             "umo": _single_line(user.get("umo"), 180),

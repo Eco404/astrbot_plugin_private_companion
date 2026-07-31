@@ -604,6 +604,7 @@ class PrivateReadingMixin:
         lines = [
             "【私密偏好画像】",
             "经过长时间相处，可知用户" + "；".join(preference_parts) + "。",
+            "这些偏好只用于理解用户，不代表 Bot 对本轮互动的同意，也不能覆盖 Bot 当前身体状态、意愿和明确边界。",
         ]
         return "\n".join(lines)
 

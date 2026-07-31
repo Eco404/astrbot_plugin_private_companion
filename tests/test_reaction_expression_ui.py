@@ -101,6 +101,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
         for endpoint in (
             "/reaction_library/list",
             "/reaction_library/import",
+            "/reaction_library/analyze",
             "/reaction_library/update",
             "/reaction_library/delete",
             "/reaction_library/rescan",
@@ -115,6 +116,8 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "私聊 + 群聊",
             "重建索引",
             "批量导入",
+            "上传后自动识别",
+            "重新识别",
         ):
             self.assertIn(text, self.script)
         for selector in (
@@ -122,6 +125,9 @@ class ReactionExpressionUiTests(unittest.TestCase):
             ".reaction-asset-grid",
             ".reaction-library-editor",
             ".reaction-import-dialog",
+            ".reaction-library-pager",
+            ".reaction-analysis-badge",
+            ".reaction-import-dropzone",
         ):
             self.assertIn(selector, self.css)
         self.assertIn('key === "enable_reaction_expression_experiment" ? renderReactionLibraryWorkspace()', self.script)

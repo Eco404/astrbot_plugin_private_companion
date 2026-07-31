@@ -106,6 +106,7 @@ const state = {
   providerDraft: {},
   providerTimeoutDraft: {},
   providerFallbackDraft: {},
+  providerTestResults: {},
   availableTtsProviders: [],
   ttsProviderDraft: {},
   ttsProviderConfigs: [],
@@ -141,11 +142,13 @@ const state = {
   reactionLibraryQuery: "",
   reactionLibraryStatus: "all",
   reactionLibraryScope: "all",
+  reactionLibraryAnalysis: "all",
   reactionLibraryPage: 1,
   reactionLibraryPageSize: 48,
   reactionLibrarySelected: new Set(),
   reactionLibraryEditorId: "",
   reactionLibraryImageData: new Map(),
+  reactionLibraryPollTimer: null,
   troubleshootingFilter: "all",
   troubleshootingCategory: "all",
   tokenSource: "companion",
@@ -1518,6 +1521,8 @@ const safeFeatureKeys = [
 ];
 
 const configLabels = {
+  photo_generation_trace_max_size_kb: "生图日志单文件大小（KB）",
+  photo_generation_trace_backup_count: "生图日志轮转备份数",
   enabled_user_count: "启用私聊对象",
   user_count: "私聊对象总数",
   require_opt_in: "是否需要私聊确认",
@@ -2491,7 +2496,7 @@ const configDescriptions = {
   proactive_photo_text_probability: "在主动生图可用、额度未用完，且本轮主动有生活画面或视觉切口时，把普通文字主动升级成带图的概率，按百分比填写。",
   photo_generation_backend: "auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/SDGen；未配置在线 API 时使用本地后端。comfyui/sdgen/external 可指定单一后端。tool_call 会调用其他插件注册的函数工具（需在下方填写工具名）。",
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "用于普通随手拍、风景、桌面小物等 photo_text 的 ComfyUI 工作流名。",
-  COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。开启参考图一致性并配置参考图后，会优先寻找 images=1 的自拍工作流。",
+  COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。开启参考图一致性后，会按实际提交数量寻找匹配的 images=N 自拍/改图工作流；单图工作流只提交主参考，其余职责转为文字提示。",
   enable_photo_reference_image: "可选。开启后，自拍、人像、头像和角色表情包会自动使用今日穿搭图或下方人设参考图来保持外观一致；关闭后不自动读取固定参考图，只按提示词生成。用户显式发送或引用图片要求改图时不受影响。",
   photo_reference_catalog: "统一保存基础人设图与图库参考图的稳定 ID、职责、服装锁、场景和首选预设；请使用参考图库管理器编辑。",
   enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
@@ -2758,7 +2763,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
+  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -3347,6 +3352,11 @@ const featureSettingSections = {
       keys: ["command_photo_generation_max_daily"],
     },
     {
+      title: "生图可观测日志",
+      note: "控制生图事件日志、逐次提示词调试文件与轮转备份；单文件大小设为 0 会全部关闭。",
+      keys: ["photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count"],
+    },
+    {
       title: "主动发送频率",
       note: "只控制插件主动消息升级为带图的频率，不限制用户明确要求的生图。",
       keys: ["proactive_photo_text_probability", "photo_action_max_daily"],
@@ -3615,6 +3625,8 @@ const featureSettingTypes = {
   memory_companion_context_max_chars: { type: "number", min: 240, max: 1800, step: 60 },
   natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
   command_photo_generation_max_daily: { type: "number", min: 0, max: 100, step: 1 },
+  photo_generation_trace_max_size_kb: { type: "number", min: 0, max: 102400, step: 512 },
+  photo_generation_trace_backup_count: { type: "number", min: 0, max: 20, step: 1 },
   private_image_vision_provider_priority: { type: "select", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]] },
   private_image_vision_custom_prompt: { type: "textarea", rows: 8, maxLength: 12000 },
   private_image_vision_max_chars: { type: "number", min: 300, max: 12000, step: 100 },
@@ -3963,7 +3975,7 @@ function photoApiEndpointResult(endpoint, index) {
   return result && (result.ran_at || result.ran_at_text || result.error || result.detail) ? result : null;
 }
 
-function photoApiEndpointResultHtml(result) {
+function photoApiEndpointResultHtml(result, index) {
   if (!result || !(result.ran_at || result.ran_at_text || result.error || result.detail)) return "";
   const ok = Boolean(result.ok);
   const meta = [
@@ -3977,6 +3989,8 @@ function photoApiEndpointResultHtml(result) {
       <b>${escapeHtml(ok ? "最近测试通过" : "最近测试失败")}</b>
       <span>${escapeHtml(result.error || result.detail || (ok ? "接口已返回有效图片" : "接口未返回有效图片"))}</span>
       ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+      ${result.suggestion ? `<small class="test-result-suggestion">${escapeHtml(result.suggestion)}</small>` : ""}
+      <button type="button" class="test-result-inline-button" data-test-result-source="image-api" data-test-result-key="${escapeHtml(index)}">查看诊断</button>
     </div>
   `;
 }
@@ -4044,7 +4058,7 @@ function photoApiEndpointCardHtml(endpoint, index, total, options = {}) {
           <textarea rows="2" data-image-api-field="custom_headers" data-index="${index}" placeholder="X-Custom-Header: value">${escapeHtml(item.custom_headers)}</textarea>
         </label>
       </div>
-      ${photoApiEndpointResultHtml(result)}
+      ${photoApiEndpointResultHtml(result, index)}
     </article>
   `;
 }
@@ -6335,6 +6349,8 @@ const setupGuideAdvancedItems = {
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
         { key: "command_photo_generation_max_daily", type: "number", label: "用户请求每日上限", placeholder: "0（不限量）", min: 0, max: 100, description: "显式陪伴生图指令与主链 pc_generate_photo 工具共用；0 表示不限量。" },
+        { key: "photo_generation_trace_max_size_kb", type: "number", label: "生图日志单文件大小（KB）", placeholder: "0", min: 0, max: 102400, description: "仅排障时开启；事件日志和逐次提示词调试文件可能包含会话标识、用户请求、完整提示词和本地参考图路径。0 表示全部关闭。" },
+        { key: "photo_generation_trace_backup_count", type: "number", label: "生图日志轮转备份数", placeholder: "5", min: 0, max: 20, description: "轮转时保留 photo_generation_trace.1.txt 等历史日志的数量。0 表示不保留旧文件。" },
         { key: "enable_natural_language_photo_generation", type: "bool", kind: "setting", label: "允许规则快判生图/改图", description: "开启后，插件会在主链前直接接管高置信图片请求。", showWhen: (draft) => photoSettingVisibleForValues("enable_natural_language_photo_generation", draft) },
         { key: "natural_language_photo_generation_max_daily", type: "number", label: "规则快判每日上限", placeholder: "3", min: 0, showWhen: (draft) => photoSettingVisibleForValues("natural_language_photo_generation_max_daily", draft) },
         { key: "natural_language_photo_extra_prompt", type: "textarea", label: "规则快判附加提示词", placeholder: "keep character identity consistent, clean composition, no text, no watermark", showWhen: (draft) => photoSettingVisibleForValues("natural_language_photo_extra_prompt", draft) },
@@ -10320,6 +10336,213 @@ function troubleshootingFaqMarkup(data = {}, category = "all") {
   `).join("");
 }
 
+let activeTestDiagnosticResult = null;
+let activeTestDiagnosticTitle = "";
+
+function testDiagnosticStatus(result = {}) {
+  if (result.pending || result.test_status === "pending") return "pending";
+  if (result.ok || result.test_status === "passed") return "passed";
+  return "failed";
+}
+
+function testDiagnosticStatusLabel(result = {}) {
+  return { passed: "测试通过", failed: "测试失败", pending: "等待完成" }[testDiagnosticStatus(result)] || "未知状态";
+}
+
+function testDiagnosticTimeText(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "";
+  try {
+    return new Date(timestamp * 1000).toLocaleString("zh-CN", { hour12: false });
+  } catch (_error) {
+    return "";
+  }
+}
+
+function testDiagnosticFacts(result = {}) {
+  return [
+    ["测试编号", result.request_id || result.trace_id || "未记录"],
+    ["测试状态", testDiagnosticStatusLabel(result)],
+    ["总耗时", `${Number(result.elapsed_ms || 0)} ms`],
+    ["完成时间", result.ran_at_text || testDiagnosticTimeText(result.finished_at || result.ran_at) || "未记录"],
+    ["错误类别", result.error_category || "无"],
+    ["异常类型", result.exception_type || "无"],
+    ["Provider", result.provider || result.provider_id || ""],
+    ["执行后端", result.backend || ""],
+    ["模型", result.image_model || ""],
+    ["接口", result.endpoint_name || result.endpoint_url || ""],
+    ["投递目标", result.delivery_umo || result.umo || ""],
+    ["结果文件", result.path || ""],
+  ].filter(([, value]) => String(value || "").trim());
+}
+
+function testDiagnosticReportText(title, result = {}) {
+  const lines = [
+    title || result.title || "测试诊断",
+    ...testDiagnosticFacts(result).map(([label, value]) => `${label}：${value}`),
+  ];
+  const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+  if (warnings.length) {
+    lines.push("", "范围说明：", ...warnings.map((item) => `- ${item}`));
+  }
+  const steps = Array.isArray(result.steps) ? result.steps.filter(Boolean) : [];
+  if (steps.length) {
+    lines.push("", "执行阶段：", ...steps.map((step) => {
+      const elapsed = Number(step.elapsed_ms || 0) > 0 ? ` · ${Number(step.elapsed_ms)} ms` : "";
+      return `- [${step.status || "info"}] ${step.name || "执行阶段"}${elapsed}：${step.detail || ""}`;
+    }));
+  }
+  const entries = Array.isArray(result.diagnostic_entries) ? result.diagnostic_entries.filter(Boolean) : [];
+  if (entries.length) {
+    lines.push("", "诊断记录：", ...entries.map((entry) => {
+      const elapsed = Number(entry.elapsed_ms || 0) > 0 ? `+${Number(entry.elapsed_ms)} ms ` : "";
+      return `- ${elapsed}[${entry.level || "info"}] ${entry.stage || "记录"}：${entry.message || ""}`;
+    }));
+  }
+  if (result.error) lines.push("", `错误详情：${result.error}`);
+  if (result.delivery_error && result.delivery_error !== result.error) lines.push(`投递错误：${result.delivery_error}`);
+  if (result.suggestion) lines.push("", `建议：${result.suggestion}`);
+  return lines.join("\n").trim();
+}
+
+function testDiagnosticDialogMarkup(title, result = {}) {
+  const status = testDiagnosticStatus(result);
+  const facts = testDiagnosticFacts(result);
+  const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+  const steps = Array.isArray(result.steps) ? result.steps.filter(Boolean) : [];
+  const entries = Array.isArray(result.diagnostic_entries) ? result.diagnostic_entries.filter(Boolean) : [];
+  return `
+    <section class="test-diagnostic-overview ${escapeHtml(status)}">
+      <span>${escapeHtml(testDiagnosticStatusLabel(result))}</span>
+      <b>${escapeHtml(result.detail || result.error || (status === "passed" ? "测试链路运行正常" : "正在等待异步测试完成"))}</b>
+    </section>
+    <dl class="test-diagnostic-facts">
+      ${facts.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+    </dl>
+    ${result.suggestion ? `<section class="test-diagnostic-suggestion"><b>下一步建议</b><p>${escapeHtml(result.suggestion)}</p></section>` : ""}
+    ${warnings.length ? `
+      <section class="test-diagnostic-section">
+        <h3>测试范围</h3>
+        <ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>
+      </section>
+    ` : ""}
+    ${steps.length ? `
+      <section class="test-diagnostic-section">
+        <h3>执行阶段</h3>
+        <div class="test-diagnostic-steps">
+          ${steps.map((step) => `
+            <div class="${escapeHtml(step.status || "info")}">
+              <span></span>
+              <b>${escapeHtml(step.name || "执行阶段")}</b>
+              <p>${escapeHtml(step.detail || "")}</p>
+              ${Number(step.elapsed_ms || 0) > 0 ? `<small>${escapeHtml(Number(step.elapsed_ms))} ms</small>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
+    ${entries.length ? `
+      <section class="test-diagnostic-section">
+        <h3>诊断记录</h3>
+        <div class="test-diagnostic-log">
+          ${entries.map((entry) => `
+            <div class="${escapeHtml(entry.level || "info")}">
+              <small>${Number(entry.elapsed_ms || 0) > 0 ? `+${escapeHtml(Number(entry.elapsed_ms))} ms` : "起始"}</small>
+              <b>${escapeHtml(entry.stage || "记录")}</b>
+              <p>${escapeHtml(entry.message || "")}</p>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
+    ${result.error || result.delivery_error ? `
+      <section class="test-diagnostic-section error">
+        <h3>错误详情</h3>
+        <pre>${escapeHtml(result.error || result.delivery_error || "")}</pre>
+        ${result.delivery_error && result.delivery_error !== result.error ? `<pre>${escapeHtml(result.delivery_error)}</pre>` : ""}
+      </section>
+    ` : ""}
+  `;
+}
+
+function ensureTestDiagnosticDialog() {
+  let dialog = document.querySelector("#testDiagnosticDialog");
+  if (dialog) return dialog;
+  dialog = document.createElement("dialog");
+  dialog.id = "testDiagnosticDialog";
+  dialog.className = "test-diagnostic-dialog";
+  dialog.setAttribute("aria-labelledby", "testDiagnosticDialogTitle");
+  dialog.innerHTML = `
+    <div class="test-diagnostic-dialog-shell">
+      <header>
+        <div><span>TEST DIAGNOSTICS</span><h2 id="testDiagnosticDialogTitle">测试诊断</h2></div>
+        <button type="button" data-test-diagnostic-close aria-label="关闭测试诊断">×</button>
+      </header>
+      <div class="test-diagnostic-dialog-body" id="testDiagnosticDialogBody"></div>
+      <footer>
+        <button type="button" class="secondary" data-test-diagnostic-copy>复制诊断</button>
+        <button type="button" data-test-diagnostic-close>关闭</button>
+      </footer>
+    </div>
+  `;
+  dialog.querySelectorAll("[data-test-diagnostic-close]").forEach((button) => button.addEventListener("click", () => {
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }));
+  dialog.querySelector("[data-test-diagnostic-copy]")?.addEventListener("click", () => {
+    void copyTextToClipboard(testDiagnosticReportText(activeTestDiagnosticTitle, activeTestDiagnosticResult || {}), "诊断详情已复制");
+  });
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      if (typeof dialog.close === "function") dialog.close();
+      else dialog.removeAttribute("open");
+    }
+  });
+  document.body.appendChild(dialog);
+  return dialog;
+}
+
+function showTestDiagnosticDialog(title, result) {
+  if (!result || typeof result !== "object") {
+    showToast("没有可展示的测试结果", "error");
+    return;
+  }
+  activeTestDiagnosticTitle = title || result.title || "测试诊断";
+  activeTestDiagnosticResult = result;
+  const dialog = ensureTestDiagnosticDialog();
+  const heading = dialog.querySelector("#testDiagnosticDialogTitle");
+  const body = dialog.querySelector("#testDiagnosticDialogBody");
+  if (heading) heading.textContent = activeTestDiagnosticTitle;
+  if (body) body.innerHTML = testDiagnosticDialogMarkup(activeTestDiagnosticTitle, result);
+  if (dialog.open) return;
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function resolveTestDiagnosticResult(source, key) {
+  if (source === "provider") {
+    return { title: `${providerLabels[key] || key || "模型"}测试`, result: state.providerTestResults?.[key] };
+  }
+  if (source === "tts-provider") {
+    const provider = state.ttsProviderConfigs.find((item) => item.id === key);
+    return { title: `${provider?.name || provider?.id || "TTS Provider"}测试`, result: state.ttsProviderTestResults?.[key] };
+  }
+  if (source === "image-api") {
+    const index = Number(key || 0);
+    const endpoint = photoApiEndpointDraft()[index];
+    const result = state.imageApiEndpointTestResults?.[index]?.result
+      || state.imageApiStatus?.items?.[index]?.result;
+    return { title: `${endpoint?.name || `在线 API ${index + 1}`}测试`, result };
+  }
+  const results = state.troubleshooting?.chain_tests || {};
+  const aliases = {
+    image_generation_text2img: results.image_generation,
+    model_diagnostics: results.skill_similarity,
+  };
+  const result = results[key] || aliases[key];
+  return { title: result?.title || "链路测试", result };
+}
+
 function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], screenCompanion = {}, qzone = {}, tts = {}, category = "all") {
   const tests = [
     {
@@ -10419,6 +10642,8 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       result.context_chars ? `摘要 ${result.context_chars} 字` : "",
       result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
+      result.error_category ? `错误 ${result.error_category}` : "",
+      result.request_id || result.trace_id ? `编号 ${result.request_id || result.trace_id}` : "",
       result.ran_at_text || "",
     ].filter(Boolean).join(" · ");
     const stepsMarkup = troubleshootingChainStepsMarkup(result.steps);
@@ -10433,11 +10658,15 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
           ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
           ${result.prompt_path ? `<small class="path">完整调试文件：${escapeHtml(result.prompt_path)}</small>` : ""}
+          ${result.suggestion ? `<small class="test-result-suggestion">${escapeHtml(result.suggestion)}</small>` : ""}
           ${previewMarkup}
           ${diagnosticMarkup}
           ${stepsMarkup}
         </div>
-        <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}" ${test.workflowKind ? `data-troubleshooting-workflow-kind="${escapeHtml(test.workflowKind)}"` : ""}>${escapeHtml(test.button)}</button>
+        <div class="troubleshooting-chain-test-actions">
+          <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}" ${test.workflowKind ? `data-troubleshooting-workflow-kind="${escapeHtml(test.workflowKind)}"` : ""}>${escapeHtml(test.button)}</button>
+          ${hasResult ? `<button type="button" class="secondary" data-test-result-source="troubleshooting" data-test-result-key="${escapeHtml(test.type)}">查看诊断</button>` : ""}
+        </div>
       </section>
     `;
   }).join("");
@@ -21766,6 +21995,7 @@ function syncFeatureProviderInput(select) {
 
 function collectFeatureDetailPayload(featureKey, root = document) {
   const overviewSettings = state.overview?.settings || {};
+  const parameterDraft = state.featureDetailParamDraft || {};
   const features = {};
   const settings = {};
   const providers = {};
@@ -21794,6 +22024,7 @@ function collectFeatureDetailPayload(featureKey, root = document) {
   root.querySelectorAll("[data-feature-param]").forEach((input) => {
     const key = input.dataset.featureParam;
     if (!key) return;
+    if (key === "photo_reference_catalog" && !Object.prototype.hasOwnProperty.call(parameterDraft, key)) return;
     assignParam(key, collectSettingValue(key, input));
   });
   Object.entries(state.featureDetailParamDraft || {}).forEach(([key, value]) => assignParam(key, value));
@@ -22621,6 +22852,9 @@ function photoReferenceMetadataFromObject(rawItem) {
   if (Object.prototype.hasOwnProperty.call(metadata, "scene_categories")) {
     metadata.scene_categories = normalizePhotoReferenceMetadataList(metadata.scene_categories);
   }
+  if (Object.prototype.hasOwnProperty.call(metadata, "time_categories")) {
+    metadata.time_categories = normalizePhotoReferenceMetadataList(metadata.time_categories);
+  }
   if (Object.prototype.hasOwnProperty.call(metadata, "outfit_lock_default")) {
     const normalizedLock = normalizePhotoReferenceMetadataBoolean(metadata.outfit_lock_default);
     if (normalizedLock !== undefined) metadata.outfit_lock_default = normalizedLock;
@@ -22666,6 +22900,7 @@ function parsePhotoReferenceCatalog(value) {
         outfit_category: String(item.outfit_category || ""),
         outfit_lock_default: item.outfit_lock_default === true,
         scene_categories: Array.isArray(item.scene_categories) ? [...item.scene_categories] : [],
+        time_categories: Array.isArray(item.time_categories) ? [...item.time_categories] : [],
         preferred_preset: String(item.preferred_preset || ""),
         metadata_source: String(item.metadata_source || "configured"),
       },
@@ -22696,6 +22931,12 @@ function hydratePhotoReferenceDraftFromStatus(status) {
 
 function canonicalPhotoReference(item, kind) {
   const metadata = photoReferenceMetadataFromObject(item?.metadata);
+  const preferredPreset = String(metadata.preferred_preset || "").trim();
+  const availablePresets = Array.isArray(state.photoReferenceLibraryStatus?.options?.presets)
+    ? state.photoReferenceLibraryStatus.options.presets
+      .map((option) => String(typeof option === "string" ? option : option?.value || "").trim())
+      .filter(Boolean)
+    : null;
   return {
     id: kind === "persona" ? "persona" : String(item?.id || newPhotoReferenceId()),
     kind,
@@ -22705,7 +22946,8 @@ function canonicalPhotoReference(item, kind) {
     outfit_category: String(metadata.outfit_category || "").trim(),
     outfit_lock_default: metadata.outfit_lock_default === true,
     scene_categories: normalizePhotoReferenceMetadataList(metadata.scene_categories),
-    preferred_preset: String(metadata.preferred_preset || "").trim(),
+    time_categories: normalizePhotoReferenceMetadataList(metadata.time_categories),
+    preferred_preset: availablePresets && !availablePresets.includes(preferredPreset) ? "" : preferredPreset,
     metadata_source: String(metadata.metadata_source || "configured"),
   };
 }
@@ -22756,6 +22998,174 @@ function photoReferenceStatusFor(kind, source) {
   ) || null;
 }
 
+function photoReferenceFallbackFieldOptions(field) {
+  const fallbacks = {
+    reference_roles: [
+      { value: "identity", label: "身份" },
+      { value: "outfit", label: "服装" },
+      { value: "pose", label: "姿势" },
+      { value: "scene", label: "场景" },
+      { value: "style", label: "画风" },
+      { value: "continuity", label: "连续性" },
+      { value: "source", label: "原图" },
+    ],
+    outfit_categories: [
+      { value: "cosplay", label: "COS" },
+      { value: "school_uniform", label: "校服" },
+      { value: "sleepwear", label: "睡衣" },
+      { value: "swimwear", label: "泳装" },
+      { value: "sportswear", label: "运动服" },
+      { value: "formalwear", label: "礼服/正装" },
+      { value: "homewear", label: "居家服" },
+      { value: "daily_outfit", label: "日常穿搭" },
+    ],
+    scene_categories: [
+      { value: "home", label: "居家" },
+      { value: "bedroom", label: "卧室" },
+      { value: "school", label: "校园" },
+      { value: "office", label: "办公室" },
+      { value: "outdoor", label: "户外" },
+      { value: "formal_event", label: "正式场合" },
+      { value: "sport", label: "运动" },
+      { value: "beach", label: "海边/泳池" },
+    ],
+    time_categories: [
+      { value: "morning", label: "早晨" },
+      { value: "daytime", label: "白天" },
+      { value: "afternoon", label: "下午" },
+      { value: "evening", label: "傍晚" },
+      { value: "night", label: "夜晚" },
+      { value: "bedtime", label: "睡前" },
+    ],
+    presets: [],
+  };
+  return fallbacks[field] || [];
+}
+
+function photoReferenceFieldOptions(field) {
+  const configured = Array.isArray(state.photoReferenceLibraryStatus?.options?.[field])
+    ? state.photoReferenceLibraryStatus.options[field]
+    : [];
+  const fallback = photoReferenceFallbackFieldOptions(field);
+  const mergeStandardOptions = ["reference_roles", "scene_categories", "time_categories"].includes(field);
+  const rawOptions = configured.length
+    ? (mergeStandardOptions ? [...configured, ...fallback] : configured)
+    : fallback;
+  const seen = new Set();
+  return rawOptions
+    .map((item) => {
+      const value = typeof item === "string" ? item : item?.value;
+      const label = typeof item === "string" ? item : item?.label;
+      return {
+        value: String(value || "").trim(),
+        label: String(label || value || "").trim(),
+      };
+    })
+    .filter((item) => {
+      if (!item.value || !item.label || seen.has(item.value)) return false;
+      seen.add(item.value);
+      return true;
+    });
+}
+
+function photoReferenceUnknownOptionLabel(value) {
+  const text = String(value || "").trim();
+  if (text.toLowerCase().startsWith("custom:")) {
+    return `自定义：${text.slice(text.indexOf(":") + 1).trim() || text}`;
+  }
+  return `当前值：${text}`;
+}
+
+function photoReferenceFieldOptionLabel(field, value) {
+  const text = String(value || "").trim();
+  const matched = photoReferenceFieldOptions(field).find((item) => item.value === text);
+  return matched?.label || photoReferenceUnknownOptionLabel(text);
+}
+
+function photoReferenceSingleSelectOptions(field, selectedValue, emptyLabel) {
+  const selected = String(selectedValue || "").trim();
+  const options = photoReferenceFieldOptions(field);
+  if (selected && !options.some((item) => item.value === selected)) {
+    options.push({
+      value: selected,
+      label: field === "presets" ? `已失效预设：${selected}` : photoReferenceUnknownOptionLabel(selected),
+    });
+  }
+  return [
+    `<option value="" ${selected ? "" : "selected"}>${escapeHtml(emptyLabel)}</option>`,
+    ...options.map((item) => `<option value="${escapeHtml(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>`),
+  ].join("");
+}
+
+function photoReferenceMultiSelectHtml(field, selectedValues, index, emptyLabel, ariaLabel) {
+  const selected = new Set(normalizePhotoReferenceMetadataList(selectedValues));
+  const options = photoReferenceFieldOptions(field);
+  selected.forEach((value) => {
+    if (!options.some((item) => item.value === value)) {
+      options.push({ value, label: photoReferenceUnknownOptionLabel(value) });
+    }
+  });
+  const selectedLabels = options
+    .filter((item) => selected.has(item.value))
+    .map((item) => item.label);
+  return `
+    <details
+      class="photo-reference-multi-select"
+      data-photo-reference-multi-select="${escapeHtml(field)}"
+      data-empty-label="${escapeHtml(emptyLabel)}"
+    >
+      <summary aria-label="${escapeHtml(ariaLabel)}">
+        <span data-photo-reference-multi-summary>${escapeHtml(selectedLabels.join("、") || emptyLabel)}</span>
+      </summary>
+      <div class="photo-reference-multi-options" role="group" aria-label="${escapeHtml(ariaLabel)}">
+        ${options.map((item) => `
+          <label class="photo-reference-multi-option">
+            <input
+              type="checkbox"
+              data-photo-reference-multi-option="${escapeHtml(field)}"
+              data-photo-reference-option-label="${escapeHtml(item.label)}"
+              data-index="${index}"
+              value="${escapeHtml(item.value)}"
+              ${selected.has(item.value) ? "checked" : ""}
+            />
+            <span>${escapeHtml(item.label)}</span>
+          </label>
+        `).join("")}
+      </div>
+    </details>
+  `;
+}
+
+function syncPhotoReferenceMultiSelectSummary(input) {
+  const details = input?.closest?.("[data-photo-reference-multi-select]");
+  const summary = details?.querySelector?.("[data-photo-reference-multi-summary]");
+  if (!details || !summary) return;
+  const labels = Array.from(details.querySelectorAll("[data-photo-reference-multi-option]:checked"))
+    .map((option) => String(option.dataset.photoReferenceOptionLabel || "").trim())
+    .filter(Boolean);
+  summary.textContent = labels.join("、") || String(details.dataset.emptyLabel || "未选择");
+}
+
+function photoReferenceRoleShortcuts() {
+  const status = state.photoReferenceLibraryStatus;
+  const configured = Array.isArray(status?.options?.role_shortcuts)
+    ? status.options.role_shortcuts
+    : [];
+  const fallback = [
+    { value: ["identity"], label: "仅身份" },
+    { value: ["outfit"], label: "仅服装" },
+    { value: ["pose"], label: "仅姿势" },
+    { value: ["scene"], label: "仅场景" },
+    { value: ["style"], label: "仅画风" },
+  ];
+  return (configured.length ? configured : fallback)
+    .map((item) => ({
+      value: normalizePhotoReferenceMetadataList(item?.value),
+      label: String(item?.label || "").trim(),
+    }))
+    .filter((item) => item.value.length && item.label);
+}
+
 function photoReferenceSourceKind(source) {
   const text = String(source || "").trim();
   if (/^https?:\/\//i.test(text)) return "远程 URL";
@@ -22795,6 +23205,7 @@ function photoReferenceManagerCard(item, index) {
   const outfitLocked = status ? Boolean(status.outfit_lock_default) : Boolean(configuredMetadata.outfit_lock_default);
   const configuredRoles = normalizePhotoReferenceMetadataList(configuredMetadata.reference_roles);
   const configuredScenes = normalizePhotoReferenceMetadataList(configuredMetadata.scene_categories);
+  const configuredTimes = normalizePhotoReferenceMetadataList(configuredMetadata.time_categories);
   const configuredCategory = String(configuredMetadata.outfit_category || "");
   const configuredPreset = String(configuredMetadata.preferred_preset || "");
   const configuredLock = Object.prototype.hasOwnProperty.call(configuredMetadata, "outfit_lock_default")
@@ -22802,11 +23213,13 @@ function photoReferenceManagerCard(item, index) {
     : undefined;
   const configuredLockMode = configuredLock === true ? "true" : configuredLock === false ? "false" : "";
   const responsibilityTags = [
-    ...roles.map((role) => `职责 ${role}`),
-    outfitCategory ? `服装 ${outfitCategory}` : "",
+    ...roles.map((role) => `职责 ${photoReferenceFieldOptionLabel("reference_roles", role)}`),
+    ...configuredTimes.map((category) => `时间 ${photoReferenceFieldOptionLabel("time_categories", category)}`),
+    outfitCategory ? `服装 ${photoReferenceFieldOptionLabel("outfit_categories", outfitCategory)}` : "",
     outfitLocked ? "默认锁定服装" : "",
     preferredPreset ? `预设 ${preferredPreset}` : "",
   ].filter(Boolean);
+  const roleShortcuts = photoReferenceRoleShortcuts();
   return `
     <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}">
       ${photoReferencePreviewHtml("library", source, `参考图 ${index + 1}`)}
@@ -22829,30 +23242,53 @@ function photoReferenceManagerCard(item, index) {
           <textarea data-photo-reference-note data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea>
         </label>
         <details class="photo-reference-metadata-editor">
-          <summary>参考职责与服装裁决</summary>
-          <label>
+          <summary>
+            <span>参考职责与服装裁决</span>
+            <small>展开后可指定这张图在生图时负责保留哪些信息。留空表示不限制或由系统决定。</small>
+          </summary>
+          <div class="photo-reference-field">
             <span>参考职责</span>
-            <input type="text" data-photo-reference-roles data-index="${index}" value="${escapeHtml(configuredRoles.join(", "))}" maxlength="160" placeholder="identity, outfit, scene, continuity" />
-          </label>
+            ${photoReferenceMultiSelectHtml("reference_roles", configuredRoles, index, "未选择参考职责", "选择参考职责")}
+            <small>决定生成时从这张图保留哪些内容，可多选；“原图”用于改图底图。</small>
+          </div>
+          <div class="photo-reference-role-shortcuts" role="group" aria-label="参考职责快捷设置">
+            ${roleShortcuts.map((shortcut) => {
+              const selected = shortcut.value.length === configuredRoles.length
+                && shortcut.value.every((role) => configuredRoles.includes(role));
+              return `<button type="button" data-photo-reference-role-shortcut="${escapeHtml(shortcut.value.join(","))}" data-index="${index}" aria-pressed="${selected ? "true" : "false"}" class="${selected ? "is-active" : ""}">${escapeHtml(shortcut.label)}</button>`;
+            }).join("")}
+          </div>
           <label>
             <span>服装类别</span>
-            <input type="text" data-photo-reference-outfit-category data-index="${index}" value="${escapeHtml(configuredCategory)}" maxlength="40" placeholder="sleepwear / daily_outfit / formal" />
+            <select data-photo-reference-outfit-category data-index="${index}">
+              ${photoReferenceSingleSelectOptions("outfit_categories", configuredCategory, "不指定服装类别")}
+            </select>
+            <small>标记图片中的服装类型，用于匹配换装要求；只有参考职责包含“服装”时才参与裁决。</small>
           </label>
           <label>
             <span>默认服装锁</span>
             <select data-photo-reference-outfit-lock data-index="${index}">
-              <option value="" ${configuredLockMode === "" ? "selected" : ""}>自动推断</option>
               <option value="true" ${configuredLockMode === "true" ? "selected" : ""}>锁定参考图服装</option>
-              <option value="false" ${configuredLockMode === "false" ? "selected" : ""}>不锁定参考图服装</option>
+              <option value="false" ${configuredLockMode !== "true" ? "selected" : ""}>不锁定参考图服装</option>
             </select>
+            <small>控制是否优先沿用参考图中的服装；用户明确要求换装时，仍以用户要求为准。</small>
           </label>
-          <label>
+          <div class="photo-reference-field">
             <span>适用场景</span>
-            <input type="text" data-photo-reference-scenes data-index="${index}" value="${escapeHtml(configuredScenes.join(", "))}" maxlength="200" placeholder="home, bedroom, outdoor" />
-          </label>
+            ${photoReferenceMultiSelectHtml("scene_categories", configuredScenes, index, "通用场景（不限制）", "选择适用场景")}
+            <small>选择这张图适合使用的通用场景，可多选；匹配时会提高选用优先级，留空表示不限场景。</small>
+          </div>
+          <div class="photo-reference-field">
+            <span>适用时间</span>
+            ${photoReferenceMultiSelectHtml("time_categories", configuredTimes, index, "不限时间", "选择适用时间")}
+            <small>选择这张图适合使用的时间段，可多选；匹配拍摄时间时会提高选用优先级，留空表示不限时间。</small>
+          </div>
           <label>
             <span>首选预设</span>
-            <input type="text" data-photo-reference-preferred-preset data-index="${index}" value="${escapeHtml(configuredPreset)}" maxlength="60" placeholder="居家睡衣" />
+            <select data-photo-reference-preferred-preset data-index="${index}">
+              ${photoReferenceSingleSelectOptions("presets", configuredPreset, "不指定预设")}
+            </select>
+            <small>选择使用这张图时优先套用的生图场景预设；用户明确要求优先，冲突或失效预设不会静默替代用户要求。</small>
           </label>
         </details>
       </div>
@@ -23088,7 +23524,7 @@ function bindFeatureDetailActions() {
   const detailPage = document.querySelector(".feature-detail-page");
   const trackFeatureDetailChange = (event) => {
     if (
-      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")
+      event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-multi-option], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-times], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")
       || event.target?.closest?.("[data-photo-reference-add-form]")
       || event.target?.matches?.("[data-group-safety-manage-group]")
     ) return;
@@ -23460,16 +23896,40 @@ function bindPhotoReferenceManagerActions() {
     void refreshPhotoReferenceLibraryStatus(event.currentTarget);
   });
   manager.querySelector("[data-photo-reference-persona-source]")?.addEventListener("input", syncPhotoReferenceManagerDraft);
-  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-preferred-preset]").forEach((input) => {
-    input.addEventListener(input.matches("select") ? "change" : "input", () => {
+  manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-role-shortcut], [data-photo-reference-multi-option], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-times], [data-photo-reference-preferred-preset]").forEach((input) => {
+    const eventName = input.matches("button") ? "click" : input.matches("select, input[type='checkbox']") ? "change" : "input";
+    input.addEventListener(eventName, () => {
       const index = Number(input.dataset.index);
       const item = photoReferenceManagerItems()[index];
       if (!item) return;
+      if (input.dataset.photoReferenceRoleShortcut) {
+        item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+        item.metadata.reference_roles = normalizePhotoReferenceMetadataList(
+          input.dataset.photoReferenceRoleShortcut,
+        );
+        syncPhotoReferenceManagerDraft();
+        renderFeatureSwitches();
+        return;
+      }
       if (input.matches("[data-photo-reference-source]")) item.source = input.value;
       else if (input.matches("[data-photo-reference-note]")) item.note = input.value;
       else {
         item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
-        if (input.matches("[data-photo-reference-roles]")) {
+        if (input.matches("[data-photo-reference-multi-option]")) {
+          const field = String(input.dataset.photoReferenceMultiOption || "");
+          const card = input.closest("[data-photo-reference-card]");
+          const values = Array.from(card?.querySelectorAll(`[data-photo-reference-multi-option="${field}"]:checked`) || [])
+            .map((option) => String(option.value || "").trim())
+            .filter(Boolean);
+          const metadataKey = {
+            reference_roles: "reference_roles",
+            scene_categories: "scene_categories",
+            time_categories: "time_categories",
+          }[field];
+          if (metadataKey && values.length) item.metadata[metadataKey] = values;
+          else if (metadataKey) delete item.metadata[metadataKey];
+          syncPhotoReferenceMultiSelectSummary(input);
+        } else if (input.matches("[data-photo-reference-roles]")) {
           const value = normalizePhotoReferenceMetadataList(input.value);
           if (value.length) item.metadata.reference_roles = value;
           else delete item.metadata.reference_roles;
@@ -23484,6 +23944,10 @@ function bindPhotoReferenceManagerActions() {
           const value = normalizePhotoReferenceMetadataList(input.value);
           if (value.length) item.metadata.scene_categories = value;
           else delete item.metadata.scene_categories;
+        } else if (input.matches("[data-photo-reference-times]")) {
+          const value = normalizePhotoReferenceMetadataList(input.value);
+          if (value.length) item.metadata.time_categories = value;
+          else delete item.metadata.time_categories;
         } else if (input.matches("[data-photo-reference-preferred-preset]")) {
           const value = String(input.value || "").trim();
           if (value) item.metadata.preferred_preset = value;
@@ -23518,6 +23982,7 @@ function bindPhotoReferenceManagerActions() {
         outfit_category: "",
         outfit_lock_default: false,
         scene_categories: [],
+        time_categories: [],
         preferred_preset: "",
         metadata_source: "configured",
       },
@@ -23627,6 +24092,20 @@ function bindPhotoApiEndpointEditor(root = document) {
           result.ok ? "success" : "error",
         );
       } catch (error) {
+        state.imageApiEndpointTestResults = {
+          ...(state.imageApiEndpointTestResults || {}),
+          [index]: {
+            fingerprint: photoApiEndpointFingerprint(endpoint, index),
+            result: {
+              ok: false,
+              test_status: "failed",
+              error_category: "请求失败",
+              error: error.message,
+              detail: "测试请求未能完成",
+            },
+          },
+        };
+        renderImageModelConfig();
         showToast(`${endpoint.name} 测试失败：${error.message}`, "error");
       } finally {
         setActionBusy(button, false);
@@ -23909,7 +24388,7 @@ function ttsLanguageConfiguratorMarkup(settings, values, language) {
             if (!fields.length) return "";
             return `<section class="tts-provider-field-group"><h4>${escapeHtml(group.label)}</h4><div class="tts-provider-field-grid">${fields.map((field) => ttsProviderFieldMarkup(selected, field)).join("")}</div></section>`;
           }).join("")}</div></div>` : `<div class="tts-provider-empty">当前${escapeHtml(meta.label)}跟随 AstrBot 会话 TTS；也可以在上方选择或新建专用 Provider。</div>`}
-        <footer class="tts-provider-editor-actions"><span class="tts-provider-test-result ${testResult?.ok ? "ok" : testResult ? "error" : ""}">${testResult ? testResult.ok ? `测试通过 · ${testResult.elapsed_ms || 0} ms` : escapeHtml(testResult.error || "测试失败") : draft ? "有未保存修改" : sharedLanguages.length ? "保存时自动拆分三个语种的重复绑定" : "保存时同时应用语种绑定与语音策略"}</span><button type="button" class="secondary" data-tts-provider-test${!selected?.loaded ? " disabled" : ""}>测试连接</button><button type="button" data-tts-provider-save>${sharedLanguages.length ? "保存并拆分独立配置" : `保存${escapeHtml(meta.label)}配置`}</button></footer>
+        <footer class="tts-provider-editor-actions"><span class="tts-provider-test-result ${testResult?.ok ? "ok" : testResult ? "error" : ""}"><span>${testResult ? testResult.ok ? `测试通过 · ${testResult.elapsed_ms || 0} ms` : escapeHtml(testResult.error || "测试失败") : draft ? "有未保存修改" : sharedLanguages.length ? "保存时自动拆分三个语种的重复绑定" : "保存时同时应用语种绑定与语音策略"}</span>${testResult ? `<button type="button" data-test-result-source="tts-provider" data-test-result-key="${escapeHtml(selected.id)}">查看诊断</button>` : ""}</span><button type="button" class="secondary" data-tts-provider-test${!selected?.loaded ? " disabled" : ""}>测试连接</button><button type="button" data-tts-provider-save>${sharedLanguages.length ? "保存并拆分独立配置" : `保存${escapeHtml(meta.label)}配置`}</button></footer>
       </div>
     </section>`;
 }
@@ -24116,7 +24595,16 @@ function renderTtsModelConfig() {
       state.ttsProviderTestResults = { ...state.ttsProviderTestResults, [selected.id]: result };
       showToast(result.ok ? `TTS Provider 测试通过（${result.elapsed_ms || 0} ms）` : `测试失败：${result.error || "未知错误"}`, result.ok ? "" : "error");
     } catch (error) {
-      state.ttsProviderTestResults = { ...state.ttsProviderTestResults, [selected.id]: { ok: false, error: error.message } };
+      state.ttsProviderTestResults = {
+        ...state.ttsProviderTestResults,
+        [selected.id]: {
+          ok: false,
+          test_status: "failed",
+          error_category: "请求失败",
+          error: error.message,
+          suggestion: "确认面板后端可访问后重新测试；Provider 自身异常请同时查看 AstrBot 后端日志。",
+        },
+      };
       showToast(`测试失败：${error.message}`, "error");
     } finally {
       setActionBusy(button, false);
@@ -24148,7 +24636,6 @@ function syncModelsSectionControls() {
         }
         state.modelsSection = nextSection;
         renderProviders();
-        resetActiveWorkspaceScroll();
         if (state.modelsSection === "image" && !state.lazyLoaded.imageApiStatus) {
           loadImageApiStatus().catch((error) => showToast(`读取生图 API 状态失败：${error.message}`, "error"));
         }
@@ -24864,6 +25351,7 @@ async function loadReactionLibrary(force = false) {
     q: state.reactionLibraryQuery || "",
     status: state.reactionLibraryStatus || "all",
     scope: state.reactionLibraryScope || "all",
+    analysis: state.reactionLibraryAnalysis || "all",
     page: String(state.reactionLibraryPage || 1),
     page_size: String(state.reactionLibraryPageSize || 48),
   });
@@ -24871,10 +25359,6 @@ async function loadReactionLibrary(force = false) {
     const data = await fetchJson(`/reaction_library/list?${params.toString()}`);
     if (requestSeq !== state.reactionLibraryRequestSeq) return;
     state.reactionLibrary = data || { items: [], total: 0, summary: {} };
-    const visibleIds = new Set(reactionLibraryItems().map((item) => String(item.id || "")));
-    state.reactionLibrarySelected = new Set(
-      [...state.reactionLibrarySelected].filter((id) => visibleIds.has(id)),
-    );
     if (state.reactionLibraryEditorId && !reactionLibraryItems().some((item) => item.id === state.reactionLibraryEditorId)) {
       state.reactionLibraryEditorId = "";
     }
@@ -24887,33 +25371,65 @@ async function loadReactionLibrary(force = false) {
       if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
         renderExperimentalPage();
       }
+      scheduleReactionLibraryPoll();
     }
   }
+}
+
+function scheduleReactionLibraryPoll() {
+  window.clearTimeout(state.reactionLibraryPollTimer);
+  state.reactionLibraryPollTimer = null;
+  const pending = Number(state.reactionLibrary?.summary?.analysis_pending || 0);
+  if (!pending) return;
+  state.reactionLibraryPollTimer = window.setTimeout(() => {
+    if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
+      loadReactionLibrary(true).catch(() => {});
+    }
+  }, 1800);
 }
 
 async function hydrateReactionLibraryImages() {
   const root = $("#reactionLibraryWorkspace");
   if (!root) return;
-  const images = [...root.querySelectorAll("img[data-reaction-preview]")];
-  await Promise.all(images.map(async (image) => {
-    const endpoint = image.dataset.reactionPreview || "";
-    if (!endpoint || image.dataset.loaded === "1") return;
-    let dataUrl = state.reactionLibraryImageData.get(endpoint) || "";
-    try {
-      if (!dataUrl) {
-        const result = await fetchJson(endpoint);
-        dataUrl = result?.data_url || "";
-        if (dataUrl) state.reactionLibraryImageData.set(endpoint, dataUrl);
+  const images = [...root.querySelectorAll("img[data-reaction-preview]")]
+    .filter((image) => image.dataset.loaded !== "1" && image.dataset.loading !== "1");
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < images.length) {
+      const image = images[cursor];
+      cursor += 1;
+      const endpoint = image.dataset.reactionPreview || "";
+      if (!endpoint) continue;
+      image.dataset.loading = "1";
+      let dataUrl = state.reactionLibraryImageData.get(endpoint) || "";
+      try {
+        if (!dataUrl) {
+          const result = await fetchJson(endpoint);
+          dataUrl = result?.data_url || "";
+          if (dataUrl) state.reactionLibraryImageData.set(endpoint, dataUrl);
+        }
+        if (!dataUrl) throw new Error("图片数据为空");
+        image.src = dataUrl;
+        image.dataset.loaded = "1";
+        image.closest(".reaction-asset-card")?.classList.add("is-ready");
+      } catch (_error) {
+        image.alt = "预览不可用";
+        image.closest(".reaction-asset-card")?.classList.add("is-missing");
+      } finally {
+        image.dataset.loading = "0";
       }
-      if (!dataUrl) throw new Error("图片数据为空");
-      image.src = dataUrl;
-      image.dataset.loaded = "1";
-      image.closest(".reaction-asset-card")?.classList.add("is-ready");
-    } catch (_error) {
-      image.alt = "预览不可用";
-      image.closest(".reaction-asset-card")?.classList.add("is-missing");
     }
-  }));
+  };
+  await Promise.all(Array.from({ length: Math.min(4, images.length) }, () => worker()));
+}
+
+function reactionAnalysisMeta(status) {
+  const value = String(status || "unprocessed");
+  if (value === "complete") return { label: "已识别", tone: "complete" };
+  if (value === "running") return { label: "识别中", tone: "running" };
+  if (value === "pending") return { label: "待识别", tone: "pending" };
+  if (value === "failed") return { label: "识别失败", tone: "failed" };
+  return { label: "未识别", tone: "unprocessed" };
 }
 
 function reactionScopeLabel(scopes) {
@@ -24926,28 +25442,26 @@ function reactionScopeLabel(scopes) {
 
 function renderReactionLibraryEditor() {
   const item = reactionLibraryItems().find((candidate) => candidate.id === state.reactionLibraryEditorId);
-  if (!item) {
-    return `
-      <aside class="reaction-library-editor is-empty">
-        <b>素材详情</b>
-        <span>选择一张表情包后，可调整名称、标签、情绪、用途和适用会话。</span>
-      </aside>
-    `;
-  }
+  if (!item) return "";
+  const analysis = reactionAnalysisMeta(item.analysis_status);
   return `
-    <aside class="reaction-library-editor" data-reaction-editor="${escapeHtml(item.id)}">
+    <button type="button" class="reaction-editor-backdrop" aria-label="关闭素材详情" data-reaction-editor-close></button>
+    <aside class="reaction-library-editor" role="dialog" aria-modal="true" aria-label="素材详情" data-reaction-editor="${escapeHtml(item.id)}">
       <header>
-        <div><span>素材详情</span><b>${escapeHtml(item.name || item.filename || "未命名")}</b></div>
+        <div><span class="reaction-analysis-badge ${analysis.tone}">${analysis.label}</span><b>${escapeHtml(item.name || item.filename || "未命名")}</b></div>
         <button type="button" title="关闭详情" aria-label="关闭详情" data-reaction-editor-close>×</button>
       </header>
       <div class="reaction-editor-preview">
-        <img src="${TRANSPARENT_IMAGE}" alt="${escapeHtml(item.name || "表情包预览")}" data-reaction-preview="${escapeHtml(item.preview_endpoint || "")}">
+        <img src="${TRANSPARENT_IMAGE}" alt="${escapeHtml(item.name || "表情包预览")}" loading="lazy" data-reaction-preview="${escapeHtml(item.preview_endpoint || "")}">
       </div>
+      ${item.analysis_error ? `<div class="reaction-analysis-error">${escapeHtml(item.analysis_error)}</div>` : ""}
       <form data-reaction-editor-form>
         <label><span>名称</span><input name="name" maxlength="100" value="${escapeHtml(item.name || "")}" placeholder="例如：无语摊手"></label>
         <label><span>标签</span><input name="tags" value="${escapeHtml((item.tags || []).join("，"))}" placeholder="角色、动作、梗"></label>
         <label><span>情绪</span><input name="emotions" value="${escapeHtml((item.emotions || []).join("，"))}" placeholder="开心、无语、委屈"></label>
         <label><span>沟通用途</span><input name="intents" value="${escapeHtml((item.intents || []).join("，"))}" placeholder="接梗、安慰、吐槽"></label>
+        <label><span>画面摘要</span><textarea name="description" rows="3" maxlength="500" placeholder="自动识别后生成">${escapeHtml(item.description || "")}</textarea></label>
+        <label><span>图片文字</span><textarea name="visible_text" rows="2" maxlength="300" placeholder="自动识别后生成">${escapeHtml(item.visible_text || "")}</textarea></label>
         <fieldset>
           <legend>适用会话</legend>
           <label><input type="checkbox" name="scope_private" ${item.scopes?.includes("private") ? "checked" : ""}> 私聊</label>
@@ -24958,9 +25472,11 @@ function renderReactionLibraryEditor() {
           <span>${escapeHtml(item.filename || "")}</span>
           <span>${item.width && item.height ? `${item.width} × ${item.height}` : "尺寸未知"}</span>
           <span>使用 ${Number(item.usage_count || 0)} 次</span>
+          ${item.analysis_provider ? `<span title="视觉模型">${escapeHtml(item.analysis_provider)}</span>` : ""}
         </div>
         <footer>
           <button type="button" class="danger" data-reaction-delete-one="${escapeHtml(item.id)}">删除</button>
+          <button type="button" data-reaction-analyze-one="${escapeHtml(item.id)}">重新识别</button>
           <button type="submit" class="primary">保存修改</button>
         </footer>
       </form>
@@ -24978,18 +25494,19 @@ function renderReactionLibraryWorkspace() {
   const cards = items.map((item) => {
     const selected = state.reactionLibrarySelected.has(item.id);
     const active = state.reactionLibraryEditorId === item.id;
-    const chips = [...(item.emotions || []), ...(item.intents || []), ...(item.tags || [])].slice(0, 4);
+    const analysis = reactionAnalysisMeta(item.analysis_status);
+    const chips = [...(item.emotions || []), ...(item.intents || [])].slice(0, 3);
     return `
       <article class="reaction-asset-card ${selected ? "is-selected" : ""} ${active ? "is-active" : ""} ${item.enabled ? "" : "is-disabled"} ${item.missing ? "is-missing" : ""}" data-reaction-open="${escapeHtml(item.id)}" tabindex="0">
         <div class="reaction-asset-media">
-          <img src="${TRANSPARENT_IMAGE}" alt="${escapeHtml(item.name || item.filename || "表情包")}" data-reaction-preview="${escapeHtml(item.preview_endpoint || "")}">
+          <img src="${TRANSPARENT_IMAGE}" alt="${escapeHtml(item.name || item.filename || "表情包")}" loading="lazy" data-reaction-preview="${escapeHtml(item.preview_endpoint || "")}">
           <label class="reaction-asset-check" title="选择素材"><input type="checkbox" data-reaction-select="${escapeHtml(item.id)}" ${selected ? "checked" : ""}><span></span></label>
-          <button type="button" class="reaction-asset-toggle ${item.enabled ? "on" : "off"}" title="${item.enabled ? "停用素材" : "启用素材"}" data-reaction-toggle="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "1" : "0"}">${item.enabled ? "启用" : "停用"}</button>
+          <span class="reaction-analysis-badge ${analysis.tone}" title="${escapeHtml(item.analysis_error || analysis.label)}">${analysis.label}</span>
         </div>
         <div class="reaction-asset-body">
-          <b>${escapeHtml(item.name || item.filename || "未命名")}</b>
+          <div class="reaction-asset-title"><b>${escapeHtml(item.name || item.filename || "未命名")}</b><button type="button" class="reaction-asset-toggle ${item.enabled ? "on" : "off"}" title="${item.enabled ? "停用素材" : "启用素材"}" aria-label="${item.enabled ? "停用素材" : "启用素材"}" data-reaction-toggle="${escapeHtml(item.id)}" data-enabled="${item.enabled ? "1" : "0"}">${item.enabled ? "开" : "关"}</button></div>
           <span>${escapeHtml(reactionScopeLabel(item.scopes))}${item.missing ? " · 文件丢失" : ""}</span>
-          <div>${chips.length ? chips.map((chip) => `<em>${escapeHtml(chip)}</em>`).join("") : "<em>待补标签</em>"}</div>
+          <div>${chips.length ? chips.map((chip) => `<em>${escapeHtml(chip)}</em>`).join("") : `<em>${analysis.tone === "complete" ? "暂无分类" : "等待识别"}</em>`}</div>
         </div>
       </article>
     `;
@@ -25001,23 +25518,48 @@ function renderReactionLibraryWorkspace() {
       : cards
         ? `<div class="reaction-asset-grid">${cards}</div>`
         : `<div class="reaction-library-state empty"><b>还没有可管理的表情包</b><span>导入图片、文件夹或 ZIP 后，Bot 才能在对话中自行选用。</span><button type="button" class="primary" data-reaction-import-open>导入第一批素材</button></div>`;
+  const total = Math.max(0, Number(library.total || 0));
+  const page = Math.max(1, Number(library.page || 1));
+  const pages = Math.max(1, Number(library.pages || 1));
+  const pageSize = Math.max(1, Number(library.page_size || state.reactionLibraryPageSize || 48));
+  const pageStart = total ? (page - 1) * pageSize + 1 : 0;
+  const pageEnd = Math.min(total, page * pageSize);
+  const pager = pages > 1 ? `
+    <nav class="reaction-library-pager" aria-label="素材分页">
+      <button type="button" data-reaction-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button>
+      <span>${imageCachePageSequence(page, pages).map((value) => value === "…"
+        ? `<i aria-hidden="true">…</i>`
+        : `<button type="button" data-reaction-page="${value}" class="${value === page ? "is-active" : ""}" aria-current="${value === page ? "page" : "false"}">${value}</button>`).join("")}</span>
+      <small>${pageStart}-${pageEnd} / ${total}</small>
+      <button type="button" data-reaction-page="${page + 1}" ${page >= pages ? "disabled" : ""}>下一页</button>
+    </nav>` : "";
+  const analysisTotal = Number(summary.analyzed || 0) + Number(summary.analysis_pending || 0) + Number(summary.analysis_failed || 0) + Number(summary.analysis_unprocessed || 0);
+  const analysisPercent = analysisTotal ? Math.round(Number(summary.analyzed || 0) / analysisTotal * 100) : 0;
   return `
     <section id="reactionLibraryWorkspace" class="reaction-library-workspace">
       <header class="reaction-library-head">
-        <div><span>PRIVATE COMPANION LIBRARY</span><h3>表情包素材库</h3><p>素材由本插件独立保存和检索，不依赖其他图片插件。</p></div>
+        <div><h3>表情包素材库</h3><p>上传后自动识别内容、情绪和沟通用途。</p></div>
         <div class="reaction-library-head-actions">
           <button type="button" title="扫描素材目录并补全索引" data-reaction-rescan>重建索引</button>
           <button type="button" class="primary" data-reaction-import-open>导入素材</button>
         </div>
       </header>
       <div class="reaction-library-summary">
-        <span><small>全部素材</small><b>${Number(summary.total || 0)}</b></span>
-        <span><small>当前可用</small><b>${Number(summary.enabled || 0)}</b></span>
-        <span><small>私聊可用</small><b>${Number(summary.private || 0)}</b></span>
-        <span><small>累计使用</small><b>${Number(summary.usage_count || 0)}</b></span>
+        <span><small>全部</small><b>${Number(summary.total || 0)}</b></span>
+        <span><small>可用</small><b>${Number(summary.enabled || 0)}</b></span>
+        <span><small>已识别</small><b>${Number(summary.analyzed || 0)}</b></span>
+        <span><small>待处理</small><b>${Number(summary.analysis_pending || 0) + Number(summary.analysis_failed || 0)}</b></span>
       </div>
+      ${analysisTotal ? `<div class="reaction-library-progress ${Number(summary.analysis_failed || 0) ? "has-error" : ""}"><div><b>${Number(summary.analysis_pending || 0) ? `正在识别 ${Number(summary.analysis_pending || 0)} 张` : `自动识别 ${analysisPercent}%`}</b><span>${Number(summary.analysis_failed || 0) ? `${Number(summary.analysis_failed || 0)} 张失败，可筛选后重试` : "模型生成的字段仍可手动修正"}</span></div><progress max="100" value="${analysisPercent}">${analysisPercent}%</progress>${Number(summary.analysis_failed || 0) ? '<button type="button" data-reaction-show-failed>查看失败</button>' : ""}</div>` : ""}
       <div class="reaction-library-toolbar">
-        <label class="reaction-library-search"><span>搜索</span><input type="search" value="${escapeHtml(state.reactionLibraryQuery)}" placeholder="名称、标签、情绪或用途" data-reaction-query></label>
+        <label class="reaction-library-search"><span>搜索</span><input type="search" value="${escapeHtml(state.reactionLibraryQuery)}" placeholder="名称、画面文字、情绪或用途" data-reaction-query></label>
+        <select aria-label="识别状态" data-reaction-analysis>
+          <option value="all" ${state.reactionLibraryAnalysis === "all" ? "selected" : ""}>全部识别状态</option>
+          <option value="complete" ${state.reactionLibraryAnalysis === "complete" ? "selected" : ""}>已识别</option>
+          <option value="pending" ${state.reactionLibraryAnalysis === "pending" ? "selected" : ""}>识别中 / 待识别</option>
+          <option value="failed" ${state.reactionLibraryAnalysis === "failed" ? "selected" : ""}>识别失败</option>
+          <option value="unprocessed" ${state.reactionLibraryAnalysis === "unprocessed" ? "selected" : ""}>未识别</option>
+        </select>
         <select aria-label="启用状态" data-reaction-status>
           <option value="all" ${state.reactionLibraryStatus === "all" ? "selected" : ""}>全部状态</option>
           <option value="enabled" ${state.reactionLibraryStatus === "enabled" ? "selected" : ""}>仅启用</option>
@@ -25030,6 +25572,7 @@ function renderReactionLibraryWorkspace() {
           <option value="group" ${state.reactionLibraryScope === "group" ? "selected" : ""}>群聊</option>
         </select>
         <button type="button" title="刷新素材列表" data-reaction-refresh>刷新</button>
+        ${items.length ? '<button type="button" data-reaction-select-page>选择本页</button>' : ""}
       </div>
       ${selectedCount ? `
         <div class="reaction-library-batch">
@@ -25038,31 +25581,38 @@ function renderReactionLibraryWorkspace() {
           <button type="button" data-reaction-batch="disable">停用</button>
           <button type="button" data-reaction-batch="private">仅私聊</button>
           <button type="button" data-reaction-batch="both">私聊 + 群聊</button>
+          <button type="button" data-reaction-batch="analyze">自动识别</button>
           <button type="button" class="danger" data-reaction-batch="delete">删除</button>
           <button type="button" data-reaction-clear-selection>取消选择</button>
         </div>
       ` : ""}
-      <div class="reaction-library-layout">
+      <div class="reaction-library-layout ${state.reactionLibraryEditorId ? "has-editor" : ""}">
         <div class="reaction-library-content">${body}</div>
         ${renderReactionLibraryEditor()}
       </div>
+      ${pager}
       <dialog class="reaction-import-dialog" id="reactionImportDialog">
         <form data-reaction-import-form>
-          <header><div><span>批量导入</span><b>添加表情包素材</b></div><button type="button" title="关闭" aria-label="关闭" data-reaction-import-close>×</button></header>
-          <p>支持 PNG、JPG、GIF、WebP、BMP 和 ZIP；相同内容会自动跳过。</p>
-          <div class="reaction-import-fields">
-            <label><span>默认标签</span><input name="tags" placeholder="角色、动作、梗"></label>
-            <label><span>默认情绪</span><input name="emotions" placeholder="开心、无语、委屈"></label>
-            <label><span>默认用途</span><input name="intents" placeholder="接梗、安慰、吐槽"></label>
-            <fieldset><legend>适用会话</legend><label><input type="checkbox" name="scope_private" checked> 私聊</label><label><input type="checkbox" name="scope_group" checked> 群聊</label></fieldset>
-          </div>
+          <header><div><span>批量导入</span><b>添加表情包</b></div><button type="button" title="关闭" aria-label="关闭" data-reaction-import-close>×</button></header>
           <input type="file" hidden multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,.zip" data-reaction-files>
           <input type="file" hidden multiple webkitdirectory accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" data-reaction-folder>
-          <div class="reaction-import-pickers">
-            <button type="button" data-reaction-pick-files>选择图片或 ZIP</button>
-            <button type="button" data-reaction-pick-folder>选择文件夹</button>
-            <span data-reaction-file-count>尚未选择文件</span>
+          <div class="reaction-import-dropzone" data-reaction-dropzone tabindex="0">
+            <b>选择图片或 ZIP，或拖入文件</b>
+            <span>PNG、JPG、GIF、WebP、BMP，自动跳过重复内容</span>
+            <div><button type="button" class="primary" data-reaction-pick-files>选择文件</button><button type="button" data-reaction-pick-folder>选择文件夹</button></div>
           </div>
+          <div class="reaction-import-summary" data-reaction-file-count>尚未选择文件</div>
+          <label class="reaction-import-auto"><input type="checkbox" name="auto_analyze" checked><span><b>上传后自动识别</b><small>每批最多 4 张共用一次视觉调用</small></span></label>
+          <details class="reaction-import-advanced">
+            <summary>可选默认值</summary>
+            <div class="reaction-import-fields">
+              <label><span>默认标签</span><input name="tags" placeholder="留空时由模型识别"></label>
+              <label><span>默认情绪</span><input name="emotions" placeholder="留空时由模型识别"></label>
+              <label><span>默认用途</span><input name="intents" placeholder="留空时由模型识别"></label>
+            </div>
+          </details>
+          <fieldset><legend>适用会话</legend><label><input type="checkbox" name="scope_private" checked> 私聊</label><label><input type="checkbox" name="scope_group" checked> 群聊</label></fieldset>
+          <div class="reaction-import-progress" data-reaction-import-progress hidden></div>
           <footer><button type="button" data-reaction-import-close>取消</button><button type="submit" class="primary">开始导入</button></footer>
         </form>
       </dialog>
@@ -25094,31 +25644,67 @@ async function importReactionFiles(form, control) {
   }
   setActionBusy(control, true);
   try {
-    const encoded = [];
-    for (const file of files) {
-      encoded.push({ name: file.name, data: await readFileAsBase64(file) });
-    }
     const scopes = [];
     if (form.elements.scope_private?.checked) scopes.push("private");
     if (form.elements.scope_group?.checked) scopes.push("group");
     if (!scopes.length) throw new Error("至少选择一个适用会话");
-    const result = await postJson("/reaction_library/import", {
-      files: encoded,
-      metadata: {
-        tags: form.elements.tags?.value || "",
-        emotions: form.elements.emotions?.value || "",
-        intents: form.elements.intents?.value || "",
-        scopes,
-        enabled: true,
-      },
+    const batches = [];
+    let batch = [];
+    let batchBytes = 0;
+    files.forEach((file) => {
+      const fileBytes = Number(file.size || 0);
+      if (batch.length && (batch.length >= 12 || batchBytes + fileBytes > 18 * 1024 * 1024)) {
+        batches.push(batch);
+        batch = [];
+        batchBytes = 0;
+      }
+      batch.push(file);
+      batchBytes += fileBytes;
     });
-    showToast(result.message || `已导入 ${result.imported || 0} 张素材`);
+    if (batch.length) batches.push(batch);
+    const progress = form.querySelector("[data-reaction-import-progress]");
+    const totals = { imported: 0, duplicates: 0, rejected: 0, analysis_queued: 0 };
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      if (progress) {
+        progress.hidden = false;
+        progress.textContent = `正在导入第 ${batchIndex + 1} / ${batches.length} 批`;
+      }
+      const encoded = [];
+      for (const file of batches[batchIndex]) {
+        encoded.push({ name: file.webkitRelativePath || file.name, data: await readFileAsBase64(file) });
+      }
+      const result = await postJson("/reaction_library/import", {
+        files: encoded,
+        metadata: {
+          tags: form.elements.tags?.value || "",
+          emotions: form.elements.emotions?.value || "",
+          intents: form.elements.intents?.value || "",
+          scopes,
+          enabled: true,
+          auto_analyze: Boolean(form.elements.auto_analyze?.checked),
+        },
+      });
+      totals.imported += Number(result.imported || 0);
+      totals.duplicates += Array.isArray(result.duplicates) ? result.duplicates.length : 0;
+      totals.rejected += Array.isArray(result.rejected) ? result.rejected.length : 0;
+      totals.analysis_queued += Number(result.analysis_queued || 0);
+    }
+    const details = [
+      `导入 ${totals.imported} 张`,
+      totals.analysis_queued ? `${totals.analysis_queued} 张等待识别` : "",
+      totals.duplicates ? `跳过 ${totals.duplicates} 张重复` : "",
+      totals.rejected ? `${totals.rejected} 张未导入` : "",
+    ].filter(Boolean).join("，");
+    showToast(details || "没有新增素材", totals.rejected && !totals.imported ? "error" : "ok");
     form.closest("dialog")?.close();
+    form.reset();
     state.reactionLibraryPage = 1;
     await loadReactionLibrary(true);
   } catch (error) {
     showToast(`导入失败：${error.message}`, "error");
   } finally {
+    const progress = form.querySelector("[data-reaction-import-progress]");
+    if (progress) progress.hidden = true;
     setActionBusy(control, false);
   }
 }
@@ -25140,6 +25726,8 @@ function bindReactionLibraryActions() {
   hydrateReactionLibraryImages().catch(() => {});
   if (!state.reactionLibrary && !state.reactionLibraryLoading) {
     loadReactionLibrary().catch(() => {});
+  } else if (Number(state.reactionLibrary?.summary?.analysis_pending || 0) > 0) {
+    scheduleReactionLibraryPoll();
   }
   let searchTimer = null;
   root.querySelector("[data-reaction-query]")?.addEventListener("input", (event) => {
@@ -25155,24 +25743,75 @@ function bindReactionLibraryActions() {
     state.reactionLibraryPage = 1;
     loadReactionLibrary(true).catch(() => {});
   });
+  root.querySelector("[data-reaction-analysis]")?.addEventListener("change", (event) => {
+    state.reactionLibraryAnalysis = event.currentTarget.value || "all";
+    state.reactionLibraryPage = 1;
+    loadReactionLibrary(true).catch(() => {});
+  });
   root.querySelector("[data-reaction-scope]")?.addEventListener("change", (event) => {
     state.reactionLibraryScope = event.currentTarget.value || "all";
     state.reactionLibraryPage = 1;
     loadReactionLibrary(true).catch(() => {});
   });
   root.querySelectorAll("[data-reaction-refresh]").forEach((button) => button.addEventListener("click", () => loadReactionLibrary(true)));
+  root.querySelector("[data-reaction-show-failed]")?.addEventListener("click", () => {
+    state.reactionLibraryAnalysis = "failed";
+    state.reactionLibraryPage = 1;
+    loadReactionLibrary(true).catch(() => {});
+  });
+  root.querySelectorAll("[data-reaction-page]").forEach((button) => button.addEventListener("click", () => {
+    state.reactionLibraryPage = Math.max(1, Number(button.dataset.reactionPage || 1));
+    state.reactionLibraryEditorId = "";
+    loadReactionLibrary(true).then(() => $("#reactionLibraryWorkspace")?.scrollIntoView({ block: "start", behavior: "auto" })).catch(() => {});
+  }));
+  root.querySelector("[data-reaction-select-page]")?.addEventListener("click", () => {
+    const visibleIds = reactionLibraryItems().map((item) => String(item.id || "")).filter(Boolean);
+    const allSelected = visibleIds.every((id) => state.reactionLibrarySelected.has(id));
+    visibleIds.forEach((id) => allSelected ? state.reactionLibrarySelected.delete(id) : state.reactionLibrarySelected.add(id));
+    renderExperimentalPage();
+  });
   root.querySelectorAll("[data-reaction-import-open]").forEach((button) => button.addEventListener("click", () => root.querySelector("#reactionImportDialog")?.showModal()));
   root.querySelectorAll("[data-reaction-import-close]").forEach((button) => button.addEventListener("click", () => root.querySelector("#reactionImportDialog")?.close()));
   const importForm = root.querySelector("[data-reaction-import-form]");
   importForm?.querySelector("[data-reaction-pick-files]")?.addEventListener("click", () => importForm.querySelector("[data-reaction-files]")?.click());
   importForm?.querySelector("[data-reaction-pick-folder]")?.addEventListener("click", () => importForm.querySelector("[data-reaction-folder]")?.click());
   const updateCount = () => {
-    const count = Number(importForm?.querySelector("[data-reaction-files]")?.files?.length || 0) + Number(importForm?.querySelector("[data-reaction-folder]")?.files?.length || 0);
+    const files = [
+      ...(importForm?.querySelector("[data-reaction-files]")?.files || []),
+      ...(importForm?.querySelector("[data-reaction-folder]")?.files || []),
+    ];
+    const count = files.length;
+    const bytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
     const label = importForm?.querySelector("[data-reaction-file-count]");
-    if (label) label.textContent = count ? `已选择 ${count} 个文件` : "尚未选择文件";
+    if (label) label.textContent = count ? `已选择 ${count} 个文件 · ${formatBytes(bytes)}` : "尚未选择文件";
   };
   importForm?.querySelector("[data-reaction-files]")?.addEventListener("change", updateCount);
   importForm?.querySelector("[data-reaction-folder]")?.addEventListener("change", updateCount);
+  const dropzone = importForm?.querySelector("[data-reaction-dropzone]");
+  ["dragenter", "dragover"].forEach((type) => dropzone?.addEventListener(type, (event) => {
+    event.preventDefault();
+    dropzone.classList.add("is-dragging");
+  }));
+  ["dragleave", "drop"].forEach((type) => dropzone?.addEventListener(type, (event) => {
+    event.preventDefault();
+    dropzone.classList.remove("is-dragging");
+  }));
+  dropzone?.addEventListener("drop", (event) => {
+    const input = importForm.querySelector("[data-reaction-files]");
+    if (!input || !event.dataTransfer?.files?.length) return;
+    const transfer = new DataTransfer();
+    [...event.dataTransfer.files].forEach((file) => transfer.items.add(file));
+    input.files = transfer.files;
+    const folder = importForm.querySelector("[data-reaction-folder]");
+    if (folder) folder.value = "";
+    updateCount();
+  });
+  dropzone?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      importForm.querySelector("[data-reaction-files]")?.click();
+    }
+  });
   importForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     importReactionFiles(importForm, importForm.querySelector("button[type=submit]")).catch(() => {});
@@ -25187,6 +25826,7 @@ function bindReactionLibraryActions() {
       open();
     });
     card.addEventListener("keydown", (event) => {
+      if (event.target !== card) return;
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
     });
   });
@@ -25198,22 +25838,38 @@ function bindReactionLibraryActions() {
   root.querySelectorAll("[data-reaction-toggle]").forEach((button) => button.addEventListener("click", () => {
     updateReactionItems([button.dataset.reactionToggle], { enabled: button.dataset.enabled !== "1" }, button.dataset.enabled === "1" ? "已停用素材" : "已启用素材", button);
   }));
-  root.querySelector("[data-reaction-editor-close]")?.addEventListener("click", () => { state.reactionLibraryEditorId = ""; renderExperimentalPage(); });
+  root.querySelectorAll("[data-reaction-editor-close]").forEach((button) => button.addEventListener("click", () => { state.reactionLibraryEditorId = ""; renderExperimentalPage(); }));
   root.querySelector("[data-reaction-editor-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    const item = reactionLibraryItems().find((candidate) => candidate.id === state.reactionLibraryEditorId);
+    if (!item) return;
     const scopes = [];
     if (form.elements.scope_private?.checked) scopes.push("private");
     if (form.elements.scope_group?.checked) scopes.push("group");
     if (!scopes.length) { showToast("至少选择一个适用会话", "error"); return; }
-    await updateReactionItems([state.reactionLibraryEditorId], {
-      name: form.elements.name?.value || "",
-      tags: form.elements.tags?.value || "",
-      emotions: form.elements.emotions?.value || "",
-      intents: form.elements.intents?.value || "",
-      scopes,
-      enabled: Boolean(form.elements.enabled?.checked),
-    }, "已保存素材信息", form.querySelector("button[type=submit]"));
+    const readList = (value) => [...new Set(String(value || "").split(/[,，;；|\n]+/).map((part) => part.trim()).filter(Boolean))];
+    const changes = {};
+    const name = String(form.elements.name?.value || "").trim();
+    if (name !== String(item.name || "")) changes.name = name;
+    for (const key of ["tags", "emotions", "intents"]) {
+      const next = readList(form.elements[key]?.value);
+      if (JSON.stringify(next) !== JSON.stringify(item[key] || [])) changes[key] = next;
+    }
+    for (const key of ["description", "visible_text"]) {
+      const next = String(form.elements[key]?.value || "").trim();
+      if (next !== String(item[key] || "")) changes[key] = next;
+    }
+    if (JSON.stringify([...scopes].sort()) !== JSON.stringify([...(item.scopes || [])].sort())) changes.scopes = scopes;
+    const enabled = Boolean(form.elements.enabled?.checked);
+    if (enabled !== Boolean(item.enabled)) changes.enabled = enabled;
+    if (!Object.keys(changes).length) { showToast("没有需要保存的修改"); return; }
+    await updateReactionItems([state.reactionLibraryEditorId], changes, "已保存素材信息", form.querySelector("button[type=submit]"));
+  });
+  root.querySelector("[data-reaction-analyze-one]")?.addEventListener("click", async (event) => {
+    const id = event.currentTarget.dataset.reactionAnalyzeOne || "";
+    const result = await runAction(() => postJson("/reaction_library/analyze", { ids: [id], force: true }), "已加入自动识别", event.currentTarget, { reload: false });
+    if (result) await loadReactionLibrary(true);
   });
   root.querySelectorAll("[data-reaction-delete-one]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.reactionDeleteOne || "";
@@ -25229,6 +25885,11 @@ function bindReactionLibraryActions() {
       if (!requireSecondClick(button, "reaction-batch-delete", `再次点击确认删除 ${ids.length} 张素材`)) return;
       const result = await runAction(() => postJson("/reaction_library/delete", { ids, confirm: true }), `已删除 ${ids.length} 张素材`, button, { reload: false });
       if (result) { state.reactionLibrarySelected.clear(); state.reactionLibraryEditorId = ""; state.reactionLibraryImageData.clear(); await loadReactionLibrary(true); }
+      return;
+    }
+    if (action === "analyze") {
+      const result = await runAction(() => postJson("/reaction_library/analyze", { ids, force: true }), `已将 ${ids.length} 张素材加入识别队列`, button, { reload: false });
+      if (result) { state.reactionLibrarySelected.clear(); await loadReactionLibrary(true); }
       return;
     }
     const changes = action === "enable" ? { enabled: true }
@@ -28610,20 +29271,6 @@ async function saveExperimentalSettings(key, form, successMessage) {
 }
 
 let activeTabTransition = null;
-let activeTabScrollFrame = null;
-
-function resetActiveWorkspaceScroll() {
-  if (activeTabScrollFrame !== null) window.cancelAnimationFrame(activeTabScrollFrame);
-  activeTabScrollFrame = window.requestAnimationFrame(() => {
-    activeTabScrollFrame = null;
-    const layout = document.querySelector(".layout");
-    if (!layout) return;
-    const top = Math.max(0, Math.round(layout.getBoundingClientRect().top + window.scrollY));
-    if (Math.abs(window.scrollY - top) > 1) {
-      window.scrollTo({ top, behavior: "auto" });
-    }
-  });
-}
 
 function revealActiveTab(tabButton, reduceMotion = false) {
   const nav = tabButton?.closest(".annotations");
@@ -28693,7 +29340,6 @@ function switchTab(tabName) {
       activePanel.addEventListener("animationend", () => activePanel.classList.remove("is-entering"), { once: true });
     }
     renderActiveTab(state.activeTab);
-    resetActiveWorkspaceScroll();
   };
 
   if (!reduceMotion && typeof document.startViewTransition === "function") {
@@ -29031,6 +29677,15 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("click", async (event) => {
   const element = event.target instanceof Element ? event.target : null;
+  const testResultButton = element?.closest("[data-test-result-source]");
+  if (testResultButton) {
+    const resolved = resolveTestDiagnosticResult(
+      testResultButton.dataset.testResultSource || "troubleshooting",
+      testResultButton.dataset.testResultKey || "",
+    );
+    showTestDiagnosticDialog(resolved.title, resolved.result);
+    return;
+  }
   const dailyReviewConfigLink = element?.closest("[data-daily-review-config-key]");
   if (dailyReviewConfigLink) {
     await navigateToDailyReviewConfig(dailyReviewConfigLink.dataset.dailyReviewConfigKey || "");
@@ -29172,6 +29827,20 @@ document.addEventListener("click", async (event) => {
         showToast(result.ok ? "链路测试通过" : `链路测试失败：${result.error || "未返回有效结果"}`, result.ok ? "success" : "error");
       }
     } catch (error) {
+      state.troubleshooting = state.troubleshooting || {};
+      state.troubleshooting.chain_tests = {
+        ...(state.troubleshooting.chain_tests || {}),
+        [testType]: {
+          ok: false,
+          test_status: "failed",
+          error_category: "请求失败",
+          error: error.message,
+          detail: "测试请求未能完成",
+          suggestion: "确认插件页面后端仍在运行后重试；若请求已进入后端，请查看同一时间的 AstrBot 日志。",
+          ran_at: Date.now() / 1000,
+        },
+      };
+      renderTroubleshooting();
       showToast(`链路测试失败：${error.message}`, "error");
     } finally {
       setActionBusy(troubleshootingTest, false);

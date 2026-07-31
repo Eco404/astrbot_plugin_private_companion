@@ -103,14 +103,13 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("white-space: nowrap;", mobile)
 
     def test_assets_use_tts_language_configurator_cache_version(self) -> None:
-        self.assertIn('./app.css?v=20260730-panel-asset-guard-v1', self.html)
-        self.assertIn('./app.js?v=20260730-panel-asset-guard-v1', self.html)
+        self.assertIn('./app.css?v=20260731-test-diagnostics-v1', self.html)
+        self.assertIn('./app.js?v=20260731-test-diagnostics-v1', self.html)
 
-    def test_opening_model_pages_resets_the_workspace_scroll_position(self) -> None:
-        self.assertIn("function resetActiveWorkspaceScroll()", self.script)
-        self.assertIn('const layout = document.querySelector(".layout");', self.script)
-        self.assertIn('window.scrollTo({ top, behavior: "auto" });', self.script)
-        self.assertGreaterEqual(self.script.count("resetActiveWorkspaceScroll();"), 2)
+    def test_navigation_does_not_force_the_window_scroll_position(self) -> None:
+        self.assertNotIn("resetActiveWorkspaceScroll", self.script)
+        self.assertNotIn("window.scrollTo({ top,", self.script)
+        self.assertIn('./app.js?v=20260731-test-diagnostics-v1', self.html)
 
 
 if __name__ == "__main__":
