@@ -8476,6 +8476,8 @@ Output:
             redacted = _redact_outbound_secrets(value, self)
             if normalized_key.endswith("path") or normalized_key.endswith("_path"):
                 return _path_text(redacted, 1000)
+            if normalized_key == "prompt":
+                return redacted
             return _single_line(redacted, 1200)
         if value is None or isinstance(value, (bool, int, float)):
             return value
