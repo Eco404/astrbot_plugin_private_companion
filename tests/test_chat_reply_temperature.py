@@ -52,7 +52,7 @@ class ReplyTemperatureTests(unittest.TestCase):
         self.assertNotIn("busy meeting", repr(constrained))
         self.assertNotIn("do not reply", repr(constrained))
 
-    def test_live_gate_wires_only_bounded_advisory_inputs_to_temperature(self) -> None:
+    def test_live_gate_wires_bounded_state_only_to_unified_expression_decision(self) -> None:
         source = (ROOT / "main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         gate = next(
@@ -60,20 +60,20 @@ class ReplyTemperatureTests(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name == "enforce_p4_live_confinement_before_enrichment"
         )
-        calls = [
+        legacy_calls = [
             node for node in ast.walk(gate)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id == "compose_reply_temperature"
         ]
-        self.assertEqual(1, len(calls))
-        self.assertTrue(any(keyword.arg is None for keyword in calls[0].keywords))
+        self.assertEqual([], legacy_calls)
+        self.assertIn("_private_companion_expression_decision", source)
+        self.assertNotIn("_private_companion_reply_temperature", source)
         helper = next(
             node for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "_bounded_p4_reply_temperature_signals"
+            if isinstance(node, ast.FunctionDef) and node.name == "_bounded_expression_state_signals"
         )
         constants = {node.value for node in ast.walk(helper) if isinstance(node, ast.Constant) and type(node.value) is str}
         self.assertTrue({"energy", "mood", "schedule", "context"}.issubset(constants))
-        self.assertNotIn("_private_companion_reply_temperature", constants)
 
 
 if __name__ == "__main__":

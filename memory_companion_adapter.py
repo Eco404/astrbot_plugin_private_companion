@@ -23,6 +23,8 @@ from .bot_personal_contract import (
 )
 from .bot_personal_outbox import BotPersonalOutbox
 from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
+from .companion_interaction_expression import current_interaction_projection
+from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
 
 
@@ -1495,6 +1497,19 @@ class MemoryCompanionAdapterMixin:
             else None
         )
         projection = relationship_projection_for_bridge(user.get("relationship_score", 0), policy)
+        role_getter = getattr(self, "_private_user_role", None)
+        try:
+            role = role_getter(user, user_id) if callable(role_getter) else str(user.get("relationship_role") or "friend")
+        except Exception:
+            role = str(user.get("relationship_role") or "friend")
+        relationship_mode = normalize_relationship_mode(user.get("relationship_mode"), role)
+        projection["relationship_mode"] = relationship_mode
+        projection["current_interaction"] = current_interaction_projection(
+            user.get("current_interaction"),
+            relationship_role=role,
+            relationship_mode=relationship_mode,
+            now=time.time(),
+        )
         bridge = self._memory_companion_bridge()
         consumer = getattr(bridge, "consume_relationship_projection", None) if bridge is not None else None
         if callable(consumer):

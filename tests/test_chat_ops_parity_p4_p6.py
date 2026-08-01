@@ -503,7 +503,7 @@ class P4P6ParityTests(unittest.TestCase):
         self.assertTrue(forbidden.isdisjoint(string_constants))
         self.assertIn("relationship_basis", string_constants)
         self.assertIn("memory_phase", string_constants)
-        self.assertIn("reply_temperature", string_constants)
+        self.assertIn("expression_decision", string_constants)
 
     def test_extension_api_does_not_expose_p4_effect_or_live_authority(self) -> None:
         source = (ROOT / "main.py").read_text(encoding="utf-8")

@@ -202,6 +202,14 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertNotIn("owner", user)
         self.assertEqual(1, host.saved)
 
+        core_tree = ast.parse((ROOT / "core_store.py").read_text(encoding="utf-8"))
+        core_class = next(node for node in core_tree.body if isinstance(node, ast.ClassDef) and node.name == "CoreStoreMixin")
+        auto_profile = next(
+            node for node in core_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_ensure_auto_private_user_profile"
+        )
+        self.assertNotRegex(ast.unparse(auto_profile), r"\[['\"]relationship_score['\"]\]\s*=")
+
         same, duplicate_created = host._ensure_auto_private_user_profile(
             event, user_id="10001", sender_display_name="另一个名字", now=999.0
         )
@@ -215,6 +223,7 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         host = _AutoProfileHost()
         host.enable_auto_user_profile_creation = False
         self.assertEqual((None, False), host._ensure_auto_private_user_profile(event, user_id="10001"))
+        self.assertEqual({}, host.data["users"])
 
         host = _AutoProfileHost()
         host.enable_auto_user_profile_creation = True

@@ -494,6 +494,7 @@ class WorldbookMixin:
         if not isinstance(profile, dict):
             profile = {
                 "user_id": sender_id,
+                "identity_type": "qq",
                 "name": display_name,
                 "gender": "",
                 "aliases": [],
@@ -506,6 +507,7 @@ class WorldbookMixin:
                 "priority": 0,
                 "source_entries": ["白名单群观察"],
                 "profile_origin": "group_observation",
+                "projection_kind": "group_observation",
                 "observation_only": True,
                 "proactive_contact_enabled": False,
                 "private_memory_enabled": False,
@@ -528,6 +530,8 @@ class WorldbookMixin:
         profile.setdefault("affinity_score", 0)
         profile.setdefault("relationship_state", "neutral")
         profile.setdefault("profile_origin", "group_observation")
+        profile.setdefault("projection_kind", "group_observation")
+        profile.setdefault("identity_type", "qq")
         profile.setdefault("source_entries", ["白名单群观察"])
         profile.setdefault("observation_only", True)
         aliases_by_group = profile.setdefault("group_aliases", {})
@@ -550,6 +554,30 @@ class WorldbookMixin:
             del scopes[:-32]
         profile["last_observed_at"] = now
         return profile
+
+    def _worldbook_group_observation_profile_by_identity(self, user_id: str) -> tuple[str, dict[str, Any]] | None:
+        """Return the exact, observation-only card for a future private identity merge.
+
+        This is deliberately an exact identity lookup rather than a nickname or
+        alias match.  A group nickname is scoped evidence only and must never
+        turn into an implicit private-chat identity link.
+        """
+        identity = _single_line(user_id, 40)
+        if not identity:
+            return None
+        profiles = self.data.get("worldbook_member_profiles")
+        if not isinstance(profiles, dict):
+            return None
+        direct = profiles.get(identity)
+        if isinstance(direct, dict) and bool(direct.get("observation_only")):
+            return identity, direct
+        for profile_id, profile in profiles.items():
+            if not isinstance(profile, dict) or not bool(profile.get("observation_only")):
+                continue
+            profile_identity = _single_line(profile.get("user_id") or profile_id, 40)
+            if profile_identity == identity:
+                return str(profile_id), profile
+        return None
 
     def _confirm_worldbook_observation_profile_name(
         self,

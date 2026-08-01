@@ -45,6 +45,12 @@ class ExpressionBand(str, Enum):
 _OWNER_ONLY_BANDS = frozenset({ExpressionBand.CLOSE, ExpressionBand.AFFECTIONATE})
 _ALL_BANDS = frozenset(ExpressionBand)
 _BAND_INDEX = {band: index for index, band in enumerate(ExpressionBand)}
+_P4_CAP_BANDS = {
+    "guarded": ExpressionBand.HURT,
+    "neutral": ExpressionBand.RELAXED,
+    "warm": ExpressionBand.WARM,
+    "close": ExpressionBand.AFFECTIONATE,
+}
 _DOWN_MOOD_WORDS = frozenset({
     "sad", "bad", "negative", "angry", "anxious", "tense", "tired", "sleepy",
     "难过", "低落", "生气", "焦虑", "紧张", "疲惫", "疲劳", "困", "烦", "受伤", "安静", "收声", "困倦",
@@ -241,6 +247,20 @@ def _override_band(value: Any) -> ExpressionBand | None:
     return _band(value)
 
 
+def _has_p4_block(safety: Mapping[str, Any]) -> bool:
+    if _flag(safety.get("p4_blocked")):
+        return True
+    if _text(safety.get("safety_mode")) in {"blocked", "deny", "p4_blocked", "confinement"}:
+        return True
+    for key in ("p4", "p4_state"):
+        state = _mapping(safety.get(key))
+        if _flag(state.get("blocked")):
+            return True
+        if _text(state.get("confinement_state")) in {"blocked", "active", "confinement"}:
+            return True
+    return False
+
+
 def _has_contact_boundary(safety: Mapping[str, Any]) -> bool:
     if _flag(safety.get("contact_boundary")) or _flag(safety.get("no_contact")):
         return True
@@ -386,8 +406,8 @@ def _resolve_content_tier(
 def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | None = None, **overrides: Any) -> ExpressionDecision:
     """Build one deterministic expression decision from bounded structured inputs.
 
-    Unknown values are ignored rather than echoed.  An administrator override
-    may choose a permitted band, but never bypasses contact boundaries.
+    Unknown values are ignored rather than echoed. An administrator override
+    may choose a permitted band, but never bypasses P4 or contact boundaries.
     """
 
     source = dict(_input_mapping(input_data))
@@ -399,6 +419,8 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     owner_account = role == "owner"
     owner_exclusive = owner_account and mode == "owner_exclusive"
 
+    if _has_p4_block(safety):
+        return _blocked_decision("p4_blocked", "p4_safety", reasons)
     contact_boundary = _has_contact_boundary(safety)
     passive_reengagement = _flag(safety.get("passive_reengagement"))
     if contact_boundary and not passive_reengagement:
@@ -435,6 +457,10 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     if contact_boundary:
         band = ExpressionBand.AVOIDANT
         reasons.append("contact_boundary_passive_reengagement")
+    p4_cap = _P4_CAP_BANDS.get(_text(safety.get("p4_warmth_cap")))
+    if p4_cap is not None and _BAND_INDEX[band] > _BAND_INDEX[p4_cap]:
+        band = p4_cap
+        reasons.append("p4_warmth_cap_applied")
     tone, warmth, distance, address_style, response_length, tts_style, behaviors = _BAND_DETAILS[band]
     baseline_tone = _bounded_text(relationship_baseline.get("tone"), 120)
     baseline_address = _bounded_text(
