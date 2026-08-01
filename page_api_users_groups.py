@@ -27,6 +27,21 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return normalizer(value)
         return self._single_line(value, 160)
 
+    @staticmethod
+    def _relationship_score_input(value: Any) -> int:
+        """Parse the bounded manual companion-intimacy compatibility field."""
+        if isinstance(value, bool):
+            raise ValueError("companion_intimacy must be an integer")
+        if isinstance(value, int):
+            score = value
+        elif isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            score = int(value.strip())
+        else:
+            raise ValueError("companion_intimacy must be an integer")
+        if not -1200 <= score <= 1200:
+            raise ValueError("companion_intimacy must be between -1200 and 1200")
+        return score
+
     async def list_users(self) -> dict[str, Any]:
         start = time.perf_counter()
         try:
@@ -68,6 +83,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             detail["relationship_panel"] = relationship_panel
             detail["current_interaction"] = relationship_panel["current_interaction"]
             detail["expression_decision"] = relationship_panel["expression_decision"]
+            detail["p4_runtime"] = self._p4_page_status_projection()
             route_status_getter = getattr(self.plugin, "_private_delivery_route_status", None)
             delivery_route = route_status_getter(user_id, user) if callable(route_status_getter) else {}
             detail.update(
@@ -101,16 +117,20 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not user_id:
             return self._error("缺少 user_id")
         relationship_score = None
-        if "relationship_score" in payload:
-            raw_score = payload.get("relationship_score")
-            if isinstance(raw_score, bool):
-                return self._error("relationship_score must be an integer between -1200 and 1200")
+        intimacy_keys = [
+            key
+            for key in ("companion_intimacy", "relationship_score")
+            if key in payload
+        ]
+        if len(intimacy_keys) > 1:
+            return self._error("陪伴亲密度字段不能重复提交")
+        if intimacy_keys:
             try:
-                relationship_score = int(raw_score)
-            except (TypeError, ValueError):
-                return self._error("relationship_score must be an integer between -1200 and 1200")
-            if relationship_score < -1200 or relationship_score > 1200:
-                return self._error("relationship_score must be between -1200 and 1200")
+                relationship_score = self._relationship_score_input(
+                    payload.get(intimacy_keys[0])
+                )
+            except ValueError as exc:
+                return self._error(str(exc))
         requested_mode = str(payload.get("relationship_mode") or "").strip().lower() if "relationship_mode" in payload else None
         if requested_mode is not None and requested_mode not in {"normal", "owner_exclusive"}:
             return self._error("relationship_mode must be normal or owner_exclusive")

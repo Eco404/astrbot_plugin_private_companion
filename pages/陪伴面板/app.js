@@ -13954,7 +13954,7 @@ function renderRelationshipStatus(detail) {
       <details class="companion-intimacy-advanced">
         <summary>精确调整亲密度</summary>
         <form id="relationshipScoreForm" class="inline-form companion-intimacy-form">
-          <label>亲密度数值 <input id="relationshipScoreNumber" name="relationship_score" type="number" min="-1200" max="1200" step="1" value="${escapeHtml(value)}" required ${exclusive ? "disabled" : ""}></label>
+          <label>亲密度数值 <input id="relationshipScoreNumber" name="companion_intimacy" type="number" min="-1200" max="1200" step="1" value="${escapeHtml(value)}" required ${exclusive ? "disabled" : ""}></label>
           <button type="submit" ${exclusive ? "disabled" : ""}>保存数值</button>
         </form>
       </details>
@@ -14037,6 +14037,7 @@ async function renderUserDetail(forceFetch = false) {
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
+      ${renderUserP4RuntimeStatus(detail.p4_runtime)}
       ${userWorldbookBlock(detail.worldbook_member)}
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
       ${renderOpenLoopBlock(detail)}
@@ -14061,6 +14062,20 @@ function renderRelationshipPanel(panel) {
     ["Memory phase", `${memory.phase || "unknown"} (${memory.status || "unavailable"})`],
     ["Worldbook", `${network.status || "not_registered"}, ${network.pending_observation_count || 0} pending`],
     ["Reply temperature", data.reply_temperature?.status || "live_chat_only"],
+  ]);
+}
+
+function renderUserP4RuntimeStatus(status) {
+  const p4 = status && typeof status === "object" ? status : {};
+  const gateLabel = p4.reply_gate === "host_verified_event_only" ? "真实聊天事件内生效" : "暂不可确认";
+  const warmthLabel = p4.warmth === "host_verified_event_only" ? "仅由已验证聊天事件决定" : "暂不可确认";
+  const confinementLabel = p4.confinement === "not_exposed_to_page" ? "页面不读取个人黑屋状态" : "暂不可确认";
+  const reviewLabel = p4.manual_review === "not_migrated" ? "候选生产尚未迁移，页面不能审核" : "暂不可确认";
+  return detailBlock("P4 安全回复保护", "黑屋和安全温度只在 AstrBot 已验证身份的真实聊天中判断；本页不提供审核、释放或结算操作。", [
+    ["回复防护", gateLabel],
+    ["安全温度", warmthLabel],
+    ["黑屋状态", confinementLabel],
+    ["人工审核", reviewLabel],
   ]);
 }
 
@@ -15339,7 +15354,7 @@ function bindUserActions(detail) {
       return;
     }
     const saved = await runAction(
-      () => postJson("/user/update", { user_id: detail.user_id, relationship_score: value }),
+      () => postJson("/user/update", { user_id: detail.user_id, companion_intimacy: value }),
       "已保存亲密度",
       event.submitter,
       { reload: false },

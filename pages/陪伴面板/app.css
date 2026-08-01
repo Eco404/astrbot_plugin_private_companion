@@ -2831,6 +2831,59 @@ input[type="search"] {
   grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
 }
 
+.companion-intimacy-card {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 14px;
+  border: 1px solid rgba(49, 128, 111, 0.28);
+  border-radius: 8px;
+  background: #f7fbf8;
+  box-shadow: var(--shadow-soft);
+}
+
+.companion-intimacy-head,
+.companion-intimacy-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.companion-intimacy-head h3 {
+  margin: 2px 0 0;
+}
+
+.companion-intimacy-value {
+  color: var(--accent-strong);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.companion-intimacy-form {
+  grid-template-columns: minmax(180px, 260px) auto;
+  align-items: end;
+  margin: 0;
+}
+
+.companion-intimacy-phase {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.companion-intimacy-phase strong {
+  color: var(--accent-strong);
+  font-size: 15px;
+}
+
+.companion-intimacy-note {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+
 .stack-form {
   display: grid;
   gap: 10px;

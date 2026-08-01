@@ -265,6 +265,19 @@ class PrivateCompanionPageApi(
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
 
+    @staticmethod
+    def _p4_page_status_projection() -> dict[str, Any]:
+        """Expose only fixed P4 boundaries; never resolve a user or ledger."""
+        return {
+            "schema_version": "chat.p4.page_status.v1",
+            "scope": "chat_event_only",
+            "reply_gate": "host_verified_event_only",
+            "warmth": "host_verified_event_only",
+            "confinement": "not_exposed_to_page",
+            "manual_review": "not_migrated",
+            "action_available": False,
+        }
+
     def _relationship_intimacy_projection(self, value: int) -> dict[str, Any]:
         policy = (
             getattr(self.plugin, "relationship_stage_policy", None)
@@ -12636,7 +12649,12 @@ class PrivateCompanionPageApi(
         role_labeler = getattr(self.plugin, "_private_user_role_label", None)
         role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
         relationship_state = self._emotion_relationship_state_summary(rel_state)
-        relationship_panel = self._relationship_panel(user)
+        relationship_panel = self._relationship_panel(
+            user_id_text,
+            user,
+            relationship_stage=relationship_stage,
+            worldbook_member=None,
+        )
         relationship_mode = relationship_panel["relationship_mode"]
         relationship_intimacy = relationship_panel["relationship_intimacy"]
         current_interaction = relationship_panel["current_interaction"]
