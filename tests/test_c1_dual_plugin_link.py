@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -8,8 +9,9 @@ from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PEIBAN_ROOT = ROOT.parents[1]
-MEMORY_ROOT = PEIBAN_ROOT / "astrbot_plugin_memory_companion-main"
+MEMORY_ROOT = ROOT.parent / "memory-official"
+if not MEMORY_ROOT.exists():
+    MEMORY_ROOT = ROOT.parents[1] / "astrbot_plugin_memory_companion-main"
 
 if "astrbot.api" not in sys.modules:
     astrbot = types.ModuleType("astrbot")
@@ -58,9 +60,20 @@ MemoryCompanionBridge = _load_memory_bridge()
 
 
 class _Companion(MemoryCompanionAdapterMixin):
-    def __init__(self, bridge):
+    def __init__(self, bridge, *, users=None):
         self.enable_memory_companion_bridge = True
         self.bridge = bridge
+        self.data = {
+            "users": users
+            if isinstance(users, dict)
+            else {
+                "u1": {
+                    "user_id": "u1",
+                    "enabled": True,
+                    "private_memory_enabled": True,
+                }
+            }
+        }
 
     def _memory_companion_bridge_uncached(self):
         return self.bridge
@@ -79,3 +92,75 @@ def test_chat_companion_accepts_chat_memory_capability_contract():
     assert status["available"] is True
     assert status["state"] == "ready"
     assert probe["available"] is True
+
+
+def test_chat_companion_projects_redacted_user_memory_summary():
+    class _MemoryService:
+        @staticmethod
+        async def read_user_memory_summary(user_id, *, session_id="", limit=6):
+            return {
+                "contract": "memory.user_memory_summary.v1",
+                "ok": True,
+                "state": "ready",
+                "user_id": user_id,
+                "session_id": session_id,
+                "counts": {
+                    "profile": 2,
+                    "preference": 3,
+                    "relationship": 4,
+                    "private_conversation": 5,
+                },
+                "summaries": [
+                    {"category": "profile", "summary": "用户画像记忆（内容已脱敏）"},
+                    {"category": "private_conversation", "summary": "私聊连续性记忆（内容已脱敏）"},
+                ],
+            }
+
+    companion = _Companion(MemoryCompanionBridge(_MemoryService()))
+    result = asyncio.run(companion._memory_companion_read_user_memory_summary("u1", limit=3))
+
+    assert result == {
+        "schema_version": "memory.user_memory_summary.v1",
+        "available": True,
+        "state": "ready",
+        "counts": {"profile": 2, "preference": 3, "relationship": 4, "private_chat": 5},
+        "summaries": {
+            "profile": "用户画像记忆（内容已脱敏）",
+            "private_chat": "私聊连续性记忆（内容已脱敏）",
+        },
+        "workspace_path": "",
+    }
+
+
+def test_chat_companion_user_summary_degrades_without_memory_reader():
+    companion = _Companion(MemoryCompanionBridge(SimpleNamespace()))
+    result = asyncio.run(companion._memory_companion_read_user_memory_summary("u1"))
+    assert result["available"] is False
+    assert result["reason_code"] == "summary_unavailable"
+
+
+def test_user_memory_summary_rejects_group_and_untrusted_identities_before_bridge_access():
+    class _MemoryService:
+        calls = 0
+
+        async def read_user_memory_summary(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"contract": "memory.user_memory_summary.v1", "ok": True, "state": "ready"}
+
+    service = _MemoryService()
+    companion = _Companion(
+        MemoryCompanionBridge(service),
+        users={
+            "group-user": {"user_id": "group-user", "observation_only": True, "enabled": True},
+            "opted-out": {"user_id": "opted-out", "enabled": True, "private_memory_enabled": False},
+        },
+    )
+
+    group_result = asyncio.run(companion._memory_companion_read_user_memory_summary("group-user"))
+    disabled_result = asyncio.run(companion._memory_companion_read_user_memory_summary("opted-out"))
+    unknown_result = asyncio.run(companion._memory_companion_read_user_memory_summary("unknown"))
+
+    assert group_result["reason_code"] == "group_observation_forbidden"
+    assert disabled_result["reason_code"] == "private_memory_disabled"
+    assert unknown_result["reason_code"] == "private_identity_untrusted"
+    assert service.calls == 0

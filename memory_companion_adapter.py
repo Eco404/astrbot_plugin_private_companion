@@ -2366,6 +2366,108 @@ class MemoryCompanionAdapterMixin:
             self._memory_companion_optional_dependency_failed(exc, where="get_relationship_phase")
             return {"phase": "unknown", "momentum": 0.0}
 
+    async def _memory_companion_read_user_memory_summary(
+        self,
+        user_id: str,
+        *,
+        session_id: str = "",
+        limit: int = 3,
+    ) -> dict[str, Any]:
+        """Read a bounded, redacted Memory summary without affecting the chat path."""
+        raw_identity = _single_line(user_id, 120)
+        if not raw_identity:
+            return {"available": False, "state": "invalid", "reason_code": "missing_user_identity"}
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        try:
+            identity = canonicalizer(raw_identity) if callable(canonicalizer) else raw_identity
+        except Exception:
+            return {"available": False, "state": "invalid", "reason_code": "private_identity_invalid"}
+        identity = _single_line(identity, 120)
+        users = getattr(self, "data", {}).get("users") if isinstance(getattr(self, "data", None), dict) else None
+        user = users.get(identity) if isinstance(users, dict) else None
+        if not isinstance(user, dict):
+            return {"available": False, "state": "forbidden", "reason_code": "private_identity_untrusted"}
+        if bool(user.get("observation_only")) or user.get("profile_origin") == "group_observation":
+            return {"available": False, "state": "forbidden", "reason_code": "group_observation_forbidden"}
+        if user.get("private_memory_enabled") is False:
+            return {"available": False, "state": "forbidden", "reason_code": "private_memory_disabled"}
+        footprint_getter = getattr(self, "_private_user_has_private_footprint", None)
+        try:
+            trusted_identity = (
+                bool(footprint_getter(identity, user))
+                if callable(footprint_getter)
+                else bool(user.get("enabled") or user.get("manual_enabled") or user.get("umo"))
+            )
+        except Exception:
+            trusted_identity = False
+        if not trusted_identity:
+            return {"available": False, "state": "forbidden", "reason_code": "private_identity_untrusted"}
+        stored_session = _single_line(
+            user.get("umo") or user.get("bound_delivery_umo") or user.get("preferred_delivery_umo"),
+            200,
+        )
+        requested_session = _single_line(session_id, 200)
+        if requested_session and stored_session and requested_session != stored_session:
+            return {"available": False, "state": "forbidden", "reason_code": "private_session_mismatch"}
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            reason = _single_line(getattr(self, "_bridge_last_status", {}).get("reason"), 80)
+            return {"available": False, "state": "degraded", "reason_code": reason or "bridge_unavailable"}
+        reader = getattr(bridge, "read_user_memory_summary", None)
+        if not callable(reader):
+            return {"available": False, "state": "unsupported", "reason_code": "summary_method_unavailable"}
+        try:
+            result = reader(
+                user_id=identity,
+                session_id=stored_session or requested_session,
+                limit=max(1, min(5, int(limit or 3))),
+            )
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="read_user_memory_summary")
+            return {"available": False, "state": "degraded", "reason_code": "summary_read_failed"}
+        if (
+            not isinstance(result, dict)
+            or result.get("contract") != "memory.user_memory_summary.v1"
+            or result.get("ok") is not True
+            or result.get("state") != "ready"
+        ):
+            state = _single_line(result.get("state"), 32) if isinstance(result, dict) else "invalid"
+            return {"available": False, "state": state or "degraded", "reason_code": "summary_unavailable"}
+
+        raw_counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+        counts: dict[str, int] = {}
+        for key in ("profile", "preference", "relationship"):
+            value = raw_counts.get(key, result.get(f"{key}_count", 0))
+            counts[key] = _safe_int(value, 0, 0, 1_000_000)
+        counts["private_chat"] = _safe_int(
+            raw_counts.get("private_conversation", raw_counts.get("private_chat", 0)),
+            0,
+            0,
+            1_000_000,
+        )
+
+        summaries: dict[str, str] = {}
+        category_alias = {"private_conversation": "private_chat"}
+        for item in result.get("summaries", []) if isinstance(result.get("summaries"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            key = category_alias.get(_single_line(item.get("category"), 40), _single_line(item.get("category"), 40))
+            if key not in {"profile", "preference", "relationship", "private_chat"} or key in summaries:
+                continue
+            text = _single_line(item.get("summary"), 160)
+            if text:
+                summaries[key] = text
+        return {
+            "schema_version": "memory.user_memory_summary.v1",
+            "available": True,
+            "state": "ready",
+            "counts": counts,
+            "summaries": summaries,
+            "workspace_path": "",
+        }
+
     def _memory_companion_peek_relationship_phase(self, *, session_id: str = "") -> dict[str, Any]:
         """Read an existing Memory relationship phase without creating state."""
         bridge = self._memory_companion_bridge()

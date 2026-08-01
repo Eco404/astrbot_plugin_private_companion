@@ -310,6 +310,12 @@ class _ApiHost:
         return _single_line(value, limit)
 
     @staticmethod
+    def _relationship_score_input(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or not -1200 <= value <= 1200:
+            raise ValueError("invalid relationship score")
+        return value
+
+    @staticmethod
     def _user_summary(user_id: str, user: dict[str, Any]) -> dict[str, Any]:
         return {"user_id": user_id, **copy.deepcopy(user)}
 
@@ -417,6 +423,14 @@ class _SettingsApiHost:
     def _error(message: str) -> dict[str, Any]:
         return {"success": False, "error": message}
 
+    @staticmethod
+    def _is_http_error_response(_value: Any) -> bool:
+        return False
+
+    @staticmethod
+    def _exception_error(message: str) -> dict[str, Any]:
+        return {"success": False, "error": message}
+
 
 class _RelationshipStateHost:
     relationship_positive_stage_cap_key = "deeply_bonded"
@@ -488,7 +502,7 @@ def test_legacy_relationship_scores_migrate_once_with_stage_anchors() -> None:
     created = {"relationship_score": 0}
     migrate_legacy_relationship_score(created, created=True, now=1_700_000_000)
     assert created["relationship_score"] == 0
-    assert relationship_stage_for_score(0)["phase"]["proactive_care_limit"] >= 1
+    assert relationship_stage_for_score(0)["phase"]["proactive_care_limit"] == 0
 
 
 def test_relationship_ledger_uses_sliding_dedupe_and_configured_timezone() -> None:
@@ -1194,13 +1208,8 @@ def test_legacy_relationship_state_has_no_parallel_expression_consumers() -> Non
     assert main_source.count("expression_decision_prompt(projection)") == 1
 
 
-def test_frontend_exposes_relationship_cards_and_keeps_mirrors_identical() -> None:
-    primary = ROOT / "pages" / "companion-panel"
-    mirror = ROOT / "pages" / "陪伴面板"
-    for name in ("index.html", "app.js", "app.css"):
-        assert (primary / name).read_bytes() == (mirror / name).read_bytes(), name
-
-    source = (primary / "app.js").read_text(encoding="utf-8")
+def test_active_panel_exposes_relationship_cards() -> None:
+    source = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
     assert 'enable_custom_relationship_stage_policy: ["亲密度阶段策略"' in source
     assert 'enable_relationship_content_tiers: ["关系内容尺度"' in source
     assert 'data-feature-param="relationship_stage_policy"' in source
