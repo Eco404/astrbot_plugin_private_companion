@@ -8476,6 +8476,8 @@ Output:
             redacted = _redact_outbound_secrets(value, self)
             if normalized_key.endswith("path") or normalized_key.endswith("_path"):
                 return _path_text(redacted, 1000)
+            if normalized_key in {"prompt", "submitted_prompt"}:
+                return redacted
             return _single_line(redacted, 1200)
         if value is None or isinstance(value, (bool, int, float)):
             return value
@@ -8626,7 +8628,7 @@ Output:
                 "backend": _single_line(backend, 80),
                 "ok": bool(ok),
                 "prompt_format": self._photo_generation_prompt_format_mode(),
-                "prompt": _single_line(prompt_text, 900),
+                "prompt": str(prompt_text or ""),
                 "path": _path_text(image_path, 1000),
                 "note": _single_line(note, 240),
                 "reference": bool(reference_image_path),
@@ -8792,7 +8794,7 @@ Output:
             "continuity_key": self._normalize_photo_continuity_key(linked.get("continuity_key")),
             "session": _single_line(linked.get("session"), 340),
             "backend": _single_line(linked.get("backend"), 80),
-            "final_prompt": _single_line(linked.get("prompt"), 900),
+            "final_prompt": str(linked.get("prompt") or ""),
             "prompt_hash": _single_line(linked.get("prompt_hash"), 80),
             "prompt_path": _path_text(linked.get("prompt_path"), 1000),
             "reference_intent": deepcopy(linked.get("reference_intent") or {}),
@@ -8845,6 +8847,7 @@ Output:
         prompt_sections: dict[str, str],
         prompt_sections_after: dict[str, Any],
         final_prompt: str,
+        submitted_prompt: str = "",
         conflicts: list[str],
         removed_conflicts: list[str],
         residual_conflicts: list[str],
@@ -8859,6 +8862,9 @@ Output:
         suggested_scene_preset: str = "",
     ) -> tuple[str, str]:
         prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
+        submitted_prompt_hash = hashlib.sha256(
+            str(submitted_prompt or final_prompt or "").encode("utf-8", "ignore")
+        ).hexdigest()
         if self._photo_generation_trace_max_bytes() <= 0:
             return "", prompt_hash
         try:
@@ -8949,6 +8955,8 @@ Output:
                     "final_prompt": final_prompt,
                     "final_prompt_length": len(str(final_prompt or "")),
                     "final_prompt_sha256": prompt_hash,
+                    "submitted_prompt_length": len(str(submitted_prompt or final_prompt or "")),
+                    "submitted_prompt_sha256": submitted_prompt_hash,
                 }
             )
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -10419,6 +10427,7 @@ Output:
                 name="global_fixed_prompt",
                 source="fixed_prompt",
                 positive=f"Additional fixed prompt: {fixed_prompt}" if fixed_prompt else "",
+                protected=True,
             ),
             PhotoPromptSection(
                 name="edit_contract",
@@ -10453,6 +10462,7 @@ Output:
             reference=reference_candidate or None,
         )
         prompt_text = resolved_context.final_prompt
+        complete_prompt_text = resolved_context.complete_prompt
         reference_candidate = dict(resolved_context.reference or {})
         reference_image_path = _path_text(reference_candidate.get("path"), 1000)
         if not reference_candidate:
@@ -10555,7 +10565,8 @@ Output:
             prompt_sections_before=prompt_sections_before,
             prompt_sections=prompt_sections_for_log,
             prompt_sections_after=prompt_sections_after,
-            final_prompt=prompt_text,
+            final_prompt=complete_prompt_text,
+            submitted_prompt=prompt_text,
             conflicts=conflicts,
             removed_conflicts=removed_conflicts,
             residual_conflicts=residual_conflicts,
@@ -10570,8 +10581,12 @@ Output:
             trace_id,
             "prompt_composed",
             data={
-                "prompt": prompt_text,
+                "prompt": complete_prompt_text,
+                "submitted_prompt": prompt_text,
                 "prompt_hash": prompt_hash,
+                "submitted_prompt_hash": hashlib.sha256(
+                    str(prompt_text or "").encode("utf-8", "ignore")
+                ).hexdigest(),
                 "prompt_path": prompt_path,
                 "sections": prompt_sections_for_log,
                 "conflicts": conflicts,
@@ -10694,7 +10709,7 @@ Output:
                 workflow_kind=workflow_kind,
                 backend=backend,
                 ok=ok,
-                prompt_text=prompt_text,
+                prompt_text=complete_prompt_text,
                 image_path=image_path,
                 note=note,
                 reference_image_path=reference_image_path,

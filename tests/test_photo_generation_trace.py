@@ -214,6 +214,22 @@ class PhotoGenerationTraceTests(unittest.TestCase):
             self.assertEqual(payload["api_key"], "***")
             self.assertNotIn("plain-secret", payload["url"])
 
+    def test_prompt_composed_writes_the_complete_multiline_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            harness = _Harness(temp_dir)
+            final_prompt = "Positive prompt:\n" + ("完整画面描述, " * 160) + "\nFINAL_PROMPT_END"
+
+            harness._append_photo_generation_trace_event(
+                "trace-full-prompt",
+                "prompt_composed",
+                data={"prompt": final_prompt, "summary": "s" * 1400},
+            )
+
+            payload = self._read_lines(Path(temp_dir) / "photo_generation_trace.txt")[0]["data"]
+            self.assertEqual(payload["prompt"], final_prompt)
+            self.assertTrue(payload["prompt"].endswith("FINAL_PROMPT_END"))
+            self.assertEqual(len(payload["summary"]), 1200)
+
     def test_reference_candidates_include_metadata_scores_and_selection_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             harness = _SelectionHarness(temp_dir)
