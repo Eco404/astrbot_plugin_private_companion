@@ -42,6 +42,34 @@ class PageSettingNormalizerMixin:
             return normalize_relationship_positive_stage_cap_key(value)
         if key == "normal_interaction_band_cap":
             return normalize_normal_interaction_band_cap(value)
+        if key == "auto_profile_platforms":
+            raw_items = value if isinstance(value, (list, tuple, set)) else re.split(r"[\s,，、;；]+", str(value or ""))
+            aliases = {
+                "aiocqhttp": "onebot",
+                "napcat": "onebot",
+                "qq": "onebot",
+                "qqofficial": "qq_official",
+                "qqbot": "qq_official",
+                "telegram_bot": "telegram",
+                "telegrambot": "telegram",
+                "tg": "telegram",
+            }
+            allowed = {"onebot", "qq_official", "telegram", "webchat", "generic"}
+            normalized: list[str] = []
+            for item in raw_items:
+                platform = str(item or "").strip().lower().replace("-", "_").replace(" ", "")
+                platform = aliases.get(platform, platform)
+                if platform in allowed and platform not in normalized:
+                    normalized.append(platform)
+            return normalized or ["onebot", "qq_official", "telegram", "webchat", "generic"]
+        if key == "default_nickname_strategy":
+            strategy = str(value or "platform_display_name").strip().lower()
+            return strategy if strategy in {"platform_display_name", "fixed", "user_id"} else "platform_display_name"
+        if key == "default_proactive_daily_limit":
+            try:
+                return max(0, min(30, int(value)))
+            except (TypeError, ValueError):
+                return 0
         if key == "enable_body_monitor_integration":
             return self._normalize_bool_value(value)
         if key == "enable_multi_persona_mode":

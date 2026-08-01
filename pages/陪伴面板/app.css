@@ -2884,6 +2884,82 @@ input[type="search"] {
   font-size: 12px;
 }
 
+.companion-intimacy-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.companion-intimacy-current {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.companion-intimacy-current strong {
+  color: var(--accent-strong);
+  font-size: 20px;
+}
+
+.companion-intimacy-current span {
+  color: var(--muted);
+  font: 700 13px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.relationship-stage-bar {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(72px, 1fr));
+  gap: 5px;
+  overflow-x: auto;
+  padding: 18px 1px 7px;
+}
+
+.relationship-stage-segment {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-width: 72px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.relationship-stage-segment i {
+  display: block;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 84%, white 16%);
+}
+
+.relationship-stage-segment.is-current {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.relationship-stage-segment.is-current i {
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.relationship-stage-segment b {
+  position: absolute;
+  top: -17px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 10px;
+}
+
+.companion-intimacy-meta {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .stack-form {
   display: grid;
   gap: 10px;
@@ -21657,6 +21733,103 @@ textarea {
   color: var(--muted);
 }
 
+.feature-param-row-policy {
+  grid-template-columns: 1fr;
+}
+
+.relationship-policy-editor {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.relationship-policy-notice {
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.relationship-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.relationship-policy-stage {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 11px;
+  background: var(--surface);
+}
+
+.relationship-policy-stage > header,
+.relationship-policy-stage > label:nth-of-type(2),
+.relationship-policy-stage > label:nth-of-type(3),
+.relationship-policy-behaviors {
+  grid-column: 1 / -1;
+}
+
+.relationship-policy-stage > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.relationship-policy-stage label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.relationship-policy-stage input,
+.relationship-policy-stage textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.relationship-policy-behaviors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.relationship-policy-behaviors label {
+  display: inline-flex;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 5px 8px;
+}
+
+.relationship-policy-behaviors input {
+  width: auto;
+}
+
+@media (max-width: 900px) {
+  .relationship-policy-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .photo-reference-launch {
   display: flex;
   align-items: center;
@@ -22601,6 +22774,49 @@ table {
   text-align: right;
 }
 
+.user-platform-group td {
+  padding: 9px 10px 7px;
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--accent-soft) 52%, var(--surface));
+}
+
+.user-platform-group button {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.user-platform-group button > span {
+  width: 14px;
+  color: var(--accent-strong);
+}
+
+.user-platform-group button small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-platform-group button em {
+  min-width: 28px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--surface);
+  color: var(--accent-strong);
+  font-style: normal;
+  font-weight: 700;
+  text-align: center;
+}
+
 .user-id-line {
   display: inline-flex;
   align-items: center;
@@ -22698,6 +22914,38 @@ tbody tr.is-selected {
 
 .user-cell.action {
   text-align: right;
+}
+
+.relationship-phase-summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.relationship-phase-summary b {
+  color: var(--accent-strong);
+}
+
+.relationship-phase-summary small {
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .user-platform-group button {
+    grid-template-columns: auto auto 1fr;
+  }
+
+  .user-platform-group button small {
+    grid-column: 2 / -1;
+    grid-row: 2;
+  }
+
+  .user-platform-group button em {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+  }
 }
 
 .mono {

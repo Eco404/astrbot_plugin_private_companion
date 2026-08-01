@@ -59,7 +59,7 @@ _DEFAULT_STAGES: tuple[dict[str, Any], ...] = (
         "description": "刚开始相处，友好回应并逐步观察偏好。",
         "tone": "友好、自然、不自来熟",
         "address_level": "优先固定称呼、姓名或“你”",
-        "proactive_care_limit": 1,
+        "proactive_care_limit": 0,
         "allow_playful_jokes": False,
         "allow_followup": True,
         "allow_memory_mention": False,
@@ -250,7 +250,7 @@ def relationship_stage_prompt(value: Any, policy: Any = None) -> str:
         f"当前陪伴亲密阶段：{phase['label']}（固定分数范围 {phase['min']}..{phase['max']}）。"
         f"基础语气：{phase['tone']}；称呼尺度：{phase['address_level']}；"
         f"主动关心上限：{phase['proactive_care_limit']}；{'、'.join(behaviors)}。"
-        "这些只限制表达和软行为，不能授予主要用户、跨用户查询、平台动作或现实动作权限。"
+        "这些只限制表达和软行为，不能授予主要用户、跨用户查询、平台动作、现实动作或任何 P4 安全权限。"
     )
 
 

@@ -190,6 +190,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     user["enabled"] = enabled
                     user["manual_enabled"] = enabled
                     user["manual_disabled"] = not enabled
+                    user["auto_enabled"] = False
                     if enabled:
                         self.plugin._ensure_private_user_umo(user_id, user)
                     if not enabled:

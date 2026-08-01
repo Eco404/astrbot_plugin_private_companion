@@ -23,6 +23,7 @@ from .bot_personal_contract import (
 )
 from .bot_personal_outbox import BotPersonalOutbox
 from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
+from .relationship_policy import relationship_projection_for_bridge
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -1488,6 +1489,22 @@ class MemoryCompanionAdapterMixin:
         text: str,
     ) -> None:
         payload = self._memory_companion_build_private_context(user_id=user_id, user=user, text=text, event=event)
+        policy = (
+            getattr(self, "relationship_stage_policy", None)
+            if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            else None
+        )
+        projection = relationship_projection_for_bridge(user.get("relationship_score", 0), policy)
+        bridge = self._memory_companion_bridge()
+        consumer = getattr(bridge, "consume_relationship_projection", None) if bridge is not None else None
+        if callable(consumer):
+            try:
+                consumed = consumer(projection)
+            except Exception:
+                consumed = {}
+            if isinstance(consumed, dict) and isinstance(consumed.get("projection"), dict):
+                projection = consumed["projection"]
+        payload["relationship_projection"] = projection
         self._memory_companion_attach_context(event, payload)
         self._memory_companion_attach_person_context(event)
 

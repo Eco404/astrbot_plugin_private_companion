@@ -38,6 +38,20 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         return
     if self._message_debounce_command_text(event, text):
         return
+    async with self._data_lock:
+        _, auto_profile_created = self._ensure_auto_private_user_profile(
+            event,
+            user_id=user_id,
+            sender_display_name=sender_display_name,
+            now=received_ts,
+        )
+    if auto_profile_created:
+        logger.info(
+            "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s auto_enabled=%s",
+            _single_line(self._canonical_private_user_id(user_id), 80),
+            _single_line(self._platform_kind_for_event(event), 40),
+            bool(getattr(self, "auto_enable_companion_for_new_users", False)),
+        )
     existing_reply_preview = self._event_existing_reply_result_preview(event)
     if existing_reply_preview:
         preview_user_id = self._canonical_private_user_id(user_id)

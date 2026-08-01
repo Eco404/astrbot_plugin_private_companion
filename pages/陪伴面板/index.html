@@ -252,7 +252,7 @@
         <div class="annot-axis" aria-hidden="true"></div>
         <button class="tab is-active" data-tab="dashboard"><i>01</i><span>总览</span></button>
         <button class="tab" data-tab="roleplay"><i>02</i><span>世界知识</span></button>
-        <button class="tab" data-tab="private"><i>03</i><span>私聊</span></button>
+        <button class="tab" data-tab="private"><i>03</i><span>用户</span></button>
         <button class="tab" data-tab="group"><i>04</i><span>群聊</span></button>
         <button class="tab" data-tab="learning"><i>05</i><span>学习</span></button>
         <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
@@ -620,7 +620,7 @@ QQ空间 = 公开札记
       <section class="panel" id="panel-private">
         <div class="section-head">
           <div>
-            <h2>私聊对象</h2>
+            <h2>用户档案</h2>
             <p class="section-desc">管理关系角色、主动额度、行为习惯、陪伴状态和已整理的对话片段。</p>
           </div>
           <input id="userFilter" type="search" placeholder="筛选用户 ID / 昵称" />
@@ -628,7 +628,7 @@ QQ空间 = 公开札记
         <form id="addUserForm" class="inline-form manage-form">
           <label>用户 ID <input name="user_id" placeholder="OneBot 填 QQ；官方机器人填 openid" required /></label>
           <label>称呼 <input name="nickname" placeholder="可选" /></label>
-          <button type="submit">新增对象</button>
+          <button type="submit">新增用户</button>
         </form>
         <form id="privateAliasForm" class="inline-form manage-form">
           <label>身份别名归并 <textarea name="private_user_aliases" rows="3" placeholder="临时ID=主用户ID&#10;机器人侧ID=主用户ID"></textarea></label>
@@ -895,7 +895,7 @@ QQ空间 = 公开札记
             <div id="slangCloud" class="word-cloud"></div>
           </article>
           <article class="wide memory-raw">
-            <h2>外部记忆插件协同</h2>
+            <h2>记忆插件协同</h2>
             <pre id="livingMemoryBox">加载中...</pre>
           </article>
         </div>

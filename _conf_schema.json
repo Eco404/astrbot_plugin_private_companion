@@ -208,6 +208,50 @@
         "hint": "开启后 target_user_ids 中的用户会自动建立主动私聊来源。首次使用建议开启。",
         "default": true
       },
+      "enable_auto_user_profile_creation": {
+        "description": "新用户最小档案",
+        "type": "bool",
+        "hint": "默认关闭。开启后首次收到真实私聊时才建立最小用户档案；建档不会自动授予主要用户、跨用户查询、主动触达或 P4 权限。",
+        "default": false
+      },
+      "auto_enable_companion_for_new_users": {
+        "description": "自动接管新用户陪伴",
+        "type": "bool",
+        "hint": "仅在已开启新用户最小档案时生效。默认关闭，关闭时只建档并继续放行 AstrBot 默认主链。",
+        "default": false,
+        "condition": "enable_auto_user_profile_creation"
+      },
+      "auto_profile_platforms": {
+        "description": "自动建档平台",
+        "type": "list",
+        "hint": "允许首次私聊自动建档的平台类型。QQ/NapCat 为 onebot，QQ 官方为 qq_official，Telegram 为 telegram，网页聊天为 webchat，其他适配器为 generic。",
+        "default": ["onebot", "qq_official", "telegram", "webchat", "generic"],
+        "condition": "enable_auto_user_profile_creation"
+      },
+      "default_nickname_strategy": {
+        "description": "默认称呼来源",
+        "type": "string",
+        "options": ["platform_display_name", "fixed", "user_id"],
+        "labels": ["优先平台显示名", "固定称呼", "用户 ID"],
+        "hint": "平台显示名不可用时回退到默认称呼；不会改变用户 ID、UMO、关系角色或关系分数。",
+        "default": "platform_display_name",
+        "condition": "enable_auto_user_profile_creation"
+      },
+      "default_proactive_enabled": {
+        "description": "允许新用户主动关心",
+        "type": "bool",
+        "hint": "仅在同时开启自动接管新用户陪伴时才可能生效；默认关闭。",
+        "default": false,
+        "condition": "enable_auto_user_profile_creation"
+      },
+      "default_proactive_daily_limit": {
+        "description": "新用户每日主动上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 30, "step": 1},
+        "hint": "自动档案的主动上限；未允许主动关心或未自动接管陪伴时强制为 0。",
+        "default": 0,
+        "condition": "default_proactive_enabled"
+      },
       "default_interaction_band": {
         "description": "新档案默认互动状态",
         "type": "string",

@@ -264,6 +264,22 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.worldview_adaptation_mode = "auto"
     self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
     self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
+    self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", False)
+    self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", False)
+    self.auto_profile_platforms = self._cfg_raw(
+        c,
+        "auto_profile_platforms",
+        ["onebot", "qq_official", "telegram", "webchat", "generic"],
+    )
+    self.default_nickname_strategy = self._cfg_str(
+        c,
+        "default_nickname_strategy",
+        "platform_display_name",
+    )
+    if self.default_nickname_strategy not in {"platform_display_name", "fixed", "user_id"}:
+        self.default_nickname_strategy = "platform_display_name"
+    self.default_proactive_enabled = self._cfg_bool(c, "default_proactive_enabled", False)
+    self.default_proactive_daily_limit = self._cfg_int(c, "default_proactive_daily_limit", 0, 0, 30)
     self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
     self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
