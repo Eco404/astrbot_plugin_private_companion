@@ -7,6 +7,7 @@ import unittest
 from astrbot_plugin_private_companion.planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
+    daily_plan_completion_budget,
     detail_target_event_count,
     detail_payload_quality_issues,
     evaluate_daily_plan_quality,
@@ -141,6 +142,22 @@ class PlanningPromptHarness(DailyStateMixin):
 class PlanningReferenceSourceTests(unittest.TestCase):
     def setUp(self):
         self.plugin = PlanningPromptHarness()
+
+    def test_daily_plan_completion_budget_scales_with_item_count(self):
+        self.plugin.daily_plan_item_count = 10
+        self.assertEqual(daily_plan_completion_budget(self.plugin), 1500)
+
+        self.plugin.daily_plan_item_count = 24
+        self.assertEqual(daily_plan_completion_budget(self.plugin), 3180)
+        self.assertGreater(daily_plan_completion_budget(self.plugin), 1500)
+
+    def test_daily_plan_prompt_mentions_compact_high_count_output(self):
+        self.plugin.daily_plan_item_count = 24
+
+        prompt = build_daily_plan_prompt(self.plugin, "2026-07-11 09:00")
+
+        self.assertIn("超过 12 段", prompt)
+        self.assertIn("完整、可解析的 JSON", prompt)
 
     def test_daily_prompt_orders_sources_by_authority(self):
         prompt = build_daily_plan_prompt(self.plugin, "2026-07-11 09:00", memory_companion_context="MEMORY_CONTEXT")

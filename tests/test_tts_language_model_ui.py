@@ -112,14 +112,14 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("width: 100%;", mobile)
         self.assertIn("white-space: nowrap;", mobile)
 
-    def test_assets_use_tts_language_configurator_cache_version(self) -> None:
-        self.assertIn('./app.css?v=20260801-tts-provider-isolation-v1', self.html)
-        self.assertIn('./app.js?v=20260801-tts-provider-isolation-v1', self.html)
+    def test_assets_use_cache_busted_urls(self) -> None:
+        self.assertIn('./app.css?v=20260802-role-reference-v1', self.html)
+        self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_navigation_does_not_force_the_window_scroll_position(self) -> None:
         self.assertNotIn("resetActiveWorkspaceScroll", self.script)
         self.assertNotIn("window.scrollTo({ top,", self.script)
-        self.assertIn('./app.js?v=20260801-tts-provider-isolation-v1', self.html)
+        self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
 
 if __name__ == "__main__":

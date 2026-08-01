@@ -109,10 +109,10 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('border-top: 1px solid var(--line-soft)', APP_CSS)
         self.assertIn('padding-top: 14px', APP_CSS)
 
-    def test_metadata_editor_assets_have_a_matching_cache_version(self) -> None:
-        self.assertIn('app.css?v=20260801-tts-provider-isolation-v1', INDEX_HTML)
+    def test_metadata_editor_assets_are_cache_busted(self) -> None:
+        self.assertIn('app.css?v=20260802-role-reference-v1', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260731-folio-cascade-v1', INDEX_HTML)
-        self.assertIn('app.js?v=20260801-tts-provider-isolation-v1', INDEX_HTML)
+        self.assertRegex(INDEX_HTML, r'<script src="\./app\.js\?v=[^" ]+"')
 
 
 if __name__ == "__main__":

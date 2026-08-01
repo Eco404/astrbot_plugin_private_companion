@@ -35,7 +35,32 @@ class _CoreHarness(CoreStoreMixin):
         return {"users": {}}
 
 
+class _StartupHarness(CoreStoreMixin):
+    def __init__(self) -> None:
+        self.data = {"bot_diaries": []}
+        self.diary_calls: list[dict[str, object]] = []
+
+    async def _ensure_daily_state(self) -> None:
+        return None
+
+    async def _ensure_daily_plan(self) -> None:
+        return None
+
+    async def _ensure_daily_diary(self, **kwargs) -> None:
+        self.diary_calls.append(dict(kwargs))
+
+    async def _maybe_settle_skill_growth(self) -> None:
+        return None
+
+
 class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_diary_check_does_not_force_generation(self) -> None:
+        harness = _StartupHarness()
+
+        await harness._startup_prepare_today()
+
+        self.assertEqual(harness.diary_calls, [{}])
+
     async def test_async_config_save_is_awaited(self) -> None:
         harness = _CoreHarness()
 

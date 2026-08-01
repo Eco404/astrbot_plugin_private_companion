@@ -1653,6 +1653,9 @@ class PrivateCompanionPlugin(
         self.allow_insomnia_night_message = self._cfg_bool(c, "allow_insomnia_night_message", True)
         self.proactive_reply_context_hours = self._cfg_int(c, "proactive_reply_context_hours", 12, 1, 72)
         self.enable_creative_writing = self._cfg_bool(c, "enable_creative_writing", True)
+        self.enable_creative_work_read_guard = self._cfg_bool(
+            c, "enable_creative_work_read_guard", True
+        )
         self.creative_inspiration_probability = self._cfg_unit_interval(c, "creative_inspiration_probability", 0.20, 0.0)
         self.creative_share_probability = self._cfg_unit_interval(c, "creative_share_probability", 0.28, 0.0)
         self.creative_chars_per_session = self._cfg_int(
@@ -1729,6 +1732,9 @@ class PrivateCompanionPlugin(
         self.reaction_expression_private_enabled = self._cfg_bool(
             c, "reaction_expression_private_enabled", True
         )
+        self.reaction_expression_proactive_enabled = self._cfg_bool(
+            c, "reaction_expression_proactive_enabled", True
+        )
         self.reaction_expression_group_enabled = self._cfg_bool(
             c, "reaction_expression_group_enabled", False
         )
@@ -1747,6 +1753,18 @@ class PrivateCompanionPlugin(
         self.reaction_expression_semantic_trigger_enabled = self._cfg_bool(
             c, "reaction_expression_semantic_trigger_enabled", True
         )
+        self.reaction_expression_delivery_mode = self._cfg_str(
+            c,
+            "reaction_expression_delivery_mode",
+            "separate_after",
+            "separate_after",
+        ).lower()
+        if self.reaction_expression_delivery_mode not in {
+            "separate_after",
+            "same_message",
+            "separate_before",
+        }:
+            self.reaction_expression_delivery_mode = "separate_after"
         self.enable_maslow_motivation_experiment = self._cfg_bool(c, "enable_maslow_motivation_experiment", False)
         self.enable_maslow_schedule_influence = self._cfg_bool(c, "enable_maslow_schedule_influence", False)
         self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)
@@ -2481,6 +2499,21 @@ class PrivateCompanionPlugin(
             "enable_private_reading_ask_recommendation",
             False,
         )
+        self.enable_private_reading_vision = self._cfg_bool(
+            c,
+            "enable_private_reading_vision",
+            True,
+        )
+        self.enable_private_reading_page_comments = self._cfg_bool(
+            c,
+            "enable_private_reading_page_comments",
+            True,
+        )
+        self.enable_private_reading_rating = self._cfg_bool(
+            c,
+            "enable_private_reading_rating",
+            True,
+        )
         self.jm_cosmos_min_interval_hours = self._cfg_int(
             c,
             "private_reading_min_interval_hours",
@@ -3016,6 +3049,7 @@ class PrivateCompanionPlugin(
         run_step("runtime_social_fact_sanitize", self._sanitize_runtime_social_facts_inplace)
         run_step("false_sleep_interaction_cleanup", self._cleanup_false_sleep_interaction_updates)
         run_step("private_user_alias_merge", self._merge_private_user_alias_records)
+        run_step("reaction_expression_orphan_user_cleanup", self._cleanup_orphan_reaction_expression_users)
         run_step("group_slang_cleanup", self._cleanup_all_group_slang_terms)
         run_step("recall_image_cache_cleanup", lambda: self._cleanup_recall_message_image_cache(force=True))
 
@@ -3172,6 +3206,25 @@ class PrivateCompanionPlugin(
         async with self._data_lock:
             snapshot = deepcopy(self.data)
         await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=11000)
+    async def prepare_tts_streaming_boundary(self, event: AstrMessageEvent, *args, **kwargs):
+        """在 AstrBot 读取流式配置前，为可能进入插件 TTS 的回合预留完整回复。"""
+        if self is None or not self.enabled:
+            return
+        preflight = getattr(self, "_tts_turn_requires_complete_reply", None)
+        disable = getattr(self, "_disable_streaming_for_tts_turn", None)
+        if not callable(preflight) or not callable(disable):
+            return
+        try:
+            if preflight(event):
+                disable(event)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] TTS 流式预判失败，保留默认流式行为: session=%s error=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(exc, 160),
+            )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
     async def observe_recall_enhancement_events(self, event: AstrMessageEvent, *args, **kwargs):
@@ -3466,7 +3519,7 @@ class PrivateCompanionPlugin(
     async def attach_reaction_expression_image_before_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
-        """Append a locally selected reaction image after an intact text reply."""
+        """Prepare a local reaction image without weakening the text reply."""
         if self is None or not self.enabled:
             return
         intent = getattr(
@@ -3474,6 +3527,15 @@ class PrivateCompanionPlugin(
         )
         if not isinstance(intent, dict) or not intent:
             return
+        tracker_installer = getattr(
+            self,
+            "_install_reaction_expression_delivery_tracker",
+            None,
+        )
+        if callable(tracker_installer):
+            # TTS may already be deferred even when lookup later misses. Track the
+            # primary reply before any attachment-only early return.
+            tracker_installer(event, {})
         if bool(
             getattr(
                 event,
@@ -3579,27 +3641,311 @@ class PrivateCompanionPlugin(
             )
             return
 
-        chain.append(image_component)
-        try:
-            result.chain = chain
-        except Exception:
-            event.set_result(self._build_result_from_chain(chain))
-        pending["attached"] = True
+        delivery_mode = self._reaction_expression_delivery_mode()
+        pending["delivery_mode"] = delivery_mode
         pending["component"] = image_component
+        pending["delivery_started"] = False
+        self._install_reaction_expression_delivery_tracker(event, pending)
+        if delivery_mode == "same_message":
+            chain.append(image_component)
+            try:
+                result.chain = chain
+            except Exception:
+                event.set_result(self._build_result_from_chain(chain))
+            pending["attached"] = True
+        elif delivery_mode == "separate_before":
+            pending["delivery_started"] = True
+            sent = await self._send_reaction_expression_component_separately(
+                event,
+                image_component,
+            )
+            await self._settle_reaction_expression_attachment_data(
+                pending,
+                sent=sent,
+                reason="delivered" if sent else "delivery_failed",
+            )
         self._log_reaction_expression_event(
             event,
             stage="attachment",
             decision="accepted",
-            reason="attachment_appended",
+            reason=(
+                "attachment_appended"
+                if delivery_mode == "same_message"
+                else "delivered_before_primary"
+                if delivery_mode == "separate_before" and pending.get("sent")
+                else "delivery_failed"
+                if delivery_mode == "separate_before"
+                else "attachment_prepared"
+            ),
             scope=self._reaction_expression_scope(event),
             found=True,
-            sent=False,
+            sent=bool(pending.get("sent")),
             image_id=prepared.get("image_id"),
             confidence=prepared.get("confidence"),
             cache_hit=prepared.get("cache_hit"),
             latency_ms=prepared.get("lookup_latency_ms"),
             match_basis=pending.get("match_basis"),
         )
+
+    def _reaction_expression_delivery_mode(self) -> str:
+        raw_mode = _single_line(
+            getattr(self, "reaction_expression_delivery_mode", "separate_after"),
+            32,
+        )
+        normalizer = getattr(
+            self,
+            "_normalize_reaction_expression_delivery_mode",
+            None,
+        )
+        if callable(normalizer):
+            try:
+                return normalizer(raw_mode)
+            except Exception:
+                pass
+        mode = raw_mode.lower()
+        if mode not in {"separate_after", "same_message", "separate_before"}:
+            return "separate_after"
+        return mode
+
+    async def _send_reaction_expression_component_separately(
+        self,
+        event: AstrMessageEvent,
+        component: Any,
+    ) -> bool:
+        sender = getattr(event, "send", None)
+        result_builder = getattr(event, "chain_result", None)
+        if not callable(sender) or not callable(result_builder) or component is None:
+            return False
+        try:
+            send_result = await sender(result_builder([component]))
+            return send_result is not False
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 表情图片单独投递失败: mode=%s error_type=%s",
+                self._reaction_expression_delivery_mode(),
+                type(exc).__name__,
+            )
+            return False
+
+    @staticmethod
+    def _reaction_expression_flatten_delivery_components(
+        components: Any,
+    ) -> list[Any]:
+        flattened: list[Any] = []
+
+        def visit(component: Any) -> None:
+            if component is None:
+                return
+            class_name = component.__class__.__name__.strip().lower()
+            nested = getattr(component, "content", None)
+            if class_name == "node" and isinstance(nested, (list, tuple)):
+                for item in nested:
+                    visit(item)
+                return
+            nodes = getattr(component, "nodes", None)
+            if class_name == "nodes" and isinstance(nodes, (list, tuple)):
+                for item in nodes:
+                    visit(item)
+                return
+            flattened.append(component)
+
+        raw_components = getattr(components, "chain", components)
+        if isinstance(raw_components, (list, tuple)):
+            for item in raw_components:
+                visit(item)
+        return flattened
+
+    @staticmethod
+    def _reaction_expression_delivery_signature(component: Any) -> tuple[str, ...] | None:
+        if isinstance(component, Plain):
+            text = str(getattr(component, "text", "") or "").strip()
+            return ("plain", text) if text else None
+        if isinstance(component, Record):
+            reference = _single_line(
+                getattr(component, "file", "")
+                or getattr(component, "url", ""),
+                1000,
+            )
+            return (
+                "record",
+                reference,
+                _single_line(getattr(component, "text", ""), 1000),
+            )
+        if isinstance(component, Image):
+            reference = _single_line(
+                getattr(component, "file", "")
+                or getattr(component, "url", "")
+                or getattr(component, "path", ""),
+                1000,
+            )
+            if reference and not reference.startswith(("http://", "https://")):
+                reference = os.path.normcase(os.path.normpath(reference))
+            return ("image", reference) if reference else None
+        return None
+
+    def _install_reaction_expression_delivery_tracker(
+        self,
+        event: AstrMessageEvent,
+        pending: dict[str, Any],
+    ) -> None:
+        existing = getattr(
+            event,
+            "_private_companion_reaction_expression_delivery_tracker",
+            None,
+        )
+        if isinstance(existing, dict):
+            if not existing.get("restored"):
+                pending["delivery_tracker"] = existing
+                return
+            try:
+                delattr(
+                    event,
+                    "_private_companion_reaction_expression_delivery_tracker",
+                )
+            except Exception:
+                pass
+        original_send = getattr(event, "send", None)
+        if not callable(original_send):
+            return
+        tracker: dict[str, Any] = {
+            "original_send": original_send,
+            "successful_signatures": [],
+            "restored": False,
+        }
+
+        async def tracked_send(message: Any) -> Any:
+            result = await original_send(message)
+            if result is False:
+                return result
+            signatures = tracker.get("successful_signatures")
+            if isinstance(signatures, list):
+                for item in self._reaction_expression_flatten_delivery_components(
+                    message
+                ):
+                    signature = self._reaction_expression_delivery_signature(item)
+                    if signature is not None:
+                        signatures.append(signature)
+            return result
+
+        tracker["tracked_send"] = tracked_send
+        try:
+            setattr(event, "send", tracked_send)
+            setattr(
+                event,
+                "_private_companion_reaction_expression_delivery_tracker",
+                tracker,
+            )
+            pending["delivery_tracker"] = tracker
+        except Exception:
+            return
+
+    def _reaction_expression_primary_reply_confirmed(
+        self,
+        event: AstrMessageEvent,
+        pending: dict[str, Any] | None = None,
+    ) -> bool:
+        tracker = (
+            pending.get("delivery_tracker")
+            if isinstance(pending, dict)
+            else None
+        )
+        if not isinstance(tracker, dict):
+            tracker = getattr(
+                event,
+                "_private_companion_reaction_expression_delivery_tracker",
+                None,
+            )
+        if not isinstance(tracker, dict):
+            return bool(getattr(event, "_has_send_oper", False))
+        successful = list(tracker.get("successful_signatures") or [])
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        expected: list[tuple[str, ...]] = []
+        for item in self._reaction_expression_flatten_delivery_components(chain):
+            signature = self._reaction_expression_delivery_signature(item)
+            if signature is None or signature[0] == "image":
+                continue
+            expected.append(signature)
+        if not expected:
+            return False
+        for signature in expected:
+            try:
+                successful.remove(signature)
+            except ValueError:
+                return False
+        return True
+
+    def _reaction_expression_image_delivery_confirmed(
+        self,
+        event: AstrMessageEvent,
+        pending: dict[str, Any],
+    ) -> bool:
+        tracker = pending.get("delivery_tracker")
+        component = pending.get("component")
+        signature = self._reaction_expression_delivery_signature(component)
+        if not isinstance(tracker, dict) or signature is None:
+            return False
+        return signature in list(tracker.get("successful_signatures") or [])
+
+    @staticmethod
+    def _restore_reaction_expression_delivery_tracker(event: AstrMessageEvent) -> None:
+        tracker = getattr(
+            event,
+            "_private_companion_reaction_expression_delivery_tracker",
+            None,
+        )
+        if not isinstance(tracker, dict) or tracker.get("restored"):
+            return
+        tracker["restored"] = True
+        original_send = tracker.get("original_send")
+        if callable(original_send):
+            try:
+                setattr(event, "send", original_send)
+            except Exception:
+                pass
+        try:
+            delattr(
+                event,
+                "_private_companion_reaction_expression_delivery_tracker",
+            )
+        except Exception:
+            try:
+                setattr(
+                    event,
+                    "_private_companion_reaction_expression_delivery_tracker",
+                    None,
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    def _reaction_expression_attachment_present(
+        chain: list[Any],
+        component: Any,
+        pending: dict[str, Any],
+    ) -> bool:
+        if component is None:
+            return False
+        flattened = PrivateCompanionPlugin._reaction_expression_flatten_delivery_components(
+            chain
+        )
+        if any(item is component for item in flattened):
+            return True
+        expected_path = os.path.normcase(
+            os.path.normpath(_path_text(pending.get("image_path"), 1000))
+        )
+        if not expected_path:
+            return False
+        for item in flattened:
+            if not isinstance(item, Image):
+                continue
+            for attr in ("file", "path", "url"):
+                raw_value = _path_text(getattr(item, attr, ""), 1000)
+                if not raw_value or raw_value.startswith(("http://", "https://")):
+                    continue
+                if os.path.normcase(os.path.normpath(raw_value)) == expected_path:
+                    return True
+        return False
 
     @filter.on_decorating_result(priority=-20000)
     async def finalize_proactive_chat_outbound_bridge(self, event: AstrMessageEvent, *args, **kwargs):
@@ -3678,7 +4024,7 @@ class PrivateCompanionPlugin(
         """Confirm only candidates for which the platform send operation ran."""
         if self is None or not self.enabled:
             return
-        if not bool(getattr(event, "_has_send_oper", False)):
+        if not self._reaction_expression_primary_reply_confirmed(event):
             return
         candidate = getattr(event, "_private_companion_outbound_text_candidate", None)
         if isinstance(candidate, dict):
@@ -3689,7 +4035,7 @@ class PrivateCompanionPlugin(
     async def settle_reaction_expression_attachment_after_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
-        """Record reaction history only when the composed reply was actually sent."""
+        """Deliver or settle a reaction only after the primary reply is confirmed."""
         if self is None or not self.enabled:
             return
         pending = getattr(
@@ -3699,16 +4045,67 @@ class PrivateCompanionPlugin(
         )
         if not isinstance(pending, dict) or pending.get("settled"):
             return
-        attachment_present = bool(pending.get("attached"))
+        delivery_mode = _single_line(
+            pending.get("delivery_mode"),
+            32,
+        ).lower() or self._reaction_expression_delivery_mode()
+        if delivery_mode not in {"separate_after", "same_message", "separate_before"}:
+            delivery_mode = "separate_after"
+        if delivery_mode == "separate_before":
+            await self._settle_reaction_expression_attachment_data(
+                pending,
+                sent=False,
+                reason="delivery_not_started",
+            )
+            return
+
         component = pending.get("component")
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
-        if chain and component is not None:
-            attachment_present = any(item is component for item in chain)
-        sent = bool(getattr(event, "_has_send_oper", False)) and attachment_present
+        primary_sent = self._reaction_expression_primary_reply_confirmed(
+            event,
+            pending,
+        )
+        if delivery_mode == "separate_after":
+            if pending.get("delivery_started"):
+                return
+            pending["delivery_started"] = True
+            if not primary_sent:
+                await self._settle_reaction_expression_attachment_data(
+                    pending,
+                    sent=False,
+                    reason="primary_not_delivered",
+                )
+                return
+            sent = await self._send_reaction_expression_component_separately(
+                event,
+                component,
+            )
+            await self._settle_reaction_expression_attachment_data(
+                pending,
+                sent=sent,
+                reason="delivered" if sent else "delivery_failed",
+            )
+            return
+
+        attachment_present = self._reaction_expression_attachment_present(
+            chain,
+            component,
+            pending,
+        )
+        tracker = pending.get("delivery_tracker")
+        if isinstance(tracker, dict):
+            sent = self._reaction_expression_image_delivery_confirmed(
+                event,
+                pending,
+            )
+        else:
+            sent = primary_sent and attachment_present
         reason = (
             "delivered"
             if sent
+            else "delivery_failed"
+            if primary_sent and attachment_present
             else "attachment_removed"
             if not attachment_present
             else "platform_not_sent"
@@ -3718,6 +4115,70 @@ class PrivateCompanionPlugin(
             sent=sent,
             reason=reason,
         )
+
+    @filter.after_message_sent(priority=8000)
+    async def release_tts_reply_remainder_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """Start delayed TTS chunks only after the platform accepted the first chunk."""
+        if self is None or not self.enabled:
+            return
+        pending = getattr(event, "_private_companion_tts_reply_remainder", None)
+        if not isinstance(pending, dict):
+            return
+        try:
+            delattr(event, "_private_companion_tts_reply_remainder")
+        except Exception:
+            setattr(event, "_private_companion_tts_reply_remainder", None)
+        if not self._reaction_expression_primary_reply_confirmed(event):
+            return
+        chunks = pending.get("chunks")
+        if not isinstance(chunks, list) or not chunks:
+            return
+        operation = self._send_tts_chain_chunks_after_first(
+            event,
+            chunks,
+            started_at=_safe_float(pending.get("started_at"), time.time(), 0.0),
+        )
+        self._create_lifecycle_background_task(
+            operation,
+            label="tts_reply_remainder",
+        )
+
+    @filter.after_message_sent(priority=7000)
+    async def release_deferred_reaction_tts_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """Generate optional reaction voice only after text and image delivery settle."""
+        if self is None or not self.enabled:
+            return
+        pending = getattr(
+            event,
+            "_private_companion_deferred_reaction_tts",
+            None,
+        )
+        if not isinstance(pending, dict):
+            return
+        try:
+            delattr(event, "_private_companion_deferred_reaction_tts")
+        except Exception:
+            setattr(event, "_private_companion_deferred_reaction_tts", None)
+        if not self._reaction_expression_primary_reply_confirmed(event):
+            return
+        operation = self._send_deferred_reaction_tts(event, pending)
+        self._create_lifecycle_background_task(
+            operation,
+            label="reaction_tts_after_delivery",
+        )
+
+    @filter.after_message_sent(priority=6000)
+    async def cleanup_reaction_expression_delivery_tracker_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """Restore the adapter send method after all ordered follow-ups are released."""
+        if self is None:
+            return
+        self._restore_reaction_expression_delivery_tracker(event)
 
     @filter.on_decorating_result()
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
@@ -4039,6 +4500,16 @@ class PrivateCompanionPlugin(
             "还没收到回复",
         )
         marker_kind = "framework_error" if any(marker in compact for marker in error_markers) else ""
+        provider_error_checker = getattr(self, "_looks_like_internal_provider_error_text", None)
+        if not marker_kind and callable(provider_error_checker):
+            try:
+                if provider_error_checker(text):
+                    marker_kind = "provider_error"
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] Provider 错误正文检测失败，保留其他发送前检查: error_type=%s",
+                    type(exc).__name__,
+                )
         meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
         if not marker_kind and callable(meta_leak_checker) and meta_leak_checker(text):
             marker_kind = "tool_loop_summary"
@@ -4636,6 +5107,51 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 is_llm_result = bool(result.is_llm_result())
             except Exception:
                 is_llm_result = False
+        if (
+            bool(getattr(self, "enable_framework_error_leak_guard", True))
+            and chain
+            and all(isinstance(comp, Plain) for comp in chain)
+        ):
+            provider_error_checker = getattr(self, "_looks_like_internal_provider_error_text", None)
+            outbound_text = "\n".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
+            if callable(provider_error_checker):
+                try:
+                    provider_error = bool(outbound_text and provider_error_checker(outbound_text))
+                except Exception:
+                    provider_error = False
+                if provider_error:
+                    logger.warning(
+                        "[PrivateCompanion] 分段前丢弃 Provider 错误正文: session=%s preview=%s",
+                        _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                        _single_line(outbound_text, 180),
+                    )
+                    self._record_passive_no_reply(
+                        event,
+                        source="分段前拦截",
+                        reason="Provider 错误正文未进入分段发送",
+                        reply_preview=outbound_text,
+                        level="warn",
+                    )
+                    empty_result = self._build_result_from_chain([])
+                    try:
+                        empty_result.stop_event()
+                    except Exception:
+                        pass
+                    event.set_result(empty_result)
+                    event.stop_event()
+                    return
+        reaction_intent = getattr(
+            event,
+            "_private_companion_reaction_expression_intent",
+            None,
+        )
+        if isinstance(reaction_intent, dict) and reaction_intent:
+            logger.debug(
+                "[PrivateCompanion] 表情表达保留完整正文,跳过通用分段: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                or "unknown",
+            )
+            return
         if is_llm_result and await self._should_defer_segmenting_to_astrbot_tts(event, result, chain):
             logger.debug(
                 "[PrivateCompanion] 当前 LLM 结果交由 AstrBot 官方 TTS 与原生分段处理: session=%s",
@@ -5102,6 +5618,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         return
                     if chunk and all(isinstance(comp, Plain) for comp in chunk):
                         normalized_segment = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
+                        provider_error_checker = getattr(self, "_looks_like_internal_provider_error_text", None)
+                        if (
+                            bool(getattr(self, "enable_framework_error_leak_guard", True))
+                            and callable(provider_error_checker)
+                        ):
+                            try:
+                                if normalized_segment and provider_error_checker(normalized_segment):
+                                    logger.warning(
+                                        "[PrivateCompanion] 分段剩余组件命中 Provider 错误正文，停止补发: source=%s preview=%s",
+                                        source or "unknown",
+                                        _single_line(normalized_segment, 180),
+                                    )
+                                    return
+                            except Exception:
+                                pass
                         normalizer = getattr(self, "_normalize_tts_tags", None)
                         if callable(normalizer) and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", normalized_segment, flags=re.IGNORECASE):
                             try:
@@ -6158,6 +6689,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "【回复风格约束】\n"
             + "\n\n".join(parts)
             + "\n这些规则用于普通聊天的表达节奏；如果当前问题确实需要排障、教程、代码说明、复杂解释或用户明确要求详细说明，可以优先保证信息完整。"
+            + "\n无论工具或模型返回什么内容，外发正文都不要照抄英文报错、内容策略提示、政策链接或内部诊断；遇到这类结果时，用当前人格的一句简短中文说明，再自然收住或邀请用户换一种说法。"
         )
 
     async def _append_reply_style_to_request(
@@ -6314,7 +6846,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "GROUP_SLANG_PROVIDER_ID",
             "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
             "FORWARD_MESSAGE_PROVIDER_ID",
-            "PRIVATE_READING_VISION_PROVIDER_ID",
             "NEWS_PROVIDER_ID",
             "WEB_EXPLORATION_PROVIDER_ID",
         )
@@ -6617,7 +7148,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "photo_prompt_provider_id",
         ):
             fill(attr, creative or complex_model)
-        self.jm_cosmos_vision_provider_id = plugin_vision
+        # JM reading has its own visual route even in quick mode.  Keeping it
+        # independent prevents a generic image-model change from changing the
+        # cost and output quality of bookshelf analysis.
+        config = getattr(self, "config", None)
+        self.jm_cosmos_vision_provider_id = self._cfg_str(
+            config,
+            "PRIVATE_READING_VISION_PROVIDER_ID",
+            str(getattr(self, "jm_cosmos_vision_provider_id", "") or ""),
+        )
 
     def _detect_astrbot_version(self) -> str:
         candidates: list[Any] = []
@@ -12206,6 +12745,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     secret = {}
                     self.data["bookshelf_secret"] = secret
                 secret.pop("password", None)
+                # Changing the secret also revokes any browser session issued for
+                # the previous password; a fresh unlock should be required.
+                secret.pop("web_access", None)
+                runtime_access = getattr(self, "_bookshelf_access_tokens", None)
+                if isinstance(runtime_access, dict):
+                    runtime_access.clear()
                 secret["reset_at"] = _now_ts()
                 await self._ensure_bookshelf_password_async()
                 self._save_data_sync()
@@ -13471,14 +14016,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         reaction_expression_feedback = {}
         reaction_feedback_lock = getattr(self, "_data_lock", None)
         if sender_id and reaction_feedback_lock is not None:
-            # The image tool stores its target on the sender's user record and
-            # scopes it by the exact group UMO. Apply feedback before any
+            # The image tool stores its group target in the group reaction
+            # state and scopes it by the exact group UMO. Apply feedback before any
             # early-return branch so existing reply handlers cannot swallow it.
             async with reaction_feedback_lock:
                 group_user = self._reaction_expression_feedback_user(
                     sender_id,
                     text,
                     create_for_opt_out=True,
+                    event=event,
                 )
                 if isinstance(group_user, dict):
                     reaction_expression_feedback = self._apply_reaction_expression_feedback(

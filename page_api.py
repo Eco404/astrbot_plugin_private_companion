@@ -8,12 +8,15 @@ import time
 import re
 import shutil
 import base64
+import binascii
+import hmac
 import hashlib
 import mimetypes
 import secrets
 import sqlite3
 import sys
 import uuid
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -53,6 +56,15 @@ from .photo_reference_catalog import (
     project_reference_candidate,
     validate_and_serialize,
 )
+from .reference_assets import (
+    REFERENCE_ASSET_MAX_BYTES,
+    REFERENCE_ASSET_MAX_PER_OWNER,
+    REFERENCE_ASSET_MAX_TOTAL,
+    REFERENCE_ASSET_ROLES,
+    normalize_reference_asset,
+    normalize_reference_asset_scope,
+    normalize_reference_owner_id,
+)
 from .reaction_asset_library import get_reaction_asset_library
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
@@ -60,6 +72,22 @@ PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 IMAGE_CACHE_THUMBNAIL_MAX_EDGE = 160
 IMAGE_CACHE_THUMBNAIL_QUALITY = 78
 PHOTO_REFERENCE_PREVIEW_MAX_BYTES = 20 * 1024 * 1024
+# Reference assets are an independent store for member/role/knowledge images. Keep
+# the limits generous enough for a small visual knowledge base while preventing
+# an accidental page upload from exhausting the plugin data directory.
+PHOTO_REFERENCE_ASSET_MAX_BYTES = 12 * 1024 * 1024
+PHOTO_REFERENCE_ASSET_MAX_COUNT = 256
+PHOTO_REFERENCE_ASSET_MAX_PER_OWNER = 32
+PHOTO_REFERENCE_ASSET_SCOPES = {"relation_user", "group", "knowledge"}
+PHOTO_REFERENCE_ASSET_MIMES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+BOOKSHELF_ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60
+BOOKSHELF_ACCESS_TOKEN_MAX_PERSISTED = 8
 TTS_PROVIDER_SYSTEM_KEYS = {"id", "provider", "type", "provider_type", "enable", "hint", "provider_source_id"}
 TTS_PROVIDER_SECRET_KEYS = {
     "api_key",
@@ -287,9 +315,34 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/reaction_library/rescan", self.rescan_reaction_library, ["POST"], "Private Companion Page reaction library rescan"),
             ("/photo_reference/list", self.list_photo_references, ["GET"], "Private Companion Page photo reference list"),
             ("/photo_reference/image_data", self.get_photo_reference_image_data, ["GET"], "Private Companion Page photo reference image data"),
+            ("/reference_asset/list", self.list_reference_assets, ["GET"], "Private Companion Page scoped visual reference assets"),
+            ("/reference_asset/image_data", self.get_reference_asset_image_data, ["GET"], "Private Companion Page scoped visual reference image data"),
+            ("/reference_asset/upload", self.upload_reference_asset, ["POST"], "Private Companion Page upload scoped visual reference"),
+            ("/reference_asset/update", self.update_reference_asset, ["POST"], "Private Companion Page update scoped visual reference"),
+            ("/reference_asset/delete", self.delete_reference_asset, ["POST"], "Private Companion Page delete scoped visual reference"),
+            ("/worldbook/member/reference/list", self.list_reference_assets, ["GET"], "Private Companion Page worldbook member reference list"),
+            ("/worldbook/member/reference/upload", self.upload_reference_asset, ["POST"], "Private Companion Page worldbook member reference upload"),
+            ("/worldbook/member/reference/update", self.update_reference_asset, ["POST"], "Private Companion Page worldbook member reference update"),
+            ("/worldbook/member/reference/delete", self.delete_reference_asset, ["POST"], "Private Companion Page worldbook member reference delete"),
+            ("/knowledge/reference/list", self.list_reference_assets, ["GET"], "Private Companion Page knowledge reference list"),
+            ("/knowledge/reference/upload", self.upload_reference_asset, ["POST"], "Private Companion Page knowledge reference upload"),
+            ("/knowledge/reference/update", self.update_reference_asset, ["POST"], "Private Companion Page knowledge reference update"),
+            ("/knowledge/reference/delete", self.delete_reference_asset, ["POST"], "Private Companion Page knowledge reference delete"),
+            ("/relationship/role/reference/list", self.list_reference_assets, ["GET"], "Private Companion Page relationship role reference list"),
+            ("/relationship/role/reference/image_data", self.get_reference_asset_image_data, ["GET"], "Private Companion Page relationship role reference image data"),
+            ("/relationship/role/reference/upload", self.upload_reference_asset, ["POST"], "Private Companion Page relationship role reference upload"),
+            ("/relationship/role/reference/update", self.update_reference_asset, ["POST"], "Private Companion Page relationship role reference update"),
+            ("/relationship/role/reference/delete", self.delete_reference_asset, ["POST"], "Private Companion Page relationship role reference delete"),
+            ("/photo_reference/assets", self.list_photo_reference_assets, ["GET"], "Private Companion Page visual reference assets"),
+            ("/photo_reference/assets/list", self.list_photo_reference_assets, ["GET"], "Private Companion Page visual reference asset list"),
+            ("/photo_reference/assets/image_data", self.get_photo_reference_asset_image_data, ["GET"], "Private Companion Page visual reference asset image data"),
+            ("/photo_reference/assets/upload", self.upload_photo_reference_asset, ["POST"], "Private Companion Page upload visual reference asset"),
+            ("/photo_reference/assets/update", self.update_photo_reference_asset, ["POST"], "Private Companion Page update visual reference asset"),
+            ("/photo_reference/assets/delete", self.delete_photo_reference_asset, ["POST"], "Private Companion Page delete visual reference asset"),
             ("/daily_outfit/image", self.get_daily_outfit_image, ["GET"], "Private Companion Page daily outfit image"),
             ("/daily_outfit/image_data", self.get_daily_outfit_image_data, ["GET"], "Private Companion Page daily outfit image data"),
             ("/bookshelf/unlock", self.unlock_bookshelf, ["POST"], "Private Companion Page unlock bookshelf"),
+            ("/bookshelf/session", self.get_bookshelf_session, ["GET", "POST"], "Private Companion Page restore bookshelf session"),
             ("/bookshelf/image", self.get_bookshelf_image, ["GET"], "Private Companion Page bookshelf image"),
             ("/bookshelf/image_data", self.get_bookshelf_image_data, ["GET"], "Private Companion Page bookshelf image data"),
             ("/bookshelf/delete", self.delete_bookshelf_item, ["POST"], "Private Companion Page delete bookshelf item"),
@@ -1943,6 +1996,773 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取参考图预览失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    def _reference_asset_records(self) -> list[dict[str, Any]]:
+        data = getattr(self.plugin, "data", None)
+        if not isinstance(data, dict):
+            return []
+        raw = data.get("photo_reference_assets")
+        if not isinstance(raw, list):
+            raw = []
+            data["photo_reference_assets"] = raw
+        normalized: list[dict[str, Any]] = []
+        changed = False
+        seen: set[str] = set()
+        per_owner: dict[tuple[str, str], int] = {}
+        for item in raw:
+            normalized_item = normalize_reference_asset(item)
+            if not normalized_item:
+                changed = True
+                continue
+            key = (normalized_item["scope"], normalized_item["owner_id"])
+            if normalized_item["id"] in seen or len(normalized) >= REFERENCE_ASSET_MAX_TOTAL or per_owner.get(key, 0) >= REFERENCE_ASSET_MAX_PER_OWNER:
+                changed = True
+                continue
+            seen.add(normalized_item["id"])
+            per_owner[key] = per_owner.get(key, 0) + 1
+            normalized.append(normalized_item)
+            if normalized_item != item:
+                changed = True
+        if changed:
+            data["photo_reference_assets"] = normalized
+        return normalized
+
+    def _reference_asset_local_path(self, asset: dict[str, Any]) -> Path | None:
+        source = _path_text(asset.get("path") or asset.get("source"), 1200)
+        if not source:
+            return None
+        resolver = getattr(self.plugin, "_photo_reference_local_path", None)
+        local_source = ""
+        if callable(resolver):
+            try:
+                local_source = str(resolver(source) or "")
+            except Exception:
+                local_source = ""
+        path = Path(local_source or source).expanduser()
+        try:
+            if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                return None
+            resolved = path.resolve()
+            data_root = Path(str(getattr(self.plugin, "data_dir", "") or ".")).expanduser().resolve()
+            allowed_roots = (
+                data_root / "photo_reference_images",
+                data_root / "photo_reference_assets",
+            )
+            if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+                return None
+            return resolved
+        except (OSError, ValueError):
+            return None
+
+    def _reference_asset_page_item(self, asset: dict[str, Any]) -> dict[str, Any]:
+        path = self._reference_asset_local_path(asset)
+        available = bool(path)
+        file_size = 0
+        if path is not None:
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                available = False
+        asset_id = self._single_line(asset.get("id"), 80)
+        return {
+            "id": asset_id,
+            "scope": asset.get("scope"),
+            "owner_id": asset.get("owner_id"),
+            "role_name": self._single_line(
+                asset.get("role_name")
+                or (
+                    str(asset.get("owner_id") or "")[5:]
+                    if str(asset.get("owner_id") or "").startswith("role:")
+                    else ""
+                ),
+                80,
+            ),
+            "title": self._single_line(asset.get("title"), 120),
+            "note": self._single_line(asset.get("note"), 500),
+            "tags": [self._single_line(tag, 40) for tag in (asset.get("tags") or []) if self._single_line(tag, 40)],
+            "reference_roles": [role for role in (asset.get("reference_roles") or []) if role in REFERENCE_ASSET_ROLES],
+            "enabled": bool(asset.get("enabled", True)),
+            "priority": self._clamp_int(asset.get("priority"), 0, -1000, 10000),
+            "created_at": float(asset.get("created_at") or 0),
+            "updated_at": float(asset.get("updated_at") or 0),
+            "available": available,
+            "file_size": file_size,
+            "preview_endpoint": f"/reference_asset/image_data?id={quote(asset_id, safe='')}" if available else "",
+        }
+
+    def _reference_asset_find(self, asset_id: str) -> dict[str, Any] | None:
+        clean_id = self._single_line(asset_id, 80)
+        if not clean_id:
+            return None
+        return next((item for item in self._reference_asset_records() if item.get("id") == clean_id), None)
+
+    @staticmethod
+    def _reference_asset_data_size(source: str) -> int:
+        text = str(source or "").strip()
+        if text.startswith("base64://"):
+            encoded = text[len("base64://"):]
+        elif text.lower().startswith("data:") and "," in text:
+            meta, encoded = text.split(",", 1)
+            if ";base64" not in meta.lower():
+                return 0
+            mime = meta[5:].split(";", 1)[0].strip().lower()
+            if mime not in {"image/png", "image/jpeg", "image/webp"}:
+                return -1
+        else:
+            return 0
+        try:
+            return len(base64.b64decode(encoded, validate=False))
+        except (ValueError, binascii.Error):
+            return -1
+
+    async def _reference_asset_stable_path(self, source: str, *, stem: str) -> str:
+        resolver = getattr(self.plugin, "_photo_reference_source_to_stable_path", None)
+        if callable(resolver):
+            try:
+                result = resolver(source, stem=stem)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return _path_text(result, 1200)
+            except Exception as exc:
+                logger.info("[PrivateCompanionPage] 参考资产稳定落盘失败: type=%s", type(exc).__name__)
+                return ""
+        writer = getattr(self.plugin, "_photo_reference_write_data_image", None)
+        if callable(writer) and (str(source).startswith("data:") or str(source).startswith("base64://")):
+            try:
+                return _path_text(writer(source, stem=stem), 1200)
+            except Exception:
+                return ""
+        return ""
+
+    def _reference_asset_owner_error(self, scope: str, owner_id: str) -> str:
+        if scope == "relation_user":
+            if not self._worldbook_member_id_valid(owner_id):
+                return "关系网参考图归属必须是有效 QQ 号或受支持的外部身份键"
+            return ""
+        if scope == "relation_role":
+            if not normalize_reference_owner_id(scope, owner_id):
+                return "关系角色参考图归属必须使用 role:<角色名>"
+            return ""
+        if scope == "knowledge":
+            if not normalize_reference_owner_id(scope, owner_id):
+                return "知识参考图归属必须使用 kb:<id> 或 doc:<kb_id>:<doc_id>"
+            return ""
+        return "参考资产范围只能是 relation_user、relation_role 或 knowledge"
+
+    def _reference_asset_payload_fields(self, payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+        base = dict(existing or {})
+        for key in ("title", "note"):
+            if key in payload:
+                base[key] = self._single_line(payload.get(key), 500 if key == "note" else 120)
+        if "tags" in payload:
+            base["tags"] = [self._single_line(item, 40) for item in (payload.get("tags") if isinstance(payload.get("tags"), list) else re.split(r"[,，、/|\s]+", str(payload.get("tags") or ""))) if self._single_line(item, 40)][:12]
+        if "reference_roles" in payload or "roles" in payload:
+            raw_roles = payload.get("reference_roles", payload.get("roles"))
+            base["reference_roles"] = [str(item or "").strip().lower() for item in (raw_roles if isinstance(raw_roles, list) else re.split(r"[,，、/|\s]+", str(raw_roles or ""))) if str(item or "").strip().lower() in REFERENCE_ASSET_ROLES]
+        if "enabled" in payload:
+            base["enabled"] = bool(payload.get("enabled"))
+        if "priority" in payload:
+            base["priority"] = self._clamp_int(payload.get("priority"), 0, -1000, 10000)
+        return base
+
+    async def list_reference_assets(self) -> dict[str, Any]:
+        raw_scope = request.args.get("scope")
+        owner_id = self._single_line(
+            request.args.get("owner_id")
+            or request.args.get("user_id")
+            or request.args.get("knowledge_id")
+            or request.args.get("role_name")
+            or request.args.get("relationship_role"),
+            120,
+        )
+        scope = normalize_reference_asset_scope(raw_scope)
+        if not scope and "/relationship/role/reference/" in str(request.path or ""):
+            scope = "relation_role"
+        if not scope and request.args.get("user_id"):
+            scope = "relation_user"
+        if not scope and request.args.get("knowledge_id"):
+            scope = "knowledge"
+        if not scope and (request.args.get("role_name") or request.args.get("relationship_role")):
+            scope = "relation_role"
+        if scope and owner_id:
+            owner_id = normalize_reference_owner_id(scope, owner_id)
+        items = []
+        for asset in self._reference_asset_records():
+            if scope and asset.get("scope") != scope:
+                continue
+            if owner_id and asset.get("owner_id") != owner_id:
+                continue
+            items.append(self._reference_asset_page_item(asset))
+        items.sort(key=lambda item: (not item.get("enabled", True), -float(item.get("priority") or 0), -float(item.get("updated_at") or 0)))
+        response = {
+            "version": 1,
+            "assets": items,
+            "items": items,
+            "total": len(items),
+            "available": sum(1 for item in items if item.get("available")),
+            "limit": REFERENCE_ASSET_MAX_TOTAL,
+            "per_owner_limit": REFERENCE_ASSET_MAX_PER_OWNER,
+            "options": {
+                "scopes": [
+                    {"value": "relation_user", "label": "关系网用户"},
+                    {"value": "relation_role", "label": "关系网角色卡"},
+                    {"value": "knowledge", "label": "知识库/文档"},
+                ],
+                "reference_roles": [{"value": role, "label": role} for role in REFERENCE_ASSET_ROLES],
+            },
+        }
+        return self._ok(response)
+
+    async def get_reference_asset_image_data(self) -> dict[str, Any]:
+        asset = self._reference_asset_find(request.args.get("id"))
+        if not asset:
+            return self._error("参考资产不存在或已删除")
+        path = self._reference_asset_local_path(asset)
+        if path is None:
+            return self._error("参考资产文件不存在")
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            return self._error("无法读取参考资产文件")
+        if file_size > PHOTO_REFERENCE_PREVIEW_MAX_BYTES:
+            return self._error("参考资产预览文件过大")
+        mime = mimetypes.guess_type(str(path))[0] or ""
+        if not mime.startswith("image/"):
+            return self._error("参考资产文件类型不受支持")
+        try:
+            return self._ok(await self._encode_image_cache_file_data_url(path, mime, max_bytes=PHOTO_REFERENCE_PREVIEW_MAX_BYTES))
+        except Exception as exc:
+            logger.info("[PrivateCompanionPage] 参考资产预览失败: type=%s", type(exc).__name__)
+            return self._error("参考资产预览失败")
+
+    async def upload_reference_asset(self) -> dict[str, Any]:
+        return await self._save_reference_asset(await request.get_json(silent=True) or {}, existing=None)
+
+    async def update_reference_asset(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        asset = self._reference_asset_find(payload.get("id"))
+        if not asset:
+            return self._error("参考资产不存在或已删除")
+        return await self._save_reference_asset(payload, existing=asset)
+
+    async def _save_reference_asset(self, payload: dict[str, Any], *, existing: dict[str, Any] | None) -> dict[str, Any]:
+        raw_scope = payload.get("scope") or (existing or {}).get("scope")
+        raw_owner = (
+            payload.get("owner_id")
+            or payload.get("user_id")
+            or payload.get("knowledge_id")
+            or payload.get("role_name")
+            or payload.get("relationship_role")
+            or (existing or {}).get("owner_id")
+        )
+        scope = normalize_reference_asset_scope(raw_scope)
+        if not scope and "/relationship/role/reference/" in str(request.path or ""):
+            scope = "relation_role"
+        if not scope and payload.get("user_id"):
+            scope = "relation_user"
+        if not scope and payload.get("knowledge_id"):
+            scope = "knowledge"
+        if not scope and (payload.get("role_name") or payload.get("relationship_role")):
+            scope = "relation_role"
+        owner_id = normalize_reference_owner_id(scope, raw_owner)
+        owner_error = self._reference_asset_owner_error(scope, owner_id)
+        if owner_error:
+            return self._error(owner_error)
+        if existing is None and len(self._reference_asset_records()) >= REFERENCE_ASSET_MAX_TOTAL:
+            return self._error(f"参考资产最多保存 {REFERENCE_ASSET_MAX_TOTAL} 项")
+        owner_count = sum(1 for item in self._reference_asset_records() if item.get("scope") == scope and item.get("owner_id") == owner_id and item.get("id") != (existing or {}).get("id"))
+        if existing is None and owner_count >= REFERENCE_ASSET_MAX_PER_OWNER:
+            return self._error(f"同一归属最多保存 {REFERENCE_ASSET_MAX_PER_OWNER} 张参考图")
+        source = str(payload.get("data_url") or payload.get("image") or payload.get("source") or "").strip()
+        if source:
+            size = self._reference_asset_data_size(source)
+            if size < 0:
+                return self._error("图片数据不是有效的 Base64 图片")
+            if size > REFERENCE_ASSET_MAX_BYTES:
+                return self._error(f"参考图过大，上限为 {REFERENCE_ASSET_MAX_BYTES // 1024 // 1024} MB")
+            stable_path = await self._reference_asset_stable_path(source, stem=f"{scope}_{owner_id}")
+            if not stable_path:
+                return self._error("图片无法稳定保存，请重新选择图片")
+        else:
+            stable_path = _path_text((existing or {}).get("path"), 1200)
+        if not stable_path:
+            return self._error("缺少图片数据")
+        try:
+            stored_size = Path(stable_path).stat().st_size
+        except OSError:
+            return self._error("图片保存后无法读取")
+        if stored_size <= 0 or stored_size > REFERENCE_ASSET_MAX_BYTES:
+            return self._error("保存后的图片大小不符合限制")
+        base = self._reference_asset_payload_fields(payload, existing)
+        base.update({"id": (existing or {}).get("id", ""), "scope": scope, "owner_id": owner_id, "path": stable_path})
+        asset = normalize_reference_asset(base, now=time.time())
+        if not asset:
+            return self._error("参考资产元数据无效")
+        async with self.plugin._data_lock:
+            records = self._reference_asset_records()
+            replaced = False
+            for index, item in enumerate(records):
+                if item.get("id") == asset["id"]:
+                    records[index] = asset
+                    replaced = True
+                    break
+            if not replaced:
+                records.append(asset)
+            self.plugin.data["photo_reference_assets"] = records
+            self.plugin._save_data_sync()
+            data = deepcopy(self.plugin.data)
+        return self._ok({"message": "已更新参考资产" if existing else "已上传参考资产", "asset": self._reference_asset_page_item(asset), "worldbook": self._worldbook_summary(data)})
+
+    async def delete_reference_asset(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        asset_id = self._single_line(payload.get("id"), 80)
+        if not asset_id:
+            return self._error("缺少参考资产 id")
+        async with self.plugin._data_lock:
+            records = self._reference_asset_records()
+            target = next((item for item in records if item.get("id") == asset_id), None)
+            if not target:
+                return self._error("参考资产不存在或已删除")
+            self.plugin.data["photo_reference_assets"] = [item for item in records if item.get("id") != asset_id]
+            path = self._reference_asset_local_path(target)
+            if path is not None:
+                try:
+                    root = Path(getattr(self.plugin, "data_dir", ".")).resolve() / "photo_reference_images"
+                    path.relative_to(root.resolve())
+                    if not any(item.get("path") == str(path) for item in self.plugin.data["photo_reference_assets"]):
+                        path.unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    pass
+            self.plugin._save_data_sync()
+            data = deepcopy(self.plugin.data)
+        return self._ok({"message": "已删除参考资产", "worldbook": self._worldbook_summary(data)})
+
+    # ------------------------------------------------------------------
+    # Independent visual reference assets
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_photo_reference_asset_scope(value: Any) -> str:
+        aliases = {
+            "relation": "relation_user",
+            "relation_user": "relation_user",
+            "user": "relation_user",
+            "member": "relation_user",
+            "group": "group",
+            "knowledge": "knowledge",
+            "knowledge_base": "knowledge",
+            "knowledge_item": "knowledge",
+            "kb": "knowledge",
+        }
+        return aliases.get(str(value or "").strip().lower(), "")
+
+    @staticmethod
+    def _photo_reference_asset_bool(value: Any, default: bool = True) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"0", "false", "no", "off", "disabled", "disable"}:
+            return False
+        if text in {"1", "true", "yes", "on", "enabled", "enable"}:
+            return True
+        return default
+
+    def _photo_reference_asset_dir(self) -> Path:
+        target = Path(str(getattr(self.plugin, "data_dir", "") or ".")).expanduser() / "photo_reference_assets"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _photo_reference_asset_path(self, value: Any) -> Path | None:
+        """Resolve a stored asset path without allowing traversal outside its directory."""
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        root = self._photo_reference_asset_dir().resolve()
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if resolved != root and root not in resolved.parents:
+            return None
+        return resolved
+
+    def _photo_reference_asset_raw_items(self) -> list[Any]:
+        data = getattr(self.plugin, "data", None)
+        if not isinstance(data, dict):
+            data = {}
+            self.plugin.data = data
+        assets = data.get("photo_reference_assets")
+        if not isinstance(assets, list):
+            assets = []
+            data["photo_reference_assets"] = assets
+        return assets
+
+    def _normalize_photo_reference_asset(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        asset_id = self._single_line(value.get("id"), 80)
+        scope = self._normalize_photo_reference_asset_scope(value.get("scope"))
+        owner_id = self._single_line(value.get("owner_id"), 180)
+        path = self._single_line(value.get("path") or value.get("source"), 800)
+        if not asset_id or scope not in PHOTO_REFERENCE_ASSET_SCOPES or not owner_id or not path:
+            return None
+        tags = self._dedupe_text_list(value.get("tags"), limit=24)
+        try:
+            size = max(0, int(value.get("size") or 0))
+        except (TypeError, ValueError, OverflowError):
+            size = 0
+        try:
+            created_at = float(value.get("created_at") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            created_at = 0.0
+        try:
+            updated_at = float(value.get("updated_at") or created_at or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            updated_at = created_at
+        mime = self._single_line(value.get("mime"), 80).lower()
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+            mime = mimetypes.guess_type(path)[0] or ""
+        return {
+            "id": asset_id,
+            "scope": scope,
+            "owner_id": owner_id,
+            "title": self._single_line(value.get("title") or value.get("name"), 160),
+            "note": self._multi_line(value.get("note") or value.get("description"), 1200),
+            "tags": tags,
+            "path": path,
+            "mime": mime,
+            "filename": self._single_line(value.get("filename") or Path(path).name, 180),
+            "size": size,
+            "enabled": self._photo_reference_asset_bool(value.get("enabled"), True),
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+
+    def _photo_reference_asset_items(self) -> list[dict[str, Any]]:
+        """Return normalized assets, dropping malformed persisted entries from views."""
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in self._photo_reference_asset_raw_items():
+            item = self._normalize_photo_reference_asset(raw)
+            if item is None or item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            result.append(item)
+        return result
+
+    def _photo_reference_asset_page_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        path = self._photo_reference_asset_path(item.get("path"))
+        available = bool(path is not None and path.is_file())
+        file_size = int(item.get("size") or 0)
+        if path is not None and available:
+            try:
+                file_size = max(0, int(path.stat().st_size))
+            except OSError:
+                pass
+        mime = str(item.get("mime") or "").strip().lower() or (mimetypes.guess_type(str(path or ""))[0] or "")
+        public = dict(item)
+        public.update({
+            "kind": item.get("scope", ""),
+            "source": item.get("path", ""),
+            "available": available,
+            "file_size": file_size,
+            "preview_endpoint": (
+                f"/photo_reference/assets/image_data?id={quote(str(item.get('id') or ''), safe='')}"
+                if available else ""
+            ),
+        })
+        public["mime"] = mime
+        return public
+
+    def _photo_reference_asset_page_items(
+        self,
+        *,
+        scope: str = "",
+        owner_id: str = "",
+        include_disabled: bool = True,
+    ) -> list[dict[str, Any]]:
+        normalized_scope = self._normalize_photo_reference_asset_scope(scope) if scope else ""
+        owner_filter = self._single_line(owner_id, 180) if owner_id else ""
+        items = []
+        for item in self._photo_reference_asset_items():
+            if normalized_scope and item["scope"] != normalized_scope:
+                continue
+            if owner_filter and item["owner_id"] != owner_filter:
+                continue
+            if not include_disabled and not item["enabled"]:
+                continue
+            items.append(self._photo_reference_asset_page_item(item))
+        items.sort(key=lambda value: (float(value.get("updated_at") or 0.0), str(value.get("id") or "")), reverse=True)
+        return items
+
+    @asynccontextmanager
+    async def _photo_reference_asset_lock(self):
+        lock = getattr(self.plugin, "_data_lock", None)
+        if lock is None or not callable(getattr(lock, "__aenter__", None)):
+            yield
+            return
+        async with lock:
+            yield
+
+    @staticmethod
+    def _decode_photo_reference_asset_data_url(value: Any) -> tuple[bytes, str, str] | None:
+        text = str(value or "").strip()
+        if not text.lower().startswith("data:") or "," not in text:
+            return None
+        meta, payload = text.split(",", 1)
+        parts = meta[5:].split(";")
+        mime = str(parts[0] or "").strip().lower()
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        if mime not in PHOTO_REFERENCE_ASSET_MIMES or not any(part.strip().lower() == "base64" for part in parts[1:]):
+            return None
+        payload = re.sub(r"\s+", "", payload)
+        if not payload or len(payload) > ((PHOTO_REFERENCE_ASSET_MAX_BYTES * 4) // 3 + 4096):
+            return None
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (ValueError, TypeError, base64.binascii.Error):
+            return None
+        if not raw or len(raw) > PHOTO_REFERENCE_ASSET_MAX_BYTES:
+            return None
+        signature_ok = (
+            (mime == "image/png" and raw.startswith(b"\x89PNG\r\n\x1a\n"))
+            or (mime == "image/jpeg" and raw.startswith(b"\xff\xd8\xff"))
+            or (mime == "image/webp" and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP")
+            or (mime == "image/gif" and raw[:6] in {b"GIF87a", b"GIF89a"})
+        )
+        if not signature_ok:
+            return None
+        return raw, mime, PHOTO_REFERENCE_ASSET_MIMES[mime]
+
+    def _photo_reference_asset_metadata_from_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        existing: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str, str, list[str], bool] | None:
+        current = existing or {}
+        scope = self._normalize_photo_reference_asset_scope(payload.get("scope", current.get("scope")))
+        owner_id = self._single_line(payload.get("owner_id", current.get("owner_id")), 180)
+        if scope not in PHOTO_REFERENCE_ASSET_SCOPES or not owner_id:
+            return None
+        title = self._single_line(payload.get("title", current.get("title")), 160)
+        note = self._multi_line(payload.get("note", current.get("note")), 1200)
+        tags = self._dedupe_text_list(payload.get("tags", current.get("tags")), limit=24)
+        enabled = self._photo_reference_asset_bool(payload.get("enabled"), bool(current.get("enabled", True)))
+        return scope, owner_id, title, note, tags, enabled
+
+    async def list_photo_reference_assets(self) -> dict[str, Any]:
+        try:
+            scope_raw = self._single_line(request.args.get("scope"), 40)
+            scope = self._normalize_photo_reference_asset_scope(scope_raw) if scope_raw else ""
+            if scope_raw and not scope:
+                return self._error("scope 只支持 relation_user、group 或 knowledge")
+            owner_id = self._single_line(request.args.get("owner_id"), 180)
+            include_disabled = self._photo_reference_asset_bool(request.args.get("include_disabled"), True)
+            items = self._photo_reference_asset_page_items(
+                scope=scope,
+                owner_id=owner_id,
+                include_disabled=include_disabled,
+            )
+            return self._ok({
+                "items": items,
+                "assets": items,
+                "total": len(items),
+                "available": sum(1 for item in items if item.get("available")),
+                "limit": PHOTO_REFERENCE_ASSET_MAX_COUNT,
+                "per_owner_limit": PHOTO_REFERENCE_ASSET_MAX_PER_OWNER,
+                "scopes": sorted(PHOTO_REFERENCE_ASSET_SCOPES),
+            })
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 获取参考资产列表失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def get_photo_reference_asset_image_data(self) -> dict[str, Any]:
+        asset_id = self._single_line(request.args.get("id") or request.args.get("asset_id"), 80)
+        if not asset_id:
+            return self._error("缺少参考资产 id")
+        try:
+            item = next((candidate for candidate in self._photo_reference_asset_items() if candidate.get("id") == asset_id), None)
+            if item is None:
+                return self._error("参考资产不存在")
+            path = self._photo_reference_asset_path(item.get("path"))
+            if path is None or not path.is_file():
+                return self._error("参考资产文件不存在")
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                return self._error("无法读取参考资产文件大小")
+            if file_size > PHOTO_REFERENCE_ASSET_MAX_BYTES:
+                return self._error(f"参考资产文件过大（{file_size} bytes）")
+            mime = str(item.get("mime") or "").strip().lower() or (mimetypes.guess_type(str(path))[0] or "")
+            if mime == "image/jpg":
+                mime = "image/jpeg"
+            if mime not in PHOTO_REFERENCE_ASSET_MIMES:
+                return self._error("参考资产文件类型不受支持")
+            return self._ok(await self._encode_image_cache_file_data_url(path, mime, max_bytes=PHOTO_REFERENCE_ASSET_MAX_BYTES))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 获取参考资产预览失败: %s", exc, exc_info=True)
+            return self._error(str(exc))
+
+    async def upload_photo_reference_asset(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        decoded = self._decode_photo_reference_asset_data_url(
+            payload.get("data_url") or payload.get("image_data") or payload.get("image")
+        )
+        if decoded is None:
+            return self._error("只支持有效的 PNG/JPEG/WebP/GIF data URL")
+        metadata = self._photo_reference_asset_metadata_from_payload(payload)
+        if metadata is None:
+            return self._error("scope 必须是 relation_user、group 或 knowledge，且 owner_id 不能为空")
+        raw, mime, suffix = decoded
+        scope, owner_id, title, note, tags, enabled = metadata
+        async with self._photo_reference_asset_lock():
+            items = self._photo_reference_asset_items()
+            if len(items) >= PHOTO_REFERENCE_ASSET_MAX_COUNT:
+                return self._error(f"参考资产数量已达到上限 {PHOTO_REFERENCE_ASSET_MAX_COUNT}")
+            owner_count = sum(1 for item in items if item["scope"] == scope and item["owner_id"] == owner_id)
+            if owner_count >= PHOTO_REFERENCE_ASSET_MAX_PER_OWNER:
+                return self._error(f"该归属对象的参考资产数量已达到上限 {PHOTO_REFERENCE_ASSET_MAX_PER_OWNER}")
+            asset_id = f"asset_{uuid.uuid4().hex}"
+            target = self._photo_reference_asset_dir() / f"{asset_id}{suffix}"
+            try:
+                target.write_bytes(raw)
+            except OSError as exc:
+                return self._error(f"保存参考资产失败: {exc}")
+            now = time.time()
+            item = {
+                "id": asset_id,
+                "scope": scope,
+                "owner_id": owner_id,
+                "title": title,
+                "note": note,
+                "tags": tags,
+                "path": str(target.relative_to(self._photo_reference_asset_dir().parent)),
+                "mime": mime,
+                "filename": f"{asset_id}{suffix}",
+                "size": len(raw),
+                "enabled": enabled,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._photo_reference_asset_raw_items().append(item)
+            saver = getattr(self.plugin, "_save_data_sync", None)
+            if callable(saver):
+                saver()
+            return self._ok({"asset": self._photo_reference_asset_page_item(item)})
+
+    async def update_photo_reference_asset(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        asset_id = self._single_line(payload.get("id") or payload.get("asset_id"), 80)
+        if not asset_id:
+            return self._error("缺少参考资产 id")
+        decoded = None
+        image_value = payload.get("data_url") or payload.get("image_data") or payload.get("image")
+        if image_value:
+            decoded = self._decode_photo_reference_asset_data_url(image_value)
+            if decoded is None:
+                return self._error("只支持有效的 PNG/JPEG/WebP/GIF data URL")
+        async with self._photo_reference_asset_lock():
+            raw_items = self._photo_reference_asset_raw_items()
+            index = next((idx for idx, raw in enumerate(raw_items) if isinstance(raw, dict) and str(raw.get("id") or "") == asset_id), -1)
+            if index < 0:
+                return self._error("参考资产不存在")
+            existing = self._normalize_photo_reference_asset(raw_items[index])
+            if existing is None:
+                return self._error("参考资产记录无效")
+            metadata = self._photo_reference_asset_metadata_from_payload(payload, existing=existing)
+            if metadata is None:
+                return self._error("scope 必须是 relation_user、group 或 knowledge，且 owner_id 不能为空")
+            scope, owner_id, title, note, tags, enabled = metadata
+            if (scope, owner_id) != (existing["scope"], existing["owner_id"]):
+                owner_count = sum(
+                    1 for item in self._photo_reference_asset_items()
+                    if item["id"] != asset_id and item["scope"] == scope and item["owner_id"] == owner_id
+                )
+                if owner_count >= PHOTO_REFERENCE_ASSET_MAX_PER_OWNER:
+                    return self._error(f"该归属对象的参考资产数量已达到上限 {PHOTO_REFERENCE_ASSET_MAX_PER_OWNER}")
+            replacement_path = existing["path"]
+            replacement_target: Path | None = None
+            if decoded is not None:
+                raw, mime, suffix = decoded
+                replacement_target = self._photo_reference_asset_dir() / f"{asset_id}{suffix}"
+                try:
+                    replacement_target.write_bytes(raw)
+                except OSError as exc:
+                    return self._error(f"保存参考资产失败: {exc}")
+                replacement_path = str(replacement_target.relative_to(self._photo_reference_asset_dir().parent))
+            else:
+                raw = b""
+                mime = existing.get("mime", "")
+            now = time.time()
+            updated = dict(existing)
+            updated.update({
+                "scope": scope,
+                "owner_id": owner_id,
+                "title": title,
+                "note": note,
+                "tags": tags,
+                "enabled": enabled,
+                "path": replacement_path,
+                "updated_at": now,
+            })
+            if decoded is not None:
+                updated.update({
+                    "mime": mime,
+                    "filename": f"{asset_id}{replacement_target.suffix if replacement_target else ''}",
+                    "size": len(raw),
+                })
+            raw_items[index] = updated
+            if decoded is not None and existing.get("path") != replacement_path:
+                old_path = self._photo_reference_asset_path(existing.get("path"))
+                if old_path is not None and old_path != replacement_target:
+                    try:
+                        old_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            saver = getattr(self.plugin, "_save_data_sync", None)
+            if callable(saver):
+                saver()
+            return self._ok({"asset": self._photo_reference_asset_page_item(updated)})
+
+    async def delete_photo_reference_asset(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        asset_id = self._single_line(payload.get("id") or payload.get("asset_id"), 80)
+        if not asset_id:
+            return self._error("缺少参考资产 id")
+        async with self._photo_reference_asset_lock():
+            raw_items = self._photo_reference_asset_raw_items()
+            index = next((idx for idx, raw in enumerate(raw_items) if isinstance(raw, dict) and str(raw.get("id") or "") == asset_id), -1)
+            if index < 0:
+                return self._error("参考资产不存在")
+            existing = self._normalize_photo_reference_asset(raw_items[index])
+            raw_items.pop(index)
+            removed_path = self._photo_reference_asset_path(existing.get("path")) if existing else None
+            saver = getattr(self.plugin, "_save_data_sync", None)
+            if callable(saver):
+                saver()
+            if removed_path is not None:
+                try:
+                    removed_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return self._ok({
+                "id": asset_id,
+                "remaining": len(self._photo_reference_asset_items()),
+            })
 
     async def get_image_cache_preview(self) -> Any:
         try:
@@ -4804,7 +5624,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             },
             {
                 "key": "expression",
-                "title": "表达学习污染",
+                "title": "表达规则重复与污染",
                 "local_count": len(expression_items),
                 "model_count": 0,
                 "suggestions": [
@@ -5211,8 +6031,237 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         return candidates
         return candidates
 
-    def _model_diagnostics_expression_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
-        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+    def _model_diagnostics_expression_duplicate_candidates(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        analyzer = getattr(self.plugin, "_expression_rule_duplicate_analysis", None)
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+
+        def fallback_analysis(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+            if self._single_line(left.get("kind"), 16).lower() != self._single_line(right.get("kind"), 16).lower():
+                return {}
+            compact = lambda value: re.sub(
+                r"[\s，。！？!?、；;：:‘’“”\"'~～…—–_-]",
+                "",
+                self._single_line(value, 120).lower(),
+            )
+            if compact(left.get("pattern") or left.get("style")) != compact(right.get("pattern") or right.get("style")):
+                return {}
+            return {
+                "code": "same_pattern",
+                "confidence": 0.9,
+                "auto_merge": False,
+                "reason": "同类规则使用相同表达模板",
+            }
+
+        def analyze(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+            if callable(analyzer):
+                try:
+                    result = analyzer(left, right)
+                    if isinstance(result, dict):
+                        return result
+                except Exception:
+                    pass
+            return fallback_analysis(left, right)
+
+        def inspect_source(
+            *,
+            source_type: str,
+            source_id: str,
+            source_name: str,
+            profile: Any,
+        ) -> None:
+            if not isinstance(profile, dict):
+                return
+            rows: list[dict[str, Any]] = []
+            for storage_key, storage_label in (("learned_rules", "已启用"), ("pending_rules", "待审核")):
+                values = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+                for raw in values:
+                    if isinstance(raw, dict):
+                        rows.append({**raw, "_storage_key": storage_key, "_storage_label": storage_label})
+            duplicate_count = 0
+            duplicate_families: set[str] = set()
+            parents = list(range(len(rows)))
+            edges: list[tuple[int, int, dict[str, Any]]] = []
+
+            def find(index: int) -> int:
+                while parents[index] != index:
+                    parents[index] = parents[parents[index]]
+                    index = parents[index]
+                return index
+
+            def union(left_index: int, right_index: int) -> None:
+                left_root = find(left_index)
+                right_root = find(right_index)
+                if left_root != right_root:
+                    parents[right_root] = left_root
+
+            for index, left in enumerate(rows):
+                for right_index in range(index + 1, len(rows)):
+                    right = rows[right_index]
+                    left_family = self._single_line(left.get("family_id"), 100)
+                    right_family = self._single_line(right.get("family_id"), 100)
+                    if left_family and left_family == right_family:
+                        continue
+                    analysis = analyze(left, right)
+                    confidence = self._float(analysis.get("confidence"))
+                    if confidence < 0.78:
+                        continue
+                    left_id = self._single_line(left.get("id"), 100)
+                    right_id = self._single_line(right.get("id"), 100)
+                    pair_key = (
+                        source_type,
+                        source_id,
+                        min(left_id, right_id),
+                        max(left_id, right_id),
+                    )
+                    if pair_key in seen:
+                        continue
+                    seen.add(pair_key)
+                    union(index, right_index)
+                    edges.append((index, right_index, analysis))
+
+            component_members: dict[int, set[int]] = {}
+            involved = {value for left_index, right_index, _ in edges for value in (left_index, right_index)}
+            for index in involved:
+                component_members.setdefault(find(index), set()).add(index)
+            for members in component_members.values():
+                component_edges = [
+                    analysis
+                    for left_index, right_index, analysis in edges
+                    if left_index in members and right_index in members
+                ]
+                if not component_edges:
+                    continue
+                duplicate_count += 1
+                member_rows = [rows[index] for index in sorted(members)]
+                family_ids = list(dict.fromkeys(
+                    value
+                    for item in member_rows
+                    if (value := self._single_line(item.get("family_id"), 100))
+                ))
+                duplicate_families.update(family_ids)
+                patterns = list(dict.fromkeys(
+                    value
+                    for item in member_rows
+                    if (value := self._single_line(item.get("pattern") or item.get("style"), 80))
+                ))
+                storage_text = " / ".join(dict.fromkeys(
+                    self._single_line(item.get("_storage_label"), 20)
+                    for item in member_rows
+                    if self._single_line(item.get("_storage_label"), 20)
+                ))
+                auto_merge = all(bool(item.get("auto_merge")) for item in component_edges)
+                action_text = "可保守合并证据与适用边界" if auto_merge else "应人工确认是否保留这些情境"
+                reasons = list(dict.fromkeys(
+                    self._single_line(item.get("reason"), 120)
+                    for item in component_edges
+                    if self._single_line(item.get("reason"), 120)
+                ))
+                rule_ids = list(dict.fromkeys(
+                    value
+                    for item in member_rows
+                    if (value := self._single_line(item.get("id"), 100))
+                ))
+                confidence = max((self._float(item.get("confidence")) for item in component_edges), default=0.0)
+                pattern_text = " / ".join(patterns[:4])
+                if len(patterns) > 4:
+                    pattern_text += f" 等 {len(patterns)} 种模板"
+                if len(member_rows) > len(patterns):
+                    pattern_text += f"（共 {len(member_rows)} 条规则）"
+                candidates.append({
+                    "category": "duplicate_rule",
+                    "source_type": source_type,
+                    "source_id": source_id,
+                    "user_id": source_id,
+                    "name": source_name,
+                    "text": pattern_text,
+                    "reason": f"{'；'.join(reasons[:2]) or '疑似近义规则'}；{action_text}",
+                    "confidence": round(confidence, 3),
+                    "storage": storage_text,
+                    "rule_ids": rule_ids,
+                    "family_ids": family_ids,
+                    "auto_merge": auto_merge,
+                })
+                if len(candidates) >= 24:
+                    return
+            learned = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+            rule_limit = max(1, self._int(getattr(self.plugin, "max_learned_expression_items", 60)) or 60)
+            if duplicate_count and len(learned) >= rule_limit:
+                candidates.append({
+                    "category": "rule_budget",
+                    "source_type": source_type,
+                    "source_id": source_id,
+                    "user_id": source_id,
+                    "name": source_name,
+                    "text": f"已启用 {len(learned)}/{rule_limit} 条，重复候选涉及 {len(duplicate_families)} 个规则组",
+                    "reason": "表达规则已占满来源预算，近义规则会挤掉其他有效表达",
+                    "confidence": 0.98,
+                    "auto_merge": False,
+                })
+
+        for collection_key, source_type in (("users", "private"), ("groups", "group")):
+            collection = data.get(collection_key) if isinstance(data.get(collection_key), dict) else {}
+            for source_id, owner in collection.items():
+                if not isinstance(owner, dict):
+                    continue
+                name = self._single_line(
+                    owner.get("nickname") or owner.get("name") or owner.get("group_name") or source_id,
+                    40,
+                )
+                inspect_source(
+                    source_type=source_type,
+                    source_id=self._single_line(source_id, 80),
+                    source_name=name,
+                    profile=owner.get("expression_profile"),
+                )
+                if len(candidates) >= 24:
+                    return candidates[:24]
+
+        runtime = data.get("expression_voice_profile") if isinstance(data.get("expression_voice_profile"), dict) else {}
+        runtime_rules = runtime.get("learned_rules") if isinstance(runtime.get("learned_rules"), list) else []
+        runtime_limit = max(1, self._int(getattr(self.plugin, "max_learned_expression_items", 60)) or 60)
+        runtime_parents = list(range(len(runtime_rules)))
+        runtime_involved: set[int] = set()
+
+        def runtime_find(index: int) -> int:
+            while runtime_parents[index] != index:
+                runtime_parents[index] = runtime_parents[runtime_parents[index]]
+                index = runtime_parents[index]
+            return index
+
+        def runtime_union(left_index: int, right_index: int) -> None:
+            left_root = runtime_find(left_index)
+            right_root = runtime_find(right_index)
+            if left_root != right_root:
+                runtime_parents[right_root] = left_root
+
+        for index, left in enumerate(runtime_rules):
+            if not isinstance(left, dict):
+                continue
+            for right_index in range(index + 1, len(runtime_rules)):
+                right = runtime_rules[right_index]
+                if not isinstance(right, dict):
+                    continue
+                analysis = analyze(left, right)
+                if self._float(analysis.get("confidence")) >= 0.9:
+                    runtime_union(index, right_index)
+                    runtime_involved.update((index, right_index))
+        runtime_duplicates = len({runtime_find(index) for index in runtime_involved})
+        if runtime_duplicates and len(runtime_rules) >= runtime_limit:
+            candidates.append({
+                "category": "runtime_budget",
+                "source_type": "runtime",
+                "source_id": "expression_voice_profile",
+                "user_id": "expression_voice_profile",
+                "name": "运行时表达池",
+                "text": f"当前 {len(runtime_rules)}/{runtime_limit} 条，含 {runtime_duplicates} 组高置信重复候选",
+                "reason": "运行时规则池已达上限，重复项正在占用召回槽位",
+                "confidence": 0.99,
+                "auto_merge": False,
+            })
+        return candidates[:24]
+
+    def _model_diagnostics_expression_candidates(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         log_markers = ("Traceback", "Error code:", "Exception", "[INFO]", "[WARN]", "[ERRO]", "[Core]", "```", "commit ", "diff ")
         model_markers = ("<pc_tts", "</pc_tts>", "[[PCTTS:", "send_message_to_user", "assistant", "system prompt", "提示词")
         political_markers = (
@@ -5244,55 +6293,104 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return "疑问/感叹标点过多，容易污染表达节奏"
             return ""
 
-        candidates: list[dict[str, str]] = []
-        for user_id, user in users.items():
-            if not isinstance(user, dict):
-                continue
-            name = self._single_line(user.get("nickname") or user.get("name") or user_id, 40)
-            profile = user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {}
-            samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
-            for raw in samples[:36]:
-                if not isinstance(raw, dict):
+        candidates = self._model_diagnostics_expression_duplicate_candidates(data)
+        seen_pollution: set[tuple[str, str, str]] = set()
+        for collection_key, source_type in (("users", "private"), ("groups", "group")):
+            collection = data.get(collection_key) if isinstance(data.get(collection_key), dict) else {}
+            for source_id, owner in collection.items():
+                if not isinstance(owner, dict):
                     continue
-                text = self._single_line(raw.get("phrase") or raw.get("ending"), 120)
-                marks = raw.get("punctuation") if isinstance(raw.get("punctuation"), dict) else {}
-                pause_total = sum(self._int(marks.get(mark)) for mark in ("…", "～", "~"))
-                strong_total = sum(self._int(marks.get(mark)) for mark in ("？", "?", "！", "!"))
-                direct_reason = ""
-                if pause_total >= 5:
-                    direct_reason = "标点留白过多，容易污染表达节奏"
-                elif strong_total >= 6:
-                    direct_reason = "疑问/感叹标点过多，容易污染表达节奏"
-                if not text:
-                    text = " ".join(f"{mark}×{self._int(count)}" for mark, count in marks.items() if self._int(count) > 0)
-                reason = direct_reason or reason_for(text)
-                if not reason:
-                    continue
-                candidates.append(
-                    {
-                        "user_id": self._single_line(user_id, 40),
+                name = self._single_line(
+                    owner.get("nickname") or owner.get("name") or owner.get("group_name") or source_id,
+                    40,
+                )
+                profile = owner.get("expression_profile") if isinstance(owner.get("expression_profile"), dict) else {}
+                samples = [
+                    *(profile.get("samples") if isinstance(profile.get("samples"), list) else []),
+                    *(profile.get("pending_samples") if isinstance(profile.get("pending_samples"), list) else []),
+                ]
+                for raw in samples[:48]:
+                    if not isinstance(raw, dict):
+                        continue
+                    text = self._single_line(raw.get("text") or raw.get("phrase") or raw.get("ending"), 120)
+                    marks = raw.get("punctuation") if isinstance(raw.get("punctuation"), dict) else {}
+                    pause_total = sum(self._int(marks.get(mark)) for mark in ("…", "～", "~"))
+                    strong_total = sum(self._int(marks.get(mark)) for mark in ("？", "?", "！", "!"))
+                    direct_reason = ""
+                    if pause_total >= 5:
+                        direct_reason = "标点留白过多，容易污染表达节奏"
+                    elif strong_total >= 6:
+                        direct_reason = "疑问/感叹标点过多，容易污染表达节奏"
+                    if not text:
+                        text = " ".join(
+                            f"{mark}×{self._int(count)}"
+                            for mark, count in marks.items()
+                            if self._int(count) > 0
+                        )
+                    reason = direct_reason or reason_for(text)
+                    key = (source_type, self._single_line(source_id, 80), f"{reason}|{text}")
+                    if not reason or key in seen_pollution:
+                        continue
+                    seen_pollution.add(key)
+                    candidates.append({
+                        "category": "pollution",
+                        "source_type": source_type,
+                        "source_id": self._single_line(source_id, 80),
+                        "user_id": self._single_line(source_id, 80),
                         "name": name,
                         "text": text,
                         "reason": reason,
-                    }
-                )
-                if len(candidates) >= 24:
-                    return candidates
-            for raw_text in [*(profile.get("recent_phrases") if isinstance(profile.get("recent_phrases"), list) else []), *(profile.get("endings") if isinstance(profile.get("endings"), list) else [])][:36]:
-                text = self._single_line(raw_text, 120)
-                reason = reason_for(text)
-                if not reason:
-                    continue
-                candidates.append(
-                    {
-                        "user_id": self._single_line(user_id, 40),
+                    })
+                    if len(candidates) >= 32:
+                        return candidates
+                phrase_values = [
+                    *(profile.get("recent_phrases") if isinstance(profile.get("recent_phrases"), list) else []),
+                    *(profile.get("endings") if isinstance(profile.get("endings"), list) else []),
+                ]
+                for raw_text in phrase_values[:36]:
+                    text = self._single_line(raw_text, 120)
+                    reason = reason_for(text)
+                    key = (source_type, self._single_line(source_id, 80), f"{reason}|{text}")
+                    if not reason or key in seen_pollution:
+                        continue
+                    seen_pollution.add(key)
+                    candidates.append({
+                        "category": "pollution",
+                        "source_type": source_type,
+                        "source_id": self._single_line(source_id, 80),
+                        "user_id": self._single_line(source_id, 80),
                         "name": name,
                         "text": text,
                         "reason": reason,
-                    }
-                )
-                if len(candidates) >= 24:
-                    return candidates
+                    })
+                    if len(candidates) >= 32:
+                        return candidates
+                for storage_key in ("learned_rules", "pending_rules"):
+                    rules = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+                    for raw in rules[:60]:
+                        if not isinstance(raw, dict):
+                            continue
+                        text = "｜".join(filter(None, (
+                            self._single_line(raw.get("situation"), 80),
+                            self._single_line(raw.get("pattern") or raw.get("style"), 100),
+                            self._single_line(raw.get("instruction"), 120),
+                        )))
+                        reason = reason_for(text)
+                        key = (source_type, self._single_line(source_id, 80), f"{reason}|{text}")
+                        if not reason or key in seen_pollution:
+                            continue
+                        seen_pollution.add(key)
+                        candidates.append({
+                            "category": "pollution",
+                            "source_type": source_type,
+                            "source_id": self._single_line(source_id, 80),
+                            "user_id": self._single_line(source_id, 80),
+                            "name": name,
+                            "text": text,
+                            "reason": reason,
+                        })
+                        if len(candidates) >= 32:
+                            return candidates
         return candidates
 
     def _model_diagnostics_review_prompt(
@@ -5323,8 +6421,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         ]
         return (
             "你是陪伴插件的数据排障助手。请复核下面这些由本地规则挑出的候选项，只指出明显会影响模型理解的杂音。\n"
-            "范围包括：技能相似项、群黑话杂音、关系网待确认观察、长期画像噪音、表达学习污染。不要修改数据，不要发散，不要把正常口癖或真实群梗误报。\n"
-            "表达学习污染只关注日志、复制模型格式、政治敏感内容和过度标点等，不要扩展到普通语气判断。\n"
+            "范围包括：技能相似项、群黑话杂音、关系网待确认观察、长期画像噪音、表达规则重复与污染。不要修改数据，不要发散，不要把正常口癖或真实群梗误报。\n"
+            "表达学习候选由本地规则预筛：污染项关注日志、复制模型格式、政治敏感内容和过度标点；重复项关注同一来源内已启用/待审核规则的同模板、同证据或高相似变体，以及运行时规则预算占用。\n"
+            "不要因为两条规则语气相似就建议删除；模板虽然相同但意图、关系阶段或情绪边界不兼容时应保留。auto_merge=false 的近似项只建议人工复核，不得声称已经合并。\n"
             "输出 1-10 条短建议，每条不超过 45 字，必须用分类前缀：技能｜、黑话｜、关系网｜、长期画像｜、表达学习｜。\n"
             "如果某一类没有明显问题，不要为了凑数输出。若全部无明显问题，输出“未发现明显模型数据杂音”。\n\n"
             "技能候选：\n" + ("\n".join(skill_lines) if skill_lines else "- 无") + "\n\n"
@@ -6621,11 +7720,36 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             async with self.plugin._data_lock:
                 if not self._bookshelf_password_matches(password, expected):
                     return self._error("密码不对。需要在聊天里自然向 Bot 询问。")
-                access_token = self._issue_bookshelf_access_token()
+                access_token = self._issue_bookshelf_access_token(persist=True)
+                saver = getattr(self.plugin, "_save_data_sync", None)
+                if callable(saver):
+                    saver()
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 解锁书柜夹层失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def get_bookshelf_session(self) -> dict[str, Any]:
+        """Restore a previously unlocked bookshelf session from the browser token.
+
+        The browser may call this endpoint after a page reload or a plugin restart. The
+        persisted record contains only a SHA-256 token digest, never the bearer token
+        itself; the raw token remains available only in the current request/runtime map.
+        """
+        payload = await request.get_json(silent=True) or {}
+        access_token = self._bookshelf_request_token(payload)
+        if not self._bookshelf_access_token_valid(access_token):
+            return self._error(self._bookshelf_access_error()["error"])
+        try:
+            async with self.plugin._data_lock:
+                data = deepcopy(self.plugin.data)
+            expires_at = self._bookshelf_access_token_expires_at(access_token)
+            bookshelf = await self._bookshelf_summary(data, unlocked=True, access_token=access_token)
+            bookshelf["access_expires_at"] = int(expires_at) if expires_at > 0 else 0
+            return self._ok({"bookshelf": bookshelf})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 恢复书柜夹层会话失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     def _memo_notes_payload(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -6783,17 +7907,99 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 store.pop(token, None)
         return store
 
-    def _issue_bookshelf_access_token(self) -> str:
+    @staticmethod
+    def _bookshelf_access_token_digest(token: Any) -> str:
+        token_text = str(token or "").strip()
+        if not token_text:
+            return ""
+        return hashlib.sha256(token_text.encode("utf-8")).hexdigest()
+
+    def _bookshelf_persisted_access_entries(self) -> list[dict[str, Any]]:
+        data = getattr(self.plugin, "data", None)
+        if not isinstance(data, dict):
+            return []
+        secret = data.get("bookshelf_secret")
+        if not isinstance(secret, dict):
+            return []
+        state = secret.get("web_access")
+        if not isinstance(state, dict):
+            return []
+        raw_entries = state.get("tokens")
+        if not isinstance(raw_entries, list):
+            # Accept the first single-token shape for forwards/backwards compatibility.
+            raw_entries = [state] if state.get("token_hash") or state.get("hash") else []
+        entries: list[dict[str, Any]] = []
+        for raw in raw_entries:
+            if not isinstance(raw, dict):
+                continue
+            digest = self._single_line(raw.get("token_hash") or raw.get("hash"), 128).lower()
+            expires_at = self._float(raw.get("expires_at"))
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or expires_at <= 0:
+                continue
+            entries.append({"token_hash": digest, "expires_at": expires_at})
+        return entries
+
+    def _persist_bookshelf_access_token(self, token: str, expires_at: float) -> None:
+        data = getattr(self.plugin, "data", None)
+        if not isinstance(data, dict):
+            return
+        secret = data.setdefault("bookshelf_secret", {})
+        if not isinstance(secret, dict):
+            secret = {}
+            data["bookshelf_secret"] = secret
+        digest = self._bookshelf_access_token_digest(token)
+        if not digest or expires_at <= 0:
+            return
+        now = time.time()
+        entries = [
+            entry
+            for entry in self._bookshelf_persisted_access_entries()
+            if self._float(entry.get("expires_at")) > now
+            and not hmac.compare_digest(str(entry.get("token_hash") or ""), digest)
+        ]
+        entries.insert(0, {"token_hash": digest, "expires_at": float(expires_at)})
+        secret["web_access"] = {
+            "version": 1,
+            "tokens": entries[:BOOKSHELF_ACCESS_TOKEN_MAX_PERSISTED],
+            "updated_at": now,
+        }
+
+    def _bookshelf_access_token_expires_at(self, token: Any) -> float:
+        token_text = self._single_line(token, 120)
+        if not token_text:
+            return 0.0
+        digest = self._bookshelf_access_token_digest(token_text)
+        if not digest:
+            return 0.0
+        runtime_tokens = self._bookshelf_access_tokens()
+        now = time.time()
+        for entry in self._bookshelf_persisted_access_entries():
+            entry_digest = str(entry.get("token_hash") or "")
+            if hmac.compare_digest(entry_digest, digest):
+                expires_at = self._float(entry.get("expires_at"))
+                if expires_at > now:
+                    # Persisted records are authoritative for tokens that were
+                    # explicitly saved, even if this process still has an older
+                    # in-memory expiry cached for the same token.
+                    runtime_tokens[token_text] = expires_at
+                    return expires_at
+                runtime_tokens.pop(token_text, None)
+                return 0.0
+        runtime_expiry = runtime_tokens.get(token_text)
+        if runtime_expiry and self._float(runtime_expiry) > now:
+            return self._float(runtime_expiry)
+        return 0.0
+
+    def _issue_bookshelf_access_token(self, *, persist: bool = False) -> str:
         token = secrets.token_urlsafe(24)
-        self._bookshelf_access_tokens()[token] = time.time() + 2 * 3600
+        expires_at = time.time() + BOOKSHELF_ACCESS_TOKEN_TTL_SECONDS
+        self._bookshelf_access_tokens()[token] = expires_at
+        if persist:
+            self._persist_bookshelf_access_token(token, expires_at)
         return token
 
     def _bookshelf_access_token_valid(self, token: Any) -> bool:
-        token_text = self._single_line(token, 120)
-        if not token_text:
-            return False
-        expires_at = self._bookshelf_access_tokens().get(token_text)
-        return bool(expires_at and self._float(expires_at) > time.time())
+        return self._bookshelf_access_token_expires_at(token) > time.time()
 
     def _bookshelf_request_token(self, payload: dict[str, Any] | None = None) -> str:
         if isinstance(payload, dict):
@@ -7481,6 +8687,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     if user_id not in deleted:
                         deleted.append(user_id)
                     changed = profiles.pop(user_id, None) is not None
+                    assets = self.plugin.data.get("photo_reference_assets")
+                    if isinstance(assets, list):
+                        self.plugin.data["photo_reference_assets"] = [
+                            asset for asset in assets
+                            if not (
+                                isinstance(asset, dict)
+                                and asset.get("scope") == "relation_user"
+                                and str(asset.get("owner_id") or "") == user_id
+                            )
+                        ]
                     self.plugin._save_data_sync()
                     data = deepcopy(self.plugin.data)
                     return self._ok({"changed": changed, "message": "已删除关系节点", "worldbook": self._worldbook_summary(data)})
@@ -11469,6 +12685,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     pattern_label = f"{scene or '日常交流'}中的{'与'.join(distinctive_features[:2])}"
                 elif scene:
                     pattern_label = f"{scene}表达模式"
+                pattern_details = []
+                length_bucket = self._single_line(raw.get("length_bucket"), 20)
+                if length_bucket:
+                    pattern_details.append(f"{length_bucket} 字")
+                mark_types = "".join(
+                    str(mark)
+                    for mark, count in punctuation.items()
+                    if self._int(count) > 0
+                )
+                if mark_types:
+                    pattern_details.append(f"含 {mark_types}")
+                if pattern_details:
+                    pattern_label = f"{pattern_label or '日常交流'} · {' · '.join(pattern_details)}"
             observation_status = "supported" if self._int(raw.get("evidence_count")) >= 2 else "single"
             return {
                 "id": self._single_line(raw.get("id"), 40) or str(index),
@@ -11873,6 +13102,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         if callable(family_backfiller) and family_backfiller(profile):
                             changed = True
                 if changed:
+                    refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(refresher):
+                        refresher()
                     self.plugin._save_data_sync()
                 snapshot = deepcopy(self.plugin.data)
             return self._ok(self._expression_library_summary(snapshot))
@@ -13122,6 +14354,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
+            "enable_private_reading_vision",
+            "enable_private_reading_page_comments",
+            "enable_private_reading_rating",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
             "enable_goodnight_screen_check",
@@ -13131,6 +14366,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_yesterday_screen_diary_context",
             "enable_tts_enhancement",
             "enable_creative_writing",
+            "enable_creative_work_read_guard",
             "creative_hidden_mode",
             "enable_reply_interception_forward",
         ]
@@ -13159,6 +14395,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         values["enable_private_reading_integration"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_integration", False))
         values["enable_private_reading_boredom_read"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False))
         values["enable_private_reading_ask_recommendation"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False))
+        values["enable_private_reading_vision"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_vision", True))
+        values["enable_private_reading_page_comments"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_page_comments", True))
+        values["enable_private_reading_rating"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_rating", True))
         values["enable_private_reading_preference_influence"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_preference_influence", True))
         return values
 
@@ -13326,7 +14565,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "CREATIVE_REVIEW_PROVIDER_ID": creative or complex_model,
             "DREAM_DIARY_PROVIDER_ID": creative or complex_model,
             "PHOTO_PROMPT_PROVIDER_ID": creative or complex_model,
-            "PRIVATE_READING_VISION_PROVIDER_ID": plugin_vision,
         }
 
     def _quick_bundle_from_precision(self, values: dict[str, str]) -> dict[str, str]:
@@ -13352,11 +14590,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             or complex_model,
             160,
         )
-        plugin_vision = self._single_line(
-            values.get("PRIVATE_READING_VISION_PROVIDER_ID")
-            or values.get("NARRATION_PROVIDER_ID"),
-            160,
-        )
+        plugin_vision = self._single_line(values.get("NARRATION_PROVIDER_ID"), 160)
         return {
             "FAST_RESPONSE_PROVIDER_ID": fast,
             "COMPLEX_REASONING_PROVIDER_ID": complex_model,
@@ -15387,6 +16621,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
+            "enable_private_reading_vision",
+            "enable_private_reading_page_comments",
+            "enable_private_reading_rating",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
@@ -15407,6 +16644,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_goodnight_screen_check",
             "goodnight_screen_check_delay_minutes",
             "enable_creative_writing",
+            "enable_creative_work_read_guard",
             "creative_inspiration_probability",
             "creative_share_probability",
             "creative_chars_per_session",
@@ -15510,6 +16748,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "enable_private_reading_integration": bool(getattr(self.plugin, "enable_jm_cosmos_integration", False)),
                 "enable_private_reading_boredom_read": bool(getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
                 "enable_private_reading_ask_recommendation": bool(getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
+                "enable_private_reading_vision": bool(getattr(self.plugin, "enable_private_reading_vision", True)),
+                "enable_private_reading_page_comments": bool(getattr(self.plugin, "enable_private_reading_page_comments", True)),
+                "enable_private_reading_rating": bool(getattr(self.plugin, "enable_private_reading_rating", True)),
                 "enable_private_reading_preference_influence": bool(getattr(self.plugin, "enable_private_reading_preference_influence", True)),
                 "private_reading_min_interval_hours": getattr(self.plugin, "jm_cosmos_min_interval_hours", 18),
                 "private_reading_max_photo_count": getattr(self.plugin, "jm_cosmos_max_photo_count", 60),
@@ -16994,6 +18235,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_integration": "enable_jm_cosmos_integration",
             "enable_private_reading_boredom_read": "enable_jm_cosmos_boredom_read",
             "enable_private_reading_ask_recommendation": "enable_private_reading_ask_recommendation",
+            "enable_private_reading_vision": "enable_private_reading_vision",
+            "enable_private_reading_page_comments": "enable_private_reading_page_comments",
+            "enable_private_reading_rating": "enable_private_reading_rating",
             "enable_private_reading_preference_influence": "enable_private_reading_preference_influence",
             "private_reading_min_interval_hours": "jm_cosmos_min_interval_hours",
             "private_reading_max_photo_count": "jm_cosmos_max_photo_count",
@@ -17617,6 +18861,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
+            "enable_private_reading_vision",
+            "enable_private_reading_page_comments",
+            "enable_private_reading_rating",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
             "enable_goodnight_screen_check",
@@ -17626,6 +18873,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_yesterday_screen_diary_context",
             "enable_tts_enhancement",
             "enable_creative_writing",
+            "enable_creative_work_read_guard",
             "creative_hidden_mode",
             "enable_reply_interception_forward",
         }
@@ -18079,6 +19327,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
+            "enable_private_reading_vision",
+            "enable_private_reading_page_comments",
+            "enable_private_reading_rating",
             "private_reading_min_interval_hours",
             "private_reading_max_photo_count",
             "private_reading_share_probability",
@@ -18093,6 +19344,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_goodnight_screen_check",
             "goodnight_screen_check_delay_minutes",
             "enable_creative_writing",
+            "enable_creative_work_read_guard",
             "creative_inspiration_probability",
             "creative_share_probability",
             "creative_chars_per_session",
@@ -18125,6 +19377,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._normalize_bool_value(value)
         if key in self._schema_bool_keys():
             return self._normalize_bool_value(value)
+        if key == "reaction_expression_delivery_mode":
+            mode = str(value or "separate_after").strip().lower()
+            return (
+                mode
+                if mode in {"separate_after", "same_message", "separate_before"}
+                else "separate_after"
+            )
         expression_modes = {
             "expression_private_learning_source_mode": ({"owner", "selected", "all"}, "owner"),
             "expression_group_learning_source_mode": ({"disabled", "selected", "all"}, "disabled"),
@@ -19102,10 +20361,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
+            "enable_private_reading_vision",
+            "enable_private_reading_page_comments",
+            "enable_private_reading_rating",
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
             "enable_goodnight_screen_check",
             "enable_creative_writing",
+            "enable_creative_work_read_guard",
             "creative_hidden_mode",
             "enable_environment_perception",
             "enable_holiday_perception",
@@ -19443,6 +20706,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             source_entries.append("live_stream_companion")
         target["source_entries"] = source_entries[:30]
 
+        # Keep visual references attached to the surviving QQ node when an
+        # external identity is merged into it.
+        visual_assets = self.plugin.data.get("photo_reference_assets")
+        if isinstance(visual_assets, list):
+            target_asset_count = sum(
+                1 for raw in visual_assets
+                if isinstance(raw, dict)
+                and raw.get("scope") == "relation_user"
+                and str(raw.get("owner_id") or "") == target_id
+            )
+            for raw in visual_assets:
+                if not isinstance(raw, dict) or raw.get("scope") != "relation_user" or str(raw.get("owner_id") or "") != source_id:
+                    continue
+                if target_asset_count >= REFERENCE_ASSET_MAX_PER_OWNER:
+                    break
+                raw["owner_id"] = target_id
+                raw["updated_at"] = time.time()
+                target_asset_count += 1
+
         source_profile["enabled"] = False
         source_profile["linked_qq_user_id"] = target_id
         source_profile["merged_into_user_id"] = target_id
@@ -19537,6 +20819,42 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _worldbook_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         profiles = data.get("worldbook_member_profiles") if isinstance(data.get("worldbook_member_profiles"), dict) else {}
         groups = data.get("worldbook_group_profiles") if isinstance(data.get("worldbook_group_profiles"), dict) else {}
+        visual_assets = [
+            normalized
+            for raw in (data.get("photo_reference_assets") if isinstance(data.get("photo_reference_assets"), list) else [])
+            if (normalized := normalize_reference_asset(raw)) is not None
+        ]
+        visual_assets_by_owner: dict[str, list[dict[str, Any]]] = {}
+        for asset in visual_assets:
+            if asset.get("scope") == "relation_user":
+                visual_assets_by_owner.setdefault(str(asset.get("owner_id") or ""), []).append(asset)
+        role_assets_by_owner: dict[str, list[dict[str, Any]]] = {}
+        for asset in visual_assets:
+            if asset.get("scope") == "relation_role":
+                role_assets_by_owner.setdefault(str(asset.get("owner_id") or ""), []).append(asset)
+        role_cards: list[dict[str, Any]] = []
+        for raw_card in normalize_bot_relationship_cards(
+            getattr(self.plugin, "bot_relationship_cards", [])
+        ):
+            parts = [self._single_line(part, 200) for part in raw_card.split(" || ", 2)]
+            role_name = parts[0] if parts else ""
+            if not role_name:
+                continue
+            role_owner = normalize_reference_owner_id("relation_role", role_name)
+            role_assets = role_assets_by_owner.get(role_owner, [])
+            role_cards.append(
+                {
+                    "name": role_name,
+                    "relation": parts[1] if len(parts) > 1 else "",
+                    "appearance": parts[2] if len(parts) > 2 else "",
+                    "owner_id": role_owner,
+                    "reference_asset_count": len(role_assets),
+                    "reference_assets": [
+                        self._reference_asset_page_item(asset)
+                        for asset in role_assets[:REFERENCE_ASSET_MAX_PER_OWNER]
+                    ],
+                }
+            )
         entries = data.get("worldbook_entries") if isinstance(data.get("worldbook_entries"), list) else []
         state = data.get("worldbook_import_state") if isinstance(data.get("worldbook_import_state"), dict) else {}
         member_count = self._int(data.get("worldbook_member_profile_count")) if "worldbook_member_profile_count" in data else 0
@@ -19591,6 +20909,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     "pending_observation_count": len(pending_items),
                     "source_entries": item.get("source_entries") if isinstance(item.get("source_entries"), list) else [],
                     "note": self._single_line(item.get("note"), 500),
+                    "reference_asset_count": len(visual_assets_by_owner.get(str(user_id), [])),
+                    "reference_assets": [
+                        self._reference_asset_page_item(asset)
+                        for asset in visual_assets_by_owner.get(str(user_id), [])[:REFERENCE_ASSET_MAX_PER_OWNER]
+                    ],
                 }
             )
         profile_items.sort(key=lambda item: (not item.get("enabled", True), item.get("name") or item.get("user_id")))
@@ -19632,6 +20955,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "source_files": state.get("source_files") if isinstance(state.get("source_files"), list) else [],
             "members": profile_items[:120],
             "groups": group_items[:80],
+            "relationship_roles": role_cards[:32],
+            "relationship_role_reference_count": sum(
+                len(items) for items in role_assets_by_owner.values()
+            ),
         }
 
     def _normalize_important_memories(self, value: Any) -> list[dict[str, Any]]:
@@ -20671,7 +21998,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return {
             "unlocked": unlocked,
             "access_token": access_token if unlocked and self._bookshelf_access_token_valid(access_token) else "",
-            "access_expires_in": int(max(0, self._bookshelf_access_tokens().get(access_token, 0) - time.time()))
+            "access_expires_in": int(max(0, self._bookshelf_access_token_expires_at(access_token) - time.time()))
+            if unlocked and access_token
+            else 0,
+            "access_expires_at": int(self._bookshelf_access_token_expires_at(access_token))
             if unlocked and access_token
             else 0,
             "public_count": len(public_books),

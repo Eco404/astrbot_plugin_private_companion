@@ -12,3 +12,6 @@ __pycache__/
 
 # AstrBot host runtime data must never be packaged with this plugin.
 /data/
+
+# Local release verification snapshots are not plugin source.
+/verification/

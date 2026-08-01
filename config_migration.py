@@ -51,6 +51,9 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "jm_cosmos_default_keywords": ("private_reading_default_keywords",),
     "jm_cosmos_blocked_tags": ("private_reading_blocked_tags",),
     "JM_COSMOS_VISION_PROVIDER_ID": ("PRIVATE_READING_VISION_PROVIDER_ID",),
+    "jm_cosmos_vision_enabled": ("enable_private_reading_vision",),
+    "jm_cosmos_comments_enabled": ("enable_private_reading_page_comments",),
+    "jm_cosmos_rating_enabled": ("enable_private_reading_rating",),
     "auto_japanese_voice_enabled": ("auto_voice_enabled",),
     "auto_japanese_voice_full_conversion_enabled": ("auto_voice_full_conversion_enabled",),
     "auto_japanese_voice_probability": ("auto_voice_probability",),
@@ -100,7 +103,6 @@ PRECISION_PROVIDER_MODE_KEYS: tuple[str, ...] = (
     "GROUP_SLANG_PROVIDER_ID",
     "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
     "FORWARD_MESSAGE_PROVIDER_ID",
-    "PRIVATE_READING_VISION_PROVIDER_ID",
     "NEWS_PROVIDER_ID",
     "WEB_EXPLORATION_PROVIDER_ID",
 )

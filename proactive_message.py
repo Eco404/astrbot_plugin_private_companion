@@ -168,6 +168,11 @@ from .photo_reference_plan import (
     evaluate_reference_fallback,
     project_reference_plan_for_backend,
 )
+from .reference_assets import (
+    normalize_reference_asset,
+    normalize_reference_owner_id,
+    reference_asset_tokens,
+)
 from .photo_wardrobe_decision import (
     PhotoWardrobeDecision,
     PhotoWardrobeIntent,
@@ -302,6 +307,7 @@ class _ProactiveSendOutcome:
     image_delivered: bool = False
     extra_components_delivered: int = 0
     note: str = ""
+    primary_complete: bool = False
 
     def __bool__(self) -> bool:
         return self.delivered
@@ -2177,6 +2183,80 @@ class ProactiveMessageMixin:
 最终文本会直接成为聊天窗口里的下一句话。只输出要发出的正文，不要标题、引号、前缀、分析或说明。
 """.strip()
 
+    def _proactive_reaction_expression_enabled(self, action: str = "message") -> bool:
+        normalized_action = _single_line(action, 40).lower().split("+")[-1]
+        if normalized_action and normalized_action != "message":
+            return False
+        provider_available = getattr(self, "_reaction_image_provider_available", None)
+        return bool(
+            getattr(self, "enable_reaction_expression_experiment", False)
+            and getattr(self, "reaction_expression_private_enabled", True)
+            and getattr(self, "reaction_expression_proactive_enabled", True)
+            and callable(provider_available)
+            and provider_available()
+        )
+
+    def _proactive_reaction_intent_cache(self) -> dict[str, dict[str, Any]]:
+        cache = getattr(self, "_proactive_reaction_expression_intents", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_proactive_reaction_expression_intents", cache)
+        now = _now_ts()
+        for key, entry in list(cache.items()):
+            if not isinstance(entry, dict) or _safe_float(entry.get("expires_at"), 0.0) <= now:
+                cache.pop(key, None)
+        return cache
+
+    def _clear_proactive_reaction_intent(self, umo: Any) -> None:
+        key = _single_line(umo, 240)
+        if key:
+            self._proactive_reaction_intent_cache().pop(key, None)
+
+    def _store_proactive_reaction_intent(
+        self,
+        user: dict[str, Any],
+        intent: dict[str, Any],
+        *,
+        action: str,
+    ) -> None:
+        umo = _single_line(user.get("umo"), 240) if isinstance(user, dict) else ""
+        if not umo or not isinstance(intent, dict) or not intent:
+            self._clear_proactive_reaction_intent(umo)
+            return
+        if not self._proactive_reaction_expression_enabled(action):
+            self._clear_proactive_reaction_intent(umo)
+            return
+        user_id = _single_line(user.get("user_id") or user.get("id"), 160)
+        if not user_id:
+            self._clear_proactive_reaction_intent(umo)
+            return
+        self._proactive_reaction_intent_cache()[umo] = {
+            "intent": dict(intent),
+            "user_id": user_id,
+            "expires_at": _now_ts() + 600.0,
+        }
+
+    def _pop_proactive_reaction_intent(self, umo: Any) -> dict[str, Any]:
+        key = _single_line(umo, 240)
+        if not key:
+            return {}
+        entry = self._proactive_reaction_intent_cache().pop(key, None)
+        return entry if isinstance(entry, dict) else {}
+
+    def _proactive_reaction_expression_prompt_hint(self, action: str) -> str:
+        if not self._proactive_reaction_expression_enabled(action):
+            return ""
+        return """
+【主动消息的可选表情表达】
+- 先写一条完整、自然、没有图片也能独立成立的主动私聊正文；表情包只能补充语气，不能替代、缩短或省略正文。
+- 只有轻松分享、玩笑、庆祝、撒娇、接梗、轻吐槽或温和安慰等场景中，追加一张表情包确实比纯文字更自然时，才在全部可见正文之后留下一个内部标签。
+- 事实通知、严肃或敏感话题、低压提醒、对方长期未回应、关系边界不明确，或没有准确情绪时，只输出正文，不要为了展示功能而写标签。
+- 标签格式：`<pc_reaction_expression>{"purpose":"分享开心","emotion":"开心","intensity":2,"candidate_queries":["开心分享","得意一下"]}</pc_reaction_expression>`。
+- `purpose` 写沟通用途，`emotion` 写想传达的情绪，`intensity` 为 0-5；`candidate_queries` 最多提供少量简短检索说法，不写图片路径、文件名或用户隐私。
+- 每条主动消息最多一个标签，放在全部可见正文和 TTS 标签之后；不要用 Markdown 代码块，不要解释这个标签，也不要调用图片工具。
+- 插件之后仍可能因概率、冷却、用户偏好、重复图片或图库不匹配而只发送正文；正文必须始终自然成立。
+""".strip()
+
     def _proactive_natural_delivery_hint(self) -> str:
         return (
             "【自然交付提醒】\n"
@@ -2319,7 +2399,7 @@ class ProactiveMessageMixin:
             40,
         )
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
-        unanswered_hint = f"这是第 {unanswered_count} 次主动后还没等到回复。" if unanswered_count > 0 else ""
+        unanswered_hint = f"此前连续 {unanswered_count} 次主动还没等到回复。" if unanswered_count > 0 else ""
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
         persona = await self._resolve_proactive_persona_prompt(user)
         recent_history_hint = ""
@@ -2376,6 +2456,14 @@ class ProactiveMessageMixin:
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
+        if unanswered_count >= 2 and "连续未回应时的成文边界" not in prompt:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "【连续未回应时的成文边界】\n"
+                "- 这次优先只表达一个完整意思，用一句自然短句或两个紧密相连的短分句说完。\n"
+                "- 不要把近况、提问和叮嘱叠在同一条里；更适合分享后自然收住，不要求对方回复。\n"
+                "- 如果原本想说的内容较多，应重新组织成完整短句，绝不能留下主谓宾未完成的半句话。"
+            )
         persona_marker = "<!-- private_companion_proactive_persona_v1 -->"
         if persona and persona_marker not in prompt:
             prompt = (
@@ -2418,6 +2506,9 @@ class ProactiveMessageMixin:
         )
         if "主动生成工具边界" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{tool_boundary_hint}"
+        reaction_hint = self._proactive_reaction_expression_prompt_hint(action)
+        if reaction_hint and "主动消息的可选表情表达" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{reaction_hint}"
         visible_format_hint = self._proactive_visible_text_format_hint(action)
         if visible_format_hint and "主动可见正文格式" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{visible_format_hint}"
@@ -2619,6 +2710,12 @@ class ProactiveMessageMixin:
             lines.append("这次由头不算很硬或打扰压力偏高：正文要更短、更轻，最好像把一句话放下，不追问、不求回应。")
         elif semantic_score >= 0.68:
             lines.append("这次有明确由头：正文可以贴着那个由头说一个具体点，但仍然不要解释调度原因。")
+        unanswered_count = _safe_int(user.get("ignored_streak"), 0, 0)
+        if unanswered_count >= 2:
+            lines.append(
+                "对方已连续多次没有回应：只保留一个完整意思，优先改写为一句自然短句；"
+                "不要同时堆叠近况、提问和叮嘱，任何收短都必须保证句意完整，不能留下半句话。"
+            )
         if reason not in {"environment_change", "weather_alert"}:
             lines.append("天气和气温只作环境底色，本轮不要把它们改写成正文话题，也不要顺手追问对方那边的天气；改用本轮明确动机、生活片段或最近真实话题。")
         if reason == "health_alert":
@@ -3577,6 +3674,7 @@ class ProactiveMessageMixin:
 - 不要照抄参考意图里的固定说法；只保留事实和语义。
 - 不要出现“参考/兜底/模板/系统/工具/执行/已发送给用户/消息已发送”等字样。
 - 不要新增事实、承诺、动作小剧场或没有发生的状态。
+- 如果参考意图或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，视为本轮失败并输出空文本；不要翻译、复述或润色这类内容。
 {"- 必须保留成功/失败/等待/完成/稍后再说等状态语义，不要把失败说成成功。" if preserve_status else "- 如果只是轻轻递一句，不要补多余解释。"}
 """.strip()
         try:
@@ -3592,6 +3690,12 @@ class ProactiveMessageMixin:
             )
         except Exception as exc:
             logger.debug("[PrivateCompanion] 人格参考意图改写失败: %s", _single_line(exc, 120))
+            raw = ""
+        if self._looks_like_internal_provider_error_text(raw):
+            logger.warning(
+                "[PrivateCompanion] 人格参考意图改写收到 Provider 错误正文，已丢弃: task=%s",
+                _single_line(task, 80) or "persona_reference_rewrite",
+            )
             raw = ""
         cleaned = self._clean_persona_reference_rewrite_text(raw, limit=max_chars)
         if cleaned:
@@ -3779,8 +3883,6 @@ class ProactiveMessageMixin:
                 return {"decision": "drop", "reason": "疑似混入其他私聊互动", "hard": True}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 1 and cleaned.count("？") + cleaned.count("?") >= 2:
             return {"decision": "rewrite", "reason": "未回应状态下问题太多", "text": re.split(r"[？?]", cleaned, maxsplit=1)[0].rstrip("，,。") + "。"}
-        if _safe_int(user.get("ignored_streak"), 0, 0) >= 2 and len(cleaned) > 36:
-            return {"decision": "rewrite", "reason": "连续未回应时主动偏长", "text": cleaned[:36].rstrip("，,。") + "。"}
         return {"decision": "send", "reason": "本地检查通过"}
 
     def _external_share_source_consistency_decision(
@@ -4598,6 +4700,7 @@ Rules:
 - Preserve real media context. Do not claim an image exists when none is attached.
 - A rewrite must be shorter or similarly sized and must not add new factual claims.
 - If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
+- If the candidate or any model output contains a Provider/API error, policy refusal, sensitive-word notice, policy URL, or internal diagnostic, choose drop with an empty text; never translate, quote, or polish it.
 - When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.
 
 [Recent conversation]
@@ -4937,6 +5040,8 @@ Output:
         motive: str = "",
     ) -> str:
         user.pop("_proactive_render_failure_stage", None)
+        umo = _single_line(user.get("umo"), 240)
+        self._clear_proactive_reaction_intent(umo)
         if not self.enable_llm_proactive_message:
             user["_proactive_render_failure_stage"] = "主动消息模型生成已关闭"
             return ""
@@ -4948,17 +5053,33 @@ Output:
             action=action,
             motive=motive,
         )
-        failure_stages: list[str] = []
-        if raw_text:
+        async def finalize_candidate(candidate: str) -> tuple[str, str]:
+            extractor = getattr(self, "_extract_reaction_expression_hidden_intent", None)
+            visible_candidate, reaction_intent = (
+                extractor(candidate)
+                if callable(extractor)
+                else (str(candidate or ""), {})
+            )
             finalized, failure_stage = await self._finalize_proactive_generated_text(
                 user,
-                raw_text,
+                visible_candidate,
                 name=name,
                 reason=reason,
                 action=action,
                 action_context=action_context,
                 motive=motive,
             )
+            if finalized:
+                self._store_proactive_reaction_intent(
+                    user,
+                    reaction_intent if isinstance(reaction_intent, dict) else {},
+                    action=action,
+                )
+            return finalized, failure_stage
+
+        failure_stages: list[str] = []
+        if raw_text:
+            finalized, failure_stage = await finalize_candidate(raw_text)
             if finalized:
                 return finalized
             failure_stages.append(f"框架主链{failure_stage or '处理后为空'}")
@@ -4974,15 +5095,7 @@ Output:
             motive=motive,
         )
         if fallback_text:
-            finalized, failure_stage = await self._finalize_proactive_generated_text(
-                user,
-                fallback_text,
-                name=name,
-                reason=reason,
-                action=action,
-                action_context=action_context,
-                motive=motive,
-            )
+            finalized, failure_stage = await finalize_candidate(fallback_text)
             if finalized:
                 logger.info(
                     "[PrivateCompanion] 主动框架主链为空后已由直接人格化兜底恢复: user=%s reason=%s",
@@ -5114,6 +5227,13 @@ Output:
         action_context: str = "",
         motive: str = "",
     ) -> tuple[str, str]:
+        if self._looks_like_internal_provider_error_text(raw_text):
+            logger.warning(
+                "[PrivateCompanion] 主动正文生成收到 Provider 错误正文，跳过清洗并进入回退: user=%s reason=%s",
+                _single_line(user.get("user_id"), 40),
+                _single_line(reason, 60) or "check_in",
+            )
+            return "", "Provider/API 错误正文"
         cleaned = self._sanitize_action_boundaries(
             self._sanitize_proactive_text(raw_text),
             reason=reason,
@@ -5379,6 +5499,7 @@ Output:
 - 不要把历史消息当成当前正在发生的对话
 - 没有真实图片或工具结果时，只写聊天内容本身，不描述动作结果
 - 如果原文只是过程状态或工具结果，请不要改写成另一种状态汇报；改不成自然聊天就输出空文本
+- 如果原文或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，输出空文本；不要翻译、复述或润色
 - 改写后仍要贴合内在约束里的候选语义；不能把分享型改成泛泛问候，也不能把低压关心改成追问
 - 只修正“回复空气”的问题；不得把原文改成另一种人格，也不得降低或升级当前关系亲密度
 - 尽量 1 到 2 句，像自然想起对方后随手说一句
@@ -5398,6 +5519,11 @@ Output:
             action_context=action_context,
             has_real_image="真实图片文件：" in action_context or "图片路径：" in action_context,
         )
+        if self._looks_like_internal_provider_error_text(candidate):
+            logger.warning(
+                "[PrivateCompanion] 回复/主动复核返回 Provider 错误正文，已丢弃: task=response_review"
+            )
+            return ""
         meta_leak_checker = getattr(self, "_response_review_meta_leak_reason", None)
         if callable(meta_leak_checker) and meta_leak_checker(candidate):
             logger.error(
@@ -9823,6 +9949,16 @@ Output:
                 f"effective roles={roles or 'none'}; "
                 f"outfit category={active_outfit_category}."
             )
+            if reference.get("kind") == "relation_role":
+                role_name = _single_line(reference.get("role_name"), 80) or "the named relationship role"
+                relationship = _single_line(reference.get("relationship"), 100)
+                role_context = f" ({relationship})" if relationship else ""
+                parts.append(
+                    "Named relationship-role reference: "
+                    f"the image identifies {role_name}{role_context}, not Bot. "
+                    "Use it to depict that role only when the current request explicitly asks that role to appear or share the frame; "
+                    "otherwise keep the role off-camera and use natural contextual cues. Do not transfer this identity, face, or body to Bot."
+                )
         if wardrobe.positive_instruction:
             parts.append(f"Wardrobe decision: {wardrobe.positive_instruction}")
         return " ".join(parts), wardrobe.negative_instruction
@@ -9902,7 +10038,7 @@ Output:
         explicit_back_view = self._photo_generation_explicit_back_view_request(prompt_text)
         if allow_group_photo and _photo_group_request_matches(prompt_text):
             positive = (
-                "Referenced multi-person composition: preserve every person already present in the explicit source reference, "
+                "Referenced multi-person composition: preserve every person represented by the submitted visual references, "
                 "their count, identity, and relative placement in one continuous scene; do not invent anyone else."
             )
             negative = "unreferenced extra people, invented faces, duplicated people, comparison panels, split screen, collage"
@@ -10426,6 +10562,8 @@ Output:
             reference_intent=reference_intent,
             wardrobe_intent=wardrobe_intent,
             allow_daily_outfit=allow_daily_outfit_reference,
+            requester_user_id=requester_user_id,
+            session_key=session_key,
             request_text=selection_request,
             ambient_context=scene_context_before,
             schedule_history_context=schedule_history_context,
@@ -10463,11 +10601,33 @@ Output:
             reference_plan,
             max_images=backend_reference_capacity,
         )
+        submitted_reference_id_set = {binding.reference_id for binding in submitted_bindings}
+        omitted_role_names = [
+            _single_line((binding.candidate or {}).get("role_name"), 80)
+            for binding in reference_plan.bindings
+            if binding.reference_id not in submitted_reference_id_set
+            and isinstance(binding.candidate, dict)
+            and binding.candidate.get("kind") == "relation_role"
+            and _single_line(binding.candidate.get("role_name"), 80)
+        ]
+        if omitted_role_names:
+            role_capacity_fallback = (
+                "Relationship-role reference capacity fallback: the backend could not submit the visual reference for "
+                f"{', '.join(dict.fromkeys(omitted_role_names))}. Do not claim an exact visual identity match for the omitted role; "
+                "follow the explicit text request conservatively and do not transfer another submitted person's face or body to that role."
+            )
+            plan_text_fallback = "\n".join(
+                part for part in (plan_text_fallback, role_capacity_fallback) if part
+            )
         self._append_photo_generation_trace_event(
             trace_id,
             "reference_plan_projected",
             data={
                 "backend_capacity": backend_reference_capacity,
+                "capacity_kind": "routing_capability_envelope",
+                "planned_reference_ids": [
+                    binding.reference_id for binding in submitted_bindings
+                ],
                 "submitted_reference_ids": [binding.reference_id for binding in submitted_bindings],
                 "text_fallback": plan_text_fallback,
             },
@@ -10528,7 +10688,12 @@ Output:
         if len(submitted_reference_entries) > 1:
             responsibilities = "; ".join(
                 f"reference image {index}: {', '.join(binding.roles)}"
-                for index, (binding, _candidate, _path) in enumerate(
+                + (
+                    f" for relationship role {_single_line(candidate.get('role_name'), 80)}"
+                    if candidate.get("kind") == "relation_role"
+                    else ""
+                )
+                for index, (binding, candidate, _path) in enumerate(
                     submitted_reference_entries,
                     start=1,
                 )
@@ -10536,7 +10701,7 @@ Output:
             multi_reference_instruction = (
                 "Submitted visual reference responsibilities: "
                 f"{responsibilities}. Use each image only for its assigned roles; "
-                "do not copy unrelated clothing, pose, scene, or style details."
+                "do not copy unrelated clothing, pose, scene, or style details. For a relationship-role image, preserve that role's identity and do not transfer it to Bot."
             )
             plan_text_fallback = "\n".join(
                 part for part in (multi_reference_instruction, plan_text_fallback) if part
@@ -10600,17 +10765,46 @@ Output:
             compact_scene_hint,
             has_reference=bool(reference_candidate),
         )
+        role_reference_submitted = any(
+            candidate.get("kind") == "relation_role"
+            for _binding, candidate, _path in submitted_reference_entries
+        )
+        group_role_reference_supplied = role_reference_submitted and _photo_group_request_matches(request_text)
         composition_positive, composition_negative = self._photo_generation_composition_sections(
             workflow_kind,
             request_text,
-            allow_group_photo=explicit_reference_supplied,
+            allow_group_photo=(
+                explicit_reference_supplied
+                or group_role_reference_supplied
+            ),
         )
         subject_count_positive, subject_count_negative = self._photo_generation_subject_count_contract(
             workflow_kind,
             request_text,
-            explicit_reference_supplied=explicit_reference_supplied,
+            explicit_reference_supplied=(
+                explicit_reference_supplied
+                or group_role_reference_supplied
+            ),
         )
         edit_positive, edit_negative = self._photo_generation_edit_contract(workflow_kind)
+        role_reference_names = [
+            _single_line(candidate.get("role_name"), 80)
+            for _binding, candidate, _path in submitted_reference_entries
+            if candidate.get("kind") == "relation_role" and _single_line(candidate.get("role_name"), 80)
+        ]
+        role_reference_positive = ""
+        if role_reference_names:
+            named_roles = "、".join(dict.fromkeys(role_reference_names))
+            role_reference_positive = (
+                "Named relationship-role reference(s) attached: "
+                f"{named_roles}. Preserve each attached image as the visual identity of that named role, "
+                "never transfer its face, body, hair, or clothing identity to Bot. "
+                + (
+                    "The current request explicitly asks for a shared frame, so keep Bot and each named role as distinct people in one coherent scene."
+                    if group_role_reference_supplied
+                    else "The current request names this role, so show that role only when the request asks it to appear; otherwise keep the role off-camera."
+                )
+            )
         fixed_prompt = str(getattr(self, "photo_generation_fixed_prompt", "") or "").strip()
         generated_sections = (
             PhotoPromptSection(
@@ -10623,6 +10817,11 @@ Output:
                 name="reference_plan_fallback",
                 source="reference_fallback",
                 positive=plan_text_fallback,
+            ),
+            PhotoPromptSection(
+                name="relationship_role_reference",
+                source="composition",
+                positive=role_reference_positive,
             ),
             PhotoPromptSection(
                 name="scene_context",
@@ -10874,8 +11073,27 @@ Output:
         ) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
             image_path = _path_text(image_path, 1000)
-            if reference_fallback.message and reference_fallback.message not in str(note or ""):
-                note = f"{_single_line(note, 260)}；{reference_fallback.message}".strip("；")
+            effective_submitted_reference_ids: tuple[str, ...] = ()
+            if reference_submitted:
+                submitted_count = self._photo_reference_submitted_count_from_note(
+                    note,
+                    len(submitted_reference_ids),
+                )
+                effective_submitted_reference_ids = tuple(
+                    submitted_reference_ids[:submitted_count]
+                )
+            effective_reference_fallback = evaluate_reference_fallback(
+                reference_intent,
+                reference_plan,
+                submitted_reference_ids=effective_submitted_reference_ids,
+            )
+            if (
+                effective_reference_fallback.message
+                and effective_reference_fallback.message not in str(note or "")
+            ):
+                note = (
+                    f"{_single_line(note, 260)}；{effective_reference_fallback.message}"
+                ).strip("；")
             output_exists = False
             if image_path:
                 try:
@@ -10898,6 +11116,7 @@ Output:
                 ok
                 and reference_exists
                 and reference_submitted
+                and effective_submitted_reference_ids
             )
             self._append_photo_generation_trace_event(
                 trace_id,
@@ -10909,6 +11128,9 @@ Output:
                     "note": note,
                     "output_exists": output_exists,
                     "reference_submitted": reference_submitted,
+                    "submitted_reference_ids": list(
+                        effective_submitted_reference_ids
+                    ),
                     "reference_used": reference_used,
                 },
             )
@@ -10930,8 +11152,10 @@ Output:
                 reference_candidate=reference_candidate,
                 reference_intent=reference_intent,
                 reference_plan=reference_plan,
-                reference_fallback=reference_fallback,
-                submitted_reference_ids=submitted_reference_ids if reference_used else (),
+                reference_fallback=effective_reference_fallback,
+                submitted_reference_ids=(
+                    effective_submitted_reference_ids if reference_used else ()
+                ),
                 wardrobe=wardrobe,
                 prompt_hash=prompt_hash,
                 submitted_prompt_hash=hashlib.sha256(
@@ -11058,6 +11282,7 @@ Output:
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
                 image_size=image_size,
             )
             if image_path:
@@ -11079,6 +11304,7 @@ Output:
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
                 image_size=image_size,
             )
             if image_path:
@@ -11282,9 +11508,10 @@ Output:
                 relationship_block = (
                     "【Bot 关系网】\n"
                     + "\n".join(card_lines)
-                    + "\n使用方式：这些角色卡只用于理解关系情境，不能替代人物参考图，也不授权模型凭文字生成角色外貌。当前没有与角色卡绑定的合影参考能力，"
-                    "因此不得让关系卡人物本人、脸、身体、背影、剪影、倒影或肖像入镜；话题自然涉及对方时，只能用第二只杯子、礼物、便签、空座位等非人物线索间接表达。"
-                    "画面保持 Bot 单人或纯场景，不合适时忽略本节。\n\n"
+                    + "\n使用方式：这些角色卡首先用于理解关系情境；角色卡文字不能替代人物参考图。只有当前请求明确点名角色/关系，或明确要求合影、合照、一起入镜时，"
+                    "并且候选中确实选中了对应的角色参考图，才可让该角色按参考图自然入镜；没有匹配参考图时不要凭文字补画脸、身体、背影、剪影或倒影。"
+                    "未明确要求角色出现时，仍不得让关系卡人物本人入镜，保持 Bot 单人或纯场景；在没有其他可验证人物参考时，禁止合影、合照、双人/多人同框。"
+                    "可用第二只杯子、礼物、便签、空座位等非人物线索间接表达；不合适时忽略本节。\n\n"
                 )
         prompt = f"""
 请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
@@ -11337,7 +11564,7 @@ Output:
 8. 不要默认生成全身镜/对镜自拍/手机挡脸自拍；只有话题、动机或当前日程明确出现“镜前/对镜/镜子/全身镜/mirror”时才允许。普通穿搭图用当前地点里的手持自拍、半身或四分之三身环境人像。
 9. `use_persona_reference` 仅表示画面中是否出现 Bot 本人：自拍、人物生活照、人物穿搭图填 true；纯风景、食物、桌面物品、动物、手机屏幕或生日卡填 false。
 10. 服装语义优先级为：本次明确服装需求优先；具体场景服装参考用于落实该需求；今日穿搭仅在没有新服装意图时作为连续性补充。不要同时写入彼此冲突的两套服装。
-11. 当前主动生图没有其他人物的可验证参考：禁止合影、合照、双人/多人同框，也不要画另一人的脸、身体、背影、剪影、倒影或肖像。关系卡只可影响情境，并用非人物生活线索间接表达关系。
+11. 只有当前请求明确要求关系角色出现/合影，且选中了对应的角色参考图时，才可让该角色按参考图自然入镜；否则禁止凭文字补画另一人的脸、身体、背影、剪影、倒影或肖像。未明确要求时，关系卡只影响情境，并用非人物生活线索间接表达关系。
 """.strip()
         text = await self._llm_call(
             prompt,
@@ -11794,7 +12021,224 @@ Output:
             "preferred_preset": _single_line(item.get("preferred_preset"), 60),
         }
 
-    async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True) -> list[dict[str, Any]]:
+    def _photo_reference_asset_records(self) -> list[dict[str, Any]]:
+        raw = self.data.get("photo_reference_assets") if isinstance(getattr(self, "data", None), dict) else []
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw if isinstance(raw, list) else []:
+            normalized = normalize_reference_asset(item)
+            if not normalized or normalized["id"] in seen:
+                continue
+            seen.add(normalized["id"])
+            records.append(normalized)
+        return records
+
+    def _photo_reference_asset_path(self, asset: dict[str, Any]) -> str:
+        source = _path_text(asset.get("path") or asset.get("source"), 1200)
+        if not source:
+            return ""
+        resolver = getattr(self, "_photo_reference_local_path", None)
+        if callable(resolver):
+            try:
+                resolved = _path_text(resolver(source), 1200)
+                if resolved:
+                    return resolved
+            except Exception:
+                pass
+        try:
+            path = Path(source).expanduser().resolve()
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+                return str(path)
+        except (OSError, ValueError):
+            pass
+        return ""
+
+    def _photo_reference_relation_owner_ids(self, requester_user_id: str, request_text: str) -> set[str]:
+        owners: set[str] = set()
+        raw_requester = _single_line(requester_user_id, 80)
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        if raw_requester:
+            owners.add(raw_requester)
+            if callable(canonicalizer):
+                try:
+                    canonical = _single_line(canonicalizer(raw_requester), 80)
+                    if canonical:
+                        owners.add(canonical)
+                except Exception:
+                    pass
+        profiles = self.data.get("worldbook_member_profiles") if isinstance(getattr(self, "data", None), dict) else {}
+        text = re.sub(r"\s+", "", str(request_text or "")).lower()
+        if not isinstance(profiles, dict) or not text:
+            return owners
+        for profile_id, profile in profiles.items():
+            if not isinstance(profile, dict) or profile.get("enabled", True) is False:
+                continue
+            tokens = [profile_id, profile.get("name"), *(profile.get("aliases") or []), *(profile.get("observed_names") or [])]
+            if any(len(re.sub(r"\s+", "", str(token or ""))) >= 2 and re.sub(r"\s+", "", str(token or "")).lower() in text for token in tokens):
+                owners.add(str(profile_id))
+        return owners
+
+    def _photo_reference_relation_asset_candidates(self, *, requester_user_id: str, request_text: str) -> list[dict[str, Any]]:
+        owners = self._photo_reference_relation_owner_ids(requester_user_id, request_text)
+        if not owners:
+            return []
+        candidates: list[dict[str, Any]] = []
+        for asset in self._photo_reference_asset_records():
+            if asset.get("scope") != "relation_user" or asset.get("owner_id") not in owners or asset.get("enabled") is False:
+                continue
+            path = self._photo_reference_asset_path(asset)
+            if not path:
+                continue
+            roles = list(asset.get("reference_roles") or ("identity",))
+            candidates.append({
+                "id": asset.get("id"),
+                "kind": "relation_user",
+                "scope": "relation_user",
+                "owner_id": asset.get("owner_id"),
+                "path": path,
+                "source": asset.get("path"),
+                "title": asset.get("title"),
+                "note": asset.get("note"),
+                "tags": list(asset.get("tags") or []),
+                "reference_roles": roles,
+                "available_reference_roles": roles,
+                "priority": max(650, _safe_int(asset.get("priority"), 0, -1000)),
+                "metadata_source": "relation_user",
+            })
+        return candidates
+
+    def _photo_reference_role_asset_candidates(self, *, request_text: str) -> list[dict[str, Any]]:
+        """Resolve setting/relationship-card references only for an explicit role context.
+
+        Role cards describe people other than Bot.  Loading their images for every
+        selfie would make an otherwise single-person request ambiguous, so the
+        asset is eligible only when the current request names the role/name or
+        clearly asks for a group frame.
+        """
+        if not bool(getattr(self, "enable_bot_relationship_network", False)):
+            return []
+        cards = self._normalize_bot_relationship_cards(
+            getattr(self, "bot_relationship_cards", [])
+        )
+        if not cards:
+            return []
+        request_compact = re.sub(r"\s+", "", str(request_text or "")).casefold()
+        group_requested = _photo_group_request_matches(request_text)
+        role_context: dict[str, dict[str, str]] = {}
+        for raw_card in cards:
+            parts = [_single_line(part, 200) for part in raw_card.split(" || ", 2)]
+            role_name = parts[0] if parts else ""
+            if not role_name:
+                continue
+            owner_id = normalize_reference_owner_id("relation_role", role_name)
+            if not owner_id:
+                continue
+            relation = parts[1] if len(parts) > 1 else ""
+            tokens = [role_name, relation]
+            explicit_hit = any(
+                len(re.sub(r"\s+", "", str(token or ""))) >= 2
+                and re.sub(r"\s+", "", str(token or "")).casefold() in request_compact
+                for token in tokens
+            )
+            if explicit_hit or group_requested:
+                role_context[owner_id] = {
+                    "role_name": role_name,
+                    "relationship": relation,
+                    "appearance": parts[2] if len(parts) > 2 else "",
+                    "explicit_mention": "1" if explicit_hit else "0",
+                }
+        if not role_context:
+            return []
+        candidates: list[dict[str, Any]] = []
+        for asset in self._photo_reference_asset_records():
+            if asset.get("scope") != "relation_role" or asset.get("enabled") is False:
+                continue
+            owner_id = str(asset.get("owner_id") or "")
+            context = role_context.get(owner_id)
+            if not context:
+                continue
+            path = self._photo_reference_asset_path(asset)
+            if not path:
+                continue
+            roles = list(asset.get("reference_roles") or ("identity",))
+            candidates.append(
+                {
+                    "id": asset.get("id"),
+                    "kind": "relation_role",
+                    "scope": "relation_role",
+                    "owner_id": owner_id,
+                    "path": path,
+                    "source": asset.get("path"),
+                    "title": asset.get("title"),
+                    "note": asset.get("note"),
+                    "tags": list(asset.get("tags") or []),
+                    "reference_roles": roles,
+                    "available_reference_roles": roles,
+                    "priority": max(700, _safe_int(asset.get("priority"), 0, -1000)),
+                    "metadata_source": "relation_role",
+                    "role_name": context["role_name"],
+                    "relationship": context["relationship"],
+                    "role_appearance": context["appearance"],
+                    "role_explicit_mention": context["explicit_mention"] == "1",
+                    "group_photo_requested": group_requested,
+                }
+            )
+        return candidates
+
+    def _photo_reference_knowledge_asset_candidates(self, *, request_text: str, ambient_context: str) -> list[dict[str, Any]]:
+        selected = {
+            str(item or "").strip()
+            for item in (getattr(self, "roleplay_knowledge_source_ids", None) or [])
+            if str(item or "").strip().startswith(("kb:", "doc:"))
+        }
+        if not selected:
+            return []
+        combined = re.sub(r"\s+", "", f"{request_text}\n{ambient_context}").lower()
+        candidates: list[dict[str, Any]] = []
+        for asset in self._photo_reference_asset_records():
+            if asset.get("scope") != "knowledge" or asset.get("enabled") is False:
+                continue
+            owner = str(asset.get("owner_id") or "")
+            if owner.startswith("doc:"):
+                parts = owner.split(":", 2)
+                if owner not in selected and (len(parts) < 3 or f"kb:{parts[1]}" not in selected):
+                    continue
+            elif owner not in selected:
+                continue
+            tokens = reference_asset_tokens(asset)
+            if not tokens or not any(token in combined for token in tokens):
+                continue
+            path = self._photo_reference_asset_path(asset)
+            if not path:
+                continue
+            roles = list(asset.get("reference_roles") or ("scene", "style"))
+            candidates.append({
+                "id": asset.get("id"),
+                "kind": "knowledge_reference",
+                "scope": "knowledge",
+                "owner_id": owner,
+                "path": path,
+                "source": asset.get("path"),
+                "title": asset.get("title"),
+                "note": asset.get("note"),
+                "tags": list(asset.get("tags") or []),
+                "reference_roles": roles,
+                "available_reference_roles": roles,
+                "priority": max(520, _safe_int(asset.get("priority"), 0, -1000)),
+                "metadata_source": "knowledge_reference",
+                "knowledge_context_match": True,
+            })
+        return candidates
+
+    async def _photo_reference_candidates_async(
+        self,
+        *,
+        allow_daily_outfit: bool = True,
+        requester_user_id: str = "",
+        request_text: str = "",
+        ambient_context: str = "",
+        scoped_only: bool = False,
+    ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         canonical_mode = getattr(self, "photo_reference_catalog", None) is not None
         if canonical_mode:
@@ -11873,7 +12317,7 @@ Output:
                 )
                 candidates.append(project_reference_candidate(daily_reference, resolved_source=outfit_path))
         persona_path = await self._photo_persona_reference_image_path_async()
-        if persona_path and all(item.get("path") != persona_path for item in candidates):
+        if persona_path and not any(item.get("kind") == "persona" for item in candidates):
             persona = next(
                 (
                     item
@@ -11884,6 +12328,44 @@ Output:
             )
             if persona is not None:
                 candidates.append(project_reference_candidate(persona, resolved_source=persona_path))
+            else:
+                candidates.append(
+                    {
+                        "id": "persona",
+                        "kind": "persona",
+                        "path": persona_path,
+                        "source": persona_path,
+                        "note": "Bot persona identity reference",
+                        "reference_roles": ["identity"],
+                        "available_reference_roles": ["identity"],
+                        "priority": 400,
+                        "metadata_source": "legacy_persona",
+                        "outfit_lock_default": False,
+                    }
+                )
+        candidates.extend(
+            self._photo_reference_role_asset_candidates(
+                request_text=request_text,
+            )
+        )
+        candidates.extend(
+            self._photo_reference_relation_asset_candidates(
+                requester_user_id=requester_user_id,
+                request_text=request_text,
+            )
+        )
+        candidates.extend(
+            self._photo_reference_knowledge_asset_candidates(
+                request_text=request_text,
+                ambient_context=ambient_context,
+            )
+        )
+        if scoped_only:
+            candidates = [
+                item
+                for item in candidates
+                if item.get("kind") in {"relation_user", "relation_role", "knowledge_reference"}
+            ]
         return candidates
 
     @staticmethod
@@ -11902,6 +12384,10 @@ Output:
         note = re.sub(r"\s+", "", str(candidate.get("note") or "")).lower()
         kind = candidate.get("kind")
         score = 2.0 if kind == "persona" else (0.5 if kind == "recent_sent_photo" else 1.0)
+        if kind == "relation_role":
+            # A named role is a stronger signal than an unrelated persona or
+            # library image; group intent is still a softer, contextual signal.
+            score += 6.0 if candidate.get("role_explicit_mention") else 3.0
         categories = (
             ("home", ("在家", "家里", "居家", "宿舍", "公寓", "卧室", "房间", "客厅", "宅家", "居家室内", "室内日常")),
             ("sleep", ("睡衣", "睡前", "起床", "刚醒", "床上", "夜晚休息")),
@@ -12013,6 +12499,7 @@ Output:
         workflow_kind: str,
         *,
         allow_daily_outfit: bool = True,
+        requester_user_id: str = "",
         request_text: str = "",
         ambient_context: str = "",
         schedule_history_context: str = "",
@@ -12024,9 +12511,30 @@ Output:
     ) -> dict[str, Any]:
         if not bool(getattr(self, "enable_photo_reference_image", False)):
             return {}
-        if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
+        normalized_workflow = str(workflow_kind or "").strip().lower()
+        portrait_workflow = normalized_workflow in {"selfie", "portrait", "自拍", "人像"}
+        scoped_context = bool(requester_user_id) or bool(
+            self._photo_reference_knowledge_asset_candidates(
+                request_text=request_text,
+                ambient_context=ambient_context,
+            )
+        ) or bool(self._photo_reference_role_asset_candidates(request_text=request_text))
+        if not portrait_workflow and not scoped_context:
             return {}
-        candidates = await self._photo_reference_candidates_async(allow_daily_outfit=allow_daily_outfit)
+        try:
+            candidates = await self._photo_reference_candidates_async(
+                allow_daily_outfit=allow_daily_outfit,
+                requester_user_id=requester_user_id,
+                request_text=request_text,
+                ambient_context=ambient_context,
+                scoped_only=not portrait_workflow,
+            )
+        except TypeError:
+            # Keep compatibility with lightweight test/integration adapters that
+            # still expose the original one-argument candidate loader.
+            candidates = await self._photo_reference_candidates_async(
+                allow_daily_outfit=allow_daily_outfit,
+            )
         recent_candidate = self._recent_sent_photo_continuity_candidate(continuity_key)
         if recent_candidate:
             if all(
@@ -12126,7 +12634,8 @@ Output:
         if (request_text or ambient_context or schedule_history_context) and needs_model_choice and callable(llm_call):
             selection_reason = "model_invalid_response"
             options = "\n".join(
-                f"{index}. id={item['id']}；职责={','.join(item.get('reference_roles') or []) or 'identity'}；"
+                f"{index}. id={item['id']}；角色={_single_line(item.get('role_name'), 80) or 'Bot/未指定'}；"
+                f"关系={_single_line(item.get('relationship'), 80) or 'none'}；职责={','.join(item.get('reference_roles') or []) or 'identity'}；"
                 f"服装类别={_single_line(item.get('outfit_category'), 40) or 'none'}；"
                 f"场景类别={','.join(sorted(str(value) for value in (item.get('scene_categories') or []) if str(value).strip())) or 'none'}；"
                 f"时间类别={','.join(sorted(str(value) for value in (item.get('time_categories') or []) if str(value).strip())) or 'none'}；"
@@ -12144,6 +12653,7 @@ Output:
 当天已发生日程只可作为较弱的经历、服装和连续性线索，不代表当前位置或当前活动。不得用历史中的旧地点覆盖当前环境；用户原始要求和当前环境始终优先于历史日程。
 不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
 候选 id=recent_sent_photo 是同一会话刚刚已发送的上一张成图。若用户是在自然续拍，主要只要求改变动作、表情、视线、拍摄角度或近似构图，应优先选择它来保持人物、服装和环境连续；若用户明确换人物、换装、换地点、换时间、换整体场景或另起主题，则选择更合适的其他参考图。只有所有候选都不适合新画面时才输出 0。
+若候选带有“角色”和“关系”，且用户在本轮明确点名该角色或关系，优先选择对应的关系角色参考图；它只代表该角色本人，不要把该身份转移给 Bot。没有明确点名角色时，不要因为关系卡文字而选择关系角色参考图。
 只输出候选编号，不要解释。
 
 【最终画面需求】
@@ -12366,6 +12876,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_intent: ReferenceIntent,
         wardrobe_intent: PhotoWardrobeIntent | None = None,
         allow_daily_outfit: bool = True,
+        requester_user_id: str = "",
+        session_key: str = "",
         request_text: str = "",
         ambient_context: str = "",
         schedule_history_context: str = "",
@@ -12441,6 +12953,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 selected = await self._select_photo_reference_candidate_async(
                     workflow_kind,
                     allow_daily_outfit=allow_daily_outfit,
+                    requester_user_id=requester_user_id,
                     request_text=request_text,
                     ambient_context=ambient_context,
                     schedule_history_context=schedule_history_context,
@@ -12455,8 +12968,110 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             ):
                 selected = {}
             if selected:
-                candidates.append(selected)
+                selected_candidates: list[dict[str, Any]] = []
+                resolved_role_candidates = self._photo_reference_role_asset_candidates(
+                    request_text=request_text,
+                )
+                role_candidates = [
+                    item
+                    for item in resolved_role_candidates
+                    if item.get("role_explicit_mention")
+                    and item.get("group_photo_requested")
+                ]
+                if (
+                    not role_candidates
+                    and selected.get("kind") == "relation_role"
+                    and selected.get("group_photo_requested")
+                ):
+                    role_candidates = [selected]
+                if role_candidates:
+                    unique_role_candidates: list[dict[str, Any]] = []
+                    seen_role_owners: set[str] = set()
+                    for role_candidate in sorted(
+                        role_candidates,
+                        key=lambda item: -_safe_int(item.get("priority"), 0, -1000),
+                    ):
+                        owner_id = str(role_candidate.get("owner_id") or "")
+                        if not owner_id or owner_id in seen_role_owners:
+                            continue
+                        seen_role_owners.add(owner_id)
+                        unique_role_candidates.append(role_candidate)
+                    role_candidates = unique_role_candidates
+                group_role_requested = bool(role_candidates)
+                if group_role_requested:
+                    # A named relationship-role group shot should retain both
+                    # Bot's identity and the named role when the backend can
+                    # accept multiple references.  The projection layer still
+                    # handles one-image backends and emits a textual fallback.
+                    persona_candidate = next(
+                        (
+                            item
+                            for item in await self._photo_reference_candidates_async(
+                                request_text=request_text,
+                                requester_user_id=requester_user_id,
+                                ambient_context=ambient_context,
+                                allow_daily_outfit=allow_daily_outfit,
+                            )
+                            if item.get("kind") == "persona"
+                        ),
+                        None,
+                    )
+                    if persona_candidate:
+                        persona_candidate = dict(persona_candidate)
+                        persona_candidate["priority"] = max(
+                            760,
+                            _safe_int(persona_candidate.get("priority"), 0, -1000),
+                        )
+                        selected_candidates.append(persona_candidate)
+                    elif selected.get("kind") in {
+                        "persona",
+                        "library",
+                        "daily_outfit",
+                        "recent_sent_photo",
+                    }:
+                        bot_candidate = dict(selected)
+                        bot_candidate["priority"] = max(
+                            760,
+                            _safe_int(bot_candidate.get("priority"), 0, -1000),
+                        )
+                        selected_candidates.append(bot_candidate)
+                    selected_candidates.extend(role_candidates[:4])
+                if not selected_candidates:
+                    selected_candidates = [selected]
+                for candidate in selected_candidates:
+                    if (
+                        candidate.get("kind") == "knowledge_reference"
+                        and reference_intent.source == "workflow_default"
+                        and "identity" not in set(candidate.get("reference_roles") or ())
+                    ):
+                        candidate = dict(candidate)
+                        candidate["reference_roles"] = [
+                            "identity",
+                            *(role for role in (candidate.get("reference_roles") or ()) if role != "identity"),
+                        ]
+                        candidate["available_reference_roles"] = list(candidate["reference_roles"])
+                    if all(
+                        str(candidate.get("id") or "") != str(existing.get("id") or "")
+                        for existing in candidates
+                    ):
+                        candidates.append(candidate)
         plan_intent = reference_intent
+        if not plan_intent.requested_roles and candidates:
+            scoped_roles: set[str] = set()
+            for candidate in candidates:
+                if candidate.get("kind") in {"relation_user", "relation_role"}:
+                    scoped_roles.update(candidate.get("reference_roles") or ("identity",))
+                elif candidate.get("kind") == "knowledge_reference":
+                    scoped_roles.update(candidate.get("reference_roles") or ("scene", "style"))
+            scoped_roles.intersection_update(REFERENCE_ROLES)
+            if scoped_roles:
+                plan_intent = ReferenceIntent(
+                    tuple(role for role in REFERENCE_ROLES if role in scoped_roles),
+                    reference_intent.excluded_roles,
+                    reference_intent.continuity_mode,
+                    reference_intent.confidence,
+                    "scoped_context",
+                )
         if reference_intent.continuity_mode == "edit" and has_indexed_roles:
             requested_roles = set(reference_intent.requested_roles)
             for candidate in candidates:
@@ -12602,7 +13217,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 workflow_kind,
                 requested_images=requested_images,
             )
-        if preferred in {"external", "tool_call"}:
+        if preferred == "external":
+            multi_capacity = self._external_image_multi_reference_capacity(
+                requested_images,
+            )
+            if multi_capacity > 1:
+                return multi_capacity
+            return 1
+        if preferred == "tool_call":
             return 1
 
         availability = (
@@ -12622,11 +13244,206 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                             workflow_kind,
                             requested_images=requested_images,
                         )
+                    if method_name == "_external_photo_available":
+                        multi_capacity = self._external_image_multi_reference_capacity(
+                            requested_images,
+                        )
+                        if multi_capacity > 1:
+                            return multi_capacity
                     return capacity
             except Exception:
                 continue
         # Current reference-capable adapters accept one reference_image_path.
         return 1
+
+    @staticmethod
+    def _external_image_model_supports_multi_reference(model_name: Any) -> bool:
+        model = str(model_name or "").strip().lower()
+        return bool(
+            re.search(
+                r"(?:^|[-_/:.])gpt[-_]?image[-_]?2(?:$|[-_/:.])",
+                model,
+            )
+        )
+
+    def _external_image_endpoint_multi_reference_capacity(
+        self,
+        endpoint: dict[str, Any],
+        requested_images: int,
+    ) -> int:
+        requested = max(1, _safe_int(requested_images, 1, 1))
+        if not isinstance(endpoint, dict):
+            return 1
+        try:
+            platform = self._resolved_external_image_api_platform_for_values(
+                configured=endpoint.get("platform", "auto"),
+                base_url=endpoint.get("base_url", ""),
+                model_name=endpoint.get("model", ""),
+            )
+        except Exception:
+            platform = ""
+        if platform != "openai" or not self._external_image_model_supports_multi_reference(
+            endpoint.get("model")
+        ):
+            return 1
+        # Keep an application-side ceiling below the API maximum so a role-card
+        # group request cannot create an unexpectedly large multipart body.
+        return min(requested, 8)
+
+    def _external_image_api_capacity_endpoint_snapshot(self) -> list[dict[str, Any]]:
+        configured = getattr(self, "external_image_api_endpoints", None)
+        normalizer = getattr(self, "_normalize_external_image_api_endpoints", None)
+        if isinstance(configured, list) and configured:
+            try:
+                normalized = normalizer(configured) if callable(normalizer) else configured
+                return [dict(item) for item in normalized if isinstance(item, dict)]
+            except Exception:
+                return []
+
+        config = getattr(self, "config", None)
+        config_getter = getattr(self, "_cfg_raw", None)
+
+        def get_value(key: str, default: Any = None) -> Any:
+            if config is None:
+                return default
+            if callable(config_getter):
+                try:
+                    return config_getter(config, key, default)
+                except Exception:
+                    pass
+            try:
+                return config.get(key, default)
+            except Exception:
+                return default
+
+        configured_raw = get_value("external_image_api_endpoints", [])
+        if isinstance(configured_raw, list) and configured_raw:
+            try:
+                normalized = normalizer(configured_raw) if callable(normalizer) else configured_raw
+                return [dict(item) for item in normalized if isinstance(item, dict)]
+            except Exception:
+                return []
+
+        legacy = [
+            {
+                "name": "主在线 API",
+                "enabled": True,
+                "platform": get_value("external_image_api_platform", "auto"),
+                "base_url": get_value("EXTERNAL_IMAGE_API_BASE_URL", ""),
+                "api_key": get_value("EXTERNAL_IMAGE_API_KEY", ""),
+                "model": get_value("EXTERNAL_IMAGE_API_MODEL", ""),
+            },
+            {
+                "name": "备选在线 API",
+                "enabled": bool(get_value("enable_backup_external_image_api", False)),
+                "platform": get_value("backup_external_image_api_platform", "auto"),
+                "base_url": get_value("BACKUP_EXTERNAL_IMAGE_API_BASE_URL", ""),
+                "api_key": get_value("BACKUP_EXTERNAL_IMAGE_API_KEY", ""),
+                "model": get_value("BACKUP_EXTERNAL_IMAGE_API_MODEL", ""),
+            },
+        ]
+        if not any(
+            str(item.get("base_url") or "").strip()
+            or str(item.get("api_key") or "").strip()
+            or str(item.get("model") or "").strip()
+            for item in legacy
+        ):
+            return []
+        try:
+            normalized = normalizer(legacy) if callable(normalizer) else legacy
+            return [dict(item) for item in normalized if isinstance(item, dict)]
+        except Exception:
+            return legacy
+
+    def _external_image_multi_reference_capacity(
+        self,
+        requested_images: int = 0,
+        *,
+        endpoint: dict[str, Any] | None = None,
+        inspect_queue: bool = True,
+    ) -> int:
+        """Return the GPT Image 2 capacity without reading mutable endpoint runtime.
+
+        Planning uses the capability envelope of the configured queue so a later
+        GPT Image 2 fallback still receives every planned reference.  The actual
+        adapter passes ``inspect_queue=False`` and projects again for the endpoint
+        currently being called.
+        """
+        requested = max(1, _safe_int(requested_images, 1, 1))
+        if endpoint is not None:
+            return self._external_image_endpoint_multi_reference_capacity(
+                endpoint,
+                requested,
+            )
+        if inspect_queue:
+            endpoints = self._external_image_api_capacity_endpoint_snapshot()
+            usable = [
+                item
+                for item in endpoints
+                if isinstance(item, dict)
+                and not self._external_image_api_endpoint_unavailable_note(item)
+            ]
+            if usable:
+                return max(
+                    self._external_image_endpoint_multi_reference_capacity(
+                        item,
+                        requested,
+                    )
+                    for item in usable
+                )
+        active_endpoint = {
+            "platform": getattr(self, "external_image_api_platform", "auto"),
+            "base_url": getattr(self, "external_image_api_base_url", ""),
+            "model": getattr(self, "external_image_api_model", ""),
+        }
+        return self._external_image_endpoint_multi_reference_capacity(
+            active_endpoint,
+            requested,
+        )
+
+    @staticmethod
+    def _photo_reference_prompt_for_backend_capacity(
+        prompt_text: str,
+        *,
+        planned_count: int,
+        submitted_count: int,
+    ) -> str:
+        planned = max(0, int(planned_count or 0))
+        submitted = max(0, min(planned, int(submitted_count or 0)))
+        if not planned or submitted >= planned:
+            return str(prompt_text or "")
+        missing = (
+            str(submitted + 1)
+            if submitted + 1 == planned
+            else f"{submitted + 1}-{planned}"
+        )
+        availability = (
+            "Reference attachment availability override: this backend call received "
+            f"only reference image(s) 1-{submitted}; planned reference image(s) {missing} "
+            "are not attached. Treat earlier statements that those missing images were "
+            "submitted or attached as planning metadata only. Follow their textual role "
+            "descriptions conservatively, do not claim an exact visual match for an absent "
+            "identity, and never transfer the face, body, hair, or clothing identity from an "
+            "attached person to a missing relationship role."
+        )
+        return "\n\n".join(part for part in (str(prompt_text or "").strip(), availability) if part)
+
+    @staticmethod
+    def _photo_reference_submitted_count_from_note(note: Any, default: int) -> int:
+        fallback = max(0, int(default or 0))
+        text = str(note or "")
+        capacity_match = re.search(
+            r"(?:当前(?:端点|工作流)仅支持|实际提交)\s*(\d+)\s*/\s*\d+\s*张参考图",
+            text,
+        )
+        if capacity_match:
+            return min(fallback, max(0, int(capacity_match.group(1))))
+        used_match = re.search(r"已使用\s*(\d+)\s*张(?:本地)?参考图", text)
+        if used_match:
+            return min(fallback, max(0, int(used_match.group(1))))
+        if "已使用本地人设参考图" in text:
+            return min(fallback, 1)
+        return fallback
 
     async def _select_photo_reference_image_async(
         self,
@@ -12757,28 +13574,43 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             workflow_file = ""
             text_count = 1
             image_count = 0
+            planned_reference_count = len(valid_reference_paths)
             if use_reference_image:
-                required_images = len(valid_reference_paths)
-                workflow_file = module.find_workflow_file(
-                    workflow_name,
-                    1,
-                    required_images,
-                    0,
-                    workflow_dir,
-                )
-                image_count = required_images if workflow_file else 0
-                if not workflow_file:
-                    workflow_file, text_count, image_count = self._find_photo_workflow_with_text_count(
-                        module,
-                        workflow_dir,
+                required_images = planned_reference_count
+                for candidate_count in range(required_images, 0, -1):
+                    candidate_file = module.find_workflow_file(
                         workflow_name,
-                        image_count=required_images,
+                        1,
+                        candidate_count,
+                        0,
+                        workflow_dir,
                     )
+                    candidate_text_count = 1
+                    matched_images = candidate_count if candidate_file else 0
+                    if not candidate_file:
+                        candidate_file, candidate_text_count, matched_images = self._find_photo_workflow_with_text_count(
+                            module,
+                            workflow_dir,
+                            workflow_name,
+                            image_count=candidate_count,
+                        )
+                    if candidate_file:
+                        workflow_file = candidate_file
+                        text_count = candidate_text_count
+                        image_count = min(candidate_count, max(1, matched_images))
+                        break
                 if not workflow_file:
                     return "", (
                         f"已找到 {required_images} 张参考图，但 ComfyUI 工作流 {workflow_name} "
-                        f"没有匹配的 images={required_images} 输入。请配置对应数量的自拍/改图工作流，"
+                        "没有匹配的 images>=1 输入。请至少配置单图自拍/改图工作流，"
                         "避免回退成不使用参考图的纯文生图。"
+                    )
+                if image_count < required_images:
+                    logger.info(
+                        "[PrivateCompanion] ComfyUI 按现有工作流容量降级参考图: workflow=%s planned=%s submitted=%s",
+                        _single_line(workflow_name, 80),
+                        required_images,
+                        image_count,
                     )
             if not workflow_file:
                 workflow_file = module.find_workflow_file(
@@ -12799,6 +13631,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             if not workflow_file:
                 need = f"images={len(valid_reference_paths)}" if use_reference_image else "images=0"
                 return "", f"未找到匹配工作流 {workflow_name}（需要 texts>=1、{need}、videos=0）"
+            submitted_prompt_text = self._photo_reference_prompt_for_backend_capacity(
+                prompt_text,
+                planned_count=planned_reference_count,
+                submitted_count=image_count,
+            )
             logger.info(
                 "[PrivateCompanion] ComfyUI 生图提交准备: workflow=%s file=%s text_count=%s image_count=%s reference=%s wait=%ss prompt_preview=%s",
                 _single_line(workflow_name, 80),
@@ -12807,7 +13644,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 image_count,
                 use_reference_image,
                 self.comfyui_photo_wait_seconds,
-                _single_line(prompt_text, 180),
+                _single_line(submitted_prompt_text, 180),
             )
             debug = bool(
                 getattr(config, "debug_mode", False)
@@ -12816,10 +13653,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             )
             workflow = module.ComfyUIWorkflow(server_ip, client_id)
             workflow.load_workflow_api(workflow_file)
-            input_images = list(valid_reference_paths) if image_count > 0 and use_reference_image else []
+            input_images = list(valid_reference_paths[:image_count]) if image_count > 0 and use_reference_image else []
             reference_note = ""
             if input_images:
                 reference_note = f"；已使用 {len(input_images)} 张本地参考图"
+                if len(input_images) < planned_reference_count:
+                    reference_note += f"；当前工作流仅支持 {len(input_images)}/{planned_reference_count} 张参考图"
             elif use_reference_image:
                 return "", (
                     f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 实际没有接收图片输入。"
@@ -12827,7 +13666,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 )
             prompt_id = await workflow.submit_only(
                 input_images,
-                [prompt_text] * max(1, text_count),
+                [submitted_prompt_text] * max(1, text_count),
                 [],
                 debug=debug,
             )
@@ -13141,19 +13980,24 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 pass
         return "", "候选不可用"
 
-    def _resolved_external_image_api_platform(self) -> str:
+    def _resolved_external_image_api_platform_for_values(
+        self,
+        *,
+        configured: Any = "auto",
+        base_url: Any = "",
+        model_name: Any = "",
+    ) -> str:
         normalizer = getattr(self, "_normalize_external_image_api_platform", None)
-        configured = getattr(self, "external_image_api_platform", "auto")
         platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
-        raw_base = str(getattr(self, "external_image_api_base_url", "") or "").strip().lower()
-        model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        raw_base = str(base_url or "").strip().lower()
+        model = str(model_name or "").strip().lower()
         if platform in {"auto", "openai"} and (
             "apihub.agnes-ai.com" in raw_base or model.startswith("agnes-image-")
         ):
             return "agnes"
         if platform in {"openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova"}:
             return platform
-        base = self._normalized_external_image_api_base_url(platform=platform).lower()
+        base = self._normalized_external_image_api_base_url(raw_base, platform=platform).lower()
         if "apihub.agnes-ai.com" in base or model.startswith("agnes-image-"):
             return "agnes"
         if "token.sensenova.cn" in base or model in {"senova-u1-fast", "sensenova-u1-fast"}:
@@ -13173,6 +14017,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if model.startswith(("qwen-image", "wanx", "wan-", "wan2.", "wan2x", "wan")):
             return "bailian"
         return "openai"
+
+    def _resolved_external_image_api_platform(self) -> str:
+        return self._resolved_external_image_api_platform_for_values(
+            configured=getattr(self, "external_image_api_platform", "auto"),
+            base_url=getattr(self, "external_image_api_base_url", ""),
+            model_name=getattr(self, "external_image_api_model", ""),
+        )
 
     def _normalized_external_image_api_base_url(self, value: str = "", *, platform: str = "") -> str:
         raw = str(value or getattr(self, "external_image_api_base_url", "") or "").strip()
@@ -13809,12 +14660,22 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 )
         return "", last_note
 
-    def _external_image_model_misconfiguration_note(self) -> str:
-        model = _single_line(getattr(self, "external_image_api_model", ""), 120)
+    def _external_image_model_misconfiguration_note_for_values(
+        self,
+        *,
+        model_name: Any = "",
+        configured_platform: Any = "auto",
+        base_url: Any = "",
+    ) -> str:
+        model = _single_line(model_name, 120)
         if not model:
             return "未配置在线图片模型"
         lowered = model.lower()
-        platform = self._resolved_external_image_api_platform()
+        platform = self._resolved_external_image_api_platform_for_values(
+            configured=configured_platform,
+            base_url=base_url,
+            model_name=model,
+        )
         image_tokens = ("image", "img", "dall", "flux", "sd", "stable-diffusion", "midjourney", "mj", "kolors", "wanx", "wan", "seedream", "imagen", "nano-banana")
         text_model_prefixes = ("gpt-", "claude", "gemini", "deepseek", "qwen", "glm", "moonshot", "kimi", "yi-", "doubao")
         if platform == "bailian" and (lowered.startswith("qwen-image") or lowered.startswith("wan")):
@@ -13834,6 +14695,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if lowered.startswith(text_model_prefixes) and not any(token in lowered for token in image_tokens):
             return f"在线图片模型填成了文本/聊天模型：{model}。请改成该平台的图片模型名，例如支持 /images/generations 或 /images/edits 的模型。"
         return ""
+
+    def _external_image_model_misconfiguration_note(self) -> str:
+        return self._external_image_model_misconfiguration_note_for_values(
+            model_name=getattr(self, "external_image_api_model", ""),
+            configured_platform=getattr(self, "external_image_api_platform", "auto"),
+            base_url=getattr(self, "external_image_api_base_url", ""),
+        )
 
     def _external_image_diagnostic_text(self, value: Any, limit: int = 220) -> str:
         cleaned = _redact_outbound_secrets(value, self)
@@ -14861,6 +15729,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         reference_image_path: str = "",
+        reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
         lock = getattr(self, "_external_image_api_runtime_lock", None)
@@ -14880,6 +15749,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
                 image_size=image_size,
             )
             if waited_ms > 500:
@@ -14999,19 +15869,15 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             missing.append("model")
         if missing:
             return "missing_" + ",".join(missing)
-        checker = getattr(self, "_external_image_model_misconfiguration_note", None)
-        if not callable(checker):
-            return ""
-        old_values = {key: getattr(self, key, None) for key in self._external_image_api_runtime_keys()}
         try:
-            self._apply_external_image_api_endpoint_runtime(endpoint)
-            note = checker()
+            note = self._external_image_model_misconfiguration_note_for_values(
+                model_name=endpoint.get("model"),
+                configured_platform=endpoint.get("platform", "auto"),
+                base_url=endpoint.get("base_url"),
+            )
             return _single_line(note, 160) if note else ""
         except Exception:
             return ""
-        finally:
-            for key, value in old_values.items():
-                setattr(self, key, value)
 
     def _apply_external_image_api_endpoint_runtime(self, endpoint: dict[str, Any]) -> None:
         normalizer = getattr(self, "_normalize_external_image_api_platform", None)
@@ -15035,6 +15901,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         reference_image_path: str = "",
+        reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
         endpoints = self._external_image_api_endpoint_queue(include_incomplete=True)
@@ -15062,6 +15929,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
                 image_size=image_size,
             )
             if image_path:
@@ -15075,6 +15943,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         reference_image_path: str = "",
+        reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
         return await self._run_external_photo_generation_with_endpoint(
@@ -15082,6 +15951,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             prompt_text,
             session_key=session_key,
             reference_image_path=reference_image_path,
+            reference_image_paths=reference_image_paths,
             image_size=image_size,
         )
 
@@ -15092,17 +15962,50 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         reference_image_path: str = "",
+        reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
+        raw_paths = reference_image_paths
+        if isinstance(raw_paths, str):
+            raw_paths = (raw_paths,)
+        planned_paths: list[str] = []
+        for raw_path in (reference_image_path, *(raw_paths or ())):
+            clean_path = _path_text(raw_path, 1000)
+            if clean_path and clean_path not in planned_paths:
+                planned_paths.append(clean_path)
+        endpoint_capacity = self._external_image_endpoint_multi_reference_capacity(
+            endpoint,
+            len(planned_paths) or 1,
+        )
+        endpoint_paths = planned_paths[:endpoint_capacity]
+        endpoint_prompt_text = self._photo_reference_prompt_for_backend_capacity(
+            prompt_text,
+            planned_count=len(planned_paths),
+            submitted_count=len(endpoint_paths),
+        )
+        if len(endpoint_paths) < len(planned_paths):
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 端点参考图投影: model=%s planned=%s submitted=%s prompt_hash=%s",
+                _single_line(endpoint.get("model"), 80),
+                len(planned_paths),
+                len(endpoint_paths),
+                hashlib.sha256(endpoint_prompt_text.encode("utf-8", "ignore")).hexdigest()[:16],
+            )
         old_values = {key: getattr(self, key, None) for key in self._external_image_api_runtime_keys()}
         try:
             self._apply_external_image_api_endpoint_runtime(endpoint)
-            return await self._run_external_photo_generation_once(
-                prompt_text,
+            image_path, note = await self._run_external_photo_generation_once(
+                endpoint_prompt_text,
                 session_key=session_key,
-                reference_image_path=reference_image_path,
+                reference_image_path=endpoint_paths[0] if endpoint_paths else "",
+                reference_image_paths=tuple(endpoint_paths),
                 image_size=image_size,
             )
+            if image_path and planned_paths:
+                note = (
+                    f"{note}；实际提交 {len(endpoint_paths)}/{len(planned_paths)} 张参考图"
+                )
+            return image_path, note
         finally:
             for key, value in old_values.items():
                 setattr(self, key, value)
@@ -15217,6 +16120,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         reference_image_path: str = "",
+        reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
         platform = self._resolved_external_image_api_platform()
@@ -15238,7 +16142,16 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         model_note = self._external_image_model_misconfiguration_note()
         if model_note:
             return "", model_note
-        reference_image_path = _path_text(reference_image_path, 1000)
+        normalized_reference_paths: list[str] = []
+        raw_reference_paths = reference_image_paths
+        if isinstance(raw_reference_paths, str):
+            raw_reference_paths = (raw_reference_paths,)
+        for raw_path in (reference_image_path, *(raw_reference_paths or ())):
+            path = _path_text(raw_path, 1000)
+            if path and path not in normalized_reference_paths:
+                normalized_reference_paths.append(path)
+        reference_image_paths = tuple(normalized_reference_paths)
+        reference_image_path = normalized_reference_paths[0] if normalized_reference_paths else ""
         if platform == "bailian":
             multimodal_first = bool(reference_image_path) or self._bailian_prefers_multimodal()
             bailian_note = ""
@@ -15321,6 +16234,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
                 image_size=image_size,
             )
             if image_path:
@@ -15444,38 +16358,78 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         reference_image_path: str,
+        reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
         endpoint = self._external_image_endpoint("edits")
         if not endpoint:
             return "", "未配置在线图片 API 地址"
-        path = Path(str(reference_image_path or ""))
-        if not path.exists() or not path.is_file():
+        normalized_paths: list[str] = []
+        raw_paths = reference_image_paths
+        if isinstance(raw_paths, str):
+            raw_paths = (raw_paths,)
+        for raw_path in (reference_image_path, *(raw_paths or ())):
+            clean_path = _path_text(raw_path, 1000)
+            if clean_path and clean_path not in normalized_paths:
+                normalized_paths.append(clean_path)
+        if not normalized_paths:
             return "", "参考图路径不可用"
-        suffix = path.suffix.lower()
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-            return "", "参考图格式不支持"
+        planned_reference_count = len(normalized_paths)
+        if planned_reference_count > 1:
+            supported_capacity = self._external_image_multi_reference_capacity(
+                planned_reference_count,
+                inspect_queue=False,
+            )
+            if supported_capacity <= 1:
+                normalized_paths = normalized_paths[:1]
+            else:
+                normalized_paths = normalized_paths[:supported_capacity]
+        submitted_prompt_text = self._photo_reference_prompt_for_backend_capacity(
+            prompt_text,
+            planned_count=planned_reference_count,
+            submitted_count=len(normalized_paths),
+        )
+        if len(normalized_paths) < planned_reference_count:
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 按当前端点容量降级参考图: model=%s planned=%s submitted=%s",
+                _single_line(self.external_image_api_model, 80),
+                planned_reference_count,
+                len(normalized_paths),
+            )
+        paths = [Path(value) for value in normalized_paths]
+        for path in paths:
+            if not path.exists() or not path.is_file():
+                return "", "参考图路径不可用"
+            if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                return "", "参考图格式不支持"
         try:
             import aiohttp
 
-            image_bytes = await asyncio.to_thread(path.read_bytes)
-            content_type = "image/png"
-            if suffix in {".jpg", ".jpeg"}:
-                content_type = "image/jpeg"
-            elif suffix == ".webp":
-                content_type = "image/webp"
+            image_payloads: list[tuple[Path, bytes, str]] = []
+            for path in paths:
+                suffix = path.suffix.lower()
+                content_type = "image/png"
+                if suffix in {".jpg", ".jpeg"}:
+                    content_type = "image/jpeg"
+                elif suffix == ".webp":
+                    content_type = "image/webp"
+                image_payloads.append(
+                    (path, await asyncio.to_thread(path.read_bytes), content_type)
+                )
 
             def build_form() -> Any:
                 form = aiohttp.FormData()
                 form.add_field("model", self.external_image_api_model)
-                form.add_field("prompt", prompt_text)
+                form.add_field("prompt", submitted_prompt_text)
                 form.add_field("size", self._sanitize_external_image_size(image_size))
-                form.add_field(
-                    "image",
-                    image_bytes,
-                    filename=f"persona_reference{suffix}",
-                    content_type=content_type,
-                )
+                multi = len(image_payloads) > 1
+                for index, (path, image_bytes, content_type) in enumerate(image_payloads, start=1):
+                    form.add_field(
+                        "image[]" if multi else "image",
+                        image_bytes,
+                        filename=f"reference_{index}{path.suffix.lower()}",
+                        content_type=content_type,
+                    )
                 return form
 
             headers = {"Authorization": f"Bearer {self.external_image_api_key}"}
@@ -15490,14 +16444,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     text = ""
                     for attempt in range(2):
                         logger.info(
-                            "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference=%s bytes=%s attempt=%s/2 prompt_preview=%s",
+                            "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference_count=%s bytes=%s attempt=%s/2 prompt_preview=%s",
                             self._external_image_diagnostic_text(candidate_endpoint, 160),
                             _single_line(self.external_image_api_model, 80),
                             self._sanitize_external_image_size(image_size),
-                            _single_line(str(path), 160),
-                            len(image_bytes),
+                            len(image_payloads),
+                            sum(len(item[1]) for item in image_payloads),
                             attempt + 1,
-                            _single_line(prompt_text, 180),
+                            _single_line(submitted_prompt_text, 180),
                         )
                         async with session.post(candidate_endpoint, headers=headers, data=build_form()) as response:
                             text = await response.text()
@@ -15553,10 +16507,16 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 saved, note = await self._materialize_external_openai_image_item(
                     first,
                     session_key=session_key,
-                    success_note="ok；已使用本地人设参考图",
+                    success_note=(
+                        "ok；已使用本地人设参考图"
+                        if len(image_payloads) == 1
+                        else f"ok；已使用 {len(image_payloads)} 张参考图"
+                    ),
                 )
                 if saved and retried_after_upstream_error:
                     note += "；上游短暂错误后重试成功"
+                if saved and len(image_payloads) < planned_reference_count:
+                    note += f"；当前端点仅支持 {len(image_payloads)}/{planned_reference_count} 张参考图"
                 return saved, note
             return "", "参考图接口未返回 url 或 b64_json"
         except asyncio.TimeoutError:
@@ -15566,7 +16526,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 self._external_image_diagnostic_text(endpoint, 160),
                 _single_line(self.external_image_api_model, 80),
                 _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
-                _single_line(str(path), 160),
+                len(image_payloads),
             )
             return "", note
         except Exception as e:
@@ -16643,12 +17603,15 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         extra_components: list[Any] | None = None,
         quote_message_id: str = "",
         disable_segmenting: bool = False,
+        media_delivery_mode: str = "separate_after",
+        require_complete_text_before_media: bool = False,
     ) -> _ProactiveSendOutcome:
         trigger_message_id = _single_line(quote_message_id, 120)
         delivered_segments: list[str] = []
         complete = True
         image_delivered = False
         extra_components_delivered = 0
+        primary_complete = False
 
         def outcome(*, note: str = "") -> _ProactiveSendOutcome:
             delivered_text = "\n".join(item for item in delivered_segments if item).strip()
@@ -16660,6 +17623,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 image_delivered=image_delivered,
                 extra_components_delivered=extra_components_delivered,
                 note=_single_line(note, 240),
+                primary_complete=primary_complete,
             )
 
         has_prebuilt_voice = any(isinstance(component, Record) for component in (extra_components or []))
@@ -16668,6 +17632,49 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             extra_components = []
         if text:
             await self._maybe_send_input_status(umo, text)
+        if media_delivery_mode == "same_message":
+            platform_supports = getattr(self, "_platform_supports", None)
+            platform_quote = not callable(platform_supports) or platform_supports(
+                "reply_quote",
+                umo=umo,
+            )
+            if quote_message_id and not platform_quote:
+                logger.info(
+                    "[PrivateCompanion] 当前平台不支持主动引用，正文与表情同链发送已降级为普通发送: umo=%s",
+                    _single_line(umo, 140),
+                )
+                quote_message_id = ""
+            recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(
+                trigger_message_id
+            )
+            if recalled_message_id:
+                logger.info(
+                    "[PrivateCompanion] 触发消息已撤回，取消主动正文与表情同链发送: umo=%s message_id=%s",
+                    umo,
+                    recalled_message_id,
+                )
+                complete = False
+                return outcome(note="触发消息已撤回")
+            combined_chain = self._build_outbound_chain(
+                text,
+                image_path,
+                extra_components=extra_components,
+            )
+            combined_chain = self._with_optional_reply(
+                combined_chain,
+                quote_message_id,
+            )
+            sent = await self._send_chain_components(umo, combined_chain)
+            if sent:
+                delivered_segments.append(text)
+                image_delivered = bool(image_path and os.path.exists(image_path))
+                extra_components_delivered = len(extra_components or [])
+                primary_complete = True
+            else:
+                complete = False
+            return outcome(
+                note="" if sent else "主动正文与表情同链发送未被平台接受"
+            )
         platform_supports = getattr(self, "_platform_supports", None)
         platform_segmented = not callable(platform_supports) or platform_supports("segmented_reply", umo=umo)
         platform_quote = not callable(platform_supports) or platform_supports("reply_quote", umo=umo)
@@ -16766,7 +17773,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     quote_message_id = ""
                     if index < len(segments) - 1:
                         await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
+        primary_complete = bool(complete and delivered_segments)
         has_media = bool((extra_components or []) or (image_path and os.path.exists(image_path)))
+        if require_complete_text_before_media and has_media and (
+            not complete or not delivered_segments
+        ):
+            return outcome(note="主动正文未完整送达，已跳过表情图片")
         if has_media:
             logger.info(
                 "[PrivateCompanion] 主动媒体发送: text_segments=%s image=%s extra_components=%s",
@@ -16800,6 +17812,173 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 complete = False
         return outcome()
 
+    @staticmethod
+    def _normalize_reaction_expression_delivery_mode(value: Any) -> str:
+        mode = str(value or "separate_after").strip().lower().replace("-", "_")
+        aliases = {
+            "after": "separate_after",
+            "separate": "separate_after",
+            "separate_after_text": "separate_after",
+            "inline": "same_message",
+            "current_chain": "same_message",
+            "same_chain": "same_message",
+            "before": "separate_before",
+            "separate_before_text": "separate_before",
+        }
+        normalized = aliases.get(mode, mode)
+        if normalized in {"separate_after", "same_message", "separate_before"}:
+            return normalized
+        return "separate_after"
+
+    def _build_proactive_reaction_event(
+        self,
+        *,
+        umo: str,
+        user_id: str,
+        visible_text: str,
+    ) -> Any:
+        extras: dict[str, Any] = {}
+        event = SimpleNamespace(
+            unified_msg_origin=umo,
+            message_str=visible_text,
+            extras=extras,
+        )
+        event.get_sender_id = lambda: user_id
+        event.get_message_str = lambda: visible_text
+        event.is_private_chat = lambda: True
+        event.get_extra = lambda key: extras.get(key)
+        event.set_extra = lambda key, value: extras.__setitem__(key, value)
+        return event
+
+    async def _prepare_proactive_reaction_attachment(
+        self,
+        umo: str,
+        visible_text: str,
+    ) -> tuple[Any | None, dict[str, Any] | None]:
+        entry = self._pop_proactive_reaction_intent(umo)
+        intent = entry.get("intent") if isinstance(entry.get("intent"), dict) else {}
+        user_id = _single_line(entry.get("user_id"), 160)
+        if (
+            not intent
+            or not user_id
+            or not self._proactive_reaction_expression_enabled("message")
+        ):
+            return None, None
+        visible_checker = getattr(self, "_reaction_expression_has_visible_text", None)
+        if callable(visible_checker) and not visible_checker(visible_text):
+            return None, None
+
+        event = self._build_proactive_reaction_event(
+            umo=_single_line(umo, 240),
+            user_id=user_id,
+            visible_text=str(visible_text or ""),
+        )
+        preauthorize = getattr(self, "_preauthorize_reaction_expression_prompt", None)
+        prepare = getattr(self, "_pc_reaction_expression_impl", None)
+        settle = getattr(self, "_settle_reaction_expression_attachment_data", None)
+        if not callable(preauthorize) or not callable(prepare) or not callable(settle):
+            return None, None
+        try:
+            if not await preauthorize(event):
+                return None, None
+            raw_prepared = await prepare(
+                event,
+                query=_single_line(intent.get("provider_query"), 500),
+                context=_single_line(intent.get("context"), 1000)
+                or _single_line(visible_text, 700),
+                meme_only=True,
+                send=True,
+                purpose=_single_line(intent.get("purpose"), 120),
+                emotion=_single_line(intent.get("emotion"), 80),
+                intensity=_safe_int(intent.get("intensity"), 0, 0, 5),
+                candidate_queries=intent.get("candidate_queries", []),
+                attach_only=True,
+            )
+            prepared = json.loads(raw_prepared)
+        except Exception as exc:
+            pending = getattr(
+                event,
+                "_private_companion_reaction_expression_pending_attachment",
+                None,
+            )
+            if isinstance(pending, dict):
+                await settle(pending, sent=False, reason="attachment_prepare_failed")
+            logger.warning(
+                "[PrivateCompanion] 主动表情附件准备失败,继续发送纯文字: error_type=%s",
+                type(exc).__name__,
+            )
+            return None, None
+        if not isinstance(prepared, dict) or prepared.get("decision") != "attach":
+            return None, None
+
+        pending = getattr(
+            event,
+            "_private_companion_reaction_expression_pending_attachment",
+            None,
+        )
+        image_path = _path_text(prepared.get("path"), 1000)
+        if not isinstance(pending, dict) or not image_path or not os.path.isfile(image_path):
+            if isinstance(pending, dict):
+                await settle(pending, sent=False, reason="attachment_file_missing")
+            return None, None
+        try:
+            try:
+                image_component = Image.fromFileSystem(image_path)
+            except AttributeError:
+                image_component = Image.from_file_system(image_path)
+        except Exception as exc:
+            await settle(pending, sent=False, reason="attachment_component_failed")
+            logger.warning(
+                "[PrivateCompanion] 主动表情图片组件构建失败,继续发送纯文字: error_type=%s",
+                type(exc).__name__,
+            )
+            return None, None
+
+        pending["attached"] = True
+        pending["component"] = image_component
+        runtime_logger = getattr(self, "_log_reaction_expression_event", None)
+        if callable(runtime_logger):
+            runtime_logger(
+                event,
+                stage="attachment",
+                decision="accepted",
+                reason="attachment_appended",
+                scope="private",
+                found=True,
+                sent=False,
+                image_id=prepared.get("image_id"),
+                confidence=prepared.get("confidence"),
+                cache_hit=prepared.get("cache_hit"),
+                latency_ms=prepared.get("lookup_latency_ms"),
+                match_basis=pending.get("match_basis"),
+            )
+        return image_component, pending
+
+    async def _settle_proactive_reaction_attachment(
+        self,
+        pending: dict[str, Any] | None,
+        *,
+        sent: bool,
+        reason: str,
+    ) -> None:
+        if not isinstance(pending, dict):
+            return
+        settle = getattr(self, "_settle_reaction_expression_attachment_data", None)
+        if not callable(settle):
+            return
+        try:
+            await settle(pending, sent=sent, reason=reason)
+        except Exception as exc:
+            # Delivery state is authoritative. A bookkeeping failure must not
+            # make the caller retry content that the platform already received.
+            logger.warning(
+                "[PrivateCompanion] 主动表情发送结算失败,不改变消息投递结果: "
+                "sent=%s reason=%s error_type=%s",
+                bool(sent),
+                _single_line(reason, 80),
+                type(exc).__name__,
+            )
+
     async def _send_proactive_message_chain(
         self,
         umo: str,
@@ -16822,15 +18001,96 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     _single_line(cleaned_text, 120),
                 )
                 text = cleaned_text
-        if image_path or extra_components:
-            return await self._send_media_proactive_chain(
+        reaction_pending: dict[str, Any] | None = None
+        reaction_delivery_mode = self._normalize_reaction_expression_delivery_mode(
+            getattr(self, "reaction_expression_delivery_mode", "separate_after")
+        )
+        has_existing_media = bool(
+            image_path
+            or extra_components
+            or (text and self._contains_inline_image_tag(text))
+        )
+        if has_existing_media:
+            self._clear_proactive_reaction_intent(umo)
+        else:
+            reaction_component, reaction_pending = await self._prepare_proactive_reaction_attachment(
                 umo,
                 text,
-                image_path,
-                extra_components=extra_components,
-                quote_message_id=quote_message_id,
-                disable_segmenting=disable_segmenting,
             )
+            if reaction_component is not None:
+                if isinstance(reaction_pending, dict):
+                    reaction_pending["delivery_mode"] = reaction_delivery_mode
+                if reaction_delivery_mode == "separate_before":
+                    try:
+                        reaction_sent = bool(
+                            await self._send_chain_components(
+                                umo,
+                                [reaction_component],
+                            )
+                        )
+                    except Exception as exc:
+                        reaction_sent = False
+                        logger.warning(
+                            "[PrivateCompanion] 主动表情先行发送失败，继续发送正文: "
+                            "umo=%s error_type=%s",
+                            _single_line(umo, 140),
+                            type(exc).__name__,
+                        )
+                    await self._settle_proactive_reaction_attachment(
+                        reaction_pending,
+                        sent=reaction_sent,
+                        reason="delivered" if reaction_sent else "delivery_failed",
+                    )
+                    reaction_pending = None
+                else:
+                    extra_components = [reaction_component]
+        if has_existing_media or image_path or extra_components:
+            try:
+                outcome = await self._send_media_proactive_chain(
+                    umo,
+                    text,
+                    image_path,
+                    extra_components=extra_components,
+                    quote_message_id=quote_message_id,
+                    disable_segmenting=disable_segmenting,
+                    media_delivery_mode=(
+                        reaction_delivery_mode
+                        if reaction_pending is not None
+                        else "separate_after"
+                    ),
+                    require_complete_text_before_media=bool(
+                        reaction_pending is not None
+                        and reaction_delivery_mode == "separate_after"
+                    ),
+                )
+            except Exception:
+                await self._settle_proactive_reaction_attachment(
+                    reaction_pending,
+                    sent=False,
+                    reason=(
+                        "primary_not_delivered"
+                        if reaction_pending is not None
+                        and reaction_delivery_mode == "separate_after"
+                        else "delivery_failed"
+                    ),
+                )
+                raise
+            if reaction_pending is not None:
+                reaction_sent = bool(outcome.extra_components_delivered)
+                settlement_reason = (
+                    "delivered"
+                    if reaction_sent
+                    else "primary_not_delivered"
+                    if reaction_delivery_mode == "separate_after"
+                    and not outcome.primary_complete
+                    else "delivery_failed"
+                )
+                await self._settle_proactive_reaction_attachment(
+                    reaction_pending,
+                    sent=reaction_sent,
+                    reason=settlement_reason,
+                )
+            return outcome
         if text:
             await self._maybe_send_input_status(umo, text)
         segments = self._split_proactive_text(

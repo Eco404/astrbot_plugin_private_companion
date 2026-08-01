@@ -50,12 +50,22 @@ class _FakeResultEvent(_FakeEvent):
         super().__init__()
         self._result = SimpleNamespace(chain=list(chain or []))
         self._has_send_oper = False
+        self.sent_results: list[object] = []
 
     def get_result(self):
         return self._result
 
     def set_result(self, result) -> None:
         self._result = result
+
+    @staticmethod
+    def chain_result(chain):
+        return SimpleNamespace(chain=list(chain))
+
+    async def send(self, result):
+        self.sent_results.append(result)
+        self._has_send_oper = True
+        return True
 
 
 class _FakeGroupEvent(_FakeEvent):
@@ -153,6 +163,34 @@ class _FakeToolSet:
 
 
 class _ReactionHarness(SceneContextMixin, LlmToolActionsMixin):
+    _reaction_expression_delivery_mode = (
+        PrivateCompanionPlugin._reaction_expression_delivery_mode
+    )
+    _send_reaction_expression_component_separately = (
+        PrivateCompanionPlugin._send_reaction_expression_component_separately
+    )
+    _reaction_expression_flatten_delivery_components = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_flatten_delivery_components
+    )
+    _reaction_expression_delivery_signature = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_delivery_signature
+    )
+    _install_reaction_expression_delivery_tracker = (
+        PrivateCompanionPlugin._install_reaction_expression_delivery_tracker
+    )
+    _reaction_expression_primary_reply_confirmed = (
+        PrivateCompanionPlugin._reaction_expression_primary_reply_confirmed
+    )
+    _reaction_expression_image_delivery_confirmed = (
+        PrivateCompanionPlugin._reaction_expression_image_delivery_confirmed
+    )
+    _restore_reaction_expression_delivery_tracker = staticmethod(
+        PrivateCompanionPlugin._restore_reaction_expression_delivery_tracker
+    )
+    _reaction_expression_attachment_present = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_attachment_present
+    )
+
     def __init__(self, api: _FakeSmartImageAPI, *, sent: bool = True) -> None:
         self.api = api
         self.sent = sent
@@ -171,6 +209,7 @@ class _ReactionHarness(SceneContextMixin, LlmToolActionsMixin):
         self.reaction_expression_cooldown_seconds = 180
         self.reaction_expression_low_latency_mode = True
         self.reaction_expression_candidate_limit = 6
+        self.reaction_expression_delivery_mode = "separate_after"
         self.enabled = True
         self._owned_reaction_library = _OwnedReactionLibraryAdapter(api)
 
@@ -792,9 +831,10 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, harness.deliveries)
         self.assertFalse(pending["settled"])
         self.assertEqual([], state["recent_images"])
-        self.assertEqual(1, sum(isinstance(item, Image) for item in event.get_result().chain))
+        self.assertEqual(0, sum(isinstance(item, Image) for item in event.get_result().chain))
+        self.assertEqual([], event.sent_results)
 
-        event._has_send_oper = True
+        await event.send(event.chain_result([Plain("完整正文")]))
         await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
             harness,
             event,
@@ -802,7 +842,351 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(pending["settled"])
         self.assertTrue(pending["sent"])
+        self.assertEqual(2, len(event.sent_results))
+        self.assertIsInstance(event.sent_results[1].chain[0], Image)
         self.assertEqual("reaction-1", state["recent_images"][-1]["image_id"])
+
+    async def test_same_message_mode_keeps_reaction_in_primary_chain(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(
+            reaction_expression_delivery_mode="same_message"
+        )
+        event = _FakeResultEvent([Plain("完整正文")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertEqual("same_message", pending["delivery_mode"])
+        self.assertEqual(
+            1,
+            sum(isinstance(item, Image) for item in event.get_result().chain),
+        )
+        await event.send(event.chain_result(event.get_result().chain))
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+        self.assertTrue(pending["sent"])
+        self.assertEqual(1, len(event.sent_results))
+
+    async def test_separate_before_does_not_count_image_as_primary_reply(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(
+            reaction_expression_delivery_mode="separate_before"
+        )
+        event = _FakeResultEvent([Plain("完整正文")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertTrue(pending["settled"])
+        self.assertTrue(pending["sent"])
+        self.assertTrue(event._has_send_oper)
+        self.assertFalse(
+            harness._reaction_expression_primary_reply_confirmed(event, pending)
+        )
+        self.assertEqual(1, len(event.sent_results))
+        self.assertEqual(
+            0,
+            sum(isinstance(item, Image) for item in event.get_result().chain),
+        )
+
+    async def test_separate_after_skips_image_when_primary_was_not_sent(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        event = _FakeResultEvent([Plain("完整正文")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertTrue(pending["settled"])
+        self.assertFalse(pending["sent"])
+        self.assertEqual("primary_not_delivered", pending["settled_reason"])
+        self.assertEqual([], event.sent_results)
+
+    async def test_separate_after_requires_every_primary_text_segment(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        event = _FakeResultEvent([Plain("第一段。第二段。")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        first = Plain("第一段。")
+        second = Plain("第二段。")
+        event.set_result(SimpleNamespace(chain=[first, second]))
+        await event.send(event.chain_result([first]))
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertFalse(pending["sent"])
+        self.assertEqual("primary_not_delivered", pending["settled_reason"])
+        self.assertEqual(1, len(event.sent_results))
+
+    async def test_lookup_miss_still_tracks_partial_primary_for_deferred_tts(
+        self,
+    ) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        harness._owned_reaction_library.find = lambda *_args, **_kwargs: None
+        first = Plain("第一段。")
+        second = Plain("第二段。")
+        event = _FakeResultEvent([first, second])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+        event._private_companion_deferred_reaction_tts = {
+            "normalized": "第一段。第二段。",
+            "fallback_plain": "第一段。第二段。",
+            "started_at": 1.0,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        self.assertTrue(
+            hasattr(
+                event,
+                "_private_companion_reaction_expression_delivery_tracker",
+            )
+        )
+        await event.send(event.chain_result([first]))
+        await PrivateCompanionPlugin.release_deferred_reaction_tts_after_send(
+            harness,
+            event,
+        )
+
+        self.assertFalse(
+            hasattr(event, "_private_companion_deferred_reaction_tts")
+        )
+        self.assertFalse(
+            harness._reaction_expression_primary_reply_confirmed(event)
+        )
+
+    async def test_same_message_does_not_record_failed_image_component(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(
+            reaction_expression_delivery_mode="same_message"
+        )
+        event = _FakeResultEvent([Plain("完整正文")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        await event.send(event.chain_result([event.get_result().chain[0]]))
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertFalse(pending["sent"])
+        self.assertEqual("delivery_failed", pending["settled_reason"])
+
+    async def test_same_message_records_delivered_image_when_primary_is_partial(
+        self,
+    ) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(
+            reaction_expression_delivery_mode="same_message"
+        )
+        event = _FakeResultEvent([Plain("第一段。第二段。")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        image = next(
+            item for item in event.get_result().chain if isinstance(item, Image)
+        )
+        first = Plain("第一段。")
+        second = Plain("第二段。")
+        event.set_result(SimpleNamespace(chain=[first, second, image]))
+        await event.send(event.chain_result([first]))
+        await event.send(event.chain_result([image]))
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+
+        self.assertFalse(
+            harness._reaction_expression_primary_reply_confirmed(event, pending)
+        )
+        self.assertTrue(pending["sent"])
+        self.assertEqual("delivered", pending["settled_reason"])
+        state = ensure_reaction_expression_state(harness.users["10001"])
+        self.assertEqual("reaction-1", state["recent_images"][-1]["image_id"])
+
+    async def test_same_message_tracks_image_inside_forward_node(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(
+            reaction_expression_delivery_mode="same_message"
+        )
+        event = _FakeResultEvent([Plain("完整正文")])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        node_type = type("Node", (), {})
+        node = node_type()
+        node.content = list(event.get_result().chain)
+        event.set_result(SimpleNamespace(chain=[node]))
+        await event.send(event.chain_result([node]))
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertTrue(pending["sent"])
+        self.assertEqual("delivered", pending["settled_reason"])
+
+    async def test_delivery_tracker_can_be_reinstalled_after_cleanup(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        event = _FakeResultEvent([Plain("完整正文")])
+        first_pending: dict[str, object] = {}
+        harness._install_reaction_expression_delivery_tracker(event, first_pending)
+        await event.send(event.chain_result([Plain("第一次")]))
+
+        await PrivateCompanionPlugin.cleanup_reaction_expression_delivery_tracker_after_send(
+            harness,
+            event,
+        )
+
+        self.assertFalse(
+            hasattr(
+                event,
+                "_private_companion_reaction_expression_delivery_tracker",
+            )
+        )
+        second_pending: dict[str, object] = {}
+        harness._install_reaction_expression_delivery_tracker(event, second_pending)
+        await event.send(event.chain_result([Plain("第二次")]))
+
+        tracker = second_pending["delivery_tracker"]
+        self.assertIn(("plain", "第二次"), tracker["successful_signatures"])
 
     async def test_reaction_tool_marks_collision_and_remembers_sent_image(self) -> None:
         api = _FakeSmartImageAPI(self.image_path)
@@ -1200,6 +1584,36 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(private_payload["sent"])
         self.assertTrue(group_authorized)
+
+    async def test_group_reaction_state_does_not_create_private_user(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_group_enabled=True)
+        group_event = _FakeGroupEvent()
+
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=harness._owned_reaction_library,
+        ):
+            self.assertTrue(
+                await harness._preauthorize_reaction_expression_prompt(group_event)
+            )
+            payload = json.loads(
+                await harness._pc_reaction_expression_impl(
+                    group_event,
+                    purpose="群聊回应",
+                    emotion="开心",
+                )
+            )
+
+        self.assertTrue(payload["sent"])
+        self.assertEqual({"10001": {}}, harness.users)
+        states = harness.data.get("reaction_expression_group_states")
+        self.assertIsInstance(states, dict)
+        self.assertTrue(states)
+        self.assertTrue(
+            all("20001" in key and "sender:10001" in key for key in states)
+        )
 
     async def test_positive_and_negative_feedback_update_preference(self) -> None:
         module_api = _FakeSmartImageAPI(self.image_path)

@@ -118,6 +118,72 @@ class TtsTurnLanguageOverrideTests(unittest.TestCase):
 
 
 class TtsTurnLanguageRequestIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plugin_tts_disables_streaming_for_current_event(self) -> None:
+        harness = _Harness()
+        harness.enabled = True
+        harness.enable_tts_enhancement = True
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_frequency_control_mode = "global"
+        harness.tts_trigger_probability = 1.0
+        harness.tts_constraint_mode = "weak"
+        harness.context.get_config = lambda _umo: {}
+
+        class Event(SimpleNamespace):
+            def __init__(self) -> None:
+                super().__init__(
+                    message_str="陪我聊一会儿",
+                    unified_msg_origin="default:FriendMessage:10001",
+                )
+                self.extras = {"enable_streaming": True}
+
+            def set_extra(self, key: str, value: object) -> None:
+                self.extras[key] = value
+
+            def get_extra(self, key: str, default: object = None) -> object:
+                return self.extras.get(key, default)
+
+        event = Event()
+        self.assertTrue(harness._tts_turn_requires_complete_reply(event))
+        self.assertTrue(harness._disable_streaming_for_tts_turn(event))
+        await harness.apply_tts_enhancement_request(event, SimpleNamespace(system_prompt="base"))
+
+        self.assertTrue(getattr(event, "_private_companion_tts_request_applied", False))
+        self.assertTrue(getattr(event, "_private_companion_tts_streaming_disabled", False))
+        self.assertFalse(event.get_extra("enable_streaming"))
+        self.assertTrue(getattr(event, "_private_companion_tts_streaming_previous", None))
+
+    async def test_tts_probability_miss_keeps_streaming_for_plain_turn(self) -> None:
+        harness = _Harness()
+        harness.enabled = True
+        harness.enable_tts_enhancement = True
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_frequency_control_mode = "global"
+        harness.tts_trigger_probability = 0.0
+        harness.tts_constraint_mode = "weak"
+        harness.context.get_config = lambda _umo: {}
+
+        class Event(SimpleNamespace):
+            def __init__(self) -> None:
+                super().__init__(
+                    message_str="普通聊天",
+                    unified_msg_origin="default:FriendMessage:10001",
+                )
+                self.extras = {"enable_streaming": True}
+
+            def set_extra(self, key: str, value: object) -> None:
+                self.extras[key] = value
+
+            def get_extra(self, key: str, default: object = None) -> object:
+                return self.extras.get(key, default)
+
+        event = Event()
+        self.assertFalse(harness._tts_turn_requires_complete_reply(event))
+        await harness.apply_tts_enhancement_request(event, SimpleNamespace(system_prompt="base"))
+
+        self.assertTrue(getattr(event, "_private_companion_tts_request_applied", False))
+        self.assertNotIn("_private_companion_tts_streaming_disabled", vars(event))
+        self.assertTrue(event.get_extra("enable_streaming"))
+
     async def test_language_request_bypasses_automatic_probability_and_injects_turn_rule(self) -> None:
         harness = _Harness()
         harness.enabled = True

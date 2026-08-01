@@ -157,7 +157,8 @@ MODEL_QUICK_TIMEOUT_KEYS = {
     "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": "FAST_RESPONSE_PROVIDER_ID",
     "FORWARD_MESSAGE_PROVIDER_ID": "COMPLEX_REASONING_PROVIDER_ID",
     "PLUGIN_VISION_PROVIDER_ID": "PLUGIN_VISION_PROVIDER_ID",
-    "PRIVATE_READING_VISION_PROVIDER_ID": "PLUGIN_VISION_PROVIDER_ID",
+    # 夹层阅读视觉模型在快速模式下也保持独立，不能复用通用识图的超时配置。
+    "PRIVATE_READING_VISION_PROVIDER_ID": "PRIVATE_READING_VISION_PROVIDER_ID",
     "NEWS_PROVIDER_ID": "FAST_RESPONSE_PROVIDER_ID",
     "WEB_EXPLORATION_PROVIDER_ID": "FAST_RESPONSE_PROVIDER_ID",
 }
@@ -244,10 +245,12 @@ _DATA_STORE_KEYS = (
     "worldbook_entries",
     "worldbook_member_profiles",
     "worldbook_group_profiles",
+    "photo_reference_assets",
     "worldbook_import_state",
     "atrelay_send_log",
     "inbound_debounce_stats",
     "group_llm_reply_blocks",
+    "reaction_expression_group_states",
     "balance_awareness",
     "qweather_location",
     "weather_alerts",

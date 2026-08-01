@@ -145,6 +145,8 @@ class LearningPageUiTests(unittest.TestCase):
     def test_observations_remain_non_injecting_secondary_material(self) -> None:
         self.assertIn("这不是情境表达或语法习惯", self.script)
         self.assertIn("未归纳观察", self.script)
+        self.assertIn("const patternTitle = item?.pattern_label || sceneText;", self.script)
+        self.assertIn("<b>${escapeHtml(patternTitle)}</b>", self.script)
         self.assertIn("const observationCount = samples.length;", self.script)
         self.assertIn("data-expression-sample-archive", self.script)
         self.assertIn("不会直接改变 Bot 的说法", self.script)
@@ -170,9 +172,9 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn("grid-column: 1 / -1;", narrow)
 
     def test_learning_page_assets_use_current_cache_versions(self) -> None:
-        self.assertIn('./app.css?v=20260801-tts-provider-isolation-v1', self.html)
+        self.assertIn('./app.css?v=20260802-role-reference-v1', self.html)
         self.assertIn('./css/polish.css?v=20260731-folio-cascade-v1', self.html)
-        self.assertIn('./app.js?v=20260801-tts-provider-isolation-v1', self.html)
+        self.assertIn('./app.js?v=20260802-expression-dedup-v1', self.html)
         self.assertIn(
             './js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1',
             self.html,

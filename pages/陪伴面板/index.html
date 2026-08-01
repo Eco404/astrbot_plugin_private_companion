@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260801-tts-provider-isolation-v1" />
+  <link rel="stylesheet" href="./app.css?v=20260802-role-reference-v1" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -402,32 +402,46 @@
             <span>这里不会直接覆盖群聊人格；只有相关功能注入背景时才会被当作线索参考。</span>
           </section>
         </div>
-        <article class="module-card persona-source-card">
-          <div class="module-card-head">
-            <div>
-              <h2>主回复人格来源</h2>
-              <span class="section-desc">这里用于查看聊天人格来源，不是编辑入口；需要修改时请到 AstrBot 人格或插件配置里调整。</span>
-            </div>
-            <span class="module-badge">只读</span>
-          </div>
-          <div class="module-form">
-            <label>当前聊天人格
-              <input id="currentPersonaDisplay" readonly value="读取中..." />
-            </label>
-            <p class="section-desc">主回复人格会影响被动回复、群聊人格、关系评估和主动消息口吻；本页下方的资料只是背景知识，不应拿来当完整人格覆盖它。</p>
-            <p class="section-desc">如需指定人格，请到 AstrBot 插件配置页，打开“我会永远陪着你”的配置项，在“插件指定人格 ID”里使用人格选择器选择；留空即继承 AstrBot 当前默认人格。</p>
+        <details class="persona-import-panel">
+          <summary tabindex="0">
+            <span class="persona-import-heading">
+              <b>快速从已有人格导入</b>
+              <span>读取 AstrBot 当前人格，生成可检查、可编辑的世界知识草稿。</span>
+            </span>
+            <span class="persona-import-source">
+              <small>当前来源</small>
+              <strong id="currentPersonaDisplay" aria-live="polite">读取中...</strong>
+            </span>
+            <span class="persona-import-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="persona-import-body">
+            <p class="persona-import-note">人格来源只读；需要切换时，请在 AstrBot 插件配置的“插件指定人格 ID”中选择，留空则继承 AstrBot 当前默认人格。</p>
             <div class="persona-draft-actions">
-              <div class="persona-draft-scope" aria-label="草稿生成范围">
-                <label><input type="checkbox" data-roleplay-draft-scope="persona" checked /> 角色资料</label>
-                <label><input type="checkbox" data-roleplay-draft-scope="world" /> 世界观资料</label>
-                <label><input type="checkbox" data-roleplay-draft-scope="user" /> 用户与关系</label>
+              <fieldset class="persona-draft-scope">
+                <legend>选择导入内容</legend>
+                <div class="persona-draft-scope-options">
+                  <label>
+                    <input type="checkbox" data-roleplay-draft-scope="persona" checked />
+                    <span><b>角色资料</b><small>身份、外观与性格</small></span>
+                  </label>
+                  <label>
+                    <input type="checkbox" data-roleplay-draft-scope="world" />
+                    <span><b>世界观资料</b><small>背景、规则与场景</small></span>
+                  </label>
+                  <label>
+                    <input type="checkbox" data-roleplay-draft-scope="user" />
+                    <span><b>用户与关系</b><small>称呼、关系与互动</small></span>
+                  </label>
+                </div>
+              </fieldset>
+              <div class="persona-draft-submit">
+                <button type="button" id="generateRoleplayDraftBtn">生成导入草稿</button>
+                <p>仅提取人格中明确写出的信息。生成后先预览，再决定是否填入；不会自动保存或修改 AstrBot 人格。</p>
               </div>
-              <button type="button" id="generateRoleplayDraftBtn">提取为世界知识草稿</button>
-              <span>只抽取主回复人格里明确写出的信息；生成后先预览，不会自动保存，也不会修改人格。</span>
             </div>
             <div id="roleplayPersonaDraftPanel" class="persona-draft-panel" hidden></div>
           </div>
-        </article>
+        </details>
         <article class="roleplay-studio module-card" data-roleplay-mode="standard">
           <div class="module-card-head">
             <div>
@@ -1730,6 +1744,6 @@ QQ空间 = 公开札记
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260731-test-diagnostics-v1"></script>
   <script src="./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1"></script>
-  <script src="./app.js?v=20260801-tts-provider-isolation-v1"></script>
+  <script src="./app.js?v=20260802-expression-dedup-v1"></script>
 </body>
 </html>

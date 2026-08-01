@@ -7,11 +7,28 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from astrbot.api.message_components import At, Plain, Record
+from astrbot.api.message_components import At, Plain, Record, Reply
+from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
 
 
 class _TtsHarness(TtsEnhancementMixin):
+    _reaction_expression_flatten_delivery_components = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_flatten_delivery_components
+    )
+    _reaction_expression_delivery_signature = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_delivery_signature
+    )
+    _reaction_expression_primary_reply_confirmed = (
+        PrivateCompanionPlugin._reaction_expression_primary_reply_confirmed
+    )
+    release_tts_reply_remainder_after_send = (
+        PrivateCompanionPlugin.release_tts_reply_remainder_after_send
+    )
+    release_deferred_reaction_tts_after_send = (
+        PrivateCompanionPlugin.release_deferred_reaction_tts_after_send
+    )
+
     def __init__(self):
         self.enable_tts_enhancement = True
         self.tts_generation_mode = "postprocess"
@@ -70,6 +87,18 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(1, len(event.result.chain))
         self.assertIsInstance(event.result.chain[0], Record)
+        self.assertEqual([], background_tasks)
+        self.assertEqual(
+            ["第一段。", "第二段。", "第三段。"],
+            [
+                chunk[0].text
+                for chunk in event._private_companion_tts_reply_remainder["chunks"]
+            ],
+        )
+
+        event._has_send_oper = True
+        await harness.release_tts_reply_remainder_after_send(event)
+
         self.assertEqual(1, len(background_tasks))
         with patch(
             "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
@@ -81,6 +110,177 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             ["第一段。", "第二段。", "第三段。"],
             [item.chain[0].text for item in event.sent],
         )
+
+    def test_reaction_intent_keeps_complete_plain_text_in_one_chunk(self):
+        harness = _TtsHarness()
+        harness.enable_segmented_proactive_reply = True
+        harness.segmented_proactive_scope = "all_llm"
+        harness._segmented_scope_allows_event = lambda _event: True
+        harness._split_proactive_text = lambda _text: ["第一段。", "第二段。"]
+        event = SimpleNamespace(
+            unified_msg_origin="default:GroupMessage:10001",
+            _private_companion_reaction_expression_intent={"query": "开心"},
+        )
+
+        chunks = harness._tts_segment_plain_chunk_for_ordered_send(
+            event,
+            [Plain("第一段。第二段。")],
+        )
+
+        self.assertEqual(1, len(chunks))
+        self.assertEqual("第一段。第二段。", chunks[0][0].text)
+
+    async def test_reaction_auto_tts_preserves_routing_order_and_sends_only_record_after_send(
+        self,
+    ):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_generation_mode = "postprocess"
+        harness.enable_segmented_proactive_reply = True
+        harness.segmented_proactive_scope = "all_llm"
+        harness._segmented_scope_allows_event = lambda _event: True
+        harness._split_proactive_text = lambda _text: ["第一段。", "第二段。"]
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(
+            chain=list(chain)
+        )
+        harness._event_inbound_activity_ts = lambda _event: 10.0
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(
+            return_value=[
+                Plain("不应重复发送的正文。"),
+                Record(file="voice.wav"),
+            ]
+        )
+        background_tasks = []
+        harness._create_lifecycle_background_task = (
+            lambda coro, *, label="": background_tasks.append((coro, label))
+        )
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+            message_str = "普通聊天"
+            _private_companion_tts_request_applied = True
+            _private_companion_reaction_expression_intent = {"query": "开心"}
+
+            def __init__(self):
+                self.result = SimpleNamespace(
+                    chain=[
+                        Reply(id="quoted-message"),
+                        At(qq="10001"),
+                        Plain("第一段。"),
+                        Plain("第二段。"),
+                    ]
+                )
+                self.sent = []
+
+            def get_result(self):
+                return self.result
+
+            def set_result(self, value):
+                self.result = value
+
+            @staticmethod
+            def chain_result(chain):
+                return SimpleNamespace(chain=list(chain))
+
+            async def send(self, result):
+                self.sent.append(result)
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual([Reply, At, Plain], [type(item) for item in event.result.chain])
+        self.assertEqual("第一段。第二段。", event.result.chain[2].text)
+        self.assertFalse(
+            hasattr(event, "_private_companion_tts_reply_remainder")
+        )
+        self.assertTrue(
+            hasattr(event, "_private_companion_deferred_reaction_tts")
+        )
+        harness._maybe_convert_plain_reply_to_tts.assert_not_awaited()
+        self.assertEqual([], background_tasks)
+
+        event._has_send_oper = True
+        await harness.release_deferred_reaction_tts_after_send(event)
+        await harness.release_deferred_reaction_tts_after_send(event)
+
+        self.assertEqual(1, len(background_tasks))
+        self.assertEqual("reaction_tts_after_delivery", background_tasks[0][1])
+        await background_tasks[0][0]
+
+        harness._maybe_convert_plain_reply_to_tts.assert_awaited_once_with(
+            "第一段。第二段。",
+            event,
+        )
+        self.assertEqual(1, len(event.sent))
+        self.assertEqual(1, len(event.sent[0].chain))
+        self.assertIsInstance(event.sent[0].chain[0], Record)
+
+    async def test_reaction_auto_tts_is_not_released_after_partial_primary_send(
+        self,
+    ):
+        harness = _TtsHarness()
+        harness.enabled = True
+        background_tasks = []
+        harness._create_lifecycle_background_task = (
+            lambda coro, *, label="": background_tasks.append((coro, label))
+        )
+        event = SimpleNamespace(
+            _has_send_oper=True,
+            _private_companion_deferred_reaction_tts={"text": "完整正文"},
+            _private_companion_reaction_expression_delivery_tracker={
+                "successful_signatures": [("plain", "第一段。")],
+            },
+            get_result=lambda: SimpleNamespace(
+                chain=[Plain("第一段。"), Plain("第二段。")]
+            ),
+        )
+
+        await harness.release_deferred_reaction_tts_after_send(event)
+
+        self.assertEqual([], background_tasks)
+        self.assertFalse(
+            hasattr(event, "_private_companion_deferred_reaction_tts")
+        )
+
+    async def test_reaction_background_tts_drops_voice_when_new_message_arrives(
+        self,
+    ):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "postprocess"
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(
+            return_value=[Record(file="voice.wav"), Plain("不应补发正文。")]
+        )
+        activity = iter((False, True))
+        harness._event_scope_key = lambda _event: "group:10001"
+        harness._scope_has_new_inbound_activity = (
+            lambda *_args, **_kwargs: next(activity)
+        )
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            def __init__(self):
+                self.sent = []
+
+            @staticmethod
+            def chain_result(chain):
+                return SimpleNamespace(chain=list(chain))
+
+            async def send(self, result):
+                self.sent.append(result)
+
+        event = Event()
+        await harness._send_deferred_reaction_tts(
+            event,
+            {
+                "normalized": "稍后生成语音。",
+                "fallback_plain": "稍后生成语音。",
+                "started_at": 10.0,
+            },
+        )
+
+        harness._maybe_convert_plain_reply_to_tts.assert_awaited_once()
+        self.assertEqual([], event.sent)
 
     def test_changed_visible_text_does_not_reuse_stale_source_segments(self):
         harness = _TtsHarness()

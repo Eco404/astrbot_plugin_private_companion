@@ -780,6 +780,223 @@ class ExpressionLearningTests(unittest.TestCase):
         self.harness._merge_learned_expression_rules(profile, candidates, batch_key="batch", now=time.time())
         self.assertEqual(2, len(profile["learned_rules"]))
 
+    def test_duplicate_expression_families_merge_components_and_evidence(self):
+        profile = {
+            "learned_rules": [
+                {
+                    "id": "style-a",
+                    "family_key": "joke_a",
+                    "kind": "style",
+                    "situation": "逗完亲近的人后圆场",
+                    "pattern": "逗逗你而已啦，____",
+                    "instruction": "替换占位后自然圆场",
+                    "keywords": ["玩笑", "圆场"],
+                    "evidence_examples": ["逗逗你而已啦，笨蛋"],
+                    "evidence_count": 2,
+                    "intent": "play",
+                    "channels": ["private"],
+                    "relationship_stages": ["close"],
+                    "emotion_gates": ["positive"],
+                    "last_batch_key": "batch-a",
+                },
+                {
+                    "id": "grammar-a",
+                    "family_key": "joke_a",
+                    "kind": "grammar",
+                    "situation": "逗完亲近的人后圆场",
+                    "pattern": "省略主语的 7-10 字短句",
+                    "instruction": "只借鉴短句结构",
+                    "evidence_examples": ["逗逗你而已啦，笨蛋"],
+                    "evidence_count": 2,
+                    "intent": "play",
+                    "channels": ["private"],
+                    "relationship_stages": ["close"],
+                    "emotion_gates": ["positive"],
+                    "last_batch_key": "batch-a",
+                },
+                {
+                    "id": "style-b",
+                    "family_key": "joke_b",
+                    "kind": "style",
+                    "situation": "开完玩笑后缓和语气",
+                    "pattern": "逗逗你而已啦，____",
+                    "instruction": "用当前称呼替换占位符",
+                    "keywords": ["调侃", "亲昵"],
+                    "evidence_examples": ["逗逗你而已啦，笨蛋"],
+                    "evidence_count": 2,
+                    "intent": "intimacy",
+                    "channels": ["private"],
+                    "relationship_stages": ["close"],
+                    "emotion_gates": ["positive"],
+                    "last_batch_key": "batch-b",
+                },
+                {
+                    "id": "grammar-b",
+                    "family_key": "joke_b",
+                    "kind": "grammar",
+                    "situation": "开完玩笑后缓和语气",
+                    "pattern": "省略主语的 6-10 字短句",
+                    "instruction": "先解释玩笑再补亲昵称呼",
+                    "evidence_examples": ["逗逗你而已啦，笨蛋"],
+                    "evidence_count": 2,
+                    "intent": "intimacy",
+                    "channels": ["private"],
+                    "relationship_stages": ["close"],
+                    "emotion_gates": ["positive"],
+                    "last_batch_key": "batch-b",
+                },
+            ]
+        }
+
+        self.assertTrue(self.harness._prune_invalid_expression_rules(profile))
+
+        self.assertEqual(2, len(profile["learned_rules"]))
+        self.assertEqual(1, len({item["family_id"] for item in profile["learned_rules"]}))
+        style = next(item for item in profile["learned_rules"] if item["kind"] == "style")
+        grammar = next(item for item in profile["learned_rules"] if item["kind"] == "grammar")
+        self.assertEqual(4, style["evidence_count"])
+        self.assertEqual(4, grammar["evidence_count"])
+        self.assertEqual({"玩笑", "圆场", "调侃", "亲昵"}, set(style["keywords"]))
+
+    def test_manual_duplicate_rules_are_reported_but_not_auto_merged(self):
+        profile = {
+            "learned_rules": [
+                {
+                    "id": "manual-a",
+                    "kind": "style",
+                    "situation": "确认安排时",
+                    "pattern": "好呀，____",
+                    "instruction": "替换占位后确认安排",
+                    "evidence_count": 2,
+                    "intent": "acknowledgement",
+                    "manually_edited": True,
+                },
+                {
+                    "id": "generated-b",
+                    "kind": "style",
+                    "situation": "接住话题时",
+                    "pattern": "好呀，____",
+                    "instruction": "替换占位后继续接话",
+                    "evidence_count": 2,
+                    "intent": "acknowledgement",
+                },
+            ]
+        }
+
+        self.harness._prune_invalid_expression_rules(profile)
+        analysis = self.harness._expression_rule_duplicate_analysis(*profile["learned_rules"])
+
+        self.assertEqual(2, len(profile["learned_rules"]))
+        self.assertEqual("same_pattern", analysis["code"])
+        self.assertFalse(analysis["auto_merge"])
+
+    def test_model_selected_existing_rule_can_absorb_a_valid_near_variant(self):
+        profile = {
+            "learned_rules": [
+                {
+                    "id": "sleep-rule",
+                    "kind": "style",
+                    "situation": "暂时解决不了问题时收尾",
+                    "pattern": "事已至此，先睡觉",
+                    "instruction": "用完整短句自然收尾",
+                    "keywords": ["收尾", "无奈"],
+                    "evidence_count": 2,
+                    "intent": "casual",
+                    "last_batch_key": "batch-a",
+                }
+            ]
+        }
+        candidate = {
+            "id": "sleep-variant",
+            "merge_into_id": "sleep-rule",
+            "kind": "style",
+            "situation": "无法继续推进话题时准备休息",
+            "pattern": "事已至此，先睡觉吧",
+            "instruction": "轻松结束当前话题",
+            "keywords": ["休息", "结束话题"],
+            "evidence_count": 2,
+            "intent": "casual",
+        }
+
+        self.harness._merge_learned_expression_rules(
+            profile,
+            [candidate],
+            batch_key="batch-b",
+            now=time.time(),
+        )
+
+        self.assertEqual(1, len(profile["learned_rules"]))
+        self.assertEqual("sleep-rule", profile["learned_rules"][0]["id"])
+        self.assertEqual(4, profile["learned_rules"][0]["evidence_count"])
+
+    def test_model_diagnostics_cover_private_group_and_runtime_rule_duplicates(self):
+        duplicate_rules = [
+            {
+                "id": "rule-a",
+                "kind": "style",
+                "situation": "没听懂时",
+                "pattern": "什么",
+                "instruction": "直接简短表示疑问",
+                "evidence_count": 2,
+                "intent": "question",
+            },
+            {
+                "id": "rule-b",
+                "kind": "style",
+                "situation": "感到疑惑时",
+                "pattern": "什么",
+                "instruction": "不添加多余修饰",
+                "evidence_count": 2,
+                "intent": "question",
+            },
+        ]
+        data = {
+            "users": {
+                "owner-1": {
+                    "nickname": "主要用户",
+                    "expression_profile": {"learned_rules": [dict(item) for item in duplicate_rules]},
+                }
+            },
+            "groups": {
+                "group-1": {
+                    "name": "日常群",
+                    "expression_profile": {"pending_rules": [dict(item) for item in duplicate_rules]},
+                }
+            },
+            "expression_voice_profile": {"learned_rules": [dict(item) for item in duplicate_rules]},
+        }
+        self.harness.max_learned_expression_items = 2
+        api = PrivateCompanionPageApi(self.harness)
+
+        items = api._model_diagnostics_expression_candidates(data)
+
+        duplicate_items = [item for item in items if item.get("category") == "duplicate_rule"]
+        self.assertEqual({"private", "group"}, {item["source_type"] for item in duplicate_items})
+        self.assertTrue(any(item.get("category") == "runtime_budget" for item in items))
+        self.assertTrue(all("规则" in item["reason"] or "合并" in item["reason"] for item in duplicate_items))
+
+    def test_group_observation_title_exposes_aggregation_dimensions(self):
+        summary = PrivateCompanionPageApi(self.harness)._expression_profile_summary(
+            {
+                "expression_profile": {
+                    "samples": [{
+                        "id": "group-pattern",
+                        "scene": "question",
+                        "features": ["short", "question"],
+                        "length": 5,
+                        "length_bucket": "2-6",
+                        "punctuation": {"？": 3},
+                        "evidence_count": 3,
+                        "ts": time.time(),
+                    }]
+                }
+            },
+            source_type="group",
+        )
+
+        self.assertIn("2-6 字", summary["samples"][0]["pattern_label"])
+        self.assertIn("含 ？", summary["samples"][0]["pattern_label"])
+
     def test_keyword_retrieval_uses_safe_template_and_drops_legacy_identifier_pattern(self):
         owner = {
             "user_id": "owner-1",
@@ -932,6 +1149,51 @@ class ExpressionLearningTests(unittest.TestCase):
             50,
             api._normalize_setting_value("expression_group_learning_daily_batch_limit", 999),
         )
+
+
+class ExpressionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_diagnostics_endpoint_surfaces_expression_duplicate_section_without_model(self):
+        harness = ExpressionLearningHarness()
+        harness._data_lock = asyncio.Lock()
+        harness.data = {
+            "users": {
+                "owner-1": {
+                    "nickname": "主要用户",
+                    "expression_profile": {
+                        "learned_rules": [
+                            {
+                                "id": "duplicate-a",
+                                "kind": "style",
+                                "situation": "卖萌表达情绪时",
+                                "pattern": "____喵",
+                                "instruction": "替换占位后自然使用",
+                                "evidence_count": 3,
+                                "intent": "casual",
+                            },
+                            {
+                                "id": "duplicate-b",
+                                "kind": "style",
+                                "situation": "卖萌回应时",
+                                "pattern": "____喵",
+                                "instruction": "在回应末尾加喵",
+                                "evidence_count": 2,
+                                "intent": "casual",
+                            },
+                        ]
+                    },
+                }
+            },
+            "groups": {},
+        }
+        api = PrivateCompanionPageApi(harness)
+
+        result = await api._run_model_diagnostics_check({"use_model": False})
+
+        expression_section = next(section for section in result["sections"] if section["key"] == "expression")
+        self.assertEqual("表达规则重复与污染", expression_section["title"])
+        self.assertGreaterEqual(expression_section["local_count"], 1)
+        self.assertTrue(any("____喵" in item for item in expression_section["suggestions"]))
+        self.assertEqual("本次按请求仅执行本地规则检查", result["steps"][-1]["detail"])
 
 
 class PrivateEpisodeExpressionHarness(ExpressionLearningHarness):
@@ -1112,6 +1374,34 @@ class EpisodeExpressionLearningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("只分析“用户:”行", harness.last_prompt)
         self.assertIn("style_expressions", harness.last_prompt)
         self.assertIn("grammar_expressions", harness.last_prompt)
+        self.assertIn("【已有表达规则】", harness.last_prompt)
+        self.assertIn("merge_into_id", harness.last_prompt)
+
+    async def test_private_episode_reinforces_approved_rule_instead_of_queuing_duplicate(self):
+        harness = PrivateEpisodeExpressionHarness()
+        harness._get_user(harness.user_id)["expression_profile"] = {
+            "learned_rules": [{
+                "id": "approved-ack",
+                "kind": "style",
+                "situation": "表示赞同并继续接话",
+                "pattern": "好呀，那就____",
+                "instruction": "替换占位内容后自然延续",
+                "keywords": ["赞同", "确认"],
+                "evidence_count": 2,
+                "intent": "acknowledgement",
+                "last_batch_key": "older-batch",
+            }]
+        }
+
+        await harness._maybe_refresh_dialogue_episode(harness.user_id, harness._get_user(harness.user_id))
+
+        profile = harness._get_user(harness.user_id)["expression_profile"]
+        self.assertEqual(1, len(profile["learned_rules"]))
+        self.assertEqual("approved-ack", profile["learned_rules"][0]["id"])
+        self.assertEqual(7, profile["learned_rules"][0]["evidence_count"])
+        self.assertEqual(1, len(profile["pending_rules"]))
+        self.assertEqual("grammar", profile["pending_rules"][0]["kind"])
+        self.assertIn("id=approved-ack", harness.last_prompt)
 
     async def test_group_episode_piggybacks_privacy_safe_rule_generation(self):
         harness = GroupEpisodeExpressionHarness()
@@ -1125,6 +1415,8 @@ class EpisodeExpressionLearningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("好呀，那就____", style_rule["pattern"])
         self.assertEqual(["好呀~", "行啦~"], style_rule["evidence_examples"])
         self.assertIn("可直接借鉴的短表达", harness.last_prompt)
+        self.assertIn("【已有表达规则】", harness.last_prompt)
+        self.assertIn("merge_into_id", harness.last_prompt)
         self.assertIn("只做中性、安全的概括", harness.last_prompt)
         self.assertIn("不重现敏感原话", harness.last_prompt)
         self.assertNotIn("严禁复制成员原句", harness.last_prompt)

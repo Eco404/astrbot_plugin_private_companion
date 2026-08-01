@@ -21,6 +21,14 @@ class _FakeEvent:
         return "10001"
 
 
+class _FakeGroupEvent(_FakeEvent):
+    unified_msg_origin = "default:GroupMessage:group-1"
+
+    @staticmethod
+    def is_private_chat() -> bool:
+        return False
+
+
 class _QuotaHarness(CommandHandlersMixin):
     def __init__(self, limit: int, *, used: int = 0, day: str = "2026-07-22") -> None:
         self.command_photo_generation_max_daily = limit
@@ -112,6 +120,28 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["sent"])
         self.assertTrue(payload["must_not_claim_sent"])
         self.assertFalse(harness.generated)
+
+    async def test_group_sender_is_not_created_as_private_user(self) -> None:
+        harness = _ToolQuotaHarness(0, used=0)
+        harness.data = {"users": {}}
+        harness._is_target_private_user = lambda _user_id, _user: False
+
+        def fail_if_group_sender_is_created(_user_id: str) -> dict:
+            raise AssertionError("group sender must not be created in private users")
+
+        harness._get_user = fail_if_group_sender_is_created
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeGroupEvent(),
+                prompt="画一张夏日海边照片",
+            )
+        )
+
+        self.assertEqual(payload["status"], "unauthorized")
+        self.assertFalse(payload["generated"])
+        self.assertFalse(payload["sent"])
+        self.assertEqual({}, harness.data["users"])
 
     def test_config_is_visible_persistable_and_zero_based(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))

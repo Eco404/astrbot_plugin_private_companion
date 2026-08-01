@@ -23,10 +23,13 @@ class ReactionExpressionUiTests(unittest.TestCase):
 
         self.assertFalse(items["enable_reaction_expression_experiment"]["default"])
         self.assertTrue(items["reaction_expression_private_enabled"]["default"])
+        self.assertTrue(items["reaction_expression_proactive_enabled"]["default"])
         self.assertFalse(items["reaction_expression_group_enabled"]["default"])
         for key in (
             "reaction_expression_private_enabled",
+            "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
+            "reaction_expression_delivery_mode",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_semantic_trigger_enabled",
@@ -44,7 +47,9 @@ class ReactionExpressionUiTests(unittest.TestCase):
         for key in (
             "enable_reaction_expression_experiment",
             "reaction_expression_private_enabled",
+            "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
+            "reaction_expression_delivery_mode",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_semantic_trigger_enabled",
@@ -60,6 +65,18 @@ class ReactionExpressionUiTests(unittest.TestCase):
         items = self.schema["experimental_motivation_config"]["items"]
 
         self.assertTrue(items["reaction_expression_low_latency_mode"]["default"])
+        self.assertEqual(
+            "separate_after",
+            items["reaction_expression_delivery_mode"]["default"],
+        )
+        self.assertEqual(
+            ["separate_after", "same_message", "separate_before"],
+            items["reaction_expression_delivery_mode"]["options"],
+        )
+        self.assertEqual(
+            ["正文后单独发送（推荐）", "与正文同一消息链", "正文前单独发送"],
+            items["reaction_expression_delivery_mode"]["labels"],
+        )
         self.assertEqual(0.2, items["reaction_expression_trigger_probability"]["default"])
         self.assertEqual({"min": 0, "max": 1, "step": 0.01}, items["reaction_expression_trigger_probability"]["slider"])
         self.assertEqual(180, items["reaction_expression_cooldown_seconds"]["default"])
@@ -72,6 +89,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
         self.assertIn('"enable_reaction_expression_experiment",', self.script)
         self.assertIn('label: "表情表达实验"', self.script)
         self.assertIn('title: "适用会话"', self.script)
+        self.assertIn('title: "发送方式"', self.script)
         self.assertIn('title: "触发节奏"', self.script)
         self.assertIn('title: "性能策略"', self.script)
         self.assertIn('theme: "expression"', self.script)
@@ -81,7 +99,9 @@ class ReactionExpressionUiTests(unittest.TestCase):
     def test_panel_exposes_compact_performance_controls(self) -> None:
         for key in (
             "reaction_expression_private_enabled",
+            "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
+            "reaction_expression_delivery_mode",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_semantic_trigger_enabled",
@@ -90,7 +110,23 @@ class ReactionExpressionUiTests(unittest.TestCase):
         ):
             self.assertIn(key, self.script)
         self.assertIn('reaction_expression_trigger_probability: { type: "number", min: 0, max: 100, step: 1 }', self.script)
+        self.assertIn(
+            'reaction_expression_delivery_mode: { type: "select", options: [["separate_after", "正文后单独发送（推荐）"], ["same_message", "与正文同一消息链"], ["separate_before", "正文前单独发送"]] }',
+            self.script,
+        )
         self.assertIn('reaction_expression_candidate_limit: { type: "number", min: 1, max: 16, step: 1 }', self.script)
+        self.assertIn(
+            'const deliveryMode = String(settings.reaction_expression_delivery_mode || "separate_after");',
+            self.script,
+        )
+        self.assertIn("function featureSettingAccessibility(key, prefix", self.script)
+        self.assertIn('aria-labelledby="${escapeHtml(labelId)}"', self.script)
+        self.assertIn('aria-describedby="${escapeHtml(descriptionId)}"', self.script)
+        self.assertIn(
+            "featureSettingInput(name, value, accessibility)",
+            self.script,
+        )
+        self.assertIn('["发送方式", deliveryModeLabels[deliveryMode] || deliveryModeLabels.separate_after]', self.script)
         self.assertIn("低延迟模式不调用额外选图模型", self.script)
         self.assertIn("插件仍只执行一次图库检索", self.script)
         self.assertIn("overview?.reaction_expression", self.script)
@@ -104,6 +140,12 @@ class ReactionExpressionUiTests(unittest.TestCase):
         self.assertIn("没有足够合适的候选时保持纯文字", self.script)
         self.assertIn('["模型调用", "仅主回复 1 次"]', self.script)
         self.assertIn("绝不会用图片替代正文", self.script)
+        self.assertNotIn("只把合适图片追加在文字后", self.script)
+        self.assertNotIn(
+            "只把合适图片追加在文字后",
+            self.schema["experimental_motivation_config"]["items"]
+            ["enable_reaction_expression_experiment"]["hint"],
+        )
 
     def test_runtime_panel_initializes_trigger_mode_summary_locally(self) -> None:
         runtime_source = self.script.split(

@@ -195,6 +195,36 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.saved_image, (generated, "data-uri-edit", ".webp"))
         self.assertEqual(len(calls), 1)
 
+    async def test_gpt_image_two_submits_multiple_reference_images(self) -> None:
+        harness = ImageDiagnosticHarness()
+        calls: list[dict[str, object]] = []
+        generated = base64.b64encode(b"\x89PNG\r\n\x1a\nmulti-reference").decode("ascii")
+        responses = [SequenceResponse(200, {"data": [{"b64_json": generated}]})]
+
+        def session_factory(**kwargs):
+            return SequenceSession(responses, calls, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bot_reference = Path(temp_dir) / "bot.png"
+            role_reference = Path(temp_dir) / "sister.webp"
+            bot_reference.write_bytes(b"bot-reference")
+            role_reference.write_bytes(b"role-reference")
+            with patch("aiohttp.ClientSession", new=session_factory):
+                path, note = await harness._run_external_photo_generation_once(
+                    "Bot and her sister in one coherent photo",
+                    session_key="multi-reference-edit",
+                    reference_image_path=str(bot_reference),
+                    reference_image_paths=(str(role_reference),),
+                )
+
+        self.assertEqual(path, "C:/temp/private-companion-result.png")
+        self.assertIn("已使用 2 张参考图", note)
+        self.assertEqual(len(calls), 1)
+        form = calls[0]["data"]
+        field_names = [field[0].get("name") for field in getattr(form, "_fields", [])]
+        self.assertEqual(field_names.count("image[]"), 2)
+        self.assertNotIn("image", field_names)
+
     async def test_generation_falls_back_to_url_when_b64_json_is_invalid(self) -> None:
         harness = ImageDiagnosticHarness()
         calls: list[dict[str, object]] = []

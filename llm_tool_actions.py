@@ -151,10 +151,14 @@ _REACTION_LOG_REASONS = frozenset(
         "duplicate_image",
         "attachment_state_failed",
         "attachment_appended",
+        "attachment_prepared",
+        "delivered_before_primary",
         "attachment_file_missing",
         "attachment_component_failed",
         "attachment_removed",
         "platform_not_sent",
+        "primary_not_delivered",
+        "delivery_not_started",
         "awaiting_platform_send",
         "delivered",
         "delivery_uncertain",
@@ -366,9 +370,16 @@ class LlmToolActionsMixin:
         text: Any,
         *,
         create_for_opt_out: bool = False,
+        event: Any = None,
     ) -> dict[str, Any] | None:
         """Resolve the canonical user that owns per-conversation feedback."""
         normalized_id = _single_line(user_id, 160)
+        if event is not None and self._reaction_expression_scope(event) == "group":
+            return self._reaction_expression_state_owner(
+                event,
+                normalized_id,
+                create=bool(create_for_opt_out and reaction_expression_explicit_opt_out(text)),
+            )
         data = getattr(self, "data", None)
         users = data.get("users") if isinstance(data, dict) else None
         if not normalized_id or not isinstance(users, dict):
@@ -571,6 +582,8 @@ class LlmToolActionsMixin:
                     "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
                     '- 普通场景/物件/风景：仅当画面中不出现角色本人时，传 `{"prompt":"画面描述","kind":"text2img"}`，可用 `scene_preset` 建议“可拍画面/房间日常”；该字段只是建议，不会覆盖用户原话或参考图约束。把它写成角色镜头看到的画面，不要擅自加入拍摄者、陌生女孩或人物背影。纯梗图或无角色贴纸才用 `text2img + scene_preset="表情包场景"`。',
                     '- 角色本人以任何形式出镜，包括自拍、背影、侧脸、环境人像、头像、穿搭或 COS：传 `{"prompt":"画面要求","kind":"selfie"}`，可用 `scene_preset` 建议“角色自拍/COS自拍/日常穿搭/居家睡衣/镜前穿搭/头像特写”；明确睡衣、睡裙、睡袍或睡前卧室自拍时优先建议“居家睡衣”，普通穿搭才建议“日常穿搭”，只有明确“镜前/对镜/镜子”时才建议镜前穿搭；最终只采用一个兼容预设。只有开启参考图一致性时，未传参考图才会自动使用配置的人设参考图或今日穿搭参考图。',
+                    '- 自拍也应延续角色此刻的生活状态。结合本轮已有的当前日程、位置和对话判断：如果角色正在上课、通勤或处理别的事，而用户想看海边、旅行地等明显不在当前现场的自拍，优先保持生活连续性，不要让角色像瞬间换了地点。用户只是想看这类画面时，通常可以自然理解为分享之前拍的、相册里的照片；仍可调用 `pc_generate_photo`，在 prompt 中说明按此前拍摄的照片呈现，并在 `caption` 里用角色口吻轻轻交代来源。',
+                    '- 这不是固定拒绝规则。当前状态没有明显冲突、用户是在延续刚才的拍摄情境，或语境本来就是设想/COS/创作时，可以照常生成；只有用户明确强调“现在、立刻、现场拍”且与当前活动明显不合适时，再自然商量晚点拍。不要向用户复述内部日程判断或规则。',
                     '- 用户在刚发出的角色照片后要求“比个心、看镜头、换个动作/表情/角度、再来一张”等自然续拍时，仍使用 `kind="selfie"`，并在 prompt 中说明只改变这次要求的部分、其余人物穿搭与场景继续保持；不必猜测或手填上一张图片路径，插件会在同一会话内交给选图模型判断是否复用。明确换装、换地点、换人物或另起主题时按新要求生成。',
                     '- 合影、合照、双人或多人同框必须有本轮携带或引用的其他人物参考图；Bot 单人人设图和今日穿搭图都不算，纯文字关系卡都不算其他人物参考，模型自行填写的本地路径/URL 也不能单独授权合影。没有本轮参考图时不要调用生图，也不要凭文字捏造另一张脸；可以说明需要先发或引用参考图。',
                     '- 如果前几轮文字剧情已经明确让角色换装，而本轮只说“继续、再拍一张、保持刚才的穿搭”等，不要把它理解成恢复今日穿搭。必须把仍有效的具体服装展开写进 prompt，例如“角色当前仍穿 JK 校服，保持本轮地点和人物连续性”；当前对话已发生的换装高于日程、人格默认衣着、每日穿搭参考图和旧图片。',
@@ -819,7 +832,9 @@ class LlmToolActionsMixin:
         return cleaned, parsed_intent
 
     def _creative_work_tool_instruction(self) -> str:
-        if not self.enabled:
+        if not self.enabled or not getattr(
+            self, "enable_creative_work_read_guard", True
+        ):
             return ""
         return """
 【书柜与自己的创作读取工具】
@@ -833,6 +848,7 @@ class LlmToolActionsMixin:
 - 不得把被动提示中的短片段、长期记忆或聊天印象冒充完整原文；找不到作品或部分时如实说明，并可根据 candidates 请用户进一步说明。
 - 这是只读工具，不能修改、续写或删除创作。
 - 用户只是让你讲一个、编一个或说一个新故事，或泛泛地让你讲“你的故事”时，不是在读取书柜作品，不要调用此工具；只有用户明确提到你写过的故事、某篇作品、书柜内容、原文或具体章节时才读取。
+- 用户要求查看配置文件、数据文件、日志、源码、代码、脚本、插件目录或配置项时，不是在读取书柜作品；即使文件或配置名称中包含“创作”“作品”等词，也不要调用此工具，不要把技术文件问答改写成创作原文读取失败。
 """.strip()
 
     @staticmethod
@@ -857,6 +873,18 @@ class LlmToolActionsMixin:
     def _creative_work_query_instruction_matches(self, text: Any) -> bool:
         normalized = _single_line(text, 260)
         if not normalized:
+            return False
+        technical_file_terms = (
+            "配置文件", "数据文件", "日志文件", "代码文件", "项目文件", "插件文件",
+            "配置项", "配置键", "配置目录", "插件目录", "文件目录", "文件夹",
+            "源码", "源代码", "代码", "脚本", "仓库", "数据库", "报错日志",
+        )
+        technical_extensions = re.search(
+            r"(?:^|[\\/\s])[^\\/\s]{1,100}\.(?:json|ya?ml|toml|ini|cfg|conf|env|py|js|ts|tsx|jsx|md|txt|log|db|sqlite3?)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if any(token in normalized for token in technical_file_terms) or technical_extensions:
             return False
         if self._creative_work_inventory_query_matches(normalized):
             return True
@@ -1111,6 +1139,8 @@ class LlmToolActionsMixin:
 
     def _guard_unread_creative_work_response(self, event: AstrMessageEvent, text: Any) -> str:
         raw = str(text or "")
+        if not getattr(self, "enable_creative_work_read_guard", True):
+            return raw
         if not bool(getattr(event, "private_companion_creative_work_tool_required", False)):
             return raw
         inbound_text = str(getattr(event, "message_str", "") or "")
@@ -2363,17 +2393,84 @@ class LlmToolActionsMixin:
                     },
                     ensure_ascii=False,
                 )
+            # Group senders are not private users by default.  Looking them up
+            # through ``_get_user`` would create a new private record (and the
+            # configured fallback nickname) before authorization can reject it.
+            scope_getter = getattr(self, "_reaction_expression_scope", None)
+            try:
+                request_scope = (
+                    _single_line(scope_getter(event), 16).casefold()
+                    if callable(scope_getter)
+                    else "private"
+                )
+            except Exception:
+                request_scope = "private"
+
+            def existing_private_user(raw_id: str) -> dict[str, Any] | None:
+                data = getattr(self, "data", None)
+                users = data.get("users") if isinstance(data, dict) else None
+                if not isinstance(users, dict):
+                    return None
+                normalized = _single_line(raw_id, 160)
+                if not normalized:
+                    return None
+                canonical = normalized
+                canonicalizer = getattr(self, "_canonical_private_user_id", None)
+                if callable(canonicalizer):
+                    try:
+                        canonical = _single_line(canonicalizer(normalized), 160) or normalized
+                    except Exception:
+                        canonical = normalized
+                for candidate_id in dict.fromkeys((normalized, canonical)):
+                    candidate = users.get(candidate_id)
+                    if isinstance(candidate, dict):
+                        return candidate
+                for candidate in users.values():
+                    if not isinstance(candidate, dict):
+                        continue
+                    aliases = candidate.get("alias_user_ids")
+                    if (
+                        _single_line(candidate.get("user_id"), 160) in {normalized, canonical}
+                        or isinstance(aliases, list)
+                        and any(_single_line(alias, 160) in {normalized, canonical} for alias in aliases)
+                    ):
+                        return candidate
+                return None
+
             data_lock = getattr(self, "_data_lock", None)
             if data_lock is not None:
                 async with data_lock:
-                    requester = user_getter(requester_id)
+                    requester = (
+                        existing_private_user(requester_id)
+                        if request_scope == "group"
+                        else user_getter(requester_id)
+                    )
+                    # A configured target may legitimately be encountered in a
+                    # group before its first private message; retain that
+                    # existing behavior for the explicit target only.
+                    if (
+                        request_scope == "group"
+                        and requester is None
+                        and target_checker(requester_id, None)
+                    ):
+                        requester = user_getter(requester_id)
                     requester_authorized = bool(
                         isinstance(requester, dict)
                         and target_checker(requester_id, requester)
                         and requester.get("enabled", True)
                     )
             else:
-                requester = user_getter(requester_id)
+                requester = (
+                    existing_private_user(requester_id)
+                    if request_scope == "group"
+                    else user_getter(requester_id)
+                )
+                if (
+                    request_scope == "group"
+                    and requester is None
+                    and target_checker(requester_id, None)
+                ):
+                    requester = user_getter(requester_id)
                 requester_authorized = bool(
                     isinstance(requester, dict)
                     and target_checker(requester_id, requester)
@@ -3071,6 +3168,55 @@ class LlmToolActionsMixin:
         scope = cls._reaction_expression_scope(event)
         return f"{scope}:{_single_line(user_id, 160) or 'unknown'}"
 
+    def _reaction_expression_state_owner(
+        self,
+        event: Any,
+        user_id: Any,
+        *,
+        create: bool = True,
+        scope: str = "",
+        scope_key: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the state owner without turning group senders into private users."""
+        normalized_id = _single_line(user_id, 160)
+        if not normalized_id:
+            return None
+        resolved_scope = _single_line(scope, 16).casefold()
+        if not resolved_scope:
+            resolved_scope = self._reaction_expression_scope(event) if event is not None else "private"
+        if resolved_scope != "group":
+            getter = getattr(self, "_get_user", None)
+            if not callable(getter):
+                return None
+            try:
+                owner = getter(normalized_id)
+            except Exception:
+                return None
+            return owner if isinstance(owner, dict) else None
+
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return None
+        resolved_scope_key = _single_line(scope_key, 240)
+        if not resolved_scope_key:
+            resolved_scope_key = self._reaction_expression_scope_key(event, normalized_id)
+        state_key = _single_line(f"{resolved_scope_key}|sender:{normalized_id}", 420)
+        if not state_key:
+            return None
+        states = data.get("reaction_expression_group_states")
+        if not isinstance(states, dict):
+            if not create:
+                return None
+            states = {}
+            data["reaction_expression_group_states"] = states
+        owner = states.get(state_key)
+        if not isinstance(owner, dict):
+            if not create:
+                return None
+            owner = {}
+            states[state_key] = owner
+        return owner
+
     @staticmethod
     def _reaction_expression_authorization(event: Any) -> dict[str, Any]:
         raw = getattr(
@@ -3471,13 +3617,11 @@ class LlmToolActionsMixin:
             return {}
         profile = authorization.get("profile_snapshot")
         if not isinstance(profile, dict) or not profile:
-            getter = getattr(self, "_get_user", None)
-            if not callable(getter):
-                return {}
-            try:
-                user = getter(user_id)
-            except Exception:
-                return {}
+            user = self._reaction_expression_state_owner(
+                event,
+                user_id,
+                create=False,
+            )
             if not isinstance(user, dict):
                 return {}
             profile = user.get("intent_profile")
@@ -3647,7 +3791,9 @@ class LlmToolActionsMixin:
             86400.0,
         )
         async with self._data_lock:
-            user = self._get_user(user_id)
+            user = self._reaction_expression_state_owner(event, user_id)
+            if not isinstance(user, dict):
+                return False
             state = ensure_reaction_expression_state(user)
             scoped_state = reaction_expression_scope_state(state, scope_key)
             probability = reaction_expression_effective_probability(
@@ -3719,7 +3865,9 @@ class LlmToolActionsMixin:
         if authorization["authorized"]:
             if authorization.get("trigger_mode") in {"semantic_rule", "strong_emotion"}:
                 async with self._data_lock:
-                    user = self._get_user(user_id)
+                    user = self._reaction_expression_state_owner(event, user_id)
+                    if not isinstance(user, dict):
+                        return bool(authorization["authorized"])
                     state = ensure_reaction_expression_state(user)
                     reaction_expression_scope_state(state, scope_key)["last_offer_at"] = now
                     self._persist_reaction_expression_state()
@@ -4199,7 +4347,16 @@ class LlmToolActionsMixin:
         reservation_token = uuid.uuid4().hex
         now = _now_ts()
         async with self._data_lock:
-            user = self._get_user(user_id)
+            user = self._reaction_expression_state_owner(event, user_id)
+            if not isinstance(user, dict):
+                return json.dumps(
+                    self._reaction_expression_skip_result(
+                        "state_unavailable",
+                        event=event,
+                        scope=scope,
+                    ),
+                    ensure_ascii=False,
+                )
             state = ensure_reaction_expression_state(user)
             scoped_state = reaction_expression_scope_state(state, scope_key)
             gate = evaluate_reaction_expression_gate(
@@ -4284,7 +4441,18 @@ class LlmToolActionsMixin:
         if not isinstance(lookup, dict) or not lookup.get("success") or not lookup.get("found"):
             reason = _single_line(lookup.get("status") if isinstance(lookup, dict) else "", 80) or "not_found"
             async with self._data_lock:
-                state = ensure_reaction_expression_state(self._get_user(user_id))
+                state_owner = self._reaction_expression_state_owner(event, user_id)
+                if not isinstance(state_owner, dict):
+                    return json.dumps(
+                        self._reaction_expression_skip_result(
+                            "state_unavailable",
+                            event=event,
+                            scope=scope,
+                            intent=intent,
+                        ),
+                        ensure_ascii=False,
+                    )
+                state = ensure_reaction_expression_state(state_owner)
                 scoped_state = reaction_expression_scope_state(state, scope_key)
                 release_reaction_expression_reservation(
                     scoped_state,
@@ -4330,7 +4498,18 @@ class LlmToolActionsMixin:
             * 3,
         )
         async with self._data_lock:
-            state = ensure_reaction_expression_state(self._get_user(user_id))
+            state_owner = self._reaction_expression_state_owner(event, user_id)
+            if not isinstance(state_owner, dict):
+                return json.dumps(
+                    self._reaction_expression_skip_result(
+                        "state_unavailable",
+                        event=event,
+                        scope=scope,
+                        intent=intent,
+                    ),
+                    ensure_ascii=False,
+                )
+            state = ensure_reaction_expression_state(state_owner)
             scoped_state = reaction_expression_scope_state(state, scope_key)
             final_reason = ""
             if not reaction_expression_reservation_owned(
@@ -4561,7 +4740,18 @@ class LlmToolActionsMixin:
                 else "delivery_failed"
             )
             async with self._data_lock:
-                state = ensure_reaction_expression_state(self._get_user(user_id))
+                state_owner = self._reaction_expression_state_owner(event, user_id)
+                if not isinstance(state_owner, dict):
+                    return json.dumps(
+                        self._reaction_expression_skip_result(
+                            "state_unavailable",
+                            event=event,
+                            scope=scope,
+                            intent=intent,
+                        ),
+                        ensure_ascii=False,
+                    )
+                state = ensure_reaction_expression_state(state_owner)
                 scoped_state = reaction_expression_scope_state(state, scope_key)
                 release_reaction_expression_image(
                     state,
@@ -4609,7 +4799,17 @@ class LlmToolActionsMixin:
             pass
         settled_at = _now_ts()
         async with self._data_lock:
-            user = self._get_user(user_id)
+            user = self._reaction_expression_state_owner(event, user_id)
+            if not isinstance(user, dict):
+                return json.dumps(
+                    self._reaction_expression_skip_result(
+                        "state_unavailable",
+                        event=event,
+                        scope=scope,
+                        intent=intent,
+                    ),
+                    ensure_ascii=False,
+                )
             state = ensure_reaction_expression_state(user)
             record_reaction_expression_sent(
                 state,
@@ -4740,7 +4940,18 @@ class LlmToolActionsMixin:
             return False
 
         async with self._data_lock:
-            user = self._get_user(user_id)
+            user = self._reaction_expression_state_owner(
+                None,
+                user_id,
+                scope=scope,
+                scope_key=scope_key,
+            )
+            if not isinstance(user, dict):
+                self._note_reaction_expression_runtime(
+                    skipped=1,
+                    last_reason=reason or "state_unavailable",
+                )
+                return False
             state = ensure_reaction_expression_state(user)
             scoped_state = reaction_expression_scope_state(state, scope_key)
             if sent:
@@ -5143,7 +5354,16 @@ class LlmToolActionsMixin:
                 user_id = ""
             if user_id:
                 async with self._data_lock:
-                    user = self._get_user(user_id)
+                    user = self._reaction_expression_state_owner(event, user_id)
+                    if not isinstance(user, dict):
+                        return json.dumps(
+                            self._reaction_expression_skip_result(
+                                "state_unavailable",
+                                event=event,
+                                scope=scope,
+                            ),
+                            ensure_ascii=False,
+                        )
                     self._remember_recent_photo_share_snapshot(
                         user,
                         caption=snapshot_caption,

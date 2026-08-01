@@ -11586,81 +11586,242 @@ body.daily-outfit-preview-open {
   line-height: 1.65;
 }
 
-.persona-source-card .module-form {
-  align-items: start;
+.persona-import-panel {
+  margin: 14px 0 16px;
+  overflow: hidden;
+  border: 1px solid rgba(26, 75, 140, 0.18);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow-ring);
 }
 
-.persona-source-card .module-form > label,
-.persona-source-card .module-form > .section-desc {
-  grid-column: 1 / -1;
+.persona-import-panel > summary {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 360px) 18px;
+  gap: 16px;
+  align-items: center;
+  min-height: 72px;
+  padding: 13px 16px;
+  list-style: none;
+  cursor: pointer;
 }
 
-.persona-source-card .module-form > .section-desc {
+.persona-import-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.persona-import-panel > summary::marker {
+  content: "";
+}
+
+.persona-import-panel > summary:hover {
+  background: rgba(238, 247, 243, 0.68);
+}
+
+.persona-import-panel > summary:focus-visible {
+  outline: 2px solid rgba(26, 95, 78, 0.7);
+  outline-offset: -3px;
+}
+
+.persona-import-panel[open] > summary {
+  border-bottom: 1px solid rgba(26, 75, 140, 0.14);
+  background: rgba(247, 250, 248, 0.9);
+}
+
+.persona-import-heading,
+.persona-import-source {
+  display: grid;
+  min-width: 0;
+}
+
+.persona-import-heading {
+  gap: 4px;
+}
+
+.persona-import-heading b {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.persona-import-heading span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.persona-import-source {
+  gap: 3px;
+  justify-items: end;
+  text-align: right;
+}
+
+.persona-import-source small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.persona-import-source strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--accent-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.persona-import-chevron {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg) translate(-2px, -2px);
+}
+
+.persona-import-panel[open] .persona-import-chevron {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.persona-import-body {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+}
+
+.persona-import-note {
   margin: 0;
+  border-left: 3px solid rgba(42, 124, 100, 0.58);
+  padding: 2px 0 2px 11px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
 }
 
 .persona-draft-actions {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  padding: 12px;
-  border: 1px solid rgba(26, 75, 140, 0.14);
-  border-radius: var(--radius);
-  background:
-    radial-gradient(circle at 0 0, rgba(226, 241, 236, 0.92), transparent 44%),
-    rgba(255, 255, 255, 0.72);
-}
-
-.persona-draft-actions button {
-  grid-column: auto;
-  min-width: 168px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(250px, 0.65fr);
+  gap: 18px;
+  align-items: stretch;
 }
 
 .persona-draft-scope {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
-  width: 100%;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
 }
 
-.persona-draft-scope label {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  min-height: 30px;
-  border: 1px solid rgba(26, 75, 140, 0.18);
-  border-radius: 999px;
-  padding: 0 10px;
-  background: rgba(255, 255, 255, 0.72);
-  color: var(--accent-strong);
+.persona-draft-scope legend {
+  margin-bottom: 7px;
+  padding: 0;
+  color: var(--text);
   font-size: 13px;
   font-weight: 700;
 }
 
+.persona-draft-scope-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.persona-draft-scope label {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  min-height: 58px;
+  border: 1px solid rgba(26, 75, 140, 0.18);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+}
+
+.persona-draft-scope label:hover {
+  border-color: rgba(42, 124, 100, 0.42);
+  background: rgba(241, 248, 245, 0.92);
+}
+
+.persona-draft-scope label:has(input:checked) {
+  border-color: rgba(42, 124, 100, 0.48);
+  background: rgba(232, 245, 239, 0.8);
+}
+
 .persona-draft-scope input {
-  width: auto;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
   accent-color: var(--accent-strong);
 }
 
-.persona-draft-actions span {
-  color: var(--muted);
+.persona-draft-scope label > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.persona-draft-scope label b {
+  color: var(--text);
   font-size: 13px;
+}
+
+.persona-draft-scope label small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.persona-draft-submit {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  justify-content: center;
+  min-width: 0;
+  border-left: 1px solid rgba(26, 75, 140, 0.14);
+  padding-left: 18px;
+}
+
+.persona-draft-submit button {
+  align-self: flex-start;
+  min-width: 154px;
+  min-height: 38px;
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 14px;
+  background: var(--accent-strong);
+  color: #fff;
+  box-shadow: 0 6px 14px rgba(24, 81, 67, 0.16);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.persona-draft-submit button:hover {
+  background: #164f42;
+}
+
+.persona-draft-submit button:focus-visible {
+  outline: 2px solid rgba(26, 95, 78, 0.54);
+  outline-offset: 2px;
+}
+
+.persona-draft-submit p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
   line-height: 1.6;
 }
 
 .persona-draft-panel {
-  grid-column: 1 / -1;
   display: grid;
   gap: 12px;
   padding: 14px;
   border: 1px solid rgba(26, 75, 140, 0.18);
   border-radius: var(--radius);
-  background:
-    linear-gradient(135deg, rgba(226, 241, 236, 0.84), rgba(255, 255, 255, 0.94) 48%),
-    #fff;
-  box-shadow: var(--shadow-ring);
+  background: rgba(247, 250, 248, 0.92);
 }
 
 .persona-draft-panel[hidden] {
@@ -11760,6 +11921,39 @@ body.daily-outfit-preview-open {
   border-radius: 999px;
   background: rgba(245, 238, 221, 0.78);
   color: var(--muted);
+}
+
+@media (max-width: 860px) {
+  .persona-import-panel > summary {
+    grid-template-columns: minmax(0, 1fr) 18px;
+    gap: 9px 12px;
+  }
+
+  .persona-import-source {
+    grid-column: 1;
+    justify-items: start;
+    text-align: left;
+  }
+
+  .persona-import-chevron {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .persona-draft-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .persona-draft-scope-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .persona-draft-submit {
+    border-top: 1px solid rgba(26, 75, 140, 0.14);
+    border-left: 0;
+    padding-top: 16px;
+    padding-left: 0;
+  }
 }
 
 .roleplay-form {
@@ -12203,6 +12397,155 @@ body.daily-outfit-preview-open {
   display: grid;
   gap: 7px;
   padding-left: 24px;
+}
+
+.roleplay-knowledge-doc-row {
+  display: grid;
+  gap: 6px;
+}
+
+.roleplay-knowledge-reference,
+.worldbook-reference-assets {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+
+.roleplay-knowledge-reference-head,
+.worldbook-reference-assets-head {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.roleplay-knowledge-reference-head span,
+.worldbook-reference-assets-head span {
+  color: var(--muted);
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+.roleplay-knowledge-reference > small {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.roleplay-knowledge-reference-grid,
+.worldbook-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 7px;
+}
+
+.roleplay-knowledge-reference-tile,
+.worldbook-reference-tile {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 5px;
+  background: var(--surface);
+}
+
+.roleplay-knowledge-reference-tile img,
+.worldbook-reference-tile img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #eee;
+}
+
+.roleplay-knowledge-reference-tile span,
+.worldbook-reference-tile b,
+.worldbook-reference-tile small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roleplay-knowledge-reference-tile span,
+.worldbook-reference-tile b {
+  font-size: 11px;
+}
+
+.worldbook-reference-tile small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.roleplay-knowledge-reference-tile > button,
+.worldbook-reference-tile > button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  min-height: 22px;
+  padding: 0;
+}
+
+.worldbook-reference-missing {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  color: var(--muted);
+  font-size: 11px;
+  background: #f1eee8;
+}
+
+.roleplay-knowledge-reference-upload,
+.worldbook-reference-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.roleplay-knowledge-reference-upload input[type="text"],
+.worldbook-reference-upload input[type="text"] {
+  min-width: 100px;
+  flex: 1 1 120px;
+  min-height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 4px 7px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.worldbook-reference-file {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.worldbook-reference-file input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.roleplay-knowledge-reference-upload button,
+.worldbook-reference-upload button {
+  min-height: 28px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 4px 9px;
+  background: #fff;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
 }
 
 .roleplay-user-card {

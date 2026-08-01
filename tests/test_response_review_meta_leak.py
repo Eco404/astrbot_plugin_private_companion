@@ -93,6 +93,19 @@ class ResponseReviewMetaLeakTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], list(event.result.chain or []))
         self.assertTrue(event.stopped)
 
+    async def test_framework_error_guard_drops_mixed_punctuation_policy_refusal(self):
+        event = _Event(
+            "The。 prompt。 could。not。be。submitted.。The。prompt。contains。sensitive。words。"
+            "that。violate。Google's。[Generative。AI。Prohibited。Use。policy]"
+            "(https://policies.google.com/terms/generative-ai/use-policy).，Tryrephrasingtheprompt.",
+            "",
+        )
+
+        await self.plugin.suppress_framework_error_leak_before_send(event)
+
+        self.assertEqual([], list(event.result.chain or []))
+        self.assertTrue(event.stopped)
+
     def test_group_interjection_fails_closed_on_non_json_review_text(self):
         leaked = "属于正常人无法容忍的一字废话，无法通过清洗正常规整，需要重写"
 

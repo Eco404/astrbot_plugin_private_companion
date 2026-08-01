@@ -18,7 +18,9 @@ from astrbot_plugin_private_companion.reaction_asset_library import ReactionAsse
 ROOT = Path(__file__).resolve().parents[1]
 REACTION_SETTING_KEYS = {
     "reaction_expression_private_enabled",
+    "reaction_expression_proactive_enabled",
     "reaction_expression_group_enabled",
+    "reaction_expression_delivery_mode",
     "reaction_expression_trigger_probability",
     "reaction_expression_cooldown_seconds",
     "reaction_expression_semantic_trigger_enabled",
@@ -130,7 +132,9 @@ class ReactionExpressionPageApiSaveTests(unittest.IsolatedAsyncioTestCase):
             "features": {"enable_reaction_expression_experiment": "true"},
             "settings": {
                 "reaction_expression_private_enabled": "false",
+                "reaction_expression_proactive_enabled": "false",
                 "reaction_expression_group_enabled": "yes",
+                "reaction_expression_delivery_mode": "separate_before",
                 "reaction_expression_trigger_probability": 180,
                 "reaction_expression_cooldown_seconds": 9999,
                 "reaction_expression_semantic_trigger_enabled": "false",
@@ -141,7 +145,9 @@ class ReactionExpressionPageApiSaveTests(unittest.IsolatedAsyncioTestCase):
         expected = {
             "enable_reaction_expression_experiment": True,
             "reaction_expression_private_enabled": False,
+            "reaction_expression_proactive_enabled": False,
             "reaction_expression_group_enabled": True,
+            "reaction_expression_delivery_mode": "separate_before",
             "reaction_expression_trigger_probability": 1.0,
             "reaction_expression_cooldown_seconds": 3600,
             "reaction_expression_semantic_trigger_enabled": False,
@@ -175,6 +181,26 @@ class ReactionExpressionPageApiSaveTests(unittest.IsolatedAsyncioTestCase):
             reloaded = AstrBotConfig(str(config_path), schema=schema)
             for key, value in expected.items():
                 self.assertEqual(_flat_get(reloaded, key), value, key)
+
+    def test_delivery_mode_rejects_unknown_values(self) -> None:
+        api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+        api._schema_key_index_cache = None
+
+        self.assertEqual(
+            "separate_after",
+            api._normalize_setting_value(
+                "reaction_expression_delivery_mode",
+                "unexpected-mode",
+            ),
+        )
+        for mode in ("separate_after", "same_message", "separate_before"):
+            self.assertEqual(
+                mode,
+                api._normalize_setting_value(
+                    "reaction_expression_delivery_mode",
+                    mode.upper(),
+                ),
+            )
 
 
 class ReactionLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):

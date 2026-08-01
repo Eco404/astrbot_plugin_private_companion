@@ -38,7 +38,14 @@ class _ContinuityHarness(ProactiveMessageMixin):
         self.selection_prompt = prompt
         return self.model_reply
 
-    async def _photo_reference_candidates_async(self, *, allow_daily_outfit: bool = True):
+    async def _photo_reference_candidates_async(
+        self,
+        *,
+        allow_daily_outfit: bool = True,
+        requester_user_id: str = "",
+        request_text: str = "",
+        ambient_context: str = "",
+    ):
         return deepcopy(self._normal_candidates)
 
 

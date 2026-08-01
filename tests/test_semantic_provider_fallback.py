@@ -377,6 +377,20 @@ class SemanticProviderFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.direct_fallback_calls, 1)
         self.assertEqual(text, "这是人格化直接兜底。")
 
+    async def test_provider_error_candidate_stops_before_proactive_cleanup(self) -> None:
+        harness = ProactiveMessageMixin()
+
+        text, stage = await harness._finalize_proactive_generated_text(
+            {"user_id": "10001"},
+            _GOOGLE_POLICY_ERROR,
+            name="测试角色",
+            reason="quiet_care",
+            action="message",
+        )
+
+        self.assertEqual(text, "")
+        self.assertEqual(stage, "Provider/API 错误正文")
+
     async def test_tool_call_response_is_not_reclassified(self) -> None:
         calls: list[str] = []
         tool_response = LLMResponse(

@@ -76,6 +76,19 @@ class _PrivateImageRemainderHarness(PrivateImageMixin):
 
 
 class _TtsRemainderHarness(TtsEnhancementMixin):
+    _reaction_expression_flatten_delivery_components = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_flatten_delivery_components
+    )
+    _reaction_expression_delivery_signature = staticmethod(
+        PrivateCompanionPlugin._reaction_expression_delivery_signature
+    )
+    _reaction_expression_primary_reply_confirmed = (
+        PrivateCompanionPlugin._reaction_expression_primary_reply_confirmed
+    )
+    release_tts_reply_remainder_after_send = (
+        PrivateCompanionPlugin.release_tts_reply_remainder_after_send
+    )
+
     def __init__(self) -> None:
         self.enabled = True
         self.enable_tts_enhancement = True
@@ -192,19 +205,88 @@ class BackgroundTaskLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("private_image_reply_remainder", harness.background_jobs[0][1])
         harness.background_jobs[0][0].close()
 
-    async def test_tts_remainder_uses_lifecycle_tracker(self) -> None:
-        harness = _TtsRemainderHarness()
+    @staticmethod
+    def _tts_remainder_event(*, proactive: bool = False) -> Any:
         event = SimpleNamespace(
             _private_companion_tts_request_applied=True,
             unified_msg_origin="default:FriendMessage:1",
             get_result=lambda: SimpleNamespace(chain=[Plain("reply")]),
         )
+        if proactive:
+            event._private_companion_proactive_delivery_umo = (
+                "default:FriendMessage:1"
+            )
         event.set_result = lambda result: setattr(event, "result", result)
+        return event
+
+    async def test_passive_tts_remainder_waits_for_platform_send_confirmation(self) -> None:
+        harness = _TtsRemainderHarness()
+        event = self._tts_remainder_event()
+
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual("voice", event.result.chain[0].text)
+        self.assertEqual([], harness.background_jobs)
+        self.assertEqual(
+            "caption",
+            event._private_companion_tts_reply_remainder["chunks"][0][0].text,
+        )
+
+        event._has_send_oper = True
+        await harness.release_tts_reply_remainder_after_send(event)
+
+        self.assertEqual("tts_reply_remainder", harness.background_jobs[0][1])
+        self.assertFalse(hasattr(event, "_private_companion_tts_reply_remainder"))
+
+        await harness.release_tts_reply_remainder_after_send(event)
+        self.assertEqual(1, len(harness.background_jobs))
+        harness.background_jobs[0][0].close()
+
+    async def test_passive_tts_remainder_is_not_released_when_platform_did_not_send(
+        self,
+    ) -> None:
+        harness = _TtsRemainderHarness()
+        event = self._tts_remainder_event()
+
+        await harness.apply_tts_enhancement_before_send(event)
+        event._has_send_oper = False
+        await harness.release_tts_reply_remainder_after_send(event)
+
+        self.assertEqual([], harness.background_jobs)
+        self.assertFalse(hasattr(event, "_private_companion_tts_reply_remainder"))
+
+    async def test_passive_tts_remainder_is_not_released_after_partial_primary_send(
+        self,
+    ) -> None:
+        harness = _TtsRemainderHarness()
+        event = SimpleNamespace(
+            _has_send_oper=True,
+            _private_companion_tts_reply_remainder={
+                "chunks": [[Plain("余下正文")]],
+                "started_at": 1.0,
+            },
+            _private_companion_reaction_expression_delivery_tracker={
+                "successful_signatures": [("plain", "第一段。")],
+            },
+            get_result=lambda: SimpleNamespace(
+                chain=[Plain("第一段。"), Plain("第二段。")]
+            ),
+        )
+
+        await harness.release_tts_reply_remainder_after_send(event)
+
+        self.assertEqual([], harness.background_jobs)
+        self.assertFalse(hasattr(event, "_private_companion_tts_reply_remainder"))
+
+    async def test_proactive_tts_remainder_starts_immediately(self) -> None:
+        harness = _TtsRemainderHarness()
+        event = self._tts_remainder_event(proactive=True)
 
         await harness.apply_tts_enhancement_before_send(event)
 
         self.assertEqual("voice", event.result.chain[0].text)
         self.assertEqual("tts_reply_remainder", harness.background_jobs[0][1])
+        self.assertFalse(hasattr(event, "_private_companion_tts_reply_remainder"))
         harness.background_jobs[0][0].close()
 
     async def test_reply_interception_forward_uses_lifecycle_tracker(self) -> None:

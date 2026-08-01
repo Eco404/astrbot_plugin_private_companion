@@ -270,6 +270,7 @@ process.stdout.write(JSON.stringify({{ precision, quick }}));
             "LLM_PROVIDER_ID": "new-main",
             "MAI_STYLE_PROVIDER_ID": "new-style",
             "CREATIVE_PROVIDER_ID": "new-creative",
+            "NARRATION_PROVIDER_ID": "new-narration",
             "PRIVATE_READING_VISION_PROVIDER_ID": "new-vision",
         }
 
@@ -278,7 +279,7 @@ process.stdout.write(JSON.stringify({{ precision, quick }}));
         self.assertEqual(bundle["FAST_RESPONSE_PROVIDER_ID"], "new-style")
         self.assertEqual(bundle["COMPLEX_REASONING_PROVIDER_ID"], "new-main")
         self.assertEqual(bundle["CREATIVE_MODEL_PROVIDER_ID"], "new-creative")
-        self.assertEqual(bundle["PLUGIN_VISION_PROVIDER_ID"], "new-vision")
+        self.assertEqual(bundle["PLUGIN_VISION_PROVIDER_ID"], "new-narration")
 
     def test_page_api_accepts_and_serializes_fallback_map(self) -> None:
         api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)

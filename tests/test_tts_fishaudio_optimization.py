@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
@@ -448,6 +448,78 @@ class FishAudioTtsOptimizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(source, recorded_source)
         finally:
             Path(audio_path).unlink(missing_ok=True)
+
+    async def test_background_record_retries_connection_and_timeout_only_once(
+        self,
+    ) -> None:
+        for transient_error in (
+            ConnectionError("connection interrupted"),
+            TimeoutError("provider timeout"),
+        ):
+            with self.subTest(error_type=type(transient_error).__name__):
+                harness = _TtsHarness()
+                generate = AsyncMock(side_effect=transient_error)
+                harness._tts_generate_audio_path = generate
+
+                with patch(
+                    "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+                    new=AsyncMock(),
+                ) as retry_sleep:
+                    component = await harness._tts_record_component(
+                        "重试测试。",
+                        object(),
+                        {},
+                        {},
+                        retry_transient=True,
+                        defer_delivery_effects=True,
+                    )
+
+                self.assertIsNone(component)
+                self.assertEqual(2, generate.await_count)
+                retry_sleep.assert_awaited_once_with(0.2)
+
+    async def test_foreground_record_does_not_retry_transient_error(self) -> None:
+        harness = _TtsHarness()
+        generate = AsyncMock(side_effect=ConnectionError("connection interrupted"))
+        harness._tts_generate_audio_path = generate
+
+        with patch(
+            "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+            new=AsyncMock(),
+        ) as retry_sleep:
+            component = await harness._tts_record_component(
+                "前台测试。",
+                object(),
+                {},
+                {},
+                defer_delivery_effects=True,
+            )
+
+        self.assertIsNone(component)
+        self.assertEqual(1, generate.await_count)
+        retry_sleep.assert_not_awaited()
+
+    async def test_background_record_does_not_retry_permanent_error(self) -> None:
+        harness = _TtsHarness()
+        generate = AsyncMock(side_effect=ValueError("invalid provider parameter"))
+        harness._tts_generate_audio_path = generate
+
+        with patch(
+            "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+            new=AsyncMock(),
+        ) as retry_sleep:
+            component = await harness._tts_record_component(
+                "永久错误测试。",
+                object(),
+                {},
+                {},
+                retry_transient=True,
+                defer_delivery_effects=True,
+            )
+
+        self.assertIsNone(component)
+        self.assertEqual(1, generate.await_count)
+        retry_sleep.assert_not_awaited()
 
     async def test_realtime_japanese_voice_converts_chinese_before_synthesis(self) -> None:
         harness = _RealtimeHarness("うん、一緒に見よう。")

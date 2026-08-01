@@ -265,24 +265,37 @@ class ProactiveFactGroundingTests(unittest.TestCase):
         self.assertIn("仅本地检查模式", decision["reason"])
         self.assertFalse(harness.rewrite_called)
 
-    def test_long_creative_share_is_locally_shortened_instead_of_dropped(self) -> None:
+    def test_unanswered_message_is_not_sliced_at_an_arbitrary_character(self) -> None:
         harness = _ActualLocalReviewDisabledHarness()
-        original = "刚写到推门进庭院那段，风穿过常绿树的声音写得有点入迷，像在听一首很轻的歌谣。"
+        original = "比折大人… 刚对完物理卷子，手肘有点酸呢。 突然好想吃点甜的哦，你晚饭吃过了没呀？可不许拿小零食对付啦～"
 
         decision = asyncio.run(
             harness._review_proactive_message_send_decision(
                 {"nickname": "测试用户", "ignored_streak": 2},
                 original,
-                reason="creative_writing",
+                reason="state_share",
                 action="message",
-                motive="想分享刚写到的片段",
-                topic="庄园夜风与茉莉香",
+                motive="突然想吃点甜的，顺便问问晚饭打算",
+                topic="晚餐吃什么/小零食念头",
             )
         )
 
-        self.assertEqual(decision["decision"], "rewrite")
-        self.assertLess(len(decision["text"]), len(original))
-        self.assertIn("连续未回应时主动偏长", decision["reason"])
+        self.assertEqual(decision["decision"], "send")
+        self.assertEqual(decision["text"], "")
+        self.assertNotEqual(original[:36].rstrip("，,。") + "。", original)
+
+    def test_unanswered_generation_hint_requires_a_complete_single_thought(self) -> None:
+        harness = _FactGroundingHarness()
+
+        hint = harness._format_proactive_generation_intent_hint(
+            {"ignored_streak": 2},
+            reason="state_share",
+            action="message",
+        )
+
+        self.assertIn("只保留一个完整意思", hint)
+        self.assertIn("任何收短都必须保证句意完整", hint)
+        self.assertIn("不能留下半句话", hint)
 
     def test_next_same_session_reply_knows_the_last_proactive_message(self) -> None:
         harness = _ReplyContextHarness()

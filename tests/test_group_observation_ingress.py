@@ -115,7 +115,12 @@ class GroupObservationIngressTests(unittest.IsolatedAsyncioTestCase):
         event = _GroupEvent("刚才那张表情包很合适")
         scope_key = event.unified_msg_origin
         user: dict = {}
-        plugin.data = {"users": {"user-1": user}}
+        plugin.data = {
+            "users": {},
+            "reaction_expression_group_states": {
+                f"{scope_key}|sender:user-1": user,
+            },
+        }
         plugin._data_lock = asyncio.Lock()
         plugin._qzone_note_event_bot = Mock()
         plugin._feature_enabled_or_temp_unlocked = Mock(return_value=True)

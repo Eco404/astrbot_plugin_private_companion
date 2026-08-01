@@ -43,6 +43,7 @@ class _CreativeToolHarness(LlmToolActionsMixin):
     def __init__(self) -> None:
         self.enabled = True
         self.enable_creative_writing = True
+        self.enable_creative_work_read_guard = True
         self._data_lock = asyncio.Lock()
         self.data = {
             "creative_projects": [
@@ -177,6 +178,33 @@ class CreativeChatToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(harness._creative_work_query_instruction_matches(text))
 
         self.assertIn("讲一个、编一个或说一个新故事", harness._creative_work_tool_instruction())
+
+    def test_technical_files_do_not_trigger_creative_work_read(self) -> None:
+        harness = _CreativeToolHarness()
+        for text in (
+            "帮我看看创作功能的配置文件",
+            "再翻翻 creative.json 里的配置",
+            "读取插件的作品配置项",
+            "看看创作模块源码为什么报错",
+            "检查一下作品生成脚本",
+            "读取创作数据文件的内容",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(harness._creative_work_query_instruction_matches(text))
+
+        instruction = harness._creative_work_tool_instruction()
+        self.assertIn("配置文件、数据文件、日志、源码", instruction)
+        self.assertIn("不要把技术文件问答改写成创作原文读取失败", instruction)
+
+    def test_creative_read_guard_can_be_disabled_independently(self) -> None:
+        harness = _CreativeToolHarness()
+        harness.enable_creative_work_read_guard = False
+        event = _PrivateEvent()
+        event.private_companion_creative_work_tool_required = True
+        original = "我先按你给出的文件内容继续分析。"
+
+        self.assertEqual("", harness._creative_work_tool_instruction())
+        self.assertEqual(original, harness._guard_unread_creative_work_response(event, original))
 
     def test_bookshelf_inventory_question_triggers_list_tool(self) -> None:
         harness = _CreativeToolHarness()

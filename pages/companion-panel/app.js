@@ -1,4 +1,5 @@
 const HTTP_API = "/astrbot_plugin_private_companion/page";
+const BOOKSHELF_ACCESS_STORAGE_KEY = "pc_bookshelf_access_v1";
 const PAGE_ENDPOINT_PREFIX = "page";
 const PAGE_PLUGIN_NAME = "astrbot_plugin_private_companion";
 const TRANSPARENT_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
@@ -71,6 +72,10 @@ const state = {
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
   photoReferenceLibraryError: "",
+  relationshipRoleReferenceAssets: {},
+  relationshipRoleReferenceAssetsLoaded: false,
+  relationshipRoleReferenceAssetsLoading: false,
+  relationshipRoleReferenceAssetsError: "",
   selectedFeatureKey: "",
   imageApiEndpointDraft: null,
   imageApiEndpointSavedFingerprints: [],
@@ -295,6 +300,9 @@ const privateReadingConfigKeys = new Set([
   "enable_private_reading_integration",
   "enable_private_reading_boredom_read",
   "enable_private_reading_ask_recommendation",
+  "enable_private_reading_vision",
+  "enable_private_reading_page_comments",
+  "enable_private_reading_rating",
   "enable_private_reading_preference_influence",
   "private_reading_min_interval_hours",
   "private_reading_max_photo_count",
@@ -323,6 +331,10 @@ const quickProviderKeys = new Set([
   "COMPLEX_REASONING_PROVIDER_ID",
   "CREATIVE_MODEL_PROVIDER_ID",
   "PLUGIN_VISION_PROVIDER_ID",
+]);
+
+const alwaysVisibleProviderKeys = new Set([
+  "PRIVATE_READING_VISION_PROVIDER_ID",
 ]);
 
 const setupGuideQuickProviderKeys = [
@@ -440,6 +452,7 @@ function currentProviderConfigMode() {
 }
 
 function providerAllowedInCurrentMode(key) {
+  if (alwaysVisibleProviderKeys.has(key)) return true;
   const mode = currentProviderConfigMode();
   return mode === "quick" ? quickProviderKeys.has(key) : !quickProviderKeys.has(key);
 }
@@ -462,7 +475,7 @@ function syncProviderConfigModeControls() {
   const hint = document.getElementById("providerConfigModeHint");
   if (hint) {
     hint.textContent = quick
-      ? "快速配置只显示 4 个场景模型；细分任务会按运行态自动套用这些入口。"
+      ? "快速配置显示通用场景模型；夹层阅读视觉模型始终单独配置。"
       : "精准配置显示各任务单独 Provider；快速入口不会参与本模式保存。";
   }
 }
@@ -1205,8 +1218,9 @@ const featureMeta = {
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
+  enable_creative_work_read_guard: ["创作原文读取保护", "询问书柜已有作品时先读取真实原文；关闭后不再强制调用工具或替换模型回复。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
-  enable_reaction_expression_experiment: ["表情表达实验", "主模型一次生成完整文字和隐藏表情意图，插件只在文字后追加合适图片；没有足够合适的候选时保持纯文字。"],
+  enable_reaction_expression_experiment: ["表情表达实验", "主模型一次生成完整文字和隐藏表情意图，插件再按配置的位置发送合适图片；没有足够合适的候选时保持纯文字。"],
   enable_maslow_motivation_experiment: ["需求强化功能", "实验性功能第一项：把主动念头按状态、安全、归属、尊重、成长和意义等内部需求层轻量分类，强化候选排序与可选日程倾向。"],
   enable_experimental_motivation_model: ["动机调度模型", "实验性功能第二项：结合驱力、诱因和唤醒状态，对主动计划做轻量调权，并在主动排障中显示判断依据。"],
   enable_personality_iteration_experiment: ["角色贴合校准", "实验性功能第三项：基于艾森克 PEN、大五人格、依恋风格和自我决定理论，帮用户判断行为是否贴近角色，并提示该怎么调整。"],
@@ -1406,6 +1420,9 @@ const embeddedFeatureParentByKey = {
   enable_local_photo_load_guard: "enable_photo_text_action",
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
+  enable_private_reading_vision: "enable_private_reading_integration",
+  enable_private_reading_page_comments: "enable_private_reading_vision",
+  enable_private_reading_rating: "enable_private_reading_vision",
   enable_private_reading_preference_influence: "enable_private_reading_integration",
   enable_unanswered_screen_peek_followup: "enable_screen_glance_action",
   enable_goodnight_screen_check: "enable_screen_glance_action",
@@ -1414,6 +1431,7 @@ const embeddedFeatureParentByKey = {
   enable_tts_local_playback: "enable_tts_enhancement",
   enable_tts_local_playback_live_only: "enable_tts_enhancement",
   enable_tts_live_subtitle_sync: "enable_tts_enhancement",
+  enable_creative_work_read_guard: "enable_creative_writing",
   creative_hidden_mode: "enable_creative_writing",
   enable_maslow_schedule_influence: "enable_maslow_motivation_experiment",
   maslow_motivation_strength: "enable_maslow_motivation_experiment",
@@ -2021,6 +2039,9 @@ const configLabels = {
   private_reading_default_keywords: "默认搜索关键词",
   private_reading_blocked_tags: "过滤标签",
   private_reading_ask_probability: "征求推荐概率",
+  enable_private_reading_vision: "本子识图",
+  enable_private_reading_page_comments: "本子页边批注",
+  enable_private_reading_rating: "本子阅读评价",
   enable_private_reading_preference_influence: "私密偏好影响",
   private_reading_preference_min_ratings: "偏好生效最少评分数",
   private_reading_preference_max_terms: "偏好注入最多词条",
@@ -2083,7 +2104,9 @@ const configLabels = {
   external_image_api_endpoints: "在线生图 API 队列",
   enable_reaction_expression_experiment: "启用表情表达实验",
   reaction_expression_private_enabled: "允许私聊表情表达",
+  reaction_expression_proactive_enabled: "允许主动消息表情表达",
   reaction_expression_group_enabled: "允许群聊表情表达",
+  reaction_expression_delivery_mode: "表情表达发送方式",
   reaction_expression_trigger_probability: "表情表达触发概率",
   reaction_expression_cooldown_seconds: "表情表达冷却秒数",
   reaction_expression_low_latency_mode: "低延迟选择模式",
@@ -2097,9 +2120,11 @@ const configLabels = {
 };
 
 const configDescriptions = {
-  enable_reaction_expression_experiment: "默认关闭。开启后，主模型仍只生成一次可独立成立的完整文字，并可留下隐藏表情意图；插件清除意图后只把合适图片追加在文字后，绝不会用图片替代正文。",
+  enable_reaction_expression_experiment: "默认关闭。开启后，主模型仍只生成一次可独立成立的完整文字，并可留下隐藏表情意图；插件清除意图后再按发送方式投递合适图片，绝不会用图片替代正文。",
   reaction_expression_private_enabled: "允许在私聊回复中使用实验性表情表达，仍需通过触发概率、冷却、重复控制和关系边界检查。",
+  reaction_expression_proactive_enabled: "允许主动私聊在完整正文后留下隐藏表情意图，再复用相同的概率、冷却、用户停用边界、重复图片与本地图库匹配；不会增加模型调用，已有媒体时不会叠加表情包。",
   reaction_expression_group_enabled: "默认关闭。开启后允许群聊使用，但公开风险高、关系不明确或上下文不足的候选会被降低优先级。",
+  reaction_expression_delivery_mode: "默认先完整发送正文，再单独发送表情包。也可放进正文消息链，最终是否合并展示取决于平台适配器；正文前模式无法在后续正文发送失败时撤回已送达的图片。",
   reaction_expression_trigger_probability: "通过语境、关系边界和冷却检查后实际尝试选择表情的概率，建议先从 15% 到 25% 观察。",
   reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
@@ -2561,6 +2586,9 @@ const configDescriptions = {
   private_reading_default_keywords: "私下阅读时默认搜索关键词。多个词可用逗号或换行分隔。",
   private_reading_blocked_tags: "过滤标签。匹配到这些标签时跳过对应素材。",
   private_reading_ask_probability: "无聊时向用户征求推荐的概率，按百分比填写。",
+  enable_private_reading_vision: "开启后调用夹层阅读专用视觉模型读取封面和正文抽样页。",
+  enable_private_reading_page_comments: "开启后保存模型对正文抽样页生成的即时短批注；关闭后不写入新的页边批注。",
+  enable_private_reading_rating: "开启后生成 Bot 自评分、理由和偏好标签；关闭后本次阅读不更新自动偏好画像。",
   enable_private_reading_preference_influence: "开启后，夹层阅读评分样本足够时会把稳定偏好作为私聊私密互动的弱背景；关闭后评分只用于素材挑选。",
   private_reading_preference_min_ratings: "累计评分达到这个数量后，偏好画像才会影响私聊私密互动。",
   private_reading_preference_max_terms: "每次注入最多参考多少个稳定偏好词，避免上下文太长或风格偏移。",
@@ -2706,7 +2734,7 @@ const featureSettingGroups = {
   enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "proactive_generation_history_limit", "proactive_history_context_mode", "proactive_history_recent_raw_count", "proactive_history_max_chars", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
-  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_group_enabled", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
+  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled", "reaction_expression_delivery_mode", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", ...advancedCycleSettingKeys, "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
@@ -2783,7 +2811,7 @@ const featureSettingGroups = {
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
-  enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
+  enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_private_reading_vision", "enable_private_reading_page_comments", "enable_private_reading_rating", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -2791,7 +2819,7 @@ const featureSettingGroups = {
   enable_goodnight_screen_check: ["goodnight_screen_check_delay_minutes"],
   enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
-  enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
+  enable_creative_writing: ["enable_creative_work_read_guard", "creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
   creative_hidden_mode: ["creative_share_probability"],
 };
 
@@ -3284,8 +3312,13 @@ const featureSettingSections = {
   enable_reaction_expression_experiment: [
     {
       title: "适用会话",
-      note: "私聊默认可用；群聊需要单独开启，避免在公开语境误用或刷屏。",
-      keys: ["reaction_expression_private_enabled", "reaction_expression_group_enabled"],
+      note: "私聊与主动私聊默认可用；群聊需要单独开启，避免在公开语境误用或刷屏。",
+      keys: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled"],
+    },
+    {
+      title: "发送方式",
+      note: "默认先完整发送正文，再单独发送表情包；也可按会话体验改为同一消息链或正文前单独发送。",
+      keys: ["reaction_expression_delivery_mode"],
     },
     {
       title: "触发节奏",
@@ -3316,8 +3349,8 @@ const featureSettingSections = {
   enable_private_reading_integration: [
     {
       title: "自主阅读",
-      note: "控制空档私下阅读、用户推荐请求和基础素材范围。",
-      keys: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags"],
+      note: "控制空档私下阅读、用户推荐请求，以及识图、页边批注、阅读评价和基础素材范围。",
+      keys: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_private_reading_vision", "enable_private_reading_page_comments", "enable_private_reading_rating", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags"],
     },
     {
       title: "偏好影响",
@@ -3326,6 +3359,11 @@ const featureSettingSections = {
     },
   ],
   enable_creative_writing: [
+    {
+      title: "聊天读取",
+      note: "控制询问书柜已有作品时，是否要求先读取真实原文。",
+      keys: ["enable_creative_work_read_guard"],
+    },
     {
       title: "创作方式",
       note: "控制私下创作触发、是否低调提起和单次推进规模。",
@@ -3633,7 +3671,9 @@ const featureSettingTypes = {
   maslow_motivation_strength: { type: "number", min: 0, max: 100, step: 1 },
   enable_personality_iteration_auto_tune: { type: "checkbox" },
   reaction_expression_private_enabled: { type: "checkbox" },
+  reaction_expression_proactive_enabled: { type: "checkbox" },
   reaction_expression_group_enabled: { type: "checkbox" },
+  reaction_expression_delivery_mode: { type: "select", options: [["separate_after", "正文后单独发送（推荐）"], ["same_message", "与正文同一消息链"], ["separate_before", "正文前单独发送"]] },
   reaction_expression_trigger_probability: { type: "number", min: 0, max: 100, step: 1 },
   reaction_expression_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 10 },
   reaction_expression_low_latency_mode: { type: "checkbox" },
@@ -4139,10 +4179,63 @@ function relationshipCardsToText(cards) {
     .join("\n");
 }
 
+const RELATIONSHIP_ROLE_REFERENCE_SCOPE = "relation_role";
+let relationshipRoleReferenceAssetsLoadPromise = null;
+
+function relationshipRoleOwnerKey(name) {
+  const clean = String(name || "").trim().replace(/\s+/g, " ");
+  return clean ? `role:${clean.toLowerCase()}` : "";
+}
+
+function relationshipRoleReferenceAssets(ownerId) {
+  const cleanOwner = String(ownerId || "");
+  if (!cleanOwner) return [];
+  const assets = state.relationshipRoleReferenceAssets?.[cleanOwner];
+  return Array.isArray(assets) ? assets : [];
+}
+
+function relationshipRoleReferenceHtml(ownerId, assets = relationshipRoleReferenceAssets(ownerId)) {
+  const cleanOwner = String(ownerId || "");
+  const hasOwner = Boolean(cleanOwner);
+  const titleKey = cleanOwner || "empty";
+  return `
+    <section class="worldbook-reference-assets relationship-role-reference-assets" data-relationship-role-reference-panel data-relationship-role-reference-owner="${escapeHtml(cleanOwner)}">
+      <header class="worldbook-reference-assets-head">
+        <div><b>角色参考图</b><span>${hasOwner ? `${assets.length} / 8 张 · 仅在明确提到该角色或要求合影时使用` : "先填写角色名后上传"}</span></div>
+      </header>
+      ${assets.length ? `
+        <div class="worldbook-reference-grid">
+          ${assets.map((asset) => {
+            const assetId = String(asset?.id || "");
+            const preview = String(asset?.preview_endpoint || (assetId ? `/reference_asset/image_data?id=${encodeURIComponent(assetId)}` : ""));
+            return `
+              <article class="worldbook-reference-tile" data-relationship-role-reference-asset="${escapeHtml(assetId)}">
+                <div class="relationship-role-reference-preview">
+                  ${preview ? `<img src="${TRANSPARENT_IMAGE}" data-role-reference-image data-preview-endpoint="${escapeHtml(preview)}" alt="${escapeHtml(asset.title || "角色参考图")}" loading="lazy" hidden />` : `<div class="worldbook-reference-missing">不可用</div>`}
+                  ${preview ? `<div class="worldbook-reference-missing" data-role-reference-placeholder>正在读取</div>` : ""}
+                </div>
+                <div><b>${escapeHtml(asset.title || "角色参考图")}</b><small>${escapeHtml((asset.tags || []).join(" · ") || asset.note || "角色外观")}</small></div>
+                <button type="button" class="danger-outline" data-relationship-role-reference-delete="${escapeHtml(assetId)}" title="删除角色参考图" aria-label="删除角色参考图">×</button>
+              </article>
+            `;
+          }).join("")}
+        </div>
+      ` : `<div class="empty small">${hasOwner ? "暂无角色参考图。上传后仅按明确的角色提及或合影请求调用。" : "角色名为空时不会关联参考图。"}</div>`}
+      <div class="worldbook-reference-upload">
+        <label class="worldbook-reference-file">选择图片<input type="file" accept="image/png,image/jpeg,image/webp" data-role-reference-file data-role-reference-owner="${escapeHtml(cleanOwner)}"${hasOwner ? "" : " disabled"} /></label>
+        <input type="text" maxlength="120" placeholder="标题（可选）" data-role-reference-title data-role-reference-owner="${escapeHtml(titleKey)}"${hasOwner ? "" : " disabled"} />
+        <input type="text" maxlength="160" placeholder="标签：发型、制服、识别点" data-role-reference-tags data-role-reference-owner="${escapeHtml(titleKey)}"${hasOwner ? "" : " disabled"} />
+        <button type="button" data-relationship-role-reference-upload="${escapeHtml(cleanOwner)}"${hasOwner ? "" : " disabled"}>上传角色参考图</button>
+      </div>
+    </section>
+  `;
+}
+
 function relationshipCardItemHtml(card, index) {
   const cardNumber = index + 1;
+  const ownerId = relationshipRoleOwnerKey(card.name);
   return `
-    <article class="relationship-card" data-relationship-card>
+    <article class="relationship-card" data-relationship-card data-relationship-role-owner="${escapeHtml(ownerId)}" data-relationship-role-asset-owner="${escapeHtml(ownerId)}">
       <header>
         <b>角色卡 ${cardNumber}</b>
         <button type="button" data-relationship-card-action="delete" data-index="${index}" aria-label="删除角色卡 ${cardNumber}">删除</button>
@@ -4161,6 +4254,7 @@ function relationshipCardItemHtml(card, index) {
           <textarea rows="2" maxlength="200" data-relationship-card-field="appearance" placeholder="例如 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣">${escapeHtml(card.appearance)}</textarea>
         </label>
       </div>
+      ${relationshipRoleReferenceHtml(ownerId)}
     </article>
   `;
 }
@@ -4206,16 +4300,239 @@ function syncRelationshipCardEditor(editor) {
   if (addButton) addButton.disabled = cards.length >= RELATIONSHIP_CARD_MAX;
 }
 
+function replaceRelationshipRoleReferencePanel(cardElement) {
+  if (!cardElement) return;
+  const name = cardElement.querySelector('[data-relationship-card-field="name"]')?.value || "";
+  const ownerId = relationshipRoleOwnerKey(name);
+  cardElement.dataset.relationshipRoleOwner = ownerId;
+  const panel = cardElement.querySelector("[data-relationship-role-reference-panel]");
+  if (!panel) return;
+  panel.outerHTML = relationshipRoleReferenceHtml(ownerId);
+  void hydrateRelationshipRoleReferencePreviews(cardElement);
+}
+
+function refreshRelationshipRoleReferencePanels(root = document) {
+  const editor = root?.matches?.("[data-relationship-card-editor]")
+    ? root
+    : root?.querySelector?.("[data-relationship-card-editor]");
+  if (!editor) return;
+  editor.querySelectorAll("[data-relationship-card]").forEach((cardElement) => {
+    replaceRelationshipRoleReferencePanel(cardElement);
+  });
+}
+
+async function hydrateRelationshipRoleReferencePreviews(root = document) {
+  const images = [...(root?.querySelectorAll?.("img[data-role-reference-image]") || [])]
+    .filter((image) => image.dataset.loading !== "1" && image.dataset.loaded !== "1");
+  await Promise.all(images.map(async (img) => {
+    const endpoint = String(img.dataset.previewEndpoint || "");
+    if (!endpoint) return;
+    const placeholder = img.parentElement?.querySelector("[data-role-reference-placeholder]");
+    const fail = () => {
+      img.hidden = true;
+      img.dataset.loaded = "0";
+      if (placeholder) {
+        placeholder.hidden = false;
+        placeholder.textContent = "预览失败";
+      }
+    };
+    img.dataset.loading = "1";
+    try {
+      const result = await fetchJson(endpoint);
+      if (!result?.data_url) throw new Error("预览内容为空");
+      img.src = result.data_url;
+      img.hidden = false;
+      img.dataset.loaded = "1";
+      if (placeholder) placeholder.hidden = true;
+    } catch (_error) {
+      fail();
+    } finally {
+      img.dataset.loading = "0";
+    }
+  }));
+}
+
+function setRelationshipRoleReferenceAsset(asset) {
+  const ownerId = String(asset?.owner_id || "");
+  const assetId = String(asset?.id || "");
+  if (!ownerId || !assetId) return;
+  const map = state.relationshipRoleReferenceAssets || (state.relationshipRoleReferenceAssets = {});
+  const current = Array.isArray(map[ownerId]) ? map[ownerId].filter((item) => String(item?.id || "") !== assetId) : [];
+  map[ownerId] = [...current, asset];
+}
+
+function removeRelationshipRoleReferenceAsset(assetId) {
+  const cleanId = String(assetId || "");
+  if (!cleanId) return;
+  const map = state.relationshipRoleReferenceAssets || {};
+  Object.keys(map).forEach((ownerId) => {
+    map[ownerId] = (Array.isArray(map[ownerId]) ? map[ownerId] : []).filter((item) => String(item?.id || "") !== cleanId);
+  });
+}
+
+async function loadRelationshipRoleReferenceAssets(editor) {
+  if (state.relationshipRoleReferenceAssetsLoaded) return;
+  if (relationshipRoleReferenceAssetsLoadPromise) return relationshipRoleReferenceAssetsLoadPromise;
+  const request = (async () => {
+    state.relationshipRoleReferenceAssetsLoading = true;
+    state.relationshipRoleReferenceAssetsError = "";
+    try {
+      const params = new URLSearchParams({ scope: RELATIONSHIP_ROLE_REFERENCE_SCOPE });
+      const result = await fetchJson(`/reference_asset/list?${params.toString()}`);
+      const map = {};
+      const assets = Array.isArray(result?.assets) ? result.assets : (Array.isArray(result?.items) ? result.items : []);
+      assets.forEach((asset) => {
+        const ownerId = String(asset?.owner_id || "");
+        if (!ownerId) return;
+        if (!Array.isArray(map[ownerId])) map[ownerId] = [];
+        map[ownerId].push(asset);
+      });
+      state.relationshipRoleReferenceAssets = map;
+      state.relationshipRoleReferenceAssetsLoaded = true;
+      refreshRelationshipRoleReferencePanels(editor);
+    } catch (error) {
+      state.relationshipRoleReferenceAssetsError = String(error?.message || "读取角色参考图失败");
+    } finally {
+      state.relationshipRoleReferenceAssetsLoading = false;
+    }
+  })();
+  relationshipRoleReferenceAssetsLoadPromise = request;
+  try {
+    await request;
+  } finally {
+    if (relationshipRoleReferenceAssetsLoadPromise === request) relationshipRoleReferenceAssetsLoadPromise = null;
+  }
+}
+
+async function migrateRelationshipRoleReferenceAssets(previousOwnerId, nextOwnerId, editorCard) {
+  const previous = String(previousOwnerId || "");
+  const next = String(nextOwnerId || "");
+  if (!next) return;
+  if (!previous || previous === next) {
+    if (editorCard) editorCard.dataset.relationshipRoleAssetOwner = next;
+    return;
+  }
+  const source = [...relationshipRoleReferenceAssets(previous)];
+  if (!source.length) {
+    if (editorCard) editorCard.dataset.relationshipRoleAssetOwner = next;
+    return;
+  }
+  const map = state.relationshipRoleReferenceAssets || (state.relationshipRoleReferenceAssets = {});
+  const migrated = [];
+  let remaining = source.slice();
+  try {
+    for (const asset of source) {
+      const result = await postJson("/reference_asset/update", {
+        id: asset.id,
+        scope: RELATIONSHIP_ROLE_REFERENCE_SCOPE,
+        owner_id: next,
+      });
+      const updated = result?.asset || { ...asset, owner_id: next };
+      migrated.push(updated);
+      remaining = remaining.slice(1);
+      map[previous] = remaining;
+      setRelationshipRoleReferenceAsset(updated);
+    }
+    if (!remaining.length) delete map[previous];
+    if (editorCard) editorCard.dataset.relationshipRoleAssetOwner = next;
+    const latestOwner = relationshipRoleOwnerKey(
+      editorCard?.querySelector('[data-relationship-card-field="name"]')?.value || "",
+    );
+    if (latestOwner && latestOwner !== next) {
+      await migrateRelationshipRoleReferenceAssets(next, latestOwner, editorCard);
+      return;
+    }
+    showToast("已同步角色名对应的参考图");
+    replaceRelationshipRoleReferencePanel(editorCard);
+  } catch (error) {
+    map[previous] = remaining;
+    if (migrated.length) showToast(`部分角色参考图已同步：${error.message}`, "error");
+    else showToast(`角色参考图同步失败：${error.message}`, "error");
+    replaceRelationshipRoleReferencePanel(editorCard);
+  }
+}
+
+async function handleRelationshipRoleReferenceAction(button) {
+  if (button.dataset.relationshipRoleReferenceUpload !== undefined) {
+    const ownerId = String(button.dataset.relationshipRoleReferenceUpload || "");
+    const panel = button.closest("[data-relationship-role-reference-panel]");
+    const file = panel?.querySelector("[data-role-reference-file]")?.files?.[0];
+    if (!ownerId) {
+      showToast("请先填写角色名", "error");
+      return;
+    }
+    if (!file) {
+      showToast("请先选择一张图片", "error");
+      return;
+    }
+    if (Number(file.size || 0) > 12 * 1024 * 1024) {
+      showToast("单张角色参考图不能超过 12 MB", "error");
+      return;
+    }
+    const title = panel?.querySelector("[data-role-reference-title]")?.value || "";
+    const tags = panel?.querySelector("[data-role-reference-tags]")?.value || "";
+    let base64 = "";
+    try {
+      base64 = await readFileAsBase64(file);
+    } catch (error) {
+      showToast(`图片读取失败：${error.message}`, "error");
+      return;
+    }
+    const result = await runAction(() => postJson("/reference_asset/upload", {
+      scope: RELATIONSHIP_ROLE_REFERENCE_SCOPE,
+      owner_id: ownerId,
+      data_url: `data:${file.type || "image/jpeg"};base64,${base64}`,
+      title,
+      tags,
+      reference_roles: ["identity", "continuity"],
+    }), "已上传角色参考图", button, { reload: false });
+    if (result?.asset) {
+      setRelationshipRoleReferenceAsset(result.asset);
+      replaceRelationshipRoleReferencePanel(button.closest("[data-relationship-card]"));
+    }
+    return;
+  }
+  if (button.dataset.relationshipRoleReferenceDelete !== undefined) {
+    const assetId = String(button.dataset.relationshipRoleReferenceDelete || "");
+    if (!assetId) return;
+    if (!requireSecondClick(button, `relationship-role-reference-delete:${assetId}`, "再次点击删除这张角色参考图", "再次点击删除")) return;
+    const result = await runAction(() => postJson("/reference_asset/delete", { id: assetId }), "已删除角色参考图", button, { reload: false });
+    if (result) {
+      removeRelationshipRoleReferenceAsset(assetId);
+      replaceRelationshipRoleReferencePanel(button.closest("[data-relationship-card]"));
+    }
+  }
+}
+
 function bindRelationshipCardEditor(root = document) {
   const editor = root.querySelector?.("[data-relationship-card-editor]");
   if (!editor) return;
   editor.addEventListener("input", (event) => {
     if (event.target?.matches?.("[data-relationship-card-field]")) syncRelationshipCardEditor(editor);
   });
+  editor.addEventListener("change", (event) => {
+    if (!event.target?.matches?.('[data-relationship-card-field="name"]')) return;
+    const cardElement = event.target.closest("[data-relationship-card]");
+    if (!cardElement) return;
+    const previousOwnerId = cardElement.dataset.relationshipRoleAssetOwner || cardElement.dataset.relationshipRoleOwner || "";
+    const nextOwnerId = relationshipRoleOwnerKey(event.target.value);
+    cardElement.dataset.relationshipRoleOwner = nextOwnerId;
+    syncRelationshipCardEditor(editor);
+    void loadRelationshipRoleReferenceAssets(editor).then(() => (
+      migrateRelationshipRoleReferenceAssets(previousOwnerId, nextOwnerId, cardElement)
+    ));
+    replaceRelationshipRoleReferencePanel(cardElement);
+    markFeatureDetailDirty();
+  });
   editor.addEventListener("click", (event) => {
-    const button = event.target?.closest?.("[data-relationship-card-action]");
+    const button = event.target?.closest?.("[data-relationship-card-action], [data-relationship-role-reference-upload], [data-relationship-role-reference-delete]");
     if (!button) return;
     const action = button.dataset.relationshipCardAction;
+    if (button.dataset.relationshipRoleReferenceUpload !== undefined || button.dataset.relationshipRoleReferenceDelete !== undefined) {
+      event.preventDefault();
+      void handleRelationshipRoleReferenceAction(button);
+      return;
+    }
     const cards = collectRelationshipCardsFromDom(editor);
     let focusNewCard = false;
     if (action === "add") {
@@ -4244,6 +4561,8 @@ function bindRelationshipCardEditor(root = document) {
       editor.querySelector('[data-relationship-card]:last-child [data-relationship-card-field="name"]')?.focus();
     }
   });
+  void loadRelationshipRoleReferenceAssets(editor);
+  void hydrateRelationshipRoleReferencePreviews(editor);
 }
 
 const percentSettingKeys = new Set([
@@ -5200,7 +5519,7 @@ function applyOverviewData(overview) {
     && unlockedBookshelfCount !== overviewBookshelfCount
   ) {
     state.bookshelfUnlocked = null;
-    state.bookshelfAccessToken = "";
+    clearBookshelfAccessToken();
     state.selectedBook = null;
     state.selectedBookSpreadIndex = 0;
     state.bookshelfPage = "shelf";
@@ -5380,6 +5699,7 @@ async function loadAll(options = {}) {
     applyOverviewData(overview);
     state.overviewRefreshedAt = Date.now();
     renderAll();
+    void restoreBookshelfAccess();
     void ensureTabData(state.activeTab, true);
     $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载`;
     const loadLists = () => {
@@ -6113,16 +6433,19 @@ const setupGuideAdvancedItems = {
       key: "enable_private_reading_integration",
       title: "夹层阅读",
       ask: "是否让 Bot 能在空档读你的素材/书柜内容，并在合适时聊起？",
-      description: "它会从可用素材里读取图片或文本，生成读后感、偏好和后续话题。",
+      description: "它会从可用素材里读取图片或文本；识图、页边批注和阅读评价可以分别控制。",
       caution: "需要素材插件/数据可用。内容私密时要先整理来源和屏蔽词。",
       dependencies: [
         { label: "联动", text: "需要已有书柜/素材/JM-Cosmos 兼容数据源；没有素材时只会记录配置，不会凭空阅读。" },
-        { label: "模型", text: "阅读图片素材时还需要夹层阅读视觉模型或插件识图模型。" },
+        { label: "模型", text: "阅读图片素材时需要单独配置夹层阅读视觉模型。" },
       ],
       kind: "feature",
       settings: [
         { key: "enable_private_reading_boredom_read", type: "bool", label: "空档主动阅读", description: "Bot 无聊时自己读一点。" },
         { key: "enable_private_reading_ask_recommendation", type: "bool", label: "主动征求推荐", description: "会问用户想让它看什么。" },
+        { key: "enable_private_reading_vision", type: "bool", label: "本子识图", description: "允许调用夹层阅读专用视觉模型读取封面和正文抽样页。" },
+        { key: "enable_private_reading_page_comments", type: "bool", label: "本子页边批注", description: "保存模型对正文抽样页生成的即时短批注。" },
+        { key: "enable_private_reading_rating", type: "bool", label: "本子阅读评价", description: "生成 Bot 自评分、理由和偏好标签，并允许本次评分进入偏好画像。" },
         { key: "private_reading_min_interval_hours", type: "number", label: "阅读最小间隔小时", placeholder: "12", min: 1 },
         { key: "private_reading_default_keywords", type: "textarea", label: "默认搜索关键词", placeholder: "纯爱, 恋爱, 同人", description: "素材源支持搜索时使用；多个词可用逗号或换行分隔。" },
         { key: "private_reading_blocked_tags", type: "textarea", label: "过滤标签", placeholder: "連載中, 長篇, 青年漫", description: "匹配这些标签的素材会尽量跳过。" },
@@ -14262,6 +14585,7 @@ function expressionSampleItem(item, index, pending) {
   const text = item?.text || item?.phrase || item?.ending || "";
   const featureText = Array.isArray(item?.features) ? item.features.filter(Boolean).join(" / ") : "";
   const sceneText = item?.scene || "未分类场景";
+  const patternTitle = item?.pattern_label || sceneText;
   const displayText = text || featureText || "尚无可归纳特征";
   const sourceIndex = Number.isInteger(Number(item?.index)) ? Number(item.index) : index;
   const meta = [
@@ -14279,7 +14603,7 @@ function expressionSampleItem(item, index, pending) {
       <div class="expression-observation-main">
         <div class="expression-observation-title">
           <span class="badge ${pending ? "warn" : "off"}">${pending ? "待收录观察" : "未归纳观察"}</span>
-          <b>${escapeHtml(sceneText)}</b>
+          <b>${escapeHtml(patternTitle)}</b>
           ${patternStatus}
         </div>
         <p><span>观察特征</span>${escapeHtml(displayText)}</p>
@@ -15437,6 +15761,7 @@ function worldbookMemberCard(item) {
             <input readonly value="${escapeHtml(externalIds.join(" / ") || item.linked_bili_profile_id || "暂无")}" />
           </label>
         `}
+        ${worldbookReferenceAssetsHtml(item)}
         <div class="worldbook-memory-list">
           ${pending.length ? pending.map((obs) => worldbookPendingObservationCard(item.user_id || "", obs)).join("") : ""}
           ${memories.length ? memories.map((memory, index) => worldbookMemoryCard(item.user_id || "", memory, index)).join("") : `<div class="empty small">暂无重要记忆</div>`}
@@ -15479,6 +15804,35 @@ function worldbookMemberPreviewItems(item, memories = []) {
   const memory = memories.find((entry) => entry && entry.enabled !== false && String(entry.content || "").trim());
   if (memory) add("记忆", `${memory.title ? `${memory.title}：` : ""}${memory.content || ""}`, 120);
   return rows.slice(0, 4);
+}
+
+function worldbookReferenceAssetsHtml(item) {
+  const userId = String(item?.user_id || "");
+  const assets = Array.isArray(item?.reference_assets) ? item.reference_assets : [];
+  return `
+    <section class="worldbook-reference-assets" data-worldbook-reference-owner="${escapeHtml(userId)}">
+      <header class="worldbook-reference-assets-head">
+        <div><b>视觉参考图</b><span>${escapeHtml(item?.reference_asset_count || assets.length)} / 8 张 · 生图时仅在关联该成员时调用</span></div>
+      </header>
+      ${assets.length ? `
+        <div class="worldbook-reference-grid">
+          ${assets.map((asset) => `
+            <article class="worldbook-reference-tile ${asset.enabled === false ? "off" : ""}">
+              ${asset.preview_endpoint ? `<img src="${escapeHtml(asset.preview_endpoint)}" alt="${escapeHtml(asset.title || "成员参考图")}" loading="lazy" />` : `<div class="worldbook-reference-missing">不可用</div>`}
+              <div><b>${escapeHtml(asset.title || "成员参考图")}</b><small>${escapeHtml((asset.tags || []).join(" · ") || asset.note || "身份参考")}</small></div>
+              <button type="button" class="danger-outline" data-worldbook-reference-delete="${escapeHtml(asset.id || "")}" data-worldbook-reference-owner-id="${escapeHtml(userId)}" title="删除参考图" aria-label="删除参考图">×</button>
+            </article>
+          `).join("")}
+        </div>
+      ` : `<div class="empty small">暂无成员参考图。上传后，只有当前消息提到该成员或该成员发起的生图会使用。</div>`}
+      <div class="worldbook-reference-upload">
+        <label class="worldbook-reference-file">选择图片<input type="file" accept="image/png,image/jpeg,image/webp" data-worldbook-reference-file="${escapeHtml(userId)}" /></label>
+        <input type="text" maxlength="120" placeholder="标题（可选）" data-worldbook-reference-title="${escapeHtml(userId)}" />
+        <input type="text" maxlength="160" placeholder="标签：发型、制服、识别点" data-worldbook-reference-tags="${escapeHtml(userId)}" />
+        <button type="button" data-worldbook-reference-upload="${escapeHtml(userId)}">上传参考图</button>
+      </div>
+    </section>
+  `;
 }
 
 function worldbookMemoryCard(userId, memory, index) {
@@ -15689,6 +16043,39 @@ async function handleWorldbookMemberAction(button) {
     await runAction(() => postJson("/worldbook/member/update", payload), "已保存关系节点", button);
     return;
   }
+  if (button.dataset.worldbookReferenceUpload !== undefined) {
+    const ownerId = button.dataset.worldbookReferenceUpload;
+    const panel = button.closest("[data-worldbook-reference-owner]");
+    const fileInput = panel?.querySelector(`[data-worldbook-reference-file="${ownerId}"]`);
+    const file = fileInput?.files?.[0];
+    if (!ownerId || !file) {
+      showToast("请先选择一张图片", "error");
+      return;
+    }
+    if (Number(file.size || 0) > 12 * 1024 * 1024) {
+      showToast("单张参考图不能超过 12 MB", "error");
+      return;
+    }
+    const title = panel?.querySelector(`[data-worldbook-reference-title="${ownerId}"]`)?.value || "";
+    const tags = panel?.querySelector(`[data-worldbook-reference-tags="${ownerId}"]`)?.value || "";
+    const base64 = await readFileAsBase64(file);
+    await runAction(() => postJson("/reference_asset/upload", {
+      scope: "relation_user",
+      owner_id: ownerId,
+      data_url: `data:${file.type || "image/jpeg"};base64,${base64}`,
+      title,
+      tags,
+      reference_roles: ["identity"],
+    }), "已上传成员参考图", button);
+    return;
+  }
+  if (button.dataset.worldbookReferenceDelete !== undefined) {
+    const assetId = button.dataset.worldbookReferenceDelete;
+    if (!assetId) return;
+    if (!requireSecondClick(button, `worldbook-reference-delete:${assetId}`, "再次点击删除这张参考图", "再次点击删除")) return;
+    await runAction(() => postJson("/reference_asset/delete", { id: assetId }), "已删除成员参考图", button);
+    return;
+  }
   if (button.dataset.worldbookMemoryToggle !== undefined) {
     const userId = button.dataset.worldbookMemoryToggle;
     const index = Number(button.dataset.memoryIndex || -1);
@@ -15798,6 +16185,40 @@ async function handleWorldbookGroupAction(button) {
     delete button.dataset.deleteArmed;
     delete button.dataset.deleteArmedAt;
     await runAction(() => postJson("/worldbook/group/update", { group_id: groupId, delete: true }), "已删除群资料", button);
+  }
+}
+
+async function handleKnowledgeReferenceAction(button) {
+  if (button.dataset.knowledgeReferenceUpload !== undefined) {
+    const ownerId = button.dataset.knowledgeReferenceUpload;
+    const panel = button.closest("[data-knowledge-reference-owner]");
+    const file = panel?.querySelector(`[data-knowledge-reference-file="${ownerId}"]`)?.files?.[0];
+    if (!ownerId || !file) {
+      showToast("请先选择一张图片", "error");
+      return;
+    }
+    if (Number(file.size || 0) > 12 * 1024 * 1024) {
+      showToast("单张参考图不能超过 12 MB", "error");
+      return;
+    }
+    const title = panel?.querySelector(`[data-knowledge-reference-title="${ownerId}"]`)?.value || "";
+    const tags = panel?.querySelector(`[data-knowledge-reference-tags="${ownerId}"]`)?.value || "";
+    const base64 = await readFileAsBase64(file);
+    await runAction(() => postJson("/reference_asset/upload", {
+      scope: "knowledge",
+      owner_id: ownerId,
+      data_url: `data:${file.type || "image/jpeg"};base64,${base64}`,
+      title,
+      tags,
+      reference_roles: ["scene", "style"],
+    }), "已添加知识参考图", button);
+    return;
+  }
+  if (button.dataset.knowledgeReferenceDelete !== undefined) {
+    const assetId = button.dataset.knowledgeReferenceDelete;
+    if (!assetId) return;
+    if (!requireSecondClick(button, `knowledge-reference-delete:${assetId}`, "再次点击删除这张知识参考图", "再次点击删除")) return;
+    await runAction(() => postJson("/reference_asset/delete", { id: assetId }), "已删除知识参考图", button);
   }
 }
 
@@ -17901,6 +18322,74 @@ function setBookshelfUnlockMessage(text, tone = "") {
   message.classList.toggle("error", tone === "error");
 }
 
+function readBookshelfAccessStorage() {
+  try {
+    const raw = localStorage.getItem(BOOKSHELF_ACCESS_STORAGE_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw);
+    const token = String(stored?.token || "").trim();
+    const expiresAt = Number(stored?.expiresAt || 0);
+    if (!token || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      localStorage.removeItem(BOOKSHELF_ACCESS_STORAGE_KEY);
+      return null;
+    }
+    return { token, expiresAt };
+  } catch (error) {
+    return null;
+  }
+}
+
+function persistBookshelfAccess(bookshelf = {}) {
+  const token = String(bookshelf?.access_token || state.bookshelfAccessToken || "").trim();
+  if (!token) return false;
+  const absoluteExpiresAt = Number(bookshelf?.access_expires_at || 0) * 1000;
+  const relativeExpiresAt = Date.now() + Math.max(0, Number(bookshelf?.access_expires_in || 0)) * 1000;
+  const expiresAt = absoluteExpiresAt > Date.now() ? absoluteExpiresAt : relativeExpiresAt;
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
+  state.bookshelfAccessToken = token;
+  try {
+    localStorage.setItem(BOOKSHELF_ACCESS_STORAGE_KEY, JSON.stringify({ token, expiresAt }));
+  } catch (error) {}
+  return true;
+}
+
+function clearBookshelfAccessToken() {
+  state.bookshelfAccessToken = "";
+  try { localStorage.removeItem(BOOKSHELF_ACCESS_STORAGE_KEY); } catch (error) {}
+}
+
+async function restoreBookshelfAccess() {
+  if (state.bookshelfUnlocked?.unlocked && state.bookshelfAccessToken) return true;
+  const stored = readBookshelfAccessStorage();
+  if (!stored) return false;
+  state.bookshelfAccessToken = stored.token;
+  try {
+    const result = await postJson("/bookshelf/session", { access_token: stored.token });
+    const bookshelf = result?.bookshelf;
+    if (!bookshelf?.unlocked) throw new Error("夹层会话无效");
+    state.bookshelfUnlocked = bookshelf;
+    persistBookshelfAccess(bookshelf);
+    if (bookshelf.memo_notes) applyMemoPayload(bookshelf.memo_notes);
+    state.selectedBook = null;
+    state.bookshelfPage = "shelf";
+    renderBookshelf();
+    setBookshelfUnlockMessage("已恢复今日的夹层访问", "ok");
+    return true;
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (/访问已过期|会话无效/.test(message)) {
+      clearBookshelfAccessToken();
+    } else {
+      state.bookshelfAccessToken = "";
+    }
+    state.bookshelfUnlocked = null;
+    state.selectedBook = null;
+    state.bookshelfPage = "shelf";
+    renderBookshelf();
+    return false;
+  }
+}
+
 function formatBookContent(value) {
   const parts = String(value || "")
     .split(/\n{2,}/)
@@ -19569,10 +20058,13 @@ function moduleWorkbenchCard(item) {
 }
 
 function renderCurrentPersonaStatus(settings) {
-  const input = document.getElementById("currentPersonaDisplay");
-  if (!input) return;
+  const output = document.getElementById("currentPersonaDisplay");
+  if (!output) return;
   const personaId = String(settings.plugin_specific_persona_id || "").trim();
-  input.value = personaId ? `插件指定人格 ID：${personaId}` : "继承 AstrBot 当前默认人格";
+  const label = personaId ? `插件指定 · ${personaId}` : "AstrBot 当前默认人格";
+  if ("value" in output) output.value = label;
+  else output.textContent = label;
+  output.title = label;
 }
 
 function renderExternalAbilities() {
@@ -19741,6 +20233,37 @@ function syncRoleplayKnowledgeSelectionToInput() {
   if (badge) badge.textContent = String(selected.length);
 }
 
+function roleplayKnowledgeReferenceAssets(ownerId) {
+  const assets = Array.isArray(state.overview?.knowledge?.reference_assets)
+    ? state.overview.knowledge.reference_assets
+    : [];
+  return assets.filter((item) => String(item?.owner_id || "") === String(ownerId || ""));
+}
+
+function roleplayKnowledgeReferenceHtml(ownerId, assets = roleplayKnowledgeReferenceAssets(ownerId)) {
+  const cleanOwner = String(ownerId || "");
+  return `
+    <div class="roleplay-knowledge-reference" data-knowledge-reference-owner="${escapeHtml(cleanOwner)}">
+      <div class="roleplay-knowledge-reference-head"><span>视觉参考 ${assets.length ? `· ${assets.length} 张` : ""}</span></div>
+      ${assets.length ? `<div class="roleplay-knowledge-reference-grid">
+        ${assets.map((asset) => `
+          <article class="roleplay-knowledge-reference-tile">
+            ${asset.preview_endpoint ? `<img src="${escapeHtml(asset.preview_endpoint)}" alt="${escapeHtml(asset.title || "知识参考图")}" loading="lazy" />` : `<div class="worldbook-reference-missing">不可用</div>`}
+            <span>${escapeHtml(asset.title || asset.note || "知识参考图")}</span>
+            <button type="button" class="danger-outline" data-knowledge-reference-delete="${escapeHtml(asset.id || "")}" title="删除知识参考图" aria-label="删除知识参考图">×</button>
+          </article>
+        `).join("")}
+      </div>` : `<small>命中该知识库/文档的上下文标签时，才会把参考图交给生图。</small>`}
+      <div class="roleplay-knowledge-reference-upload">
+        <label class="worldbook-reference-file">上传<input type="file" accept="image/png,image/jpeg,image/webp" data-knowledge-reference-file="${escapeHtml(cleanOwner)}" /></label>
+        <input type="text" maxlength="120" placeholder="标题" data-knowledge-reference-title="${escapeHtml(cleanOwner)}" />
+        <input type="text" maxlength="160" placeholder="命中标签：城堡、校园、海边" data-knowledge-reference-tags="${escapeHtml(cleanOwner)}" />
+        <button type="button" data-knowledge-reference-upload="${escapeHtml(cleanOwner)}">添加</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderRoleplayKnowledgeSources() {
   const box = document.getElementById("roleplayKnowledgeSources");
   if (!box) return;
@@ -19760,6 +20283,7 @@ function renderRoleplayKnowledgeSources() {
       const docId = String(doc.id || "");
       const chunkCount = Number(doc.chunk_count || 0);
       return `
+        <div class="roleplay-knowledge-doc-row">
         <label class="roleplay-knowledge-doc">
           <input type="checkbox" data-roleplay-knowledge-id="${escapeHtml(docId)}" ${selected.has(docId) ? "checked" : ""} />
           <span>
@@ -19767,6 +20291,8 @@ function renderRoleplayKnowledgeSources() {
             <small>${escapeHtml(doc.file_type || "doc")} · ${chunkCount} 段</small>
           </span>
         </label>
+        ${roleplayKnowledgeReferenceHtml(docId, roleplayKnowledgeReferenceAssets(docId))}
+        </div>
       `;
     }).join("");
     return `
@@ -19779,6 +20305,7 @@ function renderRoleplayKnowledgeSources() {
           </span>
         </label>
         ${source.description ? `<p>${escapeHtml(source.description)}</p>` : ""}
+        ${roleplayKnowledgeReferenceHtml(sourceId, roleplayKnowledgeReferenceAssets(sourceId))}
         ${docRows ? `<div class="roleplay-knowledge-docs">${docRows}</div>` : ""}
       </article>
     `;
@@ -19969,13 +20496,13 @@ function applyRoleplayExample(kind) {
 
 async function generateRoleplayDraftFromPersona(button) {
   setActionBusy(button, true);
-  showToast("正在读取主回复人格并提取世界知识草稿...");
+  showToast("正在读取人格并生成导入草稿...");
   try {
     const scopes = selectedRoleplayDraftScopes();
     const result = await postJson("/roleplay/draft_from_persona", { scopes });
     state.roleplayPersonaDraft = result || null;
     renderRoleplayPersonaDraftPanel();
-    showToast("世界知识草稿已生成，请先预览再填入");
+    showToast("导入草稿已生成，请预览后再填入");
   } catch (error) {
     showToast(`生成失败：${error.message}`, "error");
   } finally {
@@ -19993,7 +20520,14 @@ function selectedRoleplayDraftScopes() {
 function renderRoleplayPersonaDraftPanel() {
   const panel = document.getElementById("roleplayPersonaDraftPanel");
   if (!panel) return;
-  const result = state.roleplayPersonaDraft || {};
+  if (!state.roleplayPersonaDraft) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  const disclosure = panel.closest("details.persona-import-panel");
+  if (disclosure) disclosure.open = true;
+  const result = state.roleplayPersonaDraft;
   const draft = result.draft || {};
   const scopes = Array.isArray(result.scopes) ? result.scopes : [];
   const rows = [
@@ -20009,13 +20543,13 @@ function renderRoleplayPersonaDraftPanel() {
   panel.innerHTML = `
     <header>
       <div>
-        <b>世界知识草稿</b>
+        <b>导入预览</b>
         <span>${escapeHtml(roleplayDraftScopeLabel(scopes))} · ${escapeHtml(result.persona_id ? `指定人格：${result.persona_id}` : "继承 AstrBot 默认人格")} · ${escapeHtml(result.provider_id || "主模型")} · 来源 ${escapeHtml(result.source_chars || 0)} 字</span>
       </div>
       <div class="persona-draft-panel-actions">
         <button type="button" data-roleplay-draft-apply="empty">填入空白项</button>
         <button type="button" data-roleplay-draft-apply="overwrite" class="soft">覆盖当前草稿</button>
-        <button type="button" data-roleplay-draft-close class="ghost">关闭</button>
+        <button type="button" data-roleplay-draft-close class="ghost">收起预览</button>
       </div>
     </header>
     <p>${escapeHtml(result.source_preview || "已读取主回复人格。")} </p>
@@ -20029,7 +20563,7 @@ function renderRoleplayPersonaDraftPanel() {
           </section>
         `).join("")}
       </div>
-    ` : `<div class="empty small">主模型没有抽取到足够明确的世界知识字段。可以换一个写得更具体的主回复人格后再试。</div>`}
+    ` : `<div class="empty small">当前人格中没有提取到足够明确的世界知识字段。可以补充更具体的角色或世界观设定后再试。</div>`}
     ${notes.length ? `<div class="persona-draft-notes">${notes.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   `;
   panel.querySelector("[data-roleplay-draft-close]")?.addEventListener("click", () => {
@@ -21560,7 +22094,9 @@ function featureRelatedSettings(key) {
       main_user_mention_voice_probability: 0,
       main_user_mention_voice_prompt: "",
       reaction_expression_private_enabled: true,
+      reaction_expression_proactive_enabled: true,
       reaction_expression_group_enabled: false,
+      reaction_expression_delivery_mode: "separate_after",
       reaction_expression_trigger_probability: 0.2,
       reaction_expression_cooldown_seconds: 180,
       reaction_expression_low_latency_mode: true,
@@ -21967,15 +22503,38 @@ function featureTextareaValue(key, value) {
   }).join("\n");
 }
 
-function featureSettingInput(key, value) {
+function featureSettingAccessibility(key, prefix = "feature-setting") {
+  const token = `${prefix}-${key}`
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "feature-setting";
+  return {
+    controlId: `${token}-control`,
+    labelId: `${token}-label`,
+    descriptionId: `${token}-description`,
+  };
+}
+
+function featureSettingAccessibilityAttrs(accessibility = {}, idSuffix = "") {
+  const controlId = String(accessibility.controlId || "").trim();
+  const labelId = String(accessibility.labelId || "").trim();
+  const descriptionId = String(accessibility.descriptionId || "").trim();
+  return [
+    controlId ? ` id="${escapeHtml(`${controlId}${idSuffix}`)}"` : "",
+    labelId ? ` aria-labelledby="${escapeHtml(labelId)}"` : "",
+    descriptionId ? ` aria-describedby="${escapeHtml(descriptionId)}"` : "",
+  ].join("");
+}
+
+function featureSettingInput(key, value, accessibility = {}) {
   const spec = featureSettingInputType(key, value);
   const safeKey = escapeHtml(key);
   const disabled = featureLockedByProactiveOnlyMode(key);
   const disabledAttr = disabled ? " disabled" : "";
+  const accessibilityAttrs = featureSettingAccessibilityAttrs(accessibility);
   if (key === "environment_perception_timezone") {
     const effective = String(state.overview?.settings?.environment_perception_timezone_effective || "Asia/Shanghai");
     return `
-      <input type="text" list="environment-timezone-options" data-feature-param="${safeKey}" value="${escapeHtml(value ?? "global")}" placeholder="global 或 Asia/Shanghai"${disabledAttr}>
+      <input type="text" list="environment-timezone-options" data-feature-param="${safeKey}" value="${escapeHtml(value ?? "global")}" placeholder="global 或 Asia/Shanghai"${accessibilityAttrs}${disabledAttr}>
       <datalist id="environment-timezone-options">
         <option value="global">跟随 AstrBot 全局</option>
         <option value="Asia/Shanghai"></option>
@@ -21990,14 +22549,14 @@ function featureSettingInput(key, value) {
     const checked = toBool(value);
     return `
       <label class="feature-param-check">
-        <input type="checkbox" data-feature-param="${safeKey}" ${checked ? "checked" : ""}${disabledAttr}>
+        <input type="checkbox" data-feature-param="${safeKey}" ${checked ? "checked" : ""}${accessibilityAttrs}${disabledAttr}>
         <span>${escapeHtml(disabled ? "已锁定" : checked ? "开启" : "关闭")}</span>
       </label>
     `;
   }
   if (spec.type === "select") {
     return `
-      <select data-feature-param="${safeKey}"${disabledAttr}>
+      <select data-feature-param="${safeKey}"${accessibilityAttrs}${disabledAttr}>
         ${(spec.options || []).map(([optionValue, label]) => `
           <option value="${escapeHtml(optionValue)}"${String(value ?? "") === String(optionValue) ? " selected" : ""}>${escapeHtml(label)}</option>
         `).join("")}
@@ -22005,12 +22564,12 @@ function featureSettingInput(key, value) {
     `;
   }
   if (spec.type === "provider") {
-    return featureProviderSelect(key, value);
+    return featureProviderSelect(key, value, accessibility);
   }
   if (spec.type === "textarea") {
     const rows = Number(spec.rows) > 0 ? Number(spec.rows) : 3;
     const maxLengthAttr = Number(spec.maxLength) > 0 ? ` maxlength="${Number(spec.maxLength)}"` : "";
-    return `<textarea data-feature-param="${safeKey}" rows="${rows}"${maxLengthAttr}${disabledAttr}>${escapeHtml(featureTextareaValue(key, value))}</textarea>`;
+    return `<textarea data-feature-param="${safeKey}" rows="${rows}"${maxLengthAttr}${accessibilityAttrs}${disabledAttr}>${escapeHtml(featureTextareaValue(key, value))}</textarea>`;
   }
   const password = spec.type === "password";
   const numeric = spec.type === "number" || typeof value === "number";
@@ -22024,6 +22583,7 @@ function featureSettingInput(key, value) {
       type="${password ? "password" : numeric ? "number" : "text"}"
       data-feature-param="${safeKey}"
       value="${escapeHtml(displayValue)}"
+      ${accessibilityAttrs}
       ${numeric ? `step="${step}"` : ""}
       ${min ? `min="${min}"` : ""}
       ${max ? `max="${max}"` : ""}
@@ -22041,7 +22601,7 @@ function qweatherConsoleLinksHtml() {
   `;
 }
 
-function featureProviderSelect(key, value) {
+function featureProviderSelect(key, value, accessibility = {}) {
   const current = String(value || "").trim();
   const known = state.availableProviders.some((item) => item.id === current);
   const customValue = current && !known ? current : "";
@@ -22053,10 +22613,12 @@ function featureProviderSelect(key, value) {
     }),
     `<option value="__custom__" ${customValue ? "selected" : ""}>手动输入 Provider ID</option>`,
   ].join("");
+  const selectAccessibilityAttrs = featureSettingAccessibilityAttrs(accessibility);
+  const customAccessibilityAttrs = featureSettingAccessibilityAttrs(accessibility, "-custom");
   return `
     <div class="feature-provider-select">
-      <select data-feature-provider-select="${escapeHtml(key)}">${options}</select>
-      <input data-feature-param="${escapeHtml(key)}" value="${escapeHtml(current)}" placeholder="自定义 Provider ID" ${customValue ? "" : "hidden"} />
+      <select data-feature-provider-select="${escapeHtml(key)}"${selectAccessibilityAttrs}>${options}</select>
+      <input data-feature-param="${escapeHtml(key)}" value="${escapeHtml(current)}" placeholder="自定义 Provider ID"${customAccessibilityAttrs} ${customValue ? "" : "hidden"} />
     </div>
   `;
 }
@@ -22323,8 +22885,8 @@ const featureDetailGuides = {
   },
   enable_reaction_expression_experiment: {
     summary: "把 Bot 当前感受转换成沟通意图，再从已接入图库选择合适的表情表达，而不是按单一情绪标签随机发图。",
-    trigger: "普通回复准备发送时，先经过会话范围、边界、概率和冷却检查；没有合适候选时保持原回复。",
-    enabled: "在允许的会话中按低频策略尝试表情表达，并结合关系风险、近期重复和候选质量决定发送或不发。",
+    trigger: "普通回复或主动私聊准备发送时，先经过会话范围、边界、概率和冷却检查；没有合适候选时保持原正文。",
+    enabled: "在允许的会话中按低频策略尝试表情表达，并结合关系风险、近期重复、已有媒体和候选质量决定发送或不发。",
     disabled: "不会自动选择或发送表情；用户明确调用现有图库工具的行为不受影响。",
   },
   enable_emotion_simulation: {
@@ -22819,6 +23381,12 @@ const featureDetailGuides = {
     enabled: "每次只写一小段，不按小时产出，也不会一口气写完。",
     disabled: "不会新建或推进创作项目。",
   },
+  enable_creative_work_read_guard: {
+    summary: "明确询问书柜已有作品时，先读取真实原文再回答，避免把记忆片段冒充作品内容。",
+    trigger: "用户询问已有作品、具体章节、书柜库存或要求结合原文讨论时。",
+    enabled: "注入只读工具提示；没有实际读取时会阻止占位回答。技术文件、配置、日志和源码不属于此范围。",
+    disabled: "不注入创作读取要求，也不替换模型最终回复；私下创作和书柜功能保持可用。",
+  },
   creative_hidden_mode: {
     summary: "创作默认作为 Bot 自己的私下活动，只在合适节点或用户问近况时自然透露。",
     trigger: "创作达到节点、用户询问近况或分享概率通过时。",
@@ -22874,7 +23442,7 @@ function featureImpactLines(key) {
     lines.push(["场景", "私聊图片 / 引用图片 / 合并图片 / GIF"]);
   } else if (key === "enable_food_menu_recommendation") {
     lines.push(["场景", "私聊 / 吃饭选择"]);
-  } else if (key.startsWith("enable_bilibili_") || key.startsWith("enable_news_") || key === "enable_external_event_self_link" || key.startsWith("enable_web_exploration") || key.startsWith("enable_qzone_") || key === "enable_photo_text_action" || key.startsWith("enable_private_reading_") || key === "enable_creative_writing" || key === "creative_hidden_mode") {
+  } else if (key.startsWith("enable_bilibili_") || key.startsWith("enable_news_") || key === "enable_external_event_self_link" || key.startsWith("enable_web_exploration") || key.startsWith("enable_qzone_") || key === "enable_photo_text_action" || key.startsWith("enable_private_reading_") || key === "enable_creative_writing" || key === "enable_creative_work_read_guard" || key === "creative_hidden_mode") {
     lines.push(["场景", "长线主动"]);
   } else if (key.startsWith("enable_environment_") || key.includes("perception") || key === "enable_yesterday_screen_diary_context") {
     lines.push(["场景", key === "enable_yesterday_screen_diary_context" ? "日程 / 状态 / 屏幕日记" : "日程 / 状态 / 回复"]);
@@ -23494,21 +24062,28 @@ function featureDetailPage(key) {
     .map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`)
     .join("");
   const weatherSource = String(state.overview?.settings?.weather_source || "qweather").trim().toLowerCase();
-  const settingRow = ({ key: name, value, description }) => `
+  const settingRow = ({ key: name, value, description }) => {
+    const accessibility = featureSettingAccessibility(name, `feature-detail-${key}`);
+    const usesStandardControl = !["photo_reference_catalog", "bot_relationship_cards"].includes(name);
+    const settingLabel = usesStandardControl
+      ? `<label id="${accessibility.labelId}" for="${accessibility.controlId}">${escapeHtml(configLabel(name))}</label>`
+      : escapeHtml(configLabel(name));
+    return `
       <section class="feature-param-row">
         <div class="feature-param-main">
           <header>
-            <b>${escapeHtml(configLabel(name))}</b>
+            <b>${settingLabel}</b>
             <code>${escapeHtml(name)}</code>
           </header>
-          <p>${escapeHtml(description)}</p>
+          <p id="${accessibility.descriptionId}">${escapeHtml(description)}</p>
         </div>
         <div class="feature-param-control">
-          ${name === "photo_reference_catalog" ? photoReferenceManagerLaunchControl(value) : name === "bot_relationship_cards" ? relationshipCardEditorHtml(value) : featureSettingInput(name, value)}
+          ${name === "photo_reference_catalog" ? photoReferenceManagerLaunchControl(value) : name === "bot_relationship_cards" ? relationshipCardEditorHtml(value) : featureSettingInput(name, value, accessibility)}
         </div>
       </section>
       ${key === "enable_environment_perception" && name === "weather_api_host" && weatherSource === "qweather" ? qweatherConsoleLinksHtml() : ""}
     `;
+  };
   const sections = featureSettingSections[key] || [];
   const renderedSectionKeys = new Set();
   const groupedRows = sections
@@ -26091,7 +26666,7 @@ const experimentalFeatureMeta = {
   enable_reaction_expression_experiment: {
     label: "表情表达实验",
     index: "第五项",
-    shortDesc: "主模型一次生成完整文字和隐藏表情意图，再结合关系边界、公开风险与个体偏好本地追加图片；图片不能替代正文。",
+    shortDesc: "普通回复与主动私聊都可由主模型一次生成完整文字和隐藏表情意图，再结合关系边界、公开风险与个体偏好本地选图，并按配置的位置发送；图片不能替代正文。",
     theory: [
       { name: "表达意图中间层", desc: "区分 Bot 当前感受、准备采取的沟通动作和希望对方产生的效果。", impact: "同样是“不高兴”，可以按语境选择轻吐槽、认真说明边界、先安抚对方或保持不发，而不是共用一个生气文件夹。" },
       { name: "风险与关系边界", desc: "结合私聊/群聊、关系阶段、攻击性、暧昧度和公开风险过滤候选。", impact: "群聊不会因为关键词相近就发送容易误伤、暴露亲密关系或显得持续刷屏的图片。" },
@@ -26188,7 +26763,7 @@ function experimentalVisualSpec(key) {
       question: "这一轮是否适合用表情，以及哪种表达能产生正确的社交效果？",
       flow: [
         ["机会", "本地按会话范围、概率和冷却决定本轮是否向主模型提供表情表达能力。"],
-        ["意图", "主模型先完成可独立发送的正文，再判断追加图片能否补足语气，并给出沟通用途、情绪强度和少量检索说法。"],
+        ["意图", "主模型先完成可独立发送的正文，再判断使用图片能否补足语气，并给出沟通用途、情绪强度和少量检索说法。"],
         ["快选", "插件合并检索说法后只查询一次图库；低延迟模式使用本地评分与短时缓存。"],
         ["结算", "检查近期重复并发送图库返回的一张图片；不合适或失败时继续自然文字回复。"],
       ],
@@ -26271,8 +26846,15 @@ function experimentalRuntimeSignals(key) {
     const candidates = Math.max(1, Number(settings.reaction_expression_candidate_limit || 6));
     const scopes = [
       toBool(settings.reaction_expression_private_enabled ?? true),
+      toBool(settings.reaction_expression_proactive_enabled ?? true),
       toBool(settings.reaction_expression_group_enabled ?? false),
     ].filter(Boolean).length;
+    const deliveryMode = String(settings.reaction_expression_delivery_mode || "separate_after");
+    const deliveryModeLabels = {
+      separate_after: "正文后单独发送",
+      same_message: "与正文同一消息链",
+      separate_before: "正文前单独发送",
+    };
     const lowLatency = toBool(settings.reaction_expression_low_latency_mode ?? true);
     const semanticTrigger = toBool(settings.reaction_expression_semantic_trigger_enabled ?? true);
     const attempts = Number(runtime.attempts ?? recent.attempt_count ?? 0);
@@ -26287,9 +26869,9 @@ function experimentalRuntimeSignals(key) {
     return {
       primary: attempts ? `${sent}/${attempts}` : `${Math.round(probability)}%`,
       label: attempts ? "发送 / 尝试" : "触发概率",
-      detail: `${lowLatency ? "本地快选" : "精细选择"} · ${candidates} 条说法${semanticTrigger && semanticOffers ? ` · 语义 ${semanticOffers}` : ""}${localFallbacks ? ` · 兜底 ${localFallbacks}` : ""}${cacheRequests ? ` · 缓存 ${cacheRate}%` : ""}`,
+      detail: `${deliveryModeLabels[deliveryMode] || deliveryModeLabels.separate_after} · ${lowLatency ? "本地快选" : "精细选择"} · ${candidates} 条说法${semanticTrigger && semanticOffers ? ` · 语义 ${semanticOffers}` : ""}${localFallbacks ? ` · 兜底 ${localFallbacks}` : ""}${cacheRequests ? ` · 缓存 ${cacheRate}%` : ""}`,
       tone: scopes ? "ok" : "idle",
-      bars: [["概率", probability, 100], ["缓存", cacheRate, 100], ["范围", scopes, 2]],
+      bars: [["概率", probability, 100], ["缓存", cacheRate, 100], ["范围", scopes, 3]],
     };
   }
   if (key === "enable_daily_case_review_experiment") {
@@ -26449,13 +27031,14 @@ function renderExperimentalToolEntrances() {
 }
 
 function dailyReviewConfigRow(key, value) {
+  const accessibility = featureSettingAccessibility(key, "daily-review");
   return `
     <section class="feature-param-row" data-daily-review-config-row="${escapeHtml(key)}">
       <div class="feature-param-main">
-        <header><b>${escapeHtml(configLabel(key))}</b><code>${escapeHtml(key)}</code></header>
-        <p>${escapeHtml(configDescription(key))}</p>
+        <header><b><label id="${accessibility.labelId}" for="${accessibility.controlId}">${escapeHtml(configLabel(key))}</label></b><code>${escapeHtml(key)}</code></header>
+        <p id="${accessibility.descriptionId}">${escapeHtml(configDescription(key))}</p>
       </div>
-      <div class="feature-param-control">${featureSettingInput(key, value)}</div>
+      <div class="feature-param-control">${featureSettingInput(key, value, accessibility)}</div>
     </section>
   `;
 }
@@ -28603,20 +29186,23 @@ function renderExperimentalSettings(key) {
   const features = state.featureDraft || {};
   const providers = state.providerDraft || {};
   const relatedMap = Object.fromEntries(related.map((item) => [item.key, item]));
-  const settingRow = ({ key: name, value, description }) => `
+  const settingRow = ({ key: name, value, description }) => {
+    const accessibility = featureSettingAccessibility(name, `experimental-${key}`);
+    return `
     <section class="feature-param-row">
       <div class="feature-param-main">
         <header>
-          <b>${escapeHtml(configLabel(name))}</b>
+          <b><label id="${accessibility.labelId}" for="${accessibility.controlId}">${escapeHtml(configLabel(name))}</label></b>
           <code>${escapeHtml(name)}</code>
         </header>
-        <p>${escapeHtml(description)}</p>
+        <p id="${accessibility.descriptionId}">${escapeHtml(description)}</p>
       </div>
       <div class="feature-param-control">
-        ${featureSettingInput(name, value)}
+        ${featureSettingInput(name, value, accessibility)}
       </div>
     </section>
   `;
+  };
   const renderedKeys = new Set();
   const groupedHtml = sections.map((section) => {
     const items = (section.keys || []).map((name) => {
@@ -28664,7 +29250,14 @@ if (key === "enable_reaction_expression_experiment") {
     const rawProbability = Number(settings.reaction_expression_trigger_probability ?? 0.2);
     const probability = Math.round(Math.max(0, Math.min(100, rawProbability <= 1 ? rawProbability * 100 : rawProbability)));
     const privateEnabled = toBool(settings.reaction_expression_private_enabled ?? true);
+    const proactiveEnabled = toBool(settings.reaction_expression_proactive_enabled ?? true);
     const groupEnabled = toBool(settings.reaction_expression_group_enabled ?? false);
+    const deliveryMode = String(settings.reaction_expression_delivery_mode || "separate_after");
+    const deliveryModeLabels = {
+      separate_after: "正文后单独发送",
+      same_message: "与正文同一消息链",
+      separate_before: "正文前单独发送",
+    };
     const lowLatency = toBool(settings.reaction_expression_low_latency_mode ?? true);
     const semanticTrigger = toBool(settings.reaction_expression_semantic_trigger_enabled ?? true);
     const candidateLimit = Math.max(1, Number(settings.reaction_expression_candidate_limit || 6));
@@ -28720,7 +29313,9 @@ if (key === "enable_reaction_expression_experiment") {
       .join(" · ");
     statusItems = [
       ["私聊范围", privateEnabled ? "允许" : "关闭"],
+      ["主动私聊", proactiveEnabled ? "允许" : "关闭"],
       ["群聊范围", groupEnabled ? "允许" : "关闭"],
+      ["发送方式", deliveryModeLabels[deliveryMode] || deliveryModeLabels.separate_after],
       ["触发概率", `${probability}%`],
       ["会话冷却", `${cooldown} 秒`],
       ["语义节点", semanticTrigger ? "高置信时优先" : "关闭"],
@@ -29843,7 +30438,7 @@ document.addEventListener("click", async (event) => {
     showTestDiagnosticDialog(resolved.title, resolved.result);
     return;
   }
-  const refreshBindingsButton = target.closest("[data-setup-guide-refresh-bindings]");
+  const refreshBindingsButton = element?.closest("[data-setup-guide-refresh-bindings]");
   if (refreshBindingsButton instanceof HTMLButtonElement) {
     setActionBusy(refreshBindingsButton, true);
     try {
@@ -30682,6 +31277,7 @@ $("#bookshelfUnlockForm").addEventListener("submit", async (event) => {
     const result = await postJson("/bookshelf/unlock", { password });
     state.bookshelfUnlocked = result.bookshelf || null;
     state.bookshelfAccessToken = result.bookshelf?.access_token || "";
+    persistBookshelfAccess(result.bookshelf || {});
     if (result.bookshelf?.memo_notes) applyMemoPayload(result.bookshelf.memo_notes);
     state.selectedBook = null;
     state.bookshelfPage = "shelf";
@@ -30746,7 +31342,7 @@ $("#groupFilter").addEventListener("input", renderGroups);
 $("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
 $("#featureFilter").addEventListener("input", renderFeatureSwitches);
 $("#worldbookMembers").addEventListener("click", async (event) => {
-  const button = event.target instanceof Element ? event.target.closest("[data-worldbook-living-memory], [data-worldbook-living-memory-close], [data-worldbook-edit], [data-worldbook-member], [data-worldbook-save], [data-worldbook-memory-toggle], [data-worldbook-memory-delete], [data-worldbook-observation-accept], [data-worldbook-observation-reject], [data-worldbook-delete]") : null;
+  const button = event.target instanceof Element ? event.target.closest("[data-worldbook-living-memory], [data-worldbook-living-memory-close], [data-worldbook-edit], [data-worldbook-member], [data-worldbook-save], [data-worldbook-reference-upload], [data-worldbook-reference-delete], [data-worldbook-memory-toggle], [data-worldbook-memory-delete], [data-worldbook-observation-accept], [data-worldbook-observation-reject], [data-worldbook-delete]") : null;
   if (!button) return;
   event.preventDefault();
   await handleWorldbookMemberAction(button);
@@ -30756,6 +31352,14 @@ $("#worldbookGroups").addEventListener("click", async (event) => {
   if (!button) return;
   event.preventDefault();
   await handleWorldbookGroupAction(button);
+});
+$("#roleplayKnowledgeSources")?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-knowledge-reference-upload], [data-knowledge-reference-delete]")
+    : null;
+  if (!button) return;
+  event.preventDefault();
+  await handleKnowledgeReferenceAction(button);
 });
 $("#worldbookImportBtn").addEventListener("click", async () => {
   await runAction(() => postJson("/worldbook/import", {}), "已刷新关系网", $("#worldbookImportBtn"));

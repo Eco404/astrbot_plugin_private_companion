@@ -318,7 +318,9 @@ class CoreStoreMixin:
         try:
             await self._ensure_daily_state()
             await self._ensure_daily_plan()
-            await self._ensure_daily_diary(force=not self._has_today_diary())
+            # 启动只做一次普通维护检查；是否到达配置的日记时间由统一入口判断。
+            # 手动“刷新日记”仍可显式传 force=True，不应让重启变成隐式强制生成。
+            await self._ensure_daily_diary()
             await self._maybe_settle_skill_growth()
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 启动时生成今日日志失败: {e}", exc_info=True)
@@ -383,10 +385,13 @@ class CoreStoreMixin:
             "worldbook_entries": [],
             "worldbook_member_profiles": {},
             "worldbook_group_profiles": {},
+            # Visual references are kept separate from the legacy 24-item catalog.
+            "photo_reference_assets": [],
             "worldbook_import_state": {},
             "runtime_settings": {},
             "inbound_debounce_stats": {},
             "group_llm_reply_blocks": {},
+            "reaction_expression_group_states": {},
             "cache_metrics": {},
             "balance_awareness": {},
             "qweather_location": {},
@@ -455,6 +460,7 @@ class CoreStoreMixin:
         data.setdefault("worldbook_entries", [])
         data.setdefault("worldbook_member_profiles", {})
         data.setdefault("worldbook_group_profiles", {})
+        data.setdefault("photo_reference_assets", [])
         data.setdefault("worldbook_deleted_member_ids", [])
         data.setdefault("worldbook_deleted_group_ids", [])
         data.setdefault("worldbook_import_state", {})
@@ -462,6 +468,7 @@ class CoreStoreMixin:
         data.setdefault("atrelay_send_log", [])
         data.setdefault("inbound_debounce_stats", {})
         data.setdefault("group_llm_reply_blocks", {})
+        data.setdefault("reaction_expression_group_states", {})
         data.setdefault("cache_metrics", {})
         data.setdefault("balance_awareness", {})
         data.setdefault("qweather_location", {})
@@ -1216,6 +1223,117 @@ class CoreStoreMixin:
             users.pop(alias_id, None)
             changed = True
         return changed
+
+    def _cleanup_orphan_reaction_expression_users(self) -> bool:
+        """Remove old group-reaction placeholders from the private-user table.
+
+        Earlier reaction-expression code stored every group sender through
+        ``_get_user``.  Only records with no private route, no activity, no
+        manual ownership and the configured fallback nickname are eligible;
+        real private users and explicitly managed users stay untouched.
+        """
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(users, dict) or not users:
+            return False
+
+        try:
+            configured_targets = {str(item).strip() for item in self._configured_target_ids() if str(item).strip()}
+        except Exception:
+            configured_targets = set()
+        default_nickname = _single_line(getattr(self, "default_nickname", ""), 40)
+        removed: list[str] = []
+
+        text_activity_keys = (
+            "umo",
+            "bound_delivery_umo",
+            "last_user_message",
+            "last_companion_message",
+            "last_proactive_reason",
+            "last_proactive_action",
+            "last_proactive_behavior_summary",
+            "last_proactive_motive",
+            "last_proactive_skip_reason",
+        )
+        numeric_activity_keys = (
+            "last_seen",
+            "last_activity_at",
+            "last_sent",
+            "last_user_message_at",
+            "last_companion_message_at",
+            "last_proactive_skip_at",
+            "last_reply_at",
+            "private_inbound_count",
+            "last_private_seen",
+            "last_private_activity_at",
+            "last_private_reply_at",
+            "inbound_count",
+            "reply_count",
+            "proactive_sent_count",
+        )
+        structured_activity_keys = (
+            "companion_memory",
+            "expression_profile",
+            "intent_profile",
+            "relationship_state",
+            "persona_relationship",
+            "dialogue_episodes",
+            "recent_group_messages",
+            "open_loops",
+            "action_preferences",
+            "action_consequences",
+            "state_continuity",
+            "pending_followup_event",
+            "suspended_proactive",
+            "simulation_mode",
+            "llm_timer_event",
+            "planned_event_chain",
+            "greetings_sent",
+        )
+
+        def has_text(value: Any) -> bool:
+            return bool(_single_line(value, 240))
+
+        def has_structured_activity(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(has_structured_activity(item) for item in value.values())
+            if isinstance(value, list):
+                return any(has_structured_activity(item) for item in value)
+            if isinstance(value, str):
+                return bool(value.strip())
+            return value not in (None, False, 0)
+
+        for raw_user_id, user in list(users.items()):
+            user_id = self._canonical_private_user_id(str(raw_user_id or "").strip())
+            if not user_id or not isinstance(user, dict):
+                continue
+            if user_id in configured_targets or self._is_bot_self_user_id(user_id):
+                continue
+            if bool(user.get("enabled")) or bool(user.get("manual_enabled")) or bool(user.get("manual_disabled")):
+                continue
+            if self._private_user_role(user, user_id) == "owner":
+                continue
+            nickname = _single_line(user.get("nickname"), 40)
+            if nickname and default_nickname and nickname != default_nickname:
+                continue
+            if any(has_text(user.get(key)) for key in text_activity_keys):
+                continue
+            if any(_safe_float(user.get(key), 0.0, 0.0) > 0 for key in numeric_activity_keys):
+                continue
+            if any(has_structured_activity(user.get(key)) for key in structured_activity_keys):
+                continue
+            aliases = user.get("alias_user_ids")
+            if isinstance(aliases, list) and any(_single_line(item, 160) for item in aliases):
+                continue
+            users.pop(raw_user_id, None)
+            removed.append(user_id)
+
+        if removed:
+            logger.info(
+                "[PrivateCompanion] 已清理群聊反应遗留的私聊占位记录: count=%s",
+                len(removed),
+            )
+            return True
+        return False
 
     @staticmethod
     def _normalize_private_user_role(value: Any) -> str:

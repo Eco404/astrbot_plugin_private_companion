@@ -366,9 +366,11 @@ window.PrivateCompanionProviderTree = (() => {
     const speedRecommended = keys.filter((key) => providerNeedsLowLatency(key)).length;
     const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
     const providerConfigMode = currentProviderConfigMode();
-    const vision = providerConfigMode === "quick"
+    const genericVision = providerConfigMode === "quick"
       ? (providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述")
-      : (providers.PRIVATE_READING_VISION_PROVIDER_ID || providers.NARRATION_PROVIDER_ID || "精准分流 / 默认链路");
+      : (providers.NARRATION_PROVIDER_ID || "工具结果转述 / 主模型");
+    const readingVision = providers.PRIVATE_READING_VISION_PROVIDER_ID || "未配置";
+    const vision = `通用：${genericVision} · JM 本子：${readingVision}`;
     document.getElementById("providerSummary").innerHTML = `
       <div class="provider-cost-notice">
         <b>成本提醒</b>
@@ -381,7 +383,7 @@ window.PrivateCompanionProviderTree = (() => {
       <div class="provider-summary-card"><span>低延迟优先项</span><b>${speedRecommended}</b><small>卡顿时优先检查这些项</small></div>
       ${requiredMissing ? `<div class="provider-summary-card warn"><span>未配置专用项</span><b>${requiredMissing}</b><small>这些任务留空时不会回退</small></div>` : ""}
       <div class="provider-summary-card"><span>可选 Provider</span><b>${available}</b><small>${escapeHtml(available ? "来自 AstrBot 当前配置" : "暂无可选项，可手动输入 ID")}</small></div>
-      <div class="provider-summary-card"><span>视觉通道</span><b>${escapeHtml(vision)}</b><small>${escapeHtml(providerConfigMode === "quick" ? "图片、识屏与素材理解" : "精准模式不使用快速视觉入口")}</small></div>
+      <div class="provider-summary-card"><span>视觉通道</span><b>${escapeHtml(vision)}</b><small>通用识图与 JM 本子识图使用独立 Provider</small></div>
     `;
   }
 
@@ -513,6 +515,8 @@ window.PrivateCompanionProviderTree = (() => {
           <span class="flow-node primary">创作模型<br><b>${escapeHtml(creative)}</b></span>
           <span class="flow-arrow">·</span>
           <span class="flow-node primary">插件识图<br><b>${escapeHtml(quickVision)}</b></span>
+          <span class="flow-arrow">·</span>
+          <span class="flow-node primary">夹层阅读识图<br><b>${escapeHtml(providers.PRIVATE_READING_VISION_PROVIDER_ID || "未配置")}</b></span>
         </div>
         <div class="flow-tasks"><span class="flow-node inherited">当前为快速配置<br><b>细分任务会按场景套用上方入口</b></span></div>
       `;

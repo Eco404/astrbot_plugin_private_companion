@@ -160,6 +160,14 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.setting_groups["enable_open_loop_tracking"], [])
+        self.assertIn(
+            "enable_creative_work_read_guard",
+            self.setting_groups["enable_creative_writing"],
+        )
+        self.assertIn(
+            'enable_creative_work_read_guard: "enable_creative_writing"',
+            self.script,
+        )
         self.assertNotIn("enable_external_event_self_link", self.setting_groups["enable_web_exploration"])
         self.assertNotIn("external_event_self_link_probability", self.setting_groups["enable_web_exploration"])
         self.assertNotIn("external_event_self_link_cooldown_hours", self.setting_groups["enable_web_exploration"])
@@ -168,6 +176,14 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         self.assertIn("const preserveFeatureParamDraft = () =>", self.script)
         self.assertIn(
             "function rememberFeatureParamDraft(control, { allowPhotoReferenceCatalog = false } = {})",
+            self.script,
+        )
+        self.assertIn(
+            'if (key === "photo_reference_catalog" && !allowPhotoReferenceCatalog) return;',
+            self.script,
+        )
+        self.assertIn(
+            "if (catalogInput) rememberFeatureParamDraft(catalogInput, { allowPhotoReferenceCatalog: true });",
             self.script,
         )
         self.assertIn("state.featureDetailParamDraft", self.script)
@@ -192,6 +208,7 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
             enable_goodnight_screen_check=True,
             enable_poke_action=False,
             enable_voice_action=True,
+            enable_creative_work_read_guard=True,
         )
         api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
         api.plugin = plugin
@@ -202,13 +219,16 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         self.assertTrue(flags["enable_goodnight_screen_check"])
         self.assertFalse(flags["enable_poke_action"])
         self.assertTrue(flags["enable_voice_action"])
+        self.assertTrue(flags["enable_creative_work_read_guard"])
 
     def test_reaction_expression_settings_are_visible_and_apply_to_runtime(self) -> None:
         plugin = SimpleNamespace(
             config={},
             enable_reaction_expression_experiment=False,
             reaction_expression_private_enabled=True,
+            reaction_expression_proactive_enabled=True,
             reaction_expression_group_enabled=False,
+            reaction_expression_delivery_mode="separate_after",
             reaction_expression_trigger_probability=0.2,
             reaction_expression_cooldown_seconds=180,
             reaction_expression_low_latency_mode=True,
@@ -226,7 +246,9 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         )
         for key in (
             "reaction_expression_private_enabled",
+            "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
+            "reaction_expression_delivery_mode",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_low_latency_mode",
@@ -241,14 +263,19 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         candidate_limit = api._normalize_setting_value(
             "reaction_expression_candidate_limit", 99
         )
+        delivery_mode = api._normalize_setting_value(
+            "reaction_expression_delivery_mode", "same_message"
+        )
         api._apply_config_value(
             "reaction_expression_trigger_probability", probability
         )
         api._apply_config_value("reaction_expression_candidate_limit", candidate_limit)
+        api._apply_config_value("reaction_expression_delivery_mode", delivery_mode)
 
         self.assertTrue(plugin.enable_reaction_expression_experiment)
         self.assertEqual(0.2, plugin.reaction_expression_trigger_probability)
         self.assertEqual(16, plugin.reaction_expression_candidate_limit)
+        self.assertEqual("same_message", plugin.reaction_expression_delivery_mode)
 
     def test_proactive_chat_status_reports_installation_mode_and_last_sync(self) -> None:
         plugin = SimpleNamespace(

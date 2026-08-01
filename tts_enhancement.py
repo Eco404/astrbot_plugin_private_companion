@@ -2240,6 +2240,82 @@ TTS 朗读文本：
             "使用方式：只用于保持当前人格的称呼、距离感、语气、口癖和角色边界；不要复述人格设定，不要添加原回复没有的新信息。"
         )
 
+    def _disable_streaming_for_tts_turn(self, event: Any) -> bool:
+        """让插件 TTS 在完整消息链上运行，避免流式结果绕过发送前钩子。"""
+        if event is None or bool(getattr(event, "_private_companion_tts_streaming_disabled", False)):
+            return bool(getattr(event, "_private_companion_tts_streaming_disabled", False))
+        setter = getattr(event, "set_extra", None)
+        if not callable(setter):
+            logger.debug(
+                "[PrivateCompanion] TTS 回合无法关闭流式：事件不支持 set_extra session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return False
+        previous = None
+        getter = getattr(event, "get_extra", None)
+        if callable(getter):
+            try:
+                previous = getter("enable_streaming")
+            except Exception:
+                previous = None
+        try:
+            setter("enable_streaming", False)
+            setattr(event, "_private_companion_tts_streaming_disabled", True)
+            setattr(event, "_private_companion_tts_streaming_previous", previous)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] TTS 回合关闭流式失败 session=%s error=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                _single_line(exc, 160),
+            )
+            return False
+        logger.info(
+            "[PrivateCompanion] TTS 已预留本回合完整消息链并关闭流式输出: session=%s previous=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            previous,
+        )
+        return True
+
+    def _tts_turn_requires_complete_reply(self, event: Any) -> bool:
+        """在 AstrBot 读取流式开关前，预判本轮是否可能进入插件 TTS。"""
+        if event is None or bool(getattr(event, "_private_companion_tts_streaming_disabled", False)):
+            return bool(getattr(event, "_private_companion_tts_streaming_disabled", False))
+        feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
+        tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
+        if not getattr(self, "enabled", False) or not tts_enabled:
+            return False
+        proactive_blocker = getattr(self, "_proactive_only_blocks_passive_event", None)
+        if callable(proactive_blocker):
+            try:
+                if proactive_blocker(event, "enable_tts_enhancement"):
+                    return False
+            except Exception:
+                return False
+        turn_voice_language = self._ensure_turn_tts_voice_language(event)
+        user_requested_tts = self._event_explicitly_requests_tts(event) or bool(turn_voice_language)
+        if self._tts_functional_command_reason(event) and not user_requested_tts:
+            return False
+        mode = getattr(self, "tts_generation_mode", "fast_tag")
+        if mode not in {"fast_tag", "postprocess"}:
+            return False
+        if (
+            not user_requested_tts
+            and getattr(self, "tts_frequency_control_mode", "global") != "legacy"
+            and not self._tts_trigger_probability_allows(event, reason="streaming_preflight")
+        ):
+            return False
+        if mode == "fast_tag":
+            strong_block_reason = self._tts_strong_constraint_block_reason(
+                event,
+                user_requested_tts=user_requested_tts,
+                check_probability=False,
+                reason="streaming_preflight",
+            )
+            if strong_block_reason:
+                self._set_tts_hard_block(event, strong_block_reason)
+                return False
+        return True
+
     async def apply_tts_enhancement_request(self, event: Any, req: Any) -> None:
         if bool(getattr(event, "_private_companion_tts_request_applied", False)):
             return
@@ -2376,6 +2452,8 @@ TTS 朗读文本：
             )
             if strong_block_reason:
                 self._set_tts_hard_block(event, strong_block_reason)
+        if not strong_block_reason:
+            self._disable_streaming_for_tts_turn(event)
         if marker not in prompt and mode == "fast_tag" and not strong_block_reason:
             rule_prompt = self._build_tts_rule_prompt(provider_kind, event=event)
             req.system_prompt = f"{prompt}\n\n{marker}\n{rule_prompt}".strip()
@@ -2490,7 +2568,7 @@ TTS 朗读文本：
             resp.completion_text = _normalize_outbound_punctuation_flow(text)
 
     async def apply_tts_enhancement_before_send(self, event: Any) -> None:
-        self._ensure_turn_tts_voice_language(event)
+        turn_voice_language = self._ensure_turn_tts_voice_language(event)
         feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
         if not getattr(self, "enabled", False) or not tts_enabled:
@@ -2571,6 +2649,58 @@ TTS 朗读文本：
                     )
                 )
                 return
+        reaction_intent = getattr(
+            event,
+            "_private_companion_reaction_expression_intent",
+            None,
+        )
+        defer_reaction_tts = (
+            isinstance(reaction_intent, dict)
+            and bool(reaction_intent)
+            and not self._event_explicitly_requests_tts(event)
+            and not bool(turn_voice_language)
+        )
+        if defer_reaction_tts:
+            visible_text = self._tts_visible_fallback_text(
+                normalized,
+                text,
+                event=event,
+            ) or self._tts_plain_markup_fallback_text(normalized)
+            visible_text = self._sanitize_tts_visible_text(
+                visible_text,
+                max_chars=self._tts_complete_text_limit(visible_text, 1600),
+            )
+            if visible_text:
+                primary_chain = self._replace_plain_components_preserving_order(
+                    chain,
+                    [Plain(visible_text)],
+                )
+                inbound_ts_getter = getattr(self, "_event_inbound_activity_ts", None)
+                try:
+                    started_at = (
+                        float(inbound_ts_getter(event))
+                        if callable(inbound_ts_getter)
+                        else time.time()
+                    )
+                except Exception:
+                    started_at = time.time()
+                setattr(
+                    event,
+                    "_private_companion_deferred_reaction_tts",
+                    {
+                        "normalized": normalized,
+                        "fallback_plain": visible_text,
+                        "started_at": started_at,
+                    },
+                )
+                event.set_result(self._build_result_from_chain(primary_chain))
+                logger.info(
+                    "[PrivateCompanion] 表情表达先发送完整正文,自动 TTS 延后生成: session=%s chars=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                    or "unknown",
+                    len(visible_text),
+                )
+                return
         if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
             # A tag can also arrive from a tool or an extension that bypasses the LLM response hook.
             # Treat it as plain source text so it cannot re-enter the fast-tag path.
@@ -2606,12 +2736,16 @@ TTS 朗读文本：
                 ) or self._tts_plain_markup_fallback_text(normalized)
                 event.set_result(self._build_result_from_chain([Plain(fallback_text)] if fallback_text else []))
             return
-        if len(plain_parts) != len(chain):
-            non_plain_tail = [comp for comp in chain if not isinstance(comp, Plain)]
-            if non_plain_tail:
-                new_chain = list(new_chain) + non_plain_tail
         new_chain = self._tts_record_first_visible_last_chain(new_chain)
-        ordered_chunks = self._split_tts_chain_for_ordered_send(new_chain)
+        if len(plain_parts) != len(chain):
+            new_chain = self._replace_plain_components_preserving_order(
+                chain,
+                new_chain,
+            )
+        if isinstance(reaction_intent, dict) and reaction_intent:
+            ordered_chunks = [new_chain]
+        else:
+            ordered_chunks = self._split_tts_chain_for_ordered_send(new_chain)
         expanded_chunks: list[list[Any]] = []
         for chunk in ordered_chunks:
             expanded_chunks.extend(self._tts_segment_plain_chunk_for_ordered_send(event, chunk))
@@ -2640,16 +2774,31 @@ TTS 朗读文本：
                         outcome="delivery_pending",
                         signals={"segments_expected": len(ordered_chunks), "segments_sent": 1},
                     )
-            remainder = self._send_tts_chain_chunks_after_first(
-                event,
-                ordered_chunks[1:],
-                started_at=remainder_started_at,
+            pending = {
+                "chunks": ordered_chunks[1:],
+                "started_at": remainder_started_at,
+            }
+            proactive_umo = _single_line(
+                getattr(event, "_private_companion_proactive_delivery_umo", ""),
+                180,
             )
-            task_creator = getattr(self, "_create_lifecycle_background_task", None)
-            if callable(task_creator):
-                task_creator(remainder, label="tts_reply_remainder")
+            if proactive_umo:
+                remainder = self._send_tts_chain_chunks_after_first(
+                    event,
+                    pending["chunks"],
+                    started_at=remainder_started_at,
+                )
+                task_creator = getattr(self, "_create_lifecycle_background_task", None)
+                if callable(task_creator):
+                    task_creator(remainder, label="tts_reply_remainder")
+                else:
+                    asyncio.create_task(remainder)
             else:
-                asyncio.create_task(remainder)
+                setattr(
+                    event,
+                    "_private_companion_tts_reply_remainder",
+                    pending,
+                )
             return
         event.set_result(self._build_result_from_chain(ordered_chunks[0] if ordered_chunks else new_chain))
 
@@ -2931,8 +3080,33 @@ TTS 朗读文本：
                 normalized_chain.append(visible_comp)
         return normalized_chain
 
+    @staticmethod
+    def _replace_plain_components_preserving_order(
+        source_chain: list[Any],
+        replacement: list[Any],
+    ) -> list[Any]:
+        rebuilt: list[Any] = []
+        inserted = False
+        for component in source_chain:
+            if isinstance(component, Plain):
+                if not inserted:
+                    rebuilt.extend(replacement)
+                    inserted = True
+                continue
+            rebuilt.append(component)
+        if not inserted:
+            rebuilt.extend(replacement)
+        return rebuilt
+
     def _tts_segment_plain_chunk_for_ordered_send(self, event: Any, chunk: list[Any]) -> list[list[Any]]:
         if not chunk or any(not isinstance(comp, Plain) for comp in chunk):
+            return [chunk]
+        reaction_intent = getattr(
+            event,
+            "_private_companion_reaction_expression_intent",
+            None,
+        )
+        if isinstance(reaction_intent, dict) and reaction_intent:
             return [chunk]
         text = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
         if not text:
@@ -3267,6 +3441,144 @@ TTS 朗读文本：
                     )
                     return
 
+    def _deferred_reaction_tts_has_new_activity(
+        self,
+        event: Any,
+        started_at: float,
+    ) -> bool:
+        scope_getter = getattr(self, "_event_scope_key", None)
+        scope = ""
+        if callable(scope_getter):
+            try:
+                scope = _single_line(scope_getter(event), 160)
+            except Exception:
+                scope = ""
+        if not scope:
+            scope = _single_line(getattr(event, "unified_msg_origin", ""), 160)
+        checker = getattr(self, "_scope_has_new_inbound_activity", None)
+        if not scope or not callable(checker):
+            return False
+        try:
+            return bool(checker(scope, started_at, ignore_self=True))
+        except Exception:
+            return False
+
+    async def _send_deferred_reaction_tts(
+        self,
+        event: Any,
+        pending: dict[str, Any],
+    ) -> None:
+        normalized = str(pending.get("normalized") or "").strip()
+        fallback_plain = self._sanitize_tts_visible_text(
+            pending.get("fallback_plain"),
+            max_chars=1600,
+        )
+        try:
+            started_at = float(pending.get("started_at") or time.time())
+        except (TypeError, ValueError):
+            started_at = time.time()
+        if not normalized or self._deferred_reaction_tts_has_new_activity(
+            event,
+            started_at,
+        ):
+            logger.info(
+                "[PrivateCompanion] 表情表达后台 TTS 已因新入站消息取消: session=%s stage=before_synthesis",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                or "unknown",
+            )
+            return
+
+        setattr(event, "_private_companion_deferred_reaction_tts_active", True)
+        try:
+            if getattr(self, "tts_generation_mode", "fast_tag") == "postprocess":
+                source_text = self._sanitize_tts_visible_text(
+                    self._strip_any_tts_markup(normalized),
+                    max_chars=1600,
+                )
+                generated = (
+                    await self._maybe_convert_plain_reply_to_tts(source_text, event)
+                    if source_text
+                    else []
+                )
+            elif "<tts>" in normalized.lower() and "</tts>" in normalized.lower():
+                tagged, full_scope_fallback = self._enforce_full_tts_scope_markup(
+                    normalized,
+                    source_text=fallback_plain,
+                    event=event,
+                )
+                generated = await self._process_tts_tags(
+                    tagged,
+                    event,
+                    fallback_plain=full_scope_fallback or fallback_plain,
+                )
+            else:
+                generated = await self._maybe_convert_plain_reply_to_tts(
+                    normalized,
+                    event,
+                )
+        finally:
+            try:
+                delattr(event, "_private_companion_deferred_reaction_tts_active")
+            except Exception:
+                pass
+
+        records = [component for component in generated if isinstance(component, Record)]
+        if not records:
+            logger.info(
+                "[PrivateCompanion] 表情表达后台 TTS 未生成语音,正文与表情已保持送达: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                or "unknown",
+            )
+            return
+        if self._deferred_reaction_tts_has_new_activity(event, started_at):
+            logger.info(
+                "[PrivateCompanion] 表情表达后台 TTS 生成期间出现新入站消息,已丢弃过期语音: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                or "unknown",
+            )
+            return
+
+        proactive_umo = _single_line(
+            getattr(event, "_private_companion_proactive_delivery_umo", ""),
+            180,
+        )
+        try:
+            proactive_sender = getattr(self, "_send_chain_components", None)
+            if proactive_umo and callable(proactive_sender):
+                sent = await proactive_sender(
+                    proactive_umo,
+                    records,
+                    apply_decorating_hooks=False,
+                )
+            else:
+                sender = getattr(event, "send", None)
+                result_builder = getattr(event, "chain_result", None)
+                if not callable(sender) or not callable(result_builder):
+                    return
+                sent = await sender(result_builder(records))
+            if sent is False:
+                return
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 表情表达后台语音投递失败: error_type=%s",
+                type(exc).__name__,
+            )
+            return
+
+        self._mark_tts_session_sent(event)
+        session = str(getattr(event, "unified_msg_origin", "") or "")
+        if session:
+            state = getattr(self, "_tts_auto_voice_last_at", None)
+            if not isinstance(state, dict):
+                state = {}
+                self._tts_auto_voice_last_at = state
+            state[session] = time.time()
+        logger.info(
+            "[PrivateCompanion] 表情表达后台语音已在正文和图片后单独送达: session=%s records=%s",
+            _single_line(session, 120) or "unknown",
+            len(records),
+        )
+
     async def _maybe_convert_plain_reply_to_tts(self, text: str, event: Any) -> list[Any]:
         mode = getattr(self, "tts_generation_mode", "fast_tag")
         if self._tts_text_is_provider_safety_refusal(text):
@@ -3356,7 +3668,14 @@ TTS 朗读文本：
                         pass
         if chain:
             session = str(getattr(event, "unified_msg_origin", "") or "")
-            self._tts_auto_voice_last_at[session] = time.time()
+            if not bool(
+                getattr(
+                    event,
+                    "_private_companion_deferred_reaction_tts_active",
+                    False,
+                )
+            ):
+                self._tts_auto_voice_last_at[session] = time.time()
             logger.info(
                 "[PrivateCompanion] TTS强化已转换纯文本回复: reason=%s session=%s %s",
                 reason,
@@ -4286,6 +4605,13 @@ Provider 规则：{emotion_rule}
         output: list[Any] = []
         successful_spoken: list[str] = []
         record_failed = False
+        deferred_delivery = bool(
+            getattr(
+                event,
+                "_private_companion_deferred_reaction_tts_active",
+                False,
+            )
+        )
         pos = 0
         matches = list(re.finditer(r"<tts>(.*?)</tts>", normalized, flags=re.IGNORECASE | re.DOTALL))
         for index, match in enumerate(matches):
@@ -4339,11 +4665,14 @@ Provider 规则：{emotion_rule}
                 source_text=fallback_plain or source_spoken,
                 source=self._tts_audio_source_for_event(event),
                 voice_language=voice_language,
+                retry_transient=deferred_delivery,
+                defer_delivery_effects=deferred_delivery,
             )
             if record is not None:
                 output.append(record)
                 successful_spoken.append(spoken)
-                self._mark_tts_session_sent(event)
+                if not deferred_delivery:
+                    self._mark_tts_session_sent(event)
                 if (
                     voice_language != "zh"
                     and getattr(self, "tts_delivery_mode", "voice_and_text") != "voice_only"
@@ -4750,6 +5079,28 @@ Provider 规则：{emotion_rule}
             result = result[0] if result else ""
         return str(result or "")
 
+    @staticmethod
+    def _tts_transient_synthesis_error(exc: BaseException) -> bool:
+        transient_names = {
+            "ConnectError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+        }
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            if isinstance(current, (ConnectionError, TimeoutError)):
+                return True
+            if current.__class__.__name__ in transient_names:
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     async def _tts_record_component(
         self,
         spoken: str,
@@ -4760,6 +5111,8 @@ Provider 规则：{emotion_rule}
         source_text: str = "",
         source: str = "private_companion",
         voice_language: str = "",
+        retry_transient: bool = False,
+        defer_delivery_effects: bool = False,
     ) -> Any | None:
         provider_kind = self._tts_provider_kind(
             tts_provider,
@@ -4800,18 +5153,38 @@ Provider 规则：{emotion_rule}
                     self._fishaudio_emotion_mode(),
                     rendered_cues,
                 )
-        try:
-            audio_path = await self._tts_generate_audio_path(tts_provider, sanitized)
-        except Exception as exc:
-            logger.warning(
-                "[PrivateCompanion] TTS强化生成语音失败: provider=%s error_type=%s error=%s text=%s",
-                provider_kind or "unknown",
-                exc.__class__.__name__,
-                _single_line(repr(exc), 160),
-                _single_line(sanitized, 120),
-                exc_info=True,
-            )
-            return None
+        audio_path = ""
+        attempts = 2 if retry_transient else 1
+        for attempt in range(attempts):
+            try:
+                audio_path = await self._tts_generate_audio_path(
+                    tts_provider,
+                    sanitized,
+                )
+                break
+            except Exception as exc:
+                can_retry = (
+                    attempt == 0
+                    and attempts > 1
+                    and self._tts_transient_synthesis_error(exc)
+                )
+                if can_retry:
+                    logger.info(
+                        "[PrivateCompanion] 后台 TTS 瞬时连接失败,准备重试一次: provider=%s error_type=%s",
+                        provider_kind or "unknown",
+                        exc.__class__.__name__,
+                    )
+                    await asyncio.sleep(0.2)
+                    continue
+                logger.warning(
+                    "[PrivateCompanion] TTS强化生成语音失败: provider=%s error_type=%s error=%s text=%s",
+                    provider_kind or "unknown",
+                    exc.__class__.__name__,
+                    _single_line(repr(exc), 160),
+                    _single_line(sanitized, 120),
+                    exc_info=True,
+                )
+                return None
         if not audio_path:
             return None
         try:
@@ -4824,13 +5197,14 @@ Provider 规则：{emotion_rule}
             logger.warning("[PrivateCompanion] TTS强化检查语音路径失败: %s", _single_line(exc, 120))
             return None
         final_ref = str(audio_path)
-        asyncio.create_task(
-            self._after_tts_audio_generated(
-                str(audio_path),
-                sanitized,
-                source=source or "private_companion",
+        if not defer_delivery_effects:
+            asyncio.create_task(
+                self._after_tts_audio_generated(
+                    str(audio_path),
+                    sanitized,
+                    source=source or "private_companion",
+                )
             )
-        )
         if provider_settings.get("use_file_service", False):
             callback_api_base = str((config or {}).get("callback_api_base", "") or "").strip()
             if callback_api_base:

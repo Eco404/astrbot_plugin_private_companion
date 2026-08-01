@@ -616,7 +616,7 @@ class VisualProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.timeout_call["timeout_key"], "NARRATION_PROVIDER_ID")
         self.assertEqual(harness.timeout_call["provider_id"], "precision-vision")
 
-    def test_reading_vision_follows_quick_and_precision_cards(self) -> None:
+    def test_reading_vision_always_uses_its_dedicated_card(self) -> None:
         quick = _PrivateReadingRouteHarness(
             "quick",
             {"PLUGIN_VISION_PROVIDER_ID": "quick-reading-backup"},
@@ -627,12 +627,30 @@ class VisualProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             quick._private_reading_visual_provider_route(),
-            ("PLUGIN_VISION_PROVIDER_ID", "reading-vision", "quick-reading-backup"),
+            ("PRIVATE_READING_VISION_PROVIDER_ID", "reading-vision", ""),
         )
         self.assertEqual(
             precision._private_reading_visual_provider_route(),
             ("PRIVATE_READING_VISION_PROVIDER_ID", "reading-vision", "precision-reading-backup"),
         )
+
+    def test_reading_outputs_follow_independent_switches(self) -> None:
+        harness = _PrivateReadingRouteHarness("quick", {})
+        harness.enable_private_reading_vision = True
+        harness.enable_private_reading_page_comments = False
+        harness.enable_private_reading_rating = False
+        parsed = harness._parse_jm_cosmos_vision_result(
+            '{"impression":"保留读后感","rating":9,"rating_reason":"很喜欢","preference_tags":["节奏"],"page_comments":[{"page":2,"comment":"保留批注"}]}',
+            [2],
+        )
+        self.assertEqual(parsed["impression"], "保留读后感")
+        self.assertEqual(parsed["page_comments"], [])
+        self.assertEqual(parsed["rating"], 0)
+        self.assertEqual(parsed["rating_reason"], "")
+        self.assertEqual(parsed["preference_tags"], [])
+
+        harness.enable_private_reading_vision = False
+        self.assertEqual(harness._private_reading_vision_switches(), (False, False, False))
 
     async def test_forward_image_empty_primary_uses_next_visual_provider(self) -> None:
         harness = _ForwardVisionHarness()

@@ -12,6 +12,7 @@ from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .helpers import _single_line
+from .reference_assets import normalize_reference_asset
 
 
 class AstrBotKnowledgeMixin:
@@ -121,6 +122,33 @@ class AstrBotKnowledgeMixin:
         for item in sources:
             for doc in item.get("documents") or []:
                 available_ids.add(str(doc.get("id") or ""))
+        assets = [
+            normalized
+            for raw in (self.data.get("photo_reference_assets") if isinstance(getattr(self, "data", None), dict) and isinstance(self.data.get("photo_reference_assets"), list) else [])
+            if (normalized := normalize_reference_asset(raw)) is not None and normalized.get("scope") == "knowledge"
+        ]
+        asset_view = [
+            {
+                "id": item.get("id"),
+                "owner_id": item.get("owner_id"),
+                "title": _single_line(item.get("title"), 120),
+                "note": _single_line(item.get("note"), 240),
+                "tags": [str(tag) for tag in (item.get("tags") or [])[:12]],
+                "reference_roles": list(item.get("reference_roles") or []),
+                "enabled": bool(item.get("enabled", True)),
+                "priority": int(item.get("priority") or 0),
+                "preview_endpoint": f"/reference_asset/image_data?id={item.get('id')}" if item.get("id") else "",
+            }
+            for item in assets
+        ]
+        assets_by_owner: dict[str, int] = {}
+        for asset in assets:
+            owner = str(asset.get("owner_id") or "")
+            assets_by_owner[owner] = assets_by_owner.get(owner, 0) + 1
+        for source in sources:
+            source["reference_asset_count"] = assets_by_owner.get(str(source.get("id") or ""), 0)
+            for doc in source.get("documents") or []:
+                doc["reference_asset_count"] = assets_by_owner.get(str(doc.get("id") or ""), 0)
         return {
             "available": bool(sources),
             "root": str(self._astrbot_knowledge_root()),
@@ -128,6 +156,8 @@ class AstrBotKnowledgeMixin:
             "selected_ids": selected,
             "selected_count": len(selected),
             "missing_ids": [item for item in selected if item not in available_ids],
+            "reference_assets": asset_view,
+            "reference_asset_count": len(asset_view),
         }
 
     def _format_roleplay_knowledge_context(

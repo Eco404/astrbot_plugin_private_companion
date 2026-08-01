@@ -661,6 +661,15 @@ class PrivateReadingMixin:
                 return tag_text
         return ""
 
+    def _private_reading_vision_switches(self) -> tuple[bool, bool, bool]:
+        """Return JM image, page-comment, and rating switches with old-config defaults."""
+        vision_enabled = bool(getattr(self, "enable_private_reading_vision", True))
+        return (
+            vision_enabled,
+            vision_enabled and bool(getattr(self, "enable_private_reading_page_comments", True)),
+            vision_enabled and bool(getattr(self, "enable_private_reading_rating", True)),
+        )
+
     async def _call_jm_cosmos_vision(
         self,
         cover_path: Path | None,
@@ -668,6 +677,9 @@ class PrivateReadingMixin:
         page_paths: list[Path] | None = None,
         sampled_pages: list[int] | None = None,
     ) -> dict[str, Any]:
+        vision_enabled, comments_enabled, rating_enabled = self._private_reading_vision_switches()
+        if not vision_enabled:
+            return {}
         image_paths: list[Path] = []
         if cover_path and cover_path.exists():
             image_paths.append(cover_path)
@@ -709,33 +721,61 @@ class PrivateReadingMixin:
                 self._format_state_for_prompt(daily_state if isinstance(daily_state, dict) else {}),
                 800,
             )
-            preference_state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
-            preference_profile = preference_state.get("preference_profile") if isinstance(preference_state.get("preference_profile"), dict) else {}
-            liked_terms = preference_profile.get("liked_terms") if isinstance(preference_profile.get("liked_terms"), list) else []
-            disliked_terms = preference_profile.get("disliked_terms") if isinstance(preference_profile.get("disliked_terms"), list) else []
-            preference_text = "；".join(
-                part
-                for part in (
-                    "偏好较高：" + "、".join(_single_line(item.get("term") if isinstance(item, dict) else item, 16) for item in liked_terms[:6] if _single_line(item.get("term") if isinstance(item, dict) else item, 16)) if liked_terms else "",
-                    "偏好较低：" + "、".join(_single_line(item.get("term") if isinstance(item, dict) else item, 16) for item in disliked_terms[:6] if _single_line(item.get("term") if isinstance(item, dict) else item, 16)) if disliked_terms else "",
+            preference_text = ""
+            if rating_enabled:
+                preference_state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
+                preference_profile = preference_state.get("preference_profile") if isinstance(preference_state.get("preference_profile"), dict) else {}
+                liked_terms = preference_profile.get("liked_terms") if isinstance(preference_profile.get("liked_terms"), list) else []
+                disliked_terms = preference_profile.get("disliked_terms") if isinstance(preference_profile.get("disliked_terms"), list) else []
+                preference_text = "；".join(
+                    part
+                    for part in (
+                        "偏好较高：" + "、".join(_single_line(item.get("term") if isinstance(item, dict) else item, 16) for item in liked_terms[:6] if _single_line(item.get("term") if isinstance(item, dict) else item, 16)) if liked_terms else "",
+                        "偏好较低：" + "、".join(_single_line(item.get("term") if isinstance(item, dict) else item, 16) for item in disliked_terms[:6] if _single_line(item.get("term") if isinstance(item, dict) else item, 16)) if disliked_terms else "",
+                    )
+                    if part
                 )
-                if part
+            output_requirements = [
+                '"impression":"160字以内第一人称内部读后感"',
+            ]
+            if comments_enabled:
+                output_requirements.append('"page_comments":[{"page":12,"comment":"35字以内页边吐槽或感想"}]')
+            if rating_enabled:
+                output_requirements.extend(
+                    [
+                        '"rating":8',
+                        '"rating_reason":"60字以内第一人称评分理由"',
+                        '"preference_tags":["画风","节奏"]',
+                    ]
+                )
+            disabled_outputs = []
+            if not comments_enabled:
+                disabled_outputs.append("page_comments")
+            if not rating_enabled:
+                disabled_outputs.extend(("rating", "rating_reason", "preference_tags"))
+            preference_prompt = (
+                preference_text
+                if rating_enabled and preference_text
+                else "还没有稳定偏好,这次评分会成为早期样本。"
+                if rating_enabled
+                else "本次已关闭阅读评价,不要生成评分、评分理由或偏好标签。"
             )
             prompt = (
-                "请根据封面和抽样正文页,用 Bot 自己的第一人称口吻留下一段内部读后感,并给看过的对应页写短批注,最后按自己的喜好给这本打分。\n"
+                "请根据封面和抽样正文页,用 Bot 自己的第一人称口吻完成启用的阅读输出。\n"
                 "封面只用于确认标题、画风和整体气质；内容理解主要参考后续正文页。抽样页已尽量避开开头的封面、书脊、目录,以及结尾的汉化组、致谢、后记页。\n"
                 "如果某张图明显是版权页、目录、汉化组说明、鸣谢或空白页,请忽略它,不要当作剧情或人物关系来解读。\n"
                 "impression 必须像 Bot 刚合上书后私下记在书柜里的短句,用“我”的感受、口癖和当下状态来写；可以写画风、氛围、人物关系、叙事节奏和读完后的感觉。\n"
                 "禁止第三人称或书评腔：不要写“她觉得/这个 Bot 认为/读者会感到/作品讲述了/本作通过/整体来看”这类旁观表达。不要写成客观数据库摘要,也不要提插件、视觉模型、抽样、页码或数据来源。\n"
                 "表达风格应顺着当前bot人格与状态：如果人格冷淡就冷淡,如果嘴硬就嘴硬,如果黏人就黏人；不要固定成害羞、含蓄或直白。\n"
-                "page_comments 是 Bot 私下读漫画时写在书页旁边的小吐槽/感想,要像即时反应,不要概括剧情,不要写成通用解说。每条都要服从下面的人格语气。\n"
-                "rating 是 Bot 自己读完后的主观分数,1 到 10 的整数；不是用户评分。rating_reason 用一句第一人称短句说明为什么喜欢或不喜欢。preference_tags 写出这次影响喜好的关键词,用于以后慢慢找到阅读偏好。\n"
-                "只输出 JSON,不要使用 Markdown。格式：{\"impression\":\"160字以内第一人称内部读后感\",\"rating\":8,\"rating_reason\":\"60字以内第一人称评分理由\",\"preference_tags\":[\"画风\",\"节奏\"],\"page_comments\":[{\"page\":12,\"comment\":\"35字以内页边吐槽或感想\"}]}。\n"
-                "page_comments 只为正文参考页里真正看懂的页生成；page 必须填写实际页码,不要填写第几张参考图的序号。\n"
-                f"\n【AstrBot 默认人格】\n{persona or '未读取到默认人格。'}\n"
+                + ("page_comments 是 Bot 私下读漫画时写在书页旁边的小吐槽/感想,要像即时反应,不要概括剧情,不要写成通用解说。每条都要服从下面的人格语气。\n" if comments_enabled else "")
+                + ("rating 是 Bot 自己读完后的主观分数,1 到 10 的整数；不是用户评分。rating_reason 用一句第一人称短句说明为什么喜欢或不喜欢。preference_tags 写出这次影响喜好的关键词,用于以后慢慢找到阅读偏好。\n" if rating_enabled else "")
+                + (f"关闭的输出字段必须省略或保持空值：{','.join(disabled_outputs)}。\n" if disabled_outputs else "")
+                + ("只输出 JSON,不要使用 Markdown。格式：{" + ",".join(output_requirements) + "}。\n")
+                + ("page_comments 只为正文参考页里真正看懂的页生成；page 必须填写实际页码,不要填写第几张参考图的序号。\n" if comments_enabled else "")
+                + f"\n【AstrBot 默认人格】\n{persona or '未读取到默认人格。'}\n"
                 f"\n【生活/日程人设补充】\n{schedule_persona or '（无）'}\n"
                 f"\n【当前状态】\n{state_text or '（无）'}\n"
-                f"\n【已有阅读偏好】\n{preference_text or '还没有稳定偏好,这次评分会成为早期样本。'}\n"
+                f"\n【已有阅读偏好】\n{preference_prompt}\n"
                 f"\n{worldview_context}\n"
                 f"标题：{_single_line(detail.get('title'), 80)}\n"
                 f"标签：{_single_line(','.join(str(item) for item in (detail.get('tags') or [])) if isinstance(detail.get('tags'), list) else detail.get('tags'), 120)}"
@@ -781,7 +821,7 @@ class PrivateReadingMixin:
                     if not text and attempt_index + 1 < len(providers):
                         continue
                     parsed = self._parse_jm_cosmos_vision_result(text, sampled_pages or [])
-                    if parsed.get("impression") or parsed.get("page_comments"):
+                    if parsed.get("impression") or parsed.get("page_comments") or parsed.get("rating"):
                         return parsed
                     return {"impression": self._dedupe_private_reading_impression(text), "page_comments": []}
                 except Exception as exc:
@@ -809,8 +849,7 @@ class PrivateReadingMixin:
             return {}
 
     def _private_reading_visual_provider_card_key(self) -> str:
-        mode = str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower()
-        return "PLUGIN_VISION_PROVIDER_ID" if mode == "quick" else "PRIVATE_READING_VISION_PROVIDER_ID"
+        return "PRIVATE_READING_VISION_PROVIDER_ID"
 
     def _private_reading_visual_provider_route(self) -> tuple[str, str, str]:
         provider_key = self._private_reading_visual_provider_card_key()
@@ -836,53 +875,55 @@ class PrivateReadingMixin:
             return {}
         if not isinstance(data, dict):
             return {}
+        vision_enabled, comments_enabled, rating_enabled = self._private_reading_vision_switches()
         sampled_list = [_safe_int(page, 0, 1) for page in sampled_pages or [] if _safe_int(page, 0, 1) > 0]
         allowed_pages = set(sampled_list)
         used_pages: set[int] = set()
         comments: list[dict[str, Any]] = []
-        for comment_index, item in enumerate(data.get("page_comments", [])):
-            if not isinstance(item, dict):
-                continue
-            raw_page = _safe_int(item.get("page"), 0, 0)
-            sample_order = _safe_int(
-                item.get("sample_order")
-                or item.get("sample_index")
-                or item.get("reference_index")
-                or item.get("image_index"),
-                0,
-                0,
-            )
-            page = raw_page
-            if sampled_list:
-                if 1 <= sample_order <= len(sampled_list):
-                    page = sampled_list[sample_order - 1]
-                elif raw_page not in allowed_pages and 1 <= raw_page <= len(sampled_list):
-                    page = sampled_list[raw_page - 1]
-                elif page in used_pages and comment_index < len(sampled_list) and sampled_list[comment_index] not in used_pages:
-                    page = sampled_list[comment_index]
-            comment = _single_line(item.get("comment"), 80)
-            if page > 0 and comment and (not allowed_pages or page in allowed_pages):
-                comments.append(
-                    {
-                        "page": page,
-                        "comment": comment,
-                        "raw_page": raw_page,
-                        "sample_order": sample_order or (comment_index + 1 if sampled_list and comment_index < len(sampled_list) else 0),
-                    }
+        if comments_enabled:
+            for comment_index, item in enumerate(data.get("page_comments", [])):
+                if not isinstance(item, dict):
+                    continue
+                raw_page = _safe_int(item.get("page"), 0, 0)
+                sample_order = _safe_int(
+                    item.get("sample_order")
+                    or item.get("sample_index")
+                    or item.get("reference_index")
+                    or item.get("image_index"),
+                    0,
+                    0,
                 )
-                used_pages.add(page)
-            if len(comments) >= 8:
-                break
+                page = raw_page
+                if sampled_list:
+                    if 1 <= sample_order <= len(sampled_list):
+                        page = sampled_list[sample_order - 1]
+                    elif raw_page not in allowed_pages and 1 <= raw_page <= len(sampled_list):
+                        page = sampled_list[raw_page - 1]
+                    elif page in used_pages and comment_index < len(sampled_list) and sampled_list[comment_index] not in used_pages:
+                        page = sampled_list[comment_index]
+                comment = _single_line(item.get("comment"), 80)
+                if page > 0 and comment and (not allowed_pages or page in allowed_pages):
+                    comments.append(
+                        {
+                            "page": page,
+                            "comment": comment,
+                            "raw_page": raw_page,
+                            "sample_order": sample_order or (comment_index + 1 if sampled_list and comment_index < len(sampled_list) else 0),
+                        }
+                    )
+                    used_pages.add(page)
+                if len(comments) >= 8:
+                    break
         return {
-            "impression": self._dedupe_private_reading_impression(data.get("impression")),
-            "rating": _safe_int(data.get("rating"), 0, 0, 10),
-            "rating_reason": _single_line(data.get("rating_reason") or data.get("reason"), 160),
+            "impression": self._dedupe_private_reading_impression(data.get("impression")) if vision_enabled else "",
+            "rating": _safe_int(data.get("rating"), 0, 0, 10) if rating_enabled else 0,
+            "rating_reason": _single_line(data.get("rating_reason") or data.get("reason"), 160) if rating_enabled else "",
             "preference_tags": [
                 _single_line(tag, 24)
                 for tag in (data.get("preference_tags") if isinstance(data.get("preference_tags"), list) else [])
                 if _single_line(tag, 24)
-            ][:8],
-            "page_comments": comments,
+            ][:8] if rating_enabled else [],
+            "page_comments": comments if comments_enabled else [],
         }
 
     def _jm_cosmos_textual_impression(self, detail: dict[str, Any]) -> str:
@@ -1931,11 +1972,12 @@ class PrivateReadingMixin:
                     page_paths,
                     sampled_pages=sampled_pages,
                 )
-                vision = self._dedupe_private_reading_impression(vision_result.get("impression")) if isinstance(vision_result, dict) else ""
-                page_comments = vision_result.get("page_comments", []) if isinstance(vision_result, dict) else []
-                bot_rating = _safe_int(vision_result.get("rating"), 0, 0, 10) if isinstance(vision_result, dict) else 0
-                rating_reason = _single_line(vision_result.get("rating_reason"), 160) if isinstance(vision_result, dict) else ""
-                preference_tags = vision_result.get("preference_tags", []) if isinstance(vision_result, dict) else []
+                vision_enabled, comments_enabled, rating_enabled = self._private_reading_vision_switches()
+                vision = self._dedupe_private_reading_impression(vision_result.get("impression")) if vision_enabled and isinstance(vision_result, dict) else ""
+                page_comments = vision_result.get("page_comments", []) if comments_enabled and isinstance(vision_result, dict) else []
+                bot_rating = _safe_int(vision_result.get("rating"), 0, 0, 10) if rating_enabled and isinstance(vision_result, dict) else 0
+                rating_reason = _single_line(vision_result.get("rating_reason"), 160) if rating_enabled and isinstance(vision_result, dict) else ""
+                preference_tags = vision_result.get("preference_tags", []) if rating_enabled and isinstance(vision_result, dict) else []
                 impression = vision
                 title = _single_line(detail.get("title") or candidate.get("title"), 80)
                 description = _single_line(

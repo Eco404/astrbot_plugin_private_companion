@@ -1089,10 +1089,22 @@
     "default": true,
     "invisible": true
   },
+  "reaction_expression_proactive_enabled": {
+    "description": "Legacy flat config: 主动消息表情表达",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "reaction_expression_group_enabled": {
     "description": "Legacy flat config: 群聊表情表达",
     "type": "bool",
     "default": false,
+    "invisible": true
+  },
+  "reaction_expression_delivery_mode": {
+    "description": "Legacy flat config: 表情表达发送方式",
+    "type": "string",
+    "default": "separate_after",
     "invisible": true
   },
   "reaction_expression_trigger_probability": {
@@ -1235,6 +1247,12 @@
   },
   "enable_creative_writing": {
     "description": "Legacy flat config: 启用私下创作行为",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_creative_work_read_guard": {
+    "description": "Legacy flat config: 启用创作原文读取保护",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -2072,6 +2090,24 @@
     "description": "Legacy flat config: 向用户征求推荐",
     "type": "bool",
     "default": false,
+    "invisible": true
+  },
+  "enable_private_reading_vision": {
+    "description": "Legacy flat config: 本子识图",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_private_reading_page_comments": {
+    "description": "Legacy flat config: 本子页边批注",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "enable_private_reading_rating": {
+    "description": "Legacy flat config: 本子阅读评价",
+    "type": "bool",
+    "default": true,
     "invisible": true
   },
   "enable_private_reading_preference_influence": {
@@ -4484,7 +4520,7 @@
       "PLUGIN_VISION_PROVIDER_ID": {
         "description": "插件识图模型（私聊/合并消息/识屏）",
         "type": "string",
-        "hint": "快速配置的视觉入口。用于插件自己的通用视觉理解任务：私聊单图/表情包转述、引用图片、合并消息图片和识屏；快速模式下也作为夹层阅读视觉入口。精准模式下请使用下方各视觉/外界信息分流项。",
+        "hint": "快速配置的通用视觉入口。用于私聊单图/表情包转述、引用图片、合并消息图片和识屏；夹层阅读始终使用下方独立的专用模型。",
         "default": "",
         "condition": {
           "provider_config_mode": "quick"
@@ -4494,10 +4530,9 @@
       "PRIVATE_READING_VISION_PROVIDER_ID": {
         "description": "夹层阅读视觉模型",
         "type": "string",
-        "hint": "仅用于夹层阅读的封面/抽样页理解、页边批注、读后感、评分和阅读偏好标签。必须填写支持图片输入的视觉模型；留空或模型不可用时不会回退到通用识图模型，也不会生成批注/读后感。",
+        "hint": "始终仅用于夹层阅读的封面/抽样页理解、页边批注、读后感、评分和阅读偏好标签，不会跟随通用插件识图模型。必须填写支持图片输入的视觉模型；留空或模型不可用时不会生成阅读视觉结果。",
         "default": "",
         "condition": {
-          "provider_config_mode": "precision",
           "enable_private_reading_integration": true
         },
         "_special": "select_provider"
@@ -5614,6 +5649,12 @@
         "description": "启用私下创作行为",
         "type": "bool",
         "hint": "开启后，Bot 会在闲暇时因为生活小事、日记碎片或梦境余温产生创作灵感，可能写小说、诗、随笔、剧本、设定集等文本；这是可选的私下行为，不会按小时生产，也不会一次写完整篇。",
+        "default": true
+      },
+      "enable_creative_work_read_guard": {
+        "description": "启用创作原文读取保护",
+        "type": "bool",
+        "hint": "开启后，仅当用户明确询问书柜中的已有作品、具体章节或原文时，要求模型先读取真实内容，并拦截没有实际读取的占位回答。关闭后不再注入读取要求，也不会替换模型原回复；私下创作和书柜本身不受影响。",
         "default": true
       },
       "creative_inspiration_probability": {
@@ -7084,6 +7125,35 @@
         "default": false,
         "condition": {
           "enable_private_reading_integration": true
+        }
+      },
+      "enable_private_reading_vision": {
+        "description": "本子识图",
+        "type": "bool",
+        "hint": "开启后才调用夹层阅读专用视觉模型；关闭后只保留素材和文字元数据，不读取封面或正文页。",
+        "default": true,
+        "condition": {
+          "enable_private_reading_integration": true
+        }
+      },
+      "enable_private_reading_page_comments": {
+        "description": "本子页边批注",
+        "type": "bool",
+        "hint": "开启后才保存模型生成的页边短批注；关闭后仍可保留识图/读后感/评价。",
+        "default": true,
+        "condition": {
+          "enable_private_reading_integration": true,
+          "enable_private_reading_vision": true
+        }
+      },
+      "enable_private_reading_rating": {
+        "description": "本子阅读评价",
+        "type": "bool",
+        "hint": "开启后才生成 Bot 自评分、评分理由和偏好标签；关闭后不会用本次阅读更新自动偏好画像。",
+        "default": true,
+        "condition": {
+          "enable_private_reading_integration": true,
+          "enable_private_reading_vision": true
         }
       },
       "enable_private_reading_preference_influence": {
@@ -10820,7 +10890,7 @@
       "enable_reaction_expression_experiment": {
         "description": "启用表情表达实验",
         "type": "bool",
-        "hint": "默认关闭。开启后，主模型仍只生成一次可独立成立的完整文字，并可留下隐藏表情意图；插件清除意图后只把合适图片追加在文字后，绝不会用图片替代正文。",
+        "hint": "默认关闭。开启后，主模型仍只生成一次可独立成立的完整文字，并可留下隐藏表情意图；插件清除意图后再按发送方式投递合适图片，绝不会用图片替代正文。",
         "default": false
       },
       "reaction_expression_private_enabled": {
@@ -10832,11 +10902,39 @@
           "enable_reaction_expression_experiment": true
         }
       },
+      "reaction_expression_proactive_enabled": {
+        "description": "允许主动消息表情表达",
+        "type": "bool",
+        "hint": "开启后，主动私聊的主模型可在完整正文后留下一个隐藏表情意图；插件再按现有概率、冷却、用户停用边界、重复图片和图库匹配结果决定是否发送图片。不会增加模型调用，已有照片或语音等媒体时不会叠加表情包。",
+        "default": true,
+        "condition": {
+          "enable_reaction_expression_experiment": true
+        }
+      },
       "reaction_expression_group_enabled": {
         "description": "允许群聊表情表达",
         "type": "bool",
         "hint": "默认关闭。群聊公开语境更容易误伤或显得刷屏；开启后仍会降低公开风险较高、关系不明确或缺少上下文的候选优先级。",
         "default": false,
+        "condition": {
+          "enable_reaction_expression_experiment": true
+        }
+      },
+      "reaction_expression_delivery_mode": {
+        "description": "表情表达发送方式",
+        "type": "string",
+        "default": "separate_after",
+        "options": [
+          "separate_after",
+          "same_message",
+          "separate_before"
+        ],
+        "labels": [
+          "正文后单独发送（推荐）",
+          "与正文同一消息链",
+          "正文前单独发送"
+        ],
+        "hint": "控制自动表情表达与正文的投递顺序。默认先完整发送正文，再单独发送表情包；同一消息链模式会把图片放进正文消息链，平台最终是否合并展示取决于适配器；正文前单独发送无法在后续正文投递失败时撤回已经送达的图片。用户明确调用图库工具的发送行为不受此项影响。",
         "condition": {
           "enable_reaction_expression_experiment": true
         }

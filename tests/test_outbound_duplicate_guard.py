@@ -89,6 +89,27 @@ class OutboundDuplicateGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(duplicate.is_stopped())
 
+    async def test_partial_primary_send_is_not_confirmed_as_complete_outbound_text(
+        self,
+    ) -> None:
+        event = _Event("第一段。第二段。")
+        event.set_result(
+            MessageEventResult(chain=[Plain("第一段。"), Plain("第二段。")])
+        )
+        await self.plugin.suppress_recent_duplicate_outbound_text(event)
+        candidate = event._private_companion_outbound_text_candidate
+        event._has_send_oper = True
+        event._private_companion_reaction_expression_delivery_tracker = {
+            "successful_signatures": [("plain", "第一段。")],
+        }
+
+        await self.plugin.remember_confirmed_outbound_text(event)
+
+        self.assertEqual(
+            "pending",
+            self.plugin._recent_outbound_text_guard[candidate["signature"]]["state"],
+        )
+
     async def test_same_group_text_for_different_sender_is_not_suppressed(self) -> None:
         first = _Event("晚安，睡个好觉哦。", sender_id="user-1")
         await self._send_once(first)
