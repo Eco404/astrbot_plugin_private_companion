@@ -575,9 +575,10 @@ function beginFeatureDetailSession(featureKey) {
   state.featureDetailDirty = false;
 }
 
-function rememberFeatureParamDraft(control) {
+function rememberFeatureParamDraft(control, { allowPhotoReferenceCatalog = false } = {}) {
   const key = String(control?.dataset?.featureParam || "").trim();
   if (!key) return;
+  if (key === "photo_reference_catalog" && !allowPhotoReferenceCatalog) return;
   const value = collectSettingValue(key, control);
   state.featureDetailParamDraft = {
     ...(state.featureDetailParamDraft || {}),
@@ -613,7 +614,10 @@ function featureDetailFormSignature(root = document) {
   page.querySelectorAll("[data-feature-param]").forEach((input) => {
     const paramKey = String(input.dataset.featureParam || "").trim();
     if (!paramKey) return;
-    params[paramKey] = collectSettingValue(paramKey, input);
+    const value = collectSettingValue(paramKey, input);
+    params[paramKey] = paramKey === "photo_reference_catalog"
+      ? photoReferenceCatalogSignature(value)
+      : value;
   });
   return JSON.stringify({
     key,
@@ -22878,20 +22882,29 @@ function currentPhotoReferenceCatalogValue() {
   return state.overview?.settings?.photo_reference_catalog || [];
 }
 
-function parsePhotoReferenceCatalog(value) {
+function parsePhotoReferenceCatalog(value, { generateMissingIds = true } = {}) {
   let rawItems = Array.isArray(value) ? value : [];
   if (typeof value === "string" && value.trim()) {
+    const text = value.trim();
     try {
-      const parsed = JSON.parse(value);
+      const parsed = JSON.parse(text);
       if (Array.isArray(parsed)) rawItems = parsed;
     } catch (_error) {
-      rawItems = [];
+      rawItems = text.split(/\r?\n/)
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch (_lineError) {
+            return null;
+          }
+        })
+        .filter(Boolean);
     }
   }
   return rawItems
     .filter((item) => item && typeof item === "object" && ["persona", "library"].includes(String(item.kind || "")))
     .map((item) => ({
-      id: String(item.id || (item.kind === "persona" ? "persona" : newPhotoReferenceId())),
+      id: String(item.id || (item.kind === "persona" ? "persona" : generateMissingIds ? newPhotoReferenceId() : "")),
       kind: String(item.kind),
       source: normalizePhotoReferenceSource(item.source),
       note: String(item.note || "").trim(),
@@ -22905,6 +22918,24 @@ function parsePhotoReferenceCatalog(value) {
         metadata_source: String(item.metadata_source || "configured"),
       },
     }));
+}
+
+function photoReferenceCatalogSignature(value) {
+  return JSON.stringify(
+    parsePhotoReferenceCatalog(value, { generateMissingIds: false }).map((item) => ({
+      id: item.kind === "persona" ? "persona" : String(item.id || ""),
+      kind: item.kind,
+      source: item.source,
+      note: item.note,
+      reference_roles: item.metadata.reference_roles,
+      outfit_category: item.metadata.outfit_category,
+      outfit_lock_default: item.metadata.outfit_lock_default,
+      scene_categories: item.metadata.scene_categories,
+      time_categories: item.metadata.time_categories,
+      preferred_preset: item.metadata.preferred_preset,
+      metadata_source: item.metadata.metadata_source,
+    })),
+  );
 }
 
 function photoReferenceCatalogFromStatus(status) {
@@ -22924,6 +22955,14 @@ function hydratePhotoReferenceDraftFromStatus(status) {
     photo_reference_catalog: serialized,
   };
   if (state.overview?.settings) state.overview.settings.photo_reference_catalog = statusCatalog;
+  if (state.featureDetailBaseline) {
+    state.featureDetailBaseline.settings = {
+      ...(state.featureDetailBaseline.settings || {}),
+      photo_reference_catalog: cloneFeatureStateValue(statusCatalog),
+    };
+    state.featureDetailBaseline.formSignature = "";
+    state.featureDetailDirty = false;
+  }
   state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(statusCatalog)
     .filter((item) => item.kind === "library");
   return true;
@@ -23796,14 +23835,21 @@ function syncPhotoReferenceManagerDraft() {
   const items = photoReferenceManagerItems();
   const personaEditor = document.querySelector("[data-photo-reference-persona-source]");
   const catalogInput = document.querySelector('[data-feature-param="photo_reference_catalog"]');
+  const previousSignature = photoReferenceCatalogSignature(currentPhotoReferenceCatalogValue());
+  const serialized = serializePhotoReferenceCatalog(
+    items,
+    personaEditor ? personaEditor.value.trim() : currentPhotoPersonaReferenceValue(),
+  );
   if (catalogInput) {
-    catalogInput.value = serializePhotoReferenceCatalog(
-      items,
-      personaEditor ? personaEditor.value.trim() : currentPhotoPersonaReferenceValue(),
-    );
-    rememberFeatureParamDraft(catalogInput);
+    catalogInput.value = serialized;
   }
+  if (previousSignature === photoReferenceCatalogSignature(serialized)) {
+    refreshFeatureDetailDirty();
+    return false;
+  }
+  if (catalogInput) rememberFeatureParamDraft(catalogInput, { allowPhotoReferenceCatalog: true });
   markFeatureDetailDirty();
+  return true;
 }
 
 function photoReferenceDraftValidationError() {
