@@ -29,6 +29,13 @@ REACTION_EXPRESSION_STATE_TEMPLATE: dict[str, Any] = {
     "reservation": {},
     "pending_images": {},
     "scopes": {},
+    # A direct user boundary applies to automatic reaction attachments until
+    # the user explicitly asks to resume them. Explicit image requests remain
+    # available through the normal tool path.
+    "auto_disabled": False,
+    "auto_preference_updated_at": 0.0,
+    "auto_preference_source": "",
+    "auto_disabled_scopes": {},
 }
 
 REACTION_EXPRESSION_RESERVATION_SECONDS = 600.0
@@ -68,6 +75,7 @@ def reaction_expression_scope_state(
         scopes[key] = scoped
     scoped.setdefault("last_sent_at", 0.0)
     scoped.setdefault("last_intent_signature", "")
+    scoped.setdefault("last_offer_at", 0.0)
     if not isinstance(scoped.get("reservation"), dict):
         scoped["reservation"] = {}
     return scoped
@@ -540,11 +548,167 @@ _NEGATIVE_FEEDBACK_PATTERNS = (
     r"(?:别|不要|别再|不用再).{0,8}(?:发|用).{0,6}(?:表情包|反应图|这种图)",
     r"(?:刚才|上一张|那张|这个).{0,10}(?:表情包|反应图|图)?.{0,8}(?:不合适|不贴切|不喜欢|很尴尬|太尴尬|难看)",
     r"(?:表情包|反应图|这张图).{0,8}(?:不合适|不贴切|不喜欢|很尴尬|太尴尬|难看)",
+    r"^(?:别发了|别用了|不要这种|不想看(?:表情包|表情|反应图)?|先别发)$",
 )
 _POSITIVE_FEEDBACK_PATTERNS = (
     r"(?:刚才|上一张|那张|这个|这张).{0,10}(?:表情包|反应图|图)?.{0,8}(?:不错|合适|贴切|喜欢|好笑|好用)",
     r"(?:表情包|反应图|这张图).{0,8}(?:不错|合适|贴切|喜欢|好笑|好用)",
+    r"^(?:太贴了|太适合了|这个可以|好好笑|笑死了?|绝了|这张可以)$",
 )
+
+_EXPLICIT_REACTION_OPT_OUT_PATTERNS = (
+    r"(?:别|不要|别再|不用再).{0,8}(?:发|用).{0,8}(?:表情包|表情|反应图|贴纸|梗图|斗图|这种图)",
+    r"(?:不想看|不需要|关闭|停用).{0,6}(?:表情包|表情|反应图|贴纸|梗图|斗图)",
+    r"(?:表情包|反应图|贴纸|梗图|斗图|这种图).{0,6}(?:以后)?(?:别|不要|别再|不用再).{0,4}(?:发|用|来)",
+    r"^(?:别发了|别用了|先别发|不要这种)$",
+)
+
+_EXPLICIT_REACTION_OPT_IN_PATTERNS = (
+    r"(?:可以|能)?继续(?:自动)?(?:发|用)(?:表情包|表情|反应图|贴纸|这种图)(?:了|吧)?",
+    r"(?:恢复|重新开启|重新打开|重新启用).{0,6}(?:自动)?(?:表情包|表情|反应图|贴纸)(?:自动|功能|发送)?",
+    r"(?:打开|开启|启用|解除停用|取消停用).{0,6}(?:自动)?(?:表情包|表情|反应图|贴纸)(?:自动|功能|发送)?",
+    r"(?:不用停|不用关闭|别停|恢复默认).{0,8}(?:表情包|表情|反应图|贴纸)",
+)
+
+
+def reaction_expression_explicit_opt_out(text: Any) -> bool:
+    """Detect a direct request to stop automatic reaction images.
+
+    This is deliberately narrow: only an explicit request about reaction
+    images blocks the current offer. Ordinary negative sentiment remains a
+    learned feedback signal instead of becoming a hard gate.
+    """
+    compact = re.sub(r"\s+", "", str(text or "")).casefold()
+    if not compact:
+        return False
+    return any(
+        re.search(pattern, compact, flags=re.I)
+        for pattern in _EXPLICIT_REACTION_OPT_OUT_PATTERNS
+    )
+
+
+def reaction_expression_explicit_opt_in(text: Any) -> bool:
+    """Detect a direct request to resume automatic reaction images."""
+    compact = re.sub(r"\s+", "", str(text or "")).casefold()
+    if not compact:
+        return False
+    return any(
+        re.search(pattern, compact, flags=re.I)
+        for pattern in _EXPLICIT_REACTION_OPT_IN_PATTERNS
+    )
+
+
+_REACTION_EXPRESSION_ASSET_TERM = r"(?:表情包|表情|反应图|贴纸|梗图|斗图)"
+_REACTION_EXPRESSION_REQUEST_VERB = r"(?:来|发|找|用|整|搞)"
+_EXPLICIT_REACTION_REQUEST_PATTERNS = (
+    rf"(?:请|麻烦|拜托|帮我|给我|替我|能不能|可不可以|可以|能否|这次|这回|现在|马上|立刻|赶紧|要不|不如|重新|再|继续).{{0,8}}{_REACTION_EXPRESSION_REQUEST_VERB}(?!了|过|的|来的).{{0,10}}{_REACTION_EXPRESSION_ASSET_TERM}",
+    rf"^(?:你)?(?:给我)?{_REACTION_EXPRESSION_REQUEST_VERB}(?!了|过|的|来的)(?:个|一个|一张|张|点|些)?.{{0,10}}{_REACTION_EXPRESSION_ASSET_TERM}(?:吧|呗|呀|啊|嘛|吗|看看)?$",
+    rf"^(?:我)?(?:想看|要看|想要|需要|我要).{{0,8}}{_REACTION_EXPRESSION_ASSET_TERM}(?:吧|呗|呀|啊|嘛|吗)?$",
+    rf"^要(?:个|一个|一张|张|点|些).{{0,8}}{_REACTION_EXPRESSION_ASSET_TERM}(?:吧|呗|呀|啊|嘛|吗)?$",
+    rf"{_REACTION_EXPRESSION_ASSET_TERM}.{{0,6}}(?:给我)?(?:来|发|找|整|搞)(?!了|过|的|来的)(?:个|一个|一张|张|点|些)?(?:吧|呗|呀|啊|嘛|吗)?$",
+    rf"(?:请|帮我|给我|直接)?(?:用|拿)(?!了|过|的|来的).{{0,8}}{_REACTION_EXPRESSION_ASSET_TERM}.{{0,8}}(?:回复|回应|回|接)(?:一下)?(?:吧|呗|呀|啊|嘛|吗)?$",
+)
+_HISTORICAL_REACTION_MENTION_PATTERNS = (
+    rf"(?:刚才|刚刚|之前|上次|此前|先前|前面|过去|已经|曾经|方才|为什么|怎么还|怎么又).{{0,24}}{_REACTION_EXPRESSION_ASSET_TERM}",
+    rf"(?:你|他|她|它).{{0,6}}(?:发|用|来|找|整|搞)(?:了|过|的|来的).{{0,12}}{_REACTION_EXPRESSION_ASSET_TERM}",
+)
+
+
+def reaction_expression_explicit_request(text: Any) -> bool:
+    """Return whether the current user message explicitly asks for an image."""
+    compact = re.sub(r"\s+", "", str(text or "")).casefold()
+    if not compact:
+        return False
+    clauses = [
+        part
+        for part in re.split(
+            r"(?:[，,。！？!?；;]+|但是|不过|然而|然后|可是|但|只是)", compact
+        )
+        if part
+    ] or [compact]
+    for clause in clauses:
+        if reaction_expression_explicit_opt_out(clause):
+            continue
+        if any(
+            re.search(pattern, clause, flags=re.I)
+            for pattern in _HISTORICAL_REACTION_MENTION_PATTERNS
+        ):
+            continue
+        if any(
+            re.search(pattern, clause, flags=re.I)
+            for pattern in _EXPLICIT_REACTION_REQUEST_PATTERNS
+        ):
+            return True
+    return False
+
+
+def reaction_expression_auto_disabled(state: dict[str, Any], scope_key: Any = "") -> bool:
+    """Read the per-conversation automatic reaction boundary."""
+    if not isinstance(state, dict):
+        return False
+    key = _single_line(scope_key, 240)
+    scoped = state.get("auto_disabled_scopes")
+    if key and isinstance(scoped, dict) and key in scoped:
+        return bool(scoped.get(key))
+    # Compatibility for state written before per-scope preferences existed.
+    return bool(state.get("auto_disabled"))
+
+
+def sync_reaction_expression_auto_preference(
+    state: dict[str, Any], text: Any, *, now: float, scope_key: Any = ""
+) -> str:
+    """Persist an explicit automatic-image boundary for future turns.
+
+    Returns ``disabled``, ``enabled`` when the preference changed and an empty
+    string when the message does not express a preference. The state is kept
+    on the user record so it survives the current event and process restart.
+    """
+    if not isinstance(state, dict):
+        return ""
+    compact = re.sub(r"\s+", "", str(text or "")).casefold()
+    if not compact:
+        return ""
+    key = _single_line(scope_key, 240)
+    scoped = state.get("auto_disabled_scopes")
+    if not isinstance(scoped, dict):
+        scoped = {}
+        state["auto_disabled_scopes"] = scoped
+    current = reaction_expression_auto_disabled(state, key)
+    if reaction_expression_explicit_opt_out(compact):
+        mentions_reaction = bool(
+            re.search(r"(?:表情包|表情|反应图|贴纸|这种图)", compact, flags=re.I)
+        )
+        feedback_target = _reaction_expression_feedback_target(state, key)
+        feedback_expires_at = (
+            _safe_float(feedback_target.get("expires_at"), 0.0)
+            if isinstance(feedback_target, dict)
+            else 0.0
+        )
+        has_recent_target = bool(feedback_target) and (
+            feedback_expires_at <= 0 or float(now) <= feedback_expires_at
+        )
+        if not mentions_reaction and not has_recent_target:
+            return ""
+        if current:
+            return ""
+        if key:
+            scoped[key] = True
+        else:
+            state["auto_disabled"] = True
+        state["auto_preference_updated_at"] = float(now)
+        state["auto_preference_source"] = "user_opt_out"
+        return "disabled"
+    if reaction_expression_explicit_opt_in(compact):
+        if not current:
+            return ""
+        if key:
+            scoped[key] = False
+        else:
+            state["auto_disabled"] = False
+        state["auto_preference_updated_at"] = float(now)
+        state["auto_preference_source"] = "user_opt_in"
+        return "enabled"
+    return ""
 
 
 def _reaction_expression_feedback_target(

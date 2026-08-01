@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -16,6 +17,110 @@ from .constants import (
     MODEL_TASK_PROVIDER_PREFIXES,
 )
 from .helpers import _flat_get, _now_ts, _safe_float, _safe_int, _single_line, _today_key
+
+
+def _looks_like_upstream_llm_error_response(text: Any) -> bool:
+    """Match high-confidence error envelopes returned as successful LLM text."""
+    cleaned = _single_line(text, 2000)
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", lowered).strip()
+    compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", lowered)
+
+    direct_markers = (
+        "allchatmodelsfailed",
+        "allllmprovidersfailed",
+        "allavailablechatmodelsareunavailable",
+        "promptcouldnotbesubmitted",
+        "promptwasnotsubmitted",
+        "promptcontainssensitivewords",
+        "unabletosubmitrequest",
+        "providerapierrorupstreamreturnedaninternalfailuremessage",
+    )
+    if any(marker in compact for marker in direct_markers):
+        return True
+
+    google_policy_features = (
+        "generativeaiprohibitedusepolicy",
+        "tryrephrasingtheprompt",
+        "sensitivewords",
+    )
+    if sum(feature in compact for feature in google_policy_features) >= 2:
+        return True
+
+    if "functiondeclaration" in compact and any(
+        marker in compact
+        for marker in (
+            "schemadidntspecify",
+            "invalidrequest",
+            "badrequest",
+            "errorcode400",
+        )
+    ):
+        return True
+
+    if lowered.lstrip().startswith("traceback (most recent call last):"):
+        return True
+
+    if re.match(
+        r"^(?:模型|api|provider|函数工具|工具)\s*调用失败\s*[:：]",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if re.match(
+        r"^(?:api connection error|api status error|authentication error|"
+        r"permission denied error|rate limit error|internal server error)\s*(?:[:：-]|$)",
+        lowered,
+    ):
+        return True
+
+    error_classes = (
+        "badrequesterror",
+        "apiconnectionerror",
+        "apistatuserror",
+        "authenticationerror",
+        "permissiondeniederror",
+        "ratelimiterror",
+        "notfounderror",
+        "internalservererror",
+    )
+    error_class = next((name for name in error_classes if name in compact), "")
+    if error_class:
+        structured_signal = any(
+            marker in compact
+            for marker in (
+                "errorcode",
+                "statuscode",
+                "httpstatus",
+                "requestid",
+                "invalidrequest",
+            )
+        )
+        leading_error_class = bool(
+            re.match(
+                rf"^(?:(?:llm|provider|api)\s+(?:response\s+)?error\s+|error\s+)?{error_class}\b",
+                normalized,
+            )
+        )
+        if structured_signal or (
+            leading_error_class
+            and (":" in cleaned[:100] or "：" in cleaned[:100] or len(cleaned) <= 48)
+        ):
+            return True
+
+    if lowered.lstrip().startswith(("{", "[")) and any(
+        marker in lowered for marker in ('"error"', "'error'")
+    ) and any(
+        marker in compact
+        for marker in ("invalid_request", "badrequest", "permissiondenied", "ratelimit")
+    ):
+        return True
+
+    return False
+
 
 class TokenBudgetMixin:
     """Methods split from main.PrivateCompanionPlugin."""
@@ -916,6 +1021,7 @@ class TokenBudgetMixin:
             candidates.append(fallback_provider)
         for attempt_index, attempt_provider in enumerate(candidates):
             start = time.time()
+            resp = None
             try:
                 if not attempt_provider:
                     raise RuntimeError("未找到可用的 AstrBot 默认模型 Provider")
@@ -941,6 +1047,44 @@ class TokenBudgetMixin:
                 if resp and resp.completion_text:
                     completion = resp.completion_text.strip()
                     if completion:
+                        response_role = _single_line(getattr(resp, "role", ""), 20).lower()
+                        semantic_provider_error = _looks_like_upstream_llm_error_response(
+                            completion
+                        )
+                        if response_role == "err" or semantic_provider_error:
+                            failure_code = (
+                                "provider_error_role"
+                                if response_role == "err"
+                                else "semantic_provider_error"
+                            )
+                            self._record_llm_usage(
+                                provider_id=attempt_provider,
+                                task=task_key,
+                                prompt=prompt,
+                                completion=completion,
+                                elapsed_ms=int((time.time() - start) * 1000),
+                                success=False,
+                                error=failure_code,
+                                resp=resp,
+                                budget_exempt=budget_exempt,
+                            )
+                            if attempt_index == 0 and fallback_provider:
+                                logger.warning(
+                                    "[PrivateCompanion] 主模型返回 Provider 错误响应,尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s kind=%s",
+                                    _single_line(task_key, 80) or "unknown",
+                                    provider_key or "unknown",
+                                    _single_line(attempt_provider, 120),
+                                    _single_line(fallback_provider, 120),
+                                    failure_code,
+                                )
+                            else:
+                                logger.warning(
+                                    "[PrivateCompanion] LLM 返回 Provider 错误响应: task=%s provider=%s kind=%s",
+                                    _single_line(task_key, 80) or "unknown",
+                                    _single_line(attempt_provider, 120) or "default",
+                                    failure_code,
+                                )
+                            continue
                         self._record_llm_usage(
                             provider_id=attempt_provider,
                             task=task_key,
@@ -967,7 +1111,7 @@ class TokenBudgetMixin:
                     elapsed_ms=int((time.time() - start) * 1000),
                     success=False,
                     error="empty_response",
-                    resp=resp if "resp" in locals() else None,
+                    resp=resp,
                     budget_exempt=budget_exempt,
                 )
                 if attempt_index == 0 and fallback_provider:

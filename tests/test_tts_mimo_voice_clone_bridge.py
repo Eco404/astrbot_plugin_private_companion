@@ -162,7 +162,7 @@ class MimoVoiceCloneBridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(provider, resolved)
 
-    def test_auto_mode_probes_mimo_before_falling_back_to_astrbot_provider(self) -> None:
+    def test_auto_mode_keeps_available_astrbot_provider_authoritative(self) -> None:
         provider = SimpleNamespace(name="official-tts")
         manager = _ToolManager()
         harness = _Harness(_Context(manager, provider=provider))
@@ -171,6 +171,18 @@ class MimoVoiceCloneBridgeTests(unittest.IsolatedAsyncioTestCase):
         resolved = harness._resolve_tts_synthesis_provider(_Event(), provider)
 
         self.assertIs(provider, resolved)
+        self.assertEqual([], manager.requested)
+
+    def test_auto_mode_uses_mimo_only_without_astrbot_provider(self) -> None:
+        plugin = _FakeMimoVoiceClonePlugin(Path("unused.wav"))
+        manager = _ToolManager(plugin)
+        harness = _Harness(_Context(manager, provider=None))
+        harness.tts_synthesis_backend = "auto"
+
+        resolved = harness._resolve_tts_synthesis_provider(_Event(), None)
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual("MiMo TTS Voice Clone plugin", resolved.name)
         self.assertEqual(["mimo_tts_speak"], manager.requested)
 
     def test_proactive_voice_availability_accepts_mimo_without_official_tts(self) -> None:

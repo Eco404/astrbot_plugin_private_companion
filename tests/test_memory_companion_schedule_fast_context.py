@@ -12,6 +12,7 @@ if str(ROOT.parent) not in sys.path:
 
 from astrbot_plugin_private_companion.memory_companion_adapter import MemoryCompanionAdapterMixin
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
+from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 
 
 class _Bridge:
@@ -55,6 +56,10 @@ class _Harness(MemoryCompanionAdapterMixin, DailyStateMixin):
 
     def _memory_companion_bridge(self):
         return self.bridge
+
+    _looks_like_internal_provider_error_text = staticmethod(
+        ProactiveMessageMixin._looks_like_internal_provider_error_text
+    )
 
     def _memory_companion_schedule_owner_context(self):
         return "u1", {"umo": "qq:FriendMessage:u1", "nickname": "user"}
@@ -196,6 +201,29 @@ class MemoryCompanionScheduleFastContextTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("我妈妈最近有点忙", result)
+
+    async def test_generation_feature_memory_filters_provider_refusal_but_keeps_normal_context(self) -> None:
+        bridge = _Bridge(
+            fast_supported=True,
+            response=(
+                "[slot_memories]\n"
+                "- content=Bot：刚才在厨房闻到蒸南瓜的甜香味。\n"
+                "- content=Bot：The。 prompt。 could。not。be。submitted.。The。prompt。contains。"
+                "sensitive。words。that。violate。Google's。Generative。AI。Prohibited。Use。policy。\n"
+                "- content=Bot：晚饭后想去阳台吹一会儿风。"
+            ),
+        )
+        harness = _Harness(bridge)
+
+        result = await harness._memory_companion_compose_feature_context(
+            kind="proactive_generation",
+            query="当前日程和主动消息",
+        )
+
+        self.assertNotIn("prompt", result.lower())
+        self.assertNotIn("Prohibited", result)
+        self.assertIn("蒸南瓜的甜香味", result)
+        self.assertIn("阳台吹一会儿风", result)
 
 
 if __name__ == "__main__":

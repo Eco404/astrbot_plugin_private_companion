@@ -705,6 +705,7 @@ class ProactiveMixin:
         if explicit and ":FriendMessage:" in explicit and explicit == clean_umo:
             return True
         if clean_umo in {
+            _single_line(user.get("bound_delivery_umo"), 240),
             _single_line(user.get("last_inbound_umo"), 240),
             _single_line(user.get("preferred_delivery_umo"), 240),
             _single_line(user.get("last_proactive_delivery_umo"), 240),
@@ -729,10 +730,22 @@ class ProactiveMixin:
         user = users.get(canonical) if isinstance(users, dict) and isinstance(users.get(canonical), dict) else {}
         candidates: list[str] = []
 
-        def add(value: Any) -> None:
+        def add(value: Any, *, trusted: bool = False) -> None:
             umo = _single_line(value, 240)
-            if umo and umo not in candidates and self._private_umo_matches_user_id(umo, delivery_id):
+            if not umo or umo in candidates:
+                return
+            if not self._private_umo_matches_user_id(umo, delivery_id) and not (
+                trusted and self._private_umo_session_id(umo)
+            ):
+                return
+            platform_available = self._private_delivery_umo_platform_available(umo)
+            if platform_available is False:
+                return
+            if umo and umo not in candidates:
                 candidates.append(umo)
+
+        if isinstance(user, dict):
+            add(user.get("bound_delivery_umo"), trusted=True)
 
         explicit = self._private_delivery_alias_target(canonical)
         if ":FriendMessage:" in explicit:
@@ -763,6 +776,48 @@ class ProactiveMixin:
         add(self._default_private_umo_for_user_id(delivery_id))
         return candidates
 
+    def _private_delivery_umo_platform_available(self, umo: str) -> bool | None:
+        """Return whether a saved UMO points to a currently usable platform instance.
+
+        ``None`` keeps compatibility with harnesses or startup states where no platform
+        manager is available yet; ``False`` rejects stale instance IDs such as ``default``
+        when AstrBot has a different active instance.
+        """
+        manager = getattr(getattr(self, "context", None), "platform_manager", None)
+        if manager is None:
+            return None
+        try:
+            platforms = list(manager.get_insts())
+        except Exception:
+            platforms = list(getattr(manager, "platform_insts", []) or [])
+        if not platforms:
+            return False
+        prefix = _single_line(umo, 240).split(":", 1)[0]
+        if not prefix:
+            return False
+        for platform in platforms:
+            try:
+                meta = platform.meta()
+            except Exception:
+                continue
+            instance_id = {
+                _single_line(getattr(meta, "id", ""), 80),
+                _single_line(getattr(meta, "name", ""), 80),
+            }
+            if prefix not in instance_id:
+                continue
+            status = getattr(platform, "status", None)
+            status_text = _single_line(
+                getattr(status, "name", "") or getattr(status, "value", "") or status,
+                40,
+            ).lower()
+            if status_text and "running" not in status_text and any(
+                token in status_text for token in ("stop", "disabled", "closed", "error", "failed")
+            ):
+                return False
+            return True
+        return False
+
     def _private_delivery_umo_for_user_id(self, user_id: str) -> str:
         candidates = self._private_delivery_umo_candidates(user_id)
         return candidates[0] if candidates else ""
@@ -778,6 +833,7 @@ class ProactiveMixin:
             users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
             user = users.get(canonical) if isinstance(users, dict) and isinstance(users.get(canonical), dict) else {}
         selected = self._private_delivery_umo_for_user_id(canonical)
+        bound = _single_line(user.get("bound_delivery_umo"), 240)
         explicit = self._private_delivery_alias_target(canonical)
         routes = user.get("private_delivery_routes") if isinstance(user.get("private_delivery_routes"), dict) else {}
         selected_item = routes.get(selected) if isinstance(routes.get(selected), dict) else {}
@@ -789,7 +845,10 @@ class ProactiveMixin:
 
         source = "fallback"
         source_label = "平台兜底"
-        if explicit and ":FriendMessage:" in explicit and selected == explicit:
+        if bound and selected == bound:
+            source = "bound"
+            source_label = "用户在当前私聊绑定"
+        elif explicit and ":FriendMessage:" in explicit and selected == explicit:
             source = "explicit"
             source_label = "管理员指定完整会话"
         elif success_at > 0 and (failure_count <= 0 or selected_recovered):
@@ -841,11 +900,61 @@ class ProactiveMixin:
             "route_count": len(routes),
             "verified_route_count": verified_count,
             "explicit_target": explicit,
+            "bound_umo": bound,
             "recent_error": _single_line(recent_failure_item.get("last_error"), 240),
             "recent_error_at": recent_failure_at,
             "recent_error_umo": recent_failure_umo,
             "recent_error_recovered": bool(recent_failure_at and recent_recovered_at > recent_failure_at),
         }
+
+    def _bind_private_delivery_umo(
+        self,
+        user_id: str,
+        user: dict[str, Any] | None,
+        umo: str,
+    ) -> tuple[bool, str]:
+        if not isinstance(user, dict):
+            return False, "当前用户资料不可用，暂时无法绑定主动消息会话。"
+        clean_umo = _single_line(umo, 240)
+        if not clean_umo or ":FriendMessage:" not in clean_umo or not self._private_umo_session_id(clean_umo):
+            return False, "只能在需要接收主动消息的私聊窗口执行绑定。"
+        self._note_private_user_umo(user_id, user, clean_umo)
+        user["bound_delivery_umo"] = clean_umo
+        user["preferred_delivery_umo"] = clean_umo
+        user["umo"] = clean_umo
+        return True, (
+            "已绑定当前私聊为主动消息接收窗口。\n"
+            f"会话：{clean_umo}\n"
+            "现在可以打开陪伴面板的配置引导，刷新绑定状态后继续配置。"
+        )
+
+    def _unbind_private_delivery_umo(self, user: dict[str, Any] | None) -> tuple[bool, str]:
+        if not isinstance(user, dict):
+            return False, "当前用户资料不可用，暂时无法解绑。"
+        bound = _single_line(user.pop("bound_delivery_umo", ""), 240)
+        if not bound:
+            return False, "当前没有人工绑定的主动消息会话，插件会继续自动选择可用路线。"
+        if _single_line(user.get("preferred_delivery_umo"), 240) == bound:
+            user.pop("preferred_delivery_umo", None)
+        return True, "已取消人工绑定，之后会根据最近入站和发送结果自动选择可用会话。"
+
+    def _format_private_delivery_binding_status(self, user_id: str, user: dict[str, Any] | None) -> str:
+        route = self._private_delivery_route_status(user_id, user)
+        selected = _single_line(route.get("umo"), 240) or "尚未形成可投递会话"
+        bound = _single_line(route.get("bound_umo"), 240)
+        binding_label = "自动选择"
+        if bound:
+            binding_label = "已绑定当前私聊" if route.get("source") == "bound" else "已绑定，但当前会话不可用"
+        lines = [
+            f"绑定状态：{binding_label}",
+            f"当前会话：{selected}",
+            f"路线来源：{_single_line(route.get('source_label'), 80) or '平台兜底'}",
+        ]
+        recent_error = _single_line(route.get("recent_error"), 200)
+        if recent_error:
+            recovered = "（已恢复）" if route.get("recent_error_recovered") else ""
+            lines.append(f"最近错误{recovered}：{recent_error}")
+        return "\n".join(lines)
 
     def _private_umo_matches_user_id(self, umo: str, user_id: str) -> bool:
         clean_umo = _single_line(umo, 180)

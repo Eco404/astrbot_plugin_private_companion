@@ -116,6 +116,39 @@ class TtsProviderManagementTests(unittest.IsolatedAsyncioTestCase):
                 self.api._tts_provider_schema_bundle(),
             )
 
+    def test_untouched_native_fish_model_is_preserved(self) -> None:
+        current = _fish_config(model="future-native-model")
+
+        normalized = self.api._normalized_tts_provider_update(
+            current,
+            {"values": {"fishaudio-tts-character": "voice-b"}},
+            self.api._tts_provider_schema_bundle(),
+        )
+
+        self.assertEqual("future-native-model", normalized["model"])
+        self.assertEqual("voice-b", normalized["fishaudio-tts-character"])
+
+        current_without_model = _fish_config()
+        current_without_model.pop("model")
+        normalized_without_model = self.api._normalized_tts_provider_update(
+            current_without_model,
+            {"enable": True, "values": {}},
+            self.api._tts_provider_schema_bundle(),
+        )
+        self.assertNotIn("model", normalized_without_model)
+
+    async def test_unchanged_provider_update_does_not_reload_astrbot_provider(self) -> None:
+        fake_request = SimpleNamespace(get_json=AsyncMock(return_value={
+            "provider_id": "fish-main",
+            "config": {"enable": True, "values": {}},
+        }))
+
+        with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
+            result = await self.api.update_tts_provider_config()
+
+        self.assertTrue(result["success"])
+        self.assertEqual([], self.manager.updated)
+
     async def test_create_provider_starts_disabled(self) -> None:
         fake_request = SimpleNamespace(
             get_json=AsyncMock(return_value={"type": "edge_tts", "id": "edge-ja"})

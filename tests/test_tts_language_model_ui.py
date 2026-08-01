@@ -52,7 +52,7 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn('data-tts-config-language=', self.script)
         self.assertIn('const activeProviderId = activeRouteMeta ? String(ttsProviderValues()[activeRouteMeta.key]', self.script)
         self.assertIn('创建并用于${escapeHtml(meta.label)}', self.script)
-        self.assertIn('保存${escapeHtml(meta.label)}配置', self.script)
+        self.assertIn('保存${escapeHtml(meta.label)} Provider', self.script)
         self.assertIn('postJson("/settings/update", { settings: { ...ttsStrategyValues(), ...savedRouteValues } })', self.script)
 
     def test_shared_provider_is_copied_before_language_specific_save(self) -> None:
@@ -60,9 +60,19 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("function ttsProviderSharedLanguages(providerId, language", self.script)
         self.assertIn("function ttsSharedProviderGroups(values", self.script)
         self.assertIn('postJson("/tts/provider/clone", {', self.script)
-        self.assertIn("三个语种互不覆盖", self.script)
+        self.assertIn("修改并保存此 Provider 时会自动拆分重复绑定", self.script)
         self.assertIn("保存并拆分独立配置", self.script)
         self.assertIn("...savedRouteValues", self.script)
+
+    def test_strategy_only_save_does_not_touch_astrbot_provider(self) -> None:
+        self.assertIn(
+            "const draft = selected ? state.ttsProviderConfigDrafts[selectedDraftKey] || null : null;",
+            self.script,
+        )
+        self.assertIn("const sharedProviderDraftGroups = sharedGroups.filter", self.script)
+        self.assertIn("for (const group of sharedProviderDraftGroups)", self.script)
+        self.assertIn("if (selected && draft && !activeProviderCloned)", self.script)
+        self.assertIn("单独保存语音策略不会改动 AstrBot 原生配置", self.script)
 
     def test_tts_language_configurator_is_mobile_accessible(self) -> None:
         self.assertIn("tts-language-configurator", self.script)
@@ -103,13 +113,13 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("white-space: nowrap;", mobile)
 
     def test_assets_use_tts_language_configurator_cache_version(self) -> None:
-        self.assertIn('./app.css?v=20260731-test-diagnostics-v1', self.html)
-        self.assertIn('./app.js?v=20260731-test-diagnostics-v1', self.html)
+        self.assertIn('./app.css?v=20260801-tts-provider-isolation-v1', self.html)
+        self.assertIn('./app.js?v=20260801-tts-provider-isolation-v1', self.html)
 
     def test_navigation_does_not_force_the_window_scroll_position(self) -> None:
         self.assertNotIn("resetActiveWorkspaceScroll", self.script)
         self.assertNotIn("window.scrollTo({ top,", self.script)
-        self.assertIn('./app.js?v=20260731-test-diagnostics-v1', self.html)
+        self.assertIn('./app.js?v=20260801-tts-provider-isolation-v1', self.html)
 
 
 if __name__ == "__main__":

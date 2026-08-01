@@ -724,7 +724,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("bot_diaries", 8),
             ("dream_fragments", 40),
             ("schedule_adjustments", 24),
-            ("bookshelf_items", 60),
+            ("bookshelf_items", 80),
             ("creative_projects", 24),
             ("personal_goals", 80),
             ("external_event_pool", 80),
@@ -793,9 +793,25 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         raw_runtime = getattr(self.plugin, "_reaction_expression_runtime", None)
         runtime = raw_runtime if isinstance(raw_runtime, dict) else {}
         runtime_payload: dict[str, Any] = {}
-        for key in ("attempts", "offers", "lookups", "cache_hits", "sent", "skipped"):
+        for key in (
+            "attempts",
+            "offers",
+            "model_omissions",
+            "local_fallbacks",
+            "lookups",
+            "cache_hits",
+            "sent",
+            "skipped",
+        ):
             if key in runtime:
                 runtime_payload[key] = self._int(runtime.get(key), 0, 0)
+        trigger_modes = runtime.get("trigger_modes")
+        if isinstance(trigger_modes, dict):
+            runtime_payload["trigger_modes"] = {
+                self._single_line(key, 40): self._int(value, 0, 0)
+                for key, value in trigger_modes.items()
+                if self._single_line(key, 40)
+            }
         for key in ("last_latency_ms", "total_lookup_ms"):
             if key in runtime:
                 runtime_payload[key] = round(self._float(runtime.get(key), 0.0, 0.0), 2)
@@ -1415,6 +1431,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             result = await asyncio.to_thread(self._reaction_library().rescan)
             if _safe_int(result.get("analysis_queued"), 0, 0) > 0:
                 self._schedule_reaction_library_analysis()
+            duplicate_count = len(result.get("duplicates", [])) if isinstance(result.get("duplicates"), list) else 0
+            if duplicate_count:
+                result["message"] = f"已重建索引；发现 {duplicate_count} 个重复文件，未重复导入"
             return self._ok(result)
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 重建表情包索引失败: %s", exc, exc_info=True)
@@ -6691,6 +6710,68 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return True
         return len(normalized_expected) >= 2 and normalized_expected in normalized_provided
 
+    def _bookshelf_album_id(self, item: Any, *, limit: int = 80) -> str:
+        if not isinstance(item, dict):
+            return ""
+        album_id = self._single_line(item.get("album_id") or item.get("id"), limit)
+        key = self._single_line(item.get("key"), 120)
+        if not album_id and key.startswith("jm_album:"):
+            album_id = self._single_line(key.split(":", 1)[1], limit)
+        if not album_id and key.startswith("jm-"):
+            album_id = self._single_line(key[3:], limit)
+        return album_id
+
+    def _is_bookshelf_jm_album(self, item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        kind = self._single_line(item.get("type") or item.get("kind"), 32)
+        if kind:
+            return kind == "jm_album"
+        key = self._single_line(item.get("key"), 120)
+        return bool(
+            key.startswith("jm_album:")
+            or key.startswith("jm-")
+            or (
+                isinstance(item.get("pages"), list)
+                and (
+                    self._single_line(item.get("album_id"), 80)
+                    or self._single_line(item.get("source"), 80).startswith("bookshelf_")
+                )
+            )
+        )
+
+    def _bookshelf_deleted_album_ids(self, state: Any) -> set[str]:
+        if not isinstance(state, dict):
+            return set()
+        return {
+            self._single_line(value, 80)
+            for value in (state.get("deleted_album_ids") if isinstance(state.get("deleted_album_ids"), list) else [])
+            if self._single_line(value, 80)
+        }
+
+    def _bookshelf_deleted_title_markers(self, state: Any) -> set[str]:
+        if not isinstance(state, dict):
+            return set()
+        return {
+            marker
+            for value in (state.get("deleted_titles") if isinstance(state.get("deleted_titles"), list) else [])
+            if (marker := " ".join(self._single_line(value, 160).split()).casefold())
+        }
+
+    def _is_deleted_bookshelf_jm_album(self, item: Any, state: Any) -> bool:
+        if not self._is_bookshelf_jm_album(item):
+            return False
+        album_id = self._bookshelf_album_id(item)
+        if album_id:
+            return album_id in self._bookshelf_deleted_album_ids(state)
+        title = " ".join(self._single_line(item.get("title"), 160).split()).casefold()
+        return bool(title and title in self._bookshelf_deleted_title_markers(state))
+
+    def _mark_bookshelf_data_changed(self) -> None:
+        marker = getattr(self.plugin, "_mark_bookshelf_store_changed", None)
+        if callable(marker):
+            marker()
+
     def _bookshelf_access_tokens(self) -> dict[str, float]:
         store = getattr(self.plugin, "_bookshelf_access_tokens", None)
         if not isinstance(store, dict):
@@ -6776,16 +6857,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         try:
             async with self.plugin._data_lock:
                 data = deepcopy(self.plugin.data)
+            jm_state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
+            deleted_ids = self._bookshelf_deleted_album_ids(jm_state)
+            if album_id in deleted_ids:
+                return {"error": "图片不存在"}
             shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
             target = None
             for item in shelf_items:
-                if not isinstance(item, dict) or item.get("type") != "jm_album":
+                if not self._is_bookshelf_jm_album(item):
                     continue
-                if self._single_line(item.get("album_id") or item.get("id"), 40) == album_id:
+                if self._bookshelf_album_id(item, limit=40) == album_id:
                     target = item
                     break
             if target is None:
-                jm_state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
                 last_album = jm_state.get("last_album") if isinstance(jm_state.get("last_album"), dict) else {}
                 if self._single_line(last_album.get("id") or last_album.get("album_id"), 40) == album_id:
                     target = last_album
@@ -6863,24 +6947,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         }
                         if value
                     }
-                    items = self.plugin.data.setdefault("bookshelf_items", [])
+                    items = self.plugin.data.get("bookshelf_items")
                     if not isinstance(items, list):
-                        items = []
+                        return self._error("夹层记录结构异常，已停止删除以避免覆盖原数据")
                     removed_pages: list[dict[str, Any]] = []
                     removed_album_ids: set[str] = set()
                     kept = []
                     for item in items:
-                        if not isinstance(item, dict) or item.get("type") != "jm_album":
+                        if not self._is_bookshelf_jm_album(item):
                             kept.append(item)
                             continue
                         item_values = {
-                            self._single_line(item.get("album_id"), 80),
+                            self._bookshelf_album_id(item),
                             self._single_line(item.get("id"), 80),
                             self._single_line(item.get("key"), 100),
                         }
-                        title_matched = bool(title_payload and self._single_line(item.get("title"), 120) == title_payload)
+                        title_matched = bool(
+                            not match_keys
+                            and title_payload
+                            and self._single_line(item.get("title"), 120) == title_payload
+                        )
                         if match_keys.intersection(value for value in item_values if value) or title_matched:
-                            removed_album_id = self._single_line(item.get("album_id") or item.get("id"), 80)
+                            removed_album_id = self._bookshelf_album_id(item)
                             if removed_album_id:
                                 removed_album_ids.add(removed_album_id)
                             if isinstance(item.get("pages"), list):
@@ -6899,6 +6987,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         } if isinstance(last_album, dict) else set()
                         last_title_matched = bool(
                             isinstance(last_album, dict)
+                            and not match_keys
                             and title_payload
                             and self._single_line(last_album.get("title"), 120) == title_payload
                         )
@@ -6933,9 +7022,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                         removed_titles = [
                             self._single_line(item.get("title"), 120)
                             for item in items
-                            if isinstance(item, dict)
-                            and item.get("type") == "jm_album"
-                            and self._single_line(item.get("album_id") or item.get("id"), 80) in removed_album_ids
+                            if self._is_bookshelf_jm_album(item)
+                            and self._bookshelf_album_id(item) in removed_album_ids
                         ]
                         if title_payload:
                             removed_titles.append(title_payload)
@@ -6956,6 +7044,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 else:
                     return self._error("不支持的书柜项目类型")
                 if changed:
+                    if kind == "jm_album":
+                        self._mark_bookshelf_data_changed()
                     self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
             return self._ok({"changed": changed, "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
@@ -7022,16 +7112,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._error("缺少 album_id")
         try:
             async with self.plugin._data_lock:
-                items = self.plugin.data.setdefault("bookshelf_items", [])
+                items = self.plugin.data.get("bookshelf_items")
                 if not isinstance(items, list):
-                    items = []
-                    self.plugin.data["bookshelf_items"] = items
+                    return self._error("夹层记录结构异常，未写入阅读进度")
                 target = next(
                     (
                         item for item in items
-                        if isinstance(item, dict)
-                        and str(item.get("type") or "") == "jm_album"
-                        and self._single_line(item.get("album_id") or item.get("id"), 32) == album_id
+                        if self._is_bookshelf_jm_album(item)
+                        and self._bookshelf_album_id(item, limit=32) == album_id
                     ),
                     None,
                 )
@@ -7050,6 +7138,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                     target["reading_bookmark"] = ""
                 if safe_total > 0 and page >= safe_total:
                     target["reading_completed_at"] = self._float(target.get("reading_completed_at")) or time.time()
+                self._mark_bookshelf_data_changed()
                 self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
@@ -7071,15 +7160,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._error("评分必须是 1 到 10")
         try:
             async with self.plugin._data_lock:
-                items = self.plugin.data.setdefault("bookshelf_items", [])
+                items = self.plugin.data.get("bookshelf_items")
                 if not isinstance(items, list):
-                    items = []
-                    self.plugin.data["bookshelf_items"] = items
+                    return self._error("夹层记录结构异常，未写入评分")
                 target: dict[str, Any] | None = None
                 for item in items:
-                    if not isinstance(item, dict) or item.get("type") != "jm_album":
+                    if not self._is_bookshelf_jm_album(item):
                         continue
-                    if str(item.get("album_id") or item.get("id") or "") == album_id:
+                    if self._bookshelf_album_id(item) == album_id:
                         item["user_rating"] = rating
                         item["user_rating_reason"] = reason
                         item["user_rated_ts"] = time.time()
@@ -7099,6 +7187,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 updater = getattr(self.plugin, "_update_private_reading_preference_profile", None)
                 if callable(updater):
                     updater(target)
+                self._mark_bookshelf_data_changed()
                 self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
@@ -7181,15 +7270,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._error("缺少 album_id")
         try:
             async with self.plugin._data_lock:
-                items = self.plugin.data.setdefault("bookshelf_items", [])
+                items = self.plugin.data.get("bookshelf_items")
                 if not isinstance(items, list):
-                    items = []
-                    self.plugin.data["bookshelf_items"] = items
+                    return self._error("夹层记录结构异常，未写入标签")
                 target: dict[str, Any] | None = None
                 for item in items:
-                    if not isinstance(item, dict) or item.get("type") != "jm_album":
+                    if not self._is_bookshelf_jm_album(item):
                         continue
-                    if str(item.get("album_id") or item.get("id") or "") == album_id:
+                    if self._bookshelf_album_id(item) == album_id:
                         item["user_liked_tags"] = liked_tags
                         item["user_disliked_tags"] = disliked_tags
                         item["user_tags_updated_ts"] = time.time()
@@ -7209,6 +7297,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 updater = getattr(self.plugin, "_update_private_reading_preference_profile", None)
                 if callable(updater):
                     updater(target)
+                self._mark_bookshelf_data_changed()
                 self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
@@ -7261,14 +7350,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             return self._error("缺少 album_id")
         try:
             async with self.plugin._data_lock:
-                items = self.plugin.data.get("bookshelf_items") if isinstance(self.plugin.data.get("bookshelf_items"), list) else []
+                items = self.plugin.data.get("bookshelf_items")
+                if not isinstance(items, list):
+                    return self._error("夹层记录结构异常，未读取或覆盖原数据")
                 target = next(
                     (
                         item
                         for item in items
-                        if isinstance(item, dict)
-                        and item.get("type") == "jm_album"
-                        and str(item.get("album_id") or item.get("id") or "") == album_id
+                        if self._is_bookshelf_jm_album(item)
+                        and self._bookshelf_album_id(item) == album_id
                     ),
                     None,
                 )
@@ -7327,12 +7417,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 )
                 updates["page_comments_previous"] = existing_comments[:12]
             async with self.plugin._data_lock:
-                items = self.plugin.data.get("bookshelf_items") if isinstance(self.plugin.data.get("bookshelf_items"), list) else []
+                items = self.plugin.data.get("bookshelf_items")
+                if not isinstance(items, list):
+                    return self._error("夹层记录结构异常，未写入批注")
                 written = False
                 for item in items:
-                    if not isinstance(item, dict) or item.get("type") != "jm_album":
+                    if not self._is_bookshelf_jm_album(item):
                         continue
-                    if str(item.get("album_id") or item.get("id") or "") == album_id:
+                    if self._bookshelf_album_id(item) == album_id:
                         item.update(updates)
                         target = item
                         written = True
@@ -7350,6 +7442,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 updater = getattr(self.plugin, "_update_private_reading_preference_profile", None)
                 if callable(updater):
                     updater(target)
+                self._mark_bookshelf_data_changed()
                 self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
             return self._ok({"message": "Bot 已重新读过并更新读后感", "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
@@ -10964,6 +11057,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "nickname": user.get("nickname", ""),
             "style": user.get("style", ""),
             "umo": user.get("umo", ""),
+            "delivery_bound": bool(self._single_line(user.get("bound_delivery_umo"), 240)),
+            "bound_delivery_umo": self._single_line(user.get("bound_delivery_umo"), 240),
             "last_seen_ts": last_seen,
             "last_seen": self.plugin._format_timestamp_elapsed(last_seen),
             "last_sent_ts": last_sent,
@@ -14527,8 +14622,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 continue
             normalized[str(key)] = self._coerce_tts_provider_field(value, field)
 
-        if provider_type == "fishaudio_tts_api":
-            model = str(normalized.get("model") or "s2.1-pro-free").strip().lower()
+        if provider_type == "fishaudio_tts_api" and "model" in values:
+            model = str(normalized.get("model") or "").strip().lower()
             allowed = {str(item["value"]) for item in FISH_AUDIO_MODEL_OPTIONS}
             if model not in allowed:
                 raise ValueError("Fish Audio 模型不在支持列表中")
@@ -14669,6 +14764,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return self._error("TTS Provider 不存在")
             schema_bundle = self._tts_provider_schema_bundle()
             normalized = self._normalized_tts_provider_update(current, incoming, schema_bundle)
+            if normalized == current:
+                return self._ok(self._tts_provider_management_payload())
             updater = getattr(manager, "update_provider", None)
             if not callable(updater):
                 return self._error("当前 AstrBot 不支持动态更新 Provider")
@@ -20091,6 +20188,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         except Exception:
             available = False
         album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
+        album_id = self._bookshelf_album_id(album)
+        album_title = " ".join(self._single_line(album.get("title"), 160).split()).casefold()
+        if (
+            (album_id and album_id in self._bookshelf_deleted_album_ids(state))
+            or (
+                not album_id
+                and album_title
+                and album_title in self._bookshelf_deleted_title_markers(state)
+            )
+        ):
+            album = {}
         return {
             "enabled": bool(available and getattr(self.plugin, "enable_jm_cosmos_integration", False)),
             "boredom_read_enabled": bool(available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
@@ -20163,11 +20271,24 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return ""
 
     async def _bookshelf_summary(self, data: dict[str, Any], *, unlocked: bool, access_token: str = "") -> dict[str, Any]:
+        if unlocked:
+            recoverer = getattr(self.plugin, "_recover_bookshelf_items_from_local_pages_inplace", None)
+            if callable(recoverer):
+                try:
+                    recoverer(data)
+                except Exception as exc:
+                    logger.debug("[PrivateCompanionPage] 夹层响应内本地书页恢复失败: %s", self._single_line(exc, 160))
         projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
         diaries = data.get("bot_diaries") if isinstance(data.get("bot_diaries"), list) else []
         shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
-        jm_items = [item for item in shelf_items if isinstance(item, dict) and item.get("type") == "jm_album"]
         jm_state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
+        deleted_jm_ids = self._bookshelf_deleted_album_ids(jm_state)
+        jm_items = [
+            item
+            for item in shelf_items
+            if self._is_bookshelf_jm_album(item)
+            and not self._is_deleted_bookshelf_jm_album(item, jm_state)
+        ]
         secret_state = data.get("bookshelf_secret") if isinstance(data.get("bookshelf_secret"), dict) else {}
         reason_sanitizer = getattr(self.plugin, "_sanitize_bookshelf_password_reason", None)
         password_hint = ""
@@ -20181,12 +20302,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if not password_hint:
             password_hint = "提示会在通过“陪伴 输出夹层密码”生成后显示。"
         last_album = jm_state.get("last_album") if isinstance(jm_state.get("last_album"), dict) else {}
-        if last_album and not any(str(item.get("album_id") or item.get("id") or "") == str(last_album.get("id") or "") for item in jm_items):
+        last_album_id = self._bookshelf_album_id(last_album)
+        if (
+            last_album
+            and last_album_id
+            and not self._is_deleted_bookshelf_jm_album(
+                {**last_album, "type": last_album.get("type") or "jm_album"},
+                jm_state,
+            )
+            and not any(self._bookshelf_album_id(item) == last_album_id for item in jm_items)
+        ):
             jm_items.append(
                 {
                     "type": "jm_album",
                     "title": last_album.get("title"),
-                    "album_id": last_album.get("id"),
+                    "album_id": last_album_id,
                     "description": last_album.get("description") or last_album.get("intro") or last_album.get("summary"),
                     "keyword": last_album.get("keyword"),
                     "author": last_album.get("author"),
@@ -20216,9 +20346,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         if unlocked:
             pages_root = data_root / "bookshelf_pages"
             known_jm_ids = {
-                self._single_line(item.get("album_id") or item.get("id"), 80)
+                self._bookshelf_album_id(item)
                 for item in jm_items
-                if isinstance(item, dict) and self._single_line(item.get("album_id") or item.get("id"), 80)
+                if self._bookshelf_album_id(item)
             }
             preference_history = []
             profile = jm_state.get("preference_profile") if isinstance(jm_state.get("preference_profile"), dict) else {}
@@ -20233,17 +20363,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 orphan_dirs = [
                     path
                     for path in pages_root.iterdir()
-                    if path.is_dir() and self._single_line(path.name, 80) and self._single_line(path.name, 80) not in known_jm_ids
+                    if path.is_dir()
+                    and self._single_line(path.name, 80)
+                    and self._single_line(path.name, 80) not in known_jm_ids
+                    and self._single_line(path.name, 80) not in deleted_jm_ids
                 ] if pages_root.exists() else []
             except Exception:
                 orphan_dirs = []
             for path in orphan_dirs:
                 album_id = self._single_line(path.name, 80)
-                page_files = sorted(
-                    file
-                    for file in path.iterdir()
-                    if file.is_file() and file.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-                )
+                try:
+                    page_files = sorted(
+                        file
+                        for file in path.iterdir()
+                        if file.is_file() and file.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanionPage] 跳过无法读取的夹层目录: album=%s error=%s",
+                        album_id,
+                        self._single_line(exc, 120),
+                    )
+                    continue
                 if not album_id or not page_files:
                     continue
                 meta = history_by_album.get(album_id, {})
@@ -20374,9 +20515,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 jm_items,
                 key=lambda item: self._float(item.get("created_ts") or item.get("created_at") or item.get("ts")),
                 reverse=True,
-            )[:18]
+            )[:80]
             for item in recent_jm_items:
-                album_id = self._single_line(item.get("album_id") or item.get("id"), 32)
+                album_id = self._bookshelf_album_id(item, limit=32)
                 pages = item.get("pages") if isinstance(item.get("pages"), list) else []
                 reading_impression = self._single_line(item.get("reading_impression") or item.get("impression"), 1000)
                 vision_impression = self._single_line(item.get("vision"), 1000)

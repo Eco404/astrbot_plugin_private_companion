@@ -1338,6 +1338,245 @@ class PrivateReadingMixin:
             )
         return pages
 
+    def _touch_bookshelf_store_revision(self, data: dict[str, Any] | None = None) -> int:
+        target = data if isinstance(data, dict) else self.data
+        marker = getattr(self, "_mark_bookshelf_store_changed", None)
+        if callable(marker):
+            return int(marker(target) or 0)
+        try:
+            current = max(0, int(target.get("bookshelf_store_revision") or 0))
+        except (TypeError, ValueError, OverflowError):
+            current = 0
+        revision = max(current + 1, int(_now_ts() * 1000))
+        target["bookshelf_store_revision"] = revision
+        return revision
+
+    @staticmethod
+    def _bookshelf_album_id_from_item(item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        album_id = _single_line(item.get("album_id") or item.get("id"), 80)
+        key = _single_line(item.get("key"), 120)
+        if not album_id and key.startswith("jm_album:"):
+            album_id = _single_line(key.split(":", 1)[1], 80)
+        if not album_id and key.startswith("jm-"):
+            album_id = _single_line(key[3:], 80)
+        return album_id
+
+    @staticmethod
+    def _is_bookshelf_jm_item(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        item_type = _single_line(item.get("type") or item.get("kind"), 32)
+        if item_type:
+            return item_type == "jm_album"
+        key = _single_line(item.get("key"), 120)
+        if key.startswith("jm_album:") or key.startswith("jm-"):
+            return True
+        source = _single_line(item.get("source"), 80)
+        return bool(
+            isinstance(item.get("pages"), list)
+            and (
+                _single_line(item.get("album_id"), 80)
+                or source.startswith("bookshelf_")
+            )
+        )
+
+    @staticmethod
+    def _bookshelf_title_marker(value: Any) -> str:
+        return " ".join(_single_line(value, 160).split()).casefold()
+
+    def _recover_bookshelf_items_from_local_pages_inplace(self, data: dict[str, Any]) -> int:
+        if not isinstance(data, dict):
+            return 0
+        raw_items = data.get("bookshelf_items")
+        if raw_items is None:
+            items: list[Any] = []
+            data["bookshelf_items"] = items
+        elif not isinstance(raw_items, list):
+            logger.warning(
+                "[PrivateCompanion] 夹层记录结构异常，已停止本地书页恢复以避免覆盖: type=%s",
+                type(raw_items).__name__,
+            )
+            return 0
+        else:
+            items = raw_items
+
+        state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
+        deleted_ids = {
+            _single_line(value, 80)
+            for value in (state.get("deleted_album_ids") if isinstance(state.get("deleted_album_ids"), list) else [])
+            if _single_line(value, 80)
+        }
+        deleted_titles = {
+            marker
+            for value in (state.get("deleted_titles") if isinstance(state.get("deleted_titles"), list) else [])
+            if (marker := self._bookshelf_title_marker(value))
+        }
+        changed = False
+        recovered = 0
+        if deleted_ids or deleted_titles:
+            kept_items: list[Any] = []
+            for item in items:
+                is_jm_album = self._is_bookshelf_jm_item(item)
+                album_id = self._bookshelf_album_id_from_item(item) if is_jm_album else ""
+                title_marker = self._bookshelf_title_marker(item.get("title")) if isinstance(item, dict) else ""
+                is_deleted = bool(
+                    is_jm_album
+                    and (
+                        (album_id and album_id in deleted_ids)
+                        or (not album_id and title_marker and title_marker in deleted_titles)
+                    )
+                )
+                if is_deleted:
+                    recovered += 1
+                    changed = True
+                    continue
+                kept_items.append(item)
+            if changed:
+                items[:] = kept_items
+
+        last_album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
+        last_album_id = self._bookshelf_album_id_from_item(last_album)
+        last_album_title = self._bookshelf_title_marker(last_album.get("title"))
+        if last_album and (
+            (last_album_id and last_album_id in deleted_ids)
+            or (not last_album_id and last_album_title and last_album_title in deleted_titles)
+        ):
+            state["last_album"] = {}
+            last_album = {}
+            recovered += 1
+            changed = True
+
+        pages_root = Path(self.data_dir) / "bookshelf_pages"
+        if not pages_root.exists() or not pages_root.is_dir():
+            if changed:
+                self._touch_bookshelf_store_revision(data)
+            return recovered
+
+        history_by_album: dict[str, dict[str, Any]] = {}
+        profile = state.get("preference_profile") if isinstance(state.get("preference_profile"), dict) else {}
+        history = profile.get("history") if isinstance(profile.get("history"), list) else []
+        for raw in history:
+            if not isinstance(raw, dict):
+                continue
+            album_id = _single_line(raw.get("album_id") or raw.get("id"), 80)
+            if album_id:
+                history_by_album[album_id] = {**history_by_album.get(album_id, {}), **raw}
+        last_album_id = _single_line(last_album.get("id") or last_album.get("album_id"), 80)
+        if last_album_id:
+            history_by_album[last_album_id] = {**history_by_album.get(last_album_id, {}), **last_album}
+
+        existing_by_album = {
+            album_id: item
+            for item in items
+            if self._is_bookshelf_jm_item(item)
+            and (album_id := self._bookshelf_album_id_from_item(item))
+        }
+        try:
+            album_dirs = sorted(
+                (path for path in pages_root.iterdir() if path.is_dir()),
+                key=self._natural_path_key,
+            )
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 扫描夹层书页目录失败: %s", _single_line(exc, 160))
+            if changed:
+                self._touch_bookshelf_store_revision(data)
+            return recovered
+
+        covers_root = Path(self.data_dir) / "jm_cosmos_covers"
+        suffixes = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+        for album_dir in album_dirs:
+            album_id = _single_line(album_dir.name, 80)
+            if not album_id or album_id in deleted_ids:
+                continue
+            try:
+                page_files = sorted(
+                    (path for path in album_dir.iterdir() if path.is_file() and path.suffix.lower() in suffixes),
+                    key=self._natural_path_key,
+                )
+                if not page_files:
+                    continue
+                pages = [
+                    {"index": index, "path": str(path), "name": path.name}
+                    for index, path in enumerate(page_files, 1)
+                ]
+                existing = existing_by_album.get(album_id)
+                if isinstance(existing, dict):
+                    stored_pages = existing.get("pages") if isinstance(existing.get("pages"), list) else []
+                    stored_paths = {
+                        str(Path(str(page.get("path") or "")).resolve())
+                        for page in stored_pages
+                        if isinstance(page, dict) and str(page.get("path") or "").strip()
+                    }
+                    actual_paths = {str(path.resolve()) for path in page_files}
+                    if stored_paths != actual_paths:
+                        existing["pages"] = pages
+                        existing["image_count"] = len(pages)
+                        existing["photo_count"] = max(_safe_int(existing.get("photo_count"), 0, 0), len(pages))
+                        existing.setdefault("type", "jm_album")
+                        existing.setdefault("key", self._bookshelf_item_key("jm_album", album_id))
+                        existing["bookshelf_pages_recovered_at"] = _now_ts()
+                        changed = True
+                        recovered += 1
+                    continue
+
+                meta = history_by_album.get(album_id, {})
+                cover_path = next(
+                    (
+                        path
+                        for suffix in (".jpg", ".jpeg", ".png", ".webp")
+                        if (path := covers_root / f"{album_id}{suffix}").exists()
+                    ),
+                    None,
+                )
+                created_ts = _safe_float(meta.get("created_ts"), 0) or max(
+                    (path.stat().st_mtime for path in page_files),
+                    default=_now_ts(),
+                )
+                record = {
+                    "key": self._bookshelf_item_key("jm_album", album_id),
+                    "type": "jm_album",
+                    "album_id": album_id,
+                    "title": _single_line(meta.get("title"), 100) or f"私密阅读 {album_id}",
+                    "description": _single_line(meta.get("description") or meta.get("reason"), 600),
+                    "keyword": _single_line(meta.get("keyword"), 24),
+                    "author": _single_line(meta.get("author"), 40),
+                    "tags": list(meta.get("tags") or meta.get("terms") or [])[:8]
+                    if isinstance(meta.get("tags") or meta.get("terms"), list)
+                    else [],
+                    "impression": self._dedupe_private_reading_impression(meta.get("impression"), limit=600),
+                    "reading_impression": self._dedupe_private_reading_impression(
+                        meta.get("reading_impression") or meta.get("impression"),
+                        limit=600,
+                    ),
+                    "rating": _safe_int(meta.get("bot_rating") or meta.get("rating"), 0, 0, 10),
+                    "rating_reason": _single_line(meta.get("rating_reason") or meta.get("reason"), 160),
+                    "user_rating": _safe_int(meta.get("user_rating"), 0, 0, 10),
+                    "cover_path": str(cover_path) if cover_path else "",
+                    "download_path": _path_text(meta.get("download_path"), 1000),
+                    "pages": pages,
+                    "image_count": len(pages),
+                    "photo_count": len(pages),
+                    "created_ts": created_ts,
+                    "source": "bookshelf_upgrade_recovered",
+                    "locked": True,
+                    "bookshelf_pages_recovered_at": _now_ts(),
+                }
+                items.append(record)
+                existing_by_album[album_id] = record
+                recovered += 1
+                changed = True
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 跳过无法恢复的夹层目录: album=%s error=%s",
+                    album_id,
+                    _single_line(exc, 140),
+                )
+        if changed:
+            self._touch_bookshelf_store_revision(data)
+        return recovered
+
     def _remember_bookshelf_jm_album(self, album: dict[str, Any]) -> None:
         if not isinstance(album, dict):
             return
@@ -1346,8 +1585,11 @@ class PrivateReadingMixin:
             return
         items = self.data.setdefault("bookshelf_items", [])
         if not isinstance(items, list):
-            items = []
-            self.data["bookshelf_items"] = items
+            logger.warning(
+                "[PrivateCompanion] 夹层记录结构异常，已停止写入新书目以避免覆盖: type=%s",
+                type(items).__name__,
+            )
+            return
         key = self._bookshelf_item_key("jm_album", album_id)
         record = {
             "key": key,
@@ -1405,6 +1647,11 @@ class PrivateReadingMixin:
         if not replaced:
             items.append(record)
         del items[:-80]
+        state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
+        deleted_ids = state.get("deleted_album_ids") if isinstance(state.get("deleted_album_ids"), list) else []
+        if album_id in {str(value) for value in deleted_ids}:
+            state["deleted_album_ids"] = [value for value in deleted_ids if str(value) != album_id]
+        self._touch_bookshelf_store_revision()
 
     @staticmethod
     def _merge_jm_page_comments(*sources: Any, limit: int = 24) -> list[dict[str, Any]]:
@@ -1485,7 +1732,28 @@ class PrivateReadingMixin:
         items = self.data.get("bookshelf_items")
         if not isinstance(items, list):
             return ""
-        jm_items = [item for item in items if isinstance(item, dict) and item.get("type") == "jm_album"]
+        state = self.data.get("jm_cosmos_integration") if isinstance(self.data.get("jm_cosmos_integration"), dict) else {}
+        deleted_ids = {
+            _single_line(value, 80)
+            for value in (state.get("deleted_album_ids") if isinstance(state.get("deleted_album_ids"), list) else [])
+            if _single_line(value, 80)
+        }
+        deleted_titles = {
+            marker
+            for value in (state.get("deleted_titles") if isinstance(state.get("deleted_titles"), list) else [])
+            if (marker := self._bookshelf_title_marker(value))
+        }
+        jm_items = []
+        for item in items:
+            if not self._is_bookshelf_jm_item(item):
+                continue
+            album_id = self._bookshelf_album_id_from_item(item)
+            title_marker = self._bookshelf_title_marker(item.get("title"))
+            if album_id and album_id in deleted_ids:
+                continue
+            if not album_id and title_marker and title_marker in deleted_titles:
+                continue
+            jm_items.append(item)
         if not jm_items:
             return ""
         terms = self._worldview_terms()

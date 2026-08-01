@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import os
@@ -312,8 +313,8 @@ class TtsEnhancementMixin:
         raw_synthesis_backend = self._cfg_str(
             config,
             "tts_synthesis_backend",
-            "auto",
-            "auto",
+            "astrbot_provider",
+            "astrbot_provider",
         ).lower()
         synthesis_backend_aliases = {
             "astrbot": "astrbot_provider",
@@ -329,7 +330,7 @@ class TtsEnhancementMixin:
             raw_synthesis_backend,
         )
         if self.tts_synthesis_backend not in {"astrbot_provider", "mimo_voice_clone", "auto"}:
-            self.tts_synthesis_backend = "auto"
+            self.tts_synthesis_backend = "astrbot_provider"
         self.tts_mimo_tool_name = self._cfg_str(
             config,
             "tts_mimo_tool_name",
@@ -598,12 +599,15 @@ class TtsEnhancementMixin:
         return None
 
     def _resolve_tts_synthesis_provider(self, event: Any, astrbot_provider: Any = None) -> Any:
-        mode = str(getattr(self, "tts_synthesis_backend", "auto") or "auto").lower()
+        mode = str(
+            getattr(self, "tts_synthesis_backend", "astrbot_provider")
+            or "astrbot_provider"
+        ).lower()
         if mode != "mimo_voice_clone":
             language_provider = self._language_tts_provider(event)
             if language_provider is not None:
                 return language_provider
-        if mode == "astrbot_provider":
+        if mode == "astrbot_provider" or (mode == "auto" and astrbot_provider is not None):
             return astrbot_provider
 
         mimo_adapter = self._find_mimo_voice_clone_tts_adapter(event)
@@ -3629,7 +3633,18 @@ Provider 规则：{emotion_rule}
             if not isinstance(payload, dict):
                 return ""
             use_tts = bool(payload.get("use_tts"))
-            visible = self._sanitize_tts_visible_text(payload.get("visible_text"), max_chars=900) or source
+            # Keep the complete visible transcript in full conversion mode. A fixed
+            # 900-character cap silently dropped URLs, commands, and the tail of
+            # otherwise valid long replies after the voice block was generated.
+            visible_limit = (
+                self._tts_complete_text_limit(source, 1600)
+                if full
+                else 900
+            )
+            visible = self._sanitize_tts_visible_text(
+                payload.get("visible_text"),
+                max_chars=visible_limit,
+            ) or source
             voice = self._normalize_tts_spoken_text(str(payload.get("voice_text") or ""), provider_kind=provider_kind)
             reason = _single_line(payload.get("reason"), 120)
             if not use_tts or not voice:
@@ -4593,7 +4608,11 @@ Provider 规则：{emotion_rule}
             spoken = converted
 
         if provider_kind.startswith("fishaudio"):
-            self._prepare_fishaudio_provider_model(tts_provider, settings)
+            tts_provider, _ = self._fishaudio_request_provider(
+                tts_provider,
+                settings,
+                voice_language=voice_language,
+            )
         sanitized = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
         if provider_kind.startswith("fishaudio"):
             sanitized, _ = self._apply_fishaudio_emotion_control(
@@ -4653,26 +4672,70 @@ Provider 规则：{emotion_rule}
         *,
         voice_language: str = "",
     ) -> str:
-        model = self._tts_fishaudio_model_for_provider(
+        """Resolve Fish Audio compatibility without mutating AstrBot's provider."""
+        return self._tts_fishaudio_model_for_provider(
+            tts_provider,
+            provider_settings,
+            voice_language=voice_language,
+        )
+
+    def _fishaudio_request_provider(
+        self,
+        tts_provider: Any,
+        provider_settings: dict[str, Any] | None = None,
+        *,
+        voice_language: str = "",
+    ) -> tuple[Any, str]:
+        model = self._prepare_fishaudio_provider_model(
             tts_provider,
             provider_settings,
             voice_language=voice_language,
         )
         if not model:
-            return ""
-        headers = getattr(tts_provider, "headers", None)
-        if isinstance(headers, dict):
-            previous = str(headers.get("model", "") or "")
-            headers["model"] = model
-            if previous != model:
-                logger.info("[PrivateCompanion] FishAudio TTS 已应用模型请求头: model=%s", model)
-        set_model = getattr(tts_provider, "set_model", None)
+            return tts_provider, ""
+
+        try:
+            request_provider = copy.copy(tts_provider)
+            if request_provider is tts_provider:
+                raise TypeError("provider copy returned the shared instance")
+
+            for attr in ("provider_config", "provider_settings"):
+                value = getattr(tts_provider, attr, None)
+                if isinstance(value, dict):
+                    setattr(request_provider, attr, dict(value))
+
+            headers = getattr(tts_provider, "headers", None)
+            if isinstance(headers, dict):
+                isolated_headers = dict(headers)
+                isolated_headers["model"] = model
+                setattr(request_provider, "headers", isolated_headers)
+        except Exception as exc:
+            warning_key = f"{tts_provider.__class__.__name__}:{id(tts_provider)}:{model}"
+            if getattr(self, "_tts_fishaudio_provider_copy_warning_key", "") != warning_key:
+                self._tts_fishaudio_provider_copy_warning_key = warning_key
+                logger.warning(
+                    "[PrivateCompanion] FishAudio Provider 无法隔离本次模型参数，已保留 AstrBot 原配置: "
+                    "provider=%s model=%s error_type=%s",
+                    tts_provider.__class__.__name__,
+                    model,
+                    exc.__class__.__name__,
+                )
+            return tts_provider, ""
+
+        set_model = getattr(request_provider, "set_model", None)
         if callable(set_model):
             try:
                 set_model(model)
             except Exception:
                 pass
-        return model
+        log_key = f"{tts_provider.__class__.__name__}:{id(tts_provider)}:{model}"
+        if getattr(self, "_tts_fishaudio_request_model_log_key", "") != log_key:
+            self._tts_fishaudio_request_model_log_key = log_key
+            logger.info(
+                "[PrivateCompanion] FishAudio TTS 已在隔离请求副本应用模型参数: model=%s",
+                model,
+            )
+        return request_provider, model
 
     async def _tts_generate_audio_path(self, tts_provider: Any, text: str) -> str:
         if hasattr(tts_provider, "get_audio"):
@@ -4705,7 +4768,7 @@ Provider 规则：{emotion_rule}
         )
         fish_model = ""
         if provider_kind.startswith("fishaudio"):
-            fish_model = self._prepare_fishaudio_provider_model(
+            tts_provider, fish_model = self._fishaudio_request_provider(
                 tts_provider,
                 provider_settings,
                 voice_language=voice_language,

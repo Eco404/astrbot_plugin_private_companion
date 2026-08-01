@@ -36,7 +36,9 @@ class _ProactivePersonaHarness(ProactiveMessageMixin, DailyStateMixin):
         self.response_review_provider_id = "review"
         self.mai_style_provider_id = "style"
         self.persona_proactive_voice_prompt = "开头常用：嗯…\n保持克制但有一点俏皮。"
+        self.proactive_review_history_limit = 27
         self.captured_prompt = ""
+        self.history_limits = []
         self.resolved_sessions = []
 
     async def _refresh_default_persona_prompt(self, umo=""):
@@ -53,6 +55,7 @@ class _ProactivePersonaHarness(ProactiveMessageMixin, DailyStateMixin):
         return dict(payload)
 
     async def _recent_private_conversation_for_proactive_review(self, user, *, limit=10):
+        self.history_limits.append(limit)
         return "用户: 最近在看书"
 
     def _format_proactive_generation_intent_hint(self, *args, **kwargs):
@@ -167,6 +170,7 @@ class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("完整人格::session-a::冷静、俏皮、称呼稳定", harness.captured_prompt)
         self.assertIn("主动风格：嗯…开头，俏皮但不黏人", harness.captured_prompt)
         self.assertIn("当前收件人：小林；普通朋友边界", harness.captured_prompt)
+        self.assertEqual([27], harness.history_limits)
 
     async def test_troubleshooting_review_treats_user_request_as_real_reason(self):
         harness = _ProactivePersonaHarness()

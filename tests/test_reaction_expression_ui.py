@@ -29,6 +29,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "reaction_expression_group_enabled",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
+            "reaction_expression_semantic_trigger_enabled",
             "reaction_expression_low_latency_mode",
             "reaction_expression_candidate_limit",
         ):
@@ -46,6 +47,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "reaction_expression_group_enabled",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
+            "reaction_expression_semantic_trigger_enabled",
             "reaction_expression_low_latency_mode",
             "reaction_expression_candidate_limit",
         ):
@@ -82,6 +84,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "reaction_expression_group_enabled",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
+            "reaction_expression_semantic_trigger_enabled",
             "reaction_expression_low_latency_mode",
             "reaction_expression_candidate_limit",
         ):
@@ -93,9 +96,26 @@ class ReactionExpressionUiTests(unittest.TestCase):
         self.assertIn("overview?.reaction_expression", self.script)
         self.assertIn("缓存命中", self.script)
         self.assertIn("最近检索", self.script)
+        self.assertIn("model_omissions", self.script)
+        self.assertIn("模型未采用", self.script)
+        self.assertIn("local_fallbacks", self.script)
+        self.assertIn("本地兜底", self.script)
+        self.assertIn("高置信时优先", self.script)
         self.assertIn("没有足够合适的候选时保持纯文字", self.script)
         self.assertIn('["模型调用", "仅主回复 1 次"]', self.script)
         self.assertIn("绝不会用图片替代正文", self.script)
+
+    def test_runtime_panel_initializes_trigger_mode_summary_locally(self) -> None:
+        runtime_source = self.script.split(
+            "function renderExperimentalRuntime(key)", 1
+        )[1].split("\nfunction ", 1)[0]
+
+        declaration = "const triggerModes = runtime.trigger_modes || {};"
+        self.assertIn(declaration, runtime_source)
+        self.assertLess(
+            runtime_source.index(declaration),
+            runtime_source.index("Object.entries(triggerModes)"),
+        )
 
     def test_panel_exposes_complete_owned_asset_library(self) -> None:
         for endpoint in (

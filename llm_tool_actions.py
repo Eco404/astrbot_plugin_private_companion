@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import os
@@ -39,6 +40,10 @@ from .reaction_expression import (
     classify_reaction_expression_feedback,
     ensure_reaction_expression_state,
     evaluate_reaction_expression_gate,
+    reaction_expression_explicit_opt_out,
+    reaction_expression_explicit_request,
+    reaction_expression_auto_disabled,
+    sync_reaction_expression_auto_preference,
     normalize_reaction_expression_intent,
     reaction_expression_effective_probability,
     reaction_expression_image_key,
@@ -77,6 +82,142 @@ _PHOTO_TOOL_HTTP_URL_RE = re.compile(
     r"https?://[^\s<>\[\]{}\"']+",
     flags=re.I,
 )
+_REACTION_LOG_STAGES = frozenset(
+    {
+        "gate",
+        "authorization",
+        "decision",
+        "lookup",
+        "reservation",
+        "attachment",
+        "delivery",
+        "intent",
+        "feedback",
+        "degrade",
+    }
+)
+_REACTION_LOG_DECISIONS = frozenset(
+    {
+        "allow",
+        "deny",
+        "skip",
+        "hit",
+        "miss",
+        "prepared",
+        "sent",
+        "failed",
+        "uncertain",
+        "accepted",
+        "discarded",
+        "recorded",
+        "scoped",
+        "omit",
+    }
+)
+_REACTION_LOG_REASONS = frozenset(
+    {
+        "allowed",
+        "experiment_disabled",
+        "provider_unavailable",
+        "private_disabled",
+        "group_disabled",
+        "unknown_disabled",
+        "missing_user",
+        "probability",
+        "cooldown",
+        "in_progress",
+        "repeated_intent",
+        "not_preauthorized",
+        "not_authorized",
+        "authorization_consumed",
+        "authorization_expired",
+        "authorization_user_mismatch",
+        "authorization_scope_mismatch",
+        "send_disabled",
+        "missing_visible_text",
+        "missing_visible_caption",
+        "existing_image",
+        "proactive_only",
+        "gate",
+        "not_found",
+        "unavailable",
+        "error",
+        "lookup_error",
+        "missing_query",
+        "library_unavailable",
+        "missing_file",
+        "matched",
+        "reservation_lost",
+        "duplicate_image",
+        "attachment_state_failed",
+        "attachment_appended",
+        "attachment_file_missing",
+        "attachment_component_failed",
+        "attachment_removed",
+        "platform_not_sent",
+        "awaiting_platform_send",
+        "delivered",
+        "delivery_uncertain",
+        "delivery_failed",
+        "append_failed",
+        "not_sent",
+        "scene_snapshot_failed",
+        "usage_mark_failed",
+        "intent_extracted",
+        "intent_discarded",
+        "model_omitted_intent",
+        "local_fallback_intent",
+        "media_tools_scoped",
+        "feedback_private",
+        "feedback_group",
+        "explicit_opt_out",
+        "semantic_cooldown",
+    }
+)
+_REACTION_LOG_STATUSES = frozenset(
+    {
+        "success",
+        "prepared",
+        "need_query",
+        "unavailable",
+        "not_found",
+        "error",
+        "missing_file",
+        "delivery_failed",
+        "delivery_uncertain",
+        "disabled",
+        "missing_user",
+        "not_sent",
+    }
+)
+_REACTION_LOG_DELIVERY_CODES = frozenset(
+    {
+        "current",
+        "group",
+        "private",
+        "blocked",
+        "error",
+        "platform_sent",
+        "delivered",
+        "append_failed",
+        "attachment_removed",
+        "platform_not_sent",
+        "attachment_file_missing",
+        "attachment_component_failed",
+    }
+)
+_REACTION_LOG_MATCH_BASES = frozenset(
+    {"tags_emotions_intents", "provider_score"}
+)
+_REACTION_LOG_TRIGGER_MODES = frozenset(
+    {
+        "probability",
+        "feedback_bias",
+        "semantic_rule",
+        "strong_emotion",
+        "explicit_opt_out",
+    }
+)
 
 
 class LlmToolActionsMixin:
@@ -114,11 +255,14 @@ class LlmToolActionsMixin:
         compact = re.sub(r"\s+", "", str(text or ""))
         if not compact:
             return False
-        if self._character_photo_request_matches(compact):
-            return True
-        return any(
-            token in compact
-            for token in (
+        clauses = [
+            part
+            for part in re.split(
+                r"(?:[，,。！？!?；;]+|但是|不过|然而|然后)", compact
+            )
+            if part
+        ] or [compact]
+        non_reaction_tokens = (
                 "生图",
                 "画图",
                 "绘图",
@@ -133,11 +277,6 @@ class LlmToolActionsMixin:
                 "照片",
                 "相片",
                 "头像",
-                "表情包",
-                "贴纸",
-                "反应图",
-                "梗图",
-                "斗图",
                 "壁纸",
                 "改图",
                 "修图",
@@ -148,8 +287,35 @@ class LlmToolActionsMixin:
                 "穿搭图",
                 "COS",
                 "cosplay",
-            )
         )
+        generated_reaction = re.compile(
+            r"(?:生成|制作|做|画|绘制|设计|重绘).{0,10}"
+            r"(?:表情包|贴纸|反应图|梗图)"
+            r"|(?:表情包|贴纸|反应图|梗图).{0,10}"
+            r"(?:生成|制作|做|画|绘制|设计|重绘)",
+            flags=re.I,
+        )
+        rejected_generation = re.compile(
+            r"(?:别|不要|不用).{0,8}(?:生成|制作|做|画|绘制|设计|重绘).{0,10}"
+            r"(?:表情包|贴纸|反应图|梗图)",
+            flags=re.I,
+        )
+        for clause in clauses:
+            if reaction_expression_explicit_opt_out(clause):
+                continue
+            if self._character_photo_request_matches(clause):
+                return True
+            if any(token in clause for token in non_reaction_tokens):
+                return True
+            if rejected_generation.search(clause):
+                continue
+            if reaction_expression_explicit_request(clause):
+                return True
+            if generated_reaction.search(clause):
+                return True
+            if clause in {"斗图", "来斗图", "开始斗图"}:
+                return True
+        return False
 
     def _plaintext_photo_recovery_intent_matches(self, text: Any) -> bool:
         compact = re.sub(r"\s+", "", str(text or ""))
@@ -186,7 +352,74 @@ class LlmToolActionsMixin:
         library = self._reaction_asset_library()
         return bool(library and library.has_enabled_assets())
 
-    def _mark_reaction_asset_used(self, image_id: Any) -> None:
+    @staticmethod
+    def _reaction_expression_opt_out_requested(text: Any) -> bool:
+        return reaction_expression_explicit_opt_out(text)
+
+    @staticmethod
+    def _reaction_expression_explicit_request_matches(text: Any) -> bool:
+        return reaction_expression_explicit_request(text)
+
+    def _reaction_expression_feedback_user(
+        self,
+        user_id: Any,
+        text: Any,
+        *,
+        create_for_opt_out: bool = False,
+    ) -> dict[str, Any] | None:
+        """Resolve the canonical user that owns per-conversation feedback."""
+        normalized_id = _single_line(user_id, 160)
+        data = getattr(self, "data", None)
+        users = data.get("users") if isinstance(data, dict) else None
+        if not normalized_id or not isinstance(users, dict):
+            return None
+
+        canonical_id = normalized_id
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        if callable(canonicalizer):
+            try:
+                canonical_id = (
+                    _single_line(canonicalizer(normalized_id), 160)
+                    or normalized_id
+                )
+            except Exception:
+                canonical_id = normalized_id
+
+        for candidate_id in dict.fromkeys((normalized_id, canonical_id)):
+            candidate = users.get(candidate_id)
+            if isinstance(candidate, dict):
+                return candidate
+        for candidate in users.values():
+            if not isinstance(candidate, dict):
+                continue
+            aliases = candidate.get("alias_user_ids")
+            if (
+                _single_line(candidate.get("user_id"), 160) == normalized_id
+                or isinstance(aliases, list) and normalized_id in aliases
+            ):
+                return candidate
+
+        if not (
+            create_for_opt_out
+            and reaction_expression_explicit_opt_out(text)
+        ):
+            return None
+        getter = getattr(self, "_get_user", None)
+        if not callable(getter):
+            return None
+        try:
+            created = getter(canonical_id)
+        except Exception:
+            return None
+        return created if isinstance(created, dict) else None
+
+    def _mark_reaction_asset_used(
+        self,
+        image_id: Any,
+        *,
+        event: Any = None,
+        trace_id: str = "",
+    ) -> None:
         normalized = _single_line(image_id, 160)
         if not normalized.startswith("pc-local:"):
             return
@@ -196,9 +429,14 @@ class LlmToolActionsMixin:
         try:
             library.mark_used(normalized)
         except Exception as exc:
-            logger.debug(
-                "[PrivateCompanion] 更新表情包使用统计失败: %s",
-                _single_line(exc, 160),
+            self._log_reaction_expression_event(
+                event,
+                trace_id=trace_id,
+                stage="degrade",
+                decision="failed",
+                reason="usage_mark_failed",
+                image_id=normalized,
+                error_type=type(exc).__name__,
             )
 
     @staticmethod
@@ -292,9 +530,10 @@ class LlmToolActionsMixin:
             return """
 【实验性表情表达】
 - 先完成一条正常、完整、可以独立发送的文字回复。表情图片只能作为文字后的补充，绝对不能替代文字回复。
-- 只有表情图明显能补充当前语气、且比单纯文字更自然时，才在完整回复末尾追加一个内部标签；不适合时只输出原本的文字回复。
-- 标签格式必须是 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2,"candidate_queries":["无语摊手","看傻了"]}</pc_reaction_expression>`。
-- `purpose` 写沟通用途，`emotion` 写希望传达的情绪，`intensity` 为 0-5，`candidate_queries` 提供 1-3 个简短的图库检索说法；不要填写图片路径。
+- 本轮已经由插件完成概率抽样并获得一次表情表达机会；不要再次按概率决定，也不要因为“不确定”而默认省略标签。
+- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗或轻吐槽等能自然补充语气的场景，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。
+- 最小标签格式为 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2}</pc_reaction_expression>`。
+- `purpose` 写沟通用途，`emotion` 写希望传达的情绪，`intensity` 为 0-5；需要帮助检索时可选填 `candidate_queries`，提供 1-3 个简短说法。不要填写图片路径。
 - 每轮最多写一个标签，必须放在全部可见文字和 TTS 标签之后；不要使用 Markdown 代码块，不要解释标签，也不要调用图片或生图工具。
 - 即使图库最终没有匹配、图片重复或发送失败，前面的完整文字也必须仍然自然成立。
 """.strip()
@@ -304,6 +543,7 @@ class LlmToolActionsMixin:
                 lines.extend(
                     [
                         "- 用户要“找/发/来一张已有表情包”、要用现成反应图回应当前语境时，优先使用 `pc_find_reaction_image`，把需求和当前语境写进 `query/search_context`。",
+                        "- `pc_find_reaction_image` 在 `send=true` 时必须填写 `caption`，内容应是一条完整、自然、可独立成立的正文；图片只能追加在正文后，不能替代、缩短或省略正文。",
                         "- 图库未匹配时可以自然改用文字回应，不要擅自声称已发图。",
                     ]
                 )
@@ -316,7 +556,7 @@ class LlmToolActionsMixin:
             if spontaneous_enabled:
                 lines.extend(
                     [
-                        "- 普通闲聊中，只有表情图明显比继续写文字更自然、更贴合本轮关系边界时，才可把 `spontaneous=true` 调用 `pc_find_reaction_image`；不要每轮调用，不确定时直接保留自然文字回复。",
+                        "- 普通闲聊中，先生成一条完整、可独立成立的文字回复；只有在正文之后追加表情图能明显补足语气、且符合本轮关系边界时，才可把 `spontaneous=true` 调用 `pc_find_reaction_image`。图片不能替代、缩短或省略正文；不要每轮调用，不确定时只保留自然文字回复。",
                         "- 自发表情调用应填写 `purpose`（沟通用途）、`emotion`（想传达的情绪）、`intensity`（0-5）与 `candidate_queries`（少量候选检索说法）；这些是本轮结构化表达意图，不要另行解释给用户。",
                         "- 自发表情允许因概率、冷却、重复或图库不匹配而返回 `decision=skip`。遇到跳过时不要解释内部原因，继续按原语境自然文字回复即可。",
                     ]
@@ -343,7 +583,7 @@ class LlmToolActionsMixin:
             [
                 "- 默认 `send=true`；如果只想拿路径再决定，可传 `send=false`。",
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
-                f"- `caption` 会和图片一起作为可见消息发送，只能填写用户应当直接看到的自然正文；不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
+                f"- `caption` 会和图片一起作为可见消息发送，必须填写用户应当直接看到、可独立成立的完整自然正文；不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
                 "- 如果工具返回 `error_code=provider_policy_refusal`，不要复述或翻译 Provider 的英文原文、政策名称、敏感词判断和链接；只用符合当前人格的一句简短中文说明这次没有生成出来，再自然询问是否换一种画面描述重试。",
             ]
@@ -2877,6 +3117,439 @@ class LlmToolActionsMixin:
             except Exception:
                 pass
 
+    def _reaction_expression_trace_id(self, event: Any) -> str:
+        authorization = self._reaction_expression_authorization(event)
+        trace_id = _single_line(
+            authorization.get("trace_id") or authorization.get("nonce"),
+            12,
+        ).casefold()
+        if not re.fullmatch(r"[0-9a-f]{12}", trace_id):
+            trace_id = _single_line(
+                getattr(
+                    event,
+                    "_private_companion_reaction_expression_trace_id",
+                    "",
+                ),
+                12,
+            ).casefold()
+        if not re.fullmatch(r"[0-9a-f]{12}", trace_id):
+            trace_id = uuid.uuid4().hex[:12]
+            try:
+                setattr(
+                    event,
+                    "_private_companion_reaction_expression_trace_id",
+                    trace_id,
+                )
+            except Exception:
+                pass
+        return trace_id
+
+    def _log_reaction_expression_event(
+        self,
+        event: Any,
+        *,
+        stage: str,
+        decision: str,
+        trace_id: Any = "",
+        reason: Any = "",
+        scope: Any = "",
+        status: Any = "",
+        found: bool | None = None,
+        sent: bool | None = None,
+        image_id: Any = "",
+        confidence: Any = None,
+        cache_hit: bool | None = None,
+        latency_ms: Any = None,
+        delivery: Any = "",
+        match_basis: Any = "",
+        error_type: Any = "",
+        feedback_signal: Any = "",
+        feedback_score: Any = None,
+        trigger_mode: Any = "",
+        trigger_confidence: Any = None,
+        configured_probability: Any = None,
+        effective_probability: Any = None,
+        cooldown_seconds: Any = None,
+    ) -> None:
+        """Write one privacy-safe, correlation-friendly reaction runtime event."""
+
+        def safe_code(value: Any, allowed: frozenset[str]) -> str:
+            normalized = _single_line(value, 80).casefold()
+            if not normalized:
+                return ""
+            return normalized if normalized in allowed else "other"
+
+        try:
+            normalized_trace_id = _single_line(trace_id, 12).casefold()
+            if not re.fullmatch(r"[0-9a-f]{12}", normalized_trace_id):
+                normalized_trace_id = self._reaction_expression_trace_id(event)
+            payload: dict[str, Any] = {
+                "trace_id": normalized_trace_id,
+                "stage": safe_code(stage, _REACTION_LOG_STAGES) or "decision",
+                "decision": safe_code(decision, _REACTION_LOG_DECISIONS) or "skip",
+            }
+            for key, value, allowed in (
+                ("status", status, _REACTION_LOG_STATUSES),
+                ("reason", reason, _REACTION_LOG_REASONS),
+                ("delivery", delivery, _REACTION_LOG_DELIVERY_CODES),
+                ("match_basis", match_basis, _REACTION_LOG_MATCH_BASES),
+            ):
+                normalized = safe_code(value, allowed)
+                if normalized:
+                    payload[key] = normalized
+            normalized_scope = safe_code(
+                scope,
+                frozenset({"private", "group", "unknown"}),
+            )
+            if normalized_scope:
+                payload["scope"] = normalized_scope
+            normalized_image_id = _single_line(image_id, 160)
+            if normalized_image_id:
+                if re.fullmatch(
+                    r"pc-local:[0-9a-f]{16,64}",
+                    normalized_image_id,
+                    flags=re.I,
+                ):
+                    payload["asset_ref"] = normalized_image_id
+                else:
+                    payload["asset_ref"] = hashlib.sha256(
+                        normalized_image_id.encode("utf-8", errors="replace")
+                    ).hexdigest()[:12]
+            normalized_error_type = _single_line(error_type, 80)
+            if normalized_error_type and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.]{0,79}",
+                normalized_error_type,
+            ):
+                payload["error_type"] = normalized_error_type
+            normalized_feedback_signal = safe_code(
+                feedback_signal,
+                frozenset({"positive", "negative", "neutral"}),
+            )
+            if normalized_feedback_signal:
+                payload["feedback_signal"] = normalized_feedback_signal
+            normalized_trigger_mode = safe_code(
+                trigger_mode,
+                _REACTION_LOG_TRIGGER_MODES,
+            )
+            if normalized_trigger_mode:
+                payload["trigger_mode"] = normalized_trigger_mode
+            for key, value in (
+                ("found", found),
+                ("sent", sent),
+                ("cache_hit", cache_hit),
+            ):
+                if value is not None:
+                    payload[key] = bool(value)
+            if feedback_score is not None:
+                payload["feedback_score"] = max(
+                    -20,
+                    min(20, _safe_int(feedback_score, 0, -20, 20)),
+                )
+            for key, value, maximum, digits in (
+                ("confidence", confidence, 1.0, 3),
+                ("latency_ms", latency_ms, 3_600_000.0, 2),
+                ("configured_probability", configured_probability, 1.0, 4),
+                ("effective_probability", effective_probability, 1.0, 4),
+                ("cooldown_seconds", cooldown_seconds, 86_400.0, 2),
+            ):
+                if value is not None:
+                    payload[key] = round(
+                        _safe_float(value, 0.0, 0.0, maximum),
+                        digits,
+                    )
+            logger.info(
+                "[PrivateCompanion][ReactionExpression] %s",
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception:
+            # Diagnostics must never alter the reply or delivery path.
+            return
+
+    @staticmethod
+    def _reaction_expression_match_basis(lookup: Any) -> str:
+        if not isinstance(lookup, dict):
+            return ""
+        provider = _single_line(lookup.get("provider"), 80)
+        image_id = _single_line(lookup.get("image_id"), 160)
+        if provider == "private_companion_library" or image_id.startswith("pc-local:"):
+            return "tags_emotions_intents"
+        return "provider_score" if lookup.get("success") else ""
+
+    def _reaction_expression_local_trigger(
+        self,
+        event: Any,
+        user: dict[str, Any],
+        *,
+        configured_probability: float,
+        scope_key: str = "",
+    ) -> dict[str, Any]:
+        """Resolve a local trigger layer without another model pass.
+
+        The inbound pipeline already maintains a small intent/emotion profile.
+        Reuse only high-confidence, non-boundary signals here.  A configured
+        probability of zero remains an explicit opt-out; cooldown and duplicate
+        protection are still enforced by ``evaluate_reaction_expression_gate``.
+        """
+        base_probability = _safe_float(configured_probability, 0.2, 0.0, 1.0)
+        default = {
+            "mode": "probability",
+            "reason": "random_offer",
+            "source": "configured_probability",
+            "confidence": 0.0,
+            "bypass_probability": False,
+        }
+        if not isinstance(user, dict):
+            return default
+        inbound_text = ""
+        try:
+            inbound_text = _single_line(getattr(event, "message_str", ""), 500)
+        except Exception:
+            inbound_text = ""
+        if reaction_expression_explicit_opt_out(inbound_text):
+            return {
+                "mode": "explicit_opt_out",
+                "reason": "explicit_opt_out",
+                "source": "user_message",
+                "confidence": 1.0,
+                "bypass_probability": False,
+            }
+        state = ensure_reaction_expression_state(user)
+        # Keep an explicit user boundary across turns. A direct request for a
+        # particular reaction image is still allowed and handled by the tool
+        # path; it does not silently re-enable automatic attachments.
+        auto_disabled = reaction_expression_auto_disabled(state, scope_key)
+        if auto_disabled and not reaction_expression_explicit_request(inbound_text):
+            return {
+                "mode": "explicit_opt_out",
+                "reason": "explicit_opt_out_persisted",
+                "source": "user_preference",
+                "confidence": 1.0,
+                "bypass_probability": False,
+            }
+        if auto_disabled and reaction_expression_explicit_request(inbound_text):
+            # Explicit requests use the ordinary tool path for this turn but
+            # do not erase the persisted automatic-attachment boundary.
+            return {
+                "mode": "explicit_request",
+                "reason": "explicit_request",
+                "source": "user_message",
+                "confidence": 1.0,
+                "bypass_probability": False,
+            }
+        if base_probability <= 0:
+            return default
+        if not bool(getattr(self, "reaction_expression_semantic_trigger_enabled", True)):
+            return default
+
+        profile = user.get("intent_profile")
+        if not isinstance(profile, dict) or not profile:
+            return default
+        profile_text = re.sub(r"\s+", "", _single_line(profile.get("text"), 500))
+        current_text = re.sub(r"\s+", "", inbound_text)
+        if profile_text and (not current_text or profile_text != current_text):
+            return default
+        intent = _single_line(profile.get("intent"), 32).casefold()
+        emotion_event = _single_line(profile.get("emotion_event"), 40).casefold()
+        emotion_target = _single_line(profile.get("emotion_target"), 40).casefold()
+        source = _single_line(profile.get("source"), 48).casefold()
+        confidence = max(
+            _safe_float(profile.get("confidence"), 0.0, 0.0, 1.0),
+            _safe_float(profile.get("emotion_confidence"), 0.0, 0.0, 1.0),
+        )
+        intensity = _safe_float(profile.get("emotion_intensity"), 0.0, 0.0, 100.0)
+        profile_snapshot = {
+            "intent": intent,
+            "emotion_event": emotion_event,
+            "emotion_target": emotion_target,
+            "emotion_intensity": intensity,
+            "confidence": _safe_float(
+                profile.get("confidence"), 0.0, 0.0, 1.0
+            ),
+            "emotion_confidence": _safe_float(
+                profile.get("emotion_confidence"), 0.0, 0.0, 1.0
+            ),
+            "source": source,
+            "boundary_durable": bool(profile.get("boundary_durable")),
+            "text": _single_line(profile.get("text"), 240),
+        }
+        semantic_bypass_blocked = bool(
+            profile_snapshot["boundary_durable"]
+            or intent in {"boundary", "help", "task", "code", "search", "empty"}
+            or source
+            in {
+                "diagnostic_skip",
+                "durable_boundary_rule",
+                "single_turn_boundary",
+                "weak_boundary_ignored",
+            }
+            or emotion_event in {"hurt", "external_negative"}
+        )
+        preference = state.get("preference")
+        preference_score = (
+            _safe_int(preference.get("score"), 0, -20, 20)
+            if isinstance(preference, dict)
+            else 0
+        )
+
+        # A negative reaction history should not be overridden by a semantic
+        # shortcut.  It still participates in the ordinary probability path.
+        if preference_score < 0:
+            return {
+                "mode": "feedback_bias",
+                "reason": "negative_feedback_respect",
+                "source": "feedback_preference",
+                "confidence": 0.0,
+                "bypass_probability": False,
+                "profile_snapshot": profile_snapshot,
+            }
+
+        # These are existing local classifier outcomes, not a second model
+        # judgement.  Deliberately exclude hurt/boundary/diagnostic signals so
+        # a tense conversation does not receive an unwanted reaction image.
+        positive_events = {"comfort_need", "comfort", "praise", "apology"}
+        positive_intents = {"play", "intimacy"}
+        target_allows_event = emotion_target in {"", "self", "bot"}
+        if emotion_event == "praise" and emotion_target not in {"", "bot"}:
+            target_allows_event = False
+        strong_event = (
+            emotion_event in positive_events
+            and target_allows_event
+            and intensity >= 38
+            and confidence >= 0.62
+        )
+        strong_intent = intent in positive_intents and confidence >= 0.72
+        if not semantic_bypass_blocked and (strong_event or strong_intent):
+            return {
+                "mode": "strong_emotion" if strong_event else "semantic_rule",
+                "reason": "local_emotion_signal" if strong_event else "local_intent_signal",
+                "source": source or ("emotion_event" if strong_event else "intent"),
+                "confidence": round(confidence, 3),
+                "bypass_probability": True,
+                "profile_snapshot": profile_snapshot,
+            }
+
+        if preference_score > 0:
+            return {
+                "mode": "feedback_bias",
+                "reason": "positive_feedback_bias",
+                "source": "feedback_preference",
+                "confidence": min(1.0, preference_score / 10.0),
+                "bypass_probability": False,
+                "profile_snapshot": profile_snapshot,
+            }
+        default["profile_snapshot"] = profile_snapshot
+        return default
+
+    def _reaction_expression_local_fallback_intent(
+        self,
+        event: Any,
+        visible_text: Any,
+        authorization: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a conservative intent when the model omits the hidden tag.
+
+        This reuses the inbound classifier state that already authorized the
+        opportunity. It is intentionally limited to high-confidence social or
+        emotional turns, so factual/help replies and boundaries remain text-only.
+        """
+        if not isinstance(authorization, dict) or not authorization.get("authorized"):
+            return {}
+        if authorization.get("consumed"):
+            return {}
+        trigger_mode = _single_line(authorization.get("trigger_mode"), 40).casefold()
+        if trigger_mode not in {"semantic_rule", "strong_emotion"}:
+            return {}
+        try:
+            user_id = _single_line(
+                authorization.get("user_id")
+                or getattr(event, "get_sender_id", lambda: "")(),
+                160,
+            )
+        except Exception:
+            user_id = ""
+        if not user_id:
+            return {}
+        profile = authorization.get("profile_snapshot")
+        if not isinstance(profile, dict) or not profile:
+            getter = getattr(self, "_get_user", None)
+            if not callable(getter):
+                return {}
+            try:
+                user = getter(user_id)
+            except Exception:
+                return {}
+            if not isinstance(user, dict):
+                return {}
+            profile = user.get("intent_profile")
+            if not isinstance(profile, dict):
+                return {}
+        profile_text = re.sub(r"\s+", "", _single_line(profile.get("text"), 500))
+        current_text = re.sub(
+            r"\s+",
+            "",
+            _single_line(getattr(event, "message_str", ""), 500),
+        )
+        if profile_text and (not current_text or profile_text != current_text):
+            return {}
+        intent_name = _single_line(profile.get("intent"), 32).casefold()
+        emotion_event = _single_line(profile.get("emotion_event"), 40).casefold()
+        emotion_target = _single_line(profile.get("emotion_target"), 40).casefold()
+        confidence = max(
+            _safe_float(profile.get("confidence"), 0.0, 0.0, 1.0),
+            _safe_float(profile.get("emotion_confidence"), 0.0, 0.0, 1.0),
+        )
+        intensity = _safe_float(profile.get("emotion_intensity"), 0.0, 0.0, 100.0)
+        if confidence < 0.72 or bool(profile.get("boundary_durable")):
+            return {}
+        if emotion_target not in {"", "self", "bot"}:
+            return {}
+
+        presets: dict[str, tuple[str, str, list[str]]] = {
+            "play": ("接住玩笑", "轻松", ["轻松接梗", "开心吐槽", "无语摊手"]),
+            "intimacy": ("回应亲近", "亲昵", ["害羞亲近", "撒娇回应", "温柔陪伴"]),
+            "comfort": ("温柔安慰", "心疼", ["安慰陪伴", "温柔抱抱", "心疼安慰"]),
+        }
+        event_presets: dict[str, tuple[str, str, list[str]]] = {
+            "praise": ("回应夸奖", "开心", ["开心被夸", "害羞开心", "收到夸奖"]),
+            "apology": ("温和回应道歉", "温柔", ["温柔原谅", "轻轻安慰", "没关系"]),
+            "comfort_need": ("接住低落", "温柔", ["安慰陪伴", "抱抱安慰", "温柔鼓励"]),
+        }
+        if emotion_event == "comfort" and emotion_target in {"", "bot"}:
+            preset = (
+                "回应安抚",
+                "安心",
+                ["被安慰后安心", "收到安抚", "温柔回应关心"],
+            )
+        else:
+            preset = event_presets.get(emotion_event) or presets.get(intent_name)
+        if not preset:
+            return {}
+        purpose_text, emotion_text, candidates = preset
+        level = max(0, min(5, int(round(intensity / 20.0))))
+        if level <= 0:
+            level = 2 if trigger_mode == "semantic_rule" else 3
+        context_text = _single_line(visible_text, 700)
+        inbound_text = _single_line(profile.get("text"), 240)
+        if inbound_text and inbound_text not in context_text:
+            context_text = _single_line(
+                f"用户语境：{inbound_text}；回复正文：{context_text}",
+                1000,
+            )
+        return normalize_reaction_expression_intent(
+            query=candidates[0],
+            context=context_text,
+            purpose=purpose_text,
+            emotion=emotion_text,
+            intensity=level,
+            candidate_queries=candidates,
+            candidate_limit=_safe_int(
+                getattr(self, "reaction_expression_candidate_limit", 6),
+                6,
+                1,
+                16,
+            ),
+        )
+
     async def _preauthorize_reaction_expression_prompt(
         self, event: Any
     ) -> bool:
@@ -2884,24 +3557,48 @@ class LlmToolActionsMixin:
         existing = self._reaction_expression_authorization(event)
         if existing:
             if now > _safe_float(existing.get("expires_at"), 0.0):
+                self._log_reaction_expression_event(
+                    event,
+                    stage="gate",
+                    decision="deny",
+                    reason="authorization_expired",
+                    scope=existing.get("scope") or self._reaction_expression_scope(event),
+                )
                 return False
             return bool(existing.get("authorized") and not existing.get("consumed"))
+        scope = self._reaction_expression_scope(event)
         authorization: dict[str, Any] = {
             "authorized": False,
             "reason": "experiment_disabled",
             "authorized_at": now,
             "expires_at": now + 600.0,
             "consumed": False,
+            "model_omission_recorded": False,
+            "scope": scope,
+            "trace_id": self._reaction_expression_trace_id(event),
         }
         if not bool(getattr(self, "enable_reaction_expression_experiment", False)):
             self._set_reaction_expression_authorization(event, authorization)
+            self._log_reaction_expression_event(
+                event,
+                stage="gate",
+                decision="deny",
+                reason=authorization["reason"],
+                scope=scope,
+            )
             return False
         if not self._reaction_image_provider_available():
             authorization["reason"] = "provider_unavailable"
             self._set_reaction_expression_authorization(event, authorization)
+            self._log_reaction_expression_event(
+                event,
+                stage="gate",
+                decision="deny",
+                reason=authorization["reason"],
+                scope=scope,
+            )
             return False
 
-        scope = self._reaction_expression_scope(event)
         allowed = (
             bool(getattr(self, "reaction_expression_private_enabled", True))
             if scope == "private"
@@ -2912,6 +3609,13 @@ class LlmToolActionsMixin:
         if not allowed:
             authorization["reason"] = f"{scope}_disabled"
             self._set_reaction_expression_authorization(event, authorization)
+            self._log_reaction_expression_event(
+                event,
+                stage="gate",
+                decision="deny",
+                reason=authorization["reason"],
+                scope=scope,
+            )
             return False
         try:
             user_id = _single_line(event.get_sender_id(), 160)
@@ -2920,6 +3624,13 @@ class LlmToolActionsMixin:
         if not user_id:
             authorization["reason"] = "missing_user"
             self._set_reaction_expression_authorization(event, authorization)
+            self._log_reaction_expression_event(
+                event,
+                stage="gate",
+                decision="deny",
+                reason=authorization["reason"],
+                scope=scope,
+            )
             return False
 
         scope_key = self._reaction_expression_scope_key(event, user_id)
@@ -2942,14 +3653,44 @@ class LlmToolActionsMixin:
             probability = reaction_expression_effective_probability(
                 state, configured_probability
             )
-            gate = evaluate_reaction_expression_gate(
-                scoped_state,
-                {"signature": ""},
-                now=now,
-                probability=probability,
-                cooldown_seconds=cooldown,
-                random_value=random.random(),
+            trigger = self._reaction_expression_local_trigger(
+                event,
+                user,
+                configured_probability=configured_probability,
+                scope_key=scope_key,
             )
+            gate_probability = (
+                1.0 if bool(trigger.get("bypass_probability")) else probability
+            )
+            if trigger.get("mode") == "explicit_opt_out":
+                gate = {"allowed": False, "reason": "explicit_opt_out", "probability": gate_probability}
+            else:
+                semantic_offer_cooldown = (
+                    min(60.0, cooldown) if cooldown > 0 and trigger.get("bypass_probability") else 0.0
+                )
+                last_offer_at = _safe_float(scoped_state.get("last_offer_at"), 0.0)
+                if (
+                    semantic_offer_cooldown > 0
+                    and last_offer_at > 0
+                    and now - last_offer_at < semantic_offer_cooldown
+                ):
+                    gate = {
+                        "allowed": False,
+                        "reason": "semantic_cooldown",
+                        "probability": gate_probability,
+                    }
+                else:
+                    gate = evaluate_reaction_expression_gate(
+                        scoped_state,
+                        {"signature": ""},
+                        now=now,
+                        probability=gate_probability,
+                        cooldown_seconds=cooldown,
+                        # Avoid drawing random state for deterministic semantic tiers;
+                        # this keeps ordinary probability behavior and testability
+                        # unchanged while making the bypass explicit in diagnostics.
+                        random_value=random.random() if gate_probability < 1.0 else 0.0,
+                    )
         authorization.update(
             {
                 "authorized": bool(gate.get("allowed")),
@@ -2960,11 +3701,45 @@ class LlmToolActionsMixin:
                 "nonce": uuid.uuid4().hex,
                 "configured_probability": configured_probability,
                 "effective_probability": probability,
+                "gate_probability": gate_probability,
+                "trigger_mode": _single_line(trigger.get("mode"), 40) or "probability",
+                "trigger_reason": _single_line(trigger.get("reason"), 80),
+                "trigger_source": _single_line(trigger.get("source"), 80),
+                "trigger_confidence": _safe_float(
+                    trigger.get("confidence"), 0.0, 0.0, 1.0
+                ),
+                "profile_snapshot": (
+                    dict(trigger.get("profile_snapshot"))
+                    if isinstance(trigger.get("profile_snapshot"), dict)
+                    else {}
+                ),
             }
         )
         self._set_reaction_expression_authorization(event, authorization)
         if authorization["authorized"]:
+            if authorization.get("trigger_mode") in {"semantic_rule", "strong_emotion"}:
+                async with self._data_lock:
+                    user = self._get_user(user_id)
+                    state = ensure_reaction_expression_state(user)
+                    reaction_expression_scope_state(state, scope_key)["last_offer_at"] = now
+                    self._persist_reaction_expression_state()
             self._note_reaction_expression_runtime(offers=1, last_reason="offered")
+        self._note_reaction_expression_runtime(
+            trigger_mode=authorization.get("trigger_mode"),
+            last_reason=authorization.get("trigger_reason") or authorization.get("reason"),
+        )
+        self._log_reaction_expression_event(
+            event,
+            stage="gate",
+            decision="allow" if authorization["authorized"] else "deny",
+            reason=authorization["reason"],
+            scope=scope,
+            configured_probability=configured_probability,
+            effective_probability=gate_probability,
+            cooldown_seconds=cooldown,
+            trigger_mode=trigger.get("mode"),
+            trigger_confidence=trigger.get("confidence"),
+        )
         return bool(authorization["authorized"])
 
     def _consume_reaction_expression_authorization(
@@ -2996,6 +3771,9 @@ class LlmToolActionsMixin:
         self,
         reason: str,
         *,
+        event: Any = None,
+        stage: str = "decision",
+        scope: str = "",
         message: str = "本轮不使用表情表达，继续自然文字回复即可",
         **extra: Any,
     ) -> dict[str, Any]:
@@ -3013,6 +3791,24 @@ class LlmToolActionsMixin:
             "final_response_instruction": "无需向用户解释跳过原因，按原语境继续自然文字回复。",
         }
         payload.update(extra)
+        self._log_reaction_expression_event(
+            event,
+            stage=stage,
+            decision="skip",
+            reason=reason,
+            scope=scope or (self._reaction_expression_scope(event) if event is not None else ""),
+            found=bool(payload.get("found")),
+            sent=False,
+            image_id=payload.get("image_id"),
+            confidence=payload.get("confidence") if "confidence" in payload else None,
+            cache_hit=payload.get("cache_hit") if "cache_hit" in payload else None,
+            latency_ms=(
+                payload.get("lookup_latency_ms")
+                if "lookup_latency_ms" in payload
+                else None
+            ),
+            delivery=payload.get("delivery"),
+        )
         return payload
 
     def _note_reaction_expression_runtime(
@@ -3020,11 +3816,14 @@ class LlmToolActionsMixin:
         *,
         attempts: int = 0,
         offers: int = 0,
+        model_omissions: int = 0,
+        local_fallbacks: int = 0,
         lookups: int = 0,
         cache_hits: int = 0,
         sent: int = 0,
         skipped: int = 0,
         last_reason: str = "",
+        trigger_mode: Any = "",
         latency_ms: float | None = None,
         lookup_elapsed_ms: float = 0.0,
     ) -> None:
@@ -3035,6 +3834,8 @@ class LlmToolActionsMixin:
         for key, increment in (
             ("attempts", attempts),
             ("offers", offers),
+            ("model_omissions", model_omissions),
+            ("local_fallbacks", local_fallbacks),
             ("lookups", lookups),
             ("cache_hits", cache_hits),
             ("sent", sent),
@@ -3056,6 +3857,15 @@ class LlmToolActionsMixin:
             )
         if last_reason:
             runtime["last_reason"] = _single_line(last_reason, 120)
+        normalized_trigger_mode = _single_line(trigger_mode, 40).casefold()
+        if normalized_trigger_mode in _REACTION_LOG_TRIGGER_MODES:
+            trigger_counts = runtime.get("trigger_modes")
+            if not isinstance(trigger_counts, dict):
+                trigger_counts = {}
+                runtime["trigger_modes"] = trigger_counts
+            trigger_counts[normalized_trigger_mode] = (
+                max(0, _safe_int(trigger_counts.get(normalized_trigger_mode), 0)) + 1
+            )
         runtime["last_at"] = _now_ts()
 
     def _persist_reaction_expression_state(self) -> None:
@@ -3076,15 +3886,42 @@ class LlmToolActionsMixin:
         query: str,
         context: str,
         meme_only: bool,
-    ) -> tuple[int, str, str, bool]:
+        scope: str = "",
+        revision: str = "",
+    ) -> tuple[int, str, str, bool, str, str]:
         def normalize(value: Any) -> str:
             return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
-        return id(provider), normalize(query), normalize(context), bool(meme_only)
+        return (
+            id(provider),
+            normalize(query),
+            normalize(context),
+            bool(meme_only),
+            normalize(scope),
+            normalize(revision),
+        )
+
+    @staticmethod
+    def _reaction_expression_lookup_cache_revision(provider: Any) -> str:
+        """Return a cheap catalog revision so UI edits do not leave stale hits alive."""
+        revision_getter = getattr(provider, "lookup_revision", None)
+        if callable(revision_getter):
+            try:
+                return str(revision_getter() or "")
+            except Exception:
+                pass
+        catalog_path = getattr(provider, "catalog_path", None)
+        if catalog_path is None:
+            return ""
+        try:
+            stat = os.stat(catalog_path)
+            return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+        except (OSError, TypeError, ValueError):
+            return ""
 
     def _reaction_expression_lookup_cache_get(
         self,
-        key: tuple[int, str, str, bool],
+        key: tuple[int, str, str, bool, str, str],
     ) -> dict[str, Any] | None:
         cache = getattr(self, "_reaction_expression_lookup_cache", None)
         if not isinstance(cache, dict):
@@ -3110,7 +3947,7 @@ class LlmToolActionsMixin:
 
     def _reaction_expression_lookup_cache_put(
         self,
-        key: tuple[int, str, str, bool],
+        key: tuple[int, str, str, bool, str, str],
         lookup: dict[str, Any],
     ) -> None:
         if not isinstance(lookup, dict):
@@ -3150,6 +3987,8 @@ class LlmToolActionsMixin:
         self,
         user: dict[str, Any],
         intent: dict[str, Any],
+        *,
+        profile_snapshot: dict[str, Any] | None = None,
     ) -> str:
         parts = [
             "实验性表情表达：仅在候选自然贴合时选择，不合适时允许不返回图片。",
@@ -3167,7 +4006,11 @@ class LlmToolActionsMixin:
         candidates = intent.get("candidate_queries")
         if isinstance(candidates, list) and candidates:
             parts.append(f"候选检索表达：{'；'.join(_single_line(item, 100) for item in candidates)}")
-        intent_profile = user.get("intent_profile")
+        intent_profile = (
+            profile_snapshot
+            if isinstance(profile_snapshot, dict) and profile_snapshot
+            else user.get("intent_profile")
+        )
         if isinstance(intent_profile, dict) and intent_profile:
             parts.append(
                 "近期用户意图："
@@ -3221,6 +4064,9 @@ class LlmToolActionsMixin:
     ) -> dict[str, Any]:
         state = ensure_reaction_expression_state(user)
         now = _now_ts()
+        preference_change = sync_reaction_expression_auto_preference(
+            state, text, now=now, scope_key=scope_key
+        )
         signal = classify_reaction_expression_feedback(
             state,
             text,
@@ -3228,8 +4074,18 @@ class LlmToolActionsMixin:
             scope_key=scope_key,
         )
         if not signal:
+            if preference_change:
+                return {
+                    "auto_preference": preference_change,
+                    "score": _safe_int(
+                        (state.get("preference") or {}).get("score"),
+                        0,
+                        -20,
+                        20,
+                    ),
+                }
             return {}
-        return record_reaction_expression_feedback(
+        result = record_reaction_expression_feedback(
             state,
             signal,
             text,
@@ -3237,6 +4093,9 @@ class LlmToolActionsMixin:
             event_limit=max(8, _safe_int(getattr(self, "reaction_expression_candidate_limit", 6), 6, 1, 16) * 2),
             scope_key=scope_key,
         )
+        if preference_change:
+            result["auto_preference"] = preference_change
+        return result
 
     async def _pc_reaction_expression_impl(
         self,
@@ -3256,12 +4115,18 @@ class LlmToolActionsMixin:
         self._note_reaction_expression_runtime(attempts=1)
         if not bool(getattr(self, "enable_reaction_expression_experiment", False)):
             return json.dumps(
-                self._reaction_expression_skip_result("experiment_disabled"),
+                self._reaction_expression_skip_result(
+                    "experiment_disabled",
+                    event=event,
+                ),
                 ensure_ascii=False,
             )
         if not attach_only and not self._reaction_expression_bool_arg(send, True):
             return json.dumps(
-                self._reaction_expression_skip_result("send_disabled"),
+                self._reaction_expression_skip_result(
+                    "send_disabled",
+                    event=event,
+                ),
                 ensure_ascii=False,
             )
 
@@ -3275,7 +4140,11 @@ class LlmToolActionsMixin:
         )
         if not scope_enabled:
             return json.dumps(
-                self._reaction_expression_skip_result(f"{scope}_disabled"),
+                self._reaction_expression_skip_result(
+                    f"{scope}_disabled",
+                    event=event,
+                    scope=scope,
+                ),
                 ensure_ascii=False,
             )
 
@@ -3285,10 +4154,20 @@ class LlmToolActionsMixin:
             user_id = ""
         if not user_id:
             return json.dumps(
-                self._reaction_expression_skip_result("missing_user"),
+                self._reaction_expression_skip_result(
+                    "missing_user",
+                    event=event,
+                    scope=scope,
+                ),
                 ensure_ascii=False,
             )
         scope_key = self._reaction_expression_scope_key(event, user_id)
+        authorization = self._reaction_expression_authorization(event)
+        profile_snapshot = (
+            dict(authorization.get("profile_snapshot"))
+            if isinstance(authorization.get("profile_snapshot"), dict)
+            else None
+        )
         authorized, authorization_reason = self._consume_reaction_expression_authorization(
             event,
             user_id=user_id,
@@ -3296,7 +4175,11 @@ class LlmToolActionsMixin:
         )
         if not authorized:
             return json.dumps(
-                self._reaction_expression_skip_result(authorization_reason),
+                self._reaction_expression_skip_result(
+                    authorization_reason,
+                    event=event,
+                    scope=scope,
+                ),
                 ensure_ascii=False,
             )
 
@@ -3344,7 +4227,12 @@ class LlmToolActionsMixin:
                 )
                 self._persist_reaction_expression_state()
                 return json.dumps(
-                    self._reaction_expression_skip_result(reason, intent=intent),
+                    self._reaction_expression_skip_result(
+                        reason,
+                        event=event,
+                        scope=scope,
+                        intent=intent,
+                    ),
                     ensure_ascii=False,
                 )
             reserve_reaction_expression_intent(
@@ -3353,7 +4241,25 @@ class LlmToolActionsMixin:
                 now=now,
                 reservation_token=reservation_token,
             )
-            lookup_context = self._reaction_expression_lookup_context(user, intent)
+            lookup_context = self._reaction_expression_lookup_context(
+                user,
+                intent,
+                profile_snapshot=profile_snapshot,
+            )
+
+        # Keep alternate model-provided search phrases explicit in the local
+        # lookup context. The owned catalog can score these phrases directly
+        # without another provider/model request.
+        candidate_queries = intent.get("candidate_queries")
+        if isinstance(candidate_queries, list) and candidate_queries:
+            candidate_text = "；".join(
+                _single_line(item, 100) for item in candidate_queries if _single_line(item, 100)
+            )
+            if candidate_text and "候选检索表达：" not in lookup_context:
+                lookup_context = _single_line(
+                    "；".join(part for part in (lookup_context, f"候选检索表达：{candidate_text}") if part),
+                    1000,
+                )
 
         low_latency = bool(getattr(self, "reaction_expression_low_latency_mode", True))
         raw_lookup = await self._pc_find_reaction_image_impl(
@@ -3399,8 +4305,12 @@ class LlmToolActionsMixin:
             return json.dumps(
                 self._reaction_expression_skip_result(
                     reason,
+                    event=event,
+                    scope=scope,
                     intent=intent,
                     provider_status=reason,
+                    cache_hit=lookup_cache_hit,
+                    lookup_latency_ms=lookup_latency_ms,
                 ),
                 ensure_ascii=False,
             )
@@ -3466,9 +4376,13 @@ class LlmToolActionsMixin:
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         final_reason,
+                        event=event,
+                        scope=scope,
                         intent=intent,
                         found=True,
                         image_id=image_id,
+                        cache_hit=lookup_cache_hit,
+                        lookup_latency_ms=lookup_latency_ms,
                     ),
                     ensure_ascii=False,
                 )
@@ -3501,9 +4415,13 @@ class LlmToolActionsMixin:
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         "duplicate_image",
+                        event=event,
+                        scope=scope,
                         intent=intent,
                         found=True,
                         image_id=image_id,
+                        cache_hit=lookup_cache_hit,
+                        lookup_latency_ms=lookup_latency_ms,
                     ),
                     ensure_ascii=False,
                 )
@@ -3528,7 +4446,9 @@ class LlmToolActionsMixin:
         )
         if attach_only:
             pending_attachment = {
+                "trace_id": self._reaction_expression_trace_id(event),
                 "user_id": user_id,
+                "scope": scope,
                 "scope_key": scope_key,
                 "intent": intent,
                 "intent_signature": signature,
@@ -3542,9 +4462,13 @@ class LlmToolActionsMixin:
                 "tags": tags,
                 "need": need,
                 "match_reason": match_reason,
+                "match_basis": self._reaction_expression_match_basis(lookup),
                 "snapshot_caption": snapshot_caption,
                 "cache_hit": lookup_cache_hit,
                 "lookup_latency_ms": lookup_latency_ms,
+                "confidence": _safe_float(
+                    lookup.get("confidence"), 0.0, 0.0, 1.0
+                ),
                 "attached": False,
                 "settled": False,
             }
@@ -3575,6 +4499,21 @@ class LlmToolActionsMixin:
                     },
                     ensure_ascii=False,
                 )
+            self._log_reaction_expression_event(
+                event,
+                stage="attachment",
+                decision="prepared",
+                reason="awaiting_platform_send",
+                scope=scope,
+                status="prepared",
+                found=True,
+                sent=False,
+                image_id=image_id,
+                confidence=lookup.get("confidence"),
+                cache_hit=lookup_cache_hit,
+                latency_ms=lookup_latency_ms,
+                match_basis=self._reaction_expression_match_basis(lookup),
+            )
             return json.dumps(
                 {
                     "status": "prepared",
@@ -3650,9 +4589,15 @@ class LlmToolActionsMixin:
             return json.dumps(
                 self._reaction_expression_skip_result(
                     delivery_reason,
+                    event=event,
+                    stage="delivery",
+                    scope=scope,
                     intent=intent,
                     found=True,
                     image_id=image_id,
+                    cache_hit=lookup_cache_hit,
+                    lookup_latency_ms=lookup_latency_ms,
+                    delivery=_single_line(delivery.get("destination"), 40),
                 ),
                 ensure_ascii=False,
             )
@@ -3693,7 +4638,23 @@ class LlmToolActionsMixin:
             self._persist_reaction_expression_state()
 
         self._note_reaction_expression_runtime(sent=1, last_reason="delivered")
-        self._mark_reaction_asset_used(image_id)
+        self._mark_reaction_asset_used(image_id, event=event)
+        self._log_reaction_expression_event(
+            event,
+            stage="delivery",
+            decision="sent",
+            reason="delivered",
+            scope=scope,
+            status="success",
+            found=True,
+            sent=True,
+            image_id=image_id,
+            confidence=lookup.get("confidence"),
+            cache_hit=lookup_cache_hit,
+            latency_ms=lookup_latency_ms,
+            delivery=delivery.get("destination"),
+            match_basis=self._reaction_expression_match_basis(lookup),
+        )
 
         return json.dumps(
             {
@@ -3738,6 +4699,8 @@ class LlmToolActionsMixin:
         pending["settled_reason"] = _single_line(reason, 80)
 
         user_id = _single_line(pending.get("user_id"), 160)
+        trace_id = _single_line(pending.get("trace_id"), 12)
+        scope = _single_line(pending.get("scope"), 16)
         scope_key = _single_line(pending.get("scope_key"), 240)
         intent = pending.get("intent") if isinstance(pending.get("intent"), dict) else {}
         signature = _single_line(pending.get("intent_signature"), 40)
@@ -3751,12 +4714,28 @@ class LlmToolActionsMixin:
         latency_ms = _safe_float(
             pending.get("lookup_latency_ms"), 0.0, 0.0, 3_600_000.0
         )
+        confidence = _safe_float(pending.get("confidence"), 0.0, 0.0, 1.0)
         settled_at = _now_ts()
 
         if not user_id:
             self._note_reaction_expression_runtime(
                 skipped=1,
                 last_reason=reason or "missing_user",
+            )
+            self._log_reaction_expression_event(
+                None,
+                trace_id=trace_id,
+                stage="delivery",
+                decision="failed",
+                reason=reason or "missing_user",
+                scope=scope,
+                status="missing_user",
+                found=bool(image_id),
+                sent=False,
+                image_id=image_id,
+                confidence=confidence,
+                cache_hit=cache_hit,
+                latency_ms=latency_ms,
             )
             return False
 
@@ -3827,12 +4806,29 @@ class LlmToolActionsMixin:
 
         if sent:
             self._note_reaction_expression_runtime(sent=1, last_reason="delivered")
-            self._mark_reaction_asset_used(image_id)
+            self._mark_reaction_asset_used(image_id, trace_id=trace_id)
         else:
             self._note_reaction_expression_runtime(
                 skipped=1,
                 last_reason=_single_line(reason, 80) or "not_sent",
             )
+        self._log_reaction_expression_event(
+            None,
+            trace_id=trace_id,
+            stage="delivery",
+            decision="sent" if sent else "failed",
+            reason="delivered" if sent else (_single_line(reason, 80) or "not_sent"),
+            scope=scope,
+            status="success" if sent else "not_sent",
+            found=bool(image_id),
+            sent=sent,
+            image_id=image_id,
+            confidence=confidence,
+            cache_hit=cache_hit,
+            latency_ms=latency_ms,
+            delivery=_single_line(reason, 80),
+            match_basis=pending.get("match_basis"),
+        )
         return True
 
     async def _pc_find_reaction_image_impl(
@@ -3845,6 +4841,7 @@ class LlmToolActionsMixin:
         caption: str = "",
         low_latency: bool = False,
     ) -> str:
+        scope = self._reaction_expression_scope(event)
         query_text = _single_line(query, 500)
         if not query_text:
             getter = getattr(event, "get_message_str", None)
@@ -3853,6 +4850,16 @@ class LlmToolActionsMixin:
                 500,
             )
         if not query_text:
+            self._log_reaction_expression_event(
+                event,
+                stage="lookup",
+                decision="miss",
+                reason="missing_query",
+                scope=scope,
+                status="need_query",
+                found=False,
+                sent=False,
+            )
             return json.dumps(
                 {
                     "status": "need_query",
@@ -3879,6 +4886,22 @@ class LlmToolActionsMixin:
 
         send_image = bool_arg(send, True)
         meme_filter = bool_arg(meme_only, True)
+        visible_caption = self._sanitize_photo_tool_caption(caption, limit=500)
+        if send_image and not visible_caption:
+            return json.dumps(
+                {
+                    "status": "missing_visible_caption",
+                    "success": False,
+                    "found": False,
+                    "sent": False,
+                    "message": "发送表情包前需要同时提供一条完整的可见正文",
+                    "must_not_claim_sent": True,
+                    "final_response_instruction": "请保留完整自然文字回复；不要用图片替代正文。",
+                },
+                ensure_ascii=False,
+            )
+        if send_image:
+            caption = visible_caption
         lookup_context = _single_line(context, 1000)
         snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
         snapshot_formatter = getattr(self, "_format_companion_scene_snapshot", None)
@@ -3905,13 +4928,27 @@ class LlmToolActionsMixin:
                         1000,
                     )
             except Exception as exc:
-                logger.debug(
-                    "[PrivateCompanion] 图库检索读取统一情境快照失败，已忽略: %s",
-                    _single_line(exc, 160),
+                self._log_reaction_expression_event(
+                    event,
+                    stage="degrade",
+                    decision="failed",
+                    reason="scene_snapshot_failed",
+                    scope=scope,
+                    error_type=type(exc).__name__,
                 )
 
         library = self._reaction_asset_library()
         if library is None or not library.has_enabled_assets():
+            self._log_reaction_expression_event(
+                event,
+                stage="lookup",
+                decision="miss",
+                reason="library_unavailable",
+                scope=scope,
+                status="unavailable",
+                found=False,
+                sent=False,
+            )
             return json.dumps(
                 {
                     "status": "unavailable",
@@ -3926,11 +4963,14 @@ class LlmToolActionsMixin:
 
         lookup_started = time.perf_counter()
         cache_hit = False
+        lookup_error_type = ""
         cache_key = self._reaction_expression_lookup_cache_key(
             library,
             query_text,
             lookup_context,
             meme_filter,
+            scope,
+            self._reaction_expression_lookup_cache_revision(library),
         )
         lookup = (
             self._reaction_expression_lookup_cache_get(cache_key)
@@ -3945,7 +4985,7 @@ class LlmToolActionsMixin:
                     library.find,
                     query_text,
                     context=lookup_context,
-                    scope=self._reaction_expression_scope(event),
+                    scope=scope,
                 )
                 if lookup is None:
                     lookup = {
@@ -3954,10 +4994,10 @@ class LlmToolActionsMixin:
                         "message": "素材库中没有足够贴合当前语境的表情包",
                     }
             except Exception as exc:
+                lookup_error_type = type(exc).__name__
                 logger.warning(
-                    "[PrivateCompanion] 自有表情包素材库检索失败: %s",
-                    _single_line(exc, 180),
-                    exc_info=True,
+                    "[PrivateCompanion] 自有表情包素材库检索失败: error_type=%s",
+                    lookup_error_type,
                 )
                 lookup = {
                     "success": False,
@@ -3979,9 +5019,23 @@ class LlmToolActionsMixin:
             )
         if not isinstance(lookup, dict) or not lookup.get("success"):
             lookup = lookup if isinstance(lookup, dict) else {}
+            lookup_status = _single_line(lookup.get("status"), 40) or "not_found"
+            self._log_reaction_expression_event(
+                event,
+                stage="lookup",
+                decision="miss",
+                reason="lookup_error" if lookup_status == "error" else lookup_status,
+                scope=scope,
+                status=lookup_status,
+                found=False,
+                sent=False,
+                cache_hit=cache_hit,
+                latency_ms=lookup_latency_ms,
+                error_type=lookup_error_type,
+            )
             return json.dumps(
                 {
-                    "status": _single_line(lookup.get("status"), 40) or "not_found",
+                    "status": lookup_status,
                     "success": False,
                     "found": False,
                     "sent": False,
@@ -3997,6 +5051,21 @@ class LlmToolActionsMixin:
 
         image_path = _path_text(lookup.get("path"), 1000)
         if not image_path or not os.path.isfile(image_path):
+            self._log_reaction_expression_event(
+                event,
+                stage="lookup",
+                decision="miss",
+                reason="missing_file",
+                scope=scope,
+                status="missing_file",
+                found=False,
+                sent=False,
+                image_id=lookup.get("image_id"),
+                confidence=lookup.get("confidence"),
+                cache_hit=cache_hit,
+                latency_ms=lookup_latency_ms,
+                match_basis=self._reaction_expression_match_basis(lookup),
+            )
             return json.dumps(
                 {
                     "status": "missing_file",
@@ -4010,6 +5079,22 @@ class LlmToolActionsMixin:
                 },
                 ensure_ascii=False,
             )
+
+        self._log_reaction_expression_event(
+            event,
+            stage="lookup",
+            decision="hit",
+            reason="matched",
+            scope=scope,
+            status=_single_line(lookup.get("status"), 40) or "success",
+            found=True,
+            sent=False,
+            image_id=lookup.get("image_id"),
+            confidence=lookup.get("confidence"),
+            cache_hit=cache_hit,
+            latency_ms=lookup_latency_ms,
+            match_basis=self._reaction_expression_match_basis(lookup),
+        )
 
         sent = False
         delivery: dict[str, Any] = {}
@@ -4070,9 +5155,44 @@ class LlmToolActionsMixin:
                     self._save_data_sync()
 
         if sent:
-            self._mark_reaction_asset_used(lookup.get("image_id"))
+            self._mark_reaction_asset_used(lookup.get("image_id"), event=event)
         delivery_uncertain = bool(delivery.get("uncertain"))
         success = bool(image_path and (not send_image or sent))
+        if send_image:
+            self._log_reaction_expression_event(
+                event,
+                stage="delivery",
+                decision=(
+                    "sent"
+                    if sent
+                    else "uncertain"
+                    if delivery_uncertain
+                    else "failed"
+                ),
+                reason=(
+                    "delivered"
+                    if sent
+                    else "delivery_uncertain"
+                    if delivery_uncertain
+                    else "delivery_failed"
+                ),
+                scope=scope,
+                status=(
+                    "success"
+                    if sent
+                    else "delivery_uncertain"
+                    if delivery_uncertain
+                    else "delivery_failed"
+                ),
+                found=True,
+                sent=sent,
+                image_id=lookup.get("image_id"),
+                confidence=lookup.get("confidence"),
+                cache_hit=cache_hit,
+                latency_ms=lookup_latency_ms,
+                delivery=delivery.get("destination"),
+                match_basis=self._reaction_expression_match_basis(lookup),
+            )
         return json.dumps(
             {
                 "status": (
@@ -4103,7 +5223,7 @@ class LlmToolActionsMixin:
                 "lookup_latency_ms": lookup_latency_ms,
                 "must_not_claim_sent": not sent,
                 "final_response_instruction": (
-                    f"图片和 caption 已作为本轮唯一可见回复发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                    f"完整正文 caption 与图片已一并发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
                     if sent
                     else ""
                 ),

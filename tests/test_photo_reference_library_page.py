@@ -380,8 +380,8 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', self.styles)
         self.assertIn('@media (max-width: 520px)', self.styles)
         self.assertIn('.photo-reference-manager[hidden]', self.styles)
-        self.assertIn('./app.css?v=20260731-test-diagnostics-v1', self.html)
-        self.assertIn('./app.js?v=20260731-test-diagnostics-v1', self.html)
+        self.assertIn('./app.css?v=20260801-tts-provider-isolation-v1', self.html)
+        self.assertIn('./app.js?v=20260801-tts-provider-isolation-v1', self.html)
 
     def test_structured_metadata_round_trip_keeps_explicit_false_lock(self) -> None:
         self.assertIn('function normalizePhotoReferenceMetadataBoolean(value)', self.script)

@@ -187,6 +187,11 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.harness = _DailyReviewHarness()
 
+    def _recent_complete_case_day(self) -> tuple[str, float]:
+        review_day = self.harness._daily_review_now() - timedelta(days=1)
+        case_time = review_day.replace(hour=20, minute=0, second=0, microsecond=0)
+        return review_day.date().isoformat(), case_time.timestamp()
+
     async def test_snapshot_excludes_raw_messages_and_stable_identifiers(self) -> None:
         snapshot = self.harness._daily_review_snapshot("2026-07-28")
         encoded = json.dumps(snapshot, ensure_ascii=False)
@@ -200,7 +205,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snapshot["case_review"]["enabled"])
 
     async def test_experimental_case_audit_is_opt_in_and_anonymous(self) -> None:
-        day_ts = datetime(2026, 7, 28, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        date_key, day_ts = self._recent_complete_case_day()
         self.assertEqual("", self.harness._append_daily_review_case(
             kind="reply", scene="private", inbound="用户 123456789", output="回复", ts=day_ts
         ))
@@ -218,7 +223,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
             ts=day_ts,
         )
         self.assertTrue(case_id)
-        sampled = self.harness._daily_review_case_samples("2026-07-28")
+        sampled = self.harness._daily_review_case_samples(date_key)
         encoded = json.dumps(sampled, ensure_ascii=False)
         self.assertTrue(sampled["enabled"])
         self.assertGreaterEqual(sampled["sampled"], 1)
@@ -231,7 +236,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[数字标识已隐藏]", reply_cases[0]["inbound"])
 
     async def test_case_review_only_accepts_real_sample_ids(self) -> None:
-        day_ts = datetime(2026, 7, 28, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        date_key, day_ts = self._recent_complete_case_day()
         self.harness.enable_daily_case_review_experiment = True
         self.harness._append_daily_review_case(
             kind="tts",
@@ -244,7 +249,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
             ts=day_ts,
         )
         payload = json.loads(self.harness.llm_result)
-        real_case_id = self.harness._daily_review_case_samples("2026-07-28")["cases"][0]["case_id"]
+        real_case_id = self.harness._daily_review_case_samples(date_key)["cases"][0]["case_id"]
         payload["case_reviews"] = [
             {
                 "case_id": real_case_id,
@@ -256,8 +261,8 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
             {"case_id": "C-NOTFOUND", "verdict": "needs_attention", "reason": "不存在的案例"},
         ]
         self.harness.llm_result = json.dumps(payload, ensure_ascii=False)
-        expected_samples = self.harness._daily_review_case_samples("2026-07-28")["sampled"]
-        report = await self.harness._ensure_daily_review(target_date="2026-07-28")
+        expected_samples = self.harness._daily_review_case_samples(date_key)["sampled"]
+        report = await self.harness._ensure_daily_review(target_date=date_key)
         self.assertEqual([real_case_id], [item["case_id"] for item in report["case_reviews"]])
         self.assertEqual(expected_samples, report["evidence_summary"]["case_samples"])
 
@@ -292,7 +297,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sampling_mixes_controls_clusters_repeats_and_prioritizes_owner(self) -> None:
         self.harness.enable_daily_case_review_experiment = True
-        day_ts = datetime(2026, 7, 28, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        date_key, day_ts = self._recent_complete_case_day()
         for _ in range(3):
             self.harness._append_daily_review_case(
                 kind="tts",
@@ -315,7 +320,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
             components=["plain"],
             ts=day_ts,
         )
-        sampled = self.harness._daily_review_case_samples("2026-07-28")
+        sampled = self.harness._daily_review_case_samples(date_key)
         self.assertGreaterEqual(sampled["sample_mix"].get("anomaly", 0), 1)
         self.assertGreaterEqual(sampled["sample_mix"].get("control", 0), 1)
         clustered = next(item for item in sampled["cases"] if item["kind"] == "tts")
@@ -325,12 +330,12 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_experimental_guidance_requires_confident_case_evidence(self) -> None:
         self.harness.enable_daily_case_review_experiment = True
-        day_ts = datetime(2026, 7, 28, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        date_key, day_ts = self._recent_complete_case_day()
         self.harness._append_daily_review_case(
             kind="reply", scene="private", inbound="问题", output="答非所问",
             outcome="prepared", ts=day_ts,
         )
-        case_id = self.harness._daily_review_case_samples("2026-07-28")["cases"][0]["case_id"]
+        case_id = self.harness._daily_review_case_samples(date_key)["cases"][0]["case_id"]
         payload = json.loads(self.harness.llm_result)
         payload["case_reviews"] = [{
             "case_id": case_id,
@@ -343,7 +348,7 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
         payload["corrections"][0]["confidence"] = 0.91
         payload["corrections"][0]["evidence_case_ids"] = [case_id]
         self.harness.llm_result = json.dumps(payload, ensure_ascii=False)
-        report = await self.harness._ensure_daily_review(target_date="2026-07-28")
+        report = await self.harness._ensure_daily_review(target_date=date_key)
         self.assertEqual(1, len(report["applied_safe_guidance"]))
         self.assertEqual([case_id], report["applied_safe_guidance"][0]["evidence_case_ids"])
 
@@ -458,7 +463,10 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("failed", self.harness.data["daily_review_last_attempt"]["status"])
 
     async def test_guidance_injection_is_soft_and_can_be_paused(self) -> None:
-        await self.harness._ensure_daily_review(target_date="2026-07-28")
+        target_date = (
+            self.harness._daily_review_now().date() - timedelta(days=1)
+        ).isoformat()
+        await self.harness._ensure_daily_review(target_date=target_date)
         request = SimpleNamespace(system_prompt="原系统提示", prompt="当前问题")
         await self.harness._append_daily_review_guidance_to_request(object(), request)
         self.assertIn("private_companion_daily_review_guidance_v1", request.system_prompt)

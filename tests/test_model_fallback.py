@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from astrbot_plugin_private_companion.token_budget import TokenBudgetMixin
+from astrbot_plugin_private_companion.token_budget import (
+    TokenBudgetMixin,
+    _looks_like_upstream_llm_error_response,
+)
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 
 
@@ -23,7 +26,9 @@ class _FallbackContext:
         result = self.responses.get(provider_id)
         if isinstance(result, Exception):
             raise result
-        return SimpleNamespace(completion_text=str(result or ""))
+        if hasattr(result, "completion_text"):
+            return result
+        return SimpleNamespace(role="assistant", completion_text=str(result or ""))
 
 
 class _FallbackHarness(TokenBudgetMixin):
@@ -78,6 +83,76 @@ class ModelFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result, "fallback text")
         self.assertEqual(harness.context.calls, ["primary", "backup"])
+
+    async def test_semantic_provider_error_uses_card_fallback(self) -> None:
+        harness = _FallbackHarness(
+            {
+                "primary": "The prompt could not be submitted.",
+                "backup": "人格化备用模型正文",
+            }
+        )
+        harness.model_fallback_overrides = {"RESPONSE_REVIEW_PROVIDER_ID": "backup"}
+
+        result = await harness._llm_call(
+            "review",
+            provider_id="primary",
+            task="proactive_message_fallback",
+        )
+
+        self.assertEqual(result, "人格化备用模型正文")
+        self.assertEqual(harness.context.calls, ["primary", "backup"])
+        self.assertFalse(harness.usage[0]["success"])
+        self.assertEqual(harness.usage[0]["error"], "semantic_provider_error")
+        self.assertEqual(harness.usage[0]["completion"], "The prompt could not be submitted.")
+        self.assertTrue(harness.usage[1]["success"])
+
+    async def test_native_error_role_uses_card_fallback(self) -> None:
+        harness = _FallbackHarness(
+            {
+                "primary": SimpleNamespace(
+                    role="err",
+                    completion_text="opaque upstream failure",
+                ),
+                "backup": "备用模型正常正文",
+            }
+        )
+        harness.model_fallback_overrides = {"RESPONSE_REVIEW_PROVIDER_ID": "backup"}
+
+        result = await harness._llm_call(
+            "review",
+            provider_id="primary",
+            task="response_review",
+            timeout_key="RESPONSE_REVIEW_PROVIDER_ID",
+        )
+
+        self.assertEqual(result, "备用模型正常正文")
+        self.assertEqual(harness.context.calls, ["primary", "backup"])
+        self.assertEqual(harness.usage[0]["error"], "provider_error_role")
+
+    async def test_normal_technical_text_does_not_use_card_fallback(self) -> None:
+        normal_messages = (
+            "你刚才说的 tool schema 我看懂了，先歇一会儿吧。",
+            "那个页面显示 status disabled，晚点我陪你再看。",
+            "别再盯着 traceback 了，先喝口水。",
+            "工具调用失败这种提示确实很烦，但先别折腾了。",
+        )
+        for normal_text in normal_messages:
+            with self.subTest(normal_text=normal_text):
+                self.assertFalse(_looks_like_upstream_llm_error_response(normal_text))
+                harness = _FallbackHarness(
+                    {"primary": normal_text, "backup": "不应调用"}
+                )
+                harness.model_fallback_overrides = {
+                    "RESPONSE_REVIEW_PROVIDER_ID": "backup"
+                }
+                result = await harness._llm_call(
+                    "review",
+                    provider_id="primary",
+                    task="response_review",
+                    timeout_key="RESPONSE_REVIEW_PROVIDER_ID",
+                )
+                self.assertEqual(result, normal_text)
+                self.assertEqual(harness.context.calls, ["primary"])
 
     async def test_same_primary_and_fallback_is_not_retried(self) -> None:
         harness = _FallbackHarness({"primary": RuntimeError("down")})

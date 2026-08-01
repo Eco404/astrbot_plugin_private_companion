@@ -32,11 +32,20 @@ class _RecordingFishProvider(_FishProvider):
     def __init__(self, audio_path: str) -> None:
         super().__init__()
         self.audio_path = audio_path
-        self.received_text = ""
+        self.received_texts: list[str] = []
+
+    @property
+    def received_text(self) -> str:
+        return self.received_texts[-1] if self.received_texts else ""
 
     async def get_audio(self, text: str) -> str:
-        self.received_text = text
+        self.received_texts.append(text)
         return self.audio_path
+
+
+class _UncopyableFishProvider(_FishProvider):
+    def __copy__(self):
+        return self
 
 
 class _TtsHarness(TtsEnhancementMixin):
@@ -119,14 +128,19 @@ class _RealtimeHarness(_TtsHarness):
 
 
 class FishAudioTtsOptimizationTests(unittest.IsolatedAsyncioTestCase):
-    def test_official_fishaudio_auto_uses_s2_and_default_model_header(self) -> None:
+    def test_official_fishaudio_auto_uses_isolated_s2_request_settings(self) -> None:
         harness = _TtsHarness()
         provider = _FishProvider()
 
         self.assertEqual("fishaudio_s2", harness._tts_provider_kind(provider, {}))
-        self.assertEqual("s2.1-pro-free", harness._prepare_fishaudio_provider_model(provider, {}))
-        self.assertEqual("s2.1-pro-free", provider.headers["model"])
-        self.assertEqual("s2.1-pro-free", provider.get_model())
+        request_provider, model = harness._fishaudio_request_provider(provider, {})
+
+        self.assertEqual("s2.1-pro-free", model)
+        self.assertIsNot(request_provider, provider)
+        self.assertEqual("s2.1-pro-free", request_provider.headers["model"])
+        self.assertEqual("s2.1-pro-free", request_provider.get_model())
+        self.assertNotIn("model", provider.headers)
+        self.assertEqual("", provider.get_model())
 
     def test_custom_fishaudio_auto_does_not_force_model_header(self) -> None:
         harness = _TtsHarness()
@@ -142,8 +156,24 @@ class FishAudioTtsOptimizationTests(unittest.IsolatedAsyncioTestCase):
         provider = _FishProvider()
 
         self.assertEqual("fishaudio_s1", harness._tts_provider_kind(provider, {}))
-        harness._prepare_fishaudio_provider_model(provider, {})
-        self.assertEqual("s1", provider.headers["model"])
+        request_provider, model = harness._fishaudio_request_provider(provider, {})
+
+        self.assertEqual("s1", model)
+        self.assertEqual("s1", request_provider.headers["model"])
+        self.assertEqual("s1", request_provider.get_model())
+        self.assertNotIn("model", provider.headers)
+        self.assertEqual("", provider.get_model())
+
+    def test_uncopyable_provider_keeps_astrbot_runtime_state(self) -> None:
+        harness = _TtsHarness()
+        provider = _UncopyableFishProvider()
+
+        request_provider, model = harness._fishaudio_request_provider(provider, {})
+
+        self.assertIs(request_provider, provider)
+        self.assertEqual("", model)
+        self.assertNotIn("model", provider.headers)
+        self.assertEqual("", provider.get_model())
 
     def test_s2_prompt_uses_official_placement_and_combination_guidance(self) -> None:
         harness = _TtsHarness()
@@ -411,6 +441,8 @@ class FishAudioTtsOptimizationTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNotNone(component)
             self.assertEqual(f"[upset]{spoken}", provider.received_text)
+            self.assertNotIn("model", provider.headers)
+            self.assertEqual("", provider.get_model())
             self.assertEqual(source, component.text)
             _, recorded_source = harness._lookup_tts_record_text(component)
             self.assertEqual(source, recorded_source)
@@ -437,6 +469,8 @@ class FishAudioTtsOptimizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(Path(audio_path).resolve()), result["audio_path"])
             self.assertIn("一緒に見よう", provider.received_text)
             self.assertNotIn("我们一起看", provider.received_text)
+            self.assertNotIn("model", provider.headers)
+            self.assertEqual("", provider.get_model())
         finally:
             Path(audio_path).unlink(missing_ok=True)
 
@@ -506,6 +540,8 @@ class FishAudioTtsOptimizationTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual("zh-CN", result["language"])
             self.assertIn("我们一起看", provider.received_text)
+            self.assertNotIn("model", provider.headers)
+            self.assertEqual("", provider.get_model())
         finally:
             Path(audio_path).unlink(missing_ok=True)
 

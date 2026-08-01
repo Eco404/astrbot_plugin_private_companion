@@ -91,6 +91,11 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
 
     def test_previously_missing_settings_have_one_primary_owner(self) -> None:
         expected = {
+            "proactive_generation_history_limit": "enable_proactive_only_mode",
+            "proactive_history_context_mode": "enable_proactive_only_mode",
+            "proactive_history_recent_raw_count": "enable_proactive_only_mode",
+            "proactive_history_max_chars": "enable_proactive_only_mode",
+            "proactive_review_history_limit": "enable_proactive_message_review",
             "enable_proactive_chat_integration": "enable_proactive_only_mode",
             "proactive_chat_bridge_review_mode": "enable_proactive_only_mode",
             "proactive_chat_bridge_collision_window_seconds": "enable_proactive_only_mode",
@@ -161,7 +166,10 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
 
     def test_conditional_rerender_preserves_all_feature_form_drafts(self) -> None:
         self.assertIn("const preserveFeatureParamDraft = () =>", self.script)
-        self.assertIn("function rememberFeatureParamDraft(control)", self.script)
+        self.assertIn(
+            "function rememberFeatureParamDraft(control, { allowPhotoReferenceCatalog = false } = {})",
+            self.script,
+        )
         self.assertIn("state.featureDetailParamDraft", self.script)
         self.assertIn(
             'detailPage?.addEventListener("input", trackFeatureDetailChange, true);',

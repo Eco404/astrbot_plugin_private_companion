@@ -374,6 +374,7 @@ class CoreStoreMixin:
             "jm_cosmos_integration": {},
             "bookshelf_items": [],
             "bookshelf_secret": {},
+            "bookshelf_store_revision": 0,
             "memo_notes": [],
             "creative_projects": [],
             "creative_memory_pool": [],
@@ -445,6 +446,7 @@ class CoreStoreMixin:
         data.setdefault("jm_cosmos_integration", {})
         data.setdefault("bookshelf_items", [])
         data.setdefault("bookshelf_secret", {})
+        data.setdefault("bookshelf_store_revision", 0)
         data.setdefault("memo_notes", [])
         data.setdefault("creative_projects", [])
         data.setdefault("creative_memory_pool", [])
@@ -770,6 +772,32 @@ class CoreStoreMixin:
                     changed["web_last_digest_results"] = len(compacted_results)
         return changed
 
+    def _mark_bookshelf_store_changed(self, data: dict[str, Any] | None = None) -> int:
+        target = data if isinstance(data, dict) else self.data
+        try:
+            current = max(0, int(target.get("bookshelf_store_revision") or 0))
+        except (TypeError, ValueError, OverflowError):
+            current = 0
+        revision = max(current + 1, int(time.time() * 1000))
+        target["bookshelf_store_revision"] = revision
+        return revision
+
+    def _recover_bookshelf_after_load(self, data: dict[str, Any]) -> int:
+        recoverer = getattr(self, "_recover_bookshelf_items_from_local_pages_inplace", None)
+        if not callable(recoverer):
+            return 0
+        try:
+            recovered = max(0, int(recoverer(data) or 0))
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 启动恢复夹层本地书页失败，已保留现有存储: %s",
+                _single_line(exc, 160),
+            )
+            return 0
+        if recovered:
+            logger.warning("[PrivateCompanion] 已根据本地书页和删除记录校准夹层书库: changed=%s", recovered)
+        return recovered
+
     def _load_data_sync(self) -> dict[str, Any]:
         manager = getattr(self, "store_manager", None)
         if manager is not None:
@@ -778,12 +806,20 @@ class CoreStoreMixin:
                 changed = self._sanitize_store_control_tags_inplace(data)
                 repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
                 compacted = self._compact_store_history_inplace(data)
+                bookshelf_recovered = self._recover_bookshelf_after_load(data)
                 if changed:
                     logger.warning("[PrivateCompanion] 启动读取数据时清理非标准控制标签: fields=%s", changed)
                 if repeat_changed:
                     logger.warning("[PrivateCompanion] 启动读取数据时压缩主动候选重复计数: items=%s", repeat_changed)
                 if compacted:
                     logger.info("[PrivateCompanion] 启动读取数据时压缩历史存储: %s", compacted)
+                if bookshelf_recovered:
+                    manager.save_store(data)
+                    if getattr(self, "storage_backend", "json") == "sqlite":
+                        try:
+                            manager.export_current_to_json(data)
+                        except Exception as exc:
+                            logger.debug("[PrivateCompanion] 夹层恢复后的 JSON 镜像写出失败: %s", _single_line(exc, 160))
                 return data
             except Exception as exc:
                 logger.error(
@@ -802,6 +838,7 @@ class CoreStoreMixin:
             changed = self._sanitize_store_control_tags_inplace(data)
             repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
             compacted = self._compact_store_history_inplace(data)
+            self._recover_bookshelf_after_load(data)
             if changed:
                 logger.warning("[PrivateCompanion] 启动读取 JSON 时清理非标准控制标签: fields=%s", changed)
             if repeat_changed:

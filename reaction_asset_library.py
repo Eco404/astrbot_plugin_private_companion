@@ -22,6 +22,7 @@ CATALOG_VERSION = 2
 MAX_SINGLE_FILE_BYTES = 20 * 1024 * 1024
 MAX_BATCH_BYTES = 120 * 1024 * 1024
 MAX_ZIP_MEMBERS = 1000
+LOOKUP_CACHE_TTL_SECONDS = 2.0
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 ANALYSIS_STATUSES = {"unprocessed", "pending", "running", "complete", "failed"}
 MIME_BY_EXTENSION = {
@@ -49,6 +50,33 @@ def _text_list(value: Any, *, limit: int, item_limit: int = 60) -> list[str]:
         seen.add(key)
         result.append(text)
         if len(result) >= limit:
+            break
+    return result
+
+
+def _query_list(value: Any, *, limit: int = 8, item_limit: int = 160) -> list[str]:
+    """Normalize a small list of lookup phrases from tool/context payloads."""
+    if isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        text = str(value or "").strip()
+        parsed: Any = None
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = None
+        raw = list(parsed) if isinstance(parsed, list) else re.split(r"[,，;；|\n]+", text)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = _single_line(item, item_limit).strip(" \t\"'")
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= max(1, int(limit)):
             break
     return result
 
@@ -97,6 +125,10 @@ class ReactionAssetLibrary:
         self.images_dir = self.root / "images"
         self.catalog_path = self.root / "catalog.json"
         self._lock = threading.RLock()
+        self._lookup_revision_stamp: tuple[int, int, int, int] | None = None
+        self._lookup_revision_value = ""
+        self._lookup_has_enabled_assets = False
+        self._lookup_revision_checked_at = 0.0
         self.images_dir.mkdir(parents=True, exist_ok=True)
 
     def _empty_catalog(self) -> dict[str, Any]:
@@ -144,8 +176,22 @@ class ReactionAssetLibrary:
         raw["items"] = migrated_items
         return raw
 
-    def _save(self, catalog: dict[str, Any]) -> None:
+    def _lookup_source_stamp(self) -> tuple[int, int, int, int]:
+        try:
+            catalog_stat = self.catalog_path.stat()
+            catalog_stamp = (int(catalog_stat.st_mtime_ns), int(catalog_stat.st_size))
+        except OSError:
+            catalog_stamp = (0, 0)
+        try:
+            images_stat = self.images_dir.stat()
+            images_stamp = (int(images_stat.st_mtime_ns), int(images_stat.st_size))
+        except OSError:
+            images_stamp = (0, 0)
+        return (*catalog_stamp, *images_stamp)
+
+    def _save(self, catalog: dict[str, Any], *, lookup_changed: bool = True) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        previous_source_stamp = self._lookup_source_stamp() if not lookup_changed else None
         catalog["version"] = CATALOG_VERSION
         catalog["updated_at"] = time.time()
         temporary = self.catalog_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
@@ -154,6 +200,30 @@ class ReactionAssetLibrary:
             encoding="utf-8",
         )
         os.replace(temporary, self.catalog_path)
+        if lookup_changed:
+            self._lookup_revision_stamp = None
+            self._lookup_revision_value = ""
+            self._lookup_has_enabled_assets = False
+            self._lookup_revision_checked_at = 0.0
+        else:
+            current_source_stamp = self._lookup_source_stamp()
+            can_preserve_lookup = bool(
+                self._lookup_revision_value
+                and previous_source_stamp == self._lookup_revision_stamp
+                and previous_source_stamp is not None
+                and previous_source_stamp[2:] == current_source_stamp[2:]
+            )
+            if not can_preserve_lookup:
+                self._lookup_revision_stamp = None
+                self._lookup_revision_value = ""
+                self._lookup_has_enabled_assets = False
+                self._lookup_revision_checked_at = 0.0
+                return
+            # Usage statistics do not participate in matching. Keep the hot
+            # lookup result and advance its source stamp to the catalog just
+            # written so the next reply does not parse the catalog again.
+            self._lookup_revision_stamp = current_source_stamp
+            self._lookup_revision_checked_at = time.monotonic()
 
     def _normalize_item(self, item: dict[str, Any]) -> dict[str, Any]:
         scopes = [scope for scope in _text_list(item.get("scopes"), limit=2) if scope in {"private", "group"}]
@@ -215,13 +285,77 @@ class ReactionAssetLibrary:
             return 0, 0
 
     def has_enabled_assets(self) -> bool:
+        # lookup_revision caches the catalog/file walk behind the catalog
+        # mtime. Pre-authorization calls this method on every normal reply, so
+        # keeping the hot path to one stat avoids reparsing a large catalog.
+        self.lookup_revision()
         with self._lock:
-            for raw in self._load()["items"]:
-                item = self._normalize_item(raw)
+            return bool(self._lookup_has_enabled_assets)
+
+    def lookup_revision(self) -> str:
+        """Return a stable revision for fields that affect runtime matching.
+
+        Usage counters are intentionally excluded: marking an image as used must
+        not invalidate an otherwise reusable lookup result, while edits to name,
+        tags, enabled state, scopes, or the backing file should do so.
+        """
+        with self._lock:
+            now = time.monotonic()
+            if (
+                self._lookup_revision_value
+                and now - self._lookup_revision_checked_at < LOOKUP_CACHE_TTL_SECONDS
+            ):
+                return self._lookup_revision_value
+
+            stamp = self._lookup_source_stamp()
+            if (
+                self._lookup_revision_stamp == stamp
+                and self._lookup_revision_value
+            ):
+                self._lookup_revision_checked_at = now
+                return self._lookup_revision_value
+
+            items = [self._normalize_item(raw) for raw in self._load()["items"]]
+            rows: list[dict[str, Any]] = []
+            has_enabled_assets = False
+            for item in items:
                 path = self._path_for(item)
-                if item["enabled"] and path is not None and path.is_file():
-                    return True
-        return False
+                try:
+                    file_stat = path.stat() if path is not None else None
+                    file_revision = (
+                        int(file_stat.st_mtime_ns),
+                        int(file_stat.st_size),
+                    ) if file_stat is not None else None
+                except OSError:
+                    file_revision = None
+                if item["enabled"] and file_revision is not None:
+                    has_enabled_assets = True
+                rows.append(
+                    {
+                        "id": item["id"],
+                        "enabled": item["enabled"],
+                        "scopes": item["scopes"],
+                        "name": item["name"],
+                        "description": item["description"],
+                        "visible_text": item["visible_text"],
+                        "tags": item["tags"],
+                        "emotions": item["emotions"],
+                        "intents": item["intents"],
+                        "file": file_revision,
+                    }
+                )
+            payload = json.dumps(
+                rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            revision = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+            self._lookup_revision_stamp = stamp
+            self._lookup_revision_value = revision
+            self._lookup_has_enabled_assets = has_enabled_assets
+            self._lookup_revision_checked_at = now
+            return revision
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -723,6 +857,7 @@ class ReactionAssetLibrary:
     def delete_items(self, ids: Any) -> dict[str, Any]:
         item_ids = set(_text_list(ids, limit=500, item_limit=64))
         removed: list[str] = []
+        failed: list[str] = []
         with self._lock:
             catalog = self._load()
             kept: list[dict[str, Any]] = []
@@ -732,13 +867,25 @@ class ReactionAssetLibrary:
                     kept.append(item)
                     continue
                 path = self._path_for(item)
-                if path is not None:
-                    path.unlink(missing_ok=True)
+                try:
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    # Keep an item whose backing file could not be removed so
+                    # a transient lock/permission error never loses catalog data.
+                    kept.append(item)
+                    failed.append(item["id"])
+                    continue
                 removed.append(item["id"])
             if removed:
                 catalog["items"] = kept
                 self._save(catalog)
-        return {"deleted": len(removed), "ids": removed, "summary": self.summary()}
+        return {
+            "deleted": len(removed),
+            "ids": removed,
+            "failed": failed,
+            "summary": self.summary(),
+        }
 
     @staticmethod
     def _tokens(value: str) -> list[str]:
@@ -751,14 +898,38 @@ class ReactionAssetLibrary:
     def find(self, query: Any, *, context: Any = "", scope: str = "private") -> dict[str, Any] | None:
         query_text = _single_line(query, 500)
         context_text = _single_line(context, 1000)
+        scope_text = _single_line(scope, 20).casefold() or "private"
+        if scope_text not in {"private", "group"}:
+            return None
         query_tokens = self._tokens(query_text)
         context_tokens = self._tokens(context_text)
+        # Structured reaction intents put a few alternate lookup phrases in
+        # the context. Treat them as first-class queries so a generic provider
+        # query does not drown out a useful model-supplied synonym.
+        candidate_queries: list[str] = []
+        candidate_match = re.search(
+            r"(?:候选检索表达|候选检索词|候选表达)\s*[:：]\s*(.*)",
+            context_text,
+            flags=re.IGNORECASE,
+        )
+        if candidate_match:
+            candidate_text = candidate_match.group(1)
+            # The lookup context is a semicolon-delimited diagnostic string;
+            # stop at the next labeled context section instead of treating
+            # relationship/emotion JSON as a search phrase.
+            candidate_text = re.split(
+                r"；(?=(?:当前语境|近期用户意图|当前关系状态|情绪余波|用户对近期用户意图))",
+                candidate_text,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            candidate_queries = _query_list(candidate_text, limit=8)
         with self._lock:
             candidates = [self._normalize_item(raw) for raw in self._load()["items"]]
-        ranked: list[tuple[float, dict[str, Any], Path]] = []
+        ranked: list[tuple[float, dict[str, Any], Path, list[str]]] = []
         for item in candidates:
             path = self._path_for(item)
-            if not item["enabled"] or scope not in item["scopes"] or path is None or not path.is_file():
+            if not item["enabled"] or scope_text not in item["scopes"] or path is None or not path.is_file():
                 continue
             primary = " ".join(
                 [
@@ -772,26 +943,37 @@ class ReactionAssetLibrary:
             ).casefold()
             secondary = item["filename"].casefold()
             score = 0.0
-            matched: list[str] = []
+            matched_phrases: list[str] = []
             if query_text and query_text.casefold() in primary:
                 score += 1.4
+                matched_phrases.append(query_text)
+            for phrase in candidate_queries:
+                phrase_key = phrase.casefold()
+                if phrase_key and phrase_key != query_text.casefold() and phrase_key in primary:
+                    score += 1.05
+                    matched_phrases.append(phrase)
             for token in query_tokens:
                 if token in primary:
                     score += 0.32 if len(token) <= 2 else 0.52
-                    matched.append(token)
                 elif token in secondary:
                     score += 0.16
+            for phrase in candidate_queries:
+                for token in self._tokens(phrase):
+                    if token in primary:
+                        score += 0.24 if len(token) <= 2 else 0.4
+                    elif token in secondary:
+                        score += 0.12
             for token in context_tokens:
                 if token in primary:
                     score += 0.08
             if not query_tokens and not query_text:
                 score += 0.1
             score += min(item["usage_count"], 20) * 0.002
-            ranked.append((score, item, path))
+            ranked.append((score, item, path, matched_phrases))
         if not ranked:
             return None
         ranked.sort(key=lambda row: (row[0], row[1]["updated_at"]), reverse=True)
-        score, item, path = ranked[0]
+        score, item, path, matched_phrases = ranked[0]
         # A weak lexical match is not enough to force an image into the conversation.
         if query_tokens and score < 0.28:
             return None
@@ -805,7 +987,13 @@ class ReactionAssetLibrary:
             "path": str(path),
             "tags": [*item["tags"], *item["emotions"], *item["intents"]][:20],
             "need": query_text,
-            "reason": "本插件素材库按标签、情绪和沟通用途匹配",
+            "matched_queries": matched_phrases,
+            "candidate_queries": candidate_queries,
+            "reason": (
+                "本插件素材库按候选检索表达、标签、情绪和沟通用途匹配"
+                if matched_phrases
+                else "本插件素材库按标签、情绪和沟通用途匹配"
+            ),
             "confidence": round(confidence, 3),
             "provider": "private_companion_library",
         }
@@ -829,7 +1017,7 @@ class ReactionAssetLibrary:
                 changed = True
                 break
             if changed:
-                self._save(catalog)
+                self._save(catalog, lookup_changed=False)
             return changed
 
     def rescan(self) -> dict[str, Any]:
@@ -842,6 +1030,7 @@ class ReactionAssetLibrary:
                 if isinstance(item, dict)
             }
             imported: list[dict[str, Any]] = []
+            duplicates: list[str] = []
             rejected: list[dict[str, str]] = []
             scanned = 0
             for path in self.images_dir.iterdir():
@@ -857,6 +1046,7 @@ class ReactionAssetLibrary:
                     continue
                 digest = hashlib.sha256(data).hexdigest()
                 if digest in hashes:
+                    duplicates.append(path.name)
                     rejected.append({"name": path.name, "reason": "内容已存在于索引"})
                     continue
                 now = time.time()
@@ -889,7 +1079,7 @@ class ReactionAssetLibrary:
         return {
             "scanned": scanned,
             "imported": len(imported),
-            "duplicates": [],
+            "duplicates": duplicates,
             "rejected": rejected,
             "items": imported,
             "analysis_queued": sum(1 for item in imported if item["analysis_status"] == "pending"),

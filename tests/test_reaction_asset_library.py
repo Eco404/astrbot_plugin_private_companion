@@ -10,6 +10,7 @@ import json
 import hashlib
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from astrbot_plugin_private_companion.reaction_asset_library import ReactionAssetLibrary
 from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixin
@@ -162,6 +163,104 @@ class ReactionAssetLibraryTests(unittest.TestCase):
         self.assertEqual(f"pc-local:{item['id']}", private_result["image_id"])
         self.assertTrue(Path(private_result["path"]).is_file())
         self.assertIsNone(group_result)
+
+    def test_find_uses_structured_candidate_queries_from_context(self) -> None:
+        preferred = self.library.import_blobs(
+            [("捂脸.png", PNG_BYTES)],
+            metadata={"tags": ["捂脸"], "scopes": ["private"]},
+        )["items"][0]
+
+        result = self.library.find(
+            "回应",
+            context="候选检索表达：捂脸；轻松回应；当前语境：用户开了个玩笑",
+            scope="private",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(f"pc-local:{preferred['id']}", result["image_id"])
+        self.assertIn("捂脸", result["candidate_queries"])
+        self.assertIn("捂脸", result["matched_queries"])
+
+    def test_lookup_revision_reuses_hot_cache_and_tracks_matching_edits(self) -> None:
+        item = self.library.import_blobs(
+            [("开心.png", PNG_BYTES)],
+            metadata={"tags": ["开心"], "scopes": ["private"]},
+        )["items"][0]
+
+        first = self.library.lookup_revision()
+        self.assertTrue(self.library.has_enabled_assets())
+        with patch.object(self.library, "_load", wraps=self.library._load) as load:
+            self.assertEqual(first, self.library.lookup_revision())
+            self.assertTrue(self.library.has_enabled_assets())
+            load.assert_not_called()
+
+        # Usage counters do not affect matching, so the computed revision stays
+        # stable even though the catalog file is persisted again.
+        with patch.object(self.library, "_load", wraps=self.library._load) as load:
+            self.assertTrue(self.library.mark_used(f"pc-local:{item['id']}"))
+            self.assertEqual(first, self.library.lookup_revision())
+            load.assert_called_once()
+
+        self.library.update_items([item["id"]], {"tags": ["庆祝"]})
+        self.assertNotEqual(first, self.library.lookup_revision())
+        self.library.update_items([item["id"]], {"enabled": False})
+        self.assertFalse(self.library.has_enabled_assets())
+
+    def test_lookup_revision_detects_externally_deleted_image_after_ttl(self) -> None:
+        item = self.library.import_blobs(
+            [("开心.png", PNG_BYTES)],
+            metadata={"tags": ["开心"], "scopes": ["private"]},
+        )["items"][0]
+        first = self.library.lookup_revision()
+        self.assertTrue(self.library.has_enabled_assets())
+
+        path = self.library._path_for(item)
+        self.assertIsNotNone(path)
+        path.unlink()
+        self.library._lookup_revision_checked_at = 0.0
+
+        self.assertNotEqual(first, self.library.lookup_revision())
+        self.assertFalse(self.library.has_enabled_assets())
+
+    def test_usage_write_does_not_hide_external_image_deletion(self) -> None:
+        item = self.library.import_blobs([("开心.png", PNG_BYTES)])["items"][0]
+        first = self.library.lookup_revision()
+        path = self.library._path_for(item)
+        self.assertIsNotNone(path)
+
+        path.unlink()
+        self.assertTrue(self.library.mark_used(item["id"]))
+
+        self.assertNotEqual(first, self.library.lookup_revision())
+        self.assertFalse(self.library.has_enabled_assets())
+
+    def test_rescan_reports_duplicates_and_delete_keeps_locked_item(self) -> None:
+        item = self.library.import_blobs([("已有.png", PNG_BYTES)])["items"][0]
+        duplicate_path = self.library.images_dir / "目录重复.png"
+        duplicate_path.write_bytes(PNG_BYTES)
+
+        scan = self.library.rescan()
+
+        self.assertEqual([duplicate_path.name], scan["duplicates"])
+        self.assertEqual(0, scan["imported"])
+
+        original_path = self.library._path_for(item)
+        original_unlink = Path.unlink
+
+        def fail_original(path, *args, **kwargs):
+            if path == original_path:
+                raise PermissionError("locked")
+            return original_unlink(path, *args, **kwargs)
+
+        try:
+            Path.unlink = fail_original
+            deleted = self.library.delete_items([item["id"]])
+        finally:
+            Path.unlink = original_unlink
+
+        self.assertEqual(0, deleted["deleted"])
+        self.assertEqual([item["id"]], deleted["failed"])
+        self.assertEqual(1, self.library.summary()["total"])
 
     def test_update_usage_and_delete_are_persisted(self) -> None:
         item = self.library.import_blobs([("开心.png", PNG_BYTES)])["items"][0]

@@ -115,7 +115,7 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
         self.data: dict = {}
         self.photo_generation_backend = "comfyui"
         self.photo_generation_prompt_format = "traditional"
-        self.photo_generation_fixed_prompt = "fine film grain"
+        self.photo_generation_fixed_prompt = "pajamas; fine film grain"
         self.photo_generation_scene_presets = ""
         self.comfyui_selfie_workflow_name = "selfie-workflow"
         self.comfyui_text2img_workflow_name = ""
@@ -215,6 +215,58 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
 
 
 class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_debug_log_keeps_complete_prompt_without_changing_backend_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            complete_preset = "Scene preset: " + ("cozy bedroom detail, " * 40) + "PRESET_END"
+            harness._apply_photo_generation_scene_presets = lambda *_args, **_kwargs: (
+                complete_preset,
+                ["long preset"],
+            )
+            harness._write_photo_prompt_debug_file = lambda **kwargs: (
+                ProactiveMessageMixin._write_photo_prompt_debug_file(harness, **kwargs)
+            )
+
+            await harness._generate_photo_image(
+                workflow_kind="selfie",
+                prompt_text="Take a natural selfie in the bedroom.",
+                session_key="complete-prompt-log",
+            )
+
+            backend_prompt = harness.backend_calls[0]["prompt"]
+            debug_path = next((Path(directory) / "photo_prompt_debug").glob("*.json"))
+            debug_payload = json.loads(debug_path.read_text(encoding="utf-8"))
+            logged_prompt = debug_payload["final_prompt"]
+            trace_events = [
+                json.loads(line)
+                for line in (Path(directory) / "photo_generation_trace.txt")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            trace_prompt_event = next(
+                event for event in trace_events if event["stage"] == "prompt_composed"
+            )
+            recent = harness.data["recent_photo_generations"][0]
+
+            self.assertIn("[section compacted]", backend_prompt)
+            self.assertNotIn("[section compacted]", logged_prompt)
+            self.assertIn(complete_preset, logged_prompt)
+            self.assertEqual(trace_prompt_event["data"]["prompt"], logged_prompt)
+            self.assertEqual(trace_prompt_event["data"]["submitted_prompt"], backend_prompt)
+            self.assertLessEqual(len(recent["prompt"]), 900)
+            self.assertEqual(recent["complete_prompt_length"], len(logged_prompt))
+            self.assertEqual(recent["submitted_prompt_length"], len(backend_prompt))
+            self.assertEqual(
+                recent["prompt_hash"],
+                hashlib.sha256(logged_prompt.encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual(
+                recent["submitted_prompt_hash"],
+                hashlib.sha256(backend_prompt.encode("utf-8")).hexdigest(),
+            )
+
     async def test_schedule_history_reaches_selection_but_not_final_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "generated.png"
@@ -283,60 +335,6 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events[-1]["status"], "ok")
             self.assertEqual(events[-1]["context"]["backend"], "ComfyUI")
             self.assertEqual(events[-1]["data"]["image_path"], str(output))
-
-    async def test_prompt_debug_json_writes_complete_prompt_without_changing_backend_budget(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "generated.png"
-            output.write_bytes(b"generated")
-            harness = _PhotoGenerationHarness(str(output))
-            complete_preset = "Scene preset: " + ("cozy bedroom detail, " * 40) + "PRESET_END"
-            harness._apply_photo_generation_scene_presets = lambda *_args, **_kwargs: (
-                complete_preset,
-                ["long preset"],
-            )
-            harness._write_photo_prompt_debug_file = lambda **kwargs: (
-                ProactiveMessageMixin._write_photo_prompt_debug_file(harness, **kwargs)
-            )
-
-            await harness._generate_photo_image(
-                workflow_kind="selfie",
-                prompt_text="Take a natural selfie in the bedroom.",
-                session_key="complete-prompt-log",
-            )
-
-            backend_prompt = harness.backend_calls[0]["prompt"]
-            debug_path = next((Path(directory) / "photo_prompt_debug").glob("*.json"))
-            debug_payload = json.loads(debug_path.read_text(encoding="utf-8"))
-            logged_prompt = debug_payload["final_prompt"]
-            trace_events = [
-                json.loads(line)
-                for line in (Path(directory) / "photo_generation_trace.txt")
-                .read_text(encoding="utf-8")
-                .splitlines()
-            ]
-            trace_prompt_event = next(
-                event
-                for event in trace_events
-                if event["stage"] == "prompt_composed"
-            )
-            trace_prompt = trace_prompt_event["data"]["prompt"]
-            recent_prompt = harness.data["recent_photo_generations"][0]["prompt"]
-
-            self.assertIn("[section compacted]", backend_prompt)
-            self.assertNotIn("[section compacted]", logged_prompt)
-            self.assertIn(complete_preset, logged_prompt)
-            self.assertEqual(trace_prompt, logged_prompt)
-            self.assertEqual(trace_prompt_event["data"]["submitted_prompt"], backend_prompt)
-            self.assertEqual(recent_prompt, logged_prompt)
-            self.assertEqual(
-                debug_payload["final_prompt_sha256"],
-                hashlib.sha256(logged_prompt.encode("utf-8")).hexdigest(),
-            )
-            self.assertEqual(
-                debug_payload["submitted_prompt_sha256"],
-                hashlib.sha256(backend_prompt.encode("utf-8")).hexdigest(),
-            )
-            self.assertEqual(debug_payload["submitted_prompt_length"], len(backend_prompt))
 
     async def test_backend_receives_physically_sanitized_context_and_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -413,16 +411,14 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded["prompt_sections"]["duplicate_context#2"], "second neutral detail")
         self.assertNotIn("recent_continuity", recorded["prompt_sections"])
 
-    async def test_protected_fixed_rules_reach_backend_in_full(self) -> None:
+    async def test_protected_fixed_rules_reach_backend_without_compaction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "generated.png"
             output.write_bytes(b"generated")
             harness = _PhotoGenerationHarness(str(output))
             fixed_prompt = (
                 "Overall Physique: preserve complete body proportions and stable facial structure; "
-                "Lip Color: preserve the exact natural lip color without simplification or substitution; "
-                "Her attire and posture remain modest and unassuming, with no overt exposure or "
-                "suggestive cues—keeping the impression innocent and understated."
+                "Lip Color: preserve the exact natural lip color without simplification or substitution."
             )
             harness.photo_generation_fixed_prompt = fixed_prompt
             _composition_positive, composition_negative = (
@@ -434,7 +430,7 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
 
             backend, image_path, _note = await harness._generate_photo_image(
                 workflow_kind="selfie",
-                prompt_text="Take a natural selfie wearing pajamas.",
+                prompt_text="拍一张自然自拍",
                 session_key="protected-fixed-rules",
             )
 
@@ -446,15 +442,11 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             submitted_prompt,
         )
         self.assertIn(
-            "Lip Color: preserve the exact natural lip color without simplification or substitution",
-            submitted_prompt,
-        )
-        self.assertIn(
-            "Her attire and posture remain modest and unassuming, with no overt exposure or "
-            "suggestive cues—keeping the impression innocent and understated.",
+            "Lip Color: preserve the exact natural lip color without simplification or substitution.",
             submitted_prompt,
         )
         self.assertIn(composition_negative, submitted_prompt)
+        self.assertNotIn("[section compacted]", submitted_prompt)
 
     def test_prompt_clip_never_returns_a_partial_word(self) -> None:
         self.assertEqual(

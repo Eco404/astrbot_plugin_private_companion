@@ -1819,13 +1819,12 @@ class DailyStateMixin:
             and str(state.get("custom_text") or "") == custom_text
         )
         elapsed = _now_ts() - _safe_float(state.get("updated_at"), 0)
-        same_detail = (
+        same_plan = (
             str(state.get("date") or "") == _today_key()
             and str(state.get("plan_date") or "") == str(self.data.get("detail_enhanced_day") or "")
-            and str(state.get("detail_key") or "") == key
         )
         if same_presence and (
-            (same_detail and bool(state.get("ok", False)) and elapsed < 10 * 60)
+            (same_plan and bool(state.get("ok", False)) and elapsed < 10 * 60)
             or (not bool(state.get("ok", False)) and elapsed < 60 * 60)
         ):
             return

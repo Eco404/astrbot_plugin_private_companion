@@ -9,6 +9,46 @@ INDEX_HTML = (PLUGIN_ROOT / "pages" / "陪伴面板" / "index.html").read_text(e
 
 
 class PhotoReferenceWebUiTests(unittest.TestCase):
+    def test_catalog_dirty_signature_normalizes_array_and_line_formats(self) -> None:
+        self.assertIn('paramKey === "photo_reference_catalog"', APP_JS)
+        self.assertIn("photoReferenceCatalogSignature(value)", APP_JS)
+        self.assertIn("value.split(/\\r?\\n/)", APP_JS)
+        self.assertIn("parsePhotoReferenceCatalog(value, true)", APP_JS)
+        self.assertIn('if (canonical.kind === "library") delete canonical.id', APP_JS)
+
+    def test_status_hydration_replaces_the_clean_catalog_baseline(self) -> None:
+        self.assertIn('baseline?.key === "enable_photo_text_action"', APP_JS)
+        self.assertIn('baseline.formSignature = ""', APP_JS)
+
+    def test_opening_manager_skips_the_managed_catalog_draft(self) -> None:
+        self.assertIn('control.dataset.featureParam === "photo_reference_catalog"', APP_JS)
+
+    def test_generic_form_events_cannot_overwrite_the_managed_catalog_draft(self) -> None:
+        self.assertIn(
+            'function rememberFeatureParamDraft(control, { allowPhotoReferenceCatalog = false } = {})',
+            APP_JS,
+        )
+        self.assertIn(
+            'key === "photo_reference_catalog" && !allowPhotoReferenceCatalog',
+            APP_JS,
+        )
+        self.assertIn(
+            'rememberFeatureParamDraft(catalogInput, { allowPhotoReferenceCatalog: true })',
+            APP_JS,
+        )
+
+    def test_catalog_sync_marks_dirty_only_after_a_semantic_change(self) -> None:
+        self.assertIn(
+            'const previousSignature = photoReferenceCatalogSignature(currentPhotoReferenceCatalogValue())',
+            APP_JS,
+        )
+        self.assertIn(
+            'previousSignature === photoReferenceCatalogSignature(serialized)',
+            APP_JS,
+        )
+        self.assertIn('refreshFeatureDetailDirty();', APP_JS)
+        self.assertIn('return false;', APP_JS)
+
     def test_unedited_catalog_is_not_submitted_with_other_photo_settings(self) -> None:
         self.assertIn(
             'key === "photo_reference_catalog" && !Object.prototype.hasOwnProperty.call(parameterDraft, key)',
@@ -70,10 +110,9 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('padding-top: 14px', APP_CSS)
 
     def test_metadata_editor_assets_have_a_matching_cache_version(self) -> None:
-        main_version = "20260731-test-diagnostics-v1"
-        self.assertIn(f'app.css?v={main_version}', INDEX_HTML)
+        self.assertIn('app.css?v=20260801-tts-provider-isolation-v1', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260731-folio-cascade-v1', INDEX_HTML)
-        self.assertIn(f'app.js?v={main_version}', INDEX_HTML)
+        self.assertIn('app.js?v=20260801-tts-provider-isolation-v1', INDEX_HTML)
 
 
 if __name__ == "__main__":

@@ -141,6 +141,7 @@ from .planning import (
     pick_detail_segment,
 )
 from .scene_context import infer_companion_scene_category
+from .token_budget import _looks_like_upstream_llm_error_response
 from .photo_reference_catalog import (
     PhotoReference,
     build_daily_outfit_reference,
@@ -909,6 +910,11 @@ class ProactiveMessageMixin:
         direct_markers = (
             "all chat models failed",
             "all llm providers failed",
+            "prompt could not be submitted",
+            "prompt was not submitted",
+            "try rephrasing the prompt",
+            "generative ai prohibited use policy",
+            "prompt contains sensitive words",
             "badrequesterror",
             "api connection error",
             "apiconnectionerror",
@@ -950,6 +956,11 @@ class ProactiveMessageMixin:
         compact_markers = (
             "allchatmodelsfailed",
             "allllmprovidersfailed",
+            "promptcouldnotbesubmitted",
+            "promptwasnotsubmitted",
+            "tryrephrasingtheprompt",
+            "generativeaiprohibitedusepolicy",
+            "promptcontainssensitivewords",
             "badrequesterror",
             "apiconnectionerror",
             "apistatuserror",
@@ -2313,7 +2324,10 @@ class ProactiveMessageMixin:
         persona = await self._resolve_proactive_persona_prompt(user)
         recent_history_hint = ""
         try:
-            recent_history_hint = await self._recent_private_conversation_for_proactive_review(user, limit=5)
+            recent_history_hint = await self._recent_private_conversation_for_proactive_review(
+                user,
+                limit=self._proactive_history_limit("generation"),
+            )
         except Exception:
             recent_history_hint = ""
         recent_history_hint = sanitize_relationship_source(
@@ -2398,6 +2412,8 @@ class ProactiveMessageMixin:
             "【主动生成工具边界】\n"
             "- 这一轮只生成要发给当前私聊对象的一句正文，不调用任何转述、私聊发送、群发、QQ空间或生图发送工具。\n"
             "- 不要写“已发送/已转述/消息已发给某人/工具执行完成”等状态回执。\n"
+            "- 如果本轮 Provider/API 返回英文报错、内容策略拒绝、敏感词提示或政策链接，那是内部失败，不是给用户的正文；"
+            "不要复述、翻译或润色，直接停止输出，交给插件稍后重试。\n"
             "- 如果想分享一件事，就直接把那句自然聊天内容写出来。"
         )
         if "主动生成工具边界" not in prompt:
@@ -2867,6 +2883,111 @@ class ProactiveMessageMixin:
             )
         return removed
 
+    def _install_proactive_semantic_provider_fallback(
+        self,
+        build_result: Any,
+        *,
+        label: str,
+    ) -> bool:
+        """Let AstrBot's native fallback chain handle successful error responses."""
+        runner = getattr(build_result, "agent_runner", None)
+        if runner is None:
+            return False
+        installed_marker = "_private_companion_semantic_provider_fallback_installed"
+        if bool(getattr(runner, installed_marker, False)):
+            return True
+        original_iter = getattr(runner, "_iter_llm_responses", None)
+        if not callable(original_iter):
+            return False
+
+        async def _guarded_iter(*args: Any, **kwargs: Any):
+            buffered_chunks: list[LLMResponse] = []
+            async for response in original_iter(*args, **kwargs):
+                if isinstance(response, LLMResponse) and bool(response.is_chunk):
+                    buffered_chunks.append(response)
+                    continue
+
+                result_chain = getattr(response, "result_chain", None)
+                chain = list(getattr(result_chain, "chain", []) or [])
+                has_non_plain_component = any(
+                    not isinstance(component, Plain) for component in chain
+                )
+                completion_text = str(
+                    getattr(response, "completion_text", "") or ""
+                ).strip()
+                response_role = str(
+                    getattr(response, "role", "") or ""
+                ).strip().lower()
+                is_native_provider_error = (
+                    isinstance(response, LLMResponse)
+                    and response_role == "err"
+                    and not bool(getattr(response, "is_chunk", False))
+                )
+                is_semantic_provider_error = (
+                    isinstance(response, LLMResponse)
+                    and response_role == "assistant"
+                    and not bool(getattr(response, "is_chunk", False))
+                    and not list(getattr(response, "tools_call_name", []) or [])
+                    and not has_non_plain_component
+                    and bool(completion_text)
+                    and _looks_like_upstream_llm_error_response(completion_text)
+                )
+                if is_native_provider_error or is_semantic_provider_error:
+                    provider = getattr(runner, "provider", None)
+                    provider_config = getattr(provider, "provider_config", {})
+                    provider_id = (
+                        _single_line(provider_config.get("id"), 80)
+                        if isinstance(provider_config, dict)
+                        else ""
+                    )
+                    response_ref = hashlib.sha256(
+                        completion_text.encode("utf-8", errors="replace")
+                    ).hexdigest()[:12]
+                    logger.warning(
+                        "[PrivateCompanion] 主动主链识别到 Provider 错误响应,已交给 AstrBot 原生回退链: label=%s provider=%s kind=%s response_ref=%s",
+                        _single_line(label, 80),
+                        provider_id or type(provider).__name__,
+                        "native_error" if is_native_provider_error else "semantic_error",
+                        response_ref,
+                    )
+                    sanitized_response = LLMResponse(
+                        role="err",
+                        completion_text=(
+                            "Provider API error: upstream returned an internal "
+                            "failure message."
+                        ),
+                    )
+                    for attr_name in ("id", "usage"):
+                        attr_value = getattr(response, attr_name, None)
+                        if attr_value is not None:
+                            try:
+                                setattr(sanitized_response, attr_name, attr_value)
+                            except Exception:
+                                pass
+                    yield sanitized_response
+                    return
+
+                for chunk in buffered_chunks:
+                    yield chunk
+                buffered_chunks.clear()
+                yield response
+                return
+
+            for chunk in buffered_chunks:
+                yield chunk
+
+        try:
+            setattr(runner, "_iter_llm_responses", _guarded_iter)
+            setattr(runner, installed_marker, True)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 主动主链无法安装 Provider 语义错误回退适配器: label=%s error_type=%s",
+                _single_line(label, 80),
+                type(exc).__name__,
+            )
+            return False
+        return True
+
     def _framework_agent_meta_summary_leak(self, text: str) -> bool:
         cleaned = _single_line(text, 500).lower()
         if not cleaned:
@@ -3118,7 +3239,7 @@ class ProactiveMessageMixin:
                     req.conversation = self._proactive_conversation_with_configured_persona(conv)
 
                     async def _runner_factory():
-                        runner = await build_main_agent(
+                        build_result = await build_main_agent(
                             event=event,
                             # AstrBot 4.26.2+ validates this as the concrete Context type.
                             plugin_context=framework_context,
@@ -3126,7 +3247,11 @@ class ProactiveMessageMixin:
                             req=req,
                         )
                         self._filter_incompatible_proactive_framework_tools(req)
-                        return runner
+                        self._install_proactive_semantic_provider_fallback(
+                            build_result,
+                            label=label,
+                        )
+                        return build_result
 
                     result, captured_tool_sends = await self._capture_framework_send_message_calls(
                         target_session=umo,
@@ -3256,6 +3381,82 @@ class ProactiveMessageMixin:
                 logger.warning("[PrivateCompanion] 主动消息主链生成失败: %s", exc)
             return ""
 
+    def _proactive_history_limit(self, stage: str) -> int:
+        review_stage = str(stage or "").strip().lower() == "review"
+        attr = "proactive_review_history_limit" if review_stage else "proactive_generation_history_limit"
+        default = 30 if review_stage else 20
+        return _safe_int(getattr(self, attr, default), default, 1, 200)
+
+    @staticmethod
+    def _fit_proactive_history_lines(lines: list[str], max_chars: int) -> list[str]:
+        budget = max(0, int(max_chars))
+        if not lines or budget <= 0:
+            return []
+        kept_reversed: list[str] = []
+        used = 0
+        for raw_line in reversed(lines):
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            separator = 1 if kept_reversed else 0
+            available = budget - used - separator
+            if available <= 0:
+                break
+            if len(line) <= available:
+                kept_reversed.append(line)
+                used += separator + len(line)
+                continue
+            if not kept_reversed:
+                kept_reversed.append(line[:available].rstrip())
+            break
+        return list(reversed([line for line in kept_reversed if line]))
+
+    def _format_proactive_history_context(self, lines: list[str]) -> str:
+        cleaned_lines = [str(line or "").strip() for line in lines if str(line or "").strip()]
+        if not cleaned_lines:
+            return ""
+        mode = str(getattr(self, "proactive_history_context_mode", "compact") or "compact").strip().lower()
+        if mode not in {"recent_only", "compact", "expanded"}:
+            mode = "compact"
+        recent_count = _safe_int(
+            getattr(self, "proactive_history_recent_raw_count", 8),
+            8,
+            1,
+            50,
+        )
+        max_chars = _safe_int(
+            getattr(self, "proactive_history_max_chars", 6000),
+            6000,
+            500,
+            20000,
+        )
+
+        if mode == "recent_only":
+            fitted = self._fit_proactive_history_lines(cleaned_lines[-recent_count:], max_chars)
+            return "\n".join(fitted)
+        if mode == "expanded":
+            fitted = self._fit_proactive_history_lines(cleaned_lines, max_chars)
+            return "\n".join(fitted)
+
+        recent_lines = cleaned_lines[-recent_count:]
+        older_lines = [_single_line(line, 160) for line in cleaned_lines[:-recent_count]]
+        recent_header = "【最近对话（保留原文）】"
+        recent_budget = max(0, max_chars - len(recent_header) - 1)
+        fitted_recent = self._fit_proactive_history_lines(recent_lines, recent_budget)
+        recent_block = recent_header
+        if fitted_recent:
+            recent_block += "\n" + "\n".join(fitted_recent)
+        if not older_lines:
+            return recent_block[:max_chars]
+
+        older_header = "【较早对话（已压缩）】"
+        remaining = max_chars - len(recent_block) - len(older_header) - 2
+        fitted_older = self._fit_proactive_history_lines(older_lines, remaining)
+        if not fitted_older:
+            return recent_block[:max_chars]
+        older_text = "\n".join(fitted_older)
+        return f"{older_header}\n{older_text}\n{recent_block}"[:max_chars]
+
     async def _recent_private_conversation_for_proactive_review(
         self,
         user: dict[str, Any],
@@ -3281,7 +3482,7 @@ class ProactiveMessageMixin:
                 lines.append(f"{self.bot_name}: {last_bot}")
             if last_user:
                 lines.append(f"用户: {last_user}")
-        return "\n".join(lines[-max(1, limit):])
+        return self._format_proactive_history_context(lines[-max(1, limit):])
 
     def _clean_persona_reference_rewrite_text(self, text: Any, *, limit: int = 160) -> str:
         cleaned = self._sanitize_proactive_text(str(text or ""))
@@ -3341,7 +3542,8 @@ class ProactiveMessageMixin:
             reply_style = self._format_reply_style_prompt()
         if not history and isinstance(user, dict):
             try:
-                history = await self._recent_private_conversation_for_proactive_review(user, limit=6)
+                history_limit = self._proactive_history_limit("generation") if proactive_rewrite else 6
+                history = await self._recent_private_conversation_for_proactive_review(user, limit=history_limit)
             except Exception:
                 history = ""
         recipient_identity = self._format_proactive_recipient_identity_guard(
@@ -4329,7 +4531,10 @@ class ProactiveMessageMixin:
                 "reason": "主动终审严重问题模式：本地检查通过",
             }
         persona = await self._resolve_proactive_persona_prompt(user)
-        history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
+        history = await self._recent_private_conversation_for_proactive_review(
+            user,
+            limit=self._proactive_history_limit("review"),
+        )
         intent_hint = self._format_proactive_generation_intent_hint(
             user,
             reason=reason,
@@ -8580,7 +8785,10 @@ Output:
         submitted_reference_ids: tuple[str, ...] = (),
         wardrobe: PhotoWardrobeDecision | None = None,
         prompt_hash: str = "",
+        submitted_prompt_hash: str = "",
         prompt_path: str = "",
+        complete_prompt_length: int = 0,
+        submitted_prompt_length: int = 0,
         prompt_sections: dict[str, str] | None = None,
         conflicts: list[str] | None = None,
         removed_conflicts: list[str] | None = None,
@@ -8628,7 +8836,7 @@ Output:
                 "backend": _single_line(backend, 80),
                 "ok": bool(ok),
                 "prompt_format": self._photo_generation_prompt_format_mode(),
-                "prompt": str(prompt_text or ""),
+                "prompt": _single_line(prompt_text, 900),
                 "path": _path_text(image_path, 1000),
                 "note": _single_line(note, 240),
                 "reference": bool(reference_image_path),
@@ -8700,7 +8908,10 @@ Output:
                     if _single_line(value, 120)
                 ][:12],
                 "prompt_hash": _single_line(prompt_hash, 80),
+                "submitted_prompt_hash": _single_line(submitted_prompt_hash, 80),
                 "prompt_path": _path_text(prompt_path, 1000),
+                "complete_prompt_length": _safe_int(complete_prompt_length, 0, 0),
+                "submitted_prompt_length": _safe_int(submitted_prompt_length, 0, 0),
                 "prompt_sections": {
                     _single_line(key, 50): _single_line(value, 240)
                     for key, value in (prompt_sections or {}).items()
@@ -8794,7 +9005,7 @@ Output:
             "continuity_key": self._normalize_photo_continuity_key(linked.get("continuity_key")),
             "session": _single_line(linked.get("session"), 340),
             "backend": _single_line(linked.get("backend"), 80),
-            "final_prompt": str(linked.get("prompt") or ""),
+            "final_prompt": _single_line(linked.get("prompt"), 900),
             "prompt_hash": _single_line(linked.get("prompt_hash"), 80),
             "prompt_path": _path_text(linked.get("prompt_path"), 1000),
             "reference_intent": deepcopy(linked.get("reference_intent") or {}),
@@ -10427,7 +10638,6 @@ Output:
                 name="global_fixed_prompt",
                 source="fixed_prompt",
                 positive=f"Additional fixed prompt: {fixed_prompt}" if fixed_prompt else "",
-                protected=True,
             ),
             PhotoPromptSection(
                 name="edit_contract",
@@ -10724,7 +10934,12 @@ Output:
                 submitted_reference_ids=submitted_reference_ids if reference_used else (),
                 wardrobe=wardrobe,
                 prompt_hash=prompt_hash,
+                submitted_prompt_hash=hashlib.sha256(
+                    str(prompt_text or "").encode("utf-8", "ignore")
+                ).hexdigest(),
                 prompt_path=prompt_path,
+                complete_prompt_length=len(str(complete_prompt_text or "")),
+                submitted_prompt_length=len(str(prompt_text or "")),
                 prompt_sections=prompt_sections_for_log,
                 conflicts=conflicts,
                 removed_conflicts=removed_conflicts,

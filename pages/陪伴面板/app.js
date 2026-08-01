@@ -1547,6 +1547,10 @@ const configLabels = {
   roleplay_user_profile_prompt: "用户与关系补充",
   max_daily_messages: "每日主动上限",
   enable_llm_proactive_message: "主动文本使用 LLM 生成",
+  proactive_generation_history_limit: "主动生成召回消息数",
+  proactive_history_context_mode: "主动消息历史整理模式",
+  proactive_history_recent_raw_count: "最近原文消息数",
+  proactive_history_max_chars: "主动上下文字符上限",
   enable_proactive_chat_integration: "联动 Proactive Chat",
   proactive_chat_bridge_review_mode: "联动复核模式",
   proactive_chat_bridge_collision_window_seconds: "调度防撞窗口",
@@ -1594,6 +1598,7 @@ const configLabels = {
   smart_silence_min_confidence: "智能沉默置信度",
   smart_silence_model_timeout_seconds: "智能沉默超时秒数",
   proactive_review_strength: "主动复核强度",
+  proactive_review_history_limit: "主动终审召回消息数",
   proactive_review_hard_risk_threshold: "硬拦截风险阈值",
   proactive_review_low_score_threshold: "低价值分数阈值",
   proactive_review_pressure_threshold: "打扰压力阈值",
@@ -2083,6 +2088,7 @@ const configLabels = {
   reaction_expression_cooldown_seconds: "表情表达冷却秒数",
   reaction_expression_low_latency_mode: "低延迟选择模式",
   reaction_expression_candidate_limit: "表情检索说法上限",
+  reaction_expression_semantic_trigger_enabled: "允许语义节点触发表情表达",
   enable_daily_review: "启用每日终盘巡视",
   daily_review_time: "每日巡视时间",
   daily_review_auto_apply_guidance: "自动应用低风险次日纠偏",
@@ -2098,12 +2104,17 @@ const configDescriptions = {
   reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
   reaction_expression_candidate_limit: "主模型一次最多提供多少条不同检索说法，用来补充情绪和沟通意图；无论填写多少，插件仍只执行一次图库检索。建议保持 4 到 8 条。",
+  reaction_expression_semantic_trigger_enabled: "开启后，高置信接梗、安慰、夸奖、道歉或亲密互动节点可跳过普通概率一次；仍受语义冷却、会话冷却、重复图、素材置信度和正文完整性约束，不增加模型调用。关闭后所有自动表达只按触发概率。",
   enable_daily_review: "开启后按设定时间复盘前一完整自然日；插件错过时间会在下次启动后按顺序补跑。",
   daily_review_time: "使用 HH:MM 格式。巡视目标始终是前一完整自然日，避免当天数据尚未结束就提前下结论。",
   daily_review_auto_apply_guidance: "只把低风险表达与判断建议作为次日柔性提示词使用；配置、阈值、名单、权限和 Provider 不会自动修改。",
   daily_review_retention_days: "只保留结构化结论和脱敏证据计数，不保存原始聊天内容。",
   enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发本插件的被动回复增强，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复主动消息时仍会被轻量记为已回应。适合只想使用主动陪伴、或担心本插件被动链路误接管/误识别的场景。",
   enable_llm_proactive_message: "开启后，主动调度只负责挑选动机和时机，真正文本会调用 AstrBot 人格生成；关闭时回退为本地模板，更省但更机械。",
+  proactive_generation_history_limit: "主动生成和人格改写最多读取多少条当前私聊历史；消息密集时可调高，但仍受整理模式和字符上限约束。",
+  proactive_history_context_mode: "compact 保留最近消息原文并压缩较早消息；recent_only 只注入最近原文；expanded 在字符上限内尽量保留全部历史。整理过程不额外调用模型。",
+  proactive_history_recent_raw_count: "compact 模式保留的最新原文消息数；recent_only 模式也使用此数量。",
+  proactive_history_max_chars: "生成与终审共用的近期私聊上下文字符上限，超出后优先保留最新消息。",
   enable_proactive_chat_integration: "检测到 Proactive Chat 时自动建立深度运行时联动：生成前检查两套调度是否撞车，并注入当前关系、状态、时机和已审核表达；生成后统一复核；平台发送无异常返回后才结算成功。不会修改对方插件文件或配置，也不会新建第二套定时任务。版本不兼容时自动降级为发送前装饰联动。",
   proactive_chat_bridge_review_mode: "轻量本地只做确定性检查，适合追求即时触达；跟随主动终审会按本插件当前主动终审配置加入关系、状态和表达复核，质量更稳，但会多一次模型调用和等待。",
   proactive_chat_bridge_collision_window_seconds: "只防止两套主动链路在很短时间内重复生成和连续发送，不接管 Proactive Chat 的长期频率。建议保持 90 秒；平台或模型较慢时可适当增加。",
@@ -2588,6 +2599,7 @@ const configDescriptions = {
   smart_silence_min_confidence: "小模型判定 silent 且达到该置信度才会真正吞掉回复。值越高越保守，按百分比填写。",
   smart_silence_model_timeout_seconds: "智能沉默判定最长等待时间。超时默认放行，避免正常回复被拖慢。",
   proactive_review_strength: "控制主动消息发送前复核的拦截力度。默认宽松，避免模型过度保守导致主动消息归零。",
+  proactive_review_history_limit: "发送前终审最多读取多少条当前私聊历史，用于发现候选与前文事实、状态或已完成事项的冲突。",
   proactive_review_hard_risk_threshold: "本地语义风险达到该值时会硬拦截主动候选。值越高越少拦截，按百分比填写。",
   proactive_review_low_score_threshold: "标准/严格强度下，候选价值分低于该值且压力较高时会延后。值越低越少延后，按百分比填写。",
   proactive_review_pressure_threshold: "标准/严格强度下，打扰压力达到该值且候选分偏低时会延后。值越高越少延后，按百分比填写。",
@@ -2683,7 +2695,7 @@ const featureSettingGroups = {
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
   enable_passive_response_review: ["passive_review_mode", "passive_review_strength", "response_review_max_chars"],
-  enable_proactive_message_review: ["proactive_review_mode", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold"],
+  enable_proactive_message_review: ["proactive_review_mode", "proactive_review_strength", "proactive_review_history_limit", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold"],
   enable_smart_silence: ["smart_silence_judge_mode", "SMART_SILENCE_PROVIDER_ID", "smart_silence_min_confidence", "smart_silence_model_timeout_seconds"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
@@ -2692,9 +2704,9 @@ const featureSettingGroups = {
   enable_open_loop_tracking: [],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
-  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
+  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "proactive_generation_history_limit", "proactive_history_context_mode", "proactive_history_recent_raw_count", "proactive_history_max_chars", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
-  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_group_enabled", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
+  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_group_enabled", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", ...advancedCycleSettingKeys, "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
@@ -2795,7 +2807,7 @@ const featureSettingSections = {
     {
       title: "保留主动链路",
       note: "开启仅保留主动能力后，仍保留主动念头、调度和主动文本生成。",
-      keys: ["enable_llm_proactive_message", "proactive_prompt_template"],
+      keys: ["enable_llm_proactive_message", "proactive_prompt_template", "proactive_generation_history_limit", "proactive_history_context_mode", "proactive_history_recent_raw_count", "proactive_history_max_chars"],
     },
     {
       title: "Proactive Chat 联动",
@@ -3278,12 +3290,15 @@ const featureSettingSections = {
     {
       title: "触发节奏",
       note: "只有通过语境与边界判断后才抽取概率，冷却按会话独立计算。",
-      keys: ["reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds"],
+      keys: [
+        "reaction_expression_trigger_probability",
+        "reaction_expression_cooldown_seconds",
+      ],
     },
     {
       title: "性能策略",
       note: "低延迟模式不调用额外选图模型；多条检索说法会合并后只查一次图库。",
-      keys: ["reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
+      keys: ["reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
     },
   ],
   enable_emotion_simulation: [
@@ -3566,6 +3581,11 @@ const featureSettingTypes = {
   passive_review_mode: { type: "select", options: [["severe_only", "仅严重问题"], ["local_only", "仅本地识别"], ["full", "积极复核（延迟更高）"]] },
   passive_review_strength: { type: "select", options: [["lenient", "宽松：不吞回复"], ["balanced", "标准：允许去重取消"], ["strict", "严格：强化拦截"]] },
   proactive_review_mode: { type: "select", options: [["full", "完整终审"], ["severe_only", "仅风险候选"], ["local_only", "仅本地检查"]] },
+  proactive_generation_history_limit: { type: "number", min: 1, max: 200, step: 1 },
+  proactive_history_context_mode: { type: "select", options: [["compact", "压缩较早消息"], ["recent_only", "仅最近原文"], ["expanded", "尽量保留全部"]] },
+  proactive_history_recent_raw_count: { type: "number", min: 1, max: 50, step: 1 },
+  proactive_history_max_chars: { type: "number", min: 500, max: 20000, step: 500 },
+  proactive_review_history_limit: { type: "number", min: 1, max: 200, step: 1 },
   smart_silence_judge_mode: { type: "select", options: [["boundary_only", "明确边界才判断"], ["contextual", "上下文模型判断"]] },
   proactive_intensity_preset: { type: "select", options: [["off", "关闭：手动参数"], ["balanced", "标准偏主动"], ["high_private", "私聊高频"], ["high_group", "群聊活跃"], ["live", "在线陪伴：不省成本"]] },
   proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
@@ -3618,6 +3638,7 @@ const featureSettingTypes = {
   reaction_expression_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 10 },
   reaction_expression_low_latency_mode: { type: "checkbox" },
   reaction_expression_candidate_limit: { type: "number", min: 1, max: 16, step: 1 },
+  reaction_expression_semantic_trigger_enabled: { type: "checkbox" },
   memory_companion_context_timeout_seconds: { type: "number", min: 0.2, max: 6, step: 0.1 },
   livingmemory_tool_name: { type: "text" },
   enable_memory_companion_emotional_drift: { type: "checkbox" },
@@ -5166,6 +5187,24 @@ async function loadDailyReview(force = false) {
 }
 
 function applyOverviewData(overview) {
+  const unlockedBooks = Array.isArray(state.bookshelfUnlocked?.secret_books)
+    ? state.bookshelfUnlocked.secret_books
+    : null;
+  const overviewBookshelfCount = Number(overview?.bookshelf?.jm_album_count);
+  const unlockedBookshelfCount = unlockedBooks
+    ? unlockedBooks.filter((item) => item?.kind === "jm_album").length
+    : 0;
+  if (
+    state.bookshelfUnlocked?.unlocked
+    && Number.isFinite(overviewBookshelfCount)
+    && unlockedBookshelfCount !== overviewBookshelfCount
+  ) {
+    state.bookshelfUnlocked = null;
+    state.bookshelfAccessToken = "";
+    state.selectedBook = null;
+    state.selectedBookSpreadIndex = 0;
+    state.bookshelfPage = "shelf";
+  }
   state.overview = overview;
   const overviewMemoNotes = overview?.bookshelf?.memo_notes;
   if (overviewMemoNotes && typeof overviewMemoNotes === "object") {
@@ -5571,7 +5610,7 @@ const setupGuideStepGroups = [
   {
     title: "目标用户与平台",
     tag: "第 1 步 · 约 2 分钟",
-    body: "Bot 需要知道服务谁。填写目标用户 ID，确认适配器类型和免打扰时段，以及管理命令是否只能在私聊执行。完成这一步后，Bot 就能正常触发被动回复了。",
+    body: "先在需要接收主动消息的私聊窗口执行“/陪伴 绑定主动消息”，本页会读取真实用户 ID 和平台会话；手工填写继续作为兼容兜底。",
   },
   {
     title: "核心模型配置",
@@ -5596,8 +5635,8 @@ const setupGuideSteps = [
     groupIndex: 0,
     title: "基础连通",
     tag: "目标用户与平台",
-    body: "先检查插件页面 API 是否可用；已有目标用户就沿用并预填，没有就立刻填写平台用户 ID，同时确认 target_platform、免打扰时段和管理命令权限范围。",
-    checks: ["检查插件基本连接", "填写或沿用目标用户 ID 与 target_platform", "确认免打扰时段和管理命令权限"],
+    body: "先检查插件页面 API 和私聊绑定；已绑定用户会自动预填真实用户 ID 与平台类型，未绑定时仍可手工填写。",
+    checks: ["在目标私聊执行绑定指令", "刷新并确认目标用户与平台", "确认免打扰时段和管理命令权限"],
   },
   {
     tab: "models",
@@ -6623,6 +6662,14 @@ function setupRunStatusLabel(level) {
   return labels[level] || "建议测试";
 }
 
+function setupGuideBoundUsers() {
+  return (Array.isArray(state.users) ? state.users : []).filter((item) => item?.delivery_bound && item?.user_id);
+}
+
+function setupGuideBoundPlatform(user) {
+  return String(user?.platform_kind || "").toLowerCase() === "qq_official" ? "qq_official" : "aiocqhttp";
+}
+
 function setupGuideDraft() {
   if (!state.setupGuideDraft) {
     const settings = state.overview?.settings || {};
@@ -6631,7 +6678,13 @@ function setupGuideDraft() {
     const intensity = state.overview?.proactive_intensity || {};
     const effective = intensity.effective || {};
     const configured = intensity.configured || {};
-    const targetIds = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+    const configuredTargetIds = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
+    const boundUsers = setupGuideBoundUsers();
+    const boundTargetIds = boundUsers.map((item) => String(item.user_id || "").trim()).filter(Boolean);
+    const targetIds = configuredTargetIds.length ? configuredTargetIds : boundTargetIds;
+    const targetPlatform = !configuredTargetIds.length && boundUsers.length
+      ? setupGuideBoundPlatform(boundUsers[0])
+      : String(settings.target_platform || "aiocqhttp").trim() || "aiocqhttp";
     const savedWorldKnowledgePersona = String(settings.schedule_persona_prompt || "").trim();
     const savedWorldKnowledgeWorld = String(settings.schedule_worldview_prompt || "").trim();
     const savedWorldKnowledgeUser = String(settings.roleplay_user_profile_prompt || "").trim();
@@ -6646,7 +6699,7 @@ function setupGuideDraft() {
     state.setupGuideDraft = {
       ...setupGuideDraftDefaults,
       targetUserIds: targetIds.join("\n"),
-      targetPlatform: String(settings.target_platform || "aiocqhttp").trim() || "aiocqhttp",
+      targetPlatform,
       quietHours: String(settings.quiet_hours || setupGuideDraftDefaults.quietHours).trim() || setupGuideDraftDefaults.quietHours,
       requirePrivateOptIn: setupGuideBoolValue(settings.require_private_opt_in, setupGuideDraftDefaults.requirePrivateOptIn),
       privateIntensity: String(settings.proactive_intensity_preset || intensity.preset || setupGuideDraftDefaults.privateIntensity || "off"),
@@ -6700,6 +6753,20 @@ function setupGuideDraft() {
     });
   }
   return state.setupGuideDraft;
+}
+
+function syncSetupGuideBoundUsers({ append = false } = {}) {
+  const boundUsers = setupGuideBoundUsers();
+  if (!boundUsers.length) return [];
+  const draft = setupGuideDraft();
+  const currentIds = String(draft.targetUserIds || "").split(/[\s,，;；、]+/).map((item) => item.trim()).filter(Boolean);
+  if (append || !currentIds.length) {
+    const merged = [...new Set([...currentIds, ...boundUsers.map((item) => String(item.user_id || "").trim()).filter(Boolean)])];
+    draft.targetUserIds = merged.join("\n");
+    if (!currentIds.length) draft.targetPlatform = setupGuideBoundPlatform(boundUsers[0]);
+    if (!draft.worldbookUserId) draft.worldbookUserId = merged[0] || "";
+  }
+  return boundUsers;
 }
 
 function setupGuideDraftDisplayValue(key, value) {
@@ -8116,6 +8183,8 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
   const providers = overview.providers || {};
   const targetUsers = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.filter(Boolean) : [];
   if (index === 0) {
+    const boundUsers = setupGuideBoundUsers();
+    const boundLabels = boundUsers.slice(0, 4).map((item) => item.display_name || item.user_id).join("、");
     return `
       ${setupGuideStatusPills(overview)}
       <div class="setup-guide-question">
@@ -8124,7 +8193,14 @@ function setupGuideQuestionnaireHtml(index, overview = state.overview || {}) {
       </div>
       <div class="setup-guide-question">
         <h4>目标用户</h4>
-        ${setupGuideHint(targetUsers.length ? `已预填 ${targetUsers.length} 个目标用户。检查用户 ID 和平台后继续。` : "未找到目标用户。请先填写要陪伴的用户 ID。", targetUsers.length ? "ok" : "warn")}
+        ${boundUsers.length
+          ? setupGuideHint(`已检测到 ${boundUsers.length} 个私聊绑定${boundLabels ? `：${boundLabels}` : ""}，目标用户和平台会自动预填。`, "ok")
+          : setupGuideHint("还没有检测到私聊绑定。请先在目标私聊发送“/陪伴 绑定主动消息”，再点击刷新；也可以暂时手工填写目标用户 ID。", targetUsers.length ? "info" : "warn")}
+        <div class="setup-guide-provider-test-actions">
+          <code>/陪伴 绑定主动消息</code>
+          <button type="button" data-setup-guide-refresh-bindings>刷新绑定状态</button>
+          <span>绑定只记录当前真实私聊会话，不需要手填 UMO。</span>
+        </div>
         ${setupGuideText("targetUserIds", "目标用户 ID", "每行一个用户 ID；OneBot 填 QQ，官方机器人填 openid；私聊 UMO 会自动提取", true)}
         ${setupGuideText("targetPlatform", "target_platform", "aiocqhttp / qq_official")}
       </div>
@@ -21489,6 +21565,7 @@ function featureRelatedSettings(key) {
       reaction_expression_cooldown_seconds: 180,
       reaction_expression_low_latency_mode: true,
       reaction_expression_candidate_limit: 6,
+      reaction_expression_semantic_trigger_enabled: true,
     };
     return Object.prototype.hasOwnProperty.call(defaults, name) ? defaults[name] : undefined;
   };
@@ -22882,29 +22959,33 @@ function currentPhotoReferenceCatalogValue() {
   return state.overview?.settings?.photo_reference_catalog || [];
 }
 
-function parsePhotoReferenceCatalog(value, { generateMissingIds = true } = {}) {
+function parsePhotoReferenceCatalog(value, stableIds = false) {
   let rawItems = Array.isArray(value) ? value : [];
   if (typeof value === "string" && value.trim()) {
-    const text = value.trim();
     try {
-      const parsed = JSON.parse(text);
+      const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) rawItems = parsed;
     } catch (_error) {
-      rawItems = text.split(/\r?\n/)
-        .map((line) => {
-          try {
-            return JSON.parse(line);
-          } catch (_lineError) {
-            return null;
-          }
-        })
-        .filter(Boolean);
+      rawItems = value.split(/\r?\n/).map((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return parsed && typeof parsed === "object" ? parsed : null;
+        } catch (_lineError) {
+          return null;
+        }
+      }).filter(Boolean);
     }
   }
   return rawItems
     .filter((item) => item && typeof item === "object" && ["persona", "library"].includes(String(item.kind || "")))
-    .map((item) => ({
-      id: String(item.id || (item.kind === "persona" ? "persona" : generateMissingIds ? newPhotoReferenceId() : "")),
+    .map((item, index) => ({
+      id: String(item.id || (
+        item.kind === "persona"
+          ? "persona"
+          : stableIds
+            ? `library_${index + 1}`
+            : newPhotoReferenceId()
+      )),
       kind: String(item.kind),
       source: normalizePhotoReferenceSource(item.source),
       note: String(item.note || "").trim(),
@@ -22921,21 +23002,12 @@ function parsePhotoReferenceCatalog(value, { generateMissingIds = true } = {}) {
 }
 
 function photoReferenceCatalogSignature(value) {
-  return JSON.stringify(
-    parsePhotoReferenceCatalog(value, { generateMissingIds: false }).map((item) => ({
-      id: item.kind === "persona" ? "persona" : String(item.id || ""),
-      kind: item.kind,
-      source: item.source,
-      note: item.note,
-      reference_roles: item.metadata.reference_roles,
-      outfit_category: item.metadata.outfit_category,
-      outfit_lock_default: item.metadata.outfit_lock_default,
-      scene_categories: item.metadata.scene_categories,
-      time_categories: item.metadata.time_categories,
-      preferred_preset: item.metadata.preferred_preset,
-      metadata_source: item.metadata.metadata_source,
-    })),
-  );
+  const catalog = parsePhotoReferenceCatalog(value, true).map((item) => {
+    const canonical = canonicalPhotoReference(item, item.kind);
+    if (canonical.kind === "library") delete canonical.id;
+    return canonical;
+  });
+  return JSON.stringify(catalog);
 }
 
 function photoReferenceCatalogFromStatus(status) {
@@ -22955,16 +23027,17 @@ function hydratePhotoReferenceDraftFromStatus(status) {
     photo_reference_catalog: serialized,
   };
   if (state.overview?.settings) state.overview.settings.photo_reference_catalog = statusCatalog;
-  if (state.featureDetailBaseline) {
-    state.featureDetailBaseline.settings = {
-      ...(state.featureDetailBaseline.settings || {}),
-      photo_reference_catalog: cloneFeatureStateValue(statusCatalog),
-    };
-    state.featureDetailBaseline.formSignature = "";
-    state.featureDetailDirty = false;
-  }
   state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(statusCatalog)
     .filter((item) => item.kind === "library");
+  const baseline = state.featureDetailBaseline;
+  if (baseline?.key === "enable_photo_text_action") {
+    baseline.settings = {
+      ...(baseline.settings || {}),
+      photo_reference_catalog: cloneFeatureStateValue(statusCatalog),
+    };
+    baseline.formSignature = "";
+  }
+  state.featureDetailDirty = false;
   return true;
 }
 
@@ -23924,7 +23997,10 @@ function bindPhotoReferenceManagerActions() {
   const manager = document.querySelector("[data-photo-reference-manager]");
   const openButton = document.querySelector("[data-photo-reference-open]");
   openButton?.addEventListener("click", () => {
-    document.querySelectorAll("[data-feature-param]").forEach(rememberFeatureParamDraft);
+    document.querySelectorAll("[data-feature-param]").forEach((control) => {
+      if (control.dataset.featureParam === "photo_reference_catalog") return;
+      rememberFeatureParamDraft(control);
+    });
     state.photoReferenceManagerDraft = parsePhotoReferenceCatalog(currentPhotoReferenceCatalogValue())
       .filter((item) => item.kind === "library");
     state.featureDetailSubpage = "photo_reference_library";
@@ -24426,7 +24502,7 @@ function ttsLanguageConfiguratorMarkup(settings, values, language) {
       </form>` : ""}
       <div class="tts-language-provider-editor">
         ${selected ? `<div class="tts-provider-editor"><header class="tts-provider-editor-head"><div><b>${escapeHtml(selected.name || selected.type)}</b><span>${escapeHtml(selected.id)} · ${escapeHtml(selected.type)}${selected.is_default ? " · AstrBot 当前默认" : ""}</span></div><label class="tts-provider-enable"><input type="checkbox" data-tts-provider-enable${enabled ? " checked" : ""} /><span>启用</span></label></header>
-          ${sharedLanguages.length ? `<div class="tts-provider-sharing-note"><b>检测到旧版共享绑定</b><span>当前与${escapeHtml(sharedLabels)}共用 Provider。保存任一语种时会自动拆分全部重复绑定，三个语种互不覆盖。</span></div>` : ""}
+          ${sharedLanguages.length ? `<div class="tts-provider-sharing-note"><b>检测到旧版共享绑定</b><span>当前与${escapeHtml(sharedLabels)}共用 Provider。修改并保存此 Provider 时会自动拆分重复绑定，单独保存语音策略不会改动 AstrBot 原生配置。</span></div>` : ""}
           <div class="tts-provider-field-groups">${ttsProviderFieldGroups.map((group) => {
             const fields = (selected.fields || [])
               .filter((field) => (field.group || "advanced") === group.id)
@@ -24434,7 +24510,7 @@ function ttsLanguageConfiguratorMarkup(settings, values, language) {
             if (!fields.length) return "";
             return `<section class="tts-provider-field-group"><h4>${escapeHtml(group.label)}</h4><div class="tts-provider-field-grid">${fields.map((field) => ttsProviderFieldMarkup(selected, field)).join("")}</div></section>`;
           }).join("")}</div></div>` : `<div class="tts-provider-empty">当前${escapeHtml(meta.label)}跟随 AstrBot 会话 TTS；也可以在上方选择或新建专用 Provider。</div>`}
-        <footer class="tts-provider-editor-actions"><span class="tts-provider-test-result ${testResult?.ok ? "ok" : testResult ? "error" : ""}"><span>${testResult ? testResult.ok ? `测试通过 · ${testResult.elapsed_ms || 0} ms` : escapeHtml(testResult.error || "测试失败") : draft ? "有未保存修改" : sharedLanguages.length ? "保存时自动拆分三个语种的重复绑定" : "保存时同时应用语种绑定与语音策略"}</span>${testResult ? `<button type="button" data-test-result-source="tts-provider" data-test-result-key="${escapeHtml(selected.id)}">查看诊断</button>` : ""}</span><button type="button" class="secondary" data-tts-provider-test${!selected?.loaded ? " disabled" : ""}>测试连接</button><button type="button" data-tts-provider-save>${sharedLanguages.length ? "保存并拆分独立配置" : `保存${escapeHtml(meta.label)}配置`}</button></footer>
+        <footer class="tts-provider-editor-actions"><span class="tts-provider-test-result ${testResult?.ok ? "ok" : testResult ? "error" : ""}"><span>${testResult ? testResult.ok ? `测试通过 · ${testResult.elapsed_ms || 0} ms` : escapeHtml(testResult.error || "测试失败") : draft ? "Provider 有未保存修改" : "仅保存插件语种绑定与语音策略，不改 AstrBot Provider"}</span>${testResult ? `<button type="button" data-test-result-source="tts-provider" data-test-result-key="${escapeHtml(selected.id)}">查看诊断</button>` : ""}</span><button type="button" class="secondary" data-tts-provider-test${!selected?.loaded ? " disabled" : ""}>测试连接</button><button type="button" data-tts-provider-save>${draft && sharedLanguages.length ? "保存并拆分独立配置" : draft ? `保存${escapeHtml(meta.label)} Provider` : "保存 TTS 设置"}</button></footer>
       </div>
     </section>`;
 }
@@ -24570,18 +24646,19 @@ function renderTtsModelConfig() {
     ));
   });
   editor.querySelector("[data-tts-provider-save]")?.addEventListener("click", async (event) => {
-    const draft = selected
-      ? state.ttsProviderConfigDrafts[selectedDraftKey] || { provider_id: selected.id, enable: selected.enable, values: {} }
-      : null;
+    const draft = selected ? state.ttsProviderConfigDrafts[selectedDraftKey] || null : null;
     const routeValues = ttsProviderValues();
     const sharedGroups = ttsSharedProviderGroups(routeValues);
+    const sharedProviderDraftGroups = sharedGroups.filter((group) => group.languages.some((meta) => (
+      Boolean(state.ttsProviderConfigDrafts[ttsProviderConfigDraftKey(group.providerId, meta.language)])
+    )));
     const saveMessage = `已保存${activeRouteMeta?.label || "当前语种"} TTS 配置`;
     let savedRouteValues = { ...routeValues };
     const consumedDraftKeys = new Set();
     const result = await runAction(async () => {
       let providerResult = null;
       let activeProviderCloned = false;
-      for (const group of sharedGroups) {
+      for (const group of sharedProviderDraftGroups) {
         if (!state.ttsProviderConfigs.some((item) => item.id === group.providerId)) continue;
         const activeMember = activeRouteMeta && group.languages.find((item) => item.language === activeRouteMeta.language);
         const remaining = activeMember ? group.languages.filter((item) => item !== activeMember) : [...group.languages];
@@ -24621,7 +24698,7 @@ function renderTtsModelConfig() {
       }
       await postJson("/settings/update", { settings: { ...ttsStrategyValues(), ...savedRouteValues } });
       return providerResult || { items: state.ttsProviderConfigs, templates: state.ttsProviderTemplates };
-    }, sharedGroups.length ? `${saveMessage}，三个语种已独立` : saveMessage, event.currentTarget, { reload: false });
+    }, sharedProviderDraftGroups.length ? `${saveMessage}，已拆分修改过的共享 Provider` : saveMessage, event.currentTarget, { reload: false });
     if (!result) return;
     if (selectedDraftKey) consumedDraftKeys.add(selectedDraftKey);
     consumedDraftKeys.forEach((key) => delete state.ttsProviderConfigDrafts[key]);
@@ -26111,7 +26188,7 @@ function experimentalVisualSpec(key) {
       question: "这一轮是否适合用表情，以及哪种表达能产生正确的社交效果？",
       flow: [
         ["机会", "本地按会话范围、概率和冷却决定本轮是否向主模型提供表情表达能力。"],
-        ["意图", "主模型判断图片是否优于文字，并给出沟通用途、情绪强度和少量检索说法。"],
+        ["意图", "主模型先完成可独立发送的正文，再判断追加图片能否补足语气，并给出沟通用途、情绪强度和少量检索说法。"],
         ["快选", "插件合并检索说法后只查询一次图库；低延迟模式使用本地评分与短时缓存。"],
         ["结算", "检查近期重复并发送图库返回的一张图片；不合适或失败时继续自然文字回复。"],
       ],
@@ -26197,16 +26274,20 @@ function experimentalRuntimeSignals(key) {
       toBool(settings.reaction_expression_group_enabled ?? false),
     ].filter(Boolean).length;
     const lowLatency = toBool(settings.reaction_expression_low_latency_mode ?? true);
+    const semanticTrigger = toBool(settings.reaction_expression_semantic_trigger_enabled ?? true);
     const attempts = Number(runtime.attempts ?? recent.attempt_count ?? 0);
     const sent = Number(runtime.sent ?? recent.sent_count ?? 0);
     const lookups = Number(runtime.lookups || 0);
     const cacheHits = Number(runtime.cache_hits || 0);
+    const triggerModes = runtime.trigger_modes || {};
+    const semanticOffers = Number(triggerModes.semantic_rule || 0) + Number(triggerModes.strong_emotion || 0);
+    const localFallbacks = Number(runtime.local_fallbacks || 0);
     const cacheRequests = lookups + cacheHits;
     const cacheRate = cacheRequests ? Math.round(cacheHits * 100 / cacheRequests) : 0;
     return {
       primary: attempts ? `${sent}/${attempts}` : `${Math.round(probability)}%`,
       label: attempts ? "发送 / 尝试" : "触发概率",
-      detail: `${lowLatency ? "本地快选" : "精细选择"} · ${candidates} 条说法${cacheRequests ? ` · 缓存 ${cacheRate}%` : ""}`,
+      detail: `${lowLatency ? "本地快选" : "精细选择"} · ${candidates} 条说法${semanticTrigger && semanticOffers ? ` · 语义 ${semanticOffers}` : ""}${localFallbacks ? ` · 兜底 ${localFallbacks}` : ""}${cacheRequests ? ` · 缓存 ${cacheRate}%` : ""}`,
       tone: scopes ? "ok" : "idle",
       bars: [["概率", probability, 100], ["缓存", cacheRate, 100], ["范围", scopes, 2]],
     };
@@ -28585,6 +28666,7 @@ if (key === "enable_reaction_expression_experiment") {
     const privateEnabled = toBool(settings.reaction_expression_private_enabled ?? true);
     const groupEnabled = toBool(settings.reaction_expression_group_enabled ?? false);
     const lowLatency = toBool(settings.reaction_expression_low_latency_mode ?? true);
+    const semanticTrigger = toBool(settings.reaction_expression_semantic_trigger_enabled ?? true);
     const candidateLimit = Math.max(1, Number(settings.reaction_expression_candidate_limit || 6));
     const cooldown = Math.max(0, Number(settings.reaction_expression_cooldown_seconds ?? 180));
     const summary = overview.reaction_expression || {};
@@ -28593,10 +28675,13 @@ if (key === "enable_reaction_expression_experiment") {
     const recent = summary.recent || {};
     const attempts = Number(runtime.attempts ?? recent.attempt_count ?? 0);
     const offers = Number(runtime.offers || 0);
+    const modelOmissions = Number(runtime.model_omissions || 0);
+    const localFallbacks = Number(runtime.local_fallbacks || 0);
     const sent = Number(runtime.sent ?? recent.sent_count ?? 0);
     const skipped = Number(runtime.skipped ?? recent.skipped_count ?? 0);
     const lookups = Number(runtime.lookups || 0);
     const cacheHits = Number(runtime.cache_hits || 0);
+    const triggerModes = runtime.trigger_modes || {};
     const lookupRequests = lookups + cacheHits;
     const cacheRate = lookupRequests ? Math.round(cacheHits * 100 / lookupRequests) : 0;
     const lastLatency = Number(runtime.last_latency_ms || 0);
@@ -28613,7 +28698,22 @@ if (key === "enable_reaction_expression_experiment") {
       delivery_failed: "发送失败",
       provider_unavailable: "素材库暂无可用图片",
       authorization_consumed: "本轮已尝试",
+      explicit_opt_out: "用户暂不想看",
+      semantic_cooldown: "语义触发冷却",
     };
+    const triggerLabels = {
+      probability: "普通概率",
+      semantic_rule: "语义节点",
+      strong_emotion: "高情绪节点",
+      feedback_bias: "反馈偏好",
+      explicit_opt_out: "用户停用",
+    };
+    const triggerModeText = Object.entries(triggerModes)
+      .filter(([, count]) => Number(count) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 4)
+      .map(([mode, count]) => `${triggerLabels[mode] || mode} ${count}`)
+      .join(" · ");
     const skipReasonText = Object.entries(recent.skip_reasons || {})
       .slice(0, 3)
       .map(([reason, count]) => `${reasonLabels[reason] || reason} ${count}`)
@@ -28623,6 +28723,7 @@ if (key === "enable_reaction_expression_experiment") {
       ["群聊范围", groupEnabled ? "允许" : "关闭"],
       ["触发概率", `${probability}%`],
       ["会话冷却", `${cooldown} 秒`],
+      ["语义节点", semanticTrigger ? "高置信时优先" : "关闭"],
       ["选择路径", lowLatency ? "本地评分 + 短时缓存" : "每次重新本地评分"],
       ["可用素材", `${Number(librarySummary.enabled || 0)} 张`],
       ["模型调用", "仅主回复 1 次"],
@@ -28632,16 +28733,21 @@ if (key === "enable_reaction_expression_experiment") {
       <div class="exp-runtime-extra">
         <div class="exp-runtime-stats-row">
           <div class="exp-runtime-stat"><span>获得表达机会</span><b>${escapeHtml(String(offers))}</b></div>
-          <div class="exp-runtime-stat"><span>实际尝试</span><b>${escapeHtml(String(attempts))}</b></div>
+          <div class="exp-runtime-stat"><span>模型未采用</span><b>${escapeHtml(String(modelOmissions))}</b></div>
+          <div class="exp-runtime-stat"><span>本地兜底</span><b>${escapeHtml(String(localFallbacks))}</b></div>
+          <div class="exp-runtime-stat"><span>进入本地选图</span><b>${escapeHtml(String(attempts))}</b></div>
           <div class="exp-runtime-stat"><span>成功发送</span><b>${escapeHtml(String(sent))}</b></div>
           <div class="exp-runtime-stat"><span>缓存命中</span><b>${lookupRequests ? `${cacheRate}%` : "-"}</b></div>
           <div class="exp-runtime-stat"><span>最近检索</span><b>${lastLatency ? `${Math.round(lastLatency)}ms` : "-"}</b></div>
           <div class="exp-runtime-stat"><span>平均后端</span><b>${averageLookup ? `${Math.round(averageLookup)}ms` : "-"}</b></div>
         </div>
+        ${triggerModeText ? `<div class="exp-runtime-hint">触发来源：${escapeHtml(triggerModeText)}</div>` : ""}
         <div class="exp-runtime-hint">${
           attempts
-            ? `近期跳过 ${skipped} 次${skipReasonText ? `：${escapeHtml(skipReasonText)}` : ""}。反馈：喜欢 ${positiveFeedback}，不合适 ${negativeFeedback}。`
-            : "尚无实际尝试。只有请求前的轻量抽样命中时，模型才会看到自发表情提示；普通回复不会先查图库。"
+            ? `近期跳过 ${skipped} 次${skipReasonText ? `：${escapeHtml(skipReasonText)}` : ""}。反馈：喜欢 ${positiveFeedback}，不合适 ${negativeFeedback}。${localFallbacks ? `模型漏写隐藏意图时已本地兜底 ${localFallbacks} 次。` : ""}`
+            : modelOmissions
+              ? `模型已获得表达机会，其中 ${modelOmissions} 次未写隐藏意图；已有高置信语义时，插件会尝试本地兜底${localFallbacks ? `（已兜底 ${localFallbacks} 次）` : ""}。`
+              : "尚未进入本地选图。只有请求前的轻量抽样命中时，模型才会看到自发表情提示；普通回复不会先查图库。"
         }选图始终由本插件按标签、情绪和沟通用途在本地完成，不增加模型调用；低延迟模式只额外复用短时评分缓存。</div>
       </div>
     `;
@@ -29424,8 +29530,13 @@ document.addEventListener("click", async (event) => {
     state.setupGuideAdvancedBlock = "";
     state.setupGuideAdvancedStep = 0;
     renderSetupGuideOverlay();
-    Promise.all([loadAvailableProviders(false), loadRoleplayPersonas(false)])
+    Promise.all([
+      loadAvailableProviders(false),
+      loadRoleplayPersonas(false),
+      loadUserGroupLists(loadAllRequestSeq, { force: true, silent: true }),
+    ])
       .then(() => {
+        syncSetupGuideBoundUsers();
         const active = document.activeElement;
         const editingGuideField = active instanceof Element && Boolean(active.closest(".setup-guide-modal [data-setup-guide-field]"));
         if (state.setupGuideOpen && !editingGuideField) renderSetupGuideOverlay();
@@ -29730,6 +29841,21 @@ document.addEventListener("click", async (event) => {
       testResultButton.dataset.testResultKey || "",
     );
     showTestDiagnosticDialog(resolved.title, resolved.result);
+    return;
+  }
+  const refreshBindingsButton = target.closest("[data-setup-guide-refresh-bindings]");
+  if (refreshBindingsButton instanceof HTMLButtonElement) {
+    setActionBusy(refreshBindingsButton, true);
+    try {
+      await loadUserGroupLists(loadAllRequestSeq, { force: true, silent: true, showErrors: true });
+      const boundUsers = syncSetupGuideBoundUsers({ append: true });
+      rerenderSetupGuideOverlayPreserveScroll();
+      showToast(boundUsers.length ? `已读取 ${boundUsers.length} 个私聊绑定` : "暂未检测到私聊绑定", boundUsers.length ? "success" : "warn");
+    } catch (error) {
+      showToast(`刷新绑定状态失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(refreshBindingsButton, false);
+    }
     return;
   }
   const dailyReviewConfigLink = element?.closest("[data-daily-review-config-key]");

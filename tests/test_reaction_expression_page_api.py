@@ -21,6 +21,7 @@ REACTION_SETTING_KEYS = {
     "reaction_expression_group_enabled",
     "reaction_expression_trigger_probability",
     "reaction_expression_cooldown_seconds",
+    "reaction_expression_semantic_trigger_enabled",
     "reaction_expression_low_latency_mode",
     "reaction_expression_candidate_limit",
 }
@@ -51,6 +52,8 @@ class ReactionExpressionPageApiTests(unittest.TestCase):
             _reaction_expression_runtime={
                 "attempts": "7",
                 "offers": -2,
+                "model_omissions": "3",
+                "local_fallbacks": "2",
                 "lookups": 4,
                 "cache_hits": "2",
                 "sent": 1,
@@ -58,6 +61,11 @@ class ReactionExpressionPageApiTests(unittest.TestCase):
                 "last_reason": "cooldown\nignored",
                 "last_latency_ms": -5,
                 "total_lookup_ms": 123.456,
+                "trigger_modes": {
+                    "semantic_rule": "4",
+                    "strong_emotion": 2,
+                    "": 9,
+                },
             },
         )
         api = PrivateCompanionPageApi(plugin)
@@ -89,12 +97,18 @@ class ReactionExpressionPageApiTests(unittest.TestCase):
             {
                 "attempts": 7,
                 "offers": 0,
+                "model_omissions": 3,
+                "local_fallbacks": 2,
                 "lookups": 4,
                 "cache_hits": 2,
                 "sent": 1,
                 "skipped": 3,
                 "last_latency_ms": 0.0,
                 "total_lookup_ms": 123.46,
+                "trigger_modes": {
+                    "semantic_rule": 4,
+                    "strong_emotion": 2,
+                },
                 "last_reason": "cooldown ignored",
             },
         )
@@ -119,6 +133,7 @@ class ReactionExpressionPageApiSaveTests(unittest.IsolatedAsyncioTestCase):
                 "reaction_expression_group_enabled": "yes",
                 "reaction_expression_trigger_probability": 180,
                 "reaction_expression_cooldown_seconds": 9999,
+                "reaction_expression_semantic_trigger_enabled": "false",
                 "reaction_expression_low_latency_mode": "off",
                 "reaction_expression_candidate_limit": 99,
             },
@@ -129,6 +144,7 @@ class ReactionExpressionPageApiSaveTests(unittest.IsolatedAsyncioTestCase):
             "reaction_expression_group_enabled": True,
             "reaction_expression_trigger_probability": 1.0,
             "reaction_expression_cooldown_seconds": 3600,
+            "reaction_expression_semantic_trigger_enabled": False,
             "reaction_expression_low_latency_mode": False,
             "reaction_expression_candidate_limit": 16,
         }

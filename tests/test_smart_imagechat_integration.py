@@ -23,6 +23,10 @@ from astrbot_plugin_private_companion.reaction_expression import (
     reserve_reaction_expression_image,
     record_reaction_expression_feedback,
     record_reaction_expression_sent,
+    reaction_expression_explicit_opt_out,
+    reaction_expression_explicit_request,
+    reaction_expression_auto_disabled,
+    sync_reaction_expression_auto_preference,
 )
 from astrbot_plugin_private_companion.scene_context import SceneContextMixin
 
@@ -202,6 +206,18 @@ class _ReactionHarness(SceneContextMixin, LlmToolActionsMixin):
             setattr(self, key, value)
 
 
+def _reaction_log_payloads(log_info) -> list[dict[str, object]]:
+    prefix = "[PrivateCompanion][ReactionExpression] %s"
+    payloads: list[dict[str, object]] = []
+    for call in log_info.call_args_list:
+        if len(call.args) < 2 or call.args[0] != prefix:
+            continue
+        payload = json.loads(call.args[1])
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
 class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -212,6 +228,135 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_reaction_auto_preference_persists_until_explicit_resume(self) -> None:
+        state = ensure_reaction_expression_state({})
+        self.assertEqual(
+            "",
+            sync_reaction_expression_auto_preference(
+                state, "别发了", now=5.0, scope_key="private:10001"
+            ),
+        )
+        self.assertEqual(
+            "disabled",
+            sync_reaction_expression_auto_preference(
+                state, "别再发表情包了", now=10.0, scope_key="private:10001"
+            ),
+        )
+        self.assertTrue(reaction_expression_auto_disabled(state, "private:10001"))
+        self.assertFalse(reaction_expression_auto_disabled(state, "group:20002"))
+        self.assertEqual(
+            "",
+            sync_reaction_expression_auto_preference(
+                state, "普通聊天", now=20.0, scope_key="private:10001"
+            ),
+        )
+        self.assertTrue(reaction_expression_auto_disabled(state, "private:10001"))
+        self.assertTrue(reaction_expression_explicit_request("给我来一张无语表情包"))
+        self.assertEqual(
+            "enabled",
+            sync_reaction_expression_auto_preference(
+                state, "可以继续发表情包", now=30.0, scope_key="private:10001"
+            ),
+        )
+        self.assertFalse(reaction_expression_auto_disabled(state, "private:10001"))
+
+    def test_legacy_global_reaction_opt_out_is_inherited_per_scope(self) -> None:
+        state = ensure_reaction_expression_state({})
+        state["auto_disabled"] = True
+
+        self.assertTrue(reaction_expression_auto_disabled(state, "private:10001"))
+        self.assertEqual(
+            "enabled",
+            sync_reaction_expression_auto_preference(
+                state,
+                "恢复自动表情包",
+                now=30.0,
+                scope_key="private:10001",
+            ),
+        )
+        self.assertFalse(reaction_expression_auto_disabled(state, "private:10001"))
+        self.assertTrue(reaction_expression_auto_disabled(state, "group:20002"))
+
+    def test_explicit_request_is_single_turn_and_does_not_resume_automatic_reactions(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        user = harness.users["10001"]
+        state = ensure_reaction_expression_state(user)
+        scope_key = "default:FriendMessage:10001"
+        sync_reaction_expression_auto_preference(
+            state,
+            "别再发表情包了",
+            now=10.0,
+            scope_key=scope_key,
+        )
+        event = _FakeEvent()
+        event.message_str = "给我来一张无语表情包"
+
+        trigger = harness._reaction_expression_local_trigger(
+            event,
+            user,
+            configured_probability=1.0,
+            scope_key=scope_key,
+        )
+
+        self.assertEqual("explicit_request", trigger["mode"])
+        self.assertTrue(reaction_expression_auto_disabled(state, scope_key))
+
+    def test_one_off_reaction_requests_never_restore_automatic_sending(self) -> None:
+        scope_key = "default:FriendMessage:10001"
+        for index, text in enumerate(("请发个表情包", "继续发个表情包"), start=1):
+            with self.subTest(text=text):
+                state = ensure_reaction_expression_state({})
+                self.assertEqual(
+                    "disabled",
+                    sync_reaction_expression_auto_preference(
+                        state,
+                        "别再发表情包了",
+                        now=float(index),
+                        scope_key=scope_key,
+                    ),
+                )
+                self.assertTrue(reaction_expression_explicit_request(text))
+                self.assertEqual(
+                    "",
+                    sync_reaction_expression_auto_preference(
+                        state,
+                        text,
+                        now=10.0 + index,
+                        scope_key=scope_key,
+                    ),
+                )
+                self.assertTrue(
+                    reaction_expression_auto_disabled(state, scope_key)
+                )
+
+        self.assertTrue(
+            reaction_expression_explicit_request(
+                "以后别自动发表情包了，不过这次给我来一张表情包"
+            )
+        )
+
+    def test_historical_reaction_mentions_do_not_override_opt_out(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        cases = (
+            "别再发表情包了，你刚才发的表情包很烦",
+            "别再发表情包了，为什么你刚刚还发了一个表情包",
+            "别发了，你发的表情包一点也不贴切",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertTrue(reaction_expression_explicit_opt_out(text))
+                self.assertFalse(reaction_expression_explicit_request(text))
+                self.assertFalse(harness._photo_generation_instruction_matches(text))
+
+        for text in (
+            "请发个表情包",
+            "给我找个开心反应图",
+            "用这个表情包回应一下",
+            "以后别自动发，不过这次给我来一张表情包",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(reaction_expression_explicit_request(text))
 
     def test_hidden_reaction_intent_is_parsed_and_removed(self) -> None:
         harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
@@ -325,6 +470,269 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         harness.protect_tts_enhancement_response_blocks.assert_awaited_once()
 
+    async def test_tool_call_intermediate_response_cannot_stash_reaction_intent(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        source = (
+            "这是工具调用前的中间文字。\n"
+            '<pc_reaction_expression>{"purpose":"中间意图","emotion":"惊讶"}'
+            "</pc_reaction_expression>"
+        )
+        response = SimpleNamespace(
+            completion_text=source,
+            result_chain=None,
+            tools_call_name=["some_tool"],
+        )
+        harness._recover_plaintext_photo_tool_call = AsyncMock(
+            return_value=(source, False)
+        )
+        harness._guard_unread_creative_work_response = lambda _event, text: text
+        harness.protect_tts_enhancement_response_blocks = AsyncMock()
+
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness,
+            event,
+            response,
+        )
+
+        self.assertEqual("这是工具调用前的中间文字。", response.completion_text)
+        self.assertFalse(
+            hasattr(event, "_private_companion_reaction_expression_intent")
+        )
+        self.assertFalse(
+            event.extras[
+                "private_companion_reaction_expression_authorization"
+            ]["model_omission_recorded"]
+        )
+        self.assertEqual(
+            0,
+            getattr(harness, "_reaction_expression_runtime", {}).get(
+                "model_omissions", 0
+            ),
+        )
+
+    async def test_llm_response_hook_records_model_omission_once_without_tool_call(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        source = "这是一条完整的纯文字回复。"
+        response = SimpleNamespace(
+            completion_text=source,
+            result_chain=None,
+            tools_call_name=[],
+        )
+        harness._recover_plaintext_photo_tool_call = AsyncMock(
+            return_value=(source, False)
+        )
+        harness._guard_unread_creative_work_response = lambda _event, text: text
+        harness.protect_tts_enhancement_response_blocks = AsyncMock()
+
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness, event, response
+        )
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness, event, response
+        )
+
+        self.assertEqual(1, harness._reaction_expression_runtime["model_omissions"])
+        self.assertTrue(
+            event.extras[
+                "private_companion_reaction_expression_authorization"
+            ]["model_omission_recorded"]
+        )
+        self.assertFalse(
+            hasattr(event, "_private_companion_reaction_expression_intent")
+        )
+        self.assertEqual(
+            0,
+            harness._reaction_expression_runtime.get("local_fallbacks", 0),
+        )
+
+    async def test_model_omission_uses_current_high_confidence_semantic_profile(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        event.message_str = "你这次做得不错"
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "play",
+            "emotion_event": "praise",
+            "emotion_intensity": 60,
+            "confidence": 0.9,
+            "emotion_confidence": 0.86,
+            "emotion_target": "bot",
+            "text": event.message_str,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        source = "这是一条完整的纯文字回复。"
+        response = SimpleNamespace(
+            completion_text=source,
+            result_chain=None,
+            tools_call_name=[],
+        )
+        harness._recover_plaintext_photo_tool_call = AsyncMock(
+            return_value=(source, False)
+        )
+        harness._guard_unread_creative_work_response = lambda _event, text: text
+        harness.protect_tts_enhancement_response_blocks = AsyncMock()
+
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness,
+            event,
+            response,
+        )
+
+        self.assertEqual(
+            "回应夸奖",
+            event._private_companion_reaction_expression_intent["purpose"],
+        )
+        self.assertEqual(1, harness._reaction_expression_runtime["local_fallbacks"])
+
+    async def test_local_fallback_keeps_comfort_direction_when_user_soothes_the_bot(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        event.message_str = "别难过，我陪着你"
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "intimacy",
+            "emotion_event": "comfort",
+            "emotion_intensity": 62,
+            "confidence": 0.9,
+            "emotion_confidence": 0.86,
+            "emotion_target": "bot",
+            "text": event.message_str,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        authorization = event.extras["private_companion_reaction_expression_authorization"]
+        fallback = harness._reaction_expression_local_fallback_intent(
+            event,
+            "嗯，被你这样哄着，心里好多了。",
+            authorization,
+        )
+
+        self.assertEqual("回应安抚", fallback["purpose"])
+        self.assertEqual("安心", fallback["emotion"])
+        self.assertNotIn("接住低落", fallback["purpose"])
+
+    async def test_local_fallback_keeps_comfort_need_directed_to_the_user(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        event.message_str = "我是不是很没用"
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "comfort",
+            "emotion_event": "comfort_need",
+            "emotion_intensity": 68,
+            "confidence": 0.9,
+            "emotion_confidence": 0.88,
+            "emotion_target": "self",
+            "text": event.message_str,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        authorization = event.extras["private_companion_reaction_expression_authorization"]
+        fallback = harness._reaction_expression_local_fallback_intent(
+            event,
+            "不是这样的，先让我陪你缓一缓。",
+            authorization,
+        )
+
+        self.assertEqual("接住低落", fallback["purpose"])
+        self.assertEqual("温柔", fallback["emotion"])
+        self.assertIn("安慰陪伴", fallback["candidate_queries"])
+
+    async def test_llm_response_hook_does_not_count_cleaned_intent_as_omission(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        source = (
+            "这是完整正文。\n"
+            '<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语"}'
+            "</pc_reaction_expression>"
+        )
+        response = SimpleNamespace(
+            completion_text=source,
+            result_chain=None,
+            tools_call_name=[],
+        )
+        harness._recover_plaintext_photo_tool_call = AsyncMock(
+            side_effect=lambda _event, _resp, text: (text, False)
+        )
+        harness._guard_unread_creative_work_response = lambda _event, text: text
+        harness.protect_tts_enhancement_response_blocks = AsyncMock()
+
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness, event, response
+        )
+        # AstrBot may invoke the response hook again after the hidden tag has
+        # already been removed and the intent stashed on the event.
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness, event, response
+        )
+
+        self.assertEqual(0, harness._reaction_expression_runtime.get("model_omissions", 0))
+        self.assertEqual("轻吐槽", event._private_companion_reaction_expression_intent["purpose"])
+
+    async def test_llm_response_tool_call_is_not_counted_as_model_omission(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        source = "工具调用前的说明。"
+        response = SimpleNamespace(
+            completion_text=source,
+            result_chain=None,
+            tools_call_name=["pc_find_reaction_image"],
+        )
+        harness._recover_plaintext_photo_tool_call = AsyncMock(
+            return_value=(source, False)
+        )
+        harness._guard_unread_creative_work_response = lambda _event, text: text
+        harness.protect_tts_enhancement_response_blocks = AsyncMock()
+
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness, event, response
+        )
+
+        self.assertEqual(0, harness._reaction_expression_runtime.get("model_omissions", 0))
+
     async def test_no_visible_reply_does_not_prepare_reaction_attachment(self) -> None:
         harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
         harness.enable_reaction_experiment()
@@ -411,6 +819,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     event,
                     query="无语反应图",
                     context="对方又开了同一个玩笑",
+                    caption="我给你找了张正合适的。",
                 )
             )
 
@@ -440,7 +849,11 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return_value=module,
         ):
             payload = json.loads(
-                await harness._pc_find_reaction_image_impl(event, query="无语反应图")
+                await harness._pc_find_reaction_image_impl(
+                    event,
+                    query="无语反应图",
+                    caption="这张应该很贴切。",
+                )
             )
 
         self.assertEqual("delivery_failed", payload["status"])
@@ -462,6 +875,8 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             instruction = harness._photo_generation_tool_instruction()
 
         self.assertIn("优先使用 `pc_find_reaction_image`", instruction)
+        self.assertIn("不能替代、缩短或省略正文", instruction)
+        self.assertNotIn("图片是否优于文字", instruction)
         self.assertIn("明确要求“生成/画/制作”", instruction)
         parsed = harness._plaintext_tool_call_from_object(
             {"name": "pc_find_reaction_image", "parameters": {"query": "无语"}}
@@ -855,7 +1270,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 return_value=0.1,
             ) as random_draw,
             patch(
-            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+                "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
                 return_value=module,
             ),
         ):
@@ -881,8 +1296,320 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["sent"])
         self.assertEqual(1, random_draw.call_count)
         self.assertIn("<pc_reaction_expression>", instruction)
+        self.assertIn("本轮已经由插件完成概率抽样", instruction)
+        self.assertIn("不要再次按概率决定", instruction)
+        self.assertIn('"purpose":"轻吐槽","emotion":"无语","intensity":2', instruction)
         self.assertNotIn("spontaneous=true", instruction)
         self.assertNotIn("pc_generate_photo", instruction)
+
+    async def test_semantic_reaction_trigger_bypasses_probability_once(self) -> None:
+        """High-confidence local intent can offer expression without another model call."""
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=0.2)
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "play",
+            "emotion": "light",
+            "emotion_event": "praise",
+            "emotion_intensity": 42,
+            "confidence": 0.86,
+            "emotion_confidence": 0.82,
+            "source": "play_rule",
+        }
+        event = _FakeEvent()
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+
+        with (
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.random.random",
+                return_value=0.99,
+            ) as random_draw,
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+                return_value=module,
+            ),
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        self.assertEqual("strong_emotion", authorization["trigger_mode"])
+        self.assertEqual(1.0, authorization["gate_probability"])
+        self.assertEqual(0, random_draw.call_count)
+
+    async def test_semantic_switch_off_keeps_the_normal_probability_path(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=1.0)
+        harness.reaction_expression_semantic_trigger_enabled = False
+        event = _FakeEvent()
+        event.message_str = "哈哈，你真厉害"
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "play",
+            "emotion_event": "praise",
+            "emotion_intensity": 60,
+            "confidence": 0.95,
+            "emotion_confidence": 0.9,
+            "emotion_target": "bot",
+            "text": event.message_str,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        self.assertEqual("probability", authorization["trigger_mode"])
+        self.assertEqual(1.0, authorization["gate_probability"])
+
+    async def test_low_confidence_profile_keeps_the_normal_probability_path(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=1.0)
+        event = _FakeEvent()
+        event.message_str = "也许是在开玩笑吧"
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "play",
+            "emotion_event": "praise",
+            "emotion_intensity": 60,
+            "confidence": 0.45,
+            "emotion_confidence": 0.5,
+            "emotion_target": "bot",
+            "text": event.message_str,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        self.assertEqual("probability", authorization["trigger_mode"])
+        self.assertEqual(1.0, authorization["gate_probability"])
+
+    async def test_boundary_diagnostic_and_factual_profiles_only_disable_semantic_bypass(self) -> None:
+        profiles = {
+            "boundary": {
+                "intent": "play",
+                "source": "durable_boundary_rule",
+                "boundary_durable": True,
+            },
+            "diagnostic": {
+                "intent": "play",
+                "source": "diagnostic_skip",
+            },
+            "factual": {
+                "intent": "help",
+                "source": "help_rule",
+            },
+        }
+        for label, profile in profiles.items():
+            with self.subTest(profile=label):
+                api = _FakeSmartImageAPI(self.image_path)
+                harness = _ReactionHarness(api)
+                harness.enable_reaction_experiment(
+                    reaction_expression_trigger_probability=1.0
+                )
+                event = _FakeEvent()
+                event.message_str = f"{label} current message"
+                harness.users["10001"]["intent_profile"] = {
+                    **profile,
+                    "emotion_event": "praise",
+                    "emotion_intensity": 60,
+                    "confidence": 0.95,
+                    "emotion_confidence": 0.9,
+                    "emotion_target": "bot",
+                    "text": event.message_str,
+                }
+                module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+                with patch(
+                    "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+                    return_value=module,
+                ):
+                    self.assertTrue(
+                        await harness._preauthorize_reaction_expression_prompt(event)
+                    )
+                authorization = event.extras[
+                    "private_companion_reaction_expression_authorization"
+                ]
+                self.assertEqual("probability", authorization["trigger_mode"])
+                self.assertEqual(1.0, authorization["gate_probability"])
+
+    async def test_semantic_trigger_ignores_a_stale_profile_from_the_previous_turn(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=0.2)
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "play",
+            "emotion_event": "praise",
+            "emotion_intensity": 60,
+            "confidence": 0.95,
+            "emotion_confidence": 0.9,
+            "emotion_target": "bot",
+            "text": "上一轮是在开玩笑",
+        }
+        event = _FakeEvent()
+        event.message_str = "这轮只是问一个普通事实"
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+
+        with (
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.random.random",
+                return_value=0.99,
+            ) as random_draw,
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+                return_value=module,
+            ),
+        ):
+            self.assertFalse(await harness._preauthorize_reaction_expression_prompt(event))
+
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        self.assertEqual("probability", authorization["trigger_mode"])
+        self.assertEqual("probability", authorization["reason"])
+        self.assertEqual(1, random_draw.call_count)
+
+    async def test_semantic_authorization_keeps_its_profile_when_a_later_turn_overwrites_user_state(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=0.2)
+        event = _FakeEvent()
+        event.message_str = "你这次做得真好"
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "chat",
+            "emotion_event": "praise",
+            "emotion_intensity": 42,
+            "confidence": 0.86,
+            "emotion_confidence": 0.82,
+            "emotion_target": "bot",
+            "source": "praise_rule",
+            "text": event.message_str,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "intimacy",
+            "emotion_event": "comfort",
+            "emotion_intensity": 80,
+            "confidence": 0.98,
+            "emotion_confidence": 0.98,
+            "emotion_target": "bot",
+            "source": "later_turn",
+            "text": "后到的另一条消息",
+        }
+
+        fallback = harness._reaction_expression_local_fallback_intent(
+            event,
+            "嗯，这句夸奖我收下啦。",
+            authorization,
+        )
+        lookup_context = harness._reaction_expression_lookup_context(
+            harness.users["10001"],
+            fallback,
+            profile_snapshot=authorization["profile_snapshot"],
+        )
+
+        self.assertEqual("回应夸奖", fallback["purpose"])
+        self.assertIn("你这次做得真好", lookup_context)
+        self.assertNotIn("后到的另一条消息", lookup_context)
+
+    async def test_zero_probability_remains_explicit_opt_out_for_semantic_signal(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=0.0)
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "intimacy",
+            "emotion_event": "comfort",
+            "emotion_intensity": 60,
+            "confidence": 0.95,
+            "emotion_confidence": 0.9,
+            "source": "intimacy_rule",
+        }
+        event = _FakeEvent()
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertFalse(await harness._preauthorize_reaction_expression_prompt(event))
+
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        self.assertEqual("probability", authorization["trigger_mode"])
+        self.assertEqual("probability", authorization["reason"])
+
+    async def test_explicit_reaction_opt_out_blocks_semantic_trigger(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment(reaction_expression_trigger_probability=1.0)
+        harness.users["10001"]["intent_profile"] = {
+            "intent": "play",
+            "emotion_event": "praise",
+            "emotion_intensity": 60,
+            "confidence": 0.95,
+            "emotion_confidence": 0.9,
+        }
+        event = _FakeEvent()
+        event.message_str = "别再发表情包了"
+        module = SimpleNamespace(get_smart_image_api=lambda: api)
+        with patch("astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library", return_value=module):
+            self.assertFalse(await harness._preauthorize_reaction_expression_prompt(event))
+        authorization = event.extras["private_companion_reaction_expression_authorization"]
+        self.assertEqual("explicit_opt_out", authorization["trigger_mode"])
+        self.assertEqual("explicit_opt_out", authorization["reason"])
+
+    async def test_persisted_opt_out_blocks_later_automatic_trigger(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        user = harness.users["10001"]
+        state = ensure_reaction_expression_state(user)
+        sync_reaction_expression_auto_preference(
+            state,
+            "别再发表情包了",
+            now=10.0,
+            scope_key="default:FriendMessage:10001",
+        )
+        event = _FakeEvent()
+        event.message_str = "你这次做得不错"
+        user["intent_profile"] = {
+            "intent": "play",
+            "emotion_event": "praise",
+            "emotion_intensity": 60,
+            "confidence": 0.9,
+            "emotion_confidence": 0.86,
+            "emotion_target": "bot",
+            "text": event.message_str,
+        }
+
+        self.assertFalse(await harness._preauthorize_reaction_expression_prompt(event))
+        authorization = event.extras[
+            "private_companion_reaction_expression_authorization"
+        ]
+        self.assertEqual("explicit_opt_out", authorization["trigger_mode"])
 
     async def test_low_latency_cache_reuses_lookup_across_users(self) -> None:
         api = _FakeSmartImageAPI(self.image_path)
@@ -1046,6 +1773,78 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(api.calls))
         self.assertEqual(1, harness.deliveries)
 
+    def test_media_request_detection_respects_reaction_boundaries(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+
+        self.assertFalse(
+            harness._photo_generation_instruction_matches("别再发表情包了")
+        )
+        self.assertFalse(
+            harness._photo_generation_instruction_matches("表情包以后别再发了")
+        )
+        self.assertFalse(
+            harness._photo_generation_instruction_matches("这个表情包是什么意思")
+        )
+        self.assertTrue(
+            harness._photo_generation_instruction_matches("请发个表情包")
+        )
+        self.assertTrue(
+            harness._photo_generation_instruction_matches("帮我生成一张新表情包")
+        )
+        self.assertTrue(
+            harness._photo_generation_instruction_matches(
+                "别再自动发表情包了，不过这次给我来一张表情包"
+            )
+        )
+
+    def test_lookup_cache_key_separates_scope_and_catalog_revision(self) -> None:
+        provider = object()
+        private_key = LlmToolActionsMixin._reaction_expression_lookup_cache_key(
+            provider, "开心", "当前语境", True, "private", "revision-1"
+        )
+        group_key = LlmToolActionsMixin._reaction_expression_lookup_cache_key(
+            provider, "开心", "当前语境", True, "group", "revision-1"
+        )
+        edited_key = LlmToolActionsMixin._reaction_expression_lookup_cache_key(
+            provider, "开心", "当前语境", True, "private", "revision-2"
+        )
+
+        self.assertNotEqual(private_key, group_key)
+        self.assertNotEqual(private_key, edited_key)
+
+    def test_first_group_opt_out_creates_only_the_needed_feedback_user(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.users.clear()
+
+        self.assertIsNone(
+            harness._reaction_expression_feedback_user(
+                "20002",
+                "普通群聊消息",
+                create_for_opt_out=True,
+            )
+        )
+        self.assertEqual({}, harness.users)
+
+        user = harness._reaction_expression_feedback_user(
+            "20002",
+            "表情包以后别再发了",
+            create_for_opt_out=True,
+        )
+        self.assertIsInstance(user, dict)
+        feedback = harness._apply_reaction_expression_feedback(
+            user,
+            "表情包以后别再发了",
+            scope_key="default:GroupMessage:20001",
+        )
+
+        self.assertEqual("disabled", feedback["auto_preference"])
+        self.assertTrue(
+            reaction_expression_auto_disabled(
+                ensure_reaction_expression_state(user),
+                "default:GroupMessage:20001",
+            )
+        )
+
     def test_request_tool_scope_hides_unavailable_media_actions(self) -> None:
         authorized = SimpleNamespace(
             func_tool=_FakeToolSet(
@@ -1149,6 +1948,84 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         legacy_lookup.assert_not_awaited()
         generated_photo.assert_not_awaited()
 
+    async def test_current_opt_out_cannot_fall_through_unscoped_media_tools(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        event = _FakeEvent()
+        event.message_str = "表情包以后别再发了"
+        legacy_lookup = AsyncMock(return_value='{"status":"unexpected"}')
+        generated_photo = AsyncMock(return_value='{"status":"unexpected"}')
+        harness._pc_find_reaction_image_impl = legacy_lookup
+        harness._pc_generate_photo_impl = generated_photo
+
+        reaction = json.loads(
+            await PrivateCompanionPlugin.pc_find_reaction_image(
+                harness,
+                event,
+                query="无语表情包",
+                caption="这句话也不该发出去。",
+            )
+        )
+        photo = json.loads(
+            await PrivateCompanionPlugin.pc_generate_photo(
+                harness,
+                event,
+                prompt="生成一张表情包",
+                kind="sticker",
+            )
+        )
+
+        self.assertEqual("explicit_opt_out", reaction["skip_reason"])
+        self.assertEqual("explicit_opt_out", photo["skip_reason"])
+        legacy_lookup.assert_not_awaited()
+        generated_photo.assert_not_awaited()
+
+    async def test_historical_mention_cannot_bypass_current_opt_out_tool_guard(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        event = _FakeEvent()
+        event.message_str = "别再发表情包了，为什么你刚刚还发了一个表情包"
+        legacy_lookup = AsyncMock(return_value='{"status":"unexpected"}')
+        generated_photo = AsyncMock(return_value='{"status":"unexpected"}')
+        harness._pc_find_reaction_image_impl = legacy_lookup
+        harness._pc_generate_photo_impl = generated_photo
+
+        reaction = json.loads(
+            await PrivateCompanionPlugin.pc_find_reaction_image(
+                harness,
+                event,
+                query="无语表情包",
+                caption="这句话不应被发送。",
+            )
+        )
+        photo = json.loads(
+            await PrivateCompanionPlugin.pc_generate_photo(
+                harness,
+                event,
+                prompt="生成一张表情包",
+                kind="sticker",
+            )
+        )
+
+        self.assertEqual("explicit_opt_out", reaction["skip_reason"])
+        self.assertEqual("explicit_opt_out", photo["skip_reason"])
+        legacy_lookup.assert_not_awaited()
+        generated_photo.assert_not_awaited()
+
+    async def test_reaction_image_send_requires_complete_visible_caption(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        event = _FakeEvent()
+
+        payload = json.loads(
+            await harness._pc_find_reaction_image_impl(
+                event,
+                query="无语表情包",
+            )
+        )
+
+        self.assertEqual("missing_visible_caption", payload["status"])
+        self.assertFalse(payload["sent"])
+        self.assertEqual([], harness.api.calls)
+        self.assertEqual(0, harness.deliveries)
+
     async def test_legacy_spontaneous_reaction_without_caption_is_skipped(self) -> None:
         api = _FakeSmartImageAPI(self.image_path)
         harness = _ReactionHarness(api)
@@ -1192,6 +2069,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 harness,
                 event,
                 query="无语表情包",
+                caption="给你找到了，这张很合适。",
             )
         )
         photo = json.loads(
@@ -1322,6 +2200,191 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 scope_key="default:FriendMessage:10001",
             ),
         )
+
+    async def test_reaction_runtime_logs_gate_lookup_and_delivery_without_private_inputs(
+        self,
+    ) -> None:
+        asset_id = f"pc-local:{'a' * 32}"
+        api = _FakeSmartImageAPI(self.image_path, image_id=asset_id)
+        original_find_image = api.find_image
+
+        async def find_with_private_reason(*args, **kwargs):
+            lookup = await original_find_image(*args, **kwargs)
+            lookup["reason"] = "PRIVATE_MATCH_REASON_CANARY_7F31"
+            return lookup
+
+        api.find_image = find_with_private_reason
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        event = _FakeEvent()
+        event.message_str = "PRIVATE_MESSAGE_CANARY_7F31"
+        private_query = "PRIVATE_QUERY_CANARY_7F31"
+        private_context = r"PRIVATE_CONTEXT_CANARY_7F31 C:\Users\secret\reaction.png"
+
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.logger.info"
+        ) as log_info:
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            result = json.loads(
+                await harness._pc_reaction_expression_impl(
+                    event,
+                    query=private_query,
+                    context=private_context,
+                    purpose="PRIVATE_PURPOSE_CANARY_7F31",
+                    emotion="PRIVATE_EMOTION_CANARY_7F31",
+                )
+            )
+
+        logs = _reaction_log_payloads(log_info)
+        self.assertTrue(result["sent"])
+        self.assertTrue(any(row.get("stage") == "gate" and row.get("decision") == "allow" for row in logs))
+        lookup = next(row for row in logs if row.get("stage") == "lookup" and row.get("decision") == "hit")
+        delivery = next(row for row in logs if row.get("stage") == "delivery" and row.get("decision") == "sent")
+        self.assertEqual(asset_id, lookup["asset_ref"])
+        self.assertEqual("tags_emotions_intents", lookup["match_basis"])
+        self.assertTrue(delivery["sent"])
+        self.assertEqual(1, len({row["trace_id"] for row in logs}))
+        for row in logs:
+            self.assertTrue(
+                {"query", "context", "intent", "path", "user_id", "scope_key"}.isdisjoint(row)
+            )
+        rendered = json.dumps(logs, ensure_ascii=False)
+        for private_value in (
+            event.message_str,
+            private_query,
+            private_context,
+            "PRIVATE_PURPOSE_CANARY_7F31",
+            "PRIVATE_EMOTION_CANARY_7F31",
+            "PRIVATE_MATCH_REASON_CANARY_7F31",
+            self.image_path,
+            event.unified_msg_origin,
+        ):
+            self.assertNotIn(private_value, rendered)
+
+    async def test_reaction_runtime_logs_lookup_miss_and_cache_hit(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        miss_harness = _ReactionHarness(api)
+        miss_harness._owned_reaction_library.find = lambda *_args, **_kwargs: None
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.logger.info"
+        ) as miss_log_info:
+            miss = json.loads(
+                await miss_harness._pc_find_reaction_image_impl(
+                    _FakeEvent(),
+                    query="PRIVATE_MISS_QUERY_CANARY_24AC",
+                    send=False,
+                    low_latency=True,
+                )
+            )
+
+        miss_logs = _reaction_log_payloads(miss_log_info)
+        self.assertEqual("not_found", miss["status"])
+        self.assertTrue(
+            any(
+                row.get("stage") == "lookup"
+                and row.get("decision") == "miss"
+                and row.get("reason") == "not_found"
+                for row in miss_logs
+            )
+        )
+
+        cache_harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        cache_event = _FakeEvent()
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.logger.info"
+        ) as cache_log_info:
+            first = json.loads(
+                await cache_harness._pc_find_reaction_image_impl(
+                    cache_event,
+                    query="缓存命中测试",
+                    send=False,
+                    low_latency=True,
+                )
+            )
+            second = json.loads(
+                await cache_harness._pc_find_reaction_image_impl(
+                    cache_event,
+                    query="缓存命中测试",
+                    send=False,
+                    low_latency=True,
+                )
+            )
+
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(second["cache_hit"])
+        cache_logs = _reaction_log_payloads(cache_log_info)
+        self.assertTrue(
+            any(
+                row.get("stage") == "lookup"
+                and row.get("decision") == "hit"
+                and row.get("cache_hit") is True
+                for row in cache_logs
+            )
+        )
+
+    async def test_reaction_runtime_logs_delivery_failure(self) -> None:
+        harness = _ReactionHarness(
+            _FakeSmartImageAPI(self.image_path),
+            sent=False,
+        )
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.logger.info"
+        ) as log_info:
+            result = json.loads(
+                await harness._pc_find_reaction_image_impl(
+                    _FakeEvent(),
+                    query="发送失败测试",
+                    caption="我试着把这张发给你。",
+                )
+            )
+
+        self.assertEqual("delivery_failed", result["status"])
+        logs = _reaction_log_payloads(log_info)
+        failure = next(
+            row
+            for row in logs
+            if row.get("stage") == "delivery" and row.get("decision") == "failed"
+        )
+        self.assertEqual("delivery_failed", failure["reason"])
+        self.assertFalse(failure["sent"])
+        self.assertEqual("current", failure["delivery"])
+
+    async def test_reaction_lookup_exception_log_never_contains_path_or_query(
+        self,
+    ) -> None:
+        query_canary = "PRIVATE_EXCEPTION_QUERY_CANARY_91BD"
+        path_canary = r"C:\Users\secret\reaction-private.png"
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+
+        def fail_lookup(*_args, **_kwargs):
+            raise OSError(f"cannot open {path_canary}; query={query_canary}")
+
+        harness._owned_reaction_library.find = fail_lookup
+        with (
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.logger.info"
+            ) as log_info,
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.logger.warning"
+            ) as log_warning,
+        ):
+            result = json.loads(
+                await harness._pc_find_reaction_image_impl(
+                    _FakeEvent(),
+                    query=query_canary,
+                    context=path_canary,
+                    send=False,
+                )
+            )
+
+        self.assertEqual("error", result["status"])
+        logs = _reaction_log_payloads(log_info)
+        failure = next(row for row in logs if row.get("stage") == "lookup")
+        self.assertEqual("lookup_error", failure["reason"])
+        self.assertEqual("OSError", failure["error_type"])
+        rendered_calls = repr(log_info.call_args_list) + repr(log_warning.call_args_list)
+        self.assertNotIn(query_canary, rendered_calls)
+        self.assertNotIn(path_canary, rendered_calls)
 
 
 if __name__ == "__main__":

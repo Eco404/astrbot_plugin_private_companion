@@ -576,6 +576,38 @@ class PhotoPromptContextTests(unittest.TestCase):
             sum(section.negative and len(section.negative) or 0 for section in resolved.prompt_sections if section.source != "user_request"),
             230,
         )
+        self.assertIn("p" * 220, resolved.complete_prompt)
+        self.assertNotEqual(resolved.complete_prompt, resolved.final_prompt)
+
+    def test_complete_prompt_is_sanitized_before_budgeting(self) -> None:
+        wardrobe = PhotoWardrobeDecision(
+            rule_id="explicit_prompt",
+            mode="explicit_prompt",
+            source="explicit_prompt",
+            category="school_uniform",
+            lock_outfit=True,
+            requested_outfit_text="穿校服",
+        )
+        long_safe_preset = "classroom portrait detail, " * 30
+        resolved = resolve_photo_prompt_context(
+            wardrobe=wardrobe,
+            sections=(
+                PhotoPromptSection("request", "user_request", "穿校服拍照"),
+                PhotoPromptSection(
+                    "global_fixed_prompt",
+                    "fixed_prompt",
+                    "Additional fixed prompt: pajamas; fine film grain",
+                ),
+                PhotoPromptSection("scene_preset", "preset", long_safe_preset),
+            ),
+            prompt_format="traditional",
+            workflow_kind="portrait",
+        )
+
+        self.assertNotIn("pajama", resolved.complete_prompt.lower())
+        self.assertIn("fine film grain", resolved.complete_prompt)
+        self.assertIn(long_safe_preset.strip(", "), resolved.complete_prompt)
+        self.assertNotEqual(resolved.complete_prompt, resolved.final_prompt)
 
     def test_protected_sections_bypass_all_prompt_budgets(self) -> None:
         fixed_prompt = (

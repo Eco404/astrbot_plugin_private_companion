@@ -1672,6 +1672,35 @@ class PrivateCompanionPlugin(
         self.voice_prompt_provider_id = self._cfg_str(c, "VOICE_PROMPT_PROVIDER_ID", "")
         self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
+        self.proactive_generation_history_limit = self._cfg_int(
+            c,
+            "proactive_generation_history_limit",
+            20,
+            1,
+            200,
+        )
+        self.proactive_history_context_mode = self._cfg_str(
+            c,
+            "proactive_history_context_mode",
+            "compact",
+            "compact",
+        ).lower()
+        if self.proactive_history_context_mode not in {"recent_only", "compact", "expanded"}:
+            self.proactive_history_context_mode = "compact"
+        self.proactive_history_recent_raw_count = self._cfg_int(
+            c,
+            "proactive_history_recent_raw_count",
+            8,
+            1,
+            50,
+        )
+        self.proactive_history_max_chars = self._cfg_int(
+            c,
+            "proactive_history_max_chars",
+            6000,
+            500,
+            20000,
+        )
         self.enable_proactive_chat_integration = self._cfg_bool(c, "enable_proactive_chat_integration", True)
         self.enable_body_monitor_integration = self._cfg_bool(c, "enable_body_monitor_integration", False)
         self.proactive_chat_bridge_review_mode = self._cfg_str(
@@ -1714,6 +1743,9 @@ class PrivateCompanionPlugin(
         )
         self.reaction_expression_candidate_limit = self._cfg_int(
             c, "reaction_expression_candidate_limit", 6, 1, 16
+        )
+        self.reaction_expression_semantic_trigger_enabled = self._cfg_bool(
+            c, "reaction_expression_semantic_trigger_enabled", True
         )
         self.enable_maslow_motivation_experiment = self._cfg_bool(c, "enable_maslow_motivation_experiment", False)
         self.enable_maslow_schedule_influence = self._cfg_bool(c, "enable_maslow_schedule_influence", False)
@@ -2112,6 +2144,13 @@ class PrivateCompanionPlugin(
             c,
             "enable_proactive_message_review",
             legacy_response_review_enabled,
+        )
+        self.proactive_review_history_limit = self._cfg_int(
+            c,
+            "proactive_review_history_limit",
+            30,
+            1,
+            200,
         )
         legacy_response_review_mode = self._cfg_str(c, "response_review_mode", "severe_only", "severe_only").lower()
         self.passive_review_mode = self._cfg_str(
@@ -3460,10 +3499,28 @@ class PrivateCompanionPlugin(
             self._note_reaction_expression_runtime(
                 skipped=1, last_reason="missing_visible_text"
             )
+            self._log_reaction_expression_event(
+                event,
+                stage="attachment",
+                decision="skip",
+                reason="missing_visible_text",
+                scope=self._reaction_expression_scope(event),
+                found=False,
+                sent=False,
+            )
             return
         if any(isinstance(component, Image) for component in chain):
             self._note_reaction_expression_runtime(
                 skipped=1, last_reason="existing_image"
+            )
+            self._log_reaction_expression_event(
+                event,
+                stage="attachment",
+                decision="skip",
+                reason="existing_image",
+                scope=self._reaction_expression_scope(event),
+                found=False,
+                sent=False,
             )
             return
 
@@ -3517,10 +3574,8 @@ class PrivateCompanionPlugin(
                 reason="attachment_component_failed",
             )
             logger.warning(
-                "[PrivateCompanion] 表情图片附件构建失败: session=%s error=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                or "unknown",
-                _single_line(exc, 160),
+                "[PrivateCompanion] 表情图片附件构建失败: error_type=%s",
+                type(exc).__name__,
             )
             return
 
@@ -3531,12 +3586,19 @@ class PrivateCompanionPlugin(
             event.set_result(self._build_result_from_chain(chain))
         pending["attached"] = True
         pending["component"] = image_component
-        logger.info(
-            "[PrivateCompanion] 已将本地表情图片追加到完整文字回复: session=%s cache_hit=%s latency_ms=%s",
-            _single_line(getattr(event, "unified_msg_origin", ""), 120)
-            or "unknown",
-            bool(prepared.get("cache_hit")),
-            round(_safe_float(prepared.get("lookup_latency_ms"), 0.0), 2),
+        self._log_reaction_expression_event(
+            event,
+            stage="attachment",
+            decision="accepted",
+            reason="attachment_appended",
+            scope=self._reaction_expression_scope(event),
+            found=True,
+            sent=False,
+            image_id=prepared.get("image_id"),
+            confidence=prepared.get("confidence"),
+            cache_hit=prepared.get("cache_hit"),
+            latency_ms=prepared.get("lookup_latency_ms"),
+            match_basis=pending.get("match_basis"),
         )
 
     @filter.on_decorating_result(priority=-20000)
@@ -5418,6 +5480,32 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
+        inbound_text = str(getattr(event, "message_str", "") or "")
+        reaction_kind = _single_line(kind, 24).casefold() in {
+            "sticker",
+            "emoji",
+            "meme",
+            "表情包",
+            "贴纸",
+        } or bool(re.search(r"(?:表情包|反应图|贴纸|梗图|斗图)", str(prompt or ""), flags=re.I))
+        if (
+            reaction_kind
+            and self._reaction_expression_opt_out_requested(inbound_text)
+            and not self._photo_generation_instruction_matches(inbound_text)
+        ):
+            return json.dumps(
+                {
+                    "status": "skipped",
+                    "success": True,
+                    "generated": False,
+                    "sent": False,
+                    "skip_reason": "explicit_opt_out",
+                    "message": "用户本轮明确要求不发表情包",
+                    "must_not_claim_sent": True,
+                    "final_response_instruction": "尊重用户边界，只继续自然文字回复。",
+                },
+                ensure_ascii=False,
+            )
         reaction_authorization = self._reaction_expression_authorization(event)
         if reaction_authorization and not self._photo_generation_instruction_matches(
             getattr(event, "message_str", "")
@@ -5468,7 +5556,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             search_context(string): 可选，当前对话语境或希望表达的情绪。
             meme_only(boolean): 是否只检索标记为表情包的图片，默认 true。
             send(boolean): 是否直接发送到当前会话，默认 true。
-            caption(string): 可选，随图片发送的短文字。
+            caption(string): send=true 时必填；与图片一起发送的完整可见正文，图片不能替代正文。
             purpose(string): 自发表情实验的沟通用途，例如安慰、轻吐槽或分享开心；显式找图时可留空。
             emotion(string): 自发表情实验希望传达的情绪。
             intensity(int): 自发表情实验的表达强度，0-5。
@@ -5476,6 +5564,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             candidate_queries(string): 自发表情实验的少量候选检索说法，可用分号分隔或传 JSON 字符串数组。
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            if self is not None:
+                self._log_reaction_expression_event(
+                    event,
+                    stage="decision",
+                    decision="skip",
+                    reason="proactive_only",
+                    scope=self._reaction_expression_scope(event),
+                    status="disabled",
+                    found=False,
+                    sent=False,
+                )
             return json.dumps(
                 {
                     "status": "disabled",
@@ -5486,38 +5585,60 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 },
                 ensure_ascii=False,
             )
+        inbound_text = str(getattr(event, "message_str", "") or "")
+        if (
+            self._reaction_expression_opt_out_requested(inbound_text)
+            and not self._reaction_expression_explicit_request_matches(inbound_text)
+        ):
+            return json.dumps(
+                {
+                    "status": "skipped",
+                    "success": True,
+                    "found": False,
+                    "sent": False,
+                    "decision": "skip",
+                    "skip_reason": "explicit_opt_out",
+                    "message": "用户本轮明确要求不发表情包",
+                    "must_not_claim_sent": True,
+                    "final_response_instruction": "尊重用户边界，只继续自然文字回复。",
+                },
+                ensure_ascii=False,
+            )
         reaction_authorization = self._reaction_expression_authorization(event)
         if reaction_authorization and not reaction_authorization.get("authorized"):
             return json.dumps(
                 self._reaction_expression_skip_result(
                     _single_line(reaction_authorization.get("reason"), 80)
-                    or "not_authorized"
+                    or "not_authorized",
+                    event=event,
                 ),
                 ensure_ascii=False,
             )
         if reaction_authorization and reaction_authorization.get("consumed"):
             return json.dumps(
-                self._reaction_expression_skip_result("authorization_consumed"),
+                self._reaction_expression_skip_result(
+                    "authorization_consumed",
+                    event=event,
+                ),
                 ensure_ascii=False,
             )
+        send_requested = self._reaction_expression_bool_arg(send, True)
+        visible_caption = self._sanitize_photo_tool_caption(caption, limit=500)
+        if send_requested and not visible_caption:
+            return json.dumps(
+                self._reaction_expression_skip_result(
+                    "missing_visible_caption",
+                    event=event,
+                    message="发送表情包前需要同时提供一条完整的可见正文",
+                ),
+                ensure_ascii=False,
+            )
+        if send_requested:
+            caption = visible_caption
         spontaneous_call = self._reaction_expression_bool_arg(
             spontaneous, False
         ) or bool(reaction_authorization.get("authorized"))
         if spontaneous_call:
-            visible_caption = self._sanitize_photo_tool_caption(caption, limit=120)
-            if not visible_caption:
-                if reaction_authorization:
-                    reaction_authorization["consumed"] = True
-                    self._set_reaction_expression_authorization(
-                        event, reaction_authorization
-                    )
-                return json.dumps(
-                    self._reaction_expression_skip_result(
-                        "missing_visible_caption",
-                        message="自发表情不能替代文字回复，请继续输出完整自然文字",
-                    ),
-                    ensure_ascii=False,
-                )
             return await self._pc_reaction_expression_impl(
                 event,
                 query=query,
@@ -7553,10 +7674,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             reaction_evaluated=reaction_expression_evaluated,
         )
         if removed_reaction_tools:
-            logger.debug(
-                "[PrivateCompanion] 已按本轮表情表达授权裁剪媒体工具: session=%s tools=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-                ",".join(removed_reaction_tools),
+            self._log_reaction_expression_event(
+                event,
+                stage="authorization",
+                decision="scoped",
+                reason="media_tools_scoped",
+                scope=self._reaction_expression_scope(event),
             )
         photo_instruction = self._photo_generation_tool_instruction(
             include_spontaneous=reaction_expression_authorized,
@@ -10949,15 +11072,46 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         else:
             cleaned_reaction_text, reaction_intent = recovered_text, {}
+        response_has_tool_call = bool(getattr(resp, "tools_call_name", None))
+        if response_has_tool_call:
+            try:
+                delattr(event, "_private_companion_reaction_expression_intent")
+            except (AttributeError, TypeError):
+                pass
+        reaction_authorization_getter = getattr(
+            self, "_reaction_expression_authorization", None
+        )
+        authorization = (
+            reaction_authorization_getter(event)
+            if callable(reaction_authorization_getter)
+            else {}
+        )
+        reaction_visible_checker = getattr(
+            self, "_reaction_expression_has_visible_text", None
+        )
+        reaction_visible_text = (
+            reaction_visible_checker(cleaned_reaction_text)
+            if callable(reaction_visible_checker)
+            else bool(str(cleaned_reaction_text or "").strip())
+        )
+        reaction_runtime_logger = getattr(
+            self, "_log_reaction_expression_event", None
+        )
+        reaction_scope_getter = getattr(self, "_reaction_expression_scope", None)
+        reaction_scope = (
+            reaction_scope_getter(event)
+            if callable(reaction_scope_getter)
+            else "unknown"
+        )
         if cleaned_reaction_text != recovered_text:
             resp.completion_text = cleaned_reaction_text
             recovered_text = cleaned_reaction_text
-            authorization = self._reaction_expression_authorization(event)
             if (
                 reaction_intent
                 and authorization.get("authorized")
                 and not authorization.get("consumed")
-                and self._reaction_expression_has_visible_text(cleaned_reaction_text)
+                and reaction_visible_text
+                and not response_has_tool_call
             ):
                 try:
                     setattr(
@@ -10967,19 +11121,89 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                 except Exception:
                     pass
-                logger.debug(
-                    "[PrivateCompanion] 已提取单轮表情表达意图: session=%s purpose=%s emotion=%s",
-                    _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                    or "unknown",
-                    _single_line(reaction_intent.get("purpose"), 80),
-                    _single_line(reaction_intent.get("emotion"), 60),
+                if callable(reaction_runtime_logger):
+                    reaction_runtime_logger(
+                        event,
+                        stage="intent",
+                        decision="accepted",
+                        reason="intent_extracted",
+                        scope=reaction_scope,
+                    )
+            elif reaction_intent and callable(reaction_runtime_logger):
+                reaction_runtime_logger(
+                    event,
+                    stage="intent",
+                    decision="discarded",
+                        reason=(
+                            "tool_call_intermediate"
+                            if response_has_tool_call
+                            else "intent_discarded"
+                        ),
+                        scope=reaction_scope,
+                    )
+        existing_reaction_intent = getattr(
+            event, "_private_companion_reaction_expression_intent", None
+        )
+        if (
+            authorization.get("authorized")
+            and not authorization.get("consumed")
+            and reaction_visible_text
+            and not reaction_intent
+            and not (
+                isinstance(existing_reaction_intent, dict)
+                and bool(existing_reaction_intent)
+            )
+            and not response_has_tool_call
+            and not authorization.get("model_omission_recorded")
+        ):
+            authorization["model_omission_recorded"] = True
+            authorization_setter = getattr(
+                self, "_set_reaction_expression_authorization", None
+            )
+            if callable(authorization_setter):
+                authorization_setter(event, authorization)
+            runtime_notifier = getattr(self, "_note_reaction_expression_runtime", None)
+            if callable(runtime_notifier):
+                runtime_notifier(
+                    model_omissions=1,
+                    last_reason="model_omitted_intent",
                 )
-            elif reaction_intent:
-                logger.debug(
-                    "[PrivateCompanion] 已清理未授权或无正文的表情表达标签: session=%s",
-                    _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                    or "unknown",
+            if callable(reaction_runtime_logger):
+                reaction_runtime_logger(
+                    event,
+                    stage="intent",
+                    decision="omit",
+                    reason="model_omitted_intent",
+                    scope=authorization.get("scope") or reaction_scope,
                 )
+            fallback_builder = getattr(self, "_reaction_expression_local_fallback_intent", None)
+            fallback_intent = (
+                fallback_builder(event, cleaned_reaction_text, authorization)
+                if callable(fallback_builder)
+                else {}
+            )
+            if fallback_intent:
+                try:
+                    setattr(
+                        event,
+                        "_private_companion_reaction_expression_intent",
+                        fallback_intent,
+                    )
+                except Exception:
+                    pass
+                if callable(runtime_notifier):
+                    runtime_notifier(
+                        local_fallbacks=1,
+                        last_reason="local_fallback_intent",
+                    )
+                if callable(reaction_runtime_logger):
+                    reaction_runtime_logger(
+                        event,
+                        stage="intent",
+                        decision="accepted",
+                        reason="local_fallback_intent",
+                        scope=authorization.get("scope") or reaction_scope,
+                    )
         sent_photo_caption = str(
             getattr(event, "_private_companion_photo_tool_sent_caption", "") or ""
         ).strip()
@@ -11701,6 +11925,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *qweather_location_view_actions,
             *qweather_location_unbind_actions,
         }
+        private_delivery_bind_actions = {"绑定主动消息", "绑定主动会话", "绑定会话"}
+        private_delivery_view_actions = {"查看主动路由", "查看主动绑定", "主动路由", "主动绑定"}
+        private_delivery_unbind_actions = {"解绑主动消息", "解绑主动会话", "解绑会话"}
+        private_delivery_actions = {
+            *private_delivery_bind_actions,
+            *private_delivery_view_actions,
+            *private_delivery_unbind_actions,
+        }
         tts_language_actions = {"TTS语种", "tts语种", "语音语种", "TTS", "tts"}
         if action in companion_manual_query_actions:
             inline_value = value.strip()
@@ -11776,6 +12008,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *daily_outfit_view_actions,
             *tts_language_actions,
         }
+        if action in private_delivery_actions and not is_private:
+            await self._reply(event, "请在需要接收主动消息的私聊窗口执行这个指令。")
+            event.stop_event()
+            return
         if action in qweather_location_actions and not self._can_manage_sensitive_location(event):
             await self._reply(event, self._sensitive_location_denied_text())
             event.stop_event()
@@ -11820,7 +12056,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user = self._get_user(user_id)
             self._note_private_user_umo(user_id, user, event.unified_msg_origin)
 
-            if action in {"状态", "status"}:
+            if action in private_delivery_bind_actions:
+                changed, response = self._bind_private_delivery_umo(user_id, user, event.unified_msg_origin)
+                if changed:
+                    self._save_data_sync()
+            elif action in private_delivery_view_actions:
+                response = self._format_private_delivery_binding_status(user_id, user)
+            elif action in private_delivery_unbind_actions:
+                changed, response = self._unbind_private_delivery_umo(user)
+                if changed:
+                    self._save_data_sync()
+            elif action in {"状态", "status"}:
                 self._reset_daily_counter_if_needed(user)
                 last_seen = self._format_timestamp_elapsed(self._latest_user_activity_ts(user))
                 last_sent = self._format_timestamp_elapsed(user.get("last_sent"))
@@ -12864,12 +13110,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     scope_key=self._reaction_expression_scope_key(event, user_id),
                 )
                 if reaction_expression_feedback:
-                    logger.info(
-                        "[PrivateCompanion] 实验性表情表达收到用户反馈: user=%s signal=%s image_id=%s score=%s",
-                        user_id,
-                        _single_line(reaction_expression_feedback.get("signal"), 16),
-                        _single_line(reaction_expression_feedback.get("image_id"), 80),
-                        _safe_int(reaction_expression_feedback.get("score"), 0, -20, 20),
+                    self._log_reaction_expression_event(
+                        event,
+                        stage="feedback",
+                        decision="recorded",
+                        reason="feedback_private",
+                        scope="private",
+                        image_id=reaction_expression_feedback.get("image_id"),
+                        feedback_signal=reaction_expression_feedback.get("signal"),
+                        feedback_score=reaction_expression_feedback.get("score"),
                     )
                 expression_feedback = self._apply_expression_rule_feedback(
                     user,
@@ -13226,28 +13475,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             # scopes it by the exact group UMO. Apply feedback before any
             # early-return branch so existing reply handlers cannot swallow it.
             async with reaction_feedback_lock:
-                users = self.data.get("users") if isinstance(self.data, dict) else None
-                group_user = users.get(sender_id) if isinstance(users, dict) else None
-                if not isinstance(group_user, dict):
-                    canonicalizer = getattr(self, "_canonical_private_user_id", None)
-                    canonical_id = sender_id
-                    if callable(canonicalizer):
-                        try:
-                            canonical_id = _single_line(canonicalizer(sender_id), 160) or sender_id
-                        except Exception:
-                            canonical_id = sender_id
-                    group_user = users.get(canonical_id) if isinstance(users, dict) else None
-                if not isinstance(group_user, dict) and isinstance(users, dict):
-                    for candidate in users.values():
-                        if not isinstance(candidate, dict):
-                            continue
-                        aliases = candidate.get("alias_user_ids")
-                        if (
-                            _single_line(candidate.get("user_id"), 160) == sender_id
-                            or isinstance(aliases, list) and sender_id in aliases
-                        ):
-                            group_user = candidate
-                            break
+                group_user = self._reaction_expression_feedback_user(
+                    sender_id,
+                    text,
+                    create_for_opt_out=True,
+                )
                 if isinstance(group_user, dict):
                     reaction_expression_feedback = self._apply_reaction_expression_feedback(
                         group_user,
@@ -13257,13 +13489,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     if reaction_expression_feedback:
                         self._persist_reaction_expression_state()
         if reaction_expression_feedback:
-            logger.info(
-                "[PrivateCompanion] 群聊实验性表情表达收到用户反馈: group=%s sender=%s signal=%s image_id=%s score=%s",
-                group_id,
-                sender_id,
-                _single_line(reaction_expression_feedback.get("signal"), 16),
-                _single_line(reaction_expression_feedback.get("image_id"), 80),
-                _safe_int(reaction_expression_feedback.get("score"), 0, -20, 20),
+            self._log_reaction_expression_event(
+                event,
+                stage="feedback",
+                decision="recorded",
+                reason="feedback_group",
+                scope="group",
+                image_id=reaction_expression_feedback.get("image_id"),
+                feedback_signal=reaction_expression_feedback.get("signal"),
+                feedback_score=reaction_expression_feedback.get("score"),
             )
         await self._capture_group_observation_event(
             event,

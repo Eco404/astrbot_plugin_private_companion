@@ -88,6 +88,7 @@ MODEL_TASK_PROVIDER_KEYS = {
     "response_review": "RESPONSE_REVIEW_PROVIDER_ID",
     "proactive_send_review": "RESPONSE_REVIEW_PROVIDER_ID",
     "proactive_reference_rewrite": "RESPONSE_REVIEW_PROVIDER_ID",
+    "proactive_message_fallback": "RESPONSE_REVIEW_PROVIDER_ID",
     "group_question_wakeup_reply_review": "RESPONSE_REVIEW_PROVIDER_ID",
     "group_air_reply_guard": "RESPONSE_REVIEW_PROVIDER_ID",
     "smart_silence": "SMART_SILENCE_PROVIDER_ID",

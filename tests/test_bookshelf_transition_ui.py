@@ -32,6 +32,12 @@ class BookshelfTransitionUiTests(unittest.TestCase):
         self.assertIn("bookshelf-view-enter-backward", self.css)
         self.assertIn("::view-transition-group(bookshelf-view)", self.css)
 
+    def test_stale_unlocked_snapshot_is_dropped_when_server_count_changes(self):
+        self.assertIn("const overviewBookshelfCount = Number(overview?.bookshelf?.jm_album_count);", self.script)
+        self.assertIn("unlockedBookshelfCount !== overviewBookshelfCount", self.script)
+        self.assertIn("state.bookshelfUnlocked = null;", self.script)
+        self.assertIn('state.bookshelfAccessToken = "";', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

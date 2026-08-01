@@ -34,6 +34,20 @@ class MemoryCompanionAdapterMixin:
     _bridge_dependency_failure_until: float = 0.0
     _bridge_dependency_failure_module: str = ""
 
+    def _memory_companion_filter_internal_error_context(self, value: Any) -> str:
+        """Keep recalled Provider failures out of downstream generation prompts."""
+        text = str(value or "").strip()
+        detector = getattr(self, "_looks_like_internal_provider_error_text", None)
+        if not text or not callable(detector):
+            return text
+        kept_lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line and detector(line):
+                continue
+            kept_lines.append(raw_line)
+        return "\n".join(kept_lines).strip()
+
     def _memory_companion_optional_dependency_failed(self, exc: BaseException, *, where: str = "") -> bool:
         module = _missing_optional_model_dependency(exc)
         if not module:
@@ -427,6 +441,9 @@ class MemoryCompanionAdapterMixin:
         text = str(text or "").strip()
         if not text:
             return ""
+        text = self._memory_companion_filter_internal_error_context(text)
+        if not text:
+            return ""
         if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:
             return ""
         relationship_sanitizer = getattr(self, "_sanitize_generation_relationship_context", None)
@@ -569,6 +586,9 @@ class MemoryCompanionAdapterMixin:
             logger.debug("[PrivateCompanion] MemoryCompanion 功能上下文读取失败: kind=%s err=%s", _single_line(kind, 60), _single_line(exc, 120))
             return ""
         text = str(text or "").strip()
+        if not text:
+            return ""
+        text = self._memory_companion_filter_internal_error_context(text)
         if not text:
             return ""
         if "没有检索到足够相关的长期记忆" in text and text.count("\n- ") <= 1:

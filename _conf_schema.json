@@ -993,6 +993,30 @@
     "default": true,
     "invisible": true
   },
+  "proactive_generation_history_limit": {
+    "description": "Legacy flat config: 主动生成召回消息数",
+    "type": "int",
+    "default": 20,
+    "invisible": true
+  },
+  "proactive_history_context_mode": {
+    "description": "Legacy flat config: 主动消息历史整理模式",
+    "type": "string",
+    "default": "compact",
+    "invisible": true
+  },
+  "proactive_history_recent_raw_count": {
+    "description": "Legacy flat config: 主动上下文保留原文消息数",
+    "type": "int",
+    "default": 8,
+    "invisible": true
+  },
+  "proactive_history_max_chars": {
+    "description": "Legacy flat config: 主动上下文最大字符数",
+    "type": "int",
+    "default": 6000,
+    "invisible": true
+  },
   "enable_proactive_chat_integration": {
     "description": "Legacy flat config: 联动 Proactive Chat",
     "type": "bool",
@@ -1093,6 +1117,12 @@
     "description": "Legacy flat config: 表情检索说法上限",
     "type": "int",
     "default": 6,
+    "invisible": true
+  },
+  "reaction_expression_semantic_trigger_enabled": {
+    "description": "Legacy flat config: 语义节点触发表情表达",
+    "type": "bool",
+    "default": true,
     "invisible": true
   },
   "enable_maslow_motivation_experiment": {
@@ -1551,6 +1581,12 @@
     "description": "Legacy flat config: proactive final content gate",
     "type": "bool",
     "default": true,
+    "invisible": true
+  },
+  "proactive_review_history_limit": {
+    "description": "Legacy flat config: 主动终审召回消息数",
+    "type": "int",
+    "default": 30,
     "invisible": true
   },
 
@@ -5295,6 +5331,53 @@
         "hint": "开启后，主动消息只用规则决定是否发送和发送动机，真正文本会调用 AstrBot 默认人格生成；失败时才回退模板。",
         "default": true
       },
+      "proactive_generation_history_limit": {
+        "description": "主动生成召回消息数",
+        "type": "int",
+        "hint": "主动消息生成及主动人格改写最多读取多少条当前私聊历史。消息密集、仍有效事实较多时可调高；实际注入量仍受整理模式和字符上限约束。",
+        "slider": {
+          "min": 1,
+          "max": 200,
+          "step": 1
+        },
+        "default": 20,
+        "condition": {
+          "enable_llm_proactive_message": true
+        }
+      },
+      "proactive_history_context_mode": {
+        "description": "主动消息历史整理模式",
+        "type": "string",
+        "hint": "compact 保留最近消息原文并压缩较早消息，兼顾事实与 Token；recent_only 只注入最近原文，成本最低；expanded 在字符上限内尽量保留全部召回消息原文。整理过程不额外调用模型。",
+        "options": [
+          "compact",
+          "recent_only",
+          "expanded"
+        ],
+        "default": "compact"
+      },
+      "proactive_history_recent_raw_count": {
+        "description": "最近原文消息数",
+        "type": "int",
+        "hint": "compact 模式会原样保留多少条最新消息；较早消息改为有界单行。recent_only 模式也使用此数量。",
+        "slider": {
+          "min": 1,
+          "max": 50,
+          "step": 1
+        },
+        "default": 8
+      },
+      "proactive_history_max_chars": {
+        "description": "主动上下文字符上限",
+        "type": "int",
+        "hint": "生成与终审共用的近期私聊上下文上限。超过后优先保留最新消息，避免上下文持续膨胀；不等同于模型 Token 数。",
+        "slider": {
+          "min": 500,
+          "max": 20000,
+          "step": 500
+        },
+        "default": 6000
+      },
       "enable_proactive_chat_integration": {
         "description": "联动 Proactive Chat",
         "type": "bool",
@@ -6059,6 +6142,20 @@
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
+        }
+      },
+      "proactive_review_history_limit": {
+        "description": "主动终审召回消息数",
+        "type": "int",
+        "hint": "发送前终审最多读取多少条当前私聊历史，用于发现候选与前文事实、状态或已完成事项的冲突。实际注入量仍受主动消息历史整理模式和字符上限约束。",
+        "slider": {
+          "min": 1,
+          "max": 200,
+          "step": 1
+        },
+        "default": 30,
+        "condition": {
+          "enable_proactive_message_review": true
         }
       },
 
@@ -10791,6 +10888,15 @@
           "step": 1
         },
         "default": 6,
+        "condition": {
+          "enable_reaction_expression_experiment": true
+        }
+      },
+      "reaction_expression_semantic_trigger_enabled": {
+        "description": "允许语义节点触发表情表达",
+        "type": "bool",
+        "hint": "开启后，已有本地情绪/意图分析在高置信接梗、安慰、夸奖、道歉或亲密互动节点时，可跳过普通概率一次；仍受会话冷却、重复图片、素材置信度和正文完整性约束，不会增加模型调用。关闭后所有自动表达都只按触发概率。",
+        "default": true,
         "condition": {
           "enable_reaction_expression_experiment": true
         }

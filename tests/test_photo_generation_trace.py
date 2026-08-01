@@ -214,20 +214,32 @@ class PhotoGenerationTraceTests(unittest.TestCase):
             self.assertEqual(payload["api_key"], "***")
             self.assertNotIn("plain-secret", payload["url"])
 
-    def test_prompt_composed_writes_the_complete_multiline_prompt(self) -> None:
+    def test_prompt_event_keeps_complete_multiline_prompt_within_trace_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             harness = _Harness(temp_dir)
-            final_prompt = "Positive prompt:\n" + ("完整画面描述, " * 160) + "\nFINAL_PROMPT_END"
+            complete_prompt = (
+                "Positive prompt:\n"
+                + ("complete scene detail, " * 160)
+                + "\nCOMPLETE_PROMPT_END"
+            )
+            submitted_prompt = "Positive prompt:\ncompacted scene"
 
             harness._append_photo_generation_trace_event(
-                "trace-full-prompt",
+                "trace-complete-prompt",
                 "prompt_composed",
-                data={"prompt": final_prompt, "summary": "s" * 1400},
+                data={
+                    "prompt": complete_prompt,
+                    "submitted_prompt": submitted_prompt,
+                    "summary": "s" * 1400,
+                },
             )
 
-            payload = self._read_lines(Path(temp_dir) / "photo_generation_trace.txt")[0]["data"]
-            self.assertEqual(payload["prompt"], final_prompt)
-            self.assertTrue(payload["prompt"].endswith("FINAL_PROMPT_END"))
+            payload = self._read_lines(
+                Path(temp_dir) / "photo_generation_trace.txt"
+            )[0]["data"]
+            self.assertEqual(payload["prompt"], complete_prompt)
+            self.assertEqual(payload["submitted_prompt"], submitted_prompt)
+            self.assertTrue(payload["prompt"].endswith("COMPLETE_PROMPT_END"))
             self.assertEqual(len(payload["summary"]), 1200)
 
     def test_reference_candidates_include_metadata_scores_and_selection_reason(self) -> None:

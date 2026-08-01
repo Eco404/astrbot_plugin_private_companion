@@ -86,6 +86,12 @@ class _DefaultUmoHarness(PlatformCompatibilityMixin, ProactiveMixin):
     def _canonical_private_user_id(self, user_id: str) -> str:
         return self.private_user_aliases.get(str(user_id or ""), str(user_id or ""))
 
+    def _note_private_user_umo(self, user_id: str, user: dict[str, Any] | None, umo: str) -> None:
+        if isinstance(user, dict):
+            user["last_inbound_umo"] = umo
+            self._remember_private_delivery_route(user, umo, outcome="observed")
+            user["umo"] = umo
+
     @staticmethod
     def _is_bot_self_user_id(user_id: str) -> bool:
         return False
@@ -256,6 +262,41 @@ class QqOfficialPlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("测试官方实例", harness._preferred_platform_instance_id())
         self.assertEqual(OFFICIAL_UMO, harness._default_private_umo_for_user_id(OFFICIAL_OPENID))
+
+    def test_stale_default_umo_yields_to_the_running_platform_instance(self) -> None:
+        harness = _DefaultUmoHarness(_FakePlatform())
+        user = {"user_id": OFFICIAL_OPENID, "umo": f"default:FriendMessage:{OFFICIAL_OPENID}"}
+        harness.data["users"][OFFICIAL_OPENID] = user
+
+        self.assertEqual(OFFICIAL_UMO, harness._private_delivery_umo_for_user_id(OFFICIAL_OPENID))
+
+    def test_explicit_chat_binding_outranks_an_older_successful_route(self) -> None:
+        fallback_umo = f"备用实例:FriendMessage:{OFFICIAL_OPENID}"
+        harness = _DefaultUmoHarness(
+            _FakePlatform(),
+            _FakePlatform(instance_id="备用实例", name="qq_official"),
+        )
+        user = {"user_id": OFFICIAL_OPENID}
+        harness.data["users"][OFFICIAL_OPENID] = user
+        harness._remember_private_delivery_route(user, fallback_umo, outcome="success")
+
+        ok, _ = harness._bind_private_delivery_umo(OFFICIAL_OPENID, user, OFFICIAL_UMO)
+
+        self.assertTrue(ok)
+        self.assertEqual(OFFICIAL_UMO, harness._private_delivery_umo_for_user_id(OFFICIAL_OPENID))
+        self.assertEqual("bound", harness._private_delivery_route_status(OFFICIAL_OPENID, user)["source"])
+
+    def test_unbind_restores_automatic_route_selection(self) -> None:
+        harness = _DefaultUmoHarness(_FakePlatform())
+        user = {"user_id": OFFICIAL_OPENID}
+        harness.data["users"][OFFICIAL_OPENID] = user
+        harness._bind_private_delivery_umo(OFFICIAL_OPENID, user, OFFICIAL_UMO)
+
+        changed, message = harness._unbind_private_delivery_umo(user)
+
+        self.assertTrue(changed)
+        self.assertNotIn("bound_delivery_umo", user)
+        self.assertIn("自动选择", message)
 
     def test_delivery_alias_reuses_observed_official_umo_in_mixed_deployment(self) -> None:
         harness = _DefaultUmoHarness(
