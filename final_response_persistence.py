@@ -128,7 +128,17 @@ class FinalResponsePersistenceCoordinator:
     ) -> None:
         ledger.confirmed_chains.append(components)
         event = ledger.event
-        if ledger.passive and event is not None and ledger.fallback_task is None:
+        # A normal passive turn is finalized by the after-send hook.  Only
+        # schedule the delayed fallback when propagation has already stopped;
+        # otherwise every segmented chunk leaves an unnecessary task behind
+        # that can outlive the turn's event loop.
+        stopped = False
+        if ledger.passive and event is not None:
+            try:
+                stopped = bool(event.is_stopped())
+            except Exception:
+                stopped = False
+        if stopped and ledger.fallback_task is None:
             try:
                 ledger.fallback_task = asyncio.create_task(
                     self._finalize_stopped_event_after_yield(ledger)
