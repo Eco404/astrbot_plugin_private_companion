@@ -314,8 +314,8 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reason, "continuity_anchor")
         self.assertLessEqual(len(anchor), 300)
         self.assertIn("Bot 的拟人化模拟状态", anchor)
-        self.assertIn("优先回应用户当前消息", anchor)
-        self.assertIn("整次回复最多提出一个问题，也可以不提问", anchor)
+        self.assertIn("先自然回应用户当前表达", anchor)
+        self.assertIn("整次回复最多提出一个问题", anchor)
         self.assertIn("晚上", anchor)
         self.assertIn("40-49/100", anchor)
         self.assertIn("疲惫", anchor)
@@ -347,6 +347,107 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertLessEqual(len(anchor), 300)
+                for excluded in excluded_values:
+                    self.assertNotIn(excluded, anchor)
+
+    def test_private_state_reply_policy_is_included_once_in_every_injected_branch(
+        self,
+    ) -> None:
+        plugin = _state_harness()
+        plugin.enable_passive_state_continuity_anchor = True
+        plugin._passive_state_session_cache = {}
+        state = {"energy": 62, "mood_bias": "平稳"}
+
+        initial_update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state=state,
+            current_user={},
+            inbound_text="晚上好",
+            lightweight=True,
+        )
+        direct_update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state=state,
+            current_user={},
+            inbound_text="你现在状态怎么样",
+            lightweight=True,
+        )
+        changed_state = {**state, "mood_bias": "轻松"}
+        changed_update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state=changed_state,
+            current_user={},
+            inbound_text="接着刚才的话说",
+            lightweight=True,
+        )
+        anchor_update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state=changed_state,
+            current_user={},
+            inbound_text="我继续说",
+            lightweight=True,
+        )
+
+        self.assertEqual(initial_update[1:], (True, "changed"))
+        self.assertEqual(direct_update[1:], (False, "direct"))
+        self.assertEqual(changed_update[1:], (True, "changed"))
+        self.assertEqual(anchor_update[1:], (False, "continuity_anchor"))
+        for branch, update in (
+            ("initial", initial_update),
+            ("direct", direct_update),
+            ("changed", changed_update),
+            ("continuity_anchor", anchor_update),
+        ):
+            with self.subTest(branch=branch):
+                text = update[0]
+                self.assertEqual(text.count("【私聊被动回复策略】"), 1)
+                self.assertEqual(text.count("一处"), 1)
+                self.assertEqual(text.count("汇报"), 1)
+                self.assertNotIn("不要主动展开", text)
+                for policy_text in (
+                    "先自然回应用户当前表达",
+                    "主动提供一处与 Bot 自身有关的具体细节",
+                    "不要把回复写成连续盘问",
+                    "整次回复最多提出一个问题",
+                    "没有必要时可以不提问",
+                ):
+                    self.assertEqual(text.count(policy_text), 1)
+
+    def test_continuity_anchor_uses_only_current_text_before_future_actions(
+        self,
+    ) -> None:
+        plugin = _state_harness()
+        state = {"energy": 62, "mood_bias": "平稳"}
+        cases = (
+            (
+                "在卧室准备去超市买菜",
+                ("粗略位置=家里",),
+                ("当前活动=", "超市", "买菜"),
+            ),
+            ("即将上课", (), ("当前活动=上课", "粗略位置=学校")),
+            ("正在吃饭，马上去洗澡", ("当前活动=吃饭",), ("洗澡",)),
+            ("正在看书，之后再去跑步", ("当前活动=看书",), ("跑步",)),
+            ("正在听歌，然后再去做饭", ("当前活动=听歌",), ("做饭",)),
+            ("正在休息，待会儿再去上课", ("当前活动=休息",), ("上课", "学校")),
+            ("正在看书，再做饭", ("当前活动=看书",), ("做饭",)),
+            ("正在休息，准备先去学校上课", ("当前活动=休息",), ("上课", "学校")),
+            ("正要出门", (), ("当前活动=", "粗略位置=外面")),
+            ("正在上课", ("当前活动=上课", "粗略位置=学校"), ()),
+            ("在超市买菜", ("当前活动=买菜", "粗略位置=外面"), ()),
+        )
+
+        for scene, expected_values, excluded_values in cases:
+            with self.subTest(scene=scene):
+                plugin._get_current_plan_item = lambda _plan, value=scene: {
+                    "activity": value,
+                }
+                anchor = plugin._format_private_passive_state_continuity_anchor(
+                    state,
+                    {},
+                )
+
+                for expected in expected_values:
+                    self.assertIn(expected, anchor)
                 for excluded in excluded_values:
                     self.assertNotIn(excluded, anchor)
 

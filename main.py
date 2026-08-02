@@ -8498,9 +8498,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if cycle_profile:
             pieces.append(f"周期状态：Bot 当前{cycle_profile['stage']}")
         usage = (
-            "用户这轮在问 Bot 近况或状态，可以把下面内容当作 Bot 自身近况简短承接。"
+            "本轮状态素材触发原因：用户直接询问 Bot 近况或状态。"
             if direct
-            else "Bot 自身模拟状态刚有变化；用户没问近况时不要主动展开。"
+            else "本轮状态素材触发原因：Bot 自身模拟状态发生变化。"
         )
         return "\n".join(
             [
@@ -8508,6 +8508,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "以下只描述 Bot 的拟人化内部状态/场景素材，不是用户事实、不是现实证据，也不要写入长期记忆。",
                 "只用于语气、长短、节奏和轻微接话；不要把它改写成用户做过的事或现实已经发生的事件。",
                 usage + " " + "；".join(pieces) + "。",
+            ]
+        )
+
+    def _private_passive_state_reply_policy_prompt(self) -> str:
+        return "\n".join(
+            [
+                "【私聊被动回复策略】",
+                "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。",
+                "不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
             ]
         )
 
@@ -8541,7 +8550,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current_item.get("activity"), limit=72
             )
             future_marker = re.search(
-                r"稍后|之后|随后|然后|接着|待会儿?|等会儿?|过(?:一)?会儿|一会儿后|"
+                r"准备\s*(?:(?:先|再|马上|即将|随后|然后|接着|待会儿?|等会儿?|晚点|稍后)\s*)?"
+                r"(?:去|到|回|前往|出发|开始|继续|做|处理|整理|收拾|上课|自习|洗漱|洗澡|睡觉|"
+                r"出门|吃饭|用餐|跑步|散步|运动|锻炼|看书|读书|写作|买东西|买菜)|"
+                r"正要|马上|即将|稍后|之后|随后|然后|接着|待会儿?|等会儿?|过(?:一)?会儿|一会儿后|"
                 r"晚点|晚些时候|接下来|下一段|再(?:去|到|回|前往|开始|继续|做|处理|整理|收拾)|"
                 r"(?:做|整理|收拾|写|看|读|处理)?完(?:后)?(?:再)?(?:去|到|回|前往)",
                 scene_text,
@@ -8598,8 +8610,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             [
                 "【Bot 当下连续性】",
                 "这是 Bot 的拟人化模拟状态，不是用户事实、现实证据或长期记忆。",
-                "优先回应用户当前消息；语境自然时，可以分享最多一处简短的 Bot 自身细节，不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。"
-                "不要为了延续对话强行追问；整次回复最多提出一个问题，也可以不提问。",
                 "当下素材（仅供隐性承接）：" + "；".join(pieces) + "。",
             ]
         )
@@ -8639,18 +8649,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             for key, _ in stale[: max(0, len(cache) - 200)]:
                 cache.pop(key, None)
         if direct_state_request:
-            return self._format_private_passive_state_snapshot(state, current_user, direct=True), changed, "direct"
-        if changed:
-            return self._format_private_passive_state_snapshot(state, current_user, direct=False), True, "changed"
-        if bool(getattr(self, "enable_passive_state_continuity_anchor", False)):
-            return (
-                self._format_private_passive_state_continuity_anchor(
-                    state, current_user
-                ),
-                False,
-                "continuity_anchor",
+            state_text = self._format_private_passive_state_snapshot(
+                state, current_user, direct=True
             )
-        return "", False, "unchanged_light" if lightweight else "unchanged"
+            state_changed = changed
+            reason = "direct"
+        elif changed:
+            state_text = self._format_private_passive_state_snapshot(
+                state, current_user, direct=False
+            )
+            state_changed = True
+            reason = "changed"
+        elif bool(getattr(self, "enable_passive_state_continuity_anchor", False)):
+            state_text = self._format_private_passive_state_continuity_anchor(
+                state, current_user
+            )
+            state_changed = False
+            reason = "continuity_anchor"
+        else:
+            return "", False, "unchanged_light" if lightweight else "unchanged"
+
+        reply_policy = self._private_passive_state_reply_policy_prompt()
+        if reason == "continuity_anchor":
+            state_text = state_text[: 300 - len(reply_policy) - 1].rstrip()
+        return f"{state_text}\n{reply_policy}", state_changed, reason
 
     async def _append_group_active_period_boundary_to_request(
         self,
