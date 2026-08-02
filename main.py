@@ -2971,6 +2971,9 @@ class PrivateCompanionPlugin(
                 )
 
         task.add_done_callback(discard_finished_task)
+        tracker = getattr(self, "_track_final_response_background_task", None)
+        if callable(tracker):
+            tracker(task, label)
         return task
 
     async def _cancel_lifecycle_background_tasks(self, timeout: float = 3.0) -> None:
@@ -4249,6 +4252,54 @@ class PrivateCompanionPlugin(
                 delattr(event, attr_name)
             except Exception:
                 pass
+
+    @filter.on_agent_begin(priority=100000)
+    async def begin_final_response_persistence(
+        self,
+        event: AstrMessageEvent,
+        run_context: Any,
+        *args,
+        **kwargs,
+    ):
+        """Defer optional memory sinks until the platform confirms delivery."""
+        if self is None or not self.enabled or event is None:
+            return
+        self._begin_final_response_persistence(event)
+
+    @filter.on_agent_done(priority=-100000)
+    async def prepare_final_response_persistence(
+        self,
+        event: AstrMessageEvent,
+        run_context: Any,
+        response: Any,
+        *args,
+        **kwargs,
+    ):
+        if self is None or event is None:
+            return
+        await self._prepare_final_response_after_agent(event, run_context, response)
+
+    @filter.on_decorating_result(priority=-30000)
+    async def capture_final_outbound_chain_for_persistence(
+        self,
+        event: AstrMessageEvent,
+        *args,
+        **kwargs,
+    ):
+        if self is None or event is None:
+            return
+        self._capture_final_outbound_delivery(event)
+
+    @filter.after_message_sent(priority=-100000)
+    async def persist_confirmed_passive_reply(
+        self,
+        event: AstrMessageEvent,
+        *args,
+        **kwargs,
+    ):
+        if self is None or event is None:
+            return
+        await self._persist_final_outbound_delivery(event)
 
     @filter.on_decorating_result()
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):

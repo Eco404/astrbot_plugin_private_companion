@@ -4735,6 +4735,26 @@ class PrivateImageMixin:
             vision_text=vision_text,
             image_count=image_count,
         )
+        livingmemory_recorder = getattr(
+            self,
+            "_record_final_assistant_in_livingmemory",
+            None,
+        )
+        if callable(livingmemory_recorder):
+            message_id_getter = getattr(self, "_event_message_id", None)
+            message_id = (
+                _single_line(message_id_getter(event), 120)
+                if callable(message_id_getter)
+                else ""
+            )
+            await livingmemory_recorder(
+                umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                assistant_response=assistant_message,
+                delivery_id=(
+                    f"private_image:{message_id or user_id}:"
+                    f"{_now_ts():.6f}"
+                ),
+            )
 
     async def _record_private_image_vision_feedback_target(
         self,
