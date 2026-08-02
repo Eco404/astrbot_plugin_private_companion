@@ -8759,7 +8759,13 @@ class DailyStateMixin(DailyStateTickMixin):
         )
         if not text:
             return False
-        if re.search(r"睡醒|醒来|醒后|刚醒|起床|不睡|没睡|未睡|还没睡|睡不着|失眠", text):
+        if re.search(r"继续睡|睡回去|重新入睡|再次入睡|回笼觉", text):
+            return True
+        if re.search(
+            r"自然醒|睡醒|醒来|醒后|刚醒|醒了|已醒|醒着|清醒|睁眼|起床|起身|洗漱|"
+            r"不睡|没睡|未睡|还没睡|睡不着|失眠",
+            text,
+        ):
             return False
         return bool(
             re.search(

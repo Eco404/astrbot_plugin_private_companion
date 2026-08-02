@@ -330,7 +330,7 @@ def content_intent_from_text(value: Any) -> dict[str, Any]:
         or re.search(r"(?:回复|语气|对我)[^，。！？!?]{0,8}甜一点", compact)
     )
     consent = adult_requested and bool(
-        re.search(r"(?:我同意|我允许)[^，。！？!?]{0,20}(?:成人|nsfw|继续)", compact)
+        re.search(r"(?:我同意|我允许)[^\n]{0,20}(?:成人|nsfw|继续)", compact)
         or re.search(r"(?:成人|nsfw)[^，。！？!?]{0,20}(?:我同意|我允许|可以继续)", compact)
     )
     return {
