@@ -6993,13 +6993,64 @@
       "qzone_life_publish_probability": {
         "description": "生活说说触发概率",
         "type": "float",
-        "hint": "满足间隔后每轮后台检查尝试发布生活说说的概率。",
+        "hint": "每天一次抽样：每天以该概率决定是否尝试发布一条生活说说；未命中则当天不再尝试。",
         "slider": {
           "min": 0,
           "max": 1,
           "step": 0.05
         },
         "default": 0.18,
+        "condition": {
+          "enable_qzone_life_publish": true
+        }
+      },
+      "qzone_life_publish_window_mode": {
+        "description": "发布时段模式",
+        "type": "string",
+        "default": "double",
+        "options": [
+          "double",
+          "custom",
+          "all_day"
+        ],
+        "labels": [
+          "双窗口",
+          "自定义窗口",
+          "全天随机"
+        ],
+        "hint": "双窗口：默认在清晨与傍晚两个窗口内随机取一个时刻发布；自定义窗口：按下面填写，一天最多 3 个；全天随机：任意时刻都可能发布（可能出现凌晨发布）。",
+        "condition": {
+          "enable_qzone_life_publish": true
+        }
+      },
+      "qzone_life_publish_double_windows": {
+        "description": "双窗口时段",
+        "type": "text",
+        "hint": "每行一个 HH:MM-HH:MM，最多两行；发布时刻会随机落在其中一个窗口内。",
+        "default": "07:00-10:00\n18:00-22:00",
+        "condition": {
+          "qzone_life_publish_window_mode": "double"
+        }
+      },
+      "qzone_life_publish_custom_windows": {
+        "description": "自定义发布窗口",
+        "type": "text",
+        "hint": "每行一个 HH:MM-HH:MM，一天最多 3 个窗口；发布时刻会随机落在其中一个窗口内。",
+        "default": "",
+        "condition": {
+          "qzone_life_publish_window_mode": "custom"
+        }
+      },
+      "qzone_life_publish_similarity_threshold": {
+        "description": "说说去重相似阈值",
+        "type": "int",
+        "hint": "与最近已发说说共享的 3 字片段达到该数量即视为重复，自动重写一次，仍重复则取消本次发布。默认 2。",
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 2,
         "condition": {
           "enable_qzone_life_publish": true
         }

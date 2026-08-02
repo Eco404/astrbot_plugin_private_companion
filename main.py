@@ -2478,6 +2478,14 @@ class PrivateCompanionPlugin(
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
         self.qzone_life_publish_min_interval_hours = self._cfg_int(c, "qzone_life_publish_min_interval_hours", 24, 4, 168)
         self.qzone_life_publish_probability = self._cfg_unit_interval(c, "qzone_life_publish_probability", 0.18, 0.0)
+        self.qzone_life_publish_window_mode = self._cfg_str(c, "qzone_life_publish_window_mode", "double")
+        self.qzone_life_publish_double_windows = self._cfg_str(
+            c,
+            "qzone_life_publish_double_windows",
+            "07:00-10:00\n18:00-22:00",
+        )
+        self.qzone_life_publish_custom_windows = self._cfg_str(c, "qzone_life_publish_custom_windows", "")
+        self.qzone_life_publish_similarity_threshold = self._cfg_int(c, "qzone_life_publish_similarity_threshold", 2, 1, 20)
         self.qzone_publish_style_prompt = self._cfg_str(c, "qzone_publish_style_prompt", "")
         self.enable_qzone_generated_image_publish = self._cfg_bool(c, "enable_qzone_generated_image_publish", True)
         self.qzone_generated_image_probability = self._cfg_unit_interval(c, "qzone_generated_image_probability", 0.25, 0.0)

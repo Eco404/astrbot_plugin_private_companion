@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-from .helpers import _now_ts, _path_text, _safe_float, _safe_int, _single_line
+from .helpers import _day_start_ts, _now_ts, _path_text, _safe_float, _safe_int, _single_line, _today_key
 from .qzone_media import QzoneIntegrationError, QzoneMediaMixin
 
 
@@ -3080,6 +3080,190 @@ class QzoneMixin(QzoneMediaMixin):
         )
         return [image_path]
 
+    @staticmethod
+    def _qzone_parse_windows(raw: Any, *, max_windows: int = 3) -> list[tuple[int, int]]:
+        """Parse "HH:MM-HH:MM" lines into (start_minute, end_minute) pairs."""
+        windows: list[tuple[int, int]] = []
+        for line in str(raw or "").splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            match = re.fullmatch(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", text)
+            if not match:
+                continue
+            start_h, start_m, end_h, end_m = (int(part) for part in match.groups())
+            start = start_h * 60 + start_m
+            end = end_h * 60 + end_m
+            if start_h > 23 or start_m > 59 or end_h > 23 or end_m > 59 or end <= start:
+                continue
+            windows.append((start, min(end, 24 * 60)))
+            if len(windows) >= max_windows:
+                break
+        return windows
+
+    def _qzone_life_publish_windows(self) -> list[tuple[int, int]]:
+        """Return today's publish windows as minute-of-day pairs, honoring mode."""
+        mode = _single_line(getattr(self, "qzone_life_publish_window_mode", "double"), 24) or "double"
+        if mode == "custom":
+            windows = self._qzone_parse_windows(
+                getattr(self, "qzone_life_publish_custom_windows", ""),
+                max_windows=3,
+            )
+        elif mode == "all_day":
+            windows = [(0, 24 * 60)]
+        else:
+            windows = self._qzone_parse_windows(
+                getattr(self, "qzone_life_publish_double_windows", ""),
+                max_windows=2,
+            )
+        return windows or [(0, 24 * 60)]
+
+    def _qzone_life_publish_pick_planned_at(self, state: dict[str, Any], *, now: float) -> float | None:
+        """Pick a random publish moment today inside the configured windows.
+
+        The chosen moment is clamped to never be earlier than
+        last_publish_at + min_interval. Returns None when no window remains.
+        """
+        windows = self._qzone_life_publish_windows()
+        min_interval_seconds = max(4, _safe_int(getattr(self, "qzone_life_publish_min_interval_hours", 24), 24, 4, 168)) * 3600
+        earliest = _safe_float(state.get("last_life_publish_at"), 0) + min_interval_seconds
+        day_start = _day_start_ts(now)
+        day_end = day_start + 24 * 3600
+        candidates: list[tuple[float, float]] = []
+        for start_min, end_min in windows:
+            start = max(day_start + start_min * 60, earliest)
+            end = min(day_start + end_min * 60, day_end)
+            if start < end:
+                candidates.append((start, end))
+        if not candidates:
+            return None
+        total = sum(end - start for start, end in candidates)
+        offset = random.uniform(0.0, total)
+        for start, end in candidates:
+            width = end - start
+            if offset <= width:
+                return start + offset
+            offset -= width
+        return candidates[-1][1] - 1.0
+
+    def _qzone_life_publish_gate(self, state: dict[str, Any], *, now: float) -> str:
+        """Decide if a fresh life publish should proceed right now.
+
+        Samples the daily roll once per day (qzone_life_publish_probability is a
+        per-day probability). On a hit, the publish moment is anchored to a random
+        time inside the configured window(s) instead of firing immediately.
+
+        Returns:
+          "allow" - publish now,
+          "wait"  - today allowed but the planned moment has not arrived,
+          "skip"  - today rolled a miss (or no window remains).
+        """
+        today = _today_key()
+        if isinstance(state, dict):
+            if str(state.get("last_life_publish_roll_day") or "") != today:
+                probability = max(
+                    0.0,
+                    min(1.0, _safe_float(getattr(self, "qzone_life_publish_probability", 0.18), 0.18)),
+                )
+                hit = random.random() < probability
+                state["last_life_publish_roll_day"] = today
+                state["last_life_publish_roll_hit"] = bool(hit)
+                state.pop("last_life_publish_planned_at", None)
+                if not hit:
+                    return "skip"
+                planned = self._qzone_life_publish_pick_planned_at(state, now=now)
+                if planned is None:
+                    state["last_life_publish_roll_hit"] = False
+                    return "skip"
+                state["last_life_publish_planned_at"] = planned
+                state["last_life_publish_status"] = (
+                    f"ready:planned@{time.strftime('%m-%d %H:%M', time.localtime(planned))}"
+                )
+                return "wait"
+            if not state.get("last_life_publish_roll_hit"):
+                return "skip"
+            planned = _safe_float(state.get("last_life_publish_planned_at"), 0)
+            if planned and now < planned:
+                return "wait"
+            return "allow"
+        probability = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "qzone_life_publish_probability", 0.18), 0.18)),
+        )
+        return "allow" if random.random() < probability else "skip"
+
+    @staticmethod
+    def _qzone_ngram_shared_count(left: Any, right: Any, *, n: int = 3) -> int:
+        a = re.sub(r"\s+", "", str(left or ""))
+        b = re.sub(r"\s+", "", str(right or ""))
+        if len(a) < n or len(b) < n:
+            return 1 if a and a == b else 0
+        grams_a = {a[i : i + n] for i in range(len(a) - n + 1)}
+        grams_b = {b[i : i + n] for i in range(len(b) - n + 1)}
+        return len(grams_a & grams_b)
+
+    def _qzone_life_publish_similar_recent(self, state: dict[str, Any], draft: Any) -> list[dict[str, Any]]:
+        """Return recent posts whose shared 3-gram count with the draft meets the threshold."""
+        items = state.get("recent_life_publish_texts") if isinstance(state, dict) else []
+        if not isinstance(items, list):
+            return []
+        threshold = max(1, _safe_int(getattr(self, "qzone_life_publish_similarity_threshold", 2), 2, 1, 20))
+        matches: list[dict[str, Any]] = []
+        for item in items[-8:]:
+            old = _single_line(item.get("text") if isinstance(item, dict) else item, 180)
+            if not old:
+                continue
+            shared = self._qzone_ngram_shared_count(draft, old)
+            if shared >= threshold:
+                matches.append(
+                    {
+                        "text": old,
+                        "shared": shared,
+                        "at": _safe_float(item.get("at"), 0) if isinstance(item, dict) else 0,
+                    }
+                )
+        return matches
+
+    async def _qzone_life_publish_rewrite_deduplicated(
+        self,
+        text: str,
+        similar: list[dict[str, Any]],
+        *,
+        prompt: str = "",
+    ) -> str:
+        recent_lines = "\n".join(f"- {_single_line(item['text'], 120)}" for item in similar[:3])
+        rewrite_prompt = f"""
+下面是一条 QQ 空间说说草稿，和最近发过的说说太像（同一场景、同一叙事套路）。
+请改写成一条内容上明显不同的生活说说：换一个场景、换一个观察角度、换一种情绪，不要沿用原来的骨架和用词。
+只输出正文，30 到 120 字，不要解释，不要加标题。
+
+【最近已发的说说（避免重复）】
+{recent_lines}
+
+【原草稿】
+{text}
+
+【原任务背景】
+{_single_line(prompt, 600)}
+""".strip()
+        try:
+            rewritten = await self._llm_call(
+                rewrite_prompt,
+                max_tokens=180,
+                provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+                task="qzone_publish_deduplicate",
+            )
+            return _single_line(
+                self._qzone_relationship_safe_source(
+                    rewritten,
+                    source="qzone.deduplicated_post",
+                ),
+                180,
+            )
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] QQ 空间说说去重重写失败: %s", _single_line(exc, 120))
+            return ""
+
     async def _maybe_publish_qzone_life_post(self) -> None:
         if not (self._qzone_available() and self.enable_qzone_life_publish):
             return
@@ -3094,6 +3278,8 @@ class QzoneMixin(QzoneMediaMixin):
             and now - _safe_float(state.get("last_life_publish_at"), 0) < max(4, self.qzone_life_publish_min_interval_hours) * 3600
         ):
             return
+        if state.get("last_life_publish_roll_day") == _today_key() and not state.get("last_life_publish_roll_hit"):
+            return
         block_reason = self._qzone_auto_publish_block_reason(state, now=now)
         if block_reason:
             state["last_life_publish_status"] = f"paused:auth:{_single_line(block_reason, 80)}"
@@ -3103,11 +3289,18 @@ class QzoneMixin(QzoneMediaMixin):
         if now - _safe_float(state.get("last_life_publish_failed_at"), 0) < 15 * 60:
             return
         reusable_text = self._qzone_reusable_draft(state, "life_publish", now=now)
-        if not reusable_text and random.random() > self.qzone_life_publish_probability:
-            state["last_life_publish_status"] = "skipped:probability_miss"
-            state["last_life_publish_checked_at"] = now
-            self._save_data_sync()
-            return
+        if not reusable_text:
+            gate = self._qzone_life_publish_gate(state, now=now)
+            if gate == "wait":
+                if _safe_float(state.get("last_life_publish_checked_at"), 0) < _day_start_ts(now):
+                    state["last_life_publish_checked_at"] = now
+                    self._save_data_sync()
+                return
+            if gate == "skip":
+                state["last_life_publish_status"] = "skipped:probability_miss"
+                state["last_life_publish_checked_at"] = now
+                self._save_data_sync()
+                return
         preflight_error = await self._qzone_preflight_auto_publish(None, state=state, source="life_publish")
         if preflight_error:
             state["last_life_publish_failed_at"] = now
@@ -3203,6 +3396,33 @@ class QzoneMixin(QzoneMediaMixin):
                 return
             state["last_life_publish_draft"] = _single_line(text, 300)
             state["last_life_publish_draft_at"] = now
+        similar = self._qzone_life_publish_similar_recent(state, text)
+        if similar:
+            if reusable_text:
+                state["last_life_publish_failed_at"] = now
+                state["last_life_publish_status"] = "cancelled:duplicate"
+                state["last_life_publish_checked_at"] = now
+                self._qzone_clear_pending_publish_assets(state, "life_publish")
+                self._save_data_sync()
+                logger.info("[PrivateCompanion] QQ 空间复用草稿与近期说说重复,已取消发布")
+                return
+            rewritten = await self._qzone_life_publish_rewrite_deduplicated(
+                text,
+                similar,
+                prompt=prompt,
+            )
+            if rewritten and not self._qzone_life_publish_similar_recent(state, rewritten):
+                text = rewritten
+                state["last_life_publish_draft"] = _single_line(text, 300)
+                state["last_life_publish_draft_at"] = now
+                logger.info("[PrivateCompanion] QQ 空间草稿与近期说说重复,已重写避开: %s", _single_line(text, 120))
+            else:
+                state["last_life_publish_failed_at"] = now
+                state["last_life_publish_status"] = "cancelled:duplicate_after_retry"
+                state["last_life_publish_checked_at"] = now
+                self._save_data_sync()
+                logger.info("[PrivateCompanion] QQ 空间草稿重写后仍与近期说说重复,已取消发布")
+                return
         if reusable_text:
             image_sources = self._qzone_reusable_generated_image(state, "life_publish", text, now=now)
         else:
