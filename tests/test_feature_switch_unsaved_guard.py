@@ -91,10 +91,28 @@ class FeatureSwitchUnsavedGuardTests(unittest.TestCase):
 
         self.assertIn("if (actionResultPersisted(result))", save_block)
         self.assertIn("return actionResultPersisted(result);", save_block)
-        self.assertIn("const persistenceFailed = Boolean(result && result.config_saved === false);", run_action_block)
+        self.assertIn("const persistenceFailed = configPersistenceFailed(result);", run_action_block)
         self.assertIn("if (reload && !persistenceFailed)", run_action_block)
         self.assertIn("!reload && !persistenceFailed", run_action_block)
-        self.assertIn("result?.config_saved !== false", self.script)
+        self.assertIn("function configSavedValue(result)", self.script)
+        self.assertIn("const candidates = [result, result.data, result.overview, result.overview?.data];", self.script)
+        self.assertIn("function configPersistenceFailed(result)", self.script)
+        self.assertIn("return configSavedValue(result) === false;", self.script)
+
+    def test_nested_persistence_failure_is_treated_as_unsaved(self) -> None:
+        run_action_block = self.script.split(
+            'async function runAction(action, successMessage = "", control = null, options = {}) {',
+            1,
+        )[1].split("\n}\n\nfunction configSavedValue", 1)[0]
+        persistence_block = self.script.split(
+            "function configSavedValue(result) {",
+            1,
+        )[1].split("\n}\n\nfunction configPersistenceFailed", 1)[0]
+
+        self.assertIn("result.data", persistence_block)
+        self.assertIn("candidate.config_saved === false", persistence_block)
+        self.assertIn("const persistenceFailed = configPersistenceFailed(result);", run_action_block)
+        self.assertIn("if (reload && !persistenceFailed)", run_action_block)
 
     def test_module_forms_only_become_clean_after_persistent_save(self) -> None:
         module_submit_block = self.script.split(

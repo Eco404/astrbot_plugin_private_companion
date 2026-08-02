@@ -174,6 +174,45 @@ class AdvancedCycleStrategyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdvancedCycleConfigTests(unittest.TestCase):
+    def test_panel_contains_fallback_values_for_every_cycle_setting(self) -> None:
+        panel = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
+        fallback_block = panel.split("const fallbackValue = (name) => {", 1)[1].split(
+            "return Object.prototype.hasOwnProperty.call(defaults, name)", 1
+        )[0]
+        expected = {
+            "enable_cycle_state",
+            "enable_advanced_cycle_strategy",
+            "advanced_cycle_link_intensity",
+            "advanced_cycle_start_offset",
+            "advanced_cycle_menstrual_days",
+            "advanced_cycle_menstrual_prompt",
+            "advanced_cycle_menstrual_mood",
+            "advanced_cycle_menstrual_energy",
+            "advanced_cycle_follicular_days",
+            "advanced_cycle_follicular_prompt",
+            "advanced_cycle_follicular_mood",
+            "advanced_cycle_follicular_energy",
+            "advanced_cycle_pre_ovulation_days",
+            "advanced_cycle_pre_ovulation_prompt",
+            "advanced_cycle_pre_ovulation_mood",
+            "advanced_cycle_pre_ovulation_energy",
+            "advanced_cycle_ovulation_days",
+            "advanced_cycle_ovulation_prompt",
+            "advanced_cycle_ovulation_mood",
+            "advanced_cycle_ovulation_energy",
+            "advanced_cycle_luteal_days",
+            "advanced_cycle_luteal_prompt",
+            "advanced_cycle_luteal_mood",
+            "advanced_cycle_luteal_energy",
+            "advanced_cycle_pms_days",
+            "advanced_cycle_pms_prompt",
+            "advanced_cycle_pms_mood",
+            "advanced_cycle_pms_energy",
+        }
+        for key in expected:
+            with self.subTest(key=key):
+                self.assertIn(f"{key}:", fallback_block)
+
     def test_all_advanced_cycle_settings_are_public_and_roundtrip(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         expected = {

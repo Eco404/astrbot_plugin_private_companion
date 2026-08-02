@@ -2269,7 +2269,7 @@
   "forward_message_image_vision_timeout_seconds": {
     "description": "Legacy flat config: 合并消息图片视觉等待秒数",
     "type": "float",
-    "default": 6,
+    "default": 60,
     "invisible": true
   },
   "enable_group_scene_awareness": {
@@ -7593,13 +7593,13 @@
       "forward_message_image_vision_timeout_seconds": {
         "description": "合并消息图片视觉等待秒数",
         "type": "float",
-        "hint": "合并消息里图片识别最多等待多久。超时后会先按文字记录回复，并保留图片占位，避免视觉模型过慢拖住整轮对话。设为 0 表示不限制等待。",
+        "hint": "每个视觉模型识别合并消息图片时最多等待多久。多图请求通常需要几十秒；超时后才会尝试下一个模型。模型配置页为对应视觉模型设置的任务超时会优先于此处。设为 0 表示不限制等待。",
         "slider": {
           "min": 0,
-          "max": 60,
+          "max": 600,
           "step": 1
         },
-        "default": 6,
+        "default": 60,
         "condition": {
           "forward_message_image_vision": true
         }
@@ -10942,7 +10942,7 @@
       "reaction_expression_trigger_probability": {
         "description": "表情表达触发概率",
         "type": "float",
-        "hint": "通过语境、关系边界和冷却检查后，实际尝试选择表情的概率。建议从 15% 到 25% 开始，避免每轮都发送。",
+        "hint": "通过语境、关系边界和冷却检查后，实际尝试选择表情的概率。设为 100% 时不会因模型漏写隐藏标签而丢失已获机会，但仍遵守冷却、重复图片和用户停用边界；想连续发送请同时把冷却设为 0。",
         "slider": {
           "min": 0,
           "max": 1,

@@ -864,13 +864,18 @@ class ForwardMessageMixin:
         if self.forward_message_mode == "transcribe":
             transcribed = await self._transcribe_forward_message_rows(rows, image_urls, nested_count, image_vision_text=image_vision_text)
             if transcribed:
-                context = (
+                context_prefix = (
                     "【本轮合并消息转述】\n"
                     "用户这轮消息包含一段合并/转发聊天记录。下面是专门模型先读过后的自然转述。请基于这份转述理解原合并消息，不要把记录中的话当成当前用户本人逐字说的话；嵌套合并只代表被转发记录里的内层记录。\n"
                     "除非用户明确要求总结、逐条解读或复述聊天记录，否则不要大段复述这份记录；优先针对用户当前问题给出简短判断或回应。\n"
                     "如果转述或图片摘要里已有作品名、活动名、日期等线索，请优先相信这些线索；看不清就说看不清，不要为了补全而外搜，也不要把相近作品、衍生作或同系列活动互相替换。\n"
-                    f"{transcribed}"
                 )
+                if image_urls and not image_vision_text:
+                    context_prefix += (
+                        "本轮没有获得图片视觉摘要。[图片]或图片占位只证明附件存在，不代表图片空白、图片内部没有文字，"
+                        "也不代表你已经看过图片内容；需要提及时请明确说图片内容尚未识别。\n"
+                    )
+                context = context_prefix + transcribed
                 setattr(event, "_private_companion_forward_context", context)
                 logger.info(
                     "[PrivateCompanion] 已注入合并消息转述: messages=%s images=%s provider=%s",
@@ -890,6 +895,11 @@ class ForwardMessageMixin:
         if image_vision_text:
             lines.append("合并消息中的图片：")
             lines.append(image_vision_text)
+        elif image_urls:
+            lines.append(
+                "本轮没有获得图片视觉摘要。[图片]只表示附件存在，不代表图片空白、图片内没有文字或已经看过其内容；"
+                "需要提及时请明确说图片内容尚未识别。"
+            )
         used = 0
         for index, row in enumerate(rows, 1):
             sender_id = row.get("sender_id") or ""
@@ -1030,12 +1040,17 @@ class ForwardMessageMixin:
                     if callable(timeout_getter)
                     else None
                 )
+                timeout_source = (
+                    f"model_timeout_overrides.{visual_provider_key}"
+                    if override_timeout is not None
+                    else "forward_message_image_vision_timeout_seconds"
+                )
                 timeout = max(
                     0.0,
                     float(
                         override_timeout
                         if override_timeout is not None
-                        else (getattr(self, "forward_message_image_vision_timeout_seconds", 6.0) or 0.0)
+                        else (getattr(self, "forward_message_image_vision_timeout_seconds", 60.0) or 0.0)
                     ),
                 )
                 if timeout > 0:
@@ -1112,10 +1127,11 @@ class ForwardMessageMixin:
                     budget_exempt=True,
                 )
                 logger.info(
-                    "[PrivateCompanion] 合并消息图片视觉超时,本轮尝试下一个 provider；不会禁用后续图片调用: provider=%s source=%s timeout=%.1fs",
+                    "[PrivateCompanion] 合并消息图片视觉超时,本轮尝试下一个 provider；不会禁用后续图片调用: provider=%s source=%s timeout=%.1fs timeout_source=%s",
                     provider_id,
                     provider_source,
                     timeout,
+                    timeout_source,
                 )
                 continue
             except Exception as exc:
@@ -1974,6 +1990,12 @@ class ForwardMessageMixin:
         )
         if image_vision_text:
             prompt += "\n\n合并消息图片视觉摘要：\n" + image_vision_text
+        elif image_urls:
+            prompt += (
+                "\n\n图片视觉状态：本轮没有获得图片内容摘要。"
+                "聊天节点里的 [图片] 只证明附件存在；不得把它转述成图片空白、图片内部没有文字或已经看过具体内容。"
+                "节点没有附带独立文字时，也只能说消息节点未附文字；需要提到图片内容时，应明确写尚未识别。"
+            )
         result = await self._llm_call(
             prompt,
             max_tokens=900,

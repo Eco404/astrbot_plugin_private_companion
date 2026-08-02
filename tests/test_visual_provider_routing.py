@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from astrbot_plugin_private_companion.forward_message import ForwardMessageMixin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
@@ -174,8 +175,14 @@ class _ForwardVisionHarness(ForwardMessageMixin):
             "backup": _FakeVisionProvider("第二模型摘要"),
         }
         self.usage: list[dict] = []
+        self.prepared_sources: list[str] = []
+        self.forward_message_provider_id = ""
+        self.mai_style_provider_id = ""
+        self.forward_message_max_chars = 5000
+        self.llm_calls: list[dict] = []
 
     async def _prepare_private_image_sources_for_model(self, sources, **_kwargs):
+        self.prepared_sources = list(sources)
         return list(sources)
 
     @staticmethod
@@ -230,6 +237,14 @@ class _ForwardVisionHarness(ForwardMessageMixin):
 
     def _record_llm_usage(self, **kwargs):
         self.usage.append(kwargs)
+
+    async def _llm_call(self, prompt, **kwargs):
+        self.llm_calls.append({"prompt": prompt, **kwargs})
+        return "转述结果"
+
+    @staticmethod
+    def _task_provider(*provider_ids):
+        return next((str(value).strip() for value in provider_ids if str(value or "").strip()), "")
 
     @staticmethod
     def _mark_private_image_provider_failure(*_args, **_kwargs):
@@ -661,6 +676,76 @@ class VisualProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.providers["backup"].calls, 1)
         self.assertFalse(harness.usage[0]["success"])
         self.assertTrue(harness.usage[1]["success"])
+
+    async def test_forward_image_vision_passes_explicit_180_second_timeout(self) -> None:
+        harness = _ForwardVisionHarness()
+        harness.providers["primary"].text = "第一模型摘要"
+        harness.forward_message_image_vision_timeout_seconds = 180
+        observed: list[float] = []
+
+        async def capture_wait_for(awaitable, timeout):
+            observed.append(timeout)
+            return await awaitable
+
+        event = SimpleNamespace(unified_msg_origin="default:FriendMessage:10001")
+        with patch(
+            "astrbot_plugin_private_companion.forward_message.asyncio.wait_for",
+            side_effect=capture_wait_for,
+        ):
+            result = await harness._transcribe_forward_message_images(event, ["image.png"])
+
+        self.assertEqual(result, "第一模型摘要")
+        self.assertEqual(observed, [180])
+
+    async def test_forward_image_vision_model_card_timeout_has_priority(self) -> None:
+        harness = _ForwardVisionHarness()
+        harness.providers["primary"].text = "第一模型摘要"
+        harness.forward_message_image_vision_timeout_seconds = 180
+        harness._model_timeout_seconds_for_call = lambda **_kwargs: 240
+        observed: list[float] = []
+
+        async def capture_wait_for(awaitable, timeout):
+            observed.append(timeout)
+            return await awaitable
+
+        event = SimpleNamespace(unified_msg_origin="default:FriendMessage:10001")
+        with patch(
+            "astrbot_plugin_private_companion.forward_message.asyncio.wait_for",
+            side_effect=capture_wait_for,
+        ):
+            result = await harness._transcribe_forward_message_images(event, ["image.png"])
+
+        self.assertEqual(result, "第一模型摘要")
+        self.assertEqual(observed, [240])
+
+    async def test_forward_image_limit_is_applied_before_model_preparation(self) -> None:
+        harness = _ForwardVisionHarness()
+        harness.providers["primary"].text = "第一模型摘要"
+        harness.forward_message_image_limit = 3
+        event = SimpleNamespace(unified_msg_origin="default:FriendMessage:10001")
+
+        await harness._transcribe_forward_message_images(
+            event,
+            ["1.png", "2.png", "3.png", "4.png", "5.png"],
+        )
+
+        self.assertEqual(harness.prepared_sources, ["1.png", "2.png", "3.png"])
+
+    async def test_forward_transcription_marks_missing_vision_without_claiming_empty_images(self) -> None:
+        harness = _ForwardVisionHarness()
+        rows = [{"sender": "测试用户", "text": "[图片]", "time": "-", "depth": 0}]
+
+        result = await harness._transcribe_forward_message_rows(
+            rows,
+            ["image.png"],
+            0,
+            image_vision_text="",
+        )
+
+        self.assertEqual(result, "转述结果")
+        prompt = harness.llm_calls[0]["prompt"]
+        self.assertIn("本轮没有获得图片内容摘要", prompt)
+        self.assertIn("不得把它转述成图片空白、图片内部没有文字或已经看过具体内容", prompt)
 
 
 if __name__ == "__main__":

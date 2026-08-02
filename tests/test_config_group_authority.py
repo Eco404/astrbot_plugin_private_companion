@@ -93,6 +93,47 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
             )
         self.assertEqual(config["basic_config"]["daily_token_limit"], 1500000)
 
+    def test_forward_image_timeout_legacy_default_is_upgraded(self):
+        config = {
+            "forward_message_image_vision_timeout_seconds": 6.0,
+            "forward_message_config": {
+                "forward_message_image_vision_timeout_seconds": 6.0,
+            },
+        }
+
+        changed = migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertGreater(changed, 0)
+        self.assertEqual(config["forward_message_image_vision_timeout_seconds"], 60.0)
+        self.assertEqual(
+            config["forward_message_config"]["forward_message_image_vision_timeout_seconds"],
+            60.0,
+        )
+
+    def test_forward_image_timeout_explicit_value_is_not_migrated(self):
+        config = {
+            "forward_message_image_vision_timeout_seconds": 180.0,
+            "forward_message_config": {
+                "forward_message_image_vision_timeout_seconds": 180.0,
+            },
+        }
+
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertEqual(config["forward_message_image_vision_timeout_seconds"], 180.0)
+        self.assertEqual(
+            config["forward_message_config"]["forward_message_image_vision_timeout_seconds"],
+            180.0,
+        )
+
     def test_empty_new_reference_defaults_preserve_nonempty_legacy_fields(self):
         config = {
             "photo_persona_reference_image_path": "C:/images/persona.png",

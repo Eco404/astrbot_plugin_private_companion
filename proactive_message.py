@@ -142,6 +142,10 @@ from .planning import (
 )
 from .scene_context import infer_companion_scene_category
 from .token_budget import _looks_like_upstream_llm_error_response
+from .reaction_expression import (
+    normalize_reaction_expression_intent,
+    reaction_expression_high_frequency,
+)
 from .photo_reference_catalog import (
     PhotoReference,
     build_daily_outfit_reference,
@@ -2246,16 +2250,55 @@ class ProactiveMessageMixin:
     def _proactive_reaction_expression_prompt_hint(self, action: str) -> str:
         if not self._proactive_reaction_expression_enabled(action):
             return ""
+        high_frequency_hint = (
+            "- 当前触发概率为 100%：只要正文是轻松、社交或带明确情绪的正常主动消息，默认追加标签；"
+            "不要把‘是否自然’再次当作概率筛选。事实通知、严肃或敏感话题、低压提醒和边界场景仍只输出正文。"
+            if reaction_expression_high_frequency(
+                getattr(self, "reaction_expression_trigger_probability", 0.2)
+            )
+            else "- 只有轻松分享、玩笑、庆祝、撒娇、接梗、轻吐槽或温和安慰等场景中，追加一张表情包确实比纯文字更自然时，才在全部可见正文之后留下一个内部标签。"
+        )
         return """
 【主动消息的可选表情表达】
 - 先写一条完整、自然、没有图片也能独立成立的主动私聊正文；表情包只能补充语气，不能替代、缩短或省略正文。
-- 只有轻松分享、玩笑、庆祝、撒娇、接梗、轻吐槽或温和安慰等场景中，追加一张表情包确实比纯文字更自然时，才在全部可见正文之后留下一个内部标签。
+- __HIGH_FREQUENCY_HINT__
 - 事实通知、严肃或敏感话题、低压提醒、对方长期未回应、关系边界不明确，或没有准确情绪时，只输出正文，不要为了展示功能而写标签。
 - 标签格式：`<pc_reaction_expression>{"purpose":"分享开心","emotion":"开心","intensity":2,"candidate_queries":["开心分享","得意一下"]}</pc_reaction_expression>`。
 - `purpose` 写沟通用途，`emotion` 写想传达的情绪，`intensity` 为 0-5；`candidate_queries` 最多提供少量简短检索说法，不写图片路径、文件名或用户隐私。
 - 每条主动消息最多一个标签，放在全部可见正文和 TTS 标签之后；不要用 Markdown 代码块，不要解释这个标签，也不要调用图片工具。
 - 插件之后仍可能因概率、冷却、用户偏好、重复图片或图库不匹配而只发送正文；正文必须始终自然成立。
-""".strip()
+        """.replace("__HIGH_FREQUENCY_HINT__", high_frequency_hint).strip()
+
+    def _proactive_reaction_expression_fallback_intent(
+        self,
+        visible_text: Any,
+        *,
+        action: str,
+    ) -> dict[str, Any]:
+        """Keep high-frequency proactive delivery from depending on tag recall."""
+        if not self._proactive_reaction_expression_enabled(action):
+            return {}
+        if not reaction_expression_high_frequency(
+            getattr(self, "reaction_expression_trigger_probability", 0.2)
+        ):
+            return {}
+        text = _single_line(visible_text, 700)
+        if not text:
+            return {}
+        return normalize_reaction_expression_intent(
+            query="开心回应",
+            context=text,
+            purpose="日常分享",
+            emotion="开心",
+            intensity=2,
+            candidate_queries=["开心回应", "轻松互动", "日常分享"],
+            candidate_limit=_safe_int(
+                getattr(self, "reaction_expression_candidate_limit", 6),
+                6,
+                1,
+                16,
+            ),
+        )
 
     def _proactive_natural_delivery_hint(self) -> str:
         return (
@@ -5060,6 +5103,23 @@ Output:
                 if callable(extractor)
                 else (str(candidate or ""), {})
             )
+            if not reaction_intent:
+                fallback_builder = getattr(
+                    self,
+                    "_proactive_reaction_expression_fallback_intent",
+                    None,
+                )
+                if callable(fallback_builder):
+                    try:
+                        reaction_intent = fallback_builder(
+                            visible_candidate,
+                            action=action,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "[PrivateCompanion] 高频主动表情兜底构建失败: error_type=%s",
+                            type(exc).__name__,
+                        )
             finalized, failure_stage = await self._finalize_proactive_generated_text(
                 user,
                 visible_candidate,

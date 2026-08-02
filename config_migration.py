@@ -130,6 +130,13 @@ _QWEATHER_GENERIC_FALLBACKS: dict[str, tuple[str, ...]] = {
     "weather_token": ("weather_alert_token", "weather_alert_api_key"),
 }
 
+# Only migrate values that were persisted identically in both the legacy flat
+# copy and the visible schema group. A disagreement means one side may contain
+# a deliberate user choice, so the normal group-authority rules handle it.
+LEGACY_DEFAULT_VALUE_MIGRATIONS: dict[str, tuple[Any, Any]] = {
+    "forward_message_image_vision_timeout_seconds": (6.0, 60.0),
+}
+
 
 def migrate_flat_config_into_schema_groups(
     config: Any,
@@ -181,6 +188,20 @@ def _migrate_flat_config_into_schema_groups(
     # still available for the explicit-choice checks.
     weather_changes = _migrate_qweather_config(root, schema_map, legacy_sources)
     changed.extend(weather_changes)
+
+    for key, (old_default, new_default) in LEGACY_DEFAULT_VALUE_MIGRATIONS.items():
+        item = schema_map.get(key) or {}
+        group = root.get(str(item.get("group") or ""))
+        if not isinstance(group, dict) or key not in group or key not in root:
+            continue
+        flat_value = _coerce_schema_value(root.get(key), item)
+        grouped_value = _coerce_schema_value(group.get(key), item)
+        if flat_value != old_default or grouped_value != old_default:
+            continue
+        migrated_value = _coerce_schema_value(new_default, item)
+        root[key] = migrated_value
+        group[key] = migrated_value
+        changed.append(f"{key}~legacy-default")
 
     for key, item in schema_map.items():
         if key == "provider_config_mode":

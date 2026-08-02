@@ -2125,7 +2125,7 @@ const configDescriptions = {
   reaction_expression_proactive_enabled: "允许主动私聊在完整正文后留下隐藏表情意图，再复用相同的概率、冷却、用户停用边界、重复图片与本地图库匹配；不会增加模型调用，已有媒体时不会叠加表情包。",
   reaction_expression_group_enabled: "默认关闭。开启后允许群聊使用，但公开风险高、关系不明确或上下文不足的候选会被降低优先级。",
   reaction_expression_delivery_mode: "默认先完整发送正文，再单独发送表情包。也可放进正文消息链，最终是否合并展示取决于平台适配器；正文前模式无法在后续正文发送失败时撤回已送达的图片。",
-  reaction_expression_trigger_probability: "通过语境、关系边界和冷却检查后实际尝试选择表情的概率，建议先从 15% 到 25% 观察。",
+  reaction_expression_trigger_probability: "通过语境、关系边界和冷却检查后实际尝试选择表情的概率。设为 100% 时不会因模型漏写隐藏标签而丢失已获机会，但仍遵守冷却、重复图片和用户停用边界；想连续发送请同时把冷却设为 0。",
   reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
   reaction_expression_candidate_limit: "主模型一次最多提供多少条不同检索说法，用来补充情绪和沟通意图；无论填写多少，插件仍只执行一次图库检索。建议保持 4 到 8 条。",
@@ -2662,7 +2662,7 @@ const configDescriptions = {
   context_image_caption_max_items: "单次请求最多补全多少条历史图片，超出部分保留占位。",
   context_image_caption_timeout_seconds: "历史图片补全的单次等待预算；超时不会阻塞整轮回复。",
   enable_memory_companion_private_recall: "仅在用户明确提到以前、约定、称呼、边界或稳定偏好时，从当前私聊选择性召回长期记忆。",
-  forward_message_image_vision_timeout_seconds: "合并消息图片识别最多等待多久；超时后先按文字记录回复并保留图片占位。",
+  forward_message_image_vision_timeout_seconds: "每个视觉模型识别合并消息图片时最多等待多久；多图通常需要几十秒，模型卡片里的任务超时设置优先。",
   max_group_topic_threads: "每个群最多保留多少条近期话题线。",
   group_episode_refresh_minutes: "同一群两次群聊片段总结之间的最小间隔。",
   group_slang_summary_minutes: "同一群两次黑话语义整理之间的最小间隔。",
@@ -3596,7 +3596,7 @@ const featureSettingTypes = {
   private_image_provider_failure_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 1 },
   context_image_caption_max_items: { type: "number", min: 0, max: 50, step: 1 },
   context_image_caption_timeout_seconds: { type: "number", min: 0, max: 600, step: 0.5 },
-  forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 60, step: 1 },
+  forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 600, step: 1 },
   group_image_vision_wait_seconds: { type: "number", min: 0, max: 60, step: 1 },
   group_image_max_images: { type: "number", min: 0, max: 12, step: 1 },
   max_group_topic_threads: { type: "number", min: 3, max: 40, step: 1 },
@@ -5568,7 +5568,8 @@ async function savePageFontFamily(value) {
   applyPageFontFamily();
   try {
     const result = await postJson("/settings/update", { settings: { page_font_family: next } });
-    showToast(result?.config_saved === false ? "页面字体已应用，但配置持久化失败；重启后可能恢复旧值" : "页面字体已保存", result?.config_saved === false ? "error" : "success");
+    const persistenceFailed = configPersistenceFailed(result);
+    showToast(persistenceFailed ? "页面字体已应用，但配置持久化失败；重启后可能恢复旧值" : "页面字体已保存", persistenceFailed ? "error" : "success");
   } catch (error) {
     state.pageFontFamily = previous;
     applyPageFontFamily();
@@ -7643,7 +7644,7 @@ async function saveSetupGuideAdvancedBlock(control = null) {
       state.overview = result;
       syncFeatureDraftFromOverview(result);
       state.providerConfigMode = result.settings?.provider_config_mode || state.providerConfigMode;
-      showToast(result.config_saved === false ? "已写入运行态，但配置持久化可能失败" : `已保存${block.title}`);
+      showToast(configPersistenceFailed(result) ? "已写入运行态，但配置持久化可能失败" : `已保存${block.title}`);
       return true;
     }
   } catch (error) {
@@ -9046,7 +9047,7 @@ async function applySetupGuide({ close = true, advanced = false, control = null,
     if (close) state.setupGuideOpen = false;
     renderAll();
     renderSetupGuideOverlay();
-    if (result?.config_saved === false || overview?.config_saved === false) {
+    if (configPersistenceFailed(result) || configPersistenceFailed(overview)) {
       showToast("首次配置已应用到运行态，但配置持久化失败；请查看日志", "error");
     } else {
       showToast(successMessage || (advanced ? "首次配置已保存，接下来可以继续进阶配置" : "首次配置已保存，可以开始使用"));
@@ -22084,6 +22085,38 @@ function featureRelatedSettings(key) {
       busy_reply_min_delay_seconds: 60,
       busy_reply_max_delay_seconds: 300,
       busy_reply_proactive_resume_buffer_minutes: 10,
+      enable_cycle_state: false,
+      // Keep the cycle editor usable when an older runtime omits newly added
+      // schema values from the overview response. The save payload still
+      // carries the defaults, so editing one field does not silently drop the
+      // rest of the cycle configuration.
+      enable_advanced_cycle_strategy: false,
+      advanced_cycle_link_intensity: false,
+      advanced_cycle_start_offset: 0,
+      advanced_cycle_menstrual_days: 5,
+      advanced_cycle_menstrual_prompt: "处于月经期，身体更容易疲倦，情绪感受稍敏锐",
+      advanced_cycle_menstrual_mood: "疲惫",
+      advanced_cycle_menstrual_energy: -12,
+      advanced_cycle_follicular_days: 5,
+      advanced_cycle_follicular_prompt: "处于卵泡期早，精力平稳回升，心情逐渐轻快",
+      advanced_cycle_follicular_mood: "轻快",
+      advanced_cycle_follicular_energy: 0,
+      advanced_cycle_pre_ovulation_days: 3,
+      advanced_cycle_pre_ovulation_prompt: "处于排卵前期，身体逐渐轻盈，精力有所上升",
+      advanced_cycle_pre_ovulation_mood: "期待",
+      advanced_cycle_pre_ovulation_energy: 8,
+      advanced_cycle_ovulation_days: 1,
+      advanced_cycle_ovulation_prompt: "处于排卵期，精力较充足，社交意愿稍有增强",
+      advanced_cycle_ovulation_mood: "明朗",
+      advanced_cycle_ovulation_energy: 9,
+      advanced_cycle_luteal_days: 8,
+      advanced_cycle_luteal_prompt: "处于黄体期早，精力尚可，情绪整体平稳",
+      advanced_cycle_luteal_mood: "平稳",
+      advanced_cycle_luteal_energy: 5,
+      advanced_cycle_pms_days: 6,
+      advanced_cycle_pms_prompt: "处于 PMS 期，精力有所下降，情绪波动稍明显",
+      advanced_cycle_pms_mood: "敏感",
+      advanced_cycle_pms_energy: -8,
       auto_voice_enabled: true,
       tts_conversion_scope: "full",
       auto_voice_max_chars: 80,
@@ -26000,7 +26033,7 @@ async function runAction(action, successMessage = "", control = null, options = 
   showToast("正在处理...");
   try {
     const result = await action();
-    const persistenceFailed = Boolean(result && result.config_saved === false);
+    const persistenceFailed = configPersistenceFailed(result);
     if (reload && !persistenceFailed) {
       if (result && typeof result === "object" && result.plugin && result.features) {
         const requestSeq = ++loadAllRequestSeq;
@@ -26029,8 +26062,24 @@ async function runAction(action, successMessage = "", control = null, options = 
   }
 }
 
+function configSavedValue(result) {
+  if (!result || typeof result !== "object") return null;
+  const candidates = [result, result.data, result.overview, result.overview?.data];
+  let hasExplicitSuccess = false;
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    if (candidate.config_saved === false) return false;
+    if (candidate.config_saved === true) hasExplicitSuccess = true;
+  }
+  return hasExplicitSuccess ? true : null;
+}
+
+function configPersistenceFailed(result) {
+  return configSavedValue(result) === false;
+}
+
 function actionResultPersisted(result) {
-  return Boolean(result) && result?.config_saved !== false;
+  return Boolean(result) && !configPersistenceFailed(result);
 }
 
 function reactionLibraryItems() {
@@ -31207,7 +31256,8 @@ async function savePageTheme(theme) {
   renderAppearanceSettings();
   try {
     const result = await postJson("/settings/update", { settings: { page_theme: theme } });
-    showToast(result?.config_saved === false ? "主题已应用，但配置持久化失败；重启后可能恢复旧值" : "主题已保存", result?.config_saved === false ? "error" : "success");
+    const persistenceFailed = configPersistenceFailed(result);
+    showToast(persistenceFailed ? "主题已应用，但配置持久化失败；重启后可能恢复旧值" : "主题已保存", persistenceFailed ? "error" : "success");
   } catch (error) {
     state.pageTheme = previous;
     applyPageTheme();

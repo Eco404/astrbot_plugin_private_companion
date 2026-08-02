@@ -26,6 +26,8 @@ from astrbot_plugin_private_companion.reaction_expression import (
     reaction_expression_explicit_opt_out,
     reaction_expression_explicit_request,
     reaction_expression_auto_disabled,
+    reaction_expression_high_frequency,
+    reaction_expression_normalize_probability,
     sync_reaction_expression_auto_preference,
 )
 from astrbot_plugin_private_companion.scene_context import SceneContextMixin
@@ -375,6 +377,12 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_percentage_probability_values_keep_their_runtime_unit(self) -> None:
+        self.assertEqual(0.5, reaction_expression_normalize_probability(50))
+        self.assertEqual(1.0, reaction_expression_normalize_probability(100))
+        self.assertTrue(reaction_expression_high_frequency(100))
+        self.assertFalse(reaction_expression_high_frequency(99))
+
     def test_historical_reaction_mentions_do_not_override_opt_out(self) -> None:
         harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
         cases = (
@@ -559,12 +567,20 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_llm_response_hook_records_model_omission_once_without_tool_call(self) -> None:
         harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
-        harness.enable_reaction_experiment()
+        harness.enable_reaction_experiment(
+            reaction_expression_trigger_probability=0.2
+        )
         event = _FakeEvent()
         module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
-        with patch(
-            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
-            return_value=module,
+        with (
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+                return_value=module,
+            ),
+            patch(
+                "astrbot_plugin_private_companion.llm_tool_actions.random.random",
+                return_value=0.0,
+            ),
         ):
             self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
         source = "这是一条完整的纯文字回复。"
@@ -1715,6 +1731,50 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"purpose":"轻吐槽","emotion":"无语","intensity":2', instruction)
         self.assertNotIn("spontaneous=true", instruction)
         self.assertNotIn("pc_generate_photo", instruction)
+
+    async def test_high_frequency_model_omission_builds_a_generic_fallback_intent(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_reaction_experiment(
+            reaction_expression_trigger_probability=1.0
+        )
+        event = _FakeEvent()
+        event.message_str = "普通闲聊"
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: harness.api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        source = "这是一条轻松的完整回复。"
+        response = SimpleNamespace(
+            completion_text=source,
+            result_chain=None,
+            tools_call_name=[],
+        )
+        harness._recover_plaintext_photo_tool_call = AsyncMock(
+            return_value=(source, False)
+        )
+        harness._guard_unread_creative_work_response = lambda _event, text: text
+        harness.protect_tts_enhancement_response_blocks = AsyncMock()
+
+        await PrivateCompanionPlugin.normalize_tts_enhancement_response(
+            harness,
+            event,
+            response,
+        )
+
+        self.assertEqual(
+            "日常回应",
+            event._private_companion_reaction_expression_intent["purpose"],
+        )
+        self.assertEqual(1, harness._reaction_expression_runtime["local_fallbacks"])
+        self.assertIn(
+            "当前触发概率为 100%",
+            harness._photo_generation_tool_instruction(
+                include_spontaneous=True,
+                spontaneous_only=True,
+            ),
+        )
 
     async def test_semantic_reaction_trigger_bypasses_probability_once(self) -> None:
         """High-confidence local intent can offer expression without another model call."""

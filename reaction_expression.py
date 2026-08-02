@@ -42,6 +42,29 @@ REACTION_EXPRESSION_RESERVATION_SECONDS = 600.0
 # Keep enough sent-image history to cover the duplicate window independently
 # from the number of lookup phrases configured for a single expression.
 REACTION_EXPRESSION_RECENT_IMAGES_MAX = 256
+# A full-scale setting is intentionally treated as a distinct mode.  It means
+# "do not lose opportunities to model omission", while cooldown, duplicate
+# and explicit user boundaries remain active.
+REACTION_EXPRESSION_HIGH_FREQUENCY_THRESHOLD = 0.999
+
+
+def reaction_expression_normalize_probability(
+    value: Any,
+    default: float = 0.2,
+) -> float:
+    """Accept both the persisted unit value and a UI-style percentage."""
+    raw = _safe_float(value, default, 0.0)
+    if raw > 1.0:
+        raw /= 100.0
+    return max(0.0, min(1.0, raw))
+
+
+def reaction_expression_high_frequency(value: Any) -> bool:
+    """Return whether the configured rate requests omission-resistant delivery."""
+    return (
+        reaction_expression_normalize_probability(value, 0.0)
+        >= REACTION_EXPRESSION_HIGH_FREQUENCY_THRESHOLD
+    )
 
 
 def ensure_reaction_expression_state(user: dict[str, Any]) -> dict[str, Any]:
@@ -85,7 +108,7 @@ def reaction_expression_effective_probability(
     state: dict[str, Any], configured_probability: Any
 ) -> float:
     """Apply learned preference as a gentle bias without overriding the configured rate."""
-    base = _safe_float(configured_probability, 0.2, 0.0, 1.0)
+    base = reaction_expression_normalize_probability(configured_probability, 0.2)
     preference = state.get("preference")
     score = (
         _safe_int(preference.get("score"), 0, -20, 20)
@@ -180,7 +203,7 @@ def evaluate_reaction_expression_gate(
     cooldown_seconds: float,
     random_value: float,
 ) -> dict[str, Any]:
-    probability = _safe_float(probability, 0.2, 0.0, 1.0)
+    probability = reaction_expression_normalize_probability(probability, 0.2)
     cooldown_seconds = _safe_float(cooldown_seconds, 180.0, 0.0, 86400.0)
     signature = _single_line(intent.get("signature"), 40)
 

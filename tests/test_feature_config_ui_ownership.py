@@ -260,6 +260,9 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         probability = api._normalize_setting_value(
             "reaction_expression_trigger_probability", 20
         )
+        full_probability = api._normalize_setting_value(
+            "reaction_expression_trigger_probability", 100
+        )
         candidate_limit = api._normalize_setting_value(
             "reaction_expression_candidate_limit", 99
         )
@@ -274,6 +277,7 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
 
         self.assertTrue(plugin.enable_reaction_expression_experiment)
         self.assertEqual(0.2, plugin.reaction_expression_trigger_probability)
+        self.assertEqual(1.0, full_probability)
         self.assertEqual(16, plugin.reaction_expression_candidate_limit)
         self.assertEqual("same_message", plugin.reaction_expression_delivery_mode)
 
@@ -396,6 +400,17 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         )
 
         self.assertEqual(detail_keys - saveable_keys, set())
+
+    def test_forward_image_timeout_ui_supports_slow_multi_image_models(self) -> None:
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        item = schema["forward_message_config"]["items"]["forward_message_image_vision_timeout_seconds"]
+
+        self.assertEqual(item["default"], 60)
+        self.assertEqual(item["slider"]["max"], 600)
+        self.assertIn(
+            'forward_message_image_vision_timeout_seconds: { type: "number", min: 0, max: 600, step: 1 }',
+            self.script,
+        )
 
 
 if __name__ == "__main__":

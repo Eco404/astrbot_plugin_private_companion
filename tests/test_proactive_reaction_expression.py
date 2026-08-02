@@ -233,6 +233,22 @@ class ProactiveReactionExpressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("今天路过时闻到一点桂花香，忽然想起你。", text)
         self.assertNotIn(UMO, harness._proactive_reaction_intent_cache())
 
+    async def test_high_frequency_generation_recovers_when_model_omits_hidden_intent(self) -> None:
+        harness = _GenerationHarness("今天路过时闻到一点桂花香，忽然想起你。")
+        harness.reaction_expression_trigger_probability = 1.0
+        user = {"user_id": "10001", "umo": UMO}
+
+        text = await harness._generate_proactive_message_with_llm(
+            user,
+            "用户",
+            "check_in",
+        )
+
+        self.assertEqual("今天路过时闻到一点桂花香，忽然想起你。", text)
+        cached = harness._proactive_reaction_intent_cache()[UMO]
+        self.assertEqual("日常分享", cached["intent"]["purpose"])
+        self.assertEqual("开心", cached["intent"]["emotion"])
+
     async def test_prepared_attachment_uses_canonical_user_and_visible_text_context(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             image_path = Path(folder) / "reaction.png"

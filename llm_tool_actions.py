@@ -43,6 +43,8 @@ from .reaction_expression import (
     reaction_expression_explicit_opt_out,
     reaction_expression_explicit_request,
     reaction_expression_auto_disabled,
+    reaction_expression_high_frequency,
+    reaction_expression_normalize_probability,
     sync_reaction_expression_auto_preference,
     normalize_reaction_expression_intent,
     reaction_expression_effective_probability,
@@ -538,16 +540,26 @@ class LlmToolActionsMixin:
         if not reaction_enabled and not photo_enabled:
             return ""
         if spontaneous_only:
-            return """
-【实验性表情表达】
-- 先完成一条正常、完整、可以独立发送的文字回复。表情图片只能作为文字后的补充，绝对不能替代文字回复。
-- 本轮已经由插件完成概率抽样并获得一次表情表达机会；不要再次按概率决定，也不要因为“不确定”而默认省略标签。
-- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗或轻吐槽等能自然补充语气的场景，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。
-- 最小标签格式为 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2}</pc_reaction_expression>`。
-- `purpose` 写沟通用途，`emotion` 写希望传达的情绪，`intensity` 为 0-5；需要帮助检索时可选填 `candidate_queries`，提供 1-3 个简短说法。不要填写图片路径。
-- 每轮最多写一个标签，必须放在全部可见文字和 TTS 标签之后；不要使用 Markdown 代码块，不要解释标签，也不要调用图片或生图工具。
-- 即使图库最终没有匹配、图片重复或发送失败，前面的完整文字也必须仍然自然成立。
-""".strip()
+            high_frequency_hint = (
+                "- 当前触发概率为 100%：对轻松、社交或有明确情绪的正常回复，默认追加一个标签；"
+                "不要把‘是否自然’再次当作概率筛选。纯事实、严肃、敏感或明确边界场景仍只发正文。"
+                if reaction_expression_high_frequency(
+                    getattr(self, "reaction_expression_trigger_probability", 0.2)
+                )
+                else "- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗或轻吐槽等能自然补充语气的场景，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。"
+            )
+            return "\n".join(
+                [
+                    "【实验性表情表达】",
+                    "- 先完成一条正常、完整、可以独立发送的文字回复。表情图片只能作为文字后的补充，绝对不能替代文字回复。",
+                    "- 本轮已经由插件完成概率抽样并获得一次表情表达机会；不要再次按概率决定，也不要因为‘不确定’而默认省略标签。",
+                    high_frequency_hint,
+                    '- 最小标签格式为 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2}</pc_reaction_expression>`。',
+                    "- `purpose` 写沟通用途，`emotion` 写希望传达的情绪，`intensity` 为 0-5；需要帮助检索时可选填 `candidate_queries`，提供 1-3 个简短说法。不要填写图片路径。",
+                    "- 每轮最多写一个标签，必须放在全部可见文字和 TTS 标签之后；不要使用 Markdown 代码块，不要解释标签，也不要调用图片或生图工具。",
+                    "- 即使图库最终没有匹配、图片重复或发送失败，前面的完整文字也必须仍然自然成立。",
+                ]
+            ).strip()
         lines = ["【实验性表情表达工具】" if spontaneous_only else "【图库表情与生图工具】"]
         if reaction_enabled:
             if not spontaneous_only:
@@ -3436,7 +3448,10 @@ class LlmToolActionsMixin:
         probability of zero remains an explicit opt-out; cooldown and duplicate
         protection are still enforced by ``evaluate_reaction_expression_gate``.
         """
-        base_probability = _safe_float(configured_probability, 0.2, 0.0, 1.0)
+        base_probability = reaction_expression_normalize_probability(
+            configured_probability,
+            0.2,
+        )
         default = {
             "mode": "probability",
             "reason": "random_offer",
@@ -3595,15 +3610,28 @@ class LlmToolActionsMixin:
         """Build a conservative intent when the model omits the hidden tag.
 
         This reuses the inbound classifier state that already authorized the
-        opportunity. It is intentionally limited to high-confidence social or
-        emotional turns, so factual/help replies and boundaries remain text-only.
+        opportunity. Normal rates stay limited to high-confidence social or
+        emotional turns; the explicit 100% mode also covers a plain social
+        reply when the model omitted its optional tag.
         """
         if not isinstance(authorization, dict) or not authorization.get("authorized"):
             return {}
         if authorization.get("consumed"):
             return {}
         trigger_mode = _single_line(authorization.get("trigger_mode"), 40).casefold()
-        if trigger_mode not in {"semantic_rule", "strong_emotion"}:
+        high_frequency = bool(authorization.get("high_frequency_mode")) or reaction_expression_high_frequency(
+            authorization.get(
+                "configured_probability",
+                getattr(self, "reaction_expression_trigger_probability", 0.2),
+            )
+        )
+        allowed_modes = {"semantic_rule", "strong_emotion"}
+        if high_frequency:
+            # At 100% the probability gate has already granted the opportunity;
+            # do not make delivery depend on the model remembering an optional
+            # hidden tag. Boundary and feedback checks below still apply.
+            allowed_modes.add("probability")
+        if trigger_mode not in allowed_modes:
             return {}
         try:
             user_id = _single_line(
@@ -3623,10 +3651,28 @@ class LlmToolActionsMixin:
                 create=False,
             )
             if not isinstance(user, dict):
+                user = None
+            profile = user.get("intent_profile") if isinstance(user, dict) else None
+        if not isinstance(profile, dict) or not profile:
+            if not high_frequency:
                 return {}
-            profile = user.get("intent_profile")
-            if not isinstance(profile, dict):
+            context_text = _single_line(visible_text, 700)
+            if not self._reaction_expression_has_visible_text(context_text):
                 return {}
+            return normalize_reaction_expression_intent(
+                query="开心回应",
+                context=context_text,
+                purpose="日常回应",
+                emotion="开心",
+                intensity=2,
+                candidate_queries=["开心回应", "轻松互动", "日常分享"],
+                candidate_limit=_safe_int(
+                    getattr(self, "reaction_expression_candidate_limit", 6),
+                    6,
+                    1,
+                    16,
+                ),
+            )
         profile_text = re.sub(r"\s+", "", _single_line(profile.get("text"), 500))
         current_text = re.sub(
             r"\s+",
@@ -3643,7 +3689,8 @@ class LlmToolActionsMixin:
             _safe_float(profile.get("emotion_confidence"), 0.0, 0.0, 1.0),
         )
         intensity = _safe_float(profile.get("emotion_intensity"), 0.0, 0.0, 100.0)
-        if confidence < 0.72 or bool(profile.get("boundary_durable")):
+        confidence_floor = 0.62 if high_frequency else 0.72
+        if confidence < confidence_floor or bool(profile.get("boundary_durable")):
             return {}
         if emotion_target not in {"", "self", "bot"}:
             return {}
@@ -3666,6 +3713,17 @@ class LlmToolActionsMixin:
             )
         else:
             preset = event_presets.get(emotion_event) or presets.get(intent_name)
+            if not preset and high_frequency and intent_name in {
+                "chat",
+                "social",
+                "conversation",
+                "greeting",
+            }:
+                preset = (
+                    "日常回应",
+                    "开心",
+                    ["开心回应", "轻松互动", "日常分享"],
+                )
         if not preset:
             return {}
         purpose_text, emotion_text, candidates = preset
@@ -3778,11 +3836,9 @@ class LlmToolActionsMixin:
             return False
 
         scope_key = self._reaction_expression_scope_key(event, user_id)
-        configured_probability = _safe_float(
+        configured_probability = reaction_expression_normalize_probability(
             getattr(self, "reaction_expression_trigger_probability", 0.2),
             0.2,
-            0.0,
-            1.0,
         )
         cooldown = _safe_float(
             getattr(self, "reaction_expression_cooldown_seconds", 180),
@@ -3847,6 +3903,9 @@ class LlmToolActionsMixin:
                 "nonce": uuid.uuid4().hex,
                 "configured_probability": configured_probability,
                 "effective_probability": probability,
+                "high_frequency_mode": reaction_expression_high_frequency(
+                    configured_probability
+                ),
                 "gate_probability": gate_probability,
                 "trigger_mode": _single_line(trigger.get("mode"), 40) or "probability",
                 "trigger_reason": _single_line(trigger.get("reason"), 80),

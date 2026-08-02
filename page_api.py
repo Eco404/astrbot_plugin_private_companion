@@ -102,6 +102,40 @@ FISH_AUDIO_MODEL_OPTIONS = [
     {"value": "s1", "label": "S1 旧版"},
 ]
 
+# Keep the cycle editor contract explicit.  These settings live inside the
+# humanized-state schema group, but the page API must remain usable when an
+# older AstrBot process has not rebuilt its schema index yet.
+CYCLE_SETTING_KEYS = (
+    "enable_cycle_state",
+    "enable_advanced_cycle_strategy",
+    "advanced_cycle_link_intensity",
+    "advanced_cycle_start_offset",
+    "advanced_cycle_menstrual_days",
+    "advanced_cycle_menstrual_prompt",
+    "advanced_cycle_menstrual_mood",
+    "advanced_cycle_menstrual_energy",
+    "advanced_cycle_follicular_days",
+    "advanced_cycle_follicular_prompt",
+    "advanced_cycle_follicular_mood",
+    "advanced_cycle_follicular_energy",
+    "advanced_cycle_pre_ovulation_days",
+    "advanced_cycle_pre_ovulation_prompt",
+    "advanced_cycle_pre_ovulation_mood",
+    "advanced_cycle_pre_ovulation_energy",
+    "advanced_cycle_ovulation_days",
+    "advanced_cycle_ovulation_prompt",
+    "advanced_cycle_ovulation_mood",
+    "advanced_cycle_ovulation_energy",
+    "advanced_cycle_luteal_days",
+    "advanced_cycle_luteal_prompt",
+    "advanced_cycle_luteal_mood",
+    "advanced_cycle_luteal_energy",
+    "advanced_cycle_pms_days",
+    "advanced_cycle_pms_prompt",
+    "advanced_cycle_pms_mood",
+    "advanced_cycle_pms_energy",
+)
+
 try:
     from PIL import Image as PILImage
     from PIL import ImageOps as PILImageOps
@@ -16332,6 +16366,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "humanized_state_intensity",
             "enable_health_state",
             "enable_hunger_state",
+            *CYCLE_SETTING_KEYS,
             "enable_rest_reply_simulation",
             "rest_reply_mode",
             "rest_reply_probability",
@@ -16669,6 +16704,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "atrelay_default_relay_style",
             "atrelay_multi_target_limit",
         ]
+        # Keep cycle settings in the overview even when a long-lived AstrBot
+        # process has not rebuilt its schema index after a plugin upgrade.
+        # The settings endpoint already accepts this explicit contract; the
+        # runtime snapshot must expose the same fields for the panel editor.
+        for key in CYCLE_SETTING_KEYS:
+            if key not in keys:
+                keys.append(key)
         provider_keys = self._schema_provider_keys(public_only=True)
         for key in sorted(self._schema_setting_keys(public_only=True)):
             if key not in keys and key not in provider_keys:
@@ -19370,11 +19412,58 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "atrelay_multi_target_limit",
         }
         keys.update(self._schema_setting_keys(public_only=True))
+        keys.update(CYCLE_SETTING_KEYS)
         return keys
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
         if key == "enable_body_monitor_integration":
             return self._normalize_bool_value(value)
+        if key in {"enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity"}:
+            return self._normalize_bool_value(value)
+        if key == "advanced_cycle_start_offset":
+            try:
+                return max(0, min(180, int(value)))
+            except (TypeError, ValueError):
+                return 0
+        if key in {
+            "advanced_cycle_menstrual_days",
+            "advanced_cycle_follicular_days",
+            "advanced_cycle_pre_ovulation_days",
+            "advanced_cycle_ovulation_days",
+            "advanced_cycle_luteal_days",
+            "advanced_cycle_pms_days",
+        }:
+            try:
+                return max(1, min(30, int(value)))
+            except (TypeError, ValueError):
+                return 1
+        if key in {
+            "advanced_cycle_menstrual_energy",
+            "advanced_cycle_follicular_energy",
+            "advanced_cycle_pre_ovulation_energy",
+            "advanced_cycle_ovulation_energy",
+            "advanced_cycle_luteal_energy",
+            "advanced_cycle_pms_energy",
+        }:
+            try:
+                return max(-50, min(30, int(value)))
+            except (TypeError, ValueError):
+                return 0
+        if key in {
+            "advanced_cycle_menstrual_prompt",
+            "advanced_cycle_menstrual_mood",
+            "advanced_cycle_follicular_prompt",
+            "advanced_cycle_follicular_mood",
+            "advanced_cycle_pre_ovulation_prompt",
+            "advanced_cycle_pre_ovulation_mood",
+            "advanced_cycle_ovulation_prompt",
+            "advanced_cycle_ovulation_mood",
+            "advanced_cycle_luteal_prompt",
+            "advanced_cycle_luteal_mood",
+            "advanced_cycle_pms_prompt",
+            "advanced_cycle_pms_mood",
+        }:
+            return str(value or "").strip()[:1200]
         if key in self._schema_bool_keys():
             return self._normalize_bool_value(value)
         if key == "reaction_expression_delivery_mode":

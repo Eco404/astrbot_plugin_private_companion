@@ -2318,7 +2318,13 @@ class PrivateCompanionPlugin(
         self.forward_message_parse_nested = self._cfg_bool(c, "forward_message_parse_nested", True)
         self.forward_message_image_vision = self._cfg_bool(c, "forward_message_image_vision", True)
         self.forward_message_image_limit = self._cfg_int(c, "forward_message_image_limit", 4, 0, 12)
-        self.forward_message_image_vision_timeout_seconds = self._cfg_float(c, "forward_message_image_vision_timeout_seconds", 6.0, 0.0)
+        self.forward_message_image_vision_timeout_seconds = self._cfg_float(
+            c,
+            "forward_message_image_vision_timeout_seconds",
+            60.0,
+            0.0,
+            600.0,
+        )
         self.enable_group_scene_awareness = self._cfg_bool(c, "enable_group_scene_awareness", True)
         self.group_scene_recent_limit = self._cfg_int(c, "group_scene_recent_limit", 5, 2, 12)
         self.enable_group_reality_promise_guard = self._cfg_bool(c, "enable_group_reality_promise_guard", True)
