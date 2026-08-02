@@ -3849,6 +3849,8 @@ class PrivateCompanionPlugin(
         self,
         event: AstrMessageEvent,
         pending: dict[str, Any] | None = None,
+        *,
+        require_segmented_complete: bool = False,
     ) -> bool:
         tracker = (
             pending.get("delivery_tracker")
@@ -3866,12 +3868,22 @@ class PrivateCompanionPlugin(
         successful = list(tracker.get("successful_signatures") or [])
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        expected_sources: list[Any] = [chain]
+        if require_segmented_complete:
+            segmented_chunks = getattr(
+                event,
+                "_private_companion_reaction_expression_expected_primary_chunks",
+                None,
+            )
+            if isinstance(segmented_chunks, list) and segmented_chunks:
+                expected_sources = segmented_chunks
         expected: list[tuple[str, ...]] = []
-        for item in self._reaction_expression_flatten_delivery_components(chain):
-            signature = self._reaction_expression_delivery_signature(item)
-            if signature is None or signature[0] == "image":
-                continue
-            expected.append(signature)
+        for source in expected_sources:
+            for item in self._reaction_expression_flatten_delivery_components(source):
+                signature = self._reaction_expression_delivery_signature(item)
+                if signature is None or signature[0] == "image":
+                    continue
+                expected.append(signature)
         if not expected:
             return False
         for signature in expected:
@@ -4071,6 +4083,7 @@ class PrivateCompanionPlugin(
         primary_sent = self._reaction_expression_primary_reply_confirmed(
             event,
             pending,
+            require_segmented_complete=True,
         )
         if delivery_mode == "separate_after":
             if pending.get("delivery_started"):
@@ -4121,6 +4134,49 @@ class PrivateCompanionPlugin(
             sent=sent,
             reason=reason,
         )
+
+    @filter.after_message_sent(priority=9500)
+    async def release_reaction_expression_segmented_remainder_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """Finish all text bubbles before a separate-after reaction is released."""
+        if self is None or not self.enabled:
+            return
+        pending = getattr(
+            event,
+            "_private_companion_reaction_expression_segmented_remainder",
+            None,
+        )
+        if not isinstance(pending, dict) or pending.get("started"):
+            return
+        chunks = pending.get("chunks")
+        if not isinstance(chunks, list) or not chunks:
+            return
+        if not self._reaction_expression_primary_reply_confirmed(event):
+            return
+        pending["started"] = True
+        try:
+            await self._send_segmented_llm_chain_remainder(
+                event,
+                chunks,
+                previous_segment=_single_line(pending.get("previous_segment"), 500),
+                source="reaction_expression",
+                started_at=_safe_float(pending.get("started_at"), time.time(), 0.0),
+            )
+            pending["completed"] = self._reaction_expression_primary_reply_confirmed(
+                event,
+                require_segmented_complete=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            pending["completed"] = False
+            logger.warning(
+                "[PrivateCompanion] 表情正文分段补发失败: session=%s error=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                or "unknown",
+                _single_line(exc, 160),
+            )
 
     @filter.after_message_sent(priority=8000)
     async def release_tts_reply_remainder_after_send(
@@ -4185,6 +4241,14 @@ class PrivateCompanionPlugin(
         if self is None:
             return
         self._restore_reaction_expression_delivery_tracker(event)
+        for attr_name in (
+            "_private_companion_reaction_expression_segmented_remainder",
+            "_private_companion_reaction_expression_expected_primary_chunks",
+        ):
+            try:
+                delattr(event, attr_name)
+            except Exception:
+                pass
 
     @filter.on_decorating_result()
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
@@ -5151,13 +5215,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "_private_companion_reaction_expression_intent",
             None,
         )
-        if isinstance(reaction_intent, dict) and reaction_intent:
-            logger.debug(
-                "[PrivateCompanion] 表情表达保留完整正文,跳过通用分段: session=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                or "unknown",
-            )
-            return
+        has_reaction_intent = isinstance(reaction_intent, dict) and bool(
+            reaction_intent
+        )
         if is_llm_result and await self._should_defer_segmenting_to_astrbot_tts(event, result, chain):
             logger.debug(
                 "[PrivateCompanion] 当前 LLM 结果交由 AstrBot 官方 TTS 与原生分段处理: session=%s",
@@ -5196,7 +5256,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             _single_line(text, 420),
         )
         plain_segments = self._plain_text_segments_from_chunks(chunks)
-        if plain_segments and len(plain_segments) == len(chunks) and await self._send_segmented_event_forward_message(event, plain_segments, source="decorating_result"):
+        if (
+            not has_reaction_intent
+            and plain_segments
+            and len(plain_segments) == len(chunks)
+            and await self._send_segmented_event_forward_message(
+                event,
+                plain_segments,
+                source="decorating_result",
+            )
+        ):
             empty_result = self._build_result_from_chain([])
             try:
                 empty_result.stop_event()
@@ -5210,16 +5279,41 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._record_daily_review_outbound_case(event, chunks[0])
         activity_baseline = time.time()
         if len(chunks) > 1:
-            self._create_lifecycle_background_task(
-                self._send_segmented_llm_chain_remainder(
+            previous_segment = self._segmented_chunk_log_text(chunks[0])
+            if has_reaction_intent:
+                setattr(
                     event,
-                    chunks[1:],
-                    previous_segment=self._segmented_chunk_log_text(chunks[0]),
-                    source="decorating_result",
-                    started_at=activity_baseline,
-                ),
-                label="segmented_llm_remainder",
-            )
+                    "_private_companion_reaction_expression_expected_primary_chunks",
+                    chunks,
+                )
+                setattr(
+                    event,
+                    "_private_companion_reaction_expression_segmented_remainder",
+                    {
+                        "chunks": chunks[1:],
+                        "previous_segment": previous_segment,
+                        "started_at": activity_baseline,
+                        "started": False,
+                        "completed": False,
+                    },
+                )
+                logger.info(
+                    "[PrivateCompanion] 表情正文启用有序分段: session=%s segments=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                    or "unknown",
+                    len(chunks),
+                )
+            else:
+                self._create_lifecycle_background_task(
+                    self._send_segmented_llm_chain_remainder(
+                        event,
+                        chunks[1:],
+                        previous_segment=previous_segment,
+                        source="decorating_result",
+                        started_at=activity_baseline,
+                    ),
+                    label="segmented_llm_remainder",
+                )
 
     @filter.on_decorating_result()
     async def remember_group_bot_reply_context_before_send(self, event: AstrMessageEvent, *args, **kwargs):

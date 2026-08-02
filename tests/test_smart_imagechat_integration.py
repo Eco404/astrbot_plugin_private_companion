@@ -1008,6 +1008,66 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("primary_not_delivered", pending["settled_reason"])
         self.assertEqual(1, len(event.sent_results))
 
+    async def test_segmented_reaction_sends_all_text_bubbles_before_image(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        first = Plain("第一段。")
+        second = Plain("第二段。")
+        event = _FakeResultEvent([first])
+        event._private_companion_reaction_expression_intent = {
+            "purpose": "接住玩笑",
+            "emotion": "开心",
+            "provider_query": "开心回应",
+            "candidate_queries": ["开心回应"],
+        }
+        event._private_companion_reaction_expression_expected_primary_chunks = [
+            [first],
+            [second],
+        ]
+        event._private_companion_reaction_expression_segmented_remainder = {
+            "chunks": [[second]],
+            "previous_segment": "第一段。",
+            "started_at": 10.0,
+            "started": False,
+            "completed": False,
+        }
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+            await PrivateCompanionPlugin.attach_reaction_expression_image_before_send(
+                harness,
+                event,
+            )
+
+        async def send_remainder(target_event, chunks, **_kwargs):
+            for chunk in chunks:
+                await target_event.send(target_event.chain_result(chunk))
+
+        harness._send_segmented_llm_chain_remainder = send_remainder
+        await event.send(event.chain_result([first]))
+        await PrivateCompanionPlugin.release_reaction_expression_segmented_remainder_after_send(
+            harness,
+            event,
+        )
+        await PrivateCompanionPlugin.settle_reaction_expression_attachment_after_send(
+            harness,
+            event,
+        )
+
+        pending = event._private_companion_reaction_expression_pending_attachment
+        self.assertTrue(pending["sent"])
+        self.assertTrue(
+            event._private_companion_reaction_expression_segmented_remainder["completed"]
+        )
+        self.assertEqual(3, len(event.sent_results))
+        self.assertEqual("第一段。", event.sent_results[0].chain[0].text)
+        self.assertEqual("第二段。", event.sent_results[1].chain[0].text)
+        self.assertIsInstance(event.sent_results[2].chain[0], Image)
+
     async def test_lookup_miss_still_tracks_partial_primary_for_deferred_tts(
         self,
     ) -> None:
