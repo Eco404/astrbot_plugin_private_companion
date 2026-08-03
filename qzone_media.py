@@ -39,6 +39,17 @@ class QzoneMediaMixin:
     """QZone image reading, upload and publish helpers."""
 
     @staticmethod
+    def _qzone_response_code(payload: Any) -> Any:
+        """Return an explicit failure code even when normalized data has code=null."""
+        if not isinstance(payload, dict):
+            return 0
+        values = [payload.get("code"), payload.get("ret"), payload.get("_raw_code")]
+        for value in values:
+            if value is not None and value != "" and value != 0 and value != "0":
+                return value
+        return 0
+
+    @staticmethod
     def _qzone_auth_failure_message(message: Any) -> bool:
         text = str(message or "").lower()
         if not text:
@@ -642,8 +653,8 @@ class QzoneMediaMixin:
             timeout_seconds=60.0,
             cookie_header=cookie_header,
         )
-        code = payload.get("code", payload.get("ret", payload.get("_raw_code", 0)))
-        if code not in {0, "0", None, ""}:
+        code = self._qzone_response_code(payload)
+        if code not in {0, "0"}:
             raise QzoneIntegrationError("图片上传失败", _single_line(payload.get("message") or payload.get("msg") or payload.get("_raw_message") or f"code={code}", 160))
         richval = self._qzone_build_richval(payload)
         pic_bo = str(self._qzone_find_first(payload, ("pic_bo", "picbo", "bo")) or "").strip()
@@ -881,9 +892,9 @@ class QzoneMediaMixin:
             headers=headers,
             cookie_header=cookie_header,
         )
-        code = payload.get("code", 0)
+        code = self._qzone_response_code(payload)
         if code not in {0, "0"}:
-            message = _single_line(payload.get("message") or payload.get("msg") or f"code={code}", 160)
+            message = _single_line(payload.get("message") or payload.get("msg") or payload.get("_raw_message") or f"code={code}", 160)
             if str(code) not in message:
                 message = _single_line(f"code={code} {message}", 160)
             logger.info(

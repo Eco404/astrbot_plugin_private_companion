@@ -21,6 +21,25 @@ from .helpers import _day_start_ts, _now_ts, _path_text, _safe_float, _safe_int,
 from .qzone_media import QzoneIntegrationError, QzoneMediaMixin
 
 
+# Publish-window templates offered as one-click presets in the WebUI. Users stay
+# free to edit them or add any number of extra windows afterwards.
+QZONE_WINDOW_TEMPLATE_DOUBLE = "07:00-10:00\n18:00-22:00"
+QZONE_WINDOW_TEMPLATE_DOUBLE_NIGHT = "00:30-03:30\n07:00-10:00\n18:00-22:00"
+# Night range mirrors the existing insomnia-night definition (23:00-05:59).
+QZONE_NIGHT_RANGES = ((0, 6 * 60), (23 * 60, 24 * 60))
+QZONE_LENGTH_PROFILES = {
+    "short": (20, 45),
+    "medium": (45, 80),
+    "long": (80, 110),
+}
+QZONE_LENGTH_HARD_LIMIT = 120
+# Floor for spacing several posts inside one day so a high max_daily can never
+# collapse into a burst of back-to-back posts.
+QZONE_INTRA_DAY_GAP_FLOOR_MINUTES = 45
+# A plan item that keeps failing retires instead of retrying every tick all day.
+QZONE_PLAN_ITEM_MAX_ATTEMPTS = 3
+
+
 class QzoneMixin(QzoneMediaMixin):
     """QQ Zone integration helpers."""
 
@@ -1069,9 +1088,16 @@ class QzoneMixin(QzoneMediaMixin):
             },
             cookie_header=cookie_header,
         )
-        code = payload.get("code", 0)
+        # Nested {"code": -3000, "data": {}} responses lose the outer code during
+        # normalization, so fall back to ret/_raw_code or a failure reads as success.
+        code = self._qzone_response_code(payload)
         if code not in {0, "0"}:
-            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"查询失败 code={code}", 160))
+            raise RuntimeError(
+                _single_line(
+                    payload.get("message") or payload.get("msg") or payload.get("_raw_message") or f"查询失败 code={code}",
+                    160,
+                )
+            )
         msglist = payload.get("msglist") or []
         if not isinstance(msglist, list):
             msglist = []
@@ -1169,7 +1195,7 @@ class QzoneMixin(QzoneMediaMixin):
             },
             cookie_header=cookie_header,
         )
-        code = payload.get("code", 0)
+        code = self._qzone_response_code(payload)
         if code not in {0, "0"}:
             logger.warning(
                 "[PrivateCompanion] QQ 空间点赞失败: code=%s message=%s uin=%s tid=%s appid=%s typeid=%s fid=%s http=%s",
@@ -1182,7 +1208,12 @@ class QzoneMixin(QzoneMediaMixin):
                 fid,
                 payload.get("_http_status"),
             )
-            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"点赞失败 code={code}", 160))
+            raise RuntimeError(
+                _single_line(
+                    payload.get("message") or payload.get("msg") or payload.get("_raw_message") or f"点赞失败 code={code}",
+                    160,
+                )
+            )
         verification = await self._qzone_verify_like_post(event, post, cookie_header=cookie_header, target_liked=True)
         logger.info(
             "[PrivateCompanion] QQ 空间点赞成功: uin=%s tid=%s appid=%s typeid=%s fid=%s verified=%s",
@@ -1256,8 +1287,8 @@ class QzoneMixin(QzoneMediaMixin):
             },
             cookie_header=cookie_header,
         )
-        code = payload.get("code", payload.get("ret", payload.get("_raw_code", 0)))
-        if code not in {0, "0", None, ""}:
+        code = self._qzone_response_code(payload)
+        if code not in {0, "0"}:
             logger.warning(
                 "[PrivateCompanion] QQ 空间删除说说失败: code=%s message=%s uin=%s tid=%s http=%s",
                 code,
@@ -1325,9 +1356,17 @@ class QzoneMixin(QzoneMediaMixin):
             },
             cookie_header=cookie_header,
         )
-        code = payload.get("code", 0)
+        # Nested {"code": -3000, "data": {}} responses must not read as success:
+        # a silently dropped comment used to be recorded as delivered.
+        code = self._qzone_response_code(payload)
         if code not in {0, "0"}:
-            raise RuntimeError(_single_line(payload.get("message") or payload.get("msg") or f"评论失败 code={code}", 160))
+            message = _single_line(
+                payload.get("message") or payload.get("msg") or payload.get("_raw_message") or "评论失败",
+                140,
+            )
+            if str(code) not in message:
+                message = _single_line(f"code={code} {message}", 160)
+            raise RuntimeError(message)
         return comment
 
     @staticmethod
@@ -1692,6 +1731,170 @@ class QzoneMixin(QzoneMediaMixin):
             raise RuntimeError("评论回复内容为空")
         return await self._qzone_comment_post(event, post, content=_single_line(reply, 120))
 
+    @staticmethod
+    def _qzone_comment_fuzzy_score(comment_text: Any, hint: Any) -> float:
+        """Score a remembered comment hint without pretending fuzzy is exact."""
+        text = QzoneMixin._qzone_normalized_comment_text(comment_text)
+        query = QzoneMixin._qzone_normalized_comment_text(hint)
+        if not query or not text:
+            return 0.0
+        if query == text:
+            return 1.0
+        if query in text or text in query:
+            return min(0.96, min(len(query), len(text)) / max(len(query), len(text)) + 0.18)
+        grams = lambda value: {value[i : i + 3] for i in range(max(0, len(value) - 2))}
+        left, right = grams(query), grams(text)
+        if not left or not right:
+            return 0.0
+        return len(left & right) / max(1, len(left | right))
+
+    def _qzone_comment_identifiers(self, post: Any, comment: Any) -> tuple[str, str, list[str]]:
+        """Return stable ID and fingerprint forms shared by reply paths."""
+        comment_id = _single_line(getattr(comment, "comment_id", ""), 120)
+        post_tid = _single_line(getattr(post, "tid", ""), 80)
+        raw_comment = getattr(comment, "raw", None)
+        if isinstance(raw_comment, dict):
+            comment_key = self._qzone_comment_fingerprint(post_tid, raw_comment)
+            legacy_id = self._qzone_comment_legacy_fallback_id(post_tid, raw_comment)
+        else:
+            author = _single_line(getattr(comment, "uin", ""), 40) or _single_line(getattr(comment, "name", ""), 40)
+            content = re.sub(r"\s+", "", _single_line(getattr(comment, "content", ""), 180)).lower()
+            digest = hashlib.sha1(f"{post_tid or 'post'}|{author}|{content}".encode("utf-8", "ignore")).hexdigest()[:20]
+            comment_key = f"{post_tid or 'post'}:fp:{digest}"
+            legacy_id = _single_line(getattr(comment, "comment_legacy_id", ""), 120)
+        comment_key = _single_line(getattr(comment, "comment_key", "") or comment_key, 120)
+        legacy_id = _single_line(getattr(comment, "comment_legacy_id", "") or legacy_id, 120)
+        return comment_id, comment_key, self._qzone_trim_id_list([comment_id, legacy_id], limit=5)
+
+    async def _qzone_reply_my_comment(
+        self,
+        event: AstrMessageEvent | None,
+        *,
+        comment_hint: str = "",
+        selector: str = "latest",
+        reply_hint: str = "",
+    ) -> dict[str, Any]:
+        """Find one recent comment left by the current user on Bot's own post."""
+        if not self._qzone_available(event):
+            return {"status": "disabled", "message": self._qzone_platform_unavailable_message()}
+        cookie_header = await self._qzone_get_cookies(event)
+        ctx = self._qzone_context_from_cookies(cookie_header)
+        own_uin = _safe_int(ctx.get("uin"), 0, 0)
+        posts = await self._qzone_query_feeds(
+            event,
+            target_id=str(own_uin),
+            pos=0,
+            num=max(3, _safe_int(getattr(self, "qzone_comment_inbox_recent_posts", 5), 5, 1, 20)),
+            with_detail=True,
+            cookie_header=cookie_header,
+        )
+        if selector in {"", "latest", "最新", "0", "1"}:
+            posts = posts[:1]
+        elif selector:
+            return {"status": "invalid_selector", "message": "目前只能检查最新一条动态。"}
+        sender_uin = 0
+        try:
+            sender_uin = _safe_int(event.get_sender_id() if event else 0, 0, 0)
+        except Exception:
+            pass
+        candidates: list[dict[str, Any]] = []
+        for post in posts:
+            comments = list(getattr(post, "comments", []) or [])
+            for comment in comments:
+                author_uin = _safe_int(getattr(comment, "uin", 0), 0, 0)
+                if own_uin and author_uin == own_uin:
+                    continue
+                if sender_uin and author_uin and author_uin != sender_uin:
+                    continue
+                content = _single_line(getattr(comment, "content", ""), 180)
+                if not content:
+                    continue
+                author_match = False
+                try:
+                    author_match = bool(sender_uin and sender_uin == author_uin)
+                except Exception:
+                    pass
+                score = self._qzone_comment_fuzzy_score(content, comment_hint) if comment_hint else 0.0
+                if author_match:
+                    score = max(score, 0.82)
+                if not comment_hint and not author_match:
+                    continue
+                comment_id, comment_key, id_candidates = self._qzone_comment_identifiers(post, comment)
+                candidates.append({
+                    "post": post,
+                    "comment": comment,
+                    "score": score,
+                    "comment_id": comment_id,
+                    "comment_key": comment_key,
+                    "id_candidates": id_candidates,
+                    "content": content,
+                })
+        state = self._qzone_state_dict()
+        replied = set(self._qzone_trim_id_list(state.get("comment_inbox_replied_ids"), limit=300))
+        replied_keys = set(self._qzone_trim_id_list(state.get("comment_inbox_replied_keys"), limit=300))
+        candidates = [
+            item for item in candidates
+            if not any(candidate_id in replied for candidate_id in item["id_candidates"])
+            and item["comment_key"] not in replied_keys
+            and not self._qzone_author_post_recently_replied(state, item["post"], item["comment"], now=_now_ts())
+        ]
+        candidates.sort(key=lambda item: (item["score"], _safe_float(getattr(item["comment"], "create_time", 0), 0)), reverse=True)
+        if not candidates:
+            return {"status": "not_found", "message": "暂未找到可确认的未回复评论。"}
+        best = candidates[0]
+        if best["score"] < 0.55 or (len(candidates) > 1 and best["score"] - candidates[1]["score"] < 0.12):
+            return {
+                "status": "ambiguous",
+                "message": "找到多条相近评论，暂不自动回复，以免回错对象。",
+                "candidates": [{"text": item["content"], "score": round(item["score"], 3)} for item in candidates[:3]],
+            }
+        decision = await self._qzone_decide_comment_reply(best["post"], best["comment"], own_uin=own_uin)
+        if _single_line(reply_hint, 120):
+            reply = self._qzone_clean_comment_reply_text(_single_line(reply_hint, 120), getattr(best["comment"], "name", ""))
+            if len(reply) < 2 or self._qzone_comment_reply_leaks_private(reply):
+                return {"status": "skipped", "message": "指定的公开回复内容不安全。", "comment": best["content"]}
+        else:
+            reply = str(decision.get("reply") or "")
+        if decision.get("decision") != "reply" or not reply:
+            return {"status": "skipped", "message": "这条评论不适合公开回复。", "comment": best["content"]}
+        try:
+            sent = await self._qzone_reply_to_comment(event, best["post"], best["comment"], reply)
+        except Exception as exc:
+            retryable = bool(re.search(r"\b(?:code|ret)\s*=\s*-?\d+", str(exc), flags=re.I))
+            if self._qzone_auth_failure_message(exc):
+                self._qzone_mark_auth_failure(str(exc), source="comment_tool", state=state, save=False)
+            if retryable:
+                retry_ids = self._qzone_trim_id_list(state.get("comment_inbox_retry_ids"), limit=100)
+                retry_keys = self._qzone_trim_id_list(state.get("comment_inbox_retry_keys"), limit=100)
+                state["comment_inbox_retry_ids"] = self._qzone_trim_id_list(retry_ids + best["id_candidates"], limit=100)
+                state["comment_inbox_retry_keys"] = self._qzone_trim_id_list(retry_keys + [best["comment_key"]], limit=100)
+            state["last_comment_inbox_status"] = "tool_retryable" if retryable else "tool_delivery_unknown"
+            state["last_comment_inbox_reason"] = _single_line(exc, 120)
+            self._save_data_sync()
+            return {"status": "error", "message": _single_line(exc, 160), "retryable": retryable}
+        now = _now_ts()
+        self._qzone_note_comment_inbox_sent(state, best["post"], best["comment"], sent, now=now)
+        state["comment_inbox_replied_ids"] = self._qzone_trim_id_list(
+            list(state.get("comment_inbox_replied_ids") or []) + best["id_candidates"], limit=300
+        )
+        if best["comment_key"]:
+            state["comment_inbox_replied_keys"] = self._qzone_trim_id_list(
+                list(state.get("comment_inbox_replied_keys") or []) + [best["comment_key"]], limit=300
+            )
+        state["comment_inbox_retry_ids"] = [
+            item for item in self._qzone_trim_id_list(state.get("comment_inbox_retry_ids"), limit=100)
+            if item not in set(best["id_candidates"])
+        ]
+        state["comment_inbox_retry_keys"] = [
+            item for item in self._qzone_trim_id_list(state.get("comment_inbox_retry_keys"), limit=100)
+            if item != best["comment_key"]
+        ]
+        state["last_comment_inbox_reply_at"] = now
+        state["last_comment_inbox_status"] = "tool_replied"
+        state["last_comment_inbox_reply_text"] = _single_line(sent, 120)
+        self._save_data_sync()
+        return {"status": "replied", "comment": best["content"], "reply": sent}
+
     async def _maybe_process_qzone_comment_inbox(self) -> None:
         if not (self._qzone_available() and getattr(self, "enable_qzone_comment_inbox", False)):
             return
@@ -1701,8 +1904,12 @@ class QzoneMixin(QzoneMediaMixin):
         replied_ids: list[str] = []
         seen_keys: list[str] = []
         replied_keys: list[str] = []
+        retry_ids: list[str] = []
+        retry_keys: list[str] = []
         replied_set: set[str] = set()
         replied_key_set: set[str] = set()
+        retry_set: set[str] = set()
+        retry_key_set: set[str] = set()
         interval_seconds = max(5, _safe_int(getattr(self, "qzone_comment_inbox_interval_minutes", 60), 60, 5, 1440)) * 60
         if now - _safe_float(state.get("last_comment_inbox_checked_at"), 0) < interval_seconds:
             return
@@ -1718,22 +1925,8 @@ class QzoneMixin(QzoneMediaMixin):
             observed: list[tuple[Any, Any, str, str, list[str], bool, bool]] = []
             for post in posts:
                 for comment in list(getattr(post, "comments", []) or []):
-                    comment_id = _single_line(getattr(comment, "comment_id", ""), 120)
-                    post_tid = _single_line(getattr(post, "tid", ""), 80)
-                    raw_comment = getattr(comment, "raw", None)
-                    if isinstance(raw_comment, dict):
-                        comment_key = self._qzone_comment_fingerprint(post_tid, raw_comment)
-                        comment_legacy_id = self._qzone_comment_legacy_fallback_id(post_tid, raw_comment)
-                    else:
-                        author = _single_line(getattr(comment, "uin", ""), 40) or _single_line(getattr(comment, "name", ""), 40)
-                        content = re.sub(r"\s+", "", _single_line(getattr(comment, "content", ""), 180)).lower()
-                        digest = hashlib.sha1(f"{post_tid or 'post'}|{author}|{content}".encode("utf-8", "ignore")).hexdigest()[:20]
-                        comment_key = f"{post_tid or 'post'}:fp:{digest}"
-                        comment_legacy_id = _single_line(getattr(comment, "comment_legacy_id", ""), 120)
-                    comment_key = _single_line(getattr(comment, "comment_key", "") or comment_key, 120)
-                    comment_legacy_id = _single_line(getattr(comment, "comment_legacy_id", "") or comment_legacy_id, 120)
+                    comment_id, comment_key, id_candidates = self._qzone_comment_identifiers(post, comment)
                     if comment_id or comment_key:
-                        id_candidates = self._qzone_trim_id_list([comment_id, comment_legacy_id, comment_key], limit=5)
                         is_self_comment = self._qzone_comment_is_self(state, post, comment, own_uin=own_uin, now=now)
                         author_recently_replied = self._qzone_author_post_recently_replied(state, post, comment, now=now)
                         observed.append(
@@ -1751,10 +1944,14 @@ class QzoneMixin(QzoneMediaMixin):
             replied_ids = self._qzone_trim_id_list(state.get("comment_inbox_replied_ids"), limit=300)
             seen_keys = self._qzone_trim_id_list(state.get("comment_inbox_seen_keys"), limit=500)
             replied_keys = self._qzone_trim_id_list(state.get("comment_inbox_replied_keys"), limit=300)
+            retry_ids = self._qzone_trim_id_list(state.get("comment_inbox_retry_ids"), limit=100)
+            retry_keys = self._qzone_trim_id_list(state.get("comment_inbox_retry_keys"), limit=100)
             seen_set = set(seen_ids)
             replied_set = set(replied_ids)
             seen_key_set = set(seen_keys)
             replied_key_set = set(replied_keys)
+            retry_set = set(retry_ids)
+            retry_key_set = set(retry_keys)
             observed_ids = [candidate_id for _, _, _, _, id_candidates, _, _ in observed for candidate_id in id_candidates if candidate_id]
             observed_keys = [comment_key for _, _, _, comment_key, _, _, _ in observed if comment_key]
             first_run = not state.get("comment_inbox_initialized_at")
@@ -1790,8 +1987,9 @@ class QzoneMixin(QzoneMediaMixin):
             candidates = [
                 (post, comment, comment_id, comment_key, id_candidates)
                 for post, comment, comment_id, comment_key, id_candidates, is_self_comment, author_recently_replied in observed
-                if not any(candidate_id in seen_set or candidate_id in replied_set for candidate_id in id_candidates)
-                and comment_key not in seen_key_set
+                if not any(candidate_id in replied_set for candidate_id in id_candidates)
+                and (not any(candidate_id in seen_set for candidate_id in id_candidates) or any(candidate_id in retry_set for candidate_id in id_candidates))
+                and (comment_key not in seen_key_set or comment_key in retry_key_set)
                 and comment_key not in replied_key_set
                 and not is_self_comment
                 and not author_recently_replied
@@ -1815,22 +2013,49 @@ class QzoneMixin(QzoneMediaMixin):
                     skipped += 1
                     last_reason = _single_line(decision.get("reason"), 60)
                     continue
-                for candidate_id in id_candidates:
-                    if candidate_id:
-                        replied_set.add(candidate_id)
-                if comment_id:
-                    replied_set.add(comment_id)
-                if comment_key:
-                    replied_key_set.add(comment_key)
-                state["comment_inbox_replied_ids"] = self._qzone_trim_id_list(list(replied_set), limit=300)
-                state["comment_inbox_replied_keys"] = self._qzone_trim_id_list(list(replied_key_set), limit=300)
                 state["last_comment_inbox_checked_at"] = now
-                state["last_comment_inbox_status"] = f"replying:guarded:{_single_line(comment_id or comment_key, 80)}"
+                state["last_comment_inbox_status"] = f"replying:sending:{_single_line(comment_id or comment_key, 80)}"
                 state["last_comment_inbox_reply_comment_id"] = comment_id
                 state["last_comment_inbox_reply_comment_key"] = comment_key
                 state["last_comment_inbox_reply_author"] = _single_line(getattr(comment, "name", ""), 40) or _single_line(getattr(comment, "uin", ""), 40)
                 self._save_data_sync()
-                sent_text = await self._qzone_reply_to_comment(None, post, comment, str(decision.get("reply") or ""))
+                try:
+                    sent_text = await self._qzone_reply_to_comment(None, post, comment, str(decision.get("reply") or ""))
+                except Exception as exc:
+                    retryable = bool(re.search(r"\b(?:code|ret)\s*=\s*-?\d+", str(exc), flags=re.I))
+                    if self._qzone_auth_failure_message(exc):
+                        self._qzone_mark_auth_failure(str(exc), source="comment_inbox", state=state, save=False)
+                    if retryable:
+                        for candidate_id in id_candidates:
+                            if candidate_id:
+                                retry_set.add(candidate_id)
+                        if comment_key:
+                            retry_key_set.add(comment_key)
+                    state["comment_inbox_retry_ids"] = self._qzone_trim_id_list(list(retry_set), limit=100)
+                    state["comment_inbox_retry_keys"] = self._qzone_trim_id_list(list(retry_key_set), limit=100)
+                    state["last_comment_inbox_status"] = (
+                        f"retryable:{_single_line(comment_id or comment_key, 80)}"
+                        if retryable
+                        else f"delivery_unknown:{_single_line(comment_id or comment_key, 80)}"
+                    )
+                    state["last_comment_inbox_reason"] = _single_line(exc, 120)
+                    self._save_data_sync()
+                    logger.warning(
+                        "[PrivateCompanion] QQ 空间评论回复失败: retryable=%s error=%s",
+                        retryable,
+                        _single_line(exc, 120),
+                    )
+                    continue
+                for candidate_id in id_candidates:
+                    if candidate_id:
+                        replied_set.add(candidate_id)
+                        retry_set.discard(candidate_id)
+                if comment_id:
+                    replied_set.add(comment_id)
+                    retry_set.discard(comment_id)
+                if comment_key:
+                    replied_key_set.add(comment_key)
+                    retry_key_set.discard(comment_key)
                 self._qzone_note_comment_inbox_sent(state, post, comment, sent_text, now=now)
                 replies += 1
                 last_reason = _single_line(decision.get("reason"), 60) or "已回复"
@@ -1868,6 +2093,8 @@ class QzoneMixin(QzoneMediaMixin):
             state["comment_inbox_seen_keys"] = self._qzone_trim_id_list(seen_keys + observed_keys, limit=500)
             state["comment_inbox_replied_ids"] = self._qzone_trim_id_list(list(replied_set), limit=300)
             state["comment_inbox_replied_keys"] = self._qzone_trim_id_list(list(replied_key_set), limit=300)
+            state["comment_inbox_retry_ids"] = self._qzone_trim_id_list(list(retry_set), limit=100)
+            state["comment_inbox_retry_keys"] = self._qzone_trim_id_list(list(retry_key_set), limit=100)
             state["last_comment_inbox_checked_at"] = now
             state["last_comment_inbox_status"] = f"checked:new={len(candidates)},replied={replies},skipped={skipped}"
             state["last_comment_inbox_reason"] = last_reason
@@ -3081,10 +3308,15 @@ class QzoneMixin(QzoneMediaMixin):
         return [image_path]
 
     @staticmethod
-    def _qzone_parse_windows(raw: Any, *, max_windows: int = 3) -> list[tuple[int, int]]:
-        """Parse "HH:MM-HH:MM" lines into (start_minute, end_minute) pairs."""
+    def _qzone_parse_windows(raw: Any) -> list[tuple[int, int]]:
+        """Parse "HH:MM-HH:MM" lines into (start_minute, end_minute) pairs.
+
+        There is deliberately no cap on how many windows a user may configure;
+        how many posts actually fit is decided later by the daily target count,
+        the configured gaps and the remaining time in each window.
+        """
         windows: list[tuple[int, int]] = []
-        for line in str(raw or "").splitlines():
+        for line in str(raw or "").replace("，", "\n").replace(",", "\n").splitlines():
             text = line.strip()
             if not text:
                 continue
@@ -3092,107 +3324,412 @@ class QzoneMixin(QzoneMediaMixin):
             if not match:
                 continue
             start_h, start_m, end_h, end_m = (int(part) for part in match.groups())
-            start = start_h * 60 + start_m
-            end = end_h * 60 + end_m
-            if start_h > 23 or start_m > 59 or end_h > 23 or end_m > 59 or end <= start:
+            if start_h > 23 or start_m > 59 or end_h > 24 or end_m > 59:
                 continue
-            windows.append((start, min(end, 24 * 60)))
-            if len(windows) >= max_windows:
-                break
-        return windows
+            start = start_h * 60 + start_m
+            end = min(end_h * 60 + end_m, 24 * 60)
+            if end <= start:
+                continue
+            windows.append((start, end))
+        return QzoneMixin._qzone_merge_windows(windows)
 
-    def _qzone_life_publish_windows(self) -> list[tuple[int, int]]:
-        """Return today's publish windows as minute-of-day pairs, honoring mode."""
-        mode = _single_line(getattr(self, "qzone_life_publish_window_mode", "double"), 24) or "double"
-        if mode == "custom":
-            windows = self._qzone_parse_windows(
-                getattr(self, "qzone_life_publish_custom_windows", ""),
-                max_windows=3,
-            )
-        elif mode == "all_day":
-            windows = [(0, 24 * 60)]
-        else:
-            windows = self._qzone_parse_windows(
-                getattr(self, "qzone_life_publish_double_windows", ""),
-                max_windows=2,
-            )
-        return windows or [(0, 24 * 60)]
+    @staticmethod
+    def _qzone_merge_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Sort and merge overlapping windows so no minute is scheduled twice."""
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(windows):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
 
-    def _qzone_life_publish_pick_planned_at(self, state: dict[str, Any], *, now: float) -> float | None:
-        """Pick a random publish moment today inside the configured windows.
+    @staticmethod
+    def _qzone_subtract_ranges(
+        window: tuple[int, int],
+        blocked: tuple[tuple[int, int], ...],
+    ) -> list[tuple[int, int]]:
+        """Remove blocked minute ranges from a window, keeping the remainder."""
+        pieces = [window]
+        for block_start, block_end in blocked:
+            remaining: list[tuple[int, int]] = []
+            for start, end in pieces:
+                if block_end <= start or block_start >= end:
+                    remaining.append((start, end))
+                    continue
+                if start < block_start:
+                    remaining.append((start, min(block_start, end)))
+                if end > block_end:
+                    remaining.append((max(block_end, start), end))
+            pieces = [(s, e) for s, e in remaining if e > s]
+        return pieces
 
-        The chosen moment is clamped to never be earlier than
-        last_publish_at + min_interval. Returns None when no window remains.
+    def _qzone_life_publish_window_source(self) -> str:
+        """Return the raw window text for the configured mode."""
+        mode = _single_line(getattr(self, "qzone_life_publish_window_mode", "template_double"), 32) or "template_double"
+        if mode in {"custom", "自定义"}:
+            raw = str(getattr(self, "qzone_life_publish_windows", "") or "")
+            if not raw.strip():
+                # Legacy field kept working so upgrades never lose a config.
+                raw = str(getattr(self, "qzone_life_publish_custom_windows", "") or "")
+            return raw
+        if mode in {"all_day", "全天随机"}:
+            return "00:00-24:00"
+        if mode in {"template_double_night", "double_night"}:
+            return QZONE_WINDOW_TEMPLATE_DOUBLE_NIGHT
+        legacy = str(getattr(self, "qzone_life_publish_double_windows", "") or "")
+        return legacy if legacy.strip() else QZONE_WINDOW_TEMPLATE_DOUBLE
+
+    def _qzone_night_publish_allowed(self) -> bool:
+        """Night windows only open when the bot is genuinely sleepless."""
+        if not bool(getattr(self, "qzone_life_publish_allow_insomnia_night", False)):
+            return False
+        checker = getattr(self, "_has_active_insomnia_state", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def _qzone_life_publish_effective_windows(self) -> list[tuple[int, int]]:
+        """Windows usable right now, with night hours trimmed unless sleepless."""
+        windows = self._qzone_parse_windows(self._qzone_life_publish_window_source())
+        if not windows:
+            windows = self._qzone_parse_windows(QZONE_WINDOW_TEMPLATE_DOUBLE)
+        if self._qzone_night_publish_allowed():
+            return windows
+        trimmed: list[tuple[int, int]] = []
+        for window in windows:
+            trimmed.extend(self._qzone_subtract_ranges(window, QZONE_NIGHT_RANGES))
+        return self._qzone_merge_windows(trimmed)
+
+    def _qzone_cross_day_gap_seconds(self) -> float:
+        """Minimum spacing carried over from the previous published post."""
+        hours = _safe_int(getattr(self, "qzone_life_publish_min_interval_hours", 24), 24, 1, 168)
+        return float(max(1, hours) * 3600)
+
+    def _qzone_intra_day_gap_seconds(self) -> float:
+        """Minimum spacing between two posts planned for the same day."""
+        configured = _safe_int(getattr(self, "qzone_life_publish_intra_day_gap_minutes", 0), 0, 0, 1440)
+        if configured <= 0:
+            configured = QZONE_INTRA_DAY_GAP_FLOOR_MINUTES
+        return float(max(QZONE_INTRA_DAY_GAP_FLOOR_MINUTES, configured) * 60)
+
+    def _qzone_life_publish_pick_slots(
+        self,
+        *,
+        target_count: int,
+        earliest: float,
+        now: float,
+    ) -> list[float]:
+        """Pick up to target_count random moments spread across today's windows.
+
+        One post per window comes first so a day's posts land in different parts
+        of the day; only then are longer windows reused, and every extra slot
+        still has to clear the intra-day gap.
         """
-        windows = self._qzone_life_publish_windows()
-        min_interval_seconds = max(4, _safe_int(getattr(self, "qzone_life_publish_min_interval_hours", 24), 24, 4, 168)) * 3600
-        last_publish_at = _safe_float(state.get("last_life_publish_at"), 0)
-        # A first-ever publish has no historical cooldown to honor.
-        earliest = last_publish_at + min_interval_seconds if last_publish_at > 0 else 0.0
         day_start = _day_start_ts(now)
         day_end = day_start + 24 * 3600
-        candidates: list[tuple[float, float]] = []
-        for start_min, end_min in windows:
-            start = max(day_start + start_min * 60, earliest)
+        floor = max(earliest, now, day_start)
+        gap = self._qzone_intra_day_gap_seconds()
+        spans: list[tuple[float, float]] = []
+        for start_min, end_min in self._qzone_life_publish_effective_windows():
+            start = max(day_start + start_min * 60, floor)
             end = min(day_start + end_min * 60, day_end)
             if start < end:
-                candidates.append((start, end))
+                spans.append((start, end))
+        if not spans or target_count <= 0:
+            return []
+        slots: list[float] = []
+
+        def fits(candidate: float) -> bool:
+            return all(abs(candidate - existing) >= gap for existing in slots)
+
+        for start, end in spans:
+            if len(slots) >= target_count:
+                break
+            for _ in range(6):
+                candidate = random.uniform(start, end)
+                if fits(candidate):
+                    slots.append(candidate)
+                    slots.sort()
+                    break
+        for start, end in spans:
+            while len(slots) < target_count:
+                placed = False
+                for _ in range(6):
+                    candidate = random.uniform(start, end)
+                    if fits(candidate):
+                        slots.append(candidate)
+                        slots.sort()
+                        placed = True
+                        break
+                if not placed:
+                    break
+            if len(slots) >= target_count:
+                break
+        return slots[:target_count]
+
+    @staticmethod
+    def _qzone_hhmm_to_minutes(value: Any) -> int | None:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(value or ""))
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour > 47 or minute > 59:
+            return None
+        return hour * 60 + minute
+
+    def _qzone_schedule_candidates_for_today(self) -> list[dict[str, Any]]:
+        """Collect today's schedule fragments so each post can use a different one."""
+        data = getattr(self, "data", None)
+        plan = data.get("daily_plan") if isinstance(data, dict) else None
+        if not isinstance(plan, dict):
+            return []
+        if _single_line(plan.get("date"), 24) != _today_key():
+            return []
+        items = plan.get("items")
+        if not isinstance(items, list):
+            return []
+        normalizer = getattr(self, "_normalize_schedule_lifecycle_status", None)
+        candidates: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            if callable(normalizer):
+                try:
+                    if normalizer(item.get("lifecycle_status")) == "cancelled":
+                        continue
+                except Exception:
+                    pass
+            minutes = self._qzone_hhmm_to_minutes(item.get("time"))
+            activity = _single_line(item.get("activity"), 160)
+            if minutes is None or not activity:
+                continue
+            candidates.append(
+                {
+                    # Index keeps the key unique when two entries share a time.
+                    "key": f"{_single_line(item.get('time'), 8)}#{index}",
+                    "label": activity,
+                    "start_minutes": minutes,
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _qzone_pick_schedule_for_slot(
+        candidates: list[dict[str, Any]],
+        planned_at: float,
+        used_keys: set[str],
+    ) -> dict[str, Any] | None:
+        """Pick the unused schedule fragment closest to this planned moment."""
         if not candidates:
             return None
-        total = sum(end - start for start, end in candidates)
-        offset = random.uniform(0.0, total)
-        for start, end in candidates:
-            width = end - start
-            if offset <= width:
-                return start + offset
-            offset -= width
-        return candidates[-1][1] - 1.0
+        target_minutes = (planned_at - _day_start_ts(planned_at)) / 60.0
+        best: dict[str, Any] | None = None
+        best_distance = float("inf")
+        for candidate in candidates:
+            if candidate.get("key") in used_keys:
+                continue
+            distance = abs(float(candidate.get("start_minutes") or 0) - target_minutes)
+            if distance < best_distance:
+                best = candidate
+                best_distance = distance
+        return best
 
-    def _qzone_life_publish_gate(self, state: dict[str, Any], *, now: float) -> str:
-        """Decide if a fresh life publish should proceed right now.
+    @staticmethod
+    def _qzone_length_profile_sequence(count: int) -> list[str]:
+        """Vary post lengths so a multi-post day never reads as one long block."""
+        if count <= 1:
+            return [random.choice(("short", "medium"))]
+        sequence: list[str] = []
+        for index in range(count):
+            sequence.append("short" if index % 2 == 0 else "medium")
+        if count >= 3 and random.random() < 0.35:
+            sequence[random.randrange(count)] = "long"
+        random.shuffle(sequence)
+        return sequence
 
-        Samples the daily roll once per day (qzone_life_publish_probability is a
-        per-day probability). On a hit, the publish moment is anchored to a random
-        time inside the configured window(s) instead of firing immediately.
+    @staticmethod
+    def _qzone_length_profile_range(profile: Any) -> tuple[int, int]:
+        return QZONE_LENGTH_PROFILES.get(
+            _single_line(profile, 16) or "medium",
+            QZONE_LENGTH_PROFILES["medium"],
+        )
 
-        Returns:
-          "allow" - publish now,
-          "wait"  - today allowed but the planned moment has not arrived,
-          "skip"  - today rolled a miss (or no window remains).
+    def _qzone_slot_is_night(self, planned_at: float) -> bool:
+        minutes = (planned_at - _day_start_ts(planned_at)) / 60.0
+        return any(start <= minutes < end for start, end in QZONE_NIGHT_RANGES)
+
+    def _qzone_life_publish_daily_plan(self, state: dict[str, Any], *, now: float) -> dict[str, Any]:
+        """Return today's publish plan, building it once per day.
+
+        qzone_life_publish_probability is sampled exactly once per day here: it
+        decides whether a plan gets built at all. On a hit the target count is
+        max_daily-1 or max_daily (always exactly 1 when max_daily is 1), and each
+        item is anchored to a random moment inside a configured window.
         """
         today = _today_key()
-        if isinstance(state, dict):
-            if str(state.get("last_life_publish_roll_day") or "") != today:
-                probability = max(
-                    0.0,
-                    min(1.0, _safe_float(getattr(self, "qzone_life_publish_probability", 0.18), 0.18)),
-                )
-                hit = random.random() < probability
-                state["last_life_publish_roll_day"] = today
-                state["last_life_publish_roll_hit"] = bool(hit)
-                state.pop("last_life_publish_planned_at", None)
-                if not hit:
-                    return "skip"
-                planned = self._qzone_life_publish_pick_planned_at(state, now=now)
-                if planned is None:
-                    state["last_life_publish_roll_hit"] = False
-                    return "skip"
-                state["last_life_publish_planned_at"] = planned
-                state["last_life_publish_status"] = (
-                    f"ready:planned@{time.strftime('%m-%d %H:%M', time.localtime(planned))}"
-                )
-                return "wait"
-            if not state.get("last_life_publish_roll_hit"):
-                return "skip"
-            planned = _safe_float(state.get("last_life_publish_planned_at"), 0)
-            if planned and now < planned:
-                return "wait"
-            return "allow"
-        probability = max(
-            0.0,
-            min(1.0, _safe_float(getattr(self, "qzone_life_publish_probability", 0.18), 0.18)),
-        )
-        return "allow" if random.random() < probability else "skip"
+        existing = state.get("life_publish_daily_plan")
+        if isinstance(existing, dict) and _single_line(existing.get("date"), 24) == today:
+            return existing
+
+        # The user controls this limit; do not impose a product-level ceiling.
+        # Scheduling still naturally limits actual items by windows and gaps.
+        limit = max(1, _safe_int(getattr(self, "qzone_life_publish_max_daily", 1), 1, 1))
+        probability = max(0.0, min(1.0, _safe_float(getattr(self, "qzone_life_publish_probability", 0.18), 0.18)))
+        plan: dict[str, Any] = {
+            "date": today,
+            "configured_limit": limit,
+            "target_count": 0,
+            "published_count": 0,
+            "used_schedule_keys": [],
+            "items": [],
+            "created_at": now,
+            "night_allowed": self._qzone_night_publish_allowed(),
+        }
+        if random.random() >= probability:
+            plan["skip_reason"] = "probability_miss"
+            state["life_publish_daily_plan"] = plan
+            return plan
+
+        target_count = limit if limit <= 1 else random.choice((limit - 1, limit))
+        target_count = max(1, min(limit, target_count))
+        last_publish_at = _safe_float(state.get("last_life_publish_at"), 0)
+        earliest = last_publish_at + self._qzone_cross_day_gap_seconds() if last_publish_at > 0 else 0.0
+        slots = self._qzone_life_publish_pick_slots(target_count=target_count, earliest=earliest, now=now)
+        if not slots:
+            plan["skip_reason"] = "no_window"
+            state["life_publish_daily_plan"] = plan
+            return plan
+
+        candidates = self._qzone_schedule_candidates_for_today()
+        profiles = self._qzone_length_profile_sequence(len(slots))
+        used_keys: set[str] = set()
+        items: list[dict[str, Any]] = []
+        for index, planned_at in enumerate(slots):
+            schedule = self._qzone_pick_schedule_for_slot(candidates, planned_at, used_keys)
+            if isinstance(schedule, dict):
+                used_keys.add(str(schedule.get("key")))
+            night = self._qzone_slot_is_night(planned_at)
+            items.append(
+                {
+                    "id": f"{today}-{index + 1}",
+                    "planned_at": planned_at,
+                    "schedule_key": str(schedule.get("key")) if schedule else "",
+                    "schedule_label": _single_line(schedule.get("label"), 160) if schedule else "",
+                    # Night posts stay short: a sleepless 2am note is a fragment.
+                    "length_profile": "short" if night else profiles[index],
+                    "night": night,
+                    "status": "planned",
+                    "attempts": 0,
+                }
+            )
+        plan["target_count"] = len(items)
+        plan["items"] = items
+        state["life_publish_daily_plan"] = plan
+        return plan
+
+    @staticmethod
+    def _qzone_life_publish_due_item(plan: dict[str, Any], *, now: float) -> dict[str, Any] | None:
+        """Return the earliest planned item whose moment has arrived."""
+        items = plan.get("items") if isinstance(plan, dict) else None
+        if not isinstance(items, list):
+            return None
+        due: dict[str, Any] | None = None
+        for item in items:
+            if not isinstance(item, dict) or item.get("status") != "planned":
+                continue
+            planned_at = _safe_float(item.get("planned_at"), 0)
+            if planned_at <= 0 or now < planned_at:
+                continue
+            if due is None or planned_at < _safe_float(due.get("planned_at"), 0):
+                due = item
+        return due
+
+    @staticmethod
+    def _qzone_life_publish_next_planned_at(plan: dict[str, Any]) -> float:
+        """Earliest still-pending moment, for status display."""
+        items = plan.get("items") if isinstance(plan, dict) else None
+        if not isinstance(items, list):
+            return 0.0
+        pending = [
+            _safe_float(item.get("planned_at"), 0)
+            for item in items
+            if isinstance(item, dict) and item.get("status") == "planned"
+        ]
+        pending = [value for value in pending if value > 0]
+        return min(pending) if pending else 0.0
+
+    def _qzone_plan_item_finish(
+        self,
+        plan: dict[str, Any] | None,
+        item: dict[str, Any] | None,
+        status: str,
+        *,
+        now: float,
+    ) -> None:
+        """Move a plan item to a terminal state so the slot never fires twice.
+
+        Consuming the item is what fixes the old single-planned_at bug, where a
+        finished slot stayed eligible and fired again once the cooldown lapsed.
+        """
+        if not isinstance(item, dict):
+            return
+        item["status"] = status
+        item["finished_at"] = now
+        if not isinstance(plan, dict):
+            return
+        if status == "published":
+            plan["published_count"] = _safe_int(plan.get("published_count"), 0, 0) + 1
+            key = _single_line(item.get("schedule_key"), 80)
+            if key:
+                used = plan.get("used_schedule_keys")
+                if not isinstance(used, list):
+                    used = []
+                if key not in used:
+                    used.append(key)
+                plan["used_schedule_keys"] = used
+
+    @staticmethod
+    def _qzone_text_length_ok(text: Any, profile: Any) -> bool:
+        """Length gate: a hard ceiling plus a tolerant per-profile band."""
+        length = len(re.sub(r"\s+", "", str(text or "")))
+        if length > QZONE_LENGTH_HARD_LIMIT:
+            return False
+        low, high = QzoneMixin._qzone_length_profile_range(profile)
+        # Tolerance avoids discarding an otherwise good post over a few chars.
+        return low - 8 <= length <= high + 12
+
+    async def _qzone_life_publish_rewrite_to_length(
+        self,
+        text: str,
+        profile: Any,
+        *,
+        prompt: str = "",
+    ) -> str:
+        """Ask once for a length-corrected rewrite, then re-run safety checks."""
+        low, high = self._qzone_length_profile_range(profile)
+        rewrite_prompt = f"""
+下面这条 QQ 空间说说草稿字数不合要求。请在保留原意、语气和具体生活细节的前提下改写到 {low} 到 {high} 字。
+只输出正文，不要解释，不要加标题，绝对不要超过 {QZONE_LENGTH_HARD_LIMIT} 字。
+
+【原草稿】
+{text}
+""".strip()
+        try:
+            rewritten = await self._llm_call(
+                rewrite_prompt,
+                max_tokens=180,
+                provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+                task="qzone_publish_length",
+            )
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] QQ 空间说说字数重写失败: %s", _single_line(exc, 120))
+            return ""
+        # A rewrite bypasses the original sanitizer, so re-run it here.
+        return await self._sanitize_qzone_life_post_text(rewritten, prompt=rewrite_prompt)
 
     @staticmethod
     def _qzone_ngram_shared_count(left: Any, right: Any, *, n: int = 3) -> int:
@@ -3255,16 +3792,11 @@ class QzoneMixin(QzoneMediaMixin):
                 provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
                 task="qzone_publish_deduplicate",
             )
-            return _single_line(
-                self._qzone_relationship_safe_source(
-                    rewritten,
-                    source="qzone.deduplicated_post",
-                ),
-                180,
-            )
         except Exception as exc:
             logger.warning("[PrivateCompanion] QQ 空间说说去重重写失败: %s", _single_line(exc, 120))
             return ""
+        # A rewrite bypasses the original sanitizer, so re-run it here.
+        return await self._sanitize_qzone_life_post_text(rewritten, prompt=rewrite_prompt)
 
     async def _maybe_publish_qzone_life_post(self) -> None:
         if not (self._qzone_available() and self.enable_qzone_life_publish):
@@ -3274,14 +3806,50 @@ class QzoneMixin(QzoneMediaMixin):
         if not isinstance(state, dict):
             self.data["qzone_integration"] = {}
             state = self.data["qzone_integration"]
-        last_status = str(state.get("last_life_publish_status") or "").strip()
+        existing_plan = state.get("life_publish_daily_plan")
+        plan_is_new = not (
+            isinstance(existing_plan, dict)
+            and _single_line(existing_plan.get("date"), 24) == _today_key()
+        )
+        plan = self._qzone_life_publish_daily_plan(state, now=now)
+        # The cross-day gap is applied while building the first slot. Once that
+        # plan exists, same-day posts use their own explicit spacing instead of
+        # accidentally inheriting a 24-hour cross-day cooldown.
+        last_publish_at = _safe_float(state.get("last_life_publish_at"), 0)
         if (
-            last_status == "published"
-            and now - _safe_float(state.get("last_life_publish_at"), 0) < max(4, self.qzone_life_publish_min_interval_hours) * 3600
+            last_publish_at >= _day_start_ts(now)
+            and now - last_publish_at < self._qzone_intra_day_gap_seconds()
         ):
             return
-        if state.get("last_life_publish_roll_day") == _today_key() and not state.get("last_life_publish_roll_hit"):
+        # A new plan writes an initial status once; existing plans are stable
+        # across ticks and process restarts.
+        if plan.get("skip_reason"):
+            if plan_is_new:
+                state["last_life_publish_status"] = f"skipped:{_single_line(plan.get('skip_reason'), 40)}"
+                state["last_life_publish_checked_at"] = now
+                self._save_data_sync()
             return
+        plan_item = self._qzone_life_publish_due_item(plan, now=now)
+        if plan_item is None:
+            if plan_is_new:
+                next_at = self._qzone_life_publish_next_planned_at(plan)
+                target = _safe_int(plan.get("target_count"), 0, 0)
+                state["last_life_publish_status"] = (
+                    f"ready:planned@{time.strftime('%m-%d %H:%M', time.localtime(next_at))}x{target}"
+                    if next_at > 0
+                    else "ready:planned"
+                )
+                state["last_life_publish_checked_at"] = now
+                self._save_data_sync()
+            return
+        if plan_item.get("night") and not self._qzone_night_publish_allowed():
+            self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
+            plan_item["failed_reason"] = "night_state_inactive"
+            state["last_life_publish_status"] = "cancelled:night_state_inactive"
+            state["last_life_publish_checked_at"] = now
+            self._save_data_sync()
+            return
+        reusable_text = self._qzone_reusable_draft(state, "life_publish", now=now)
         block_reason = self._qzone_auto_publish_block_reason(state, now=now)
         if block_reason:
             state["last_life_publish_status"] = f"paused:auth:{_single_line(block_reason, 80)}"
@@ -3290,16 +3858,21 @@ class QzoneMixin(QzoneMediaMixin):
             return
         if now - _safe_float(state.get("last_life_publish_failed_at"), 0) < 15 * 60:
             return
-        reusable_text = self._qzone_reusable_draft(state, "life_publish", now=now)
-        if not reusable_text:
-            gate = self._qzone_life_publish_gate(state, now=now)
-            if gate == "wait":
-                if _safe_float(state.get("last_life_publish_checked_at"), 0) < _day_start_ts(now):
-                    state["last_life_publish_checked_at"] = now
-                    self._save_data_sync()
-                return
-            if gate == "skip":
-                state["last_life_publish_status"] = "skipped:probability_miss"
+        length_profile = "medium"
+        schedule_label = ""
+        if isinstance(plan_item, dict):
+            length_profile = _single_line(plan_item.get("length_profile"), 16) or "medium"
+            schedule_label = _single_line(plan_item.get("schedule_label"), 160)
+            # The item stays "planned" until it reaches a terminal state, so an
+            # early return below simply retries on a later tick instead of
+            # stranding it. The attempt counter is what stops an endless loop.
+            attempts = _safe_int(plan_item.get("attempts"), 0, 0, 99) + 1
+            plan_item["attempts"] = attempts
+            if attempts > QZONE_PLAN_ITEM_MAX_ATTEMPTS:
+                plan_item["status"] = "failed"
+                plan_item["failed_reason"] = "max_attempts"
+                self._qzone_clear_pending_publish_assets(state, "life_publish")
+                state["last_life_publish_status"] = "cancelled:max_attempts"
                 state["last_life_publish_checked_at"] = now
                 self._save_data_sync()
                 return
@@ -3344,17 +3917,29 @@ class QzoneMixin(QzoneMediaMixin):
                 int(now - _safe_float(state.get("last_life_publish_draft_at"), now)),
             )
         else:
+            length_min, length_max = self._qzone_length_profile_range(length_profile)
+            length_rule = f"- {length_min} 到 {length_max} 字，最多不超过 {QZONE_LENGTH_HARD_LIMIT} 字。"
+            schedule_anchor = (
+                f"\n【本条要写的生活片段】\n{schedule_label}\n只围绕这一个片段写，不要复述整天日程，也不要写成行程汇报。"
+                if schedule_label
+                else ""
+            )
+            night_note = (
+                "\n【夜间状态】\n现在是失眠或浅睡的深夜，只写一句很短、低刺激的碎碎念，不要显得精神饱满。"
+                if isinstance(plan_item, dict) and plan_item.get("night")
+                else ""
+            )
             prompt = f"""
 请以当前 Bot 人格写一条 QQ 空间说说。
 只输出说说正文,不要解释,不要加标题。
 
 要求：
-- 30 到 120 字。
+{length_rule}
 - 像自然生活动态,不是公告、不是任务汇报。
 - 可以带一点公开可见的心情、天气或日记余味,但不要暴露插件、模型、内部状态数值。
 - 禁止出现“能量”“心理能量”“/100”“状态变量”“当前状态”等内部汇报词。
 - 不要 @ 用户,不要泄露私聊内容,不要写得像营销文。
-- 写作角度：{theme_hint}
+- 写作角度：{theme_hint}{schedule_anchor}{night_note}
 
 【说说风格提示】
 {self._qzone_publish_style_prompt()}
@@ -3393,9 +3978,30 @@ class QzoneMixin(QzoneMediaMixin):
                 state["last_life_publish_failed_at"] = now
                 state["last_life_publish_status"] = "cancelled:empty_or_unsafe_draft"
                 state["last_life_publish_checked_at"] = now
+                self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
                 self._save_data_sync()
                 logger.warning("[PrivateCompanion] QQ 空间生活动态草稿为空或不安全,已跳过发布")
                 return
+            if not self._qzone_text_length_ok(text, length_profile):
+                relengthed = await self._qzone_life_publish_rewrite_to_length(
+                    text,
+                    length_profile,
+                    prompt=prompt,
+                )
+                if relengthed and self._qzone_text_length_ok(relengthed, length_profile):
+                    text = relengthed
+                else:
+                    state["last_life_publish_failed_at"] = now
+                    state["last_life_publish_status"] = "cancelled:length"
+                    state["last_life_publish_checked_at"] = now
+                    self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
+                    self._save_data_sync()
+                    logger.info(
+                        "[PrivateCompanion] QQ 空间说说字数不合要求且重写失败,已取消: profile=%s len=%s",
+                        length_profile,
+                        len(re.sub(r"\s+", "", text or "")),
+                    )
+                    return
             state["last_life_publish_draft"] = _single_line(text, 300)
             state["last_life_publish_draft_at"] = now
         similar = self._qzone_life_publish_similar_recent(state, text)
@@ -3405,6 +4011,7 @@ class QzoneMixin(QzoneMediaMixin):
                 state["last_life_publish_status"] = "cancelled:duplicate"
                 state["last_life_publish_checked_at"] = now
                 self._qzone_clear_pending_publish_assets(state, "life_publish")
+                self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
                 self._save_data_sync()
                 logger.info("[PrivateCompanion] QQ 空间复用草稿与近期说说重复,已取消发布")
                 return
@@ -3413,7 +4020,11 @@ class QzoneMixin(QzoneMediaMixin):
                 similar,
                 prompt=prompt,
             )
-            if rewritten and not self._qzone_life_publish_similar_recent(state, rewritten):
+            if (
+                rewritten
+                and self._qzone_text_length_ok(rewritten, length_profile)
+                and not self._qzone_life_publish_similar_recent(state, rewritten)
+            ):
                 text = rewritten
                 state["last_life_publish_draft"] = _single_line(text, 300)
                 state["last_life_publish_draft_at"] = now
@@ -3422,6 +4033,7 @@ class QzoneMixin(QzoneMediaMixin):
                 state["last_life_publish_failed_at"] = now
                 state["last_life_publish_status"] = "cancelled:duplicate_after_retry"
                 state["last_life_publish_checked_at"] = now
+                self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
                 self._save_data_sync()
                 logger.info("[PrivateCompanion] QQ 空间草稿重写后仍与近期说说重复,已取消发布")
                 return
@@ -3456,9 +4068,17 @@ class QzoneMixin(QzoneMediaMixin):
             else:
                 state.pop("last_life_publish_image_fallback", None)
             self._qzone_clear_pending_publish_assets(state, "life_publish")
+            self._qzone_plan_item_finish(plan, plan_item, "published", now=now)
         else:
             state["last_life_publish_failed_at"] = now
             state["last_life_publish_status"] = f"failed:{_single_line(result.get('message'), 80)}"
+            # Keep the slot retryable until it exhausts its attempt budget.
+            if (
+                isinstance(plan_item, dict)
+                and _safe_int(plan_item.get("attempts"), 0, 0, 99) >= QZONE_PLAN_ITEM_MAX_ATTEMPTS
+            ):
+                self._qzone_plan_item_finish(plan, plan_item, "failed", now=now)
+                self._qzone_clear_pending_publish_assets(state, "life_publish")
         state["last_life_publish_checked_at"] = now
         state["last_life_publish_text"] = _single_line(result.get("text") or text, 180)
         state["last_life_publish_images"] = _safe_int(result.get("image_count"), len(result.get("images") or []), 0, 99) if result.get("success") else 0

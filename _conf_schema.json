@@ -6976,16 +6976,16 @@
       "enable_qzone_life_publish": {
         "description": "低频发布生活说说",
         "type": "bool",
-        "hint": "开启后, Bot 可根据当天状态、日程和日记余味低频写一条 QQ 空间说说。默认关闭,避免未经确认公开发布。",
+        "hint": "开启后, Bot 可根据当天状态、日程和日记余味建立每日 QQ 空间说说计划。默认关闭,避免未经确认公开发布。",
         "default": false,
         "condition": {
           "enable_qzone_integration": true
         }
       },
       "qzone_life_publish_min_interval_hours": {
-        "description": "生活说说最小间隔（小时）",
+        "description": "生活说说跨日最小间隔（小时）",
         "type": "int",
-        "hint": "两次自动生活说说之间的最小间隔。",
+        "hint": "上一条自动生活说说与次日第一条计划之间的最小间隔；同日多条使用单独的分钟间隔配置。",
         "slider": {
           "min": 4,
           "max": 168,
@@ -6999,7 +6999,7 @@
       "qzone_life_publish_probability": {
         "description": "生活说说触发概率",
         "type": "float",
-        "hint": "每天一次抽样：每天以该概率决定是否尝试发布一条生活说说；未命中则当天不再尝试。",
+        "hint": "每天一次抽样：每天以该概率决定是否建立当天自动说说计划；未命中则当天不再尝试。",
         "slider": {
           "min": 0,
           "max": 1,
@@ -7010,41 +7010,61 @@
           "enable_qzone_life_publish": true
         }
       },
+      "qzone_life_publish_max_daily": {
+        "description": "每日自动说说上限",
+        "type": "int",
+        "hint": "当天概率命中后，1 表示固定计划 1 条；大于 1 时随机计划上限减 1 或上限条。实际发布仍受窗口、间隔、日程、去重与认证状态限制。",
+        "default": 1,
+        "condition": {
+          "enable_qzone_life_publish": true
+        }
+      },
       "qzone_life_publish_window_mode": {
         "description": "发布时段模式",
         "type": "string",
-        "default": "double",
+        "default": "template_double",
         "options": [
-          "double",
+          "template_double",
+          "template_double_night",
           "custom",
           "all_day"
         ],
         "labels": [
           "双窗口",
+          "双窗口 + 凌晨",
           "自定义窗口",
           "全天随机"
         ],
-        "hint": "双窗口：默认在清晨与傍晚两个窗口内随机取一个时刻发布；自定义窗口：按下面填写，一天最多 3 个；全天随机：任意时刻都可能发布（可能出现凌晨发布）。",
+        "hint": "模板会填入常用窗口；自定义窗口可填写任意数量。凌晨时段只有开启失眠夜间发布且 Bot 处于失眠/浅睡状态时才会安排。",
         "condition": {
           "enable_qzone_life_publish": true
         }
       },
-      "qzone_life_publish_double_windows": {
-        "description": "双窗口时段",
-        "type": "text",
-        "hint": "每行一个 HH:MM-HH:MM，最多两行；发布时刻会随机落在其中一个窗口内。",
-        "default": "07:00-10:00\n18:00-22:00",
-        "condition": {
-          "qzone_life_publish_window_mode": "double"
-        }
-      },
-      "qzone_life_publish_custom_windows": {
+      "qzone_life_publish_windows": {
         "description": "自定义发布窗口",
         "type": "text",
-        "hint": "每行一个 HH:MM-HH:MM，一天最多 3 个窗口；发布时刻会随机落在其中一个窗口内。",
+        "hint": "每行一个 HH:MM-HH:MM，数量不限。重叠窗口会自动合并；夜间片段受失眠夜间发布开关约束。",
         "default": "",
         "condition": {
           "qzone_life_publish_window_mode": "custom"
+        }
+      },
+      "qzone_life_publish_allow_insomnia_night": {
+        "description": "失眠时允许凌晨说说",
+        "type": "bool",
+        "hint": "开启后，配置了凌晨窗口且 Bot 当天确有失眠或浅睡状态时，才会在 23:00-05:59 随机安排一条短说说。",
+        "default": false,
+        "condition": {
+          "enable_qzone_life_publish": true
+        }
+      },
+      "qzone_life_publish_intra_day_gap_minutes": {
+        "description": "同日说说最小间隔（分钟）",
+        "type": "int",
+        "hint": "当天计划多条说说时，两条之间的最小间隔。填 0 使用 45 分钟安全默认值。",
+        "default": 45,
+        "condition": {
+          "enable_qzone_life_publish": true
         }
       },
       "qzone_life_publish_similarity_threshold": {
