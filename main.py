@@ -6686,6 +6686,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_qzone_publish_feed_impl(event, text, **kwargs)
 
     @filter.llm_tool(name="pc_qzone_reply_my_comment")
+    @_multi_persona_event_context
     async def pc_qzone_reply_my_comment(
         self,
         event: AstrMessageEvent,

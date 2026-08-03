@@ -30,8 +30,17 @@ QZONE_UNSAFE_MEDIA_HOSTS = {"localhost", "localhost.localdomain"}
 class QzoneIntegrationError(RuntimeError):
     """User-facing Qzone error with a coarse failure stage."""
 
-    def __init__(self, stage: str, message: str):
+    def __init__(
+        self,
+        stage: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        delivery_unknown: bool = False,
+    ):
         self.stage = stage
+        self.retryable = bool(retryable)
+        self.delivery_unknown = bool(delivery_unknown)
         super().__init__(f"{stage}：{message}")
 
 
@@ -1066,8 +1075,16 @@ class QzoneMediaMixin:
                             "stage": exc.stage,
                             "message": f"{message}；降级纯文字也失败：{retry_message}",
                             "image_fallback_failed": True,
+                            "retryable": bool(getattr(retry_exc, "retryable", False)),
+                            "delivery_unknown": bool(getattr(retry_exc, "delivery_unknown", False)),
                         }
-                return {"success": False, "stage": exc.stage, "message": message}
+                return {
+                    "success": False,
+                    "stage": exc.stage,
+                    "message": message,
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                    "delivery_unknown": bool(getattr(exc, "delivery_unknown", False)),
+                }
             lowered = message.lower()
             if "cookie" in lowered or "p_skey" in lowered or "skey" in lowered or "g_tk" in lowered or "登录" in message:
                 self._qzone_mark_auth_failure(message, source="publish", save=True)

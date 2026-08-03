@@ -4734,6 +4734,8 @@ const tokenTaskLabels = {
   qzone_comment: "空间评论",
   qzone_comment_inbox_decision: "空间评论判断",
   qzone_publish: "空间说说",
+  qzone_publish_deduplicate: "空间说说去重重写",
+  qzone_publish_length: "空间说说长度重写",
   qzone_publish_test: "空间发布测试",
   qzone_publish_sanitize: "空间文案清理",
   qzone_publish_image_test_draft: "空间配图测试草稿",

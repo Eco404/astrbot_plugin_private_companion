@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+import random
 import time
 import logging
 import sys
@@ -23,6 +25,8 @@ except ModuleNotFoundError:
     sys.modules.setdefault("astrbot.api.event", astrbot_event_module)
 
 from astrbot_plugin_private_companion.qzone_integration import QzoneMixin
+from astrbot_plugin_private_companion.qzone_media import QzoneIntegrationError
+from astrbot_plugin_private_companion.helpers import _day_start_ts
 
 
 class _PlanHarness(QzoneMixin):
@@ -43,6 +47,9 @@ class _PlanHarness(QzoneMixin):
 
 class _CommentHarness(QzoneMixin):
     qzone_comment_inbox_recent_posts = 5
+    qzone_comment_inbox_interval_minutes = 5
+    qzone_comment_inbox_max_replies_per_tick = 1
+    enable_qzone_comment_inbox = True
 
     def __init__(self, post, event_id: str = "100") -> None:
         self.post = post
@@ -73,6 +80,29 @@ class _CommentHarness(QzoneMixin):
         pass
 
 
+class _PublishHarness(QzoneMixin):
+    enable_qzone_integration = True
+
+    def __init__(self) -> None:
+        self.data = {"qzone_integration": {}}
+
+    def _qzone_available(self, _event=None) -> bool:
+        return True
+
+    async def _qzone_publish_post(self, *_args, **_kwargs):
+        raise QzoneIntegrationError(
+            "投递结果未知",
+            "timed out",
+            delivery_unknown=True,
+        )
+
+    def _qzone_clear_auth_failure(self) -> None:
+        pass
+
+    def _qzone_mark_auth_failure(self, *_args, **_kwargs) -> None:
+        pass
+
+
 class _Event:
     def __init__(self, sender_id: str) -> None:
         self.sender_id = sender_id
@@ -90,6 +120,49 @@ class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
     def test_windows_are_unlimited_and_overlaps_merge(self) -> None:
         windows = _PlanHarness._qzone_parse_windows("07:00-09:00\n08:00-11:00\n12:00-13:00\n18:00-19:00\n20:00-21:00")
         self.assertEqual(windows, [(420, 660), (720, 780), (1080, 1140), (1200, 1260)])
+
+    def test_cross_midnight_window_is_split_without_default_fallback(self) -> None:
+        windows = _PlanHarness._qzone_parse_windows("23:00-02:00")
+        self.assertEqual(windows, [(0, 120), (1380, 1440)])
+
+    def test_invalid_custom_window_stops_daily_plan(self) -> None:
+        harness = _PlanHarness()
+        harness.qzone_life_publish_windows = "not-a-window"
+        plan = harness._qzone_life_publish_daily_plan({}, now=time.time())
+        self.assertEqual(plan["skip_reason"], "invalid_window_config")
+        self.assertEqual(harness._qzone_life_publish_effective_windows(), [])
+
+    def test_single_post_can_use_later_window(self) -> None:
+        harness = _PlanHarness()
+        harness.qzone_life_publish_max_daily = 1
+        now = _day_start_ts(time.time()) + 60 * 60
+        with (
+            patch.object(random, "shuffle", side_effect=lambda values: values.reverse()),
+            patch.object(random, "uniform", side_effect=lambda start, end: (start + end) / 2),
+        ):
+            slots = harness._qzone_life_publish_pick_slots(target_count=1, earliest=0, now=now)
+        minute = int((slots[0] - _day_start_ts(now)) / 60)
+        self.assertGreaterEqual(minute, 18 * 60)
+
+    def test_config_change_rebuilds_undelivered_plan(self) -> None:
+        harness = _PlanHarness()
+        state = {}
+        with patch("astrbot_plugin_private_companion.qzone_integration.random.random", return_value=0.0):
+            first = harness._qzone_life_publish_daily_plan(state, now=time.time())
+            harness.qzone_life_publish_windows = "16:00-17:00"
+            second = harness._qzone_life_publish_daily_plan(state, now=time.time())
+        self.assertIsNot(first, second)
+        self.assertNotEqual(first["config_signature"], second["config_signature"])
+
+    def test_schedule_labels_are_backfilled_after_daily_plan_arrives(self) -> None:
+        harness = _PlanHarness()
+        harness.data = {"daily_plan": {"date": time.strftime("%Y-%m-%d"), "items": []}}
+        with patch("astrbot_plugin_private_companion.qzone_integration.random.random", return_value=0.0):
+            plan = harness._qzone_life_publish_daily_plan({}, now=time.time())
+        self.assertTrue(all(not item.get("schedule_label") for item in plan["items"]))
+        harness.data["daily_plan"]["items"] = [{"time": "18:00", "activity": "晚饭后散步"}]
+        self.assertTrue(harness._qzone_backfill_plan_schedule_labels(plan))
+        self.assertTrue(any(item.get("schedule_label") == "晚饭后散步" for item in plan["items"]))
 
     def test_n_one_always_plans_one_item(self) -> None:
         harness = _PlanHarness()
@@ -124,6 +197,23 @@ class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
 
         again = await harness._qzone_reply_my_comment(_Event("100"), comment_hint="刚刚评论")
         self.assertEqual(again["status"], "not_found")
+
+    async def test_concurrent_immediate_comment_replies_send_once(self) -> None:
+        comment = SimpleNamespace(comment_id="c1", uin="100", name="user", content="我刚刚评论啦", raw={})
+        harness = _CommentHarness(SimpleNamespace(tid="post1", comments=[comment]))
+        original = harness._qzone_reply_to_comment
+
+        async def delayed_reply(*args, **kwargs):
+            await asyncio.sleep(0.01)
+            return await original(*args, **kwargs)
+
+        harness._qzone_reply_to_comment = delayed_reply
+        results = await asyncio.gather(
+            harness._qzone_reply_my_comment(_Event("100"), comment_hint="刚刚评论"),
+            harness._qzone_reply_my_comment(_Event("100"), comment_hint="刚刚评论"),
+        )
+        self.assertEqual(len(harness.sent), 1)
+        self.assertEqual({item["status"] for item in results}, {"replied", "not_found"})
 
     async def test_immediate_comment_reply_refuses_ambiguous_matches(self) -> None:
         comments = [
@@ -179,6 +269,24 @@ class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
         state = harness.data["qzone_integration"]
         self.assertEqual(state["last_comment_inbox_status"], "tool_delivery_unknown")
         self.assertNotIn("c1", state.get("comment_inbox_retry_ids", []))
+        self.assertIn("c1", state.get("comment_inbox_delivery_unknown_ids", []))
+        again = await harness._qzone_reply_my_comment(_Event("100"), comment_hint="刚刚评论")
+        self.assertEqual(again["status"], "not_found")
+
+    async def test_secondary_persona_skips_account_wide_maintenance(self) -> None:
+        comment = SimpleNamespace(comment_id="c1", uin="100", name="user", content="评论", raw={})
+        harness = _CommentHarness(SimpleNamespace(tid="post1", comments=[comment]))
+        harness.enable_multi_persona_mode = True
+        harness.multi_persona_primary_id = "primary"
+        harness._active_persona_scope = lambda: "secondary"
+        await harness._maybe_process_qzone_comment_inbox()
+        self.assertEqual(harness.sent, [])
+        self.assertEqual(harness.data["qzone_integration"], {})
+
+    async def test_publish_timeout_is_structured_as_delivery_unknown(self) -> None:
+        result = await _PublishHarness()._publish_qzone_text("测试说说")
+        self.assertFalse(result["success"])
+        self.assertTrue(result["delivery_unknown"])
 
 
 if __name__ == "__main__":

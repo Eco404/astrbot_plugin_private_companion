@@ -59,6 +59,42 @@ class QzoneMixin(QzoneMediaMixin):
         "impl",
         "instance",
     )
+
+    def _qzone_operation_lock(self, name: str) -> asyncio.Lock:
+        attr = f"_qzone_{name}_lock"
+        lock = getattr(self, attr, None)
+        if lock is None:
+            lock = asyncio.Lock()
+            setattr(self, attr, lock)
+        return lock
+
+    def _qzone_automatic_persona_active(self) -> bool:
+        """Run account-wide maintenance once, under the primary persona."""
+        if not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return True
+        active_getter = getattr(self, "_active_persona_scope", None)
+        active = str(active_getter() if callable(active_getter) else "").strip()
+        primary = str(getattr(self, "multi_persona_primary_id", "") or "").strip()
+        return bool(primary and active == primary)
+
+    def _qzone_activate_primary_persona(self) -> Any | None:
+        if not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return None
+        active_getter = getattr(self, "_active_persona_scope", None)
+        active = str(active_getter() if callable(active_getter) else "").strip()
+        primary = str(getattr(self, "multi_persona_primary_id", "") or "").strip()
+        if not primary or active == primary:
+            return None
+        activator = getattr(self, "_activate_persona_id", None)
+        return activator(primary) if callable(activator) else None
+
+    def _qzone_deactivate_persona(self, token: Any | None) -> None:
+        if token is None:
+            return
+        deactivator = getattr(self, "_deactivate_persona_for_event", None)
+        if callable(deactivator):
+            deactivator(token)
+
     _QZONE_COOKIE_VALUE_KEYS = (
         "cookies",
         "cookie",
@@ -802,16 +838,35 @@ class QzoneMixin(QzoneMediaMixin):
         if headers:
             request_headers.update(headers)
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout, headers=request_headers) as session:
-            async with session.request(method, url, params=params, data=data) as response:
-                text = await response.text()
-                parsed = self._qzone_parse_response(text)
-                parsed.setdefault("_http_status", response.status)
-                if parsed.get("message") == "接口返回空响应":
-                    parsed["message"] = f"接口返回空响应（HTTP {response.status}）"
-                if response.status == 403 and parsed.get("code") in {-1, None}:
-                    parsed["message"] = "无权限访问 QQ 空间或 Cookie 已失效"
-                return parsed
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=request_headers) as session:
+                async with session.request(method, url, params=params, data=data) as response:
+                    text = await response.text()
+                    parsed = self._qzone_parse_response(text)
+                    parsed.setdefault("_http_status", response.status)
+                    if parsed.get("message") == "接口返回空响应":
+                        parsed["message"] = f"接口返回空响应（HTTP {response.status}）"
+                    if response.status == 403 and parsed.get("code") in {-1, None}:
+                        parsed["message"] = "无权限访问 QQ 空间或 Cookie 已失效"
+                    return parsed
+        except aiohttp.ClientConnectorError as exc:
+            raise QzoneIntegrationError("网络连接失败", _single_line(exc, 140), retryable=True) from exc
+        except (asyncio.TimeoutError, aiohttp.ServerDisconnectedError, aiohttp.ClientPayloadError) as exc:
+            mutating = str(method or "GET").upper() not in {"GET", "HEAD"}
+            raise QzoneIntegrationError(
+                "投递结果未知" if mutating else "网络读取失败",
+                _single_line(exc, 140) or type(exc).__name__,
+                retryable=not mutating,
+                delivery_unknown=mutating,
+            ) from exc
+        except aiohttp.ClientError as exc:
+            mutating = str(method or "GET").upper() not in {"GET", "HEAD"}
+            raise QzoneIntegrationError(
+                "投递结果未知" if mutating else "网络读取失败",
+                _single_line(exc, 140),
+                retryable=not mutating,
+                delivery_unknown=mutating,
+            ) from exc
 
     @staticmethod
     def _qzone_norm_key(key: Any) -> str:
@@ -1774,6 +1829,26 @@ class QzoneMixin(QzoneMediaMixin):
         selector: str = "latest",
         reply_hint: str = "",
     ) -> dict[str, Any]:
+        token = self._qzone_activate_primary_persona()
+        try:
+            async with self._qzone_operation_lock("comment_reply"):
+                return await self._qzone_reply_my_comment_locked(
+                    event,
+                    comment_hint=comment_hint,
+                    selector=selector,
+                    reply_hint=reply_hint,
+                )
+        finally:
+            self._qzone_deactivate_persona(token)
+
+    async def _qzone_reply_my_comment_locked(
+        self,
+        event: AstrMessageEvent | None,
+        *,
+        comment_hint: str = "",
+        selector: str = "latest",
+        reply_hint: str = "",
+    ) -> dict[str, Any]:
         """Find one recent comment left by the current user on Bot's own post."""
         if not self._qzone_available(event):
             return {"status": "disabled", "message": self._qzone_platform_unavailable_message()}
@@ -1832,10 +1907,14 @@ class QzoneMixin(QzoneMediaMixin):
         state = self._qzone_state_dict()
         replied = set(self._qzone_trim_id_list(state.get("comment_inbox_replied_ids"), limit=300))
         replied_keys = set(self._qzone_trim_id_list(state.get("comment_inbox_replied_keys"), limit=300))
+        unknown = set(self._qzone_trim_id_list(state.get("comment_inbox_delivery_unknown_ids"), limit=100))
+        unknown_keys = set(self._qzone_trim_id_list(state.get("comment_inbox_delivery_unknown_keys"), limit=100))
         candidates = [
             item for item in candidates
             if not any(candidate_id in replied for candidate_id in item["id_candidates"])
             and item["comment_key"] not in replied_keys
+            and not any(candidate_id in unknown for candidate_id in item["id_candidates"])
+            and item["comment_key"] not in unknown_keys
             and not self._qzone_author_post_recently_replied(state, item["post"], item["comment"], now=_now_ts())
         ]
         candidates.sort(key=lambda item: (item["score"], _safe_float(getattr(item["comment"], "create_time", 0), 0)), reverse=True)
@@ -1860,7 +1939,12 @@ class QzoneMixin(QzoneMediaMixin):
         try:
             sent = await self._qzone_reply_to_comment(event, best["post"], best["comment"], reply)
         except Exception as exc:
-            retryable = bool(re.search(r"\b(?:code|ret)\s*=\s*-?\d+", str(exc), flags=re.I))
+            delivery_unknown = bool(getattr(exc, "delivery_unknown", False))
+            retryable = bool(getattr(exc, "retryable", False)) or bool(
+                re.search(r"\b(?:code|ret)\s*=\s*-?\d+", str(exc), flags=re.I)
+            )
+            if delivery_unknown:
+                retryable = False
             if self._qzone_auth_failure_message(exc):
                 self._qzone_mark_auth_failure(str(exc), source="comment_tool", state=state, save=False)
             if retryable:
@@ -1868,6 +1952,15 @@ class QzoneMixin(QzoneMediaMixin):
                 retry_keys = self._qzone_trim_id_list(state.get("comment_inbox_retry_keys"), limit=100)
                 state["comment_inbox_retry_ids"] = self._qzone_trim_id_list(retry_ids + best["id_candidates"], limit=100)
                 state["comment_inbox_retry_keys"] = self._qzone_trim_id_list(retry_keys + [best["comment_key"]], limit=100)
+            else:
+                state["comment_inbox_delivery_unknown_ids"] = self._qzone_trim_id_list(
+                    list(unknown) + best["id_candidates"],
+                    limit=100,
+                )
+                state["comment_inbox_delivery_unknown_keys"] = self._qzone_trim_id_list(
+                    list(unknown_keys) + [best["comment_key"]],
+                    limit=100,
+                )
             state["last_comment_inbox_status"] = "tool_retryable" if retryable else "tool_delivery_unknown"
             state["last_comment_inbox_reason"] = _single_line(exc, 120)
             self._save_data_sync()
@@ -1889,6 +1982,14 @@ class QzoneMixin(QzoneMediaMixin):
             item for item in self._qzone_trim_id_list(state.get("comment_inbox_retry_keys"), limit=100)
             if item != best["comment_key"]
         ]
+        state["comment_inbox_delivery_unknown_ids"] = [
+            item for item in self._qzone_trim_id_list(state.get("comment_inbox_delivery_unknown_ids"), limit=100)
+            if item not in set(best["id_candidates"])
+        ]
+        state["comment_inbox_delivery_unknown_keys"] = [
+            item for item in self._qzone_trim_id_list(state.get("comment_inbox_delivery_unknown_keys"), limit=100)
+            if item != best["comment_key"]
+        ]
         state["last_comment_inbox_reply_at"] = now
         state["last_comment_inbox_status"] = "tool_replied"
         state["last_comment_inbox_reply_text"] = _single_line(sent, 120)
@@ -1896,6 +1997,12 @@ class QzoneMixin(QzoneMediaMixin):
         return {"status": "replied", "comment": best["content"], "reply": sent}
 
     async def _maybe_process_qzone_comment_inbox(self) -> None:
+        if not self._qzone_automatic_persona_active():
+            return
+        async with self._qzone_operation_lock("comment_reply"):
+            await self._maybe_process_qzone_comment_inbox_locked()
+
+    async def _maybe_process_qzone_comment_inbox_locked(self) -> None:
         if not (self._qzone_available() and getattr(self, "enable_qzone_comment_inbox", False)):
             return
         now = _now_ts()
@@ -1910,6 +2017,8 @@ class QzoneMixin(QzoneMediaMixin):
         replied_key_set: set[str] = set()
         retry_set: set[str] = set()
         retry_key_set: set[str] = set()
+        unknown_set: set[str] = set()
+        unknown_key_set: set[str] = set()
         interval_seconds = max(5, _safe_int(getattr(self, "qzone_comment_inbox_interval_minutes", 60), 60, 5, 1440)) * 60
         if now - _safe_float(state.get("last_comment_inbox_checked_at"), 0) < interval_seconds:
             return
@@ -1946,12 +2055,16 @@ class QzoneMixin(QzoneMediaMixin):
             replied_keys = self._qzone_trim_id_list(state.get("comment_inbox_replied_keys"), limit=300)
             retry_ids = self._qzone_trim_id_list(state.get("comment_inbox_retry_ids"), limit=100)
             retry_keys = self._qzone_trim_id_list(state.get("comment_inbox_retry_keys"), limit=100)
+            unknown_ids = self._qzone_trim_id_list(state.get("comment_inbox_delivery_unknown_ids"), limit=100)
+            unknown_keys = self._qzone_trim_id_list(state.get("comment_inbox_delivery_unknown_keys"), limit=100)
             seen_set = set(seen_ids)
             replied_set = set(replied_ids)
             seen_key_set = set(seen_keys)
             replied_key_set = set(replied_keys)
             retry_set = set(retry_ids)
             retry_key_set = set(retry_keys)
+            unknown_set = set(unknown_ids)
+            unknown_key_set = set(unknown_keys)
             observed_ids = [candidate_id for _, _, _, _, id_candidates, _, _ in observed for candidate_id in id_candidates if candidate_id]
             observed_keys = [comment_key for _, _, _, comment_key, _, _, _ in observed if comment_key]
             first_run = not state.get("comment_inbox_initialized_at")
@@ -1991,6 +2104,8 @@ class QzoneMixin(QzoneMediaMixin):
                 and (not any(candidate_id in seen_set for candidate_id in id_candidates) or any(candidate_id in retry_set for candidate_id in id_candidates))
                 and (comment_key not in seen_key_set or comment_key in retry_key_set)
                 and comment_key not in replied_key_set
+                and not any(candidate_id in unknown_set for candidate_id in id_candidates)
+                and comment_key not in unknown_key_set
                 and not is_self_comment
                 and not author_recently_replied
             ]
@@ -2022,7 +2137,12 @@ class QzoneMixin(QzoneMediaMixin):
                 try:
                     sent_text = await self._qzone_reply_to_comment(None, post, comment, str(decision.get("reply") or ""))
                 except Exception as exc:
-                    retryable = bool(re.search(r"\b(?:code|ret)\s*=\s*-?\d+", str(exc), flags=re.I))
+                    delivery_unknown = bool(getattr(exc, "delivery_unknown", False))
+                    retryable = bool(getattr(exc, "retryable", False)) or bool(
+                        re.search(r"\b(?:code|ret)\s*=\s*-?\d+", str(exc), flags=re.I)
+                    )
+                    if delivery_unknown:
+                        retryable = False
                     if self._qzone_auth_failure_message(exc):
                         self._qzone_mark_auth_failure(str(exc), source="comment_inbox", state=state, save=False)
                     if retryable:
@@ -2031,8 +2151,14 @@ class QzoneMixin(QzoneMediaMixin):
                                 retry_set.add(candidate_id)
                         if comment_key:
                             retry_key_set.add(comment_key)
+                    else:
+                        unknown_set.update(candidate_id for candidate_id in id_candidates if candidate_id)
+                        if comment_key:
+                            unknown_key_set.add(comment_key)
                     state["comment_inbox_retry_ids"] = self._qzone_trim_id_list(list(retry_set), limit=100)
                     state["comment_inbox_retry_keys"] = self._qzone_trim_id_list(list(retry_key_set), limit=100)
+                    state["comment_inbox_delivery_unknown_ids"] = self._qzone_trim_id_list(list(unknown_set), limit=100)
+                    state["comment_inbox_delivery_unknown_keys"] = self._qzone_trim_id_list(list(unknown_key_set), limit=100)
                     state["last_comment_inbox_status"] = (
                         f"retryable:{_single_line(comment_id or comment_key, 80)}"
                         if retryable
@@ -2056,6 +2182,9 @@ class QzoneMixin(QzoneMediaMixin):
                 if comment_key:
                     replied_key_set.add(comment_key)
                     retry_key_set.discard(comment_key)
+                    unknown_key_set.discard(comment_key)
+                for candidate_id in id_candidates:
+                    unknown_set.discard(candidate_id)
                 self._qzone_note_comment_inbox_sent(state, post, comment, sent_text, now=now)
                 replies += 1
                 last_reason = _single_line(decision.get("reason"), 60) or "已回复"
@@ -2095,6 +2224,8 @@ class QzoneMixin(QzoneMediaMixin):
             state["comment_inbox_replied_keys"] = self._qzone_trim_id_list(list(replied_key_set), limit=300)
             state["comment_inbox_retry_ids"] = self._qzone_trim_id_list(list(retry_set), limit=100)
             state["comment_inbox_retry_keys"] = self._qzone_trim_id_list(list(retry_key_set), limit=100)
+            state["comment_inbox_delivery_unknown_ids"] = self._qzone_trim_id_list(list(unknown_set), limit=100)
+            state["comment_inbox_delivery_unknown_keys"] = self._qzone_trim_id_list(list(unknown_key_set), limit=100)
             state["last_comment_inbox_checked_at"] = now
             state["last_comment_inbox_status"] = f"checked:new={len(candidates)},replied={replies},skipped={skipped}"
             state["last_comment_inbox_reason"] = last_reason
@@ -3326,11 +3457,16 @@ class QzoneMixin(QzoneMediaMixin):
             start_h, start_m, end_h, end_m = (int(part) for part in match.groups())
             if start_h > 23 or start_m > 59 or end_h > 24 or end_m > 59:
                 continue
+            if end_h == 24 and end_m != 0:
+                continue
             start = start_h * 60 + start_m
             end = min(end_h * 60 + end_m, 24 * 60)
-            if end <= start:
+            if end == start:
                 continue
-            windows.append((start, end))
+            if end < start:
+                windows.extend(((start, 24 * 60), (0, end)))
+            else:
+                windows.append((start, end))
         return QzoneMixin._qzone_merge_windows(windows)
 
     @staticmethod
@@ -3396,6 +3532,9 @@ class QzoneMixin(QzoneMediaMixin):
         """Windows usable right now, with night hours trimmed unless sleepless."""
         windows = self._qzone_parse_windows(self._qzone_life_publish_window_source())
         if not windows:
+            mode = _single_line(getattr(self, "qzone_life_publish_window_mode", "template_double"), 32)
+            if mode in {"custom", "自定义"}:
+                return []
             windows = self._qzone_parse_windows(QZONE_WINDOW_TEMPLATE_DOUBLE)
         if self._qzone_night_publish_allowed():
             return windows
@@ -3446,6 +3585,7 @@ class QzoneMixin(QzoneMediaMixin):
         def fits(candidate: float) -> bool:
             return all(abs(candidate - existing) >= gap for existing in slots)
 
+        random.shuffle(spans)
         for start, end in spans:
             if len(slots) >= target_count:
                 break
@@ -3562,6 +3702,50 @@ class QzoneMixin(QzoneMediaMixin):
         minutes = (planned_at - _day_start_ts(planned_at)) / 60.0
         return any(start <= minutes < end for start, end in QZONE_NIGHT_RANGES)
 
+    def _qzone_life_publish_plan_signature(self) -> str:
+        payload = {
+            "max_daily": _safe_int(getattr(self, "qzone_life_publish_max_daily", 1), 1, 1),
+            "probability": _safe_float(getattr(self, "qzone_life_publish_probability", 0.18), 0.18),
+            "window_mode": _single_line(getattr(self, "qzone_life_publish_window_mode", "template_double"), 32),
+            "windows": self._qzone_life_publish_window_source(),
+            "allow_night": bool(getattr(self, "qzone_life_publish_allow_insomnia_night", False)),
+            "cross_day_hours": _safe_int(getattr(self, "qzone_life_publish_min_interval_hours", 24), 24, 1, 168),
+            "intra_day_minutes": _safe_int(getattr(self, "qzone_life_publish_intra_day_gap_minutes", 0), 0, 0, 1440),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:20]
+
+    def _qzone_backfill_plan_schedule_labels(self, plan: dict[str, Any]) -> bool:
+        candidates = self._qzone_schedule_candidates_for_today()
+        items = plan.get("items") if isinstance(plan, dict) else None
+        if not candidates or not isinstance(items, list):
+            return False
+        used_keys = {
+            _single_line(item.get("schedule_key"), 80)
+            for item in items
+            if isinstance(item, dict) and _single_line(item.get("schedule_key"), 80)
+        }
+        changed = False
+        for item in items:
+            if not isinstance(item, dict) or item.get("status") != "planned" or _single_line(item.get("schedule_label"), 160):
+                continue
+            schedule = self._qzone_pick_schedule_for_slot(
+                candidates,
+                _safe_float(item.get("planned_at"), 0),
+                used_keys,
+            )
+            if not isinstance(schedule, dict):
+                continue
+            key = _single_line(schedule.get("key"), 80)
+            item["schedule_key"] = key
+            item["schedule_label"] = _single_line(schedule.get("label"), 160)
+            if key:
+                used_keys.add(key)
+            changed = True
+        if changed:
+            plan["used_schedule_keys"] = sorted(used_keys)
+        return changed
+
     def _qzone_life_publish_daily_plan(self, state: dict[str, Any], *, now: float) -> dict[str, Any]:
         """Return today's publish plan, building it once per day.
 
@@ -3571,9 +3755,27 @@ class QzoneMixin(QzoneMediaMixin):
         item is anchored to a random moment inside a configured window.
         """
         today = _today_key()
+        signature = self._qzone_life_publish_plan_signature()
         existing = state.get("life_publish_daily_plan")
         if isinstance(existing, dict) and _single_line(existing.get("date"), 24) == today:
-            return existing
+            stored_signature = _single_line(existing.get("config_signature"), 40)
+            if not stored_signature or stored_signature == signature:
+                existing["config_signature"] = signature
+                return existing
+            delivered = any(
+                isinstance(item, dict) and item.get("status") in {"published", "delivery_unknown"}
+                for item in list(existing.get("items") or [])
+            )
+            if delivered:
+                for item in list(existing.get("items") or []):
+                    if isinstance(item, dict) and item.get("status") == "planned":
+                        item["status"] = "cancelled"
+                        item["failed_reason"] = "config_changed_after_delivery"
+                        item["finished_at"] = now
+                existing["config_signature"] = signature
+                existing["skip_reason"] = "config_changed_after_delivery"
+                existing["updated_at"] = now
+                return existing
 
         # The user controls this limit; do not impose a product-level ceiling.
         # Scheduling still naturally limits actual items by windows and gaps.
@@ -3588,7 +3790,13 @@ class QzoneMixin(QzoneMediaMixin):
             "items": [],
             "created_at": now,
             "night_allowed": self._qzone_night_publish_allowed(),
+            "config_signature": signature,
         }
+        mode = _single_line(getattr(self, "qzone_life_publish_window_mode", "template_double"), 32)
+        if mode in {"custom", "自定义"} and not self._qzone_parse_windows(self._qzone_life_publish_window_source()):
+            plan["skip_reason"] = "invalid_window_config"
+            state["life_publish_daily_plan"] = plan
+            return plan
         if random.random() >= probability:
             plan["skip_reason"] = "probability_miss"
             state["life_publish_daily_plan"] = plan
@@ -3799,6 +4007,12 @@ class QzoneMixin(QzoneMediaMixin):
         return await self._sanitize_qzone_life_post_text(rewritten, prompt=rewrite_prompt)
 
     async def _maybe_publish_qzone_life_post(self) -> None:
+        if not self._qzone_automatic_persona_active():
+            return
+        async with self._qzone_operation_lock("life_publish"):
+            await self._maybe_publish_qzone_life_post_locked()
+
+    async def _maybe_publish_qzone_life_post_locked(self) -> None:
         if not (self._qzone_available() and self.enable_qzone_life_publish):
             return
         now = _now_ts()
@@ -3807,11 +4021,24 @@ class QzoneMixin(QzoneMediaMixin):
             self.data["qzone_integration"] = {}
             state = self.data["qzone_integration"]
         existing_plan = state.get("life_publish_daily_plan")
+        signature = self._qzone_life_publish_plan_signature()
         plan_is_new = not (
             isinstance(existing_plan, dict)
             and _single_line(existing_plan.get("date"), 24) == _today_key()
+            and _single_line(existing_plan.get("config_signature"), 40) == signature
         )
+        daily_plan = self.data.get("daily_plan") if isinstance(self.data, dict) else None
+        if plan_is_new and not (
+            isinstance(daily_plan, dict) and _single_line(daily_plan.get("date"), 24) == _today_key()
+        ):
+            ensure_daily_plan = getattr(self, "_ensure_daily_plan", None)
+            if callable(ensure_daily_plan):
+                try:
+                    await ensure_daily_plan()
+                except Exception as exc:
+                    logger.warning("[PrivateCompanion] QQ 空间建计划前确保今日日程失败，继续使用当下状态: %s", _single_line(exc, 120))
         plan = self._qzone_life_publish_daily_plan(state, now=now)
+        plan_changed = self._qzone_backfill_plan_schedule_labels(plan)
         # The cross-day gap is applied while building the first slot. Once that
         # plan exists, same-day posts use their own explicit spacing instead of
         # accidentally inheriting a 24-hour cross-day cooldown.
@@ -3831,7 +4058,7 @@ class QzoneMixin(QzoneMediaMixin):
             return
         plan_item = self._qzone_life_publish_due_item(plan, now=now)
         if plan_item is None:
-            if plan_is_new:
+            if plan_is_new or plan_changed:
                 next_at = self._qzone_life_publish_next_planned_at(plan)
                 target = _safe_int(plan.get("target_count"), 0, 0)
                 state["last_life_publish_status"] = (
@@ -4071,9 +4298,14 @@ class QzoneMixin(QzoneMediaMixin):
             self._qzone_plan_item_finish(plan, plan_item, "published", now=now)
         else:
             state["last_life_publish_failed_at"] = now
-            state["last_life_publish_status"] = f"failed:{_single_line(result.get('message'), 80)}"
-            # Keep the slot retryable until it exhausts its attempt budget.
-            if (
+            if result.get("delivery_unknown"):
+                state["last_life_publish_status"] = f"delivery_unknown:{_single_line(result.get('message'), 80)}"
+                self._qzone_plan_item_finish(plan, plan_item, "delivery_unknown", now=now)
+                self._qzone_clear_pending_publish_assets(state, "life_publish")
+            else:
+                state["last_life_publish_status"] = f"failed:{_single_line(result.get('message'), 80)}"
+            # Keep confirmed failures retryable until the attempt budget is exhausted.
+            if not result.get("delivery_unknown") and (
                 isinstance(plan_item, dict)
                 and _safe_int(plan_item.get("attempts"), 0, 0, 99) >= QZONE_PLAN_ITEM_MAX_ATTEMPTS
             ):
