@@ -10621,6 +10621,7 @@ Output:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
         original_prompt_text = str(prompt_text or "").strip()
+        prompt_format = self._photo_generation_prompt_format_mode()
         request_text = str(request_text or original_prompt_text).strip()
         requester_user_id = _single_line(requester_user_id, 80)
         if requester_is_private is None:
@@ -10640,6 +10641,7 @@ Output:
                 "continuity_key": continuity_key,
                 "workflow_kind": workflow_kind,
                 "request_text": request_text,
+                "prompt_format": prompt_format,
             },
         )
         reference_image_path = _path_text(reference_image_path, 1000)
@@ -11181,6 +11183,7 @@ Output:
             trace_id,
             "prompt_composed",
             data={
+                "prompt_format": prompt_format,
                 "prompt": complete_prompt_text,
                 "submitted_prompt": prompt_text,
                 "prompt_hash": prompt_hash,
@@ -11209,12 +11212,13 @@ Output:
             "backend_selected",
             data={
                 "preferred": preferred,
+                "prompt_format": prompt_format,
                 "reference_count": len(reference_image_paths),
                 "image_size": image_size,
             },
         )
         logger.info(
-            "[PrivateCompanion] 生图开始: trace=%s session=%s kind=%s presets=%s prompt_chars=%s prompt_hash=%s prompt_debug=%s "
+            "[PrivateCompanion] 生图开始: trace=%s session=%s kind=%s prompt_format=%s presets=%s prompt_chars=%s prompt_hash=%s prompt_debug=%s "
             "reference=%s reference_exists=%s reference_id=%s reference_kind=%s reference_roles=%s "
             "wardrobe_version=%s wardrobe_rule=%s wardrobe_mode=%s wardrobe_category=%s outfit_locked=%s "
             "preset_hint=%s preset_source=%s suggestion_status=%s selected_presets=%s adjustments=%s daily_outfit_removed=%s continuity_reference=%s "
@@ -11223,6 +11227,7 @@ Output:
             trace_id,
             _single_line(session_key, 80),
             _single_line(workflow_kind, 30),
+            prompt_format,
             ",".join(preset_names) or "-",
             len(str(prompt_text or "")),
             prompt_hash[:16],

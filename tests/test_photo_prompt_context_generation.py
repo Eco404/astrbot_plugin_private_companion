@@ -53,6 +53,7 @@ def _astrbot_stubs() -> dict[str, types.ModuleType]:
         "astrbot.core.platform.platform",
         "astrbot.core.platform.platform_metadata",
         "astrbot.core.star",
+        "astrbot.core.star.star",
         "astrbot.core.star.star_handler",
         "astrbot.core.provider",
         "astrbot.core.provider.entities",
@@ -79,6 +80,7 @@ def _astrbot_stubs() -> dict[str, types.ModuleType]:
     for name in ("AssistantMessageSegment", "TextPart", "UserMessageSegment"):
         setattr(modules["astrbot.core.agent.message"], name, _Dummy)
     modules["astrbot.core.db.po"].Conversation = _Dummy
+    modules["astrbot.core.star.star"].star_map = {}
     symbol_groups = {
         "astrbot.core.platform.astrbot_message": ("AstrBotMessage", "MessageMember"),
         "astrbot.core.platform.message_session": ("MessageSession",),
@@ -335,6 +337,51 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events[-1]["status"], "ok")
             self.assertEqual(events[-1]["context"]["backend"], "ComfyUI")
             self.assertEqual(events[-1]["data"]["image_path"], str(output))
+
+    async def test_nai_generation_writes_identifiable_complete_trace_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            harness.photo_generation_prompt_format = "nai"
+
+            await harness._generate_photo_image(
+                workflow_kind="selfie",
+                prompt_text="{1girl}, 1.5::red dress::, -1::text::",
+                session_key="nai-trace-chain-session",
+            )
+
+            events = [
+                json.loads(line)
+                for line in (Path(directory) / "photo_generation_trace.txt")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        expected_stages = [
+            "request_received",
+            "reference_intent_analyzed",
+            "reference_plan_built",
+            "reference_plan_projected",
+            "wardrobe_resolved",
+            "prompt_composed",
+            "backend_selected",
+            "output_validated",
+            "completed",
+        ]
+        stages = [event["stage"] for event in events]
+        self.assertEqual(
+            [stages.index(stage) for stage in expected_stages],
+            sorted(stages.index(stage) for stage in expected_stages),
+        )
+        self.assertTrue(
+            all(event["context"]["prompt_format"] == "nai" for event in events)
+        )
+        prompt_event = next(
+            event for event in events if event["stage"] == "prompt_composed"
+        )
+        self.assertEqual(prompt_event["data"]["prompt_format"], "nai")
+        self.assertIn("1.5::red dress::", prompt_event["data"]["submitted_prompt"])
 
     async def test_matching_outfit_reference_reaches_debug_trace_responsibility(
         self,
