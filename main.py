@@ -2938,6 +2938,28 @@ class PrivateCompanionPlugin(
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
         self.qzone_life_publish_min_interval_hours = self._cfg_int(c, "qzone_life_publish_min_interval_hours", 24, 4, 168)
         self.qzone_life_publish_probability = self._cfg_unit_interval(c, "qzone_life_publish_probability", 0.18, 0.0)
+        self.qzone_life_publish_max_daily = self._cfg_int(c, "qzone_life_publish_max_daily", 1, 1)
+        self.qzone_life_publish_window_mode = self._cfg_str(c, "qzone_life_publish_window_mode", "template_double")
+        self.qzone_life_publish_windows = self._cfg_str(c, "qzone_life_publish_windows", "")
+        self.qzone_life_publish_allow_insomnia_night = self._cfg_bool(
+            c,
+            "qzone_life_publish_allow_insomnia_night",
+            False,
+        )
+        self.qzone_life_publish_intra_day_gap_minutes = self._cfg_int(
+            c,
+            "qzone_life_publish_intra_day_gap_minutes",
+            45,
+            0,
+            1440,
+        )
+        self.qzone_life_publish_double_windows = self._cfg_str(
+            c,
+            "qzone_life_publish_double_windows",
+            "07:00-10:00\n18:00-22:00",
+        )
+        self.qzone_life_publish_custom_windows = self._cfg_str(c, "qzone_life_publish_custom_windows", "")
+        self.qzone_life_publish_similarity_threshold = self._cfg_int(c, "qzone_life_publish_similarity_threshold", 2, 1, 20)
         self.qzone_publish_style_prompt = self._cfg_str(c, "qzone_publish_style_prompt", "")
         self.enable_qzone_generated_image_publish = self._cfg_bool(c, "enable_qzone_generated_image_publish", True)
         self.qzone_generated_image_probability = self._cfg_unit_interval(c, "qzone_generated_image_probability", 0.25, 0.0)
@@ -6662,6 +6684,34 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if use_latest_draft:
             kwargs["use_latest_draft"] = use_latest_draft
         return await self._pc_qzone_publish_feed_impl(event, text, **kwargs)
+
+    @filter.llm_tool(name="pc_qzone_reply_my_comment")
+    async def pc_qzone_reply_my_comment(
+        self,
+        event: AstrMessageEvent,
+        comment_hint: str = "",
+        selector: str = "latest",
+        reply_hint: str = "",
+    ) -> str:
+        """检查并回复用户刚在 Bot 自己 QQ 空间动态下留下的评论。
+
+        Args:
+            comment_hint(string): 用户记得的评论全文、关键词或大致说法；无法精确映射 QQ 身份时用于唯一匹配。
+            selector(string): 可选，优先检查“最新”动态。
+            reply_hint(string): 可选，用户希望 Bot 使用的公开回复语气或内容提示。
+        """
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            return '{"status":"disabled","message":"当前模式不可使用 QQ 空间工具。"}'
+        try:
+            result = await self._qzone_reply_my_comment(
+                event,
+                comment_hint=comment_hint,
+                selector=selector,
+                reply_hint=reply_hint,
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": _single_line(exc, 160)}, ensure_ascii=False)
 
     @filter.llm_tool(name="pc_generate_photo")
     @_multi_persona_event_context

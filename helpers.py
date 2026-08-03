@@ -81,6 +81,23 @@ def _today_key() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _day_start_ts(value: float | None = None) -> float:
+    """Return the epoch timestamp of the local midnight of the day containing value.
+
+    Uses the plugin-configured timezone (same source as _today_key) so that
+    “今天”的分界与时区一致，避免用 UTC 零点切分造成偏差。
+    """
+    ts = time.time() if value is None else float(value)
+    if _today_key_timezone:
+        try:
+            local = datetime.fromtimestamp(ts, zoneinfo.ZoneInfo(_today_key_timezone))
+            return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        except Exception:
+            pass
+    local = datetime.fromtimestamp(ts)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
 def _date_key(value: date) -> str:
     return value.strftime("%Y-%m-%d")
 

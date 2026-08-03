@@ -16823,6 +16823,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_qzone_life_publish",
             "qzone_life_publish_min_interval_hours",
             "qzone_life_publish_probability",
+            "qzone_life_publish_max_daily",
+            "qzone_life_publish_window_mode",
+            "qzone_life_publish_windows",
+            "qzone_life_publish_allow_insomnia_night",
+            "qzone_life_publish_intra_day_gap_minutes",
+            "qzone_life_publish_similarity_threshold",
             "qzone_publish_style_prompt",
             "enable_qzone_generated_image_publish",
             "qzone_generated_image_probability",
@@ -19579,6 +19585,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_qzone_life_publish",
             "qzone_life_publish_min_interval_hours",
             "qzone_life_publish_probability",
+            "qzone_life_publish_max_daily",
+            "qzone_life_publish_window_mode",
+            "qzone_life_publish_windows",
+            "qzone_life_publish_allow_insomnia_night",
+            "qzone_life_publish_intra_day_gap_minutes",
+            "qzone_life_publish_similarity_threshold",
             "qzone_publish_style_prompt",
             "enable_qzone_generated_image_publish",
             "qzone_generated_image_probability",
@@ -20445,6 +20457,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 return max(3, min(20, int(value)))
             except (TypeError, ValueError):
                 return 6
+        if key == "qzone_life_publish_max_daily":
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                return 1
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
@@ -20505,6 +20522,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "external_event_self_link_cooldown_hours",
             "external_link_share_cooldown_hours",
             "qzone_life_publish_min_interval_hours",
+            "qzone_life_publish_max_daily",
+            "qzone_life_publish_intra_day_gap_minutes",
+            "qzone_life_publish_similarity_threshold",
             "qzone_emotional_vent_threshold",
             "qzone_emotional_vent_cooldown_hours",
             "private_reading_min_interval_hours",
@@ -21772,6 +21792,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
     def _qzone_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("qzone_integration") if isinstance(data.get("qzone_integration"), dict) else {}
+        daily_plan = state.get("life_publish_daily_plan") if isinstance(state.get("life_publish_daily_plan"), dict) else {}
+        plan_items = daily_plan.get("items") if isinstance(daily_plan.get("items"), list) else []
+        pending_times = [
+            self._float(item.get("planned_at"))
+            for item in plan_items
+            if isinstance(item, dict) and item.get("status") == "planned" and self._float(item.get("planned_at")) > 0
+        ]
+        plan_status_counts: dict[str, int] = {}
+        for item in plan_items:
+            if not isinstance(item, dict):
+                continue
+            status = self._single_line(item.get("status"), 24) or "planned"
+            plan_status_counts[status] = plan_status_counts.get(status, 0) + 1
         service_available = bool(
             callable(getattr(self.plugin, "_qzone_get_cookies", None))
             and callable(getattr(self.plugin, "_qzone_query_feeds", None))
@@ -21796,6 +21829,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "last_life_publish_at": self.plugin._format_timestamp_elapsed(state.get("last_life_publish_at", 0)),
             "last_status": state.get("last_life_publish_status", ""),
             "last_text": state.get("last_life_publish_text", ""),
+            "life_publish_plan_date": self._single_line(daily_plan.get("date"), 24),
+            "life_publish_plan_target_count": self._int(daily_plan.get("target_count")),
+            "life_publish_plan_published_count": self._int(daily_plan.get("published_count")),
+            "life_publish_plan_skip_reason": self._single_line(daily_plan.get("skip_reason"), 80),
+            "life_publish_plan_status_counts": plan_status_counts,
+            "life_publish_plan_next_at": self.plugin._format_timestamp_elapsed(min(pending_times)) if pending_times else "",
             "generated_image_enabled": bool(enabled and getattr(self.plugin, "enable_qzone_generated_image_publish", False)),
             "generated_image_probability": self._float(getattr(self.plugin, "qzone_generated_image_probability", 0)),
             "last_life_publish_images": self._int(state.get("last_life_publish_images")),
