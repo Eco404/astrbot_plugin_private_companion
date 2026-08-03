@@ -3126,7 +3126,9 @@ class QzoneMixin(QzoneMediaMixin):
         """
         windows = self._qzone_life_publish_windows()
         min_interval_seconds = max(4, _safe_int(getattr(self, "qzone_life_publish_min_interval_hours", 24), 24, 4, 168)) * 3600
-        earliest = _safe_float(state.get("last_life_publish_at"), 0) + min_interval_seconds
+        last_publish_at = _safe_float(state.get("last_life_publish_at"), 0)
+        # A first-ever publish has no historical cooldown to honor.
+        earliest = last_publish_at + min_interval_seconds if last_publish_at > 0 else 0.0
         day_start = _day_start_ts(now)
         day_end = day_start + 24 * 3600
         candidates: list[tuple[float, float]] = []
@@ -3639,4 +3641,3 @@ class QzoneMixin(QzoneMediaMixin):
             state["last_emotional_vent_checked_at"] = now
             self._save_data_sync()
             logger.warning("[PrivateCompanion] 公开心情动态异常: %s", _single_line(exc, 160), exc_info=True)
-
