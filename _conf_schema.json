@@ -23,6 +23,35 @@
         "default": "",
         "hint": "选择系统中已定义的人设后，本插件内部的关系评估、状态注入、日程、主动消息等人格参考会优先使用该人格。留空时回退到 AstrBot 当前默认人格。"
       },
+      "enable_multi_persona_mode": {
+        "description": "开启多人格支持模式",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时保持原有单人格行为，不显示人格切换和分类。开启后每个人格使用独立资料与日程；窗口通过绑定映射到固定人格。"
+      },
+      "multi_persona_primary_id": {
+        "description": "多人格主人格 ID",
+        "type": "string",
+        "_special": "select_persona",
+        "default": "",
+        "condition": "enable_multi_persona_mode",
+        "hint": "作为未单独绑定窗口的默认人格，并用于适配其他插件；建议保持稳定。"
+      },
+      "multi_persona_ids": {
+        "description": "多人格 ID 列表",
+        "type": "list",
+        "default": [],
+        "condition": "enable_multi_persona_mode",
+        "hint": "填写已定义的人格 ID，每个人格会创建独立资料文件。主人格会自动加入列表。"
+      },
+      "multi_persona_window_bindings": {
+        "description": "窗口到人格绑定",
+        "type": "object",
+        "default": {},
+        "items": {},
+        "condition": "enable_multi_persona_mode",
+        "hint": "键为完整 UMO/会话窗口，值为人格 ID；同一窗口只应绑定一个人格，避免串人格。"
+      },
       "LLM_PROVIDER_ID": {
         "description": "主模型 / 日程模型（留空用 AstrBot 默认）",
         "type": "string",
@@ -271,6 +300,31 @@
     "description": "Legacy flat config: 插件指定人格 ID",
     "type": "string",
     "default": "",
+    "invisible": true
+  },
+  "enable_multi_persona_mode": {
+    "description": "Legacy flat config: 开启多人格支持模式",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "multi_persona_primary_id": {
+    "description": "Legacy flat config: 多人格主人格 ID",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "multi_persona_ids": {
+    "description": "Legacy flat config: 多人格 ID 列表",
+    "type": "list",
+    "default": [],
+    "invisible": true
+  },
+  "multi_persona_window_bindings": {
+    "description": "Legacy flat config: 窗口到人格绑定",
+    "type": "object",
+    "default": {},
+    "items": {},
     "invisible": true
   },
   "LLM_PROVIDER_ID": {
@@ -556,7 +610,7 @@
     "invisible": true
   },
   "COMPANION_MEMORY_PROVIDER_ID": {
-    "description": "Legacy flat config: 陪伴长期画像整理模型（留空跟随陪伴通用模型）",
+    "description": "Legacy flat config: 本地陪伴画像整理模型（留空跟随陪伴通用模型）",
     "type": "string",
     "default": "",
     "invisible": true
@@ -1360,19 +1414,19 @@
     "invisible": true
   },
   "enable_companion_memory": {
-    "description": "Legacy flat config: 启用用户陪伴记忆",
+    "description": "Legacy flat config: 启用本地陪伴画像",
     "type": "bool",
     "default": true,
     "invisible": true
   },
   "memory_refresh_interval_minutes": {
-    "description": "Legacy flat config: 长期画像整理间隔（分钟）",
+    "description": "Legacy flat config: 本地画像整理间隔（分钟）",
     "type": "int",
     "default": 360,
     "invisible": true
   },
   "max_companion_memory_items": {
-    "description": "Legacy flat config: 最多保留陪伴记忆条数",
+    "description": "Legacy flat config: 本地画像条目上限",
     "type": "int",
     "default": 36,
     "invisible": true
@@ -2172,6 +2226,12 @@
   },
   "enable_group_image_understanding": {
     "description": "Legacy flat config: 群聊图片理解增强",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "enable_group_image_wakeup": {
+    "description": "Legacy flat config: 群聊图片命中唤醒",
     "type": "bool",
     "default": false,
     "invisible": true
@@ -4256,7 +4316,7 @@
       "COMPLEX_REASONING_PROVIDER_ID": {
         "description": "复杂推理模型",
         "type": "string",
-        "hint": "快速配置入口。用于主模型兜底、日程生成/细化、长期记忆整理、关系分析、合并消息转述等更需要理解和结构化能力的任务；仅在模型配置模式为“快速配置”时参与运行态。",
+        "hint": "快速配置入口。用于主模型兜底、日程生成/细化、本地陪伴画像整理、关系分析、合并消息转述等更需要理解和结构化能力的任务；仅在模型配置模式为“快速配置”时参与运行态。外部长期记忆由记忆联动插件负责。",
         "default": "",
         "condition": {
           "provider_config_mode": "quick"
@@ -4444,7 +4504,7 @@
         "_special": "select_provider"
       },
       "COMPANION_MEMORY_PROVIDER_ID": {
-        "description": "陪伴长期画像整理模型（留空跟随陪伴通用模型）",
+        "description": "本地陪伴画像整理模型（留空跟随陪伴通用模型）",
         "type": "string",
         "hint": "用于把原始私聊记忆整理成用户画像、兴趣、边界、关系备注和说话习惯。留空会回退到 MAI_STYLE_PROVIDER_ID。",
         "default": "",
@@ -5851,23 +5911,23 @@
     }
   },
   "memory_habit_config": {
-    "description": "记忆、通用表达与习惯",
+    "description": "本地画像、通用表达与习惯",
     "type": "object",
-    "hint": "分别管理私聊长期画像、跨私聊/群聊的通用表达学习、用户习惯和吃什么候选。",
+    "hint": "分别管理私聊本地陪伴画像、跨私聊/群聊的通用表达学习、用户习惯和吃什么候选。本组不提供外部长期记忆召回。",
     "items": {
       "enable_companion_memory": {
-        "description": "启用用户陪伴记忆",
+        "description": "启用本地陪伴画像",
         "type": "bool",
-        "hint": "从私聊里轻量记录偏好、边界、重要信息和关系线索，并定期调用 LLM 整理成长期画像。",
+        "hint": "从当前私聊轻量记录偏好、边界、重要信息和关系线索，并定期调用 LLM 整理成本地陪伴画像。它用于插件内即时连续性，不等同于跨会话长期记忆；长期记忆依赖外部记忆插件。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
         }
       },
       "memory_refresh_interval_minutes": {
-        "description": "长期画像整理间隔（分钟）",
+        "description": "本地画像整理间隔（分钟）",
         "type": "int",
-        "hint": "达到间隔且有足够新记忆后，才会调用 LLM 把原始记忆整理成长期画像。",
+        "hint": "达到间隔且有足够新资料后，才会调用 LLM 把原始记录整理成本地陪伴画像。",
         "slider": {
           "min": 30,
           "max": 4320,
@@ -5879,7 +5939,7 @@
         }
       },
       "max_companion_memory_items": {
-        "description": "最多保留陪伴记忆条数",
+        "description": "本地画像条目上限",
         "type": "int",
         "hint": "保留的原始用户记忆上限。越大越完整，但提示词会更长。",
         "slider": {
@@ -6547,7 +6607,7 @@
       "enable_memory_companion_private_recall": {
         "description": "私聊选择性长期召回",
         "type": "bool",
-        "hint": "当用户明确提到以前、约定、称呼、边界或稳定偏好时，从当前私聊会话召回最多 3 条相关长期记忆。普通闲聊不会检索，不读取其他私聊或群聊。",
+        "hint": "当用户明确提到以前、约定、称呼、边界或稳定偏好时，从已联动的外部记忆插件召回当前私聊最多 3 条相关长期记忆。普通闲聊不会检索，不读取其他私聊或群聊；未接入外部记忆插件时不会产生长期召回。",
         "default": true,
         "condition": {
           "enable_memory_companion_feature_context": true
@@ -7458,6 +7518,15 @@
         "default": false,
         "condition": {
           "enable_group_companion": true
+        }
+      },
+      "enable_group_image_wakeup": {
+        "description": "图片命中唤醒 Bot",
+        "type": "bool",
+        "hint": "仅在群聊图片理解和群聊唤醒强化同时开启时生效。视觉摘要命中 Bot 名称、强唤醒词或主要用户专属强唤醒词后，才把当前图片消息接入回复链；弱相关唤醒词不会仅凭图片直接触发。会复用群聊图片等待秒数，设为 0 时只使用已完成的视觉结果。",
+        "default": false,
+        "condition": {
+          "enable_group_image_understanding": true
         }
       },
       "group_image_vision_wait_seconds": {
@@ -8840,7 +8909,7 @@
       "passive_injection_position": {
         "description": "动态提示词注入位置",
         "type": "string",
-        "hint": "控制被动状态、请求级环境感知、TTS 本轮频控、转发/引用上下文等动态片段注入到哪里。当前请求末尾会进入统一动态块，并按稳定顺序排列，更利于服务端缓存；系统提示词约束更强但更容易降低缓存命中；自动当前等同当前请求末尾。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
+        "hint": "控制被动状态、请求级环境感知、TTS 本轮频控、转发/引用上下文等动态片段注入到哪里。当前请求末尾会进入统一动态块，并按稳定顺序排列，更利于服务端缓存；系统提示词约束更强但更容易降低缓存命中；自动当前等同当前请求末尾。若同时启用外部长期记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
         "options": [
           "prompt",
           "system_prompt",

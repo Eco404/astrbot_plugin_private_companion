@@ -2,6 +2,7 @@ const HTTP_API = "/astrbot_plugin_private_companion/page";
 const BOOKSHELF_ACCESS_STORAGE_KEY = "pc_bookshelf_access_v1";
 const PAGE_ENDPOINT_PREFIX = "page";
 const PAGE_PLUGIN_NAME = "astrbot_plugin_private_companion";
+const PAGE_PERSONA_STORAGE_KEY = "pc_page_persona_v1";
 const TRANSPARENT_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 let cachedPageBridge = null;
 let cachedPageEndpointStyle = "";
@@ -104,6 +105,7 @@ const state = {
   personaStandardizationStyleBatchRequestedOffset: null,
   personaStandardizationQuestionnaire: null,
   roleplayPersonas: [],
+  multiPersona: { enabled: false, primary: "", profiles: [], current: "", window_bindings: {} },
   providerFilter: "",
   providerMode: "all",
   modelsSection: "providers",
@@ -249,7 +251,7 @@ const providerLabels = {
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断",
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: "关系站位分析",
   EMOTION_JUDGEMENT_PROVIDER_ID: "情绪变化判断",
-  COMPANION_MEMORY_PROVIDER_ID: "长期画像整理",
+  COMPANION_MEMORY_PROVIDER_ID: "本地陪伴画像整理",
   DIALOGUE_EPISODE_PROVIDER_ID: "私聊片段整理",
   GROUP_INTERJECT_PROVIDER_ID: "群聊主动插话",
   GROUP_EPISODE_PROVIDER_ID: "群聊片段整理",
@@ -521,6 +523,7 @@ function featureDraftFromOverview(overview = {}) {
     }
   });
   const settingBackedFeatureKeys = [
+    "enable_multi_persona_mode",
     "enable_body_monitor_integration",
     "enable_rest_reply_simulation",
     "enable_busy_reply_gate",
@@ -806,7 +809,7 @@ const providerGuides = {
   COMPLEX_REASONING_PROVIDER_ID: {
     preference: "quality",
     passiveImpact: "conditional",
-    purpose: "快速配置入口。给主模型兜底、日程生成/细化、长期记忆整理、关系分析、合并消息转述等复杂理解任务兜底。",
+    purpose: "快速配置入口。给主模型兜底、日程生成/细化、本地陪伴画像整理、关系分析、合并消息转述等复杂理解任务兜底；外部长期记忆由记忆联动插件负责。",
     fit: "适合推理更强、长上下文理解和结构化输出更稳的模型。",
     fallback: "只作为未单独填写任务的默认值；主模型或单项模型已填写时优先使用对应配置。",
   },
@@ -1080,7 +1083,7 @@ const providerGroups = [
   {
     id: "memory",
     title: "记忆与关系",
-    desc: "整理长期画像、对话片段和关系站位。",
+    desc: "整理本地陪伴画像、近期对话片段和关系站位。",
     keys: ["HISTORY_SUMMARY_PROVIDER_ID", "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "EMOTION_JUDGEMENT_PROVIDER_ID", "COMPANION_MEMORY_PROVIDER_ID", "DIALOGUE_EPISODE_PROVIDER_ID"],
   },
   {
@@ -1104,8 +1107,9 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 
 const featureMeta = {
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
+  enable_multi_persona_mode: ["多人格支持模式", "按人格隔离资料、日程、状态、日记、用户、群聊和 Token；同一窗口固定使用一个人格，避免串人格。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
-  enable_companion_memory: ["长期画像", "沉淀用户偏好、边界、关系线索和可复用事实。"],
+  enable_companion_memory: ["本地陪伴画像", "在插件内整理当前私聊的偏好、边界和关系线索；跨会话长期记忆依赖外部记忆插件。"],
   enable_expression_learning: ["表达方式学习", "从选定私聊或群聊提取抽象表达特征，并按范围用于私聊被动、私聊主动和群聊回复。"],
   enable_expression_manual_review: ["观察素材审核", "原始观察素材先进入待整理区；模型归纳的表达规则始终必须审核后使用。"],
   enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
@@ -1166,6 +1170,7 @@ const featureMeta = {
   enable_group_member_profiles: ["群聊观察学习", "学习群成员、关系网身份、黑话、话题线和群片段。"],
   enable_group_context_injection: ["群聊回复理解", "回复时参考近期群聊、场景对象和合并消息转述。"],
   enable_group_image_understanding: ["群聊图片理解", "控制是否识别新的群聊图片；关闭后不调用视觉模型，但缓存命中的图片语义仍会用于回复和群聊上下文。"],
+  enable_group_image_wakeup: ["图片命中唤醒 Bot", "仅在群聊图片理解和群聊唤醒强化同时开启时生效；图片视觉摘要命中 Bot 名称、强唤醒词或主要用户专属强唤醒词后，才把当前图片消息接入群聊回复链。"],
   enable_group_injection_guard: ["群聊安全保护", "防注入、隐私隔离、公共群聊语气降噪和现实承诺保护。"],
   enable_group_persona_denoise: ["群聊人格降噪", "降低群聊里的私聊腔、状态汇报和私聊关系外溢。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
@@ -1262,7 +1267,7 @@ const featureGroups = [
   },
   {
     title: "私聊陪伴",
-    note: "关系、记忆、回复策略、主动终审和自然表达。",
+    note: "关系、本地陪伴画像、回复策略、主动终审和自然表达；长期记忆由外部插件联动。",
     keys: [
       "enable_mai_style_integration",
       "enable_companion_memory",
@@ -1389,6 +1394,7 @@ const embeddedFeatureParentByKey = {
   enable_weather_context: "enable_environment_perception",
   enable_environment_change_proactive: "enable_environment_perception",
   enable_group_persona_denoise: "enable_group_injection_guard",
+  enable_group_image_wakeup: "enable_group_image_understanding",
   enable_group_reality_promise_guard: "enable_group_injection_guard",
   enable_group_wakeup_question: "enable_group_wakeup_enhancement",
   enable_group_wakeup_cold_group: "enable_group_wakeup_enhancement",
@@ -1489,7 +1495,7 @@ function proactiveOnlyRelatedUnlocks(key) {
 }
 
 function visibleFeatureSwitchKey(key) {
-  if (key === "enable_proactive_only_mode") return false;
+  if (["enable_proactive_only_mode", "enable_multi_persona_mode"].includes(key)) return false;
   if (hiddenCompatibilityConfigKeys.has(key)) return false;
   if (featureSwitchExcludedKeys.has(key)) return false;
   const detailSettingKeys = new Set(Object.values(featureSettingGroups || {}).flat());
@@ -1559,6 +1565,10 @@ const configLabels = {
   persona_inner_voice_prompt: "内心活动风格",
   persona_proactive_voice_prompt: "主动开口风格",
   plugin_specific_persona_id: "插件指定人格 ID",
+  enable_multi_persona_mode: "多人格支持模式",
+  multi_persona_primary_id: "多人格主人格 ID",
+  multi_persona_ids: "多人格 ID 列表",
+  multi_persona_window_bindings: "窗口到人格绑定",
   private_user_aliases: "私聊身份别名归并",
   private_user_delivery_aliases: "私聊主动发送目标映射",
   proactive_intensity_preset: "主动强度预设",
@@ -1728,6 +1738,7 @@ const configLabels = {
   group_air_guard_polite_loop_limit: "礼貌收尾循环上限",
   enable_group_context_injection: "群上下文注入",
   enable_group_image_understanding: "群聊图片理解增强",
+  enable_group_image_wakeup: "图片命中唤醒 Bot",
   group_image_vision_wait_seconds: "群聊回复等待识图秒数",
   group_image_max_images: "单条群消息识图上限",
   enable_group_injection_guard: "群聊防注入",
@@ -1934,8 +1945,8 @@ const configLabels = {
   enable_atrelay_llm_rewrite: "使用模型转述正文",
   atrelay_default_relay_style: "默认转述方式",
   atrelay_multi_target_limit: "多目标单次上限",
-  memory_refresh_interval_minutes: "长期画像整理间隔",
-  max_companion_memory_items: "长期画像条目上限",
+  memory_refresh_interval_minutes: "本地画像整理间隔",
+  max_companion_memory_items: "本地画像条目上限",
   expression_learning_mode: "表达学习模式",
   max_learned_expression_items: "每来源学习资料上限",
   episode_memory_refresh_messages: "片段整理消息阈值",
@@ -2138,6 +2149,9 @@ const configDescriptions = {
   daily_review_auto_apply_guidance: "只把低风险表达与判断建议作为次日柔性提示词使用；配置、阈值、名单、权限和 Provider 不会自动修改。",
   daily_review_retention_days: "只保留结构化结论和脱敏证据计数，不保存原始聊天内容。",
   enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发本插件的被动回复增强，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复主动消息时仍会被轻量记为已回应。适合只想使用主动陪伴、或担心本插件被动链路误接管/误识别的场景。",
+  enable_multi_persona_mode: "开启后，不同人格使用独立资料、日程、状态、日记、用户、群聊和 Token 记录；窗口会固定绑定人格，切换冲突时先确认迁移并清理缓存。",
+  multi_persona_primary_id: "主人格用于未绑定窗口的默认回退，也作为其他插件读取本插件人格时的兼容人格。",
+  multi_persona_ids: "选择需要由本插件独立维护完整资料的人格。主人格会自动包含在内。",
   enable_llm_proactive_message: "开启后，主动调度只负责挑选动机和时机，真正文本会调用 AstrBot 人格生成；关闭时回退为本地模板，更省但更机械。",
   proactive_generation_history_limit: "主动生成和人格改写最多读取多少条当前私聊历史；消息密集时可调高，但仍受整理模式和字符上限约束。",
   proactive_history_context_mode: "compact 保留最近消息原文并压缩较早消息；recent_only 只注入最近原文；expanded 在字符上限内尽量保留全部历史。整理过程不额外调用模型。",
@@ -2199,7 +2213,7 @@ const configDescriptions = {
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   enable_passive_state_continuity_anchor: "默认关闭。仅当被动状态注入和被动状态增量注入都开启时生效；私聊被动回复遇到状态未变化时，注入一段不超过 300 字的 Bot 当下连续性提示。开启后会增加少量动态提示词和缓存成本，不影响主动消息或群聊。",
-  passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
+  passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用外部长期记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
   memory_companion_context_timeout_seconds: "插件主动、日程、QQ 空间、创作等链路读取外部长期记忆上下文的单项等待上限。超时会跳过该项，不阻塞主链；建议 0.8-1.5 秒。",
   livingmemory_tool_name: "LivingMemory 默认注册的 Agent 工具名是 recall_long_term_memory。如插件更改了工具名，可在这里同步。“我会牢牢记住你”通过桥接接口协同，通常不需要修改此项。",
   enable_memory_companion_emotional_drift: "从“我会牢牢记住你”拉取待处理情绪事件（伤痕触动/温暖回忆/脆弱共鸣），按安全阀应用到 Bot 当前能量和心情底色。每次私聊和主动消息生成前触发。",
@@ -2427,6 +2441,7 @@ const configDescriptions = {
   group_air_guard_polite_loop_limit: "窗口内 Bot 已回复过几次晚安/谢谢/拜拜等收尾话术后，再遇到类似消息就静默。建议 1-2。",
   enable_group_context_injection: "开启后，群聊回复会参考最近群消息、当前话题、活跃成员和群内氛围；关闭后只按当前单条消息理解。",
   enable_group_image_understanding: "控制是否为群聊图片发起新的视觉识别。关闭后不会调用视觉模型，但当前图片命中已有缓存或群观察摘要时仍会注入语义；开启后只在允许观察的群中识别新图片，普通观察不等待，真正触发回复时才有限等待。建议关闭 AstrBot 官方“自动理解图片”，避免重复调用。",
+  enable_group_image_wakeup: "仅在群聊图片理解和群聊唤醒强化同时开启时生效。视觉摘要命中 Bot 名称、强唤醒词或主要用户专属强唤醒词后，才把当前图片消息接入群聊回复链；弱相关唤醒词不会仅凭图片直接触发。会复用群聊图片等待秒数，设为 0 时只使用已完成的视觉结果。",
   group_image_vision_wait_seconds: "只限制 Bot 已准备回复时等待视觉摘要的时间。视觉提前完成会立即继续；超时后主回复照常进行，后台识图不会取消。0 表示不等待，只使用已经完成的结果。",
   group_image_max_images: "一条群消息最多识别多少张图片。超过上限仍保留原始图片占位，但不进入本插件识图；0 表示不处理群图。",
   enable_group_injection_guard: "开启后，会识别群里试图改称呼、改语气、改设定或改输出格式的注入话术；这些内容不会写进群观察、黑话、话题线或后续 prompt。",
@@ -2479,8 +2494,8 @@ const configDescriptions = {
   max_group_slang_terms: "每个群最多保留多少条黑话/简称候选。",
   group_slang_web_search_terms: "黑话释义联网参考开启时，每次最多从多少个候选词里挑选待查词；实际每轮只联网搜索 1 个词，并缓存结果/失败冷却，避免短时间连发搜索。",
   group_slang_web_search_results: "黑话释义联网参考开启时，每个候选词最多保留多少条网页摘要给模型判断匹配程度。",
-  memory_refresh_interval_minutes: "长期画像整理的最小间隔，越短越容易产生模型调用。",
-  max_companion_memory_items: "每个私聊对象最多保留多少条长期画像条目。",
+  memory_refresh_interval_minutes: "本地陪伴画像整理的最小间隔，越短越容易产生模型调用。",
+  max_companion_memory_items: "每个私聊对象最多保留多少条插件内画像条目；不影响外部长期记忆插件的容量。",
   expression_learning_mode: "light 更克制；balanced 会按短确认、提问、请求、玩笑和情绪等场景应用重复证据；aggressive 会参考更多通过审核的短句和句尾样本，建议搭配手动审核。",
   enable_expression_manual_review: "开启后，原始观察素材先进入“学习”页待整理区；模型生成的情境表达和语法习惯无论此项是否开启都必须审核。",
   enable_expression_style_review: "开启后，回复复核会额外处理表达学习过头、异常逗号/断句、照抄样本等问题。",
@@ -2665,7 +2680,7 @@ const configDescriptions = {
   enable_context_image_captioning: "把历史上下文中的图片占位补成视觉摘要；优先复用缓存，失败时保留原占位。",
   context_image_caption_max_items: "单次请求最多补全多少条历史图片，超出部分保留占位。",
   context_image_caption_timeout_seconds: "历史图片补全的单次等待预算；超时不会阻塞整轮回复。",
-  enable_memory_companion_private_recall: "仅在用户明确提到以前、约定、称呼、边界或稳定偏好时，从当前私聊选择性召回长期记忆。",
+  enable_memory_companion_private_recall: "仅在用户明确提到以前、约定、称呼、边界或稳定偏好时，从已联动的外部记忆插件选择性召回当前私聊的长期记忆。",
   forward_message_image_vision_timeout_seconds: "每个视觉模型识别合并消息图片时最多等待多久；多图通常需要几十秒，模型卡片里的任务超时设置优先。",
   max_group_topic_threads: "每个群最多保留多少条近期话题线。",
   group_episode_refresh_minutes: "同一群两次群聊片段总结之间的最小间隔。",
@@ -2737,6 +2752,7 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: ["enable_meal_care_proactive", "meal_care_max_daily", "meal_care_followup_minutes"],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "proactive_generation_history_limit", "proactive_history_context_mode", "proactive_history_recent_raw_count", "proactive_history_max_chars", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
+  enable_multi_persona_mode: ["multi_persona_primary_id", "multi_persona_ids"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
   enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled", "reaction_expression_delivery_mode", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
@@ -2777,7 +2793,7 @@ const featureSettingGroups = {
   enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [],
   enable_group_member_safety: ["group_member_safety_review_mode", "group_member_safety_hidden_marker_mode", "group_member_safety_strike_threshold", "group_member_safety_strike_window_days", "group_member_safety_block_hours", "group_member_safety_min_confidence", "group_member_safety_exempt_managers", "group_member_safety_audit_limit", "GROUP_MEMBER_SAFETY_PROVIDER_ID"],
-  enable_group_image_understanding: ["group_image_vision_wait_seconds", "group_image_max_images"],
+  enable_group_image_understanding: ["enable_group_image_wakeup", "group_image_vision_wait_seconds", "group_image_max_images"],
   enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID"],
   enable_group_air_reply_guard: ["group_air_guard_window_seconds", "group_air_guard_max_bot_replies", "group_air_guard_polite_loop_limit"],
   enable_group_high_intensity_mode: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_high_intensity_max_merge_messages", "group_high_intensity_merge_scope"],
@@ -2829,6 +2845,13 @@ const featureSettingGroups = {
 };
 
 const featureSettingSections = {
+  enable_multi_persona_mode: [
+    {
+      title: "人格隔离范围",
+      note: "主人格负责兼容其他插件；参与人格分别维护完整资料和日程。",
+      keys: ["multi_persona_primary_id", "multi_persona_ids"],
+    },
+  ],
   enable_reply_interception_forward: [
     {
       title: "转发目标与范围",
@@ -3181,7 +3204,7 @@ const featureSettingSections = {
     {
       title: "识图调度",
       note: "群消息先在后台识图；只有确实触发回复时才等待一小段时间，超时不会取消后台任务。",
-      keys: ["group_image_vision_wait_seconds", "group_image_max_images"],
+      keys: ["enable_group_image_wakeup", "group_image_vision_wait_seconds", "group_image_max_images"],
     },
   ],
   enable_group_injection_guard: [
@@ -3556,6 +3579,7 @@ const featureSettingTypes = {
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
   enable_daily_plan: { type: "checkbox" },
+  enable_group_image_wakeup: { type: "checkbox" },
   daily_plan_item_count: { type: "number", min: 5, max: 24, step: 1 },
   include_schedule_in_messages: { type: "checkbox" },
   enable_detail_enhancement: { type: "checkbox" },
@@ -3858,6 +3882,12 @@ function proactiveGaugeMax(used, limit, explicit = false, fallback = 8) {
 
 function collectSettingValue(key, input) {
   if (!input) return "";
+  if (key === "multi_persona_ids") {
+    const host = input.closest("[data-feature-param-group='multi_persona_ids']");
+    return Array.from(host?.querySelectorAll("[data-multi-persona-profile]:checked") || [])
+      .map((item) => String(item.value || "").trim())
+      .filter(Boolean);
+  }
   if (input.type === "checkbox") return input.checked;
   if (input.type === "number") {
     const raw = input.value === "" ? 0 : Number(input.value);
@@ -4637,7 +4667,7 @@ const tokenTaskLabels = {
   diary_rewrite: "日记修订",
   diary_derivatives: "日记线索提取",
   daily_review: "每日终盘巡视",
-  memory_profile: "长期画像",
+  memory_profile: "本地陪伴画像",
   dialogue_episode: "私聊片段",
   response_review: "回复/主动复核",
   emotion_judgement: "情绪判断",
@@ -4940,9 +4970,51 @@ function scheduleDailyOutfitHydration(force = false) {
   }, 1600);
 }
 
+function storedPagePersonaId() {
+  try {
+    return String(sessionStorage.getItem(PAGE_PERSONA_STORAGE_KEY) || "").trim();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function selectedPagePersonaId() {
+  const stored = storedPagePersonaId();
+  if (stored) return stored;
+  return String(state.multiPersona?.current || "").trim();
+}
+
+function scopePagePersonaRequest(path, options, method) {
+  const personaId = selectedPagePersonaId();
+  if (!personaId || /^\/(?:persona\/(?:switch|migrate)|roleplay\/personas)(?:[/?]|$)/.test(path)) {
+    return { path, options };
+  }
+  if (method === "GET") {
+    const url = new URL(path, "https://astrbot-plugin-page.local/");
+    url.searchParams.set("_persona_id", personaId);
+    return { path: `${url.pathname}${url.search}`, options };
+  }
+  let payload = options.body || {};
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload || "{}");
+    } catch (_error) {
+      payload = {};
+    }
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) payload = {};
+  return {
+    path,
+    options: { ...options, body: JSON.stringify({ ...payload, _persona_id: personaId }) },
+  };
+}
+
 async function fetchJson(path, options = {}) {
   const bridge = await getPageBridge();
   const method = (options.method || "GET").toUpperCase();
+  const scoped = scopePagePersonaRequest(path, options, method);
+  path = scoped.path;
+  options = scoped.options;
   let payload;
 
   if (bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function") {
@@ -5511,6 +5583,14 @@ async function loadDailyReview(force = false) {
 }
 
 function applyOverviewData(overview) {
+  if (overview?.multi_persona?.enabled) {
+    const current = selectedPagePersonaId();
+    state.multiPersona = {
+      ...state.multiPersona,
+      ...overview.multi_persona,
+      current: current || overview.multi_persona.current || overview.multi_persona.primary || "",
+    };
+  }
   const unlockedBooks = Array.isArray(state.bookshelfUnlocked?.secret_books)
     ? state.bookshelfUnlocked.secret_books
     : null;
@@ -5871,13 +5951,23 @@ async function loadImageApiStatus(force = false) {
 
 async function loadRoleplayPersonas(force = false) {
   if (state.lazyLoaded.roleplayPersonas && !force) return state.roleplayPersonas;
+  const storedPersona = storedPagePersonaId();
   const result = await fetchJson("/roleplay/personas").catch(() => ({ items: [] }));
   state.roleplayPersonas = Array.isArray(result.items) ? result.items : [];
+  state.multiPersona = result.multi_persona || { enabled: false, primary: "", profiles: [], window_bindings: {} };
+  const profiles = Array.isArray(state.multiPersona.profiles) ? state.multiPersona.profiles : [];
+  state.multiPersona.current = profiles.includes(storedPersona)
+    ? storedPersona
+    : (result.current || state.multiPersona.primary || "");
+  if (storedPersona && !profiles.includes(storedPersona)) {
+    try { sessionStorage.removeItem(PAGE_PERSONA_STORAGE_KEY); } catch (_error) {}
+  }
   state.lazyLoaded.roleplayPersonas = true;
   const draft = setupGuideDraft();
   if (!draft.personaId) {
     draft.personaId = result.current || result.default || state.roleplayPersonas[0]?.id || "";
   }
+  if (state.activeTab === "config" || state.activeTab === "roleplay") renderModuleSettings();
   return state.roleplayPersonas;
 }
 
@@ -5918,7 +6008,7 @@ async function ensureTabData(tabName, force = false) {
   } else if (tabName === "roleplay") {
     loadAvailableProviders(force).catch(() => {});
   } else if (tabName === "config") {
-    await loadConfigBackups(force);
+    await Promise.all([loadConfigBackups(force), loadRoleplayPersonas(force)]);
   } else if (tabName === "image-cache") {
     renderImageCache();
     await loadImageCache();
@@ -6115,7 +6205,7 @@ const setupGuideAdvancedBlocks = [
   {
     id: "private",
     title: "私聊增强",
-    body: "配置私聊里的长期画像、主动终审、读图、合并转发、撤回、未回复跟进和夹层阅读。适合想让私聊更像长期陪伴，但要注意模型成本和隐私边界。",
+    body: "配置私聊里的本地陪伴画像、主动终审、读图、合并转发、撤回、未回复跟进和夹层阅读。跨会话长期记忆需要外部记忆插件联动。",
   },
   {
     id: "group",
@@ -6339,14 +6429,14 @@ const setupGuideAdvancedItems = {
   private: [
     {
       key: "enable_companion_memory",
-      title: "私聊长期画像",
-      ask: "是否让 Bot 从长期私聊中整理稳定偏好、边界、关系线索和重要事实？",
-      description: "长期画像服务于对应私聊对象，不承担跨私聊或群聊的表达学习。",
+      title: "私聊本地陪伴画像",
+      ask: "是否让 Bot 在插件内整理当前私聊的稳定偏好、边界、关系线索和重要事实？",
+      description: "本地陪伴画像只服务于对应私聊对象，不承担外部长期记忆召回，也不承担跨私聊或群聊的表达学习。",
       caution: "画像越多越需要定期清理；整理间隔太短会增加后台模型调用。",
       kind: "feature",
       settings: [
         { key: "memory_refresh_interval_minutes", type: "number", label: "画像整理间隔分钟", placeholder: "360", min: 30 },
-        { key: "max_companion_memory_items", type: "number", label: "长期画像上限", placeholder: "36", min: 8 },
+        { key: "max_companion_memory_items", type: "number", label: "本地画像上限", placeholder: "36", min: 8 },
       ],
     },
     {
@@ -6567,6 +6657,7 @@ const setupGuideAdvancedItems = {
       caution: "默认关闭。开启后建议关闭 AstrBot 官方“自动理解图片”，避免同一张图被识别两次；原始群图不会由本插件长期保存。",
       kind: "feature",
       settings: [
+        { key: "enable_group_image_wakeup", type: "bool", label: "图片命中唤醒 Bot", description: "仅在群聊图片理解和群聊唤醒强化同时开启时生效；视觉摘要命中强唤醒词后才接入群聊回复链。" },
         { key: "group_image_vision_wait_seconds", type: "number", label: "回复等待秒数", placeholder: "8", min: 0, max: 60 },
         { key: "group_image_max_images", type: "number", label: "单条图片上限", placeholder: "4", min: 0, max: 12 },
       ],
@@ -9875,10 +9966,10 @@ function renderSetupProgress() {
     {
       key: "memory",
       level: hasMemory ? "ok" : "info",
-      title: hasMemory ? "记忆学习已开启" : "记忆学习未开启",
+      title: hasMemory ? "本地画像整理已开启" : "本地画像整理未开启",
       hint: hasMemory
-        ? `每 ${settings.memory_refresh_interval_minutes ?? 0} 分钟整理一次画像`
-        : "Bot 不会沉淀长期记忆和相处细节",
+        ? `每 ${settings.memory_refresh_interval_minutes ?? 0} 分钟整理一次本地画像；长期记忆由外部插件提供`
+        : "Bot 不会新增本地陪伴画像；外部长期记忆是否可用取决于联动插件",
       tab: "memory",
       action: hasMemory ? "查看" : "去配置",
       critical: false,
@@ -11004,7 +11095,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       category: "reply",
       type: "model_diagnostics",
       title: "模型数据排障",
-      text: "检查技能、群黑话、关系网、长期画像和表达学习里的模型理解杂音；只给建议，不自动修改",
+      text: "检查技能、群黑话、关系网、本地陪伴画像和表达学习里的模型理解杂音；只给建议，不自动修改",
       button: "运行模型排障",
     },
   ];
@@ -11962,6 +12053,7 @@ function horizontalBars(data, total) {
 
 function renderTokens() {
   const stats = state.tokenStats || {};
+  renderMultiPersonaTokenSummary(stats);
   const source = tokenSelectedScope(stats);
   const scope = source.scope || {};
   const totals = source.totals || {};
@@ -12014,6 +12106,7 @@ function renderTokens() {
     proactiveMessages: exemptUsed,
   })}`;
 
+  renderMultiPersonaTokenSummary(stats);
   renderTokenChart("#tokenProviderChart", source.providers || [], `暂无${source.shortLabel} Provider 消耗数据`, (item) => item.key || "default");
   const taskChartRows = source.chartSecondaryRows || source.tasks || [];
   renderTokenChart(
@@ -19720,6 +19813,7 @@ function renderModuleSettings() {
   const formValues = { ...settings, ...(state.featureDraft || {}) };
   renderModuleWorkbench(settings);
   renderCurrentPersonaStatus(settings);
+  renderMultiPersonaSettingsPanel();
   const newsRaw = $("#newsSourcesRaw");
   if (newsRaw) newsRaw.value = displaySettingValue("news_sources", settings.news_sources);
   fillForm("#roleplayProfileForm", formValues);
@@ -19978,10 +20072,10 @@ function renderModuleWorkbench(settings) {
     },
     {
       title: "记忆与能力",
-      kicker: "长期沉淀",
+      kicker: "资料整理",
       status: settings.enable_skill_growth_simulation ? "成长中" : "记录中",
       tone: settings.enable_skill_growth_simulation ? "ok" : "cost",
-      body: `长期画像每 ${settings.memory_refresh_interval_minutes ?? 0} 分钟整理，片段阈值 ${settings.episode_memory_refresh_messages ?? 0} 条消息。`,
+      body: `本地陪伴画像每 ${settings.memory_refresh_interval_minutes ?? 0} 分钟整理；跨会话长期记忆由外部联动插件提供。`,
       meta: [
         toBool(settings.enable_skill_growth_schedule_influence) ? "技能影响日程" : "技能不影响日程",
         knowledge.selected_count ? `知识库 ${knowledge.selected_count} 项` : "未选知识库",
@@ -20071,6 +20165,87 @@ function renderCurrentPersonaStatus(settings) {
   if ("value" in output) output.value = label;
   else output.textContent = label;
   output.title = label;
+  const host = output.parentElement;
+  if (!host) return;
+  host.querySelectorAll("[data-multi-persona-switcher]").forEach((node) => node.remove());
+  if (!state.multiPersona?.enabled) return;
+  const current = String(state.multiPersona.current || state.multiPersona.primary || personaId || "").trim();
+  const options = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
+  if (!options.length) return;
+  const wrapper = document.createElement("label");
+  wrapper.dataset.multiPersonaSwitcher = "true";
+  wrapper.className = "setting-inline-control";
+  wrapper.innerHTML = `<span>页面查看人格</span><select aria-label="页面查看人格">${options.map((item) => `<option value="${escapeHtml(item.id)}" ${String(item.id) === current ? "selected" : ""}>${escapeHtml(item.label || item.id)}</option>`).join("")}</select>`;
+  const select = wrapper.querySelector("select");
+  select?.addEventListener("change", async () => {
+    try {
+      const result = await postJson("/persona/switch", { persona_id: select.value });
+      state.multiPersona.current = result.persona_id || select.value;
+      try { sessionStorage.setItem(PAGE_PERSONA_STORAGE_KEY, state.multiPersona.current); } catch (_error) {}
+      state.users = [];
+      state.groups = [];
+      state.selectedUserId = "";
+      state.selectedGroupId = "";
+      state.memoNotes = null;
+      state.tokenStats = null;
+      state.expressionLibrary = null;
+      state.lazyLoaded.userGroupLists = false;
+      state.lazyLoaded.memoNotes = false;
+      state.lazyLoaded.tokenStats = false;
+      showToast("已切换页面查看人格");
+      await loadAll({ waitForLists: true });
+    } catch (error) {
+      showToast(error.message || "人格切换失败", "error");
+    }
+  });
+  host.appendChild(wrapper);
+}
+
+function renderMultiPersonaSettingsPanel() {
+  const form = document.getElementById("roleplayProfileForm");
+  const host = form?.parentElement;
+  if (!host) return;
+  host.querySelectorAll("[data-multi-persona-migration]").forEach((node) => node.remove());
+  if (!state.multiPersona?.enabled) return;
+  const ids = (state.roleplayPersonas || []).map((item) => String(item.id || "").trim()).filter(Boolean);
+  if (ids.length < 2) return;
+  const keys = ["daily_plan", "daily_state", "bot_diaries", "users", "groups", "memo_notes", "token_usage"];
+  const panel = document.createElement("section");
+  panel.dataset.multiPersonaMigration = "true";
+  panel.className = "feature-param-status";
+  panel.innerHTML = `<b>多人格资料迁移</b><div class="inline-form"><select data-migrate-source>${ids.map((id) => `<option value="${escapeHtml(id)}">源：${escapeHtml(id)}</option>`).join("")}</select><select data-migrate-target>${ids.map((id) => `<option value="${escapeHtml(id)}">目标：${escapeHtml(id)}</option>`).join("")}</select></div><div class="setting-check-list">${keys.map((key) => `<label><input type="checkbox" value="${key}" data-migrate-key checked><span>${escapeHtml({ daily_plan: "日程", daily_state: "状态", bot_diaries: "日记", users: "用户资料", groups: "群资料", memo_notes: "备忘录", token_usage: "Token 记录" }[key] || key)}</span></label>`).join("")}</div><button type="button" data-migrate-submit>迁移选中资料并清理缓存</button>`;
+  const submit = panel.querySelector("[data-migrate-submit]");
+  submit?.addEventListener("click", async () => {
+    const source = panel.querySelector("[data-migrate-source]")?.value || "";
+    const target = panel.querySelector("[data-migrate-target]")?.value || "";
+    const selected = Array.from(panel.querySelectorAll("[data-migrate-key]:checked")).map((input) => input.value);
+    if (!source || !target || source === target) return showToast("请选择不同的源人格和目标人格", "error");
+    try {
+      await postJson("/persona/migrate", { source_persona_id: source, target_persona_id: target, keys: selected });
+      showToast("已迁移选中资料并清理目标缓存");
+      await loadOverview(true);
+    } catch (error) {
+      showToast(error.message || "资料迁移失败", "error");
+    }
+  });
+  host.appendChild(panel);
+}
+
+function renderMultiPersonaTokenSummary(stats) {
+  const host = document.querySelector("#tokenSummary");
+  if (!host) return;
+  host.querySelectorAll("[data-multi-persona-token-summary]").forEach((node) => node.remove());
+  const multi = stats?.multi_persona;
+  if (!multi?.enabled || !multi.by_persona || typeof multi.by_persona !== "object") return;
+  const rows = Object.values(multi.by_persona).map((item) => {
+    const total = Number(item?.totals?.total_tokens || 0);
+    return `<span class="token-persona-row"><b>${escapeHtml(item.persona_id || "-")}</b><em>${formatNumber(total)} Token</em></span>`;
+  }).join("");
+  const box = document.createElement("section");
+  box.dataset.multiPersonaTokenSummary = "true";
+  box.className = "token-plugin-note";
+  box.innerHTML = `<b>按人格分类</b><div class="token-persona-list">${rows || "暂无人格 Token 记录"}</div>`;
+  host.prepend(box);
 }
 
 function renderExternalAbilities() {
@@ -21671,7 +21846,7 @@ function renderListCoverage(group, draft = null) {
 
 function renderFeatureSwitches() {
   const filter = ($("#featureFilter")?.value || "").trim().toLowerCase();
-  renderProactiveOnlyModeCard();
+  renderIsolationModeCards();
   renderPassiveInjectionPositionForm();
   const knownKeys = new Set(featureGroups.flatMap((group) => group.keys));
   const extraKeys = Object.keys(state.featureDraft || {}).filter((key) => !knownKeys.has(key) && visibleFeatureSwitchKey(key));
@@ -21714,7 +21889,8 @@ function renderFeatureSwitches() {
     state.featureDetailSubpage = "";
     state.photoReferenceManagerDraft = null;
   }
-  if (state.selectedFeatureKey && state.selectedFeatureKey !== "enable_proactive_only_mode" && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
+  const standaloneFeatureKeys = new Set(["enable_proactive_only_mode", "enable_multi_persona_mode"]);
+  if (state.selectedFeatureKey && !standaloneFeatureKeys.has(state.selectedFeatureKey) && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
     state.selectedFeatureKey = "";
   }
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey)) {
@@ -21854,11 +22030,13 @@ function syncFeatureFooterAction() {
   button.disabled = busy || !dirty;
 }
 
-function renderProactiveOnlyModeCard() {
+function renderIsolationModeCards() {
   const root = $("#proactiveOnlyModeCard");
   if (!root) return;
   const key = "enable_proactive_only_mode";
   const checked = toBool(state.featureDraft[key]);
+  const multiKey = "enable_multi_persona_mode";
+  const multiChecked = toBool(state.featureDraft[multiKey]);
   const proactiveChat = state.overview?.proactive_chat || {};
   const proactiveChatState = proactiveChat.enabled
     ? (proactiveChat.runtime_mode_label || (proactiveChat.installed ? "发送前兼容" : "等待运行实例"))
@@ -21869,7 +22047,10 @@ function renderProactiveOnlyModeCard() {
     ? `v${proactiveRuntimeVersion} · 已接管 ${Number(proactiveChat.runtime_method_count || 0)} 个关键方法`
     : (proactiveChat.runtime_last_error || proactiveChat.runtime_last_event || "");
   const settings = state.overview?.settings || {};
-  const injectionPosition = String(settings.passive_injection_position || "prompt");
+  const primaryPersona = String(settings.multi_persona_primary_id || state.multiPersona?.primary || settings.plugin_specific_persona_id || "").trim();
+  const profileIds = Array.isArray(settings.multi_persona_ids)
+    ? settings.multi_persona_ids.filter(Boolean)
+    : (state.multiPersona?.profiles || []).filter(Boolean);
   root.innerHTML = `
     <div class="proactive-mode-stack">
       <div class="proactive-mode-settings-row">
@@ -21890,6 +22071,23 @@ function renderProactiveOnlyModeCard() {
           </div>
           <button type="button" class="proactive-mode-detail proactive-mode-button soft" data-feature-open="${escapeHtml(key)}">查看说明</button>
         </section>
+        <section class="proactive-mode-card multi-persona-mode-card ${multiChecked ? "on" : "off"}">
+          <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(multiKey))}">
+            <input type="checkbox" data-multi-persona-mode-toggle ${multiChecked ? "checked" : ""}>
+            <span class="feature-toggle-visual"></span>
+          </label>
+          <div class="proactive-mode-main">
+            <div class="proactive-mode-heading-row">
+              <div class="proactive-mode-kicker">人格隔离</div>
+              <span class="proactive-chat-status ${multiChecked ? "on" : "off"}">${multiChecked ? `${profileIds.length || 1} 个人格独立运行` : "单人格兼容模式"}</span>
+            </div>
+            <h3>${escapeHtml(featureLabel(multiKey))}</h3>
+            <p>为每个人格单独维护资料、日程、状态、日记和 Token，并锁定会话窗口，避免人格资料互相污染。</p>
+            ${multiChecked ? `<small class="proactive-mode-runtime">主人格：${escapeHtml(primaryPersona || "保存时自动使用当前指定人格")}</small>` : ""}
+            <small class="proactive-mode-code">${escapeHtml(multiKey)}</small>
+          </div>
+          <button type="button" class="proactive-mode-detail proactive-mode-button soft" data-feature-open="${escapeHtml(multiKey)}">${multiChecked ? "配置人格" : "查看说明"}</button>
+        </section>
       </div>
     </div>
   `;
@@ -21897,9 +22095,15 @@ function renderProactiveOnlyModeCard() {
     state.featureDraft[key] = Boolean(event.target.checked);
     renderFeatureSwitches();
   });
-  root.querySelector("[data-feature-open]")?.addEventListener("click", () => {
-    state.selectedFeatureKey = key;
+  root.querySelector("[data-multi-persona-mode-toggle]")?.addEventListener("change", (event) => {
+    state.featureDraft[multiKey] = Boolean(event.target.checked);
     renderFeatureSwitches();
+  });
+  root.querySelectorAll("[data-feature-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedFeatureKey = button.dataset.featureOpen || "";
+      renderFeatureSwitches();
+    });
   });
 
 }
@@ -21932,6 +22136,64 @@ function bodyMonitorBatchSummary(batch = {}) {
   const expired = Math.max(0, Number(batch.expired || 0));
   if (![received, accepted, skipped, duplicate, expired].some(Boolean)) return "暂无批次记录";
   return `拉取 ${received} · 入选 ${accepted} · 跳过 ${skipped} · 重复 ${duplicate} · 过期 ${expired}`;
+}
+
+function multiPersonaMigrationDetailCard() {
+  const settings = state.overview?.settings || {};
+  const ids = Array.from(new Set([
+    ...(Array.isArray(settings.multi_persona_ids) ? settings.multi_persona_ids : []),
+    ...(state.multiPersona?.profiles || []),
+  ].map((item) => String(item || "").trim()).filter(Boolean)));
+  const bindings = state.multiPersona?.window_bindings && typeof state.multiPersona.window_bindings === "object"
+    ? state.multiPersona.window_bindings
+    : {};
+  const options = ids.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("");
+  const bindingRows = Object.entries(bindings)
+    .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
+    .map(([windowKey, personaId]) => `<span><code>${escapeHtml(windowKey)}</code><em>${escapeHtml(personaId)}</em></span>`)
+    .join("");
+  const bindingCard = `
+    <article class="feature-detail-card multi-persona-binding-card">
+      <h3>会话窗口绑定</h3>
+      <div class="multi-persona-migration-selects">
+        <label><span>会话窗口 UMO</span><input type="text" data-persona-window-key value="" /></label>
+        <label><span>使用人格</span><select data-persona-window-target>${options}</select></label>
+      </div>
+      <button type="button" class="feature-param-save" data-persona-window-bind ${ids.length ? "" : "disabled"}>保存窗口绑定</button>
+      <div class="multi-persona-binding-list">${bindingRows || "<span class=\"empty small\">暂无固定窗口绑定</span>"}</div>
+    </article>
+  `;
+  if (ids.length < 2) {
+    return `${bindingCard}
+      <article class="feature-detail-card">
+        <h3>人格资料迁移</h3>
+        <p>保存至少两个人格后，这里会显示按功能迁移资料的入口。</p>
+      </article>
+    `;
+  }
+  const keys = [
+    ["daily_plan", "日程"],
+    ["daily_state", "状态"],
+    ["bot_diaries", "日记"],
+    ["users", "用户资料"],
+    ["groups", "群资料"],
+    ["memo_notes", "备忘录"],
+    ["token_usage", "Token 记录"],
+  ];
+  return `${bindingCard}
+    <article class="feature-detail-card multi-persona-migration-card">
+      <h3>人格资料迁移</h3>
+      <p>从已有的人格复制选中的资料；目标人格的缓存会同步清理，避免旧人格上下文残留。</p>
+      <div class="multi-persona-migration-selects">
+        <label><span>来源人格</span><select data-migrate-source>${options}</select></label>
+        <label><span>目标人格</span><select data-migrate-target>${options}</select></label>
+      </div>
+      <div class="multi-persona-choice-list compact">
+        ${keys.map(([key, label]) => `<label><input type="checkbox" value="${key}" data-migrate-key checked><span>${label}</span></label>`).join("")}
+      </div>
+      <button type="button" class="feature-param-save" data-migrate-submit>迁移选中资料并清理缓存</button>
+    </article>
+  `;
 }
 
 function bodyMonitorFeatureDetailCard() {
@@ -22034,7 +22296,7 @@ function featureSwitchItem(key) {
 }
 
 function featureGroupForKey(key) {
-  if (key === "enable_proactive_only_mode") return "兼容与隔离";
+  if (["enable_proactive_only_mode", "enable_multi_persona_mode"].includes(key)) return "兼容与隔离";
   const parentKey = topLevelFeatureKey(key);
   const group = featureGroups.find((item) => item.keys.includes(parentKey));
   return group ? group.title : "其他";
@@ -22572,6 +22834,31 @@ function featureSettingInput(key, value, accessibility = {}) {
   const disabled = featureLockedByProactiveOnlyMode(key);
   const disabledAttr = disabled ? " disabled" : "";
   const accessibilityAttrs = featureSettingAccessibilityAttrs(accessibility);
+  if (key === "multi_persona_primary_id") {
+    const current = String(value || "").trim();
+    const personas = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
+    return `
+      <select data-feature-param="${safeKey}"${accessibilityAttrs}${disabledAttr}>
+        <option value="">请选择主人格</option>
+        ${personas.map((item) => `<option value="${escapeHtml(item.id)}"${String(item.id) === current ? " selected" : ""}>${escapeHtml(item.label || item.id)}</option>`).join("")}
+      </select>
+    `;
+  }
+  if (key === "multi_persona_ids") {
+    const selected = new Set((Array.isArray(value) ? value : String(value || "").split(/[\r\n,，、]+/)).map((item) => String(item || "").trim()).filter(Boolean));
+    const personas = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
+    return `
+      <div class="multi-persona-choice-list" data-feature-param-group="${safeKey}"${disabled ? " data-disabled=\"true\"" : ""}>
+        ${personas.length ? personas.map((item) => `
+          <label>
+            <input type="checkbox" data-multi-persona-profile value="${escapeHtml(item.id)}"${selected.has(String(item.id)) ? " checked" : ""}${disabledAttr}>
+            <span>${escapeHtml(item.label || item.id)}</span>
+          </label>
+        `).join("") : '<span class="muted">暂未读取到 AstrBot 人格，请刷新配置页。</span>'}
+        <textarea data-feature-param="${safeKey}" hidden>${escapeHtml([...selected].join("\n"))}</textarea>
+      </div>
+    `;
+  }
   if (key === "environment_perception_timezone") {
     const effective = String(state.overview?.settings?.environment_perception_timezone_effective || "Asia/Shanghai");
     return `
@@ -22778,6 +23065,10 @@ async function saveFeatureSwitchChanges(control = null, successMessage = "已保
         beginFeatureDetailSession(state.selectedFeatureKey);
         captureFeatureDetailBaselineFromDom($("#featureFlags"));
       }
+      if (Object.prototype.hasOwnProperty.call(payload.settings || {}, "enable_multi_persona_mode")) {
+        await loadRoleplayPersonas(true).catch(() => {});
+        renderFeatureSwitches();
+      }
     }
     return actionResultPersisted(result);
   } finally {
@@ -22847,10 +23138,10 @@ const featureDetailGuides = {
     disabled: "其他学习内容仍可记录，但主回复更接近 AstrBot 原本的普通回复。",
   },
   enable_companion_memory: {
-    summary: "从长期互动里整理稳定画像，例如用户偏好、边界、称呼、重要事实和相处习惯。",
+    summary: "在插件内把当前私聊整理成轻量陪伴画像，例如偏好、边界、称呼、重要事实和相处习惯；它不替代外部长期记忆。",
     trigger: "私聊积累到整理间隔或消息阈值时低频执行。",
-    enabled: "Bot 后续更容易记得你是谁、喜欢什么、不喜欢什么。",
-    disabled: "不会新增长期画像，已有画像仍可在页面中查看和管理。",
+    enabled: "Bot 会在本插件的当前私聊资料中参考这些稳定线索；跨会话深度召回仍依赖外部记忆插件。",
+    disabled: "不会新增本地陪伴画像，已有画像仍可在页面中查看和管理；外部长期记忆联动不由此开关控制。",
   },
   enable_expression_learning: {
     summary: "从允许的私聊或群聊提取句长、场景和口语特征，让私聊被动、私聊主动与群聊回复共享稳定的 Bot 表达底色。",
@@ -23293,8 +23584,8 @@ const featureDetailGuides = {
   enable_livingmemory_integration: {
     summary: "统一接入已适配的外部长期记忆插件。当前支持“我会牢牢记住你”/MemoryCompanion 与 LivingMemory，并按各自能力提供召回或深度协同。",
     trigger: "私聊/群聊提示词构建、主动消息生成、状态问答、创作等链路需要长期记忆支持时。",
-    enabled: "可减少重复存储，让长期记忆链路更完整。检测到“我会牢牢记住你”时还会自动拉取情绪漂移、写入梦境碎片、检索未完成话题和读取功能上下文。",
-    disabled: "插件只使用自身记忆结构，不调用外部记忆插件。",
+    enabled: "长期记忆由已检测到的外部插件提供。检测到“我会牢牢记住你”时还会拉取情绪漂移、写入梦境碎片、检索未完成话题和读取功能上下文。",
+    disabled: "不调用外部记忆插件；本插件只保留本地陪伴画像、近期片段、关系和运行状态。",
   },
   enable_bilibili_integration: {
     summary: "接入 B 站相关能力，读取观看记录或视频信息作为 Bot 的生活见闻来源。",
@@ -23440,6 +23731,12 @@ const featureDetailGuides = {
     enabled: "Bot 不会频繁汇报创作进度，保留自己的创作者主动性。",
     disabled: "创作相关内容更容易被主动提起。",
   },
+  enable_multi_persona_mode: {
+    summary: "每个人格独立维护完整陪伴资料，并把一个私聊或群聊窗口固定给一个人格。",
+    trigger: "开启后，收到消息、生成日程和查看拓展页资料时都会先解析当前人格上下文。",
+    enabled: "资料、日程、状态、日记、用户、群聊和 Token 分开保存；主人格继续兼容其他插件。",
+    disabled: "保持原有单人格行为，页面不显示人格切换、迁移和 Token 分类。",
+  },
 };
 
 function featureDetailExplanation(key) {
@@ -23469,7 +23766,9 @@ function featureImpactLines(key) {
   const lines = [];
   const group = featureGroupForKey(key);
   lines.push(["模块", group]);
-  if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
+  if (key === "enable_multi_persona_mode") {
+    lines.push(["场景", "私聊 / 群聊 / 日程 / 状态 / 日记 / Token"]);
+  } else if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
     lines.push(["场景", "日程 / 状态 / 私聊 / 群聊"]);
   } else if (key === "enable_segmented_proactive_reply") {
     lines.push(["场景", "主动消息 / LLM 纯文本回复"]);
@@ -24182,6 +24481,7 @@ function featureDetailPage(key) {
     : `<div><dt>-</dt><dd>无额外依赖</dd></div>`;
   const impactRows = impacts.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   const runtimeCardHtml = key === "enable_body_monitor_integration" ? bodyMonitorFeatureDetailCard() : "";
+  const personaMigrationCardHtml = key === "enable_multi_persona_mode" ? multiPersonaMigrationDetailCard() : "";
   const managerCardHtml = key === "enable_group_member_safety" ? groupMemberSafetyManagerCardHtml() : "";
   const referenceManagerOpen = key === "enable_photo_text_action" && state.featureDetailSubpage === "photo_reference_library";
   return `
@@ -24230,6 +24530,7 @@ function featureDetailPage(key) {
           </dl>
         </article>
         ${runtimeCardHtml}
+        ${personaMigrationCardHtml}
         ${managerCardHtml}
         <article class="feature-detail-card">
           <h3>范围</h3>
@@ -24256,6 +24557,61 @@ function bindFeatureDetailActions() {
     button.addEventListener("click", () => leaveFeatureDetail(button));
   });
   const detailPage = document.querySelector(".feature-detail-page");
+  detailPage?.querySelectorAll("[data-multi-persona-profile]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const host = input.closest("[data-feature-param-group='multi_persona_ids']");
+      const hidden = host?.querySelector('[data-feature-param="multi_persona_ids"]');
+      if (hidden) {
+        hidden.value = Array.from(host.querySelectorAll("[data-multi-persona-profile]:checked"))
+          .map((item) => String(item.value || "").trim())
+          .filter(Boolean)
+          .join("\n");
+      }
+    });
+  });
+  detailPage?.querySelector("[data-migrate-submit]")?.addEventListener("click", async (event) => {
+    const card = event.currentTarget.closest(".multi-persona-migration-card");
+    const source = card?.querySelector("[data-migrate-source]")?.value || "";
+    const target = card?.querySelector("[data-migrate-target]")?.value || "";
+    const keys = Array.from(card?.querySelectorAll("[data-migrate-key]:checked") || []).map((item) => item.value);
+    if (!source || !target || source === target) {
+      showToast("请选择不同的来源人格和目标人格", "error");
+      return;
+    }
+    await runAction(
+      () => postJson("/persona/migrate", { source_persona_id: source, target_persona_id: target, keys }),
+      "已迁移选中资料并清理目标缓存",
+      event.currentTarget,
+    );
+  });
+  detailPage?.querySelector("[data-persona-window-bind]")?.addEventListener("click", async (event) => {
+    const card = event.currentTarget.closest(".multi-persona-binding-card");
+    const windowKey = String(card?.querySelector("[data-persona-window-key]")?.value || "").trim();
+    const personaId = String(card?.querySelector("[data-persona-window-target]")?.value || "").trim();
+    if (!windowKey || !personaId) {
+      showToast("请填写会话窗口并选择人格", "error");
+      return;
+    }
+    event.currentTarget.disabled = true;
+    try {
+      let result = await postJson("/persona/switch", { persona_id: personaId, window_key: windowKey });
+      if (result.conflict) {
+        if (!window.confirm("该窗口已绑定其他人格，确认改为当前选择？")) return;
+        result = await postJson("/persona/switch", { persona_id: personaId, window_key: windowKey, force: true });
+      }
+      state.multiPersona.window_bindings = {
+        ...(state.multiPersona.window_bindings || {}),
+        [windowKey]: result.persona_id || personaId,
+      };
+      showToast("已保存会话窗口绑定");
+      await loadRoleplayPersonas(true);
+      renderFeatureSwitches();
+    } catch (error) {
+      showToast(error.message || "窗口绑定失败", "error");
+    } finally {
+      event.currentTarget.disabled = false;
+    }
+  });
   const trackFeatureDetailChange = (event) => {
     if (
       event.target?.matches?.("[data-photo-reference-filter], [data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-multi-option], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-times], [data-photo-reference-preferred-preset], [data-photo-reference-persona-source]")

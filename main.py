@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import functools
 import gc
 import hashlib
 import html
 import importlib
+import inspect
 import json
 import math
 import os
@@ -16,6 +18,7 @@ import shutil
 import sqlite3
 import time
 import unicodedata
+import uuid
 import zoneinfo
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -128,6 +131,48 @@ from .helpers import (
 from .config_migration import migrate_flat_config_into_schema_groups
 from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
 from .user_rest_gate import UserRestGateMixin
+
+
+_ACTIVE_PERSONA_ID = contextvars.ContextVar("private_companion_active_persona_id", default="")
+
+
+def _multi_persona_event_context(function):
+    """Bind one event task to one persona profile for the complete event lifetime."""
+    if inspect.isasyncgenfunction(function):
+        @functools.wraps(function)
+        async def asyncgen_wrapper(self, event, *args, **kwargs):
+            activator = getattr(self, "_activate_persona_for_event_context", None)
+            if not callable(activator):
+                activator = getattr(self, "_activate_persona_for_event", None)
+            activation = activator(event) if callable(activator) else (None, "")
+            if inspect.isawaitable(activation):
+                activation = await activation
+            token, _ = activation
+            try:
+                async for item in function(self, event, *args, **kwargs):
+                    yield item
+            finally:
+                deactivator = getattr(self, "_deactivate_persona_for_event", None)
+                if callable(deactivator):
+                    deactivator(token)
+        return asyncgen_wrapper
+
+    @functools.wraps(function)
+    async def async_wrapper(self, event, *args, **kwargs):
+        activator = getattr(self, "_activate_persona_for_event_context", None)
+        if not callable(activator):
+            activator = getattr(self, "_activate_persona_for_event", None)
+        activation = activator(event) if callable(activator) else (None, "")
+        if inspect.isawaitable(activation):
+            activation = await activation
+        token, _ = activation
+        try:
+            return await function(self, event, *args, **kwargs)
+        finally:
+            deactivator = getattr(self, "_deactivate_persona_for_event", None)
+            if callable(deactivator):
+                deactivator(token)
+    return async_wrapper
 from .busy_reply_gate import BusyReplyGateMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
 from .forward_message import ForwardMessageMixin
@@ -1302,6 +1347,402 @@ class PrivateCompanionPlugin(
             system_timezone=system_timezone,
         )
 
+    @property
+    def data(self) -> dict[str, Any]:
+        """Return the profile store bound to the current event task."""
+        active = _ACTIVE_PERSONA_ID.get()
+        if active and bool(getattr(self, "enable_multi_persona_mode", False)):
+            profiles = getattr(self, "_persona_data_profiles", {})
+            profile = profiles.get(active) if isinstance(profiles, dict) else None
+            if isinstance(profile, dict):
+                return profile
+            ensure_profile = getattr(self, "_ensure_persona_profile", None)
+            if callable(ensure_profile):
+                profile = ensure_profile(active)
+                if isinstance(profile, dict):
+                    return profile
+            factory = getattr(self, "_new_store", None)
+            profile = factory() if callable(factory) else {}
+            if not isinstance(profiles, dict):
+                profiles = {}
+                self._persona_data_profiles = profiles
+            profiles[active] = profile
+            return profile
+        return getattr(self, "_data_default", {})
+
+    @data.setter
+    def data(self, value: dict[str, Any]) -> None:
+        active = _ACTIVE_PERSONA_ID.get()
+        if active and bool(getattr(self, "enable_multi_persona_mode", False)):
+            profiles = getattr(self, "_persona_data_profiles", None)
+            if profiles is None:
+                profiles = {}
+                self._persona_data_profiles = profiles
+            profiles[active] = value if isinstance(value, dict) else {}
+            return
+        self._data_default = value if isinstance(value, dict) else {}
+
+    def _effective_plugin_persona_id(self) -> str:
+        active = _ACTIVE_PERSONA_ID.get()
+        if bool(getattr(self, "enable_multi_persona_mode", False)) and active:
+            return active
+        return str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+
+    def _active_persona_scope(self) -> str:
+        return _ACTIVE_PERSONA_ID.get() if bool(getattr(self, "enable_multi_persona_mode", False)) else ""
+
+    @staticmethod
+    def _sanitize_persona_id(value: Any) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+        return text[:96]
+
+    def _configured_multi_persona_ids(self) -> list[str]:
+        raw = self._cfg_raw(getattr(self, "config", {}), "multi_persona_ids", [])
+        if isinstance(raw, str):
+            raw = re.split(r"[\s,，、]+", raw)
+        if not isinstance(raw, (list, tuple, set)):
+            raw = []
+        result: list[str] = []
+        for value in raw:
+            pid = self._sanitize_persona_id(value)
+            if pid and pid not in result:
+                result.append(pid)
+        primary = self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", ""))
+        if primary and primary not in result:
+            result.insert(0, primary)
+        return result
+
+    def _persona_profile_path(self, persona_id: str) -> Path:
+        return Path(self._persona_profiles_dir) / f"{self._sanitize_persona_id(persona_id)}.json"
+
+    def _ensure_persona_profile(self, persona_id: str) -> dict[str, Any]:
+        pid = self._sanitize_persona_id(persona_id) or self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", ""))
+        if not pid:
+            return self._data_default
+        profiles = getattr(self, "_persona_data_profiles", None)
+        if profiles is None:
+            profiles = {}
+            self._persona_data_profiles = profiles
+        existing = profiles.get(pid)
+        if isinstance(existing, dict):
+            return existing
+        path = self._persona_profile_path(pid)
+        loaded: dict[str, Any] | None = None
+        try:
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    loaded = raw
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 人格资料读取失败 persona=%s error=%s", pid, _single_line(exc, 160))
+        primary = self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", ""))
+        if loaded is not None:
+            profile = loaded
+        elif pid == primary:
+            # The primary profile inherits the legacy store once for seamless upgrades.
+            profile = deepcopy(self._data_default)
+        else:
+            factory = getattr(self, "_new_store", None)
+            profile = factory() if callable(factory) else {}
+        ensure_defaults = getattr(self, "_ensure_store_defaults", None)
+        if callable(ensure_defaults):
+            profile = ensure_defaults(profile)
+        if not isinstance(profile.get("persona_settings"), dict):
+            profile["persona_settings"] = {}
+        profiles[pid] = profile
+        return profile
+
+    def _save_persona_profile_sync(self, persona_id: str, data: dict[str, Any] | None = None) -> None:
+        pid = self._sanitize_persona_id(persona_id)
+        if not pid:
+            return
+        path = self._persona_profile_path(pid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = data if isinstance(data, dict) else self._ensure_persona_profile(pid)
+        temp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp, path)
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _persona_profile_ids(self) -> list[str]:
+        ids = self._configured_multi_persona_ids()
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for pid in profiles:
+                clean = self._sanitize_persona_id(pid)
+                if clean and clean not in ids:
+                    ids.append(clean)
+        try:
+            for path in Path(self._persona_profiles_dir).glob("*.json"):
+                clean = self._sanitize_persona_id(path.stem)
+                if clean and clean not in ids:
+                    ids.append(clean)
+        except Exception:
+            pass
+        return ids
+
+    def _persona_window_bindings(self) -> dict[str, str]:
+        raw = self._cfg_raw(getattr(self, "config", {}), "multi_persona_window_bindings", {})
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, str] = {}
+        for window, persona in raw.items():
+            window_key = str(window or "").strip()
+            pid = self._sanitize_persona_id(persona)
+            if window_key and pid:
+                result[window_key] = pid
+        return result
+
+    def _persona_id_for_event(self, event: Any) -> tuple[str, str]:
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        bindings = self._persona_window_bindings()
+        enabled_ids = self._configured_multi_persona_ids()
+        enabled = set(enabled_ids)
+        configured = bindings.get(umo, "")
+        if configured not in enabled:
+            configured = ""
+        event_persona = self._sanitize_persona_id(
+            getattr(event, "private_companion_persona_id", "")
+        )
+        if event_persona not in enabled:
+            event_persona = ""
+        primary = self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", ""))
+        pid = configured or event_persona or (primary if primary in enabled else "") or (enabled_ids or [""])[0]
+        return pid, umo if umo else ""
+
+    async def _conversation_persona_id_for_event(self, event: Any) -> str:
+        """Read AstrBot's active conversation persona without guessing on failure."""
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo:
+            return ""
+        context = getattr(self, "context", None)
+        manager = getattr(context, "conversation_manager", None)
+        if manager is None:
+            return ""
+        try:
+            conversation_id = await manager.get_curr_conversation_id(umo)
+            if not conversation_id:
+                return ""
+            conversation = await manager.get_conversation(umo, conversation_id)
+            return self._sanitize_persona_id(getattr(conversation, "persona_id", ""))
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 读取会话人格失败，使用已绑定或主人格: session=%s error=%s",
+                _single_line(umo, 120),
+                _single_line(exc, 120),
+            )
+            return ""
+
+    async def _activate_persona_for_event_context(self, event: Any) -> tuple[Any, str]:
+        if not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return None, ""
+        active = _ACTIVE_PERSONA_ID.get()
+        if active:
+            return None, active
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        bindings = self._persona_window_bindings()
+        configured = set(self._configured_multi_persona_ids())
+        event_persona = self._sanitize_persona_id(
+            getattr(event, "private_companion_persona_id", "")
+        )
+        bound_persona = bindings.get(umo, "")
+        pid = bound_persona if bound_persona in configured else ""
+        if not pid and event_persona in configured:
+            pid = event_persona
+        if not pid:
+            conversation_persona = await self._conversation_persona_id_for_event(event)
+            if conversation_persona and conversation_persona in configured:
+                pid = conversation_persona
+                if umo:
+                    bindings[umo] = pid
+                    _set_into_config(self.config, "multi_persona_window_bindings", bindings)
+                    self._persona_window_claims[umo] = pid
+                    saver = getattr(self, "_save_config_if_possible", None)
+                    if callable(saver):
+                        try:
+                            await saver()
+                        except Exception:
+                            pass
+        if not pid:
+            pid, _ = self._persona_id_for_event(event)
+        if not pid:
+            return None, ""
+        self._ensure_persona_profile(pid)
+        token = _ACTIVE_PERSONA_ID.set(pid)
+        try:
+            setattr(event, "private_companion_persona_id", pid)
+            setattr(event, "private_companion_persona_window", umo)
+            setattr(
+                event,
+                "private_companion_persona_conflict",
+                deepcopy(getattr(self, "_persona_window_conflicts", {}).get(umo, {})),
+            )
+        except Exception:
+            pass
+        return token, pid
+
+    def _activate_persona_for_event(self, event: Any) -> tuple[Any, str]:
+        if not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return None, ""
+        pid, window = self._persona_id_for_event(event)
+        if not pid:
+            return None, ""
+        self._ensure_persona_profile(pid)
+        token = _ACTIVE_PERSONA_ID.set(pid)
+        try:
+            setattr(event, "private_companion_persona_id", pid)
+            setattr(event, "private_companion_persona_window", window)
+            setattr(event, "private_companion_persona_conflict", deepcopy(getattr(self, "_persona_window_conflicts", {}).get(window, {})))
+        except Exception:
+            pass
+        return token, pid
+
+    def _activate_persona_id(self, persona_id: Any, *, allow_inactive: bool = False) -> Any:
+        pid = self._sanitize_persona_id(persona_id)
+        if not pid or not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return None
+        if not allow_inactive and pid not in set(self._configured_multi_persona_ids()):
+            return None
+        self._ensure_persona_profile(pid)
+        return _ACTIVE_PERSONA_ID.set(pid)
+
+    def _deactivate_persona_for_event(self, token: Any) -> None:
+        if token is not None:
+            _ACTIVE_PERSONA_ID.reset(token)
+
+    def _clear_persona_runtime_cache(self, profile: dict[str, Any]) -> None:
+        if not isinstance(profile, dict):
+            return
+        for key in tuple(profile.keys()):
+            lowered = str(key).lower()
+            if "cache" in lowered or lowered in {"conversation_history", "recent_context", "pending_context"}:
+                profile.pop(key, None)
+
+    def _migrate_persona_profile(self, source_persona_id: Any, target_persona_id: Any, keys: list[Any]) -> dict[str, Any]:
+        source = self._sanitize_persona_id(source_persona_id)
+        target = self._sanitize_persona_id(target_persona_id)
+        if not source or not target or source == target:
+            return {"ok": False, "message": "源人格和目标人格必须不同"}
+        source_data = self._ensure_persona_profile(source)
+        target_data = self._ensure_persona_profile(target)
+        source_before = deepcopy(source_data)
+        target_before = deepcopy(target_data)
+        source_next = deepcopy(source_data)
+        target_next = deepcopy(target_data)
+        selected = [str(key).strip() for key in keys if str(key).strip()]
+        if not selected:
+            selected = ["daily_plan", "daily_state", "bot_diaries", "users", "groups", "memo_notes", "token_usage"]
+        for key in selected:
+            source_settings = source_next.get("persona_settings") if isinstance(source_next.get("persona_settings"), dict) else {}
+            target_settings = target_next.setdefault("persona_settings", {})
+            if key in source_settings:
+                target_settings[key] = deepcopy(source_settings[key])
+            elif key in source_next:
+                target_next[key] = deepcopy(source_next[key])
+        self._clear_persona_runtime_cache(source_next)
+        self._clear_persona_runtime_cache(target_next)
+        try:
+            self._save_persona_profile_sync(source, source_next)
+            self._save_persona_profile_sync(target, target_next)
+        except Exception as exc:
+            for persona_id, previous in ((source, source_before), (target, target_before)):
+                try:
+                    self._save_persona_profile_sync(persona_id, previous)
+                except Exception:
+                    pass
+            return {
+                "ok": False,
+                "message": f"人格资料迁移落盘失败: {_single_line(exc, 120)}",
+            }
+        source_data.clear()
+        source_data.update(source_next)
+        target_data.clear()
+        target_data.update(target_next)
+        return {"ok": True, "source_persona_id": source, "target_persona_id": target, "keys": selected, "cache_cleared": True}
+
+    async def _migrate_persona_profile_async(
+        self,
+        source_persona_id: Any,
+        target_persona_id: Any,
+        keys: list[Any],
+    ) -> dict[str, Any]:
+        await self._flush_scheduled_data_save()
+        async with self._data_lock:
+            return self._migrate_persona_profile(
+                source_persona_id,
+                target_persona_id,
+                keys,
+            )
+
+    def _switch_persona_for_window(
+        self,
+        persona_id: Any,
+        *,
+        window_key: str = "",
+        source_persona_id: str = "",
+        migrate_keys: list[Any] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return {"ok": True, "enabled": False, "switched": False}
+        pid = self._sanitize_persona_id(persona_id)
+        if not pid:
+            return {"ok": False, "message": "人格 ID 不能为空"}
+        known = self._configured_multi_persona_ids()
+        if known and pid not in known:
+            return {"ok": False, "message": "人格不在多人格列表中", "persona_id": pid}
+        window = _single_line(window_key, 240)
+        bindings = self._persona_window_bindings()
+        previous = bindings.get(window) or self._persona_window_claims.get(window, "") if window else ""
+        if window and previous and previous != pid and not force:
+            return {
+                "ok": False,
+                "conflict": True,
+                "window_key": window,
+                "current_persona_id": previous,
+                "requested_persona_id": pid,
+                "migration_available": True,
+                "message": "该窗口已绑定其他人格，请先迁移资料后再切换",
+            }
+        migrated = None
+        if source_persona_id and migrate_keys:
+            migrated = self._migrate_persona_profile(source_persona_id, pid, migrate_keys)
+            if not migrated.get("ok"):
+                return migrated
+        if window:
+            bindings[window] = pid
+            _set_into_config(self.config, "multi_persona_window_bindings", bindings)
+            self._persona_window_claims[window] = pid
+            self._persona_window_conflicts.pop(window, None)
+        self._ensure_persona_profile(pid)
+        self._page_current_persona_id = pid
+        return {"ok": True, "enabled": True, "switched": True, "persona_id": pid, "window_key": window, "previous_persona_id": previous, "migrated": migrated}
+
+    async def _switch_persona_for_window_async(self, *args, **kwargs) -> dict[str, Any]:
+        source_persona_id = str(kwargs.get("source_persona_id") or "").strip()
+        migrate_keys = kwargs.get("migrate_keys")
+        if source_persona_id and isinstance(migrate_keys, list) and migrate_keys:
+            await self._flush_scheduled_data_save()
+            async with self._data_lock:
+                return self._switch_persona_for_window(*args, **kwargs)
+        return self._switch_persona_for_window(*args, **kwargs)
+
+    def _multi_persona_status(self) -> dict[str, Any]:
+        enabled = bool(getattr(self, "enable_multi_persona_mode", False))
+        return {
+            "enabled": enabled,
+            "primary": self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", "")) if enabled else "",
+            "profiles": self._persona_profile_ids() if enabled else [],
+            "window_bindings": self._persona_window_bindings() if enabled else {},
+            "window_conflicts": deepcopy(getattr(self, "_persona_window_conflicts", {})) if enabled else {},
+        }
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         global _private_companion_plugin
@@ -1314,6 +1755,16 @@ class PrivateCompanionPlugin(
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         os.makedirs(self.data_dir, exist_ok=True)
         self.data_file = os.path.join(self.data_dir, "companions.json")
+        self.enable_multi_persona_mode = self._cfg_bool(c, "enable_multi_persona_mode", False)
+        self.multi_persona_primary_id = self._sanitize_persona_id(
+            self._cfg_str(c, "multi_persona_primary_id", "", "")
+        )
+        self.multi_persona_ids = self._configured_multi_persona_ids()
+        self._persona_profiles_dir = os.path.join(self.data_dir, "persona_profiles")
+        self._persona_data_profiles: dict[str, dict[str, Any]] = {}
+        self._persona_window_claims: dict[str, str] = {}
+        self._persona_window_conflicts: dict[str, dict[str, str]] = {}
+        self._page_current_persona_id = self.multi_persona_primary_id
         self.storage_backend = self._cfg_str(c, "storage_backend", "json", "json").strip().lower() or "json"
         if self.storage_backend not in {"json", "sqlite"}:
             self.storage_backend = "json"
@@ -1453,6 +1904,7 @@ class PrivateCompanionPlugin(
         self.enable_private_image_vision_cache = self._cfg_bool(c, "enable_private_image_vision_cache", True)
         self.private_image_vision_cache_max_items = self._cfg_int(c, "private_image_vision_cache_max_items", 300, 0, 3000)
         self.enable_group_image_understanding = self._cfg_bool(c, "enable_group_image_understanding", False)
+        self.enable_group_image_wakeup = self._cfg_bool(c, "enable_group_image_wakeup", False)
         self.group_image_vision_wait_seconds = self._cfg_float(c, "group_image_vision_wait_seconds", 8.0, 0.0, 60.0)
         self.group_image_max_images = self._cfg_int(c, "group_image_max_images", 4, 0, 12)
         self.enable_context_image_captioning = self._cfg_bool(c, "enable_context_image_captioning", True)
@@ -1544,6 +1996,9 @@ class PrivateCompanionPlugin(
         self.include_schedule_in_messages = self._cfg_bool(c, "include_schedule_in_messages", True)
         self.daily_plan_prompt = self._cfg_str(c, "daily_plan_prompt", "")
         self.plugin_specific_persona_id = self._cfg_str(c, "plugin_specific_persona_id", "")
+        self._single_mode_plugin_specific_persona_id = self.plugin_specific_persona_id
+        if self.enable_multi_persona_mode and self.multi_persona_primary_id:
+            self.plugin_specific_persona_id = self.multi_persona_primary_id
         self.schedule_persona_prompt = self._cfg_str(c, "schedule_persona_prompt", "")
         self.schedule_worldview_prompt = self._cfg_str(c, "schedule_worldview_prompt", "")
         self.roleplay_user_profile_prompt = self._cfg_str(c, "roleplay_user_profile_prompt", "")
@@ -2631,6 +3086,8 @@ class PrivateCompanionPlugin(
         self._passive_state_session_cache: dict[str, dict[str, Any]] = {}
         self._data_save_task: asyncio.Task | None = None
         self._data_save_dirty = False
+        self._persona_data_save_tasks: dict[str, asyncio.Task] = {}
+        self._persona_data_save_dirty: set[str] = set()
         self._maintenance_failure_cooldowns: dict[str, dict[str, Any]] = {}
         self._framework_captured_send_cache: dict[str, list[Any]] = {}
         self._segmented_reply_remainder_locks: dict[str, asyncio.Lock] = {}
@@ -3194,9 +3651,6 @@ class PrivateCompanionPlugin(
             await asyncio.wait_for(self._flush_scheduled_data_save(), timeout=3.0)
         except asyncio.TimeoutError:
             logger.warning("[PrivateCompanion] 等待后台合并保存超时，将改用最终快照保存")
-            save_task = getattr(self, "_data_save_task", None)
-            if isinstance(save_task, asyncio.Task) and not save_task.done():
-                save_task.cancel()
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -3217,11 +3671,25 @@ class PrivateCompanionPlugin(
             _private_companion_plugin = None
 
     async def _save_data_on_terminate(self) -> None:
+        await self._flush_scheduled_data_save()
         async with self._data_lock:
-            snapshot = deepcopy(self.data)
+            snapshot = deepcopy(getattr(self, "_data_default", self.data))
+            persona_snapshots = {
+                str(persona_id): deepcopy(profile)
+                for persona_id, profile in (getattr(self, "_persona_data_profiles", {}) or {}).items()
+                if isinstance(profile, dict)
+            }
         await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+        if bool(getattr(self, "enable_multi_persona_mode", False)):
+            for persona_id, profile in persona_snapshots.items():
+                await asyncio.to_thread(
+                    self._write_persona_data_snapshot_sync,
+                    persona_id,
+                    profile,
+                )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=11000)
+    @_multi_persona_event_context
     async def prepare_tts_streaming_boundary(self, event: AstrMessageEvent, *args, **kwargs):
         """在 AstrBot 读取流式配置前，为可能进入插件 TTS 的回合预留完整回复。"""
         if self is None or not self.enabled:
@@ -3241,6 +3709,7 @@ class PrivateCompanionPlugin(
             )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
+    @_multi_persona_event_context
     async def observe_recall_enhancement_events(self, event: AstrMessageEvent, *args, **kwargs):
         """记录普通消息和 QQ/OneBot 撤回事件，用于撤回增强。"""
         if self is None:
@@ -3325,6 +3794,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result(priority=10000)
+    @_multi_persona_event_context
     async def bridge_proactive_chat_outbound(self, event: AstrMessageEvent, *args, **kwargs):
         """识别 Proactive Chat 的装饰发送链，接入状态、边界和 TTS 统一出口。"""
         if self is None or not self.enabled or not self.enable_proactive_chat_integration:
@@ -3440,6 +3910,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result(priority=20000)
+    @_multi_persona_event_context
     async def consume_group_member_safety_hidden_marker(self, event: AstrMessageEvent, *args, **kwargs):
         """Consume the reply model's internal member-risk decision before any outbound transform."""
         if self is None:
@@ -3530,6 +4001,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result(priority=-18000)
+    @_multi_persona_event_context
     async def attach_reaction_expression_image_before_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
@@ -3974,6 +4446,7 @@ class PrivateCompanionPlugin(
         return False
 
     @filter.on_decorating_result(priority=-20000)
+    @_multi_persona_event_context
     async def finalize_proactive_chat_outbound_bridge(self, event: AstrMessageEvent, *args, **kwargs):
         """在所有装饰器结束后，仅为仍有实际发送内容的 Proactive Chat 链同步状态。"""
         if self is None or not self.enabled or not self.enable_proactive_chat_integration:
@@ -4011,6 +4484,7 @@ class PrivateCompanionPlugin(
             )
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def stop_passive_input_status_before_private_send(self, event: AstrMessageEvent, *args, **kwargs):
         """LLM 回复进入发送前阶段时停止私聊持续输入状态。"""
         if self is None or not self.enabled:
@@ -4019,6 +4493,7 @@ class PrivateCompanionPlugin(
             self._stop_passive_input_status_loop(event)
 
     @filter.on_decorating_result(priority=-10000)
+    @_multi_persona_event_context
     async def suppress_recent_duplicate_outbound_text(self, event: AstrMessageEvent, *args, **kwargs):
         """Last-mile idempotency guard for adapter echoes and concurrent reply chains."""
         if self is None or not self.enabled:
@@ -4045,12 +4520,16 @@ class PrivateCompanionPlugin(
         event.set_result(empty_result)
         event.stop_event()
 
-    @filter.after_message_sent(priority=10000)
+    @filter.after_message_sent(priority=8500)
+    @_multi_persona_event_context
     async def remember_confirmed_outbound_text(self, event: AstrMessageEvent, *args, **kwargs):
         """Confirm only candidates for which the platform send operation ran."""
         if self is None or not self.enabled:
             return
-        if not self._reaction_expression_primary_reply_confirmed(event):
+        if not self._reaction_expression_primary_reply_confirmed(
+            event,
+            require_segmented_complete=True,
+        ):
             return
         candidate = getattr(event, "_private_companion_outbound_text_candidate", None)
         if isinstance(candidate, dict):
@@ -4058,6 +4537,7 @@ class PrivateCompanionPlugin(
         await self._refresh_group_conversation_after_confirmed_send(event)
 
     @filter.after_message_sent(priority=9000)
+    @_multi_persona_event_context
     async def settle_reaction_expression_attachment_after_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
@@ -4144,6 +4624,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.after_message_sent(priority=9500)
+    @_multi_persona_event_context
     async def release_reaction_expression_segmented_remainder_after_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
@@ -4187,6 +4668,7 @@ class PrivateCompanionPlugin(
             )
 
     @filter.after_message_sent(priority=8000)
+    @_multi_persona_event_context
     async def release_tts_reply_remainder_after_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
@@ -4216,6 +4698,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.after_message_sent(priority=7000)
+    @_multi_persona_event_context
     async def release_deferred_reaction_tts_after_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
@@ -4233,7 +4716,10 @@ class PrivateCompanionPlugin(
             delattr(event, "_private_companion_deferred_reaction_tts")
         except Exception:
             setattr(event, "_private_companion_deferred_reaction_tts", None)
-        if not self._reaction_expression_primary_reply_confirmed(event):
+        if not self._reaction_expression_primary_reply_confirmed(
+            event,
+            require_segmented_complete=True,
+        ):
             return
         operation = self._send_deferred_reaction_tts(event, pending)
         self._create_lifecycle_background_task(
@@ -4242,6 +4728,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.after_message_sent(priority=6000)
+    @_multi_persona_event_context
     async def cleanup_reaction_expression_delivery_tracker_after_send(
         self, event: AstrMessageEvent, *args, **kwargs
     ):
@@ -4259,6 +4746,7 @@ class PrivateCompanionPlugin(
                 pass
 
     @filter.on_agent_begin(priority=100000)
+    @_multi_persona_event_context
     async def begin_final_response_persistence(
         self,
         event: AstrMessageEvent,
@@ -4272,6 +4760,7 @@ class PrivateCompanionPlugin(
         self._begin_final_response_persistence(event)
 
     @filter.on_agent_done(priority=-100000)
+    @_multi_persona_event_context
     async def prepare_final_response_persistence(
         self,
         event: AstrMessageEvent,
@@ -4285,6 +4774,7 @@ class PrivateCompanionPlugin(
         await self._prepare_final_response_after_agent(event, run_context, response)
 
     @filter.on_decorating_result(priority=-30000)
+    @_multi_persona_event_context
     async def capture_final_outbound_chain_for_persistence(
         self,
         event: AstrMessageEvent,
@@ -4296,6 +4786,7 @@ class PrivateCompanionPlugin(
         self._capture_final_outbound_delivery(event)
 
     @filter.after_message_sent(priority=-100000)
+    @_multi_persona_event_context
     async def persist_confirmed_passive_reply(
         self,
         event: AstrMessageEvent,
@@ -4307,6 +4798,7 @@ class PrivateCompanionPlugin(
         await self._persist_final_outbound_delivery(event)
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def suppress_group_llm_reply_block_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """群级 LLM 熔断的发送前兜底。"""
         if self is None or not self.enabled:
@@ -4314,6 +4806,7 @@ class PrivateCompanionPlugin(
         self._stop_group_llm_reply_if_blocked(event, source="decorating_result")
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前兜底清理内部控制块，避免 timer/TTSBLOCK 泄漏到聊天。"""
         if self is None or not self.enabled:
@@ -4355,6 +4848,7 @@ class PrivateCompanionPlugin(
             )
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def strip_plaintext_tool_calls_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """阻止兼容模型把工具调用 JSON 当普通聊天正文发送。"""
         if self is None or not self.enabled:
@@ -4396,6 +4890,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def cancel_reply_if_trigger_recalled_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """若触发/唤醒消息在回复发出前被撤回，则静默取消本次回复。"""
         if self is None or not self.enabled:
@@ -4426,6 +4921,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def suppress_forbidden_outbound_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """自己的待发送消息命中违禁词时，优先在发送前拦截。"""
         if self is None or not self.enabled:
@@ -4466,6 +4962,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def suppress_framework_error_leak_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """避免 AstrBot/Core 的技术错误和工具循环摘要直接发进聊天。"""
         if self is None or not self.enabled:
@@ -4715,6 +5212,7 @@ class PrivateCompanionPlugin(
         return True
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def suppress_group_question_wakeup_collision_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """答疑唤醒的群聊回复发送前复核，避免 Bot 碰瓷式插话。"""
         if self is None or not self.enabled:
@@ -4782,6 +5280,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def suppress_smart_silence_reply_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """用户明确想停下当前话题时，用小模型决定是否静默取消待发送回复。"""
         if self is None or not self.enabled:
@@ -4914,6 +5413,7 @@ class PrivateCompanionPlugin(
         event.stop_event()
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def record_empty_passive_result_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前兜底记录空结果，避免被动不回复却没有排障原因。"""
         if self is None or not self.enabled:
@@ -4958,6 +5458,7 @@ class PrivateCompanionPlugin(
         return False
 
     @filter.on_decorating_result(priority=-19000)
+    @_multi_persona_event_context
     async def suppress_empty_photo_tool_followup_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """Stop adapter-visible placeholder glyphs after a tool already sent the photo."""
         if self is None or not self.enabled:
@@ -4984,6 +5485,7 @@ class PrivateCompanionPlugin(
         )
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前处理 TTS强化标签和自动语音转换。"""
         if self is None or not self.enabled:
@@ -4993,6 +5495,7 @@ class PrivateCompanionPlugin(
         await self.apply_tts_enhancement_before_send(event)
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def strip_group_internal_identity_anchors(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前清理群聊内部身份锚点，避免调试标记泄露到回复。"""
         if self is None or not self.enabled:
@@ -5019,6 +5522,7 @@ class PrivateCompanionPlugin(
                     pass
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def suppress_group_silent_control_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """模型输出“不回复”控制语时静默吞掉，避免把内部判断发到群里。"""
         if self is None or not self.enabled:
@@ -5144,6 +5648,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return {"decision": decision, "reason": reason}
 
     @filter.on_decorating_result(priority=-1000)
+    @_multi_persona_event_context
     async def strip_unexpected_private_passive_reply(self, event: AstrMessageEvent, *args, **kwargs):
         """私聊被动主链不沿用框架误带的引用，避免 QQ 显示跨会话引用。"""
         if self is None or not self.enabled:
@@ -5197,6 +5702,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def apply_segmented_llm_reply_scope(self, event: AstrMessageEvent, *args, **kwargs):
         """按回复范围与分段策略整理 LLM 输出，减少长回复和误引用。"""
         if self is None or not self.enabled:
@@ -5274,6 +5780,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         has_reaction_intent = isinstance(reaction_intent, dict) and bool(
             reaction_intent
         )
+        deferred_reaction_tts = getattr(
+            event,
+            "_private_companion_deferred_reaction_tts",
+            None,
+        )
+        plugin_owned_reaction_text = (
+            has_reaction_intent
+            and isinstance(deferred_reaction_tts, dict)
+            and bool(deferred_reaction_tts)
+        )
         if is_llm_result and await self._should_defer_segmenting_to_astrbot_tts(event, result, chain):
             logger.debug(
                 "[PrivateCompanion] 当前 LLM 结果交由 AstrBot 官方 TTS 与原生分段处理: session=%s",
@@ -5283,6 +5799,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if (
             not is_llm_result
             and not external_proactive
+            and not plugin_owned_reaction_text
             and not self._friend_private_plain_result_allows_segmenting(event, chain)
         ):
             return
@@ -5372,6 +5889,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 )
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def remember_group_bot_reply_context_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """记录群聊 Bot 实际候选回复，供下一轮连续对话判断使用。"""
         if self is None or not self.enabled:
@@ -5446,6 +5964,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return role == "friend"
 
     @filter.on_decorating_result(priority=-9000)
+    @_multi_persona_event_context
     async def final_tts_markup_guard_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """发送前终检 TTS 标签，避免 <tts> 原样泄漏到聊天。"""
         if self is None or not self.enabled:
@@ -6029,6 +6548,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 return
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def attach_group_reply_quote(self, event: AstrMessageEvent, *args, **kwargs):
         """群聊回复发送前自动补引用，保持上下文对齐。"""
         result = None
@@ -6081,6 +6601,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
 
     @filter.llm_tool(name="pc_qzone_view_feed")
+    @_multi_persona_event_context
     async def pc_qzone_view_feed(
         self,
         event: AstrMessageEvent,
@@ -6106,6 +6627,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply, selector=selector, fid=fid)
 
     @filter.llm_tool(name="pc_qzone_publish_feed")
+    @_multi_persona_event_context
     async def pc_qzone_publish_feed(
         self,
         event: AstrMessageEvent,
@@ -6142,6 +6664,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_qzone_publish_feed_impl(event, text, **kwargs)
 
     @filter.llm_tool(name="pc_generate_photo")
+    @_multi_persona_event_context
     async def pc_generate_photo(
         self,
         event: AstrMessageEvent,
@@ -6222,6 +6745,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.llm_tool(name="pc_find_reaction_image")
+    @_multi_persona_event_context
     async def pc_find_reaction_image(
         self,
         event: AstrMessageEvent,
@@ -6348,6 +6872,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.llm_tool(name="pc_manage_memo")
+    @_multi_persona_event_context
     async def pc_manage_memo(
         self,
         event: AstrMessageEvent,
@@ -6405,6 +6930,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.llm_tool(name="pc_manage_schedule")
+    @_multi_persona_event_context
     async def pc_manage_schedule(
         self,
         event: AstrMessageEvent,
@@ -6490,6 +7016,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.llm_tool(name="pc_view_creative_work")
+    @_multi_persona_event_context
     async def pc_view_creative_work(
         self,
         event: AstrMessageEvent,
@@ -6517,6 +7044,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.llm_tool(name="pc_get_group_id_by_name")
+    @_multi_persona_event_context
     async def pc_get_group_id_by_name(self, event: AstrMessageEvent, **kwargs) -> str:
         """按群名关键词查询机器人已加入的群号。
 
@@ -6528,6 +7056,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_get_group_id_by_name_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_get_user_id_by_name")
+    @_multi_persona_event_context
     async def pc_get_user_id_by_name(self, event: AstrMessageEvent, **kwargs) -> str:
         """按关系网名称、别名、群名片或昵称解析群友 QQ。
 
@@ -6540,6 +7069,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_get_user_id_by_name_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_query_relation_person")
+    @_multi_persona_event_context
     async def pc_query_relation_person(self, event: AstrMessageEvent, **kwargs) -> str:
         """查询关系网里是否认识某个 QQ、昵称或别名。
 
@@ -6551,6 +7081,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_query_relation_person_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_get_specified_group_members")
+    @_multi_persona_event_context
     async def pc_get_specified_group_members(self, event: AstrMessageEvent, **kwargs) -> str:
         """查询指定群成员,并标记是否已在关系网中登记。
 
@@ -6563,6 +7094,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_get_specified_group_members_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_query_interaction")
+    @_multi_persona_event_context
     async def pc_query_interaction(self, event: AstrMessageEvent, **kwargs) -> str:
         """查询 Bot 与某个私聊对象或群聊的近期互动摘要。
 
@@ -6579,6 +7111,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_query_interaction_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_relay_message")
+    @_multi_persona_event_context
     async def pc_relay_message(self, event: AstrMessageEvent, **kwargs) -> str:
         """统一转述入口：把用户明确要求转发/转述/提醒的话发送到群聊或私聊。
 
@@ -6600,6 +7133,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_relay_message_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_send_to_group")
+    @_multi_persona_event_context
     async def pc_send_to_group(self, event: AstrMessageEvent, **kwargs) -> str:
         """向指定群聊发送消息,可按 QQ/关系网名称/别名/群名片 @ 群友。
 
@@ -6630,6 +7164,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return result
 
     @filter.llm_tool(name="pc_send_to_private_user")
+    @_multi_persona_event_context
     async def pc_send_to_private_user(self, event: AstrMessageEvent, **kwargs) -> str:
         """向指定平台用户 ID 发送私聊消息。
 
@@ -6668,6 +7203,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return result
 
     @filter.llm_tool(name="pc_send_to_groups")
+    @_multi_persona_event_context
     async def pc_send_to_groups(self, event: AstrMessageEvent, **kwargs) -> str:
         """向多个群发送同一条通知。
 
@@ -6683,6 +7219,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_send_to_groups_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_send_to_private_users")
+    @_multi_persona_event_context
     async def pc_send_to_private_users(self, event: AstrMessageEvent, **kwargs) -> str:
         """向多个平台用户 ID 发送同一条私聊转述。
 
@@ -6697,6 +7234,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_send_to_private_users_impl(event, **kwargs)
 
     @filter.llm_tool(name="pc_schedule_group_relay")
+    @_multi_persona_event_context
     async def pc_schedule_group_relay(self, event: AstrMessageEvent, **kwargs) -> str:
         """挂起一条群聊转述,等目标用户在群里发言后自动 @ 并转述。
 
@@ -8445,6 +8983,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 )
 
     @filter.on_agent_begin()
+    @_multi_persona_event_context
     async def enforce_memo_reminder_tool_boundary(self, event: AstrMessageEvent, run_context: Any, *args, **kwargs):
         """AstrBot 会在请求钩子之后补内置工具，因此在 Agent 启动时做最终互斥。"""
         if self is None or event is None:
@@ -8457,6 +8996,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
 
     @filter.on_llm_tool_respond()
+    @_multi_persona_event_context
     async def capture_future_task_result(
         self,
         event: AstrMessageEvent,
@@ -8486,6 +9026,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
 
     @filter.on_agent_done()
+    @_multi_persona_event_context
     async def complete_official_llm_timer_lifecycle(
         self,
         event: AstrMessageEvent,
@@ -10246,6 +10787,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return chain, changed
 
     @filter.on_decorating_result()
+    @_multi_persona_event_context
     async def redact_outbound_secrets_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """Final passive-reply guard against API keys, tokens and passwords."""
         if self is None or not self.enabled:
@@ -10262,6 +10804,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
 
     @filter.on_decorating_result(priority=-21000)
+    @_multi_persona_event_context
     async def record_daily_review_outbound_case_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """Experimental final-stage sampling for the next daily case review."""
         if self is None or not self.enabled or not self.enable_daily_case_review_experiment:
@@ -10477,6 +11020,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_request()
+    @_multi_persona_event_context
     async def inject_tts_enhancement_request_fallback(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """TTS 请求规则独立兜底，避免被状态注入链路早退顺手跳过。"""
         if self is None or not self.enabled:
@@ -10735,6 +11279,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_request(priority=-21000)
+    @_multi_persona_event_context
     async def sanitize_sensitive_screen_tools(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """屏幕工具只能保留给已启用的主要用户私聊，群聊和第三方场景一律裁掉。"""
         if self is None or req is None:
@@ -10744,6 +11289,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             await self._append_sensitive_screen_tool_guard_to_request(event, req, removed)
 
     @filter.on_llm_request(priority=-20000)
+    @_multi_persona_event_context
     async def sanitize_incompatible_web_search_tools(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """移除 Gemini/OpenAI 兼容层会拒绝的 Baidu AI Search MCP 工具声明。"""
         if self is None or req is None:
@@ -10781,6 +11327,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
 
     @filter.on_llm_request()
+    @_multi_persona_event_context
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
         if self is None:
@@ -11855,6 +12402,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_response()
+    @_multi_persona_event_context
     async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """恢复降级为正文的生图调用，并规范化 TTS 标签。"""
         if self is None or not self.enabled:
@@ -12111,6 +12659,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         await self.protect_tts_enhancement_response_blocks(event, resp)
 
     @filter.on_llm_response()
+    @_multi_persona_event_context
     async def record_external_llm_token_usage(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """统计非插件内部调用的 AstrBot 主回复 Token，单独展示且不计入插件限额。"""
         if self is None or not self.enabled:
@@ -12180,6 +12729,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.on_llm_response()
+    @_multi_persona_event_context
     async def record_group_expression_rule_usage(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """记录群聊中实际进入主回复链的已审核语义表达规则。"""
         if self is None or not self.enabled or bool(getattr(event, "is_private_chat", lambda: False)()):
@@ -12217,6 +12767,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._save_data_sync()
 
     @filter.on_llm_response()
+    @_multi_persona_event_context
     async def capture_llm_timer_directive(self, event: AstrMessageEvent, resp: LLMResponse, *args, **kwargs):
         """LLM 回复后捕获定时/状态指令，并做私聊回复审校。"""
         release_now = False
@@ -12704,6 +13255,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return False
 
     @filter.command("陪伴", alias={"私聊陪伴", "主动陪伴"})
+    @_multi_persona_event_context
     async def companion_command(self, event: AstrMessageEvent):
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
         if self is None:
@@ -12991,7 +13543,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             elif action in {"画像", "关系", "回复率"}:
                 response = self._format_user_profile(user)
             elif action in {"记忆", "陪伴记忆"}:
-                response = "当前陪伴记忆：\n" + self._format_companion_memory_for_prompt(user)
+                response = "当前本地陪伴画像：\n" + self._format_companion_memory_for_prompt(user)
             elif action in {"表达学习", "说话风格", "口癖"}:
                 response = "当前表达节奏学习：\n" + self._format_expression_profile_for_prompt(user)
             elif action in {"气氛", "意图", "关系状态"}:
@@ -13280,6 +13832,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event.stop_event()
 
     @filter.command("陪伴群", alias={"群陪伴", "群聊陪伴"})
+    @_multi_persona_event_context
     async def group_companion_command(self, event: AstrMessageEvent):
         """管理群聊陪伴状态、群友画像、群内常见词、话题线程和关系网。"""
         if self is None:
@@ -13289,6 +13842,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             yield result
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    @_multi_persona_event_context
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
         if self is None:
@@ -14141,6 +14695,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         setattr(event, "_private_companion_member_safety_blocked", True)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=210000)
+    @_multi_persona_event_context
     async def guard_blocked_group_member_early(self, event: AstrMessageEvent, *args, **kwargs):
         """在群聊观察和回复插件之前丢弃已静默成员的消息。"""
         if self is None or self._is_onebot_poke_notice_event(event):
@@ -14178,6 +14733,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._stop_group_member_safety_event(event)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=200000)
+    @_multi_persona_event_context
     async def capture_group_observation_early(self, event: AstrMessageEvent, *args, **kwargs):
         """Record allowed group messages before reply plugins can stop propagation."""
         if self is None or self._is_onebot_poke_notice_event(event):
@@ -14214,6 +14770,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=190000)
+    @_multi_persona_event_context
     async def review_group_member_safety_early(self, event: AstrMessageEvent, *args, **kwargs):
         """在回复链路前保守审核当前消息，达到阈值时立即静默。"""
         if self is None or self._is_onebot_poke_notice_event(event):
@@ -14256,6 +14813,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._stop_group_member_safety_event(event)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @_multi_persona_event_context
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
         if self is None:
@@ -14413,6 +14971,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 pass
         if (at_bot or reply_to_bot) and await self._maybe_handle_natural_language_photo_request(event, sender_id, text, directed=True):
             return
+        image_wakeup: dict[str, Any] = {}
+        image_wakeup_getter = getattr(self, "_maybe_group_image_wakeup", None)
+        if callable(image_wakeup_getter):
+            image_wakeup = await image_wakeup_getter(event, sender_id=sender_id)
         registration_payload = None
         continuation: bool | None = False
         resting_mention_notice = ""
@@ -14592,6 +15154,63 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     strength=strength,
                     fatigue=fatigue,
                     note=_single_line(scene.get("wakeup_note"), 180),
+                )
+            elif (
+                image_wakeup
+                and str(scene.get("trigger") or "") not in {"at_other", "reply_other", "at_all"}
+                and not bool(scene.get("quoted_link_payload"))
+            ):
+                setattr(event, "is_at_or_wake_command", True)
+                setattr(event, "is_wake", True)
+                strength = self._group_wakeup_strength("direct_word", group, scene)
+                fatigue = self._bump_group_wakeup_fatigue(group, "direct_word")
+                scene.update(
+                    {
+                        "trigger": "group_wakeup_image_word",
+                        "talking_to": "bot",
+                        "talking_to_name": "你",
+                        "reason": _single_line(image_wakeup.get("reason"), 60) or "image_direct_wakeup_word",
+                        "wakeup_word": _single_line(image_wakeup.get("word"), 60),
+                        "wakeup_strength": strength,
+                        "wakeup_strength_label": self._group_wakeup_strength_label(strength),
+                        "wakeup_fatigue": dict(fatigue),
+                        "wakeup_note": _single_line(image_wakeup.get("note"), 180),
+                    }
+                )
+                group["last_group_wakeup_at"] = _now_ts()
+                group["last_group_wakeup"] = {
+                    "ts": _now_ts(),
+                    "type": "direct_word",
+                    "word": _single_line(image_wakeup.get("word"), 60),
+                    "strength": strength,
+                    "strength_label": self._group_wakeup_strength_label(strength),
+                    "reason": _single_line(image_wakeup.get("reason"), 80) or "image_direct_wakeup_word",
+                    "reason_label": self._group_wakeup_reason_label("direct_word", str(image_wakeup.get("reason") or "")),
+                    "reason_detail": "图片视觉摘要命中强唤醒词",
+                    "fatigue": dict(fatigue),
+                    "sender_id": sender_id,
+                    "sender_name": _single_line(sender_name, 40),
+                    "text": _single_line(text, 120),
+                    "source": "image_vision",
+                }
+                self._record_group_wakeup_log(
+                    group,
+                    scene=scene,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    text=text,
+                    wakeup=group["last_group_wakeup"],
+                    result="woke",
+                    strength=strength,
+                    fatigue=fatigue,
+                    note=_single_line(image_wakeup.get("note"), 180),
+                )
+                logger.info(
+                    "[PrivateCompanion] 群聊图片内容命中唤醒词: group=%s sender=%s word=%s strength=%s",
+                    group_id,
+                    sender_id,
+                    image_wakeup.get("word"),
+                    strength,
                 )
             else:
                 wakeup = self._evaluate_group_wakeup(

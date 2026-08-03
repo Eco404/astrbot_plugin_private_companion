@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import math
 import time
@@ -28,6 +29,28 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from quart import request, send_file
+
+
+def _multi_persona_page_context(function):
+    @functools.wraps(function)
+    async def wrapper(self, *args, **kwargs):
+        plugin = getattr(self, "plugin", None)
+        activator = getattr(plugin, "_activate_persona_id", None)
+        pid = getattr(plugin, "_page_current_persona_id", "") if plugin is not None else ""
+        active_getter = getattr(plugin, "_active_persona_scope", None)
+        active = str(active_getter() if callable(active_getter) else "").strip()
+        token = (
+            activator(pid, allow_inactive=True)
+            if not active and callable(activator) and pid
+            else None
+        )
+        try:
+            return await function(self, *args, **kwargs)
+        finally:
+            deactivator = getattr(plugin, "_deactivate_persona_for_event", None)
+            if token is not None and callable(deactivator):
+                deactivator(token)
+    return wrapper
 
 from .constants import (
     DEFAULT_DAILY_PLAN_ITEMS,
@@ -295,6 +318,35 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             self.plugin._external_image_api_runtime_lock = lock
         return lock
 
+    def _persona_scoped_route_handler(self, handler):
+        """Bind every data-facing page request to the selected page persona."""
+        @functools.wraps(handler)
+        async def wrapper(*args, **kwargs):
+            plugin = getattr(self, "plugin", None)
+            activator = getattr(plugin, "_activate_persona_id", None)
+            persona_id = self._single_line(request.args.get("_persona_id"), 96)
+            if not persona_id and request.method != "GET":
+                payload = await request.get_json(silent=True) or {}
+                if isinstance(payload, dict):
+                    persona_id = self._single_line(payload.get("_persona_id"), 96)
+            known_getter = getattr(plugin, "_persona_profile_ids", None)
+            known = set(known_getter() if callable(known_getter) else [])
+            if persona_id not in known:
+                persona_id = str(getattr(plugin, "_page_current_persona_id", "") or "").strip()
+            token = (
+                activator(persona_id, allow_inactive=True)
+                if callable(activator) and persona_id
+                else None
+            )
+            try:
+                return await handler(*args, **kwargs)
+            finally:
+                deactivator = getattr(plugin, "_deactivate_persona_for_event", None)
+                if token is not None and callable(deactivator):
+                    deactivator(token)
+
+        return wrapper
+
     def register_routes(self) -> None:
         register = self.plugin.context.register_web_api
         routes = [
@@ -435,6 +487,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/setup/daily/run", self.run_setup_daily_generation, ["POST"], "Private Companion Page setup guide daily generation"),
             ("/daily/detail/regenerate", self.regenerate_daily_detail_segment, ["POST"], "Private Companion Page regenerate one daily detail segment"),
             ("/roleplay/personas", self.list_roleplay_personas, ["GET"], "Private Companion Page roleplay personas"),
+            ("/persona/switch", self.switch_persona, ["POST"], "Private Companion Page switch persona"),
+            ("/persona/migrate", self.migrate_persona_profile, ["POST"], "Private Companion Page migrate persona profile"),
             ("/roleplay/draft_from_persona", self.generate_roleplay_draft_from_persona, ["POST"], "Private Companion Page roleplay draft from persona"),
             ("/roleplay/standardize_persona", self.standardize_persona_from_questionnaire, ["POST"], "Private Companion Page roleplay persona standardization"),
             ("/roleplay/persona_style_scenarios", self.generate_persona_style_scenarios, ["POST"], "Private Companion Page roleplay persona style scenarios"),
@@ -449,9 +503,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             ("/tts/provider/update", self.update_tts_provider_config, ["POST"], "Private Companion Page update TTS provider"),
             ("/tts/provider/test", self.test_tts_provider_config, ["POST"], "Private Companion Page test TTS provider"),
         ]
+        persona_control_routes = {
+            "/roleplay/personas",
+            "/persona/switch",
+            "/persona/migrate",
+        }
         for path, handler, methods, desc in routes:
-            register(f"{PAGE_API_PREFIX}{path}", handler, methods, desc)
+            registered_handler = (
+                handler
+                if path in persona_control_routes
+                else self._persona_scoped_route_handler(handler)
+            )
+            register(f"{PAGE_API_PREFIX}{path}", registered_handler, methods, desc)
 
+    @_multi_persona_page_context
     async def get_overview(self) -> dict[str, Any]:
         start = time.perf_counter()
         try:
@@ -585,7 +650,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "daily_timeline": self._daily_timeline_summary(data),
                 "daily_outfit": self._daily_outfit_summary(data),
                 "token_stats": token_stats,
+                "multi_persona": getattr(self.plugin, "_multi_persona_status", lambda: {"enabled": False})(),
             }
+            if not payload.get("multi_persona", {}).get("enabled"):
+                payload.pop("multi_persona", None)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             if elapsed_ms > 1200:
                 logger.warning(
@@ -651,7 +719,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             else 0,
             "skipped_calls": self._int(today_skips.get("count")) if isinstance(today_skips, dict) else 0,
         }
-        return {
+        payload = {
             "updated_at": self._single_line(usage.get("updated_at"), 24),
             "totals": totals,
             "budget": budget,
@@ -660,6 +728,30 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "together_plugin": self._token_memory_plugin_payload(self._safe_together_plugin_token_usage_raw()),
             "partial": True,
         }
+        self._attach_multi_persona_token_stats(payload)
+        return payload
+
+    def _attach_multi_persona_token_stats(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict) or not bool(getattr(self.plugin, "enable_multi_persona_mode", False)):
+            return
+        by_persona: dict[str, Any] = {}
+        profile_ids = getattr(self.plugin, "_persona_profile_ids", lambda: [])()
+        for persona_id in profile_ids:
+            try:
+                profile = self.plugin._ensure_persona_profile(persona_id)
+                usage = profile.get("token_usage", {}) if isinstance(profile, dict) else {}
+                summary = self._token_stats_payload(usage)
+                by_persona[str(persona_id)] = {
+                    "persona_id": str(persona_id),
+                    "totals": summary.get("totals", {}),
+                    "by_day": summary.get("by_day", []),
+                    "by_provider": summary.get("by_provider", []),
+                    "by_task": summary.get("by_task", []),
+                    "recent": summary.get("recent", [])[:20],
+                }
+            except Exception as exc:
+                logger.debug("[PrivateCompanionPage] 多人格 Token 分类读取失败 persona=%s error=%s", persona_id, exc)
+        payload["multi_persona"] = {"enabled": True, "by_persona": by_persona}
 
     def _overview_data_snapshot_locked(self, raw_data: Any) -> dict[str, Any]:
         """Build a light read-only snapshot for the dashboard.
@@ -5648,11 +5740,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             },
             {
                 "key": "memory",
-                "title": "长期画像噪音",
+                "title": "本地画像噪音",
                 "local_count": len(memory_items),
                 "model_count": 0,
                 "suggestions": [
-                    f"长期画像｜{item.get('name') or item.get('user_id')}｜{item.get('field')}：{item.get('reason')}｜{item.get('text')}"
+                    f"本地画像｜{item.get('name') or item.get('user_id')}｜{item.get('field')}：{item.get('reason')}｜{item.get('text')}"
                     for item in memory_items[:4]
                 ],
             },
@@ -5674,7 +5766,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "detail": (
                     (
                         f"发现 {total_local} 条候选：技能 {len(skill_items)}、黑话 {len(slang_items)}、"
-                        f"关系网 {len(pending_items)}、长期画像 {len(memory_items)}、表达学习 {len(expression_items)}"
+                        f"关系网 {len(pending_items)}、本地画像 {len(memory_items)}、表达学习 {len(expression_items)}"
                     )
                     if total_local
                     else "未发现明显技能冲突、黑话杂音、无效关系观察或私聊学习污染"
@@ -6007,13 +6099,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
 
         def reason_for(text: str) -> str:
             if any(marker.lower() in text.lower() for marker in log_markers):
-                return "像日志/代码/报错内容，不适合长期画像"
+                return "像日志/代码/报错内容，不适合本地画像"
             if any(marker.lower() in text.lower() for marker in internal_markers):
-                return "像系统或插件内部文本，不适合长期画像"
+                return "像系统或插件内部文本，不适合本地画像"
             if any(token in text for token in joke_tokens):
                 return "带有玩笑/反讽不确定性，建议人工确认"
             if any(token in text for token in temporary_tokens) and not any(token in text for token in ("以后", "长期", "一直", "固定", "默认", "记住", "记得")):
-                return "像临时状态，不像长期画像"
+                return "像临时状态，不像本地画像"
             if re.fullmatch(r"[\dA-Za-z_-]{8,}", re.sub(r"\s+", "", text)):
                 return "像 ID 或文件名，不像用户画像"
             return ""
@@ -6455,15 +6547,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         ]
         return (
             "你是陪伴插件的数据排障助手。请复核下面这些由本地规则挑出的候选项，只指出明显会影响模型理解的杂音。\n"
-            "范围包括：技能相似项、群黑话杂音、关系网待确认观察、长期画像噪音、表达规则重复与污染。不要修改数据，不要发散，不要把正常口癖或真实群梗误报。\n"
+            "范围包括：技能相似项、群黑话杂音、关系网待确认观察、本地画像噪音、表达规则重复与污染。不要修改数据，不要发散，不要把正常口癖或真实群梗误报。\n"
             "表达学习候选由本地规则预筛：污染项关注日志、复制模型格式、政治敏感内容和过度标点；重复项关注同一来源内已启用/待审核规则的同模板、同证据或高相似变体，以及运行时规则预算占用。\n"
             "不要因为两条规则语气相似就建议删除；模板虽然相同但意图、关系阶段或情绪边界不兼容时应保留。auto_merge=false 的近似项只建议人工复核，不得声称已经合并。\n"
-            "输出 1-10 条短建议，每条不超过 45 字，必须用分类前缀：技能｜、黑话｜、关系网｜、长期画像｜、表达学习｜。\n"
+            "输出 1-10 条短建议，每条不超过 45 字，必须用分类前缀：技能｜、黑话｜、关系网｜、本地画像｜、表达学习｜。\n"
             "如果某一类没有明显问题，不要为了凑数输出。若全部无明显问题，输出“未发现明显模型数据杂音”。\n\n"
             "技能候选：\n" + ("\n".join(skill_lines) if skill_lines else "- 无") + "\n\n"
             "群黑话候选：\n" + ("\n".join(slang_lines) if slang_lines else "- 无") + "\n\n"
             "关系网待确认观察候选：\n" + ("\n".join(pending_lines) if pending_lines else "- 无") + "\n\n"
-            "长期画像候选：\n" + ("\n".join(memory_lines) if memory_lines else "- 无") + "\n\n"
+            "本地画像候选：\n" + ("\n".join(memory_lines) if memory_lines else "- 无") + "\n\n"
             "表达学习候选：\n" + ("\n".join(expression_lines) if expression_lines else "- 无")
         )
 
@@ -6473,7 +6565,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "技能": "skills",
             "黑话": "slang",
             "关系网": "worldbook",
-            "长期画像": "memory",
+            "本地画像": "memory",
             "表达学习": "expression",
         }
         for suggestion in suggestions:
@@ -7068,7 +7160,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "diary": "日记整理",
             "diary_rewrite": "日记修订",
             "diary_derivatives": "日记线索提取",
-            "memory_profile": "长期画像",
+            "memory_profile": "本地陪伴画像",
             "dialogue_episode": "私聊片段",
             "response_review": "回复/主动复核",
             "emotion_judgement": "情绪判断",
@@ -7725,16 +7817,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         except Exception:
             return func(path)
 
+    @_multi_persona_page_context
     async def get_token_stats(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
                 usage = deepcopy(self.plugin.data.get("token_usage", {}))
                 balance_state = deepcopy(self.plugin.data.get("balance_awareness", {}))
-            return self._ok(self._token_stats_payload(usage, balance_state))
+            stats = self._token_stats_payload(usage, balance_state)
+            self._attach_multi_persona_token_stats(stats)
+            return self._ok(stats)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取 Token 统计失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    @_multi_persona_page_context
     async def reset_token_stats(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
@@ -9623,16 +9719,95 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     async def list_roleplay_personas(self) -> dict[str, Any]:
         try:
             items = await self._roleplay_persona_items()
-            current = self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120)
+            enabled = bool(getattr(self.plugin, "enable_multi_persona_mode", False))
+            if enabled:
+                configured_ids = getattr(self.plugin, "_persona_profile_ids", lambda: [])()
+                known = {str(item.get("id") or "") for item in items if isinstance(item, dict)}
+                for pid in configured_ids:
+                    if pid and pid not in known:
+                        items.append({"id": pid, "label": pid, "source": "独立资料", "is_default": False})
+            current = self._single_line(
+                getattr(self.plugin, "_page_current_persona_id", "")
+                or (getattr(self.plugin, "multi_persona_primary_id", "") if enabled else getattr(self.plugin, "plugin_specific_persona_id", "")),
+                120,
+            )
             default_id = ""
             for item in items:
                 if item.get("is_default"):
                     default_id = str(item.get("id") or "")
                     break
-            return self._ok({"items": items, "current": current or default_id, "default": default_id})
+            response = {
+                "items": items,
+                "current": current or default_id,
+                "default": default_id,
+            }
+            if enabled:
+                status_getter = getattr(self.plugin, "_multi_persona_status", None)
+                response["multi_persona"] = (
+                    status_getter()
+                    if callable(status_getter)
+                    else {
+                        "enabled": enabled,
+                        "primary": self._single_line(getattr(self.plugin, "multi_persona_primary_id", ""), 120),
+                        "profiles": configured_ids,
+                        "window_bindings": {},
+                    }
+                )
+                response["multi_persona"]["current"] = current or default_id
+            return self._ok(response)
         except Exception as exc:
             logger.warning(f"[PrivateCompanionPage] 获取人格列表失败: {exc}", exc_info=True)
             return self._ok({"items": self._fallback_roleplay_persona_items(), "current": "", "default": ""})
+
+    async def switch_persona(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        if not bool(getattr(self.plugin, "enable_multi_persona_mode", False)):
+            return self._ok({"enabled": False, "switched": False, "message": "多人格支持模式未开启"})
+        persona_id = str(payload.get("persona_id") or payload.get("id") or "").strip()
+        window_key = str(payload.get("window_key") or payload.get("umo") or "").strip()
+        source_id = str(payload.get("source_persona_id") or "").strip()
+        migrate_keys = payload.get("migrate_keys") if isinstance(payload.get("migrate_keys"), list) else []
+        switcher = getattr(
+            self.plugin,
+            "_switch_persona_for_window_async",
+            None,
+        )
+        switch_args = {
+            "window_key": window_key,
+            "source_persona_id": source_id,
+            "migrate_keys": migrate_keys,
+            "force": bool(payload.get("force")),
+        }
+        result = await switcher(persona_id, **switch_args) if callable(switcher) else self.plugin._switch_persona_for_window(
+            persona_id,
+            **switch_args,
+        )
+        if not result.get("ok"):
+            if result.get("conflict"):
+                return self._ok(result)
+            return self._error(result.get("message") or "人格窗口存在冲突")
+        saver = getattr(self.plugin, "_save_config_if_possible", None)
+        if callable(saver) and result.get("window_key"):
+            try:
+                await saver()
+            except Exception:
+                pass
+        return self._ok(result)
+
+    async def migrate_persona_profile(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        if not bool(getattr(self.plugin, "enable_multi_persona_mode", False)):
+            return self._ok({"enabled": False, "migrated": False})
+        source_id = str(payload.get("source_persona_id") or "").strip()
+        target_id = str(payload.get("target_persona_id") or "").strip()
+        keys = payload.get("keys") if isinstance(payload.get("keys"), list) else []
+        migrator = getattr(self.plugin, "_migrate_persona_profile_async", None)
+        result = (
+            await migrator(source_id, target_id, keys)
+            if callable(migrator)
+            else self.plugin._migrate_persona_profile(source_id, target_id, keys)
+        )
+        return self._ok(result) if result.get("ok") else self._error(result.get("message") or "人格资料迁移失败")
 
     async def _roleplay_persona_items(self) -> list[dict[str, Any]]:
         items: dict[str, dict[str, Any]] = {
@@ -14343,6 +14518,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_member_profiles",
             "enable_group_context_injection",
             "enable_group_image_understanding",
+            "enable_group_image_wakeup",
             "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_forward_message_adaptation",
@@ -16273,6 +16449,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "deepseek_peak_timezone",
             "deepseek_peak_match_keywords",
             "plugin_specific_persona_id",
+            "enable_multi_persona_mode",
+            "multi_persona_primary_id",
+            "multi_persona_ids",
+            "multi_persona_window_bindings",
             "target_user_ids",
             "private_user_aliases",
             "private_user_delivery_aliases",
@@ -16491,6 +16671,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_image_vision_cache",
             "private_image_vision_cache_max_items",
             "enable_group_image_understanding",
+            "enable_group_image_wakeup",
             "group_image_vision_wait_seconds",
             "group_image_max_images",
             "screen_diary_context_max_chars",
@@ -17505,9 +17686,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             add("info", "每日 Token 软限额已关闭", "功能全开时后台任务会按各自开关正常运行")
 
         if features.get("enable_companion_memory"):
-            add("ok", "私聊长期画像已启用", "按私聊对象整理偏好、边界、关系线索和重要事实")
+            add("ok", "私聊本地画像已启用", "按私聊对象整理偏好、边界、关系线索和重要事实")
         else:
-            add("info", "私聊长期画像已关闭", "不会新增私聊长期画像，已有资料仍可管理")
+            add("info", "私聊本地画像已关闭", "不会新增私聊本地画像，已有资料仍可管理")
         if features.get("enable_expression_learning"):
             add("ok", "通用表达学习已启用", "按学习页设置的来源与范围用于私聊、主动私聊和群聊")
         else:
@@ -18102,6 +18283,42 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             enabled = self._normalize_bool_value(value)
             self.plugin.enable_body_monitor_integration = enabled
             self._schedule_body_monitor_integration_toggle(enabled)
+            return
+        if key == "enable_multi_persona_mode":
+            enabled = self._normalize_bool_value(value)
+            self.plugin.enable_multi_persona_mode = enabled
+            if enabled and not self.plugin.multi_persona_primary_id:
+                fallback_id = self.plugin._sanitize_persona_id(
+                    getattr(self.plugin, "_single_mode_plugin_specific_persona_id", "")
+                    or getattr(self.plugin, "plugin_specific_persona_id", "")
+                )
+                if fallback_id:
+                    self.plugin.multi_persona_primary_id = fallback_id
+                    self.plugin.multi_persona_ids = [fallback_id]
+                    self._set_config_value("multi_persona_primary_id", fallback_id)
+                    self._set_config_value("multi_persona_ids", [fallback_id])
+            if enabled and self.plugin.multi_persona_primary_id:
+                self.plugin.plugin_specific_persona_id = self.plugin.multi_persona_primary_id
+                self.plugin._page_current_persona_id = self.plugin.multi_persona_primary_id
+            elif not enabled:
+                self.plugin.plugin_specific_persona_id = str(getattr(self.plugin, "_single_mode_plugin_specific_persona_id", "") or "")
+            return
+        if key == "plugin_specific_persona_id":
+            normalized = str(value or "").strip()[:160]
+            if not self.plugin.enable_multi_persona_mode:
+                self.plugin._single_mode_plugin_specific_persona_id = normalized
+                self.plugin.plugin_specific_persona_id = normalized
+            return
+        if key == "multi_persona_primary_id":
+            self.plugin.multi_persona_primary_id = self.plugin._sanitize_persona_id(value)
+            if self.plugin.enable_multi_persona_mode and self.plugin.multi_persona_primary_id:
+                self.plugin.plugin_specific_persona_id = self.plugin.multi_persona_primary_id
+                self.plugin._page_current_persona_id = self.plugin.multi_persona_primary_id
+            return
+        if key == "multi_persona_ids":
+            self.plugin.multi_persona_ids = self.plugin._configured_multi_persona_ids()
+            return
+        if key == "multi_persona_window_bindings":
             return
         if key == "photo_reference_catalog":
             loaded = load_catalog(
@@ -18859,6 +19076,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_group_member_profiles",
             "enable_group_context_injection",
             "enable_group_image_understanding",
+            "enable_group_image_wakeup",
             "enable_group_injection_guard",
             "enable_group_persona_denoise",
             "enable_forward_message_adaptation",
@@ -18989,6 +19207,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_proactive_only_mode",
             "enable_body_monitor_integration",
             "plugin_specific_persona_id",
+            "enable_multi_persona_mode",
+            "multi_persona_primary_id",
+            "multi_persona_ids",
+            "multi_persona_window_bindings",
             "target_user_ids",
             "private_user_aliases",
             "private_user_delivery_aliases",
@@ -19213,6 +19435,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_image_vision_cache",
             "private_image_vision_cache_max_items",
             "enable_group_image_understanding",
+            "enable_group_image_wakeup",
             "group_image_vision_wait_seconds",
             "group_image_max_images",
             "enable_segmented_proactive_reply",
@@ -19420,6 +19643,26 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
         if key == "enable_body_monitor_integration":
             return self._normalize_bool_value(value)
+        if key == "enable_multi_persona_mode":
+            return self._normalize_bool_value(value)
+        if key == "multi_persona_primary_id":
+            return self.plugin._sanitize_persona_id(value)
+        if key == "multi_persona_ids":
+            raw = value if isinstance(value, (list, tuple, set)) else re.split(r"[\s,，、]+", str(value or ""))
+            result = []
+            for item in raw:
+                pid = self.plugin._sanitize_persona_id(item)
+                if pid and pid not in result:
+                    result.append(pid)
+            return result
+        if key == "multi_persona_window_bindings":
+            if not isinstance(value, dict):
+                return {}
+            return {
+                str(window).strip(): self.plugin._sanitize_persona_id(persona)
+                for window, persona in value.items()
+                if str(window).strip() and self.plugin._sanitize_persona_id(persona)
+            }
         if key in {"enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity"}:
             return self._normalize_bool_value(value)
         if key == "advanced_cycle_start_offset":
@@ -20511,6 +20754,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_private_image_gif_enhancement",
             "enable_private_image_vision_cache",
             "enable_group_image_understanding",
+            "enable_group_image_wakeup",
             "enable_segmented_proactive_reply",
             "segmented_proactive_send_as_forward",
             "enable_segmented_proactive_content_cleanup",

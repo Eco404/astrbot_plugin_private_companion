@@ -832,7 +832,7 @@ class CommandHandlersMixin:
             "quiet_hours": {"label": "主动免打扰时间", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
             "target_user_ids": {"label": "目标用户 ID 列表", "location": "拓展页 -> 模块 -> 快速启动 -> 部署与目标 -> 私聊服务对象 ID"},
             "REST_WAKEUP_PROVIDER_ID": {"label": "休息醒来判断模型", "location": "拓展页 -> 模型/Provider -> REST_WAKEUP_PROVIDER_ID"},
-            "enable_companion_memory": {"label": "用户陪伴记忆", "location": "拓展页 -> 功能开关 -> 记忆、表达与习惯 -> 用户陪伴记忆"},
+            "enable_companion_memory": {"label": "本地陪伴画像", "location": "拓展页 -> 功能开关 -> 本地画像、通用表达与习惯 -> 本地陪伴画像"},
             "enable_group_episode_memory": {"label": "群聊片段记忆", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊片段记忆"},
             "enable_group_privacy_guard": {"label": "群聊隐私保护", "location": "拓展页 -> 功能开关 -> 群聊观察 -> 群聊隐私保护"},
         }

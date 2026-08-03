@@ -3157,6 +3157,31 @@ class PrivateImageMixin:
             logger.warning("[PrivateCompanion] 群聊回复读取图片理解结果失败: %s", _single_line(exc, 160))
             return ""
 
+    async def _maybe_group_image_wakeup(self, event: AstrMessageEvent, *, sender_id: str = "") -> dict[str, Any]:
+        if not bool(getattr(self, "enable_group_image_understanding", False)):
+            return {}
+        if not bool(getattr(self, "enable_group_image_wakeup", False)):
+            return {}
+        if not bool(getattr(self, "enable_group_wakeup_enhancement", False)):
+            return {}
+        try:
+            sources = self._group_image_sources_from_event(event)
+        except Exception:
+            sources = []
+        if not sources:
+            return {}
+        summary = await self._await_group_image_understanding_for_request(event)
+        if not summary:
+            return {}
+        matcher = getattr(self, "_group_wakeup_from_image_vision_summary", None)
+        if not callable(matcher):
+            return {}
+        try:
+            result = matcher(summary, sender_id=sender_id)
+        except Exception:
+            return {}
+        return result if isinstance(result, dict) else {}
+
     async def _append_group_image_understanding_to_request(
         self,
         event: AstrMessageEvent,

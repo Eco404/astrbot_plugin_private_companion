@@ -280,7 +280,7 @@ class GroupWakeupMixin:
 
     def _configured_group_direct_wakeup_words(self) -> list[str]:
         words = list(getattr(self, "group_wakeup_direct_words", []) or [])
-        bot_name = _single_line(self.bot_name, 40)
+        bot_name = _single_line(getattr(self, "bot_name", ""), 40)
         if bot_name and bot_name not in words:
             words.insert(0, bot_name)
         return list(dict.fromkeys(word for word in words if _single_line(word, 60)))
@@ -288,6 +288,35 @@ class GroupWakeupMixin:
     def _configured_group_owner_direct_wakeup_words(self) -> list[str]:
         words = list(getattr(self, "group_wakeup_owner_direct_words", []) or [])
         return list(dict.fromkeys(word for word in words if _single_line(word, 60)))
+
+    def _group_wakeup_from_image_vision_summary(self, summary: Any, *, sender_id: str = "") -> dict[str, Any]:
+        if not bool(getattr(self, "enable_group_wakeup_enhancement", False)):
+            return {}
+        if not bool(getattr(self, "enable_group_image_wakeup", False)):
+            return {}
+        cleaned = _single_line(summary, 1000)
+        if not cleaned:
+            return {}
+        if self._group_sender_is_primary_user(sender_id):
+            for word in self._configured_group_owner_direct_wakeup_words():
+                if self._text_contains_wakeup_word(cleaned, word):
+                    return {
+                        "type": "direct_word",
+                        "word": word,
+                        "reason": "image_direct_wakeup_word",
+                        "note": "群聊图片视觉摘要命中了主要用户专属强唤醒词。",
+                        "source": "image_vision",
+                    }
+        for word in self._configured_group_direct_wakeup_words():
+            if self._text_contains_wakeup_word(cleaned, word):
+                return {
+                    "type": "direct_word",
+                    "word": word,
+                    "reason": "image_direct_wakeup_word",
+                    "note": "群聊图片视觉摘要命中了 Bot 名称或强唤醒词。",
+                    "source": "image_vision",
+                }
+        return {}
 
     def _group_sender_is_primary_user(self, sender_id: str) -> bool:
         raw_id = _single_line(sender_id, 128)
@@ -523,6 +552,7 @@ class GroupWakeupMixin:
         reason = str(reason or "")
         labels = {
             "direct_wakeup_word": "提到 Bot 名字或强唤醒词",
+            "image_direct_wakeup_word": "图片内容命中 Bot 名字或强唤醒词",
             "owner_direct_wakeup_word": "主要用户使用专属强唤醒词",
             "contextual_wakeup_word": "提到弱相关唤醒词且语境需要 Bot 接话",
             "interest_keyword": "命中兴趣关键词",

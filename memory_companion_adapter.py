@@ -486,7 +486,12 @@ class MemoryCompanionAdapterMixin:
         clean_query = _single_line(query, 1200)
         if not clean_query:
             return ""
-        if kind == "daily_outfit_photo" and event is None and not user_id and not isinstance(user, dict):
+        if (
+            kind in {"daily_outfit_photo", "daily_diary"}
+            and event is None
+            and not user_id
+            and not isinstance(user, dict)
+        ):
             owner_getter = getattr(self, "_memory_companion_schedule_owner_context", None)
             if callable(owner_getter):
                 try:
@@ -595,6 +600,7 @@ class MemoryCompanionAdapterMixin:
             return ""
         generation_kinds = {
             "current_state_reply",
+            "daily_diary",
             "daily_outfit_photo",
             "natural_photo",
             "command_photo",

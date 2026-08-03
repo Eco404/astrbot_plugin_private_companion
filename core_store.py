@@ -316,6 +316,29 @@ class CoreStoreMixin:
 
     async def _startup_prepare_today(self):
         try:
+            if bool(getattr(self, "enable_multi_persona_mode", False)):
+                persona_ids = getattr(self, "_configured_multi_persona_ids", lambda: [])()
+                if not persona_ids:
+                    persona_ids = [getattr(self, "multi_persona_primary_id", "")]
+                for persona_id in persona_ids:
+                    token = getattr(self, "_activate_persona_id", lambda _pid: None)(persona_id)
+                    try:
+                        try:
+                            await self._ensure_daily_state()
+                            await self._ensure_daily_plan()
+                            await self._ensure_daily_diary()
+                            await self._maybe_settle_skill_growth()
+                        except Exception as exc:
+                            logger.warning(
+                                "[PrivateCompanion] 启动初始化人格失败，继续处理其他人格: persona=%s error=%s",
+                                _single_line(persona_id, 96),
+                                _single_line(exc, 160),
+                            )
+                    finally:
+                        if token is not None:
+                            getattr(self, "_deactivate_persona_for_event", lambda _token: None)(token)
+                if persona_ids and any(str(item or "").strip() for item in persona_ids):
+                    return
             await self._ensure_daily_state()
             await self._ensure_daily_plan()
             # 启动只做一次普通维护检查；是否到达配置的日记时间由统一入口判断。
@@ -861,6 +884,16 @@ class CoreStoreMixin:
             raise
 
     def _save_data_sync(self):
+        active_persona = str(getattr(self, "_active_persona_scope", lambda: "")() or "")
+        if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                snapshot = deepcopy(self.data)
+                self._write_persona_data_snapshot_sync(active_persona, snapshot)
+                return
+            self._schedule_data_save(delay=0.35)
+            return
         compacted = self._compact_store_history_inplace(self.data)
         if compacted:
             logger.info("[PrivateCompanion] 保存前压缩历史存储: %s", compacted)
@@ -951,7 +984,107 @@ class CoreStoreMixin:
             except Exception:
                 pass
 
-    def _schedule_data_save(self, delay: float = 1.5) -> None:
+    def _persona_data_for_save(self, persona_id: str) -> dict[str, Any]:
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            profile = profiles.get(persona_id)
+            if isinstance(profile, dict):
+                return profile
+        ensure_profile = getattr(self, "_ensure_persona_profile", None)
+        if callable(ensure_profile):
+            profile = ensure_profile(persona_id)
+            if isinstance(profile, dict):
+                return profile
+        return {}
+
+    def _write_persona_data_snapshot_sync(self, persona_id: str, data: dict[str, Any]) -> int:
+        changed = self._sanitize_store_control_tags_inplace(data)
+        self._compact_store_history_inplace(data)
+        saver = getattr(self, "_save_persona_profile_sync", None)
+        if not callable(saver):
+            raise RuntimeError("persona profile saver is unavailable")
+        saver(persona_id, data)
+        return changed
+
+    def _schedule_persona_data_save(self, persona_id: str, delay: float) -> None:
+        dirty = getattr(self, "_persona_data_save_dirty", None)
+        if not isinstance(dirty, set):
+            dirty = set()
+            self._persona_data_save_dirty = dirty
+        tasks = getattr(self, "_persona_data_save_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._persona_data_save_tasks = tasks
+        dirty.add(persona_id)
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            return
+        task = tasks.get(persona_id)
+        if isinstance(task, asyncio.Task) and not task.done():
+            return
+
+        async def _runner() -> None:
+            should_retry = False
+            try:
+                while persona_id in dirty:
+                    dirty.discard(persona_id)
+                    await asyncio.sleep(max(0.0, float(delay)))
+                    live_data = self._persona_data_for_save(persona_id)
+                    snapshot = deepcopy(live_data)
+                    snapshot_changed = await asyncio.to_thread(
+                        self._write_persona_data_snapshot_sync,
+                        persona_id,
+                        snapshot,
+                    )
+                    if snapshot_changed:
+                        live_changed = self._sanitize_store_control_tags_inplace(live_data)
+                        if live_changed:
+                            dirty.add(persona_id)
+                            self._log_store_control_cleanup(
+                                "delayed_persona_save_live_sync",
+                                live_changed,
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                dirty.add(persona_id)
+                should_retry = True
+                logger.warning(
+                    "[PrivateCompanion] 延迟保存人格数据失败: persona=%s error=%s",
+                    persona_id,
+                    _single_line(exc, 160),
+                )
+            finally:
+                tasks.pop(persona_id, None)
+                stop_event = getattr(self, "_stop_event", None)
+                stopping = bool(
+                    stop_event is not None
+                    and callable(getattr(stop_event, "is_set", None))
+                    and stop_event.is_set()
+                )
+                if not stopping and persona_id in dirty:
+                    retry_delay = (
+                        max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
+                        if should_retry
+                        else max(0.0, float(delay))
+                    )
+                    try:
+                        self._schedule_persona_data_save(persona_id, retry_delay)
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "[PrivateCompanion] 延迟保存人格数据重试调度失败: persona=%s error=%s",
+                            persona_id,
+                            _single_line(retry_exc, 160),
+                        )
+
+        try:
+            tasks[persona_id] = asyncio.create_task(_runner())
+        except RuntimeError:
+            snapshot = deepcopy(self._persona_data_for_save(persona_id))
+            self._write_persona_data_snapshot_sync(persona_id, snapshot)
+            dirty.discard(persona_id)
+
+    def _schedule_default_data_save(self, delay: float) -> None:
         self._data_save_dirty = True
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
@@ -987,10 +1120,14 @@ class CoreStoreMixin:
                     and callable(getattr(stop_event, "is_set", None))
                     and stop_event.is_set()
                 )
-                if should_retry and not stopping and bool(getattr(self, "_data_save_dirty", False)):
-                    retry_delay = max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
+                if not stopping and bool(getattr(self, "_data_save_dirty", False)):
+                    retry_delay = (
+                        max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
+                        if should_retry
+                        else max(0.0, float(delay))
+                    )
                     try:
-                        self._schedule_data_save(delay=retry_delay)
+                        self._schedule_default_data_save(delay=retry_delay)
                     except Exception as retry_exc:
                         logger.warning("[PrivateCompanion] 延迟保存重试调度失败: %s", retry_exc)
 
@@ -999,14 +1136,34 @@ class CoreStoreMixin:
         except RuntimeError:
             self._save_data_sync()
 
+    def _schedule_data_save(self, delay: float = 1.5) -> None:
+        active_getter = getattr(self, "_active_persona_scope", None)
+        persona_id = str(active_getter() if callable(active_getter) else "").strip()
+        if bool(getattr(self, "enable_multi_persona_mode", False)) and persona_id:
+            self._schedule_persona_data_save(persona_id, delay)
+            return
+        self._schedule_default_data_save(delay)
+
     async def _flush_scheduled_data_save(self) -> None:
         """Wait until all coalesced writes, including writes queued while waiting, finish."""
         while True:
+            pending: list[asyncio.Task] = []
             task = getattr(self, "_data_save_task", None)
             if isinstance(task, asyncio.Task) and not task.done():
-                await asyncio.shield(task)
+                pending.append(task)
+            persona_tasks = getattr(self, "_persona_data_save_tasks", {})
+            if isinstance(persona_tasks, dict):
+                pending.extend(
+                    item
+                    for item in persona_tasks.values()
+                    if isinstance(item, asyncio.Task) and not item.done()
+                )
+            if pending:
+                await asyncio.gather(*(asyncio.shield(item) for item in pending))
                 continue
-            if bool(getattr(self, "_data_save_dirty", False)):
+            legacy_dirty = bool(getattr(self, "_data_save_dirty", False))
+            persona_dirty = set(getattr(self, "_persona_data_save_dirty", set()) or set())
+            if legacy_dirty or persona_dirty:
                 stop_event = getattr(self, "_stop_event", None)
                 if (
                     stop_event is not None
@@ -1014,7 +1171,10 @@ class CoreStoreMixin:
                     and stop_event.is_set()
                 ):
                     return
-                self._schedule_data_save(delay=0.0)
+                for persona_id in persona_dirty:
+                    self._schedule_persona_data_save(persona_id, 0.0)
+                if legacy_dirty:
+                    self._schedule_default_data_save(delay=0.0)
                 continue
             return
 

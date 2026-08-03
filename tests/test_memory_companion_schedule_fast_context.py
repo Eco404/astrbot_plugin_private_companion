@@ -173,6 +173,25 @@ class MemoryCompanionScheduleFastContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("schedule", result)
         self.assertNotIn("retrieval_profile", bridge.calls[0])
 
+    async def test_daily_diary_uses_owner_context_and_filters_unverified_relationships(self) -> None:
+        bridge = _Bridge(
+            fast_supported=True,
+            response="昨天和主要用户聊完那本书后，妈妈又端来一杯茶。",
+        )
+        harness = _Harness(bridge)
+
+        result = await harness._memory_companion_compose_feature_context(
+            kind="daily_diary",
+            query="每日日记连续性、主要用户共同经历和未完成心事",
+        )
+
+        session_context = bridge.calls[0]["session_context"]
+        self.assertEqual("u1", session_context["user_id"])
+        self.assertEqual("private", session_context["scope"])
+        self.assertEqual("user", session_context["preferred_address"])
+        self.assertIn("主要用户聊完那本书", result)
+        self.assertNotIn("妈妈", result)
+
     async def test_generation_feature_memory_filters_unverified_relationships(self) -> None:
         bridge = _Bridge(
             fast_supported=True,

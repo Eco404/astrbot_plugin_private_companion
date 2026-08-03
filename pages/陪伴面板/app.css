@@ -20082,6 +20082,111 @@ textarea {
   gap: 12px;
 }
 
+.multi-persona-mode-card {
+  border-color: rgba(74, 103, 150, 0.28);
+}
+
+.multi-persona-choice-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.multi-persona-choice-list label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--ink);
+}
+
+.multi-persona-choice-list label:has(input:checked) {
+  border-color: rgba(26, 75, 140, 0.36);
+  background: var(--accent-soft);
+}
+
+.multi-persona-choice-list input {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.multi-persona-choice-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.multi-persona-choice-list.compact {
+  margin: 12px 0;
+}
+
+.multi-persona-migration-selects {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.multi-persona-migration-selects label {
+  display: grid;
+  gap: 6px;
+}
+
+.multi-persona-migration-selects label > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.multi-persona-migration-selects input,
+.multi-persona-migration-selects select {
+  min-width: 0;
+  width: 100%;
+}
+
+.multi-persona-binding-card {
+  display: grid;
+  gap: 12px;
+}
+
+.multi-persona-binding-card .multi-persona-migration-selects {
+  margin-top: 0;
+}
+
+.multi-persona-binding-card .feature-param-save {
+  justify-self: start;
+}
+
+.multi-persona-binding-list {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.multi-persona-binding-list > span:not(.empty) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+
+.multi-persona-binding-list code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.multi-persona-binding-list em {
+  color: var(--muted);
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .proactive-mode-main p + p {
   margin-top: 4px;
 }
@@ -21944,6 +22049,20 @@ textarea {
 
   .proactive-mode-settings-row {
     grid-template-columns: 1fr;
+  }
+
+  .multi-persona-choice-list,
+  .multi-persona-migration-selects {
+    grid-template-columns: 1fr;
+  }
+
+  .multi-persona-binding-list > span:not(.empty) {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .multi-persona-binding-list em {
+    white-space: normal;
   }
 
   .proactive-mode-card {

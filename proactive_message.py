@@ -3314,7 +3314,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         return None
 
     def _proactive_conversation_with_configured_persona(self, conversation: Any) -> Any:
-        specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+        specific_id = str(
+            getattr(
+                self,
+                "_effective_plugin_persona_id",
+                lambda: getattr(self, "plugin_specific_persona_id", ""),
+            )()
+            or ""
+        ).strip()
         if conversation is None or not specific_id:
             return conversation
         if str(getattr(conversation, "persona_id", "") or "").strip() == specific_id:

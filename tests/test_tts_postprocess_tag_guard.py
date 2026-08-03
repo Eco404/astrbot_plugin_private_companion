@@ -230,8 +230,12 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             _private_companion_reaction_expression_delivery_tracker={
                 "successful_signatures": [("plain", "第一段。")],
             },
+            _private_companion_reaction_expression_expected_primary_chunks=[
+                [Plain("第一段。")],
+                [Plain("第二段。")],
+            ],
             get_result=lambda: SimpleNamespace(
-                chain=[Plain("第一段。"), Plain("第二段。")]
+                chain=[Plain("第一段。")]
             ),
         )
 

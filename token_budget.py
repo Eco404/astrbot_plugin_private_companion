@@ -357,7 +357,7 @@ class TokenBudgetMixin:
             ("full_test_detail", ("完整测试", "缺少这些主动行为", "today_events")),
             ("dream", ("梦境生成器", "dream_type", "afterglow")),
             ("diary", ("日记生成器", "dream_fragments", "long_term_events")),
-            ("memory_profile", ("私聊记忆整理", "长期画像", "user_traits")),
+            ("memory_profile", ("本地陪伴画像整理", "本地陪伴画像", "user_traits")),
             ("dialogue_episode", ("私聊对话整理成片段", "共同经历", "open_loops")),
             ("response_review", ("改写成更像真实私聊", "需要修正的问题", "原回复")),
             ("relationship", ("关系站位", "relationship", "互动边界")),

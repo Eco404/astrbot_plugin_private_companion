@@ -3010,13 +3010,14 @@ class ProactiveMixin:
         state = getattr(self, "_maintenance_failure_cooldowns", None)
         if not isinstance(state, dict):
             return ""
-        item = state.get(label)
+        key = self._maintenance_failure_key(label)
+        item = state.get(key)
         if not isinstance(item, dict):
             return ""
         check_now = _now_ts() if now is None else now
         until = _safe_float(item.get("until"), 0, 0)
         if until <= check_now:
-            state.pop(label, None)
+            state.pop(key, None)
             return ""
         error = _single_line(item.get("error"), 120)
         return f"{label} 失败冷却中（{self._format_elapsed(until - check_now)}后重试" + (f"，上次错误：{error}" if error else "") + "）"
@@ -3027,7 +3028,7 @@ class ProactiveMixin:
             state = {}
             self._maintenance_failure_cooldowns = state
         now = _now_ts()
-        state[label] = {
+        state[self._maintenance_failure_key(label)] = {
             "until": now + self._maintenance_failure_cooldown_seconds(label),
             "error": _single_line(exc, 180),
             "failed_at": now,
@@ -3036,7 +3037,12 @@ class ProactiveMixin:
     def _clear_maintenance_task_failure(self, label: str) -> None:
         state = getattr(self, "_maintenance_failure_cooldowns", None)
         if isinstance(state, dict):
-            state.pop(label, None)
+            state.pop(self._maintenance_failure_key(label), None)
+
+    def _maintenance_failure_key(self, label: str) -> str:
+        active_getter = getattr(self, "_active_persona_scope", None)
+        persona_id = str(active_getter() if callable(active_getter) else "").strip()
+        return f"{persona_id}:{label}" if persona_id else label
 
     def _scheduler_maintenance_tasks(self) -> tuple[tuple[str, Any], ...]:
         tasks = (
@@ -3071,14 +3077,29 @@ class ProactiveMixin:
         }
         return tuple(item for item in tasks if item[0] in passive_labels)
 
-    async def _scheduler_loop(self):
-        while not self._stop_event.is_set():
+    def _scheduler_persona_ids(self) -> list[str]:
+        active_getter = getattr(self, "_active_persona_scope", None)
+        active = str(active_getter() if callable(active_getter) else "").strip()
+        if not bool(getattr(self, "enable_multi_persona_mode", False)):
+            return [""]
+        getter = getattr(self, "_configured_multi_persona_ids", None)
+        ids = list(getter() if callable(getter) else [])
+        if not ids:
+            ids = [str(getattr(self, "multi_persona_primary_id", "") or "").strip()]
+        enabled = list(dict.fromkeys(item for item in ids if item))
+        if active and active in enabled:
+            return [active]
+        return enabled or [""]
+
+    async def _run_scheduler_cycle(self, *, immediate: bool = False) -> None:
+        active_getter = getattr(self, "_active_persona_scope", None)
+        current = str(active_getter() if callable(active_getter) else "").strip()
+        for persona_id in self._scheduler_persona_ids():
+            token = None
+            if persona_id and persona_id != current:
+                activator = getattr(self, "_activate_persona_id", None)
+                token = activator(persona_id) if callable(activator) else None
             try:
-                timeout = self._next_scheduler_timeout()
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=timeout
-                )
-            except asyncio.TimeoutError:
                 await self._tick()
                 for label, task_factory in self._scheduler_maintenance_tasks():
                     try:
@@ -3088,7 +3109,28 @@ class ProactiveMixin:
                         self._clear_maintenance_task_failure(label)
                     except Exception as exc:
                         self._record_maintenance_task_failure(label, exc)
-                        logger.warning("[PrivateCompanion] 主动循环维护步骤失败,已跳过: %s error=%s", label, _single_line(exc, 160))
+                        logger.warning(
+                            "[PrivateCompanion] %s维护步骤失败,已跳过: persona=%s task=%s error=%s",
+                            "主动链即时" if immediate else "主动循环",
+                            persona_id or "single",
+                            label,
+                            _single_line(exc, 160),
+                        )
+            finally:
+                if token is not None:
+                    deactivator = getattr(self, "_deactivate_persona_for_event", None)
+                    if callable(deactivator):
+                        deactivator(token)
+
+    async def _scheduler_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                timeout = self._next_scheduler_timeout()
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                await self._run_scheduler_cycle()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -3096,20 +3138,37 @@ class ProactiveMixin:
 
     async def _kick_proactive_loop_once(self) -> None:
         try:
-            await self._tick()
-            for label, task_factory in self._scheduler_maintenance_tasks():
-                try:
-                    if self._maintenance_task_blocked_by_failure(label):
-                        continue
-                    await task_factory()
-                    self._clear_maintenance_task_failure(label)
-                except Exception as exc:
-                    self._record_maintenance_task_failure(label, exc)
-                    logger.warning("[PrivateCompanion] 主动链即时维护步骤失败,已跳过: %s error=%s", label, _single_line(exc, 160))
+            await self._run_scheduler_cycle(immediate=True)
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 主动链即时唤醒失败: {e}", exc_info=True)
 
     def _next_scheduler_timeout(self) -> float:
+        active_getter = getattr(self, "_active_persona_scope", None)
+        active = str(active_getter() if callable(active_getter) else "").strip()
+        persona_getter = getattr(self, "_scheduler_persona_ids", None)
+        persona_ids = list(persona_getter() if callable(persona_getter) else [""])
+        timeout_getter = getattr(self, "_next_scheduler_timeout_for_active_persona", None)
+
+        def next_for_active_persona() -> float:
+            if callable(timeout_getter):
+                return float(timeout_getter())
+            return float(ProactiveMixin._next_scheduler_timeout_for_active_persona(self))
+
+        if active or persona_ids == [""]:
+            return next_for_active_persona()
+        timeouts: list[float] = []
+        activator = getattr(self, "_activate_persona_id", None)
+        deactivator = getattr(self, "_deactivate_persona_for_event", None)
+        for persona_id in persona_ids:
+            token = activator(persona_id) if callable(activator) else None
+            try:
+                timeouts.append(next_for_active_persona())
+            finally:
+                if token is not None and callable(deactivator):
+                    deactivator(token)
+        return min(timeouts) if timeouts else max(30.0, float(self.check_interval_seconds))
+
+    def _next_scheduler_timeout_for_active_persona(self) -> float:
         base = max(30.0, float(self.check_interval_seconds))
         now = _now_ts()
         nearest_due_in: float | None = None

@@ -391,11 +391,34 @@ class DailyStateMixin:
     """日程、状态、天气、日记、技能成长和计时器"""
 
     def _daily_generation_lock(self, attribute: str) -> asyncio.Lock:
+        scope = self._daily_generation_scope()
+        if scope:
+            locks_attribute = f"{attribute}_by_scope"
+            locks = getattr(self, locks_attribute, None)
+            if not isinstance(locks, dict):
+                locks = {}
+                setattr(self, locks_attribute, locks)
+            lock = locks.get(scope)
+            if not isinstance(lock, asyncio.Lock):
+                lock = asyncio.Lock()
+                locks[scope] = lock
+            return lock
         lock = getattr(self, attribute, None)
         if not isinstance(lock, asyncio.Lock):
             lock = asyncio.Lock()
             setattr(self, attribute, lock)
         return lock
+
+    def _daily_generation_scope(self) -> str:
+        getter = getattr(self, "_active_persona_scope", None)
+        return str(getter() if callable(getter) else "").strip()
+
+    def _daily_force_result_cache(self, attribute: str) -> dict[str, dict[str, Any]]:
+        cache = getattr(self, attribute, None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, attribute, cache)
+        return cache
 
     def _sync_detail_enhancement_day_locked(
         self,
@@ -541,19 +564,21 @@ class DailyStateMixin:
 
     async def _ensure_daily_diary(self, force: bool = False) -> dict[str, Any] | None:
         request_started = time.monotonic()
+        scope = self._daily_generation_scope()
+        force_cache = self._daily_force_result_cache("_daily_diary_force_results_by_scope")
         lock = self._daily_generation_lock("_daily_diary_generation_lock")
         async with lock:
-            if (
-                force
-                and _safe_float(getattr(self, "_daily_diary_force_completed_at", 0), 0) >= request_started
-            ):
-                completed = getattr(self, "_daily_diary_force_last_result", None)
+            completed_entry = force_cache.get(scope, {})
+            if force and _safe_float(completed_entry.get("completed_at"), 0) >= request_started:
+                completed = completed_entry.get("result")
                 if isinstance(completed, dict):
                     return completed
             diary = await self._ensure_daily_diary_once(force=force)
             if force and isinstance(diary, dict):
-                self._daily_diary_force_last_result = diary
-                self._daily_diary_force_completed_at = time.monotonic()
+                force_cache[scope] = {
+                    "result": diary,
+                    "completed_at": time.monotonic(),
+                }
             return diary
 
     async def _ensure_daily_diary_once(self, force: bool = False) -> dict[str, Any] | None:
@@ -3058,13 +3083,13 @@ class DailyStateMixin:
         passive_fast: bool = False,
     ) -> dict[str, Any]:
         request_started = time.monotonic()
+        scope = self._daily_generation_scope()
+        force_cache = self._daily_force_result_cache("_daily_state_force_results_by_scope")
         lock = self._daily_generation_lock("_daily_state_generation_lock")
         async with lock:
-            if (
-                force
-                and _safe_float(getattr(self, "_daily_state_force_completed_at", 0), 0) >= request_started
-            ):
-                completed = getattr(self, "_daily_state_force_last_result", None)
+            completed_entry = force_cache.get(scope, {})
+            if force and _safe_float(completed_entry.get("completed_at"), 0) >= request_started:
+                completed = completed_entry.get("result")
                 if isinstance(completed, dict):
                     return completed
             state = await self._ensure_daily_state_once(
@@ -3073,8 +3098,10 @@ class DailyStateMixin:
                 passive_fast=passive_fast,
             )
             if force and isinstance(state, dict):
-                self._daily_state_force_last_result = state
-                self._daily_state_force_completed_at = time.monotonic()
+                force_cache[scope] = {
+                    "result": state,
+                    "completed_at": time.monotonic(),
+                }
             return state
 
     async def _ensure_daily_state_once(
@@ -9305,7 +9332,7 @@ class DailyStateMixin:
         return cleaned
 
     def _get_default_persona_prompt(self, umo: str = "") -> str:
-        specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+        specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
         scoped, _ = self._cached_persona_prompt_for_scope(umo, specific_id)
         if scoped:
             return scoped
@@ -9336,7 +9363,7 @@ class DailyStateMixin:
 
     async def _refresh_default_persona_prompt(self, umo: str = "") -> str:
         try:
-            specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+            specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
             cached, cached_at = self._cached_persona_prompt_for_scope(umo, specific_id)
             if not cached:
                 legacy_cached = str(getattr(self, "_default_persona_prompt_cache", "") or "").strip()
@@ -9390,7 +9417,7 @@ class DailyStateMixin:
         return self._get_default_persona_prompt(umo)
 
     def _schedule_default_persona_prompt_refresh(self, umo: str = "") -> None:
-        specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+        specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
         cached, cached_at = self._cached_persona_prompt_for_scope(umo, specific_id)
         cache_fresh = cached and (_now_ts() - cached_at < 300.0)
         if cache_fresh:
@@ -9420,7 +9447,7 @@ class DailyStateMixin:
             pass
 
     def _format_plugin_persona_request_injection(self) -> str:
-        specific_id = str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+        specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
         if not specific_id:
             return ""
         persona = self._get_default_persona_prompt()

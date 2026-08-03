@@ -87,6 +87,155 @@ class OfficialTtsSegmentingCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         )
         plugin._create_lifecycle_background_task.assert_not_called()
 
+    async def test_deferred_reaction_tts_text_still_enters_segmenting(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.segmented_proactive_scope = "all_llm"
+        plugin.enable_framework_error_leak_guard = False
+        plugin.enable_daily_case_review_experiment = False
+        plugin._proactive_only_blocks_passive_event = lambda *_args: False
+        plugin._feature_enabled_or_temp_unlocked = (
+            lambda key: key == "enable_segmented_proactive_reply"
+        )
+        plugin._segmented_scope_allows_event = lambda _event: True
+        plugin._restore_response_review_meta_leak_before_send = lambda *_args: False
+        plugin._platform_supports = lambda *_args, **_kwargs: True
+        chunks = [[Plain("第一段。")], [Plain("第二段。")]]
+        plugin._segment_llm_reply_chain = Mock(
+            return_value=(chunks, True, "第一段。第二段。")
+        )
+        plugin._limit_private_routine_check_segments = lambda _text, value: value
+        plugin._plain_text_segments_from_chunks = lambda _chunks: []
+        plugin._build_result_from_chain = lambda chain: MessageEventResult(
+            chain=list(chain)
+        )
+        plugin._segmented_chunk_log_text = lambda chunk: chunk[0].text
+        plugin._create_lifecycle_background_task = Mock()
+        result = MessageEventResult(chain=[Plain("第一段。第二段。")])
+
+        class Event:
+            unified_msg_origin = "default:FriendMessage:10001"
+            message_str = "普通聊天"
+            _private_companion_reaction_expression_intent = {"query": "开心"}
+            _private_companion_deferred_reaction_tts = {
+                "normalized": "第一段。第二段。",
+                "fallback_plain": "第一段。第二段。",
+                "started_at": 10.0,
+            }
+
+            def __init__(self) -> None:
+                self.result = result
+
+            def get_result(self) -> MessageEventResult:
+                return self.result
+
+            def set_result(self, value: MessageEventResult) -> None:
+                self.result = value
+
+        event = Event()
+        await PrivateCompanionPlugin.apply_segmented_llm_reply_scope(plugin, event)
+
+        self.assertEqual(["第一段。"], [item.text for item in event.result.chain])
+        self.assertEqual(
+            chunks,
+            event._private_companion_reaction_expression_expected_primary_chunks,
+        )
+        self.assertEqual(
+            [chunks[1]],
+            event._private_companion_reaction_expression_segmented_remainder[
+                "chunks"
+            ],
+        )
+        plugin._create_lifecycle_background_task.assert_not_called()
+
+    async def test_logged_reaction_reply_uses_active_segment_rules_after_tts(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.enable_segmented_proactive_reply = True
+        plugin.segmented_proactive_scope = "all_llm"
+        plugin.enable_framework_error_leak_guard = False
+        plugin.enable_daily_case_review_experiment = False
+        plugin.enable_proactive_quote_trigger_message = False
+        plugin.enable_segmented_proactive_content_replacement = False
+        plugin.segmented_proactive_content_replacements = []
+        plugin.segmented_proactive_threshold = 500
+        plugin.segmented_proactive_min_segment_chars = 5
+        plugin.segmented_proactive_max_segments = 5
+        plugin.segmented_proactive_split_mode = "words"
+        plugin.segmented_proactive_split_words = [
+            "。",
+            "？",
+            "！",
+            "~",
+            "?",
+            ".",
+            "!",
+            ";",
+            "；",
+            "……",
+            "（",
+            "“",
+            "，",
+            "…",
+        ]
+        plugin.segmented_proactive_regex = r"(?<=[。！？!?…~～])\s*|\n+"
+        plugin.enable_segmented_proactive_content_cleanup = True
+        plugin.segmented_proactive_content_cleanup_rule = r"[\n。？！]"
+        plugin.segmented_proactive_content_cleanup_scope = "all"
+        plugin.segmented_proactive_content_cleanup_words = ["。", "，"]
+        plugin._proactive_only_blocks_passive_event = lambda *_args: False
+        plugin._feature_enabled_or_temp_unlocked = (
+            lambda key: key == "enable_segmented_proactive_reply"
+        )
+        plugin._segmented_scope_allows_event = lambda _event: True
+        plugin._restore_response_review_meta_leak_before_send = lambda *_args: False
+        plugin._platform_supports = lambda *_args, **_kwargs: True
+        plugin._plain_text_segments_from_chunks = lambda _chunks: []
+        plugin._create_lifecycle_background_task = Mock()
+        source = (
+            "唔…外面还在下着雨呢，这么晚了还要例行检查呀？"
+            "比折大人这次打算查点什么……还是说，其实只是睡不着想找我说话呀？"
+        )
+        result = MessageEventResult(chain=[Plain(source)])
+
+        class Event:
+            unified_msg_origin = "default:FriendMessage:10001"
+            message_str = "例行检查"
+            _private_companion_reaction_expression_intent = {"query": "回应"}
+            _private_companion_deferred_reaction_tts = {
+                "normalized": source,
+                "fallback_plain": source,
+                "started_at": 10.0,
+            }
+
+            def __init__(self) -> None:
+                self.result = result
+
+            def get_result(self) -> MessageEventResult:
+                return self.result
+
+            def set_result(self, value: MessageEventResult) -> None:
+                self.result = value
+
+        event = Event()
+        await PrivateCompanionPlugin.apply_segmented_llm_reply_scope(plugin, event)
+
+        expected = event._private_companion_reaction_expression_expected_primary_chunks
+        self.assertEqual(2, len(expected))
+        self.assertEqual(expected[0], event.result.chain)
+        self.assertEqual(
+            [expected[1]],
+            event._private_companion_reaction_expression_segmented_remainder[
+                "chunks"
+            ],
+        )
+        self.assertNotEqual(source, "".join(item.text for item in expected[0]))
+        plugin._create_lifecycle_background_task.assert_not_called()
+
     async def test_segmenting_hook_leaves_official_tts_llm_result_untouched(self) -> None:
         from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 

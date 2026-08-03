@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from astrbot_plugin_private_companion.group_observation import GroupObservationMixin
+from astrbot_plugin_private_companion.group_wakeup import GroupWakeupMixin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 
@@ -26,23 +27,27 @@ class _VisionProvider:
         self.calls = 0
         self.prompts: list[str] = []
         self.call_kwargs: list[dict] = []
+        self.completion_text = (
+            "图片类型：表情包\n"
+            "可见内容：一张小图，画面中有挥手动作\n"
+            "图像表达意图：通常用于轻松地打招呼"
+        )
 
     async def text_chat(self, **kwargs):
         self.calls += 1
         self.prompts.append(str(kwargs.get("prompt") or ""))
         self.call_kwargs.append(dict(kwargs))
-        return SimpleNamespace(
-            completion_text=(
-                "图片类型：表情包\n"
-                "可见内容：一张小图，画面中有挥手动作\n"
-                "图像表达意图：通常用于轻松地打招呼"
-            )
-        )
+        return SimpleNamespace(completion_text=self.completion_text)
 
 
-class _GroupImageHarness(PrivateImageMixin, GroupObservationMixin):
+class _GroupImageHarness(PrivateImageMixin, GroupObservationMixin, GroupWakeupMixin):
     def __init__(self, data_dir: str) -> None:
         self.enable_group_image_understanding = True
+        self.enable_group_wakeup_enhancement = True
+        self.enable_group_image_wakeup = False
+        self.bot_name = "星缘"
+        self.group_wakeup_direct_words: list[str] = []
+        self.group_wakeup_owner_direct_words: list[str] = []
         self.group_image_vision_wait_seconds = 0.2
         self.group_image_max_images = 4
         self.enable_private_image_vision_cache = True
@@ -295,6 +300,44 @@ class GroupImageUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         gate.set()
         self.assertTrue(await task)
 
+    async def test_image_vision_wait_can_enter_group_wakeup_chain(self) -> None:
+        self.harness.enable_group_image_wakeup = True
+        self.harness.group_wakeup_direct_words = ["星缘"]
+        self.harness.provider.completion_text = (
+            "图片类型：截图\n"
+            "可见内容：图片中的文字写着“星缘”\n"
+            "图像表达意图：呼叫 Bot"
+        )
+
+        wakeup = await self.harness._maybe_group_image_wakeup(
+            _event("wakeup-image"),
+            sender_id="user-1",
+        )
+
+        self.assertEqual("direct_word", wakeup.get("type"))
+        self.assertEqual("星缘", wakeup.get("word"))
+        self.assertEqual("image_direct_wakeup_word", wakeup.get("reason"))
+        self.assertEqual("image_vision", wakeup.get("source"))
+        self.assertEqual(1, self.harness.provider.calls)
+
+    def test_image_wakeup_switch_and_weak_words_do_not_trigger(self) -> None:
+        self.harness.group_wakeup_direct_words = ["星缘"]
+        summary = "图片中的普通文字是“日常记录”，没有唤醒词。"
+
+        self.harness.enable_group_image_wakeup = False
+        self.assertEqual(
+            {},
+            self.harness._group_wakeup_from_image_vision_summary(summary, sender_id="user-1"),
+        )
+
+        self.harness.enable_group_image_wakeup = True
+        self.harness.group_wakeup_direct_words = []
+        self.harness.group_wakeup_interest_keywords = ["日常记录"]
+        self.assertEqual(
+            {},
+            self.harness._group_wakeup_from_image_vision_summary(summary, sender_id="user-1"),
+        )
+
     async def test_terminal_group_image_transcription_failure_is_warning(self) -> None:
         self.harness.provider.text_chat = AsyncMock(side_effect=RuntimeError("vision unavailable"))
 
@@ -352,6 +395,11 @@ class GroupImageUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         group_items = schema["group_observation_config"]["items"]
         self.assertFalse(group_items["enable_group_image_understanding"]["default"])
+        self.assertFalse(group_items["enable_group_image_wakeup"]["default"])
+        self.assertEqual(
+            {"enable_group_image_understanding": True},
+            group_items["enable_group_image_wakeup"]["condition"],
+        )
         self.assertEqual(
             {"enable_group_image_understanding": True},
             group_items["group_image_vision_wait_seconds"]["condition"],
@@ -359,10 +407,16 @@ class GroupImageUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
         api._schema_key_index_cache = None
         self.assertIn("enable_group_image_understanding", api._allowed_feature_keys())
+        self.assertIn("enable_group_image_wakeup", api._allowed_feature_keys())
+        self.assertIn("enable_group_image_wakeup", api._allowed_setting_keys())
         self.assertIn("group_image_vision_wait_seconds", api._allowed_setting_keys())
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('enable_group_image_wakeup: "图片命中唤醒 Bot"', script)
         self.assertIn('group_image: "群聊图片"', script)
         self.assertIn('group_image_vision: "群聊图片识别"', script)
+        main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('image_wakeup = await image_wakeup_getter(event, sender_id=sender_id)', main_source)
+        self.assertIn('"trigger": "group_wakeup_image_word"', main_source)
 
 
 if __name__ == "__main__":

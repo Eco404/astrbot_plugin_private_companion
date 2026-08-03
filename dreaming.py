@@ -820,12 +820,50 @@ def _daily_diary_creativity_instruction(plugin) -> str:
     return "写实为主：允许对已确认事实做轻微感官化表达，不得把计划或运行推演写成真实经历。"
 
 
+def _daily_diary_memory_external_event_issue(
+    body: str,
+    evidence: list[dict[str, str]],
+    continuity_memory_context: str,
+) -> bool:
+    """Flag an explicit memory-backed interaction claim that lacks today's support."""
+    memory_text = _compact_diary_text(continuity_memory_context, 1200)
+    if not memory_text:
+        return False
+    compact_body = _compact_diary_text(body, 800)
+    if not compact_body:
+        return False
+    external_claim = re.search(
+        r"(?:今天|刚刚|今天上午|今天下午|今天晚上).{0,10}(?:和|跟|与|同).{0,24}"
+        r"(?:聊|谈|说|讨论|提到|联系|发消息|通话)",
+        compact_body,
+    )
+    if not external_claim:
+        return False
+
+    def ngrams(value: str) -> set[str]:
+        normalized = re.sub(r"[^0-9A-Za-z_\u3400-\u9fff]", "", value)
+        return {normalized[index : index + 2] for index in range(max(0, len(normalized) - 1))}
+
+    body_ngrams = ngrams(compact_body)
+    memory_overlap = len(body_ngrams & ngrams(memory_text))
+    if memory_overlap < 2:
+        return False
+    confirmed_text = "；".join(
+        _compact_diary_text(item.get("text"), 180)
+        for item in evidence
+        if item.get("level") == "confirmed"
+    )
+    confirmed_overlap = len(body_ngrams & ngrams(confirmed_text))
+    return confirmed_overlap < 2
+
+
 def _daily_diary_quality_issues(
     plugin,
     payload: Any,
     evidence: list[dict[str, str]],
     min_chars: int,
     max_chars: int,
+    continuity_memory_context: str = "",
 ) -> list[str]:
     if not isinstance(payload, dict):
         return ["没有返回 JSON 对象"]
@@ -855,6 +893,8 @@ def _daily_diary_quality_issues(
             if any(token in compact_body for token in trigrams):
                 issues.append("把未确认计划或推演写成了已完成经历")
                 break
+    if _daily_diary_memory_external_event_issue(body, evidence, continuity_memory_context):
+        issues.append("把连续性记忆中的外部互动写成了今天已经发生")
     compact_summary = _compact_diary_text(summary, 180)
     compact_body = _compact_diary_text(body, 800)
     summary_bigrams = {compact_summary[index : index + 2] for index in range(max(0, len(compact_summary) - 1))}
@@ -871,13 +911,14 @@ async def _rewrite_daily_diary_once(
     payload: Any,
     issues: list[str],
     evidence_text: str,
+    continuity_memory_context: str,
     form_instruction: str,
     min_chars: int,
     max_chars: int,
 ) -> dict[str, Any]:
     current = payload if isinstance(payload, dict) else {}
     prompt = f"""
-请修订下面这篇私人日记，只修一次。保留有事实依据的部分，删除虚构和模板化补景。
+请修订下面这篇私人日记，只修一次。保留原稿的第一人称质感、情绪浓度和细节，只纠正没有依据的外部事件与模板化补景。
 
 问题：{'；'.join(issues)}
 写作方式：{form_instruction}
@@ -886,12 +927,18 @@ async def _rewrite_daily_diary_once(
 今日经历账本：
 {evidence_text}
 
+连续性记忆参考：
+{continuity_memory_context or '（没有检索到足够相关的连续性记忆）'}
+
 原稿：
 摘要：{_single_line(current.get('summary'), 180)}
 正文：{_single_line(current.get('body'), 800)}
 
-只有“已确认发生”可作为真实经历。运行推演和原计划不能改写成已经完成。
-不要补桌面、窗光、茶水、便签等无来源场景。实在没有材料，就坦白今天具体记录很少。
+修订边界：
+1. 只有“已确认发生”可作为今天真实发生的外部事件；运行推演、原计划和旧记忆不能改写成今天已经完成的行动、对话或见闻。
+2. 心理活动、身体感受、情绪变化、注意力与回想属于第一人称内心描写，不要求在经历账本中另有同名事件。只要没有借此虚构外部事实，就应保留原稿写法与细腻程度，不要压平成事实摘要。
+3. 连续性记忆可以支撑关系熟悉感、情绪余味、共同历史和未完成心事，但只能自然承接，不能把旧日情节搬到今天重演。
+4. 只删除无中生有的外部场景、人物互动、对话和完成结果；不要补桌面、窗光、茶水、便签等无来源场景。材料少时允许写短，但不要用“记录很少”替换原稿已有的真实感受。
 只输出 JSON：{{"summary":"15-55字题眼","body":"日记正文","tags":["1-4个正文标签"]}}
 """.strip()
     try:
@@ -957,6 +1004,23 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     min_chars, max_chars = _daily_diary_length_instruction(plugin)
     creativity_instruction = _daily_diary_creativity_instruction(plugin)
     custom_direction = _single_line(getattr(plugin, "daily_diary_custom_direction", ""), 500)
+    continuity_memory_context = ""
+    memory_composer = getattr(plugin, "_memory_companion_compose_feature_context", None)
+    if callable(memory_composer):
+        try:
+            continuity_memory_context = await memory_composer(
+                kind="daily_diary",
+                query=(
+                    "每日日记连续性：Bot 自我时间线、今天与主要用户的明确聊天和共同经历、"
+                    "最近主动消息、已确认的阅读创作搜索生图与公开动态、情绪余味、"
+                    "未完成心事、稳定偏好和关系边界、近期日记连续性线索；"
+                    "区分今日事实与旧日参考，不把旧事件改写成今天发生"
+                ),
+                top_k=6,
+                max_chars=1200,
+            )
+        except Exception:
+            continuity_memory_context = ""
     worldview_adaptation = ""
     formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
     if callable(formatter):
@@ -974,7 +1038,8 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 2. 材料少就写短，允许今天没有戏剧性；禁止用桌面、窗光、凉茶、旧便签等通用小物件自行补场景。
 3. 不固定“场景→发现→余韵”的三段式，不总结人生，不把普通小事拔高成道理。
 4. 保持当前人格的词汇、观察角度和关系边界。不要写系统、模型、状态数值、日程字段或后台功能。
-5. 最近日记只用于承接或避重；没有新变化时让旧线索淡出，不强行续篇。
+5. 最近日记和连续性记忆只用于承接关系熟悉感、情绪余味、共同历史、稳定偏好与未完成心事；旧日材料不能单独证明今天发生了同一件事，没有新变化时让旧线索自然淡出。
+6. 心理活动、身体感受、情绪变化、注意力和回想属于第一人称体验表达，不要求在经历账本中另有同名事件；可以自然细写，但不能借内心描写虚构外部人物、对话、场景或完成结果。
 
 只输出 JSON：
 {{
@@ -1003,6 +1068,10 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 【今日经历账本】
 {evidence_text}
 
+【连续性记忆参考】
+以下内容只帮助保持关系、情绪和未完成线索的连贯，不是今天新发生的事件，也不是必须写入正文的清单：
+{continuity_memory_context or '（没有检索到足够相关的连续性记忆）'}
+
 最近日记：
 {plugin._recent_diary_context()}
 
@@ -1026,12 +1095,33 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
         raw_text = ""
     payload = plugin._extract_json_payload(raw_text or "")
     used_fallback = False
-    quality_issues = _daily_diary_quality_issues(plugin, payload, evidence, min_chars, max_chars)
+    quality_issues = _daily_diary_quality_issues(
+        plugin,
+        payload,
+        evidence,
+        min_chars,
+        max_chars,
+        continuity_memory_context,
+    )
     if quality_issues and isinstance(payload, dict):
         payload = await _rewrite_daily_diary_once(
-            plugin, payload, quality_issues, evidence_text, form_instruction, min_chars, max_chars
+            plugin,
+            payload,
+            quality_issues,
+            evidence_text,
+            continuity_memory_context,
+            form_instruction,
+            min_chars,
+            max_chars,
         )
-        quality_issues = _daily_diary_quality_issues(plugin, payload, evidence, min_chars, max_chars)
+        quality_issues = _daily_diary_quality_issues(
+            plugin,
+            payload,
+            evidence,
+            min_chars,
+            max_chars,
+            continuity_memory_context,
+        )
     if quality_issues:
         payload = plugin._fallback_diary_payload(evidence=evidence)
         used_fallback = True

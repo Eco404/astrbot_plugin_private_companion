@@ -7357,14 +7357,14 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         if not facts:
             return
         prompt = f"""
-请把下面的私聊记忆整理成适合角色陪伴使用的长期画像。
+请把下面的私聊轻量资料整理成适合角色陪伴使用的本地陪伴画像。
 要求：
 - 只保留用户明确表达、反复出现或要求记住的内容。
 - 不确定就不要写入；不要编造；不要输出解释。
 - 玩笑、角色扮演、临时情绪、当日心情、一次性的吐槽不要写成长期事实。
 - 强记忆只放稳定称呼、明确雷点/边界、重要关系事实或用户明确要求记住的内容。
 - 弱偏好只放兴趣、口味、表达习惯、轻度倾向；弱偏好以后只在相关话题出现时才会被注入。
-- 长期画像只描述“怎么相处”,不要重复 Bot 身份、用户身份或关系网里已有的身份事实。
+- 本地陪伴画像只描述“怎么相处”,不要重复 Bot 身份、用户身份或关系网里已有的身份事实。
 
 【AstrBot 默认人格】
 {self._get_default_persona_prompt()}
@@ -7648,7 +7648,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             flags.append("meta_or_assistant")
         if not is_help and re.search(r"^\s*(?:[-*]|\d+[.、])\s+", cleaned, re.MULTILINE) and len(cleaned) < 900:
             flags.append("over_structured")
-        if re.search(r"(能量\s*\d+|关系站位|状态机|内部规划|用户意图|表达学习|陪伴记忆)", cleaned):
+        if re.search(r"(能量\s*\d+|关系站位|状态机|内部规划|用户意图|表达学习|陪伴记忆|本地陪伴画像)", cleaned):
             flags.append("leaks_internal")
         if self._response_has_invalid_current_time_anchor(cleaned):
             flags.append("invalid_current_time_anchor")
@@ -8140,7 +8140,7 @@ Bot 主动后用户回复次数：{reply_count}
             f"打扰偏好：{profile['preference']}\n"
             f"关系分：{profile['score']}\n"
             f"人格判断：{profile.get('note') or '暂无'}\n"
-            f"陪伴记忆：{_single_line(self._format_companion_memory_for_prompt(user), 180)}\n"
+            f"本地陪伴画像：{_single_line(self._format_companion_memory_for_prompt(user), 180)}\n"
             f"表达节奏学习：{_single_line(self._format_expression_profile_for_prompt(user), 180)}\n"
             f"气氛状态：{_single_line(self._format_intent_relationship_injection(user), 180) or '暂无'}\n"
             f"媒介偏好：{_single_line(self._action_preference_hint(user), 180) or '暂无'}"
