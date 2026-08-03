@@ -1310,6 +1310,39 @@ class CoreStoreMixin:
             return ""
         return text
 
+    @staticmethod
+    def _normalize_group_identity_id(value: Any, limit: int = 160) -> str:
+        """Normalize a numeric group ID, opaque platform ID, or GroupMessage UMO."""
+        if isinstance(value, (dict, list, tuple, set)):
+            return ""
+        text = _single_line(value, limit)
+        if not text:
+            return ""
+        invalid_exact = {
+            "default",
+            "aiocqhttp",
+            "qq_official",
+            "groupmessage",
+            "group_message",
+            "group",
+            "friendmessage",
+            "friend_message",
+            "umo",
+            "uid",
+            "none",
+            "null",
+        }
+        if ":GroupMessage:" in text:
+            text = _single_line(text.rsplit(":GroupMessage:", 1)[-1], limit)
+            if not text or ":" in text:
+                return ""
+        lower = text.lower()
+        if lower in invalid_exact or ":" in text:
+            return ""
+        if re.search(r"(friendmessage|groupmessage|unified_msg_origin)", lower):
+            return ""
+        return text
+
     def _merge_user_record_values(self, target: dict[str, Any], source: dict[str, Any], alias_id: str) -> None:
         additive_keys = {
             "inbound_count",
@@ -1728,8 +1761,8 @@ class CoreStoreMixin:
             parts = []
         ids = []
         for part in parts:
-            group_id = str(part).strip()
-            if group_id and group_id.isdigit() and group_id not in ids:
+            group_id = self._normalize_group_identity_id(part)
+            if group_id and group_id not in ids:
                 ids.append(group_id)
         return ids
 

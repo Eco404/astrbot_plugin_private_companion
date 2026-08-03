@@ -13871,7 +13871,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
         group_for_filter = group
         group_id_text = str(group_id)
-        group_name = self._single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
+        manual_group_name = self._single_line(group.get("manual_group_name"), 80)
+        group_name = self._single_line(
+            manual_group_name or group.get("name") or group.get("group_name") or group.get("display_name"),
+            80,
+        )
         if group_name == group_id_text:
             group_name = ""
         cleaner = getattr(self.plugin, "_cleanup_group_slang_terms", None)
@@ -13919,6 +13923,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "name": group_name,
             "group_name": group_name,
             "display_name": group_name or "未命名群聊",
+            "manual_group_name": manual_group_name,
+            "group_name_source": "manual" if manual_group_name else str(group.get("group_name_source") or "auto"),
             "global_enabled": bool(getattr(self.plugin, "enable_group_companion", False)),
             "enabled": bool(group.get("enabled", True)),
             "allowed_by_mode": self.plugin._group_allowed_by_access_mode(group_id_text),

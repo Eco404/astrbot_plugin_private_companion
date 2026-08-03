@@ -536,6 +536,7 @@ _DEFAULT_USER_TEMPLATE = {
 _DEFAULT_GROUP_TEMPLATE = {
     "enabled": True,
     "group_id": "",
+    "manual_group_name": "",
     "message_count": 0,
     "last_seen": 0,
     "last_interject_at": 0,
