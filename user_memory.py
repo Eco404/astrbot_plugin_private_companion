@@ -104,6 +104,11 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _normalize_photo_subject_owner, _now_ts, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .relationship_policy import relationship_stage_for_score
+from .companion_interaction_expression import (
+    build_expression_decision,
+    current_interaction_projection,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -299,6 +304,7 @@ class UserMemoryMixin:
         return [item for _, item in weighted[: max(1, limit)]]
 
     def _relationship_profile(self, user: dict[str, Any]) -> dict[str, Any]:
+        """Compatibility DTO projected from the unified relationship authority."""
         proactive_count = _safe_int(user.get("proactive_sent_count"), 0)
         reply_count = _safe_int(user.get("reply_count"), 0)
         inbound_count = _safe_int(user.get("inbound_count"), 0)
@@ -306,53 +312,48 @@ class UserMemoryMixin:
         reply_rate_available = proactive_count > 0
         reply_rate = reply_count / proactive_count if reply_rate_available else 0.0
         reply_rate_label = f"{reply_rate:.0%}" if reply_rate_available else "暂无样本"
-        persona_profile = user.get("persona_relationship", {})
-        if isinstance(persona_profile, dict) and persona_profile.get("level"):
-            level = str(persona_profile.get("level"))
-            preference = str(persona_profile.get("preference") or "普通")
-            score = _safe_int(persona_profile.get("score"), score, 0, 100)
+        policy = (
+            getattr(self, "relationship_stage_policy", None)
+            if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            else None
+        )
+        stage = relationship_stage_for_score(score, policy)["phase"]
+        stage_key = str(stage.get("key") or "acquaintance")
+        if stage_key in {"deeply_distant", "strongly_distant", "distant"}:
+            level = "陌生"
+        elif stage_key in {"acquaintance", "familiar"}:
+            level = "熟悉"
         else:
-            level, preference = self._fallback_relationship_level(score, reply_rate, inbound_count, proactive_count)
+            level = "亲近"
+        role_getter = getattr(self, "_private_user_role", None)
+        try:
+            role = role_getter(user, str(user.get("user_id") or "")) if callable(role_getter) else str(user.get("relationship_role") or "friend")
+        except Exception:
+            role = str(user.get("relationship_role") or "friend")
+        interaction = current_interaction_projection(
+            user.get("current_interaction"),
+            relationship_role=role,
+            relationship_mode=str(user.get("relationship_mode") or "normal"),
+            relationship_score=score,
+            normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
+            now=_now_ts(),
+        )
         return {
             "level": level,
             "reply_rate": reply_rate,
             "reply_rate_available": reply_rate_available,
             "reply_rate_label": reply_rate_label,
-            "preference": preference,
+            "preference": str(interaction.get("label") or "放松"),
             "score": score,
             "inbound_count": inbound_count,
             "proactive_count": proactive_count,
             "reply_count": reply_count,
-            "note": (
-                str(persona_profile.get("note") or "")
-                if isinstance(persona_profile, dict) else ""
-            ),
+            "note": "由长期关系阶段与当前互动状态统一投影",
+            "stage_key": stage_key,
+            "stage_label": str(stage.get("label") or ""),
+            "interaction_band": str(interaction.get("expression_band") or "relaxed"),
+            "interaction_label": str(interaction.get("label") or "放松"),
         }
-
-    def _format_emotion_residue_hint(self, user: dict[str, Any]) -> str:
-        if not bool(getattr(self, "enable_emotion_simulation", True)):
-            return ""
-        rel_state = user.get("relationship_state")
-        if not isinstance(rel_state, dict):
-            return ""
-        mode = str(rel_state.get("mode") or "normal")
-        now = _now_ts()
-        mood_score = self._decay_relationship_mood_score(rel_state, now=now)
-        hurt_active = _safe_float(rel_state.get("hurt_until"), 0) > now
-        hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 70), 70, 10, 100)
-        refuse_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 90), 90, 20, 100)
-        regulation_hint = self._format_gross_emotion_regulation_hint(rel_state)
-        regulation = rel_state.get("emotion_regulation")
-        regulation_strategy = str(regulation.get("strategy") or "") if isinstance(regulation, dict) else ""
-        if mode == "refusing" and hurt_active and abs(mood_score) >= refuse_threshold:
-            base = "对用户刚才的言行还有些不满,表现得回避一点；回复短一些、安静一些,先别急着贴近。"
-            return f"{base} {regulation_hint}" if regulation_hint and regulation_strategy != "response_modulation" else base
-        if mode == "hurt" and hurt_active and abs(mood_score) >= hurt_threshold:
-            base = "被用户刚才的言行伤到心里,还没有完全恢复；语气放轻、放慢一点,别急着热情贴近。"
-            return f"{base} {regulation_hint}" if regulation_hint and regulation_strategy != "response_modulation" else base
-        dimension_hint = self._format_izard_emotion_dimension_hint(rel_state)
-        plutchik_hint = self._format_plutchik_emotion_hint(rel_state)
-        return " ".join(item for item in (dimension_hint, plutchik_hint, regulation_hint) if item).strip()
 
     def _emotion_dimension_baseline(self) -> dict[str, int]:
         return {"pleasantness": 0, "tension": 12, "arousal": 20, "certainty": 60}
@@ -455,26 +456,6 @@ class UserMemoryMixin:
         dims["updated_ts"] = int(now or _now_ts())
         state["emotion_dimensions"] = dims
         return dims
-
-    def _format_izard_emotion_dimension_hint(self, state: dict[str, Any]) -> str:
-        dims = self._decay_izard_emotion_dimensions(state)
-        pleasantness = _safe_int(dims.get("pleasantness"), 0, -100, 100)
-        tension = _safe_int(dims.get("tension"), 12, 0, 100)
-        arousal = _safe_int(dims.get("arousal"), 20, 0, 100)
-        certainty = _safe_int(dims.get("certainty"), 60, 0, 100)
-        if pleasantness <= -45 and tension >= 45:
-            if arousal >= 55:
-                return "情绪底色不愉快、紧张且激动度偏高；回复要短、慢、低刺激,先稳住,不要追问或开玩笑。"
-            return "情绪底色不愉快且紧张,但激动度不高；回复安静一点,先接住,别急着贴近。"
-        if tension >= 60 and certainty <= 38:
-            return "情绪紧张且确信度偏低；不要替用户下结论,多用试探和确认,少做强判断。"
-        if pleasantness >= 35 and tension <= 30 and certainty >= 55:
-            return "情绪底色较愉快且放松；可以自然一点、轻一点靠近,但仍不要突然过度热情。"
-        if arousal >= 65 and tension >= 40:
-            return "激动度和紧张度都偏高；回复节奏收住,避免长段解释和继续加压。"
-        if certainty <= 30:
-            return "当前确信度偏低；语气保留余地,不要把猜测说死。"
-        return ""
 
     def _plutchik_emotion_labels(self) -> dict[str, str]:
         return {
@@ -612,31 +593,6 @@ class UserMemoryMixin:
             "updated_ts": int(now or _now_ts()),
         }
 
-    def _format_plutchik_emotion_hint(self, state: dict[str, Any]) -> str:
-        emotions = self._decay_plutchik_emotions(state)
-        profile = self._plutchik_profile_from_basic(emotions)
-        blend = str(profile.get("blend") or "")
-        dominant = str(profile.get("dominant") or "")
-        if blend == "love":
-            return "她现在更容易被亲近感带软；可以自然靠近一点,但别突然过度黏。"
-        if blend == "optimism":
-            return "她现在有一点期待感；语气可以轻快些,适合留一个小期待或轻松收尾。"
-        if blend in {"contempt", "aggressiveness"}:
-            return "她现在有反感或想顶回去的倾向；避免讽刺、争辩和升级,先短答降压。"
-        if blend in {"disapproval", "remorse"}:
-            return "她现在偏失望或难受；回复放慢,承认感受,不要用玩笑盖过去。"
-        if blend in {"submission", "awe"}:
-            return "她现在有点不安、像被压住；语气放稳,不要继续压迫或替用户强决策。"
-        if dominant == "anger":
-            return "她现在火气比较明显；回复避免顶撞,少解释,先让压力降下来。"
-        if dominant == "sadness":
-            return "她现在有点难过；回复温和一点,不要急着活跃气氛。"
-        if dominant == "fear":
-            return "她现在不安感更强；回复要给边界和确定感,少催促。"
-        if dominant == "joy":
-            return "她现在更轻松开心；可以自然一点,但仍保持角色分寸。"
-        return ""
-
     def _gross_regulation_strategy_labels(self) -> dict[str, str]:
         return {
             "situation_selection": "避开高压",
@@ -773,59 +729,6 @@ class UserMemoryMixin:
         }
         state["emotion_regulation"] = regulation
         return regulation
-
-    def _format_gross_emotion_regulation_hint(self, state: dict[str, Any]) -> str:
-        regulation = state.get("emotion_regulation")
-        now = _now_ts()
-        if not isinstance(regulation, dict) or now - _safe_float(regulation.get("updated_ts"), 0) > 900:
-            regulation = self._derive_gross_emotion_regulation(state, now=now)
-        strategy = str(regulation.get("strategy") or "")
-        intensity = _safe_int(regulation.get("intensity"), 0, 0, 100)
-        if not strategy or strategy == "none" or intensity < 42:
-            return ""
-        if strategy == "situation_selection":
-            return "这轮更适合先避开高压点；不要继续追着刺痛处聊,必要时轻轻退开。"
-        if strategy == "situation_modification":
-            return "话题可以继续,但要换成低压问法；短句、少追问,给用户容易接的台阶。"
-        if strategy == "attentional_deployment":
-            return "更适合把注意力带回眼前小事；先接住情绪,再给一个具体、可做的小落点。"
-        if strategy == "cognitive_change":
-            return "先给对方留解释空间；少做定性判断,用试探语气,不要把猜测说死。"
-        if strategy == "response_modulation":
-            return "先控制外显反应；短一点、慢一点、少解释,避免顶回去或连续补充。"
-        return ""
-
-    def _relationship_approach_hint(self, user: dict[str, Any]) -> str:
-        profile = self._relationship_profile(user)
-        level = str(profile.get("level") or "熟悉")
-        preference = str(profile.get("preference") or "普通")
-        hints: list[str] = []
-        if level == "亲近":
-            hints.append("默认像已经很熟了,可以少一点寒暄,更容易半句起手、接旧话头,或者轻轻嘴硬一下。")
-        elif level == "熟悉":
-            hints.append("默认像已经聊顺了,可以直接从眼前的小事切进去,不用每次都铺垫。")
-        else:
-            hints.append("默认先轻一点,靠近时别把关心说得太满。")
-        if preference == "温柔":
-            hints.append("靠近方式偏温吞和收着一点。")
-        elif preference == "活泼":
-            hints.append("靠近方式可以轻快一点,偶尔带一点玩笑感。")
-        elif preference == "工作":
-            hints.append("靠近方式更克制,优先从具体事情切进去。")
-        emotion_hint = self._format_emotion_residue_hint(user)
-        if emotion_hint:
-            hints.append(emotion_hint)
-        rel_state = user.get("relationship_state")
-        if isinstance(rel_state, dict):
-            mode = str(rel_state.get("mode") or "")
-            relation_enabled = bool(getattr(self, "enable_relationship_state_machine", True))
-            if relation_enabled and mode == "backoff" and _safe_float(rel_state.get("backoff_until"), 0) > _now_ts():
-                hints.append("边界感偏强：短一点、低压、不追问。")
-            elif relation_enabled and mode == "careful":
-                hints.append("相处要放轻：先接住,不追问,不讲大道理。")
-            elif relation_enabled and mode == "warming":
-                hints.append("气氛略近：可以自然一点,别过度黏。")
-        return " ".join(hints).strip()
 
     def _expression_scope_mode(self, key: str, allowed: set[str], default: str) -> str:
         value = str(getattr(self, key, default) or default).strip().lower()
@@ -1230,14 +1133,21 @@ class UserMemoryMixin:
             intent = self._expression_scene_from_text(inbound_text) if inbound_text else "casual"
 
         emotion_gate = "normal"
-        state = owner.get("relationship_state") if isinstance(owner, dict) else {}
-        state_mode = _single_line(state.get("mode"), 24).lower() if isinstance(state, dict) else ""
+        expression_band = ""
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        if isinstance(owner, dict) and callable(expression_builder):
+            try:
+                decision = expression_builder(owner, passive_reengagement=True)
+                projection = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+                expression_band = _single_line(projection.get("expression_band"), 24).lower()
+            except Exception:
+                expression_band = ""
         intent_emotion = _single_line(intent_profile.get("emotion"), 24).lower()
-        if state_mode in {"refusing", "hurt", "backoff", "careful"} or intent == "boundary" or intent_emotion == "resistant":
+        if expression_band in {"avoidant", "hurt"} or intent == "boundary" or intent_emotion == "resistant":
             emotion_gate = "guarded"
         elif intent in {"comfort", "emotion"} or intent_emotion == "low":
             emotion_gate = "low"
-        elif intent in {"play", "intimacy"} or intent_emotion in {"light", "close", "positive"}:
+        elif expression_band in {"lively", "warm", "close", "affectionate"} or intent in {"play", "intimacy"} or intent_emotion in {"light", "close", "positive"}:
             emotion_gate = "positive"
 
         return {
@@ -5459,6 +5369,149 @@ Local classifier result:
         state["mood_updated_ts"] = now
         return score
 
+    def _settle_current_interaction_from_intent(self, user: dict[str, Any], intent: dict[str, Any]) -> None:
+        """Settle the short-term expression authority from one private-chat event.
+
+        The legacy relationship-state projection is still maintained below for
+        compatibility and diagnostics, but it no longer drives expression.
+        """
+        emotion_enabled = bool(getattr(self, "enable_emotion_simulation", True))
+        relation_enabled = bool(getattr(self, "enable_relationship_state_machine", True))
+        if not (emotion_enabled or relation_enabled):
+            return
+        now = _now_ts()
+        role_getter = getattr(self, "_private_user_role", None)
+        try:
+            role = role_getter(user, str(user.get("user_id") or "")) if callable(role_getter) else str(user.get("relationship_role") or "friend")
+        except Exception:
+            role = str(user.get("relationship_role") or "friend")
+        relationship_mode = str(user.get("relationship_mode") or "normal")
+        existing = current_interaction_projection(
+            user.get("current_interaction"),
+            relationship_role=role,
+            relationship_mode=relationship_mode,
+            relationship_score=user.get("relationship_score"),
+            normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
+            now=now,
+        )
+        inbound_intent = str(intent.get("intent") or "chat").strip().lower()
+        intent_confidence = _safe_float(intent.get("confidence"), 0.5, 0.0)
+        emotion_event = str(intent.get("emotion_event") or "neutral").strip().lower()
+        emotion_confidence = _safe_float(intent.get("emotion_confidence"), intent_confidence, 0.0)
+        intensity = _safe_int(intent.get("emotion_intensity"), 0, 0, 100)
+        target = _single_line(intent.get("emotion_target"), 24).lower() or "none"
+        pressure = _safe_int(intent.get("pressure"), 0, 0, 5)
+        hurt_threshold = _safe_int(getattr(self, "emotional_gate_hurt_threshold", 70), 70, 10, 100)
+        avoidant_threshold = _safe_int(getattr(self, "emotional_gate_refuse_threshold", 90), 90, 20, 100)
+        if avoidant_threshold <= hurt_threshold:
+            avoidant_threshold = min(100, hurt_threshold + 5)
+        recovery_per_hour = _safe_int(getattr(self, "emotional_gate_recovery_per_hour", 24), 24, 1, 60)
+        max_hurt_minutes = _safe_int(getattr(self, "emotional_gate_max_hurt_minutes", 90), 90, 10, 720)
+        boundary_durable = bool(intent.get("boundary_durable"))
+        contact = user.get("contact_preference")
+        contact_state = dict(contact) if isinstance(contact, dict) else {}
+        contact_active = bool(
+            contact_state.get("active")
+            or contact_state.get("no_contact")
+            or contact_state.get("backoff")
+            or str(contact or "").strip().lower() in {"no_contact", "backoff", "avoid", "stop"}
+        )
+        boundary_event = relation_enabled and inbound_intent == "boundary" and boundary_durable and intent_confidence >= 0.82
+        explicit_recovery = (
+            (relation_enabled and inbound_intent in {"intimacy", "play"} and intent_confidence >= 0.68)
+            or (emotion_enabled and emotion_event in {"apology", "comfort", "praise"} and emotion_confidence >= 0.65)
+        )
+        if boundary_event:
+            contact_active = True
+            user["contact_preference"] = {
+                "mode": "no_contact",
+                "active": True,
+                "no_contact": True,
+                "source": "automatic",
+                "reason_code": "explicit_user_boundary",
+                "updated_at": now,
+            }
+        elif contact_active and explicit_recovery:
+            contact_active = False
+            user["contact_preference"] = {
+                "mode": "normal",
+                "active": False,
+                "no_contact": False,
+                "source": "automatic",
+                "reason_code": "explicit_user_reengagement",
+                "updated_at": now,
+            }
+
+        if existing.get("manual_override") and (
+            not existing.get("expires_at") or _safe_float(existing.get("expires_at"), 0) > now
+        ):
+            user["current_interaction"] = existing
+            return
+
+        band = "relaxed"
+        expires_at = 0.0
+        reason_code = "interaction_neutral"
+        if contact_active:
+            band = "avoidant"
+            reason_code = "contact_boundary_active"
+        elif (
+            emotion_enabled
+            and emotion_event == "hurt"
+            and target in {"bot", "ambiguous"}
+            and emotion_confidence >= 0.65
+            and intensity >= hurt_threshold
+        ):
+            band = "avoidant" if intensity >= avoidant_threshold else "hurt"
+            recovery_load = recovery_per_hour + max(0, intensity - hurt_threshold)
+            recovery_minutes = max(10, (recovery_load * 60 + recovery_per_hour - 1) // recovery_per_hour)
+            expires_at = now + min(max_hurt_minutes, recovery_minutes) * 60
+            reason_code = "severe_hurt_event" if band == "avoidant" else "hurt_event"
+        elif relation_enabled and inbound_intent == "play" and intent_confidence >= 0.68:
+            band = "lively"
+            expires_at = now + 6 * 3600
+            reason_code = "playful_interaction"
+        elif relation_enabled and inbound_intent == "intimacy" and intent_confidence >= 0.68:
+            band = "close" if role == "owner" and relationship_mode == "owner_exclusive" else "warm"
+            expires_at = now + 6 * 3600
+            reason_code = "intimate_interaction"
+        elif emotion_enabled and emotion_event in {"apology", "comfort", "praise", "comfort_need", "external_negative"} and emotion_confidence >= 0.65:
+            band = "lively" if emotion_event == "praise" else "warm"
+            expires_at = now + (6 * 3600 if emotion_event in {"praise", "comfort"} else 4 * 3600)
+            reason_code = f"emotion_{emotion_event}"
+        elif relation_enabled and pressure >= 2 and intent_confidence >= 0.65:
+            band = "relaxed"
+            expires_at = now + 2 * 3600
+            reason_code = "interaction_pressure"
+        elif (
+            existing.get("source") == "automatic"
+            and _safe_float(existing.get("expires_at"), 0) > now
+            and str(existing.get("expression_band") or "relaxed") != "relaxed"
+        ):
+            user["current_interaction"] = existing
+            return
+
+        user["current_interaction"] = current_interaction_projection(
+            {
+                "expression_band": band,
+                "source": "automatic",
+                "reason": reason_code,
+                "updated_at": now,
+                "expires_at": expires_at,
+                "manual_override": False,
+            },
+            relationship_role=role,
+            relationship_mode=relationship_mode,
+            relationship_score=user.get("relationship_score"),
+            normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
+            now=now,
+        )
+        logger.info(
+            "[PrivateCompanion] 互动状态已统一结算: band=%s reason=%s expires=%s",
+            band,
+            reason_code,
+            int(expires_at) if expires_at else 0,
+        )
+
     def _update_relationship_state_from_intent(self, user: dict[str, Any], intent: dict[str, Any]) -> None:
         if not isinstance(intent, dict):
             return
@@ -5466,6 +5519,7 @@ Local classifier result:
         relation_enabled = bool(getattr(self, "enable_relationship_state_machine", True))
         if not (emotion_enabled or relation_enabled):
             return
+        self._settle_current_interaction_from_intent(user, intent)
         state = user.setdefault("relationship_state", {})
         if not isinstance(state, dict):
             state = {}
@@ -6253,6 +6307,43 @@ Local classifier result:
         )
         return any(re.search(pattern, response, re.IGNORECASE) for pattern in denial_patterns)
 
+    @staticmethod
+    def _response_content_tier(review_event: Any | None) -> str:
+        decision = getattr(review_event, "_private_companion_expression_decision", None) if review_event is not None else None
+        tier = str(decision.get("content_tier") or "normal").strip().lower() if isinstance(decision, dict) else "normal"
+        return tier if tier in {"normal", "flirt", "adult"} else "normal"
+
+    @staticmethod
+    def _response_contains_content_tier_review_candidate(value: Any) -> bool:
+        text = _single_line(value, 1200).lower()
+        if not text:
+            return False
+        if re.search(
+            r"疼痛|激素|就医|医生|医学|科普|治疗|检查|炎症|艺术|美术史|文学|小说|剧情|诈骗|链接|风险|怀孕|避孕|没有露骨|并非露骨|不是露骨",
+            text,
+            re.IGNORECASE,
+        ):
+            return False
+        signals = set(
+            re.findall(
+                r"nsfw|色情|露骨|性行为|性交|做爱|口交|肛交|阴茎|阴道|射精|裸体|全裸|性器官|乳房",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        return len(signals) >= 2 or bool(
+            re.search(r"(?:写|描写|展开|继续)[^。！？!?\n]{0,20}(?:性爱|做爱|性交|口交|肛交|射精)", text, re.IGNORECASE)
+        )
+
+    @staticmethod
+    def _response_contains_explicit_adult_content(value: Any) -> bool:
+        """Compatibility alias for integrations that used the old detector name."""
+        return UserMemoryMixin._response_contains_content_tier_review_candidate(value)
+
+    @staticmethod
+    def _content_tier_boundary_reply() -> str:
+        return "这个尺度我先不往露骨方向展开，我们换成更含蓄一点的说法吧。"
+
     async def _review_and_rewrite_response(
         self,
         user: dict[str, Any],
@@ -6288,9 +6379,17 @@ Local classifier result:
                     _single_line(fallback, 160),
                 )
                 return fallback
+        content_policy_enabled = bool(getattr(self, "enable_relationship_content_tiers", False))
+        content_tier = self._response_content_tier(review_event) if content_policy_enabled else "unmanaged"
         if not self._passive_response_review_enabled():
             return self._fallback_temporal_or_continuity_confused_reply(inbound_text, response_text, user=user) or response_text
         flags = self._response_review_flags(response_text, user, inbound_text=inbound_text)
+        if (
+            content_policy_enabled
+            and content_tier != "adult"
+            and self._response_contains_content_tier_review_candidate(response_text)
+        ):
+            flags.append("content_tier_review_candidate")
         if self._response_denies_existing_creative_work(response_text, creative_context):
             flags.append("denies_existing_creative_work")
             flags = list(dict.fromkeys(flags))
@@ -6323,6 +6422,7 @@ Local classifier result:
                 "unverified_fact_attribution",
                 "proactive_media_ownership_reversal",
                 "denies_existing_creative_work",
+                "content_tier_review_candidate",
             }
             if not any(flag in critical_flags for flag in effective_flags):
                 return response_text
@@ -6340,6 +6440,11 @@ Local classifier result:
         reply_style = self._format_reply_style_prompt() if callable(getattr(self, "_format_reply_style_prompt", None)) else ""
         attribution_guard = self._format_private_fact_attribution_guard(user, inbound_text)
         creative_review_context = str(creative_context or "").strip()[:3200]
+        content_tier_prompt = (
+            f"【统一内容尺度】\n{content_tier}；normal 不主动升级，flirt 只允许非露骨暧昧，adult 只承接本轮明确同意的成年人私聊。"
+            if content_policy_enabled
+            else ""
+        )
         prompt = f"""
 把下面这条回复改写成更像真实私聊里的自然回复。
 保留原意,不要新增事实,不要解释你在改写。
@@ -6368,6 +6473,8 @@ Local classifier result:
 【回复风格】
 {reply_style or '（保持当前私聊的自然表达）'}
 
+{content_tier_prompt}
+
 {attribution_guard}
 
 【本轮真实创作记录】
@@ -6393,17 +6500,25 @@ Local classifier result:
 - 如果问题是 unverified_fact_attribution，原回复正在断言“用户之前/先做过某事”，但当前短句没有提供这个归属；没有明确依据就改成中性主语或只谈那件事本身
 - 如果问题是 proactive_media_ownership_reversal，用户只是在评价 Bot 刚主动发送的图片；把图中“我/她/角色本人”的动作改回 Bot/当前人格，绝不能责怪或关心用户仿佛是用户弄洒、摔倒或受伤
 - 如果问题是 denies_existing_creative_work，必须依据本轮真实创作记录承认已有文本作品；不得把“未正式出版”偷换成“没写过”，也不要虚构出版、发行或实体书经历
+- 如果问题是 content_tier_review_candidate，先按完整语境判断；只有确实在生成露骨性描写时才收敛表达，医疗、科普、艺术、文学、风险提示和否定语境必须保留原意，不得换成固定拒答话术
 """.strip()
         if review_event is not None:
             setattr(review_event, "_private_companion_response_review_guard_active", True)
             setattr(review_event, "_private_companion_response_review_fallback_text", response_text)
         started = time.perf_counter()
         try:
+            review_provider_id = self._task_provider(self.response_review_provider_id, self.mai_style_provider_id)
+            if content_tier == "adult":
+                review_provider_id = _single_line(getattr(self, "adult_content_provider_id", ""), 160)
+                if not review_provider_id:
+                    logger.warning("[PrivateCompanion] 成人内容复核缺少指定 Provider，跳过二次模型调用")
+                    return response_text
             rewritten = await self._llm_call(
                 prompt,
                 max_tokens=260,
-                provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+                provider_id=review_provider_id,
                 task="response_review",
+                strict_provider=content_tier == "adult",
             )
         except Exception as exc:
             logger.warning(
@@ -6574,6 +6689,7 @@ Local classifier result:
             "unverified_fact_attribution",
             "proactive_media_ownership_reversal",
             "denies_existing_creative_work",
+            "content_tier_review_candidate",
         }
         if self._expression_style_review_enabled():
             severe.update({"unnatural_punctuation", "expression_overfit", "copied_user_expression_sample"})
@@ -7135,20 +7251,148 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             current["dialogue_episode_running_at"] = 0
             self._save_data_sync()
 
+    def _build_expression_decision_for_user(
+        self,
+        user: dict[str, Any],
+        *,
+        proactive_candidate: dict[str, Any] | None = None,
+        safety_constraints: dict[str, Any] | None = None,
+        passive_reengagement: bool = False,
+        bot_state: dict[str, Any] | None = None,
+        schedule: dict[str, Any] | None = None,
+        message_intent: dict[str, Any] | None = None,
+        content_policy: dict[str, Any] | None = None,
+        now: float | None = None,
+    ):
+        decision_now = _now_ts() if now is None else _safe_float(now, _now_ts(), 0)
+        role_getter = getattr(self, "_private_user_role", None)
+        try:
+            role = role_getter(user, str(user.get("user_id") or "")) if callable(role_getter) else str(user.get("relationship_role") or "friend")
+        except Exception:
+            role = str(user.get("relationship_role") or "friend")
+        relationship_mode = str(user.get("relationship_mode") or "normal")
+        if role == "owner" and relationship_mode == "owner_exclusive":
+            relationship_baseline = {
+                "stage_key": "owner_exclusive",
+                "tone": _single_line(getattr(self, "owner_exclusive_tone", "温暖、亲近、稳定"), 120),
+                "address_level": _single_line(
+                    getattr(self, "owner_exclusive_address_style", "优先使用已确认的专属称呼"),
+                    100,
+                ),
+                "proactive_care_limit": _safe_int(
+                    getattr(self, "owner_exclusive_proactive_limit", 6),
+                    6,
+                    0,
+                    30,
+                ),
+                "soft_behaviors": {
+                    "allow_playful_jokes": True,
+                    "allow_followup": True,
+                    "allow_memory_mention": True,
+                    "allow_daily_care": True,
+                },
+            }
+        else:
+            policy = (
+                getattr(self, "relationship_stage_policy", None)
+                if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+                else None
+            )
+            stage = relationship_stage_for_score(user.get("relationship_score", 0), policy)["phase"]
+            relationship_baseline = {
+                "stage_key": stage.get("key"),
+                "tone": stage.get("tone"),
+                "address_level": stage.get("address_level"),
+                "proactive_care_limit": stage.get("proactive_care_limit"),
+                "soft_behaviors": {
+                    "allow_playful_jokes": bool(stage.get("allow_playful_jokes")),
+                    "allow_followup": bool(stage.get("allow_followup")),
+                    "allow_memory_mention": bool(stage.get("allow_memory_mention")),
+                    "allow_daily_care": bool(stage.get("allow_daily_care")),
+                },
+            }
+        interaction_source = user.get("current_interaction")
+        legacy_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
+        legacy_mode = _single_line(legacy_state.get("mode"), 24).lower()
+        legacy_cooldown_until = max(
+            _safe_float(legacy_state.get("backoff_until"), 0),
+            _safe_float(legacy_state.get("hurt_until"), 0),
+        )
+        has_explicit_interaction = bool(
+            isinstance(interaction_source, dict)
+            and _single_line(
+                interaction_source.get("expression_band")
+                or interaction_source.get("band")
+                or interaction_source.get("state")
+                or interaction_source.get("mode"),
+                24,
+            )
+        )
+        if not has_explicit_interaction and legacy_mode in {"backoff", "refusing", "hurt", "careful", "warming"}:
+            legacy_active = legacy_mode in {"careful", "warming"} or legacy_cooldown_until <= 0 or legacy_cooldown_until > decision_now
+            if legacy_active:
+                interaction_source = {
+                    "expression_band": legacy_mode,
+                    "source": "legacy_compatibility",
+                    "reason": "legacy_relationship_state_projection",
+                    "expires_at": legacy_cooldown_until,
+                }
+        interaction = current_interaction_projection(
+            interaction_source,
+            relationship_role=role,
+            relationship_mode=relationship_mode,
+            relationship_score=user.get("relationship_score"),
+            normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
+            now=decision_now,
+        )
+        contact = user.get("contact_preference")
+        boundary = bool(
+            (isinstance(contact, dict) and (contact.get("no_contact") or contact.get("backoff") or contact.get("active")))
+            or str(contact or "").strip().lower() in {"no_contact", "backoff", "avoid", "stop"}
+        )
+        safety = dict(safety_constraints or {})
+        if boundary:
+            safety["contact_boundary"] = True
+            if passive_reengagement:
+                safety["passive_reengagement"] = True
+        manual_override = interaction if interaction.get("manual_override") else None
+        proactive_input = dict(proactive_candidate or {})
+        if proactive_input or legacy_cooldown_until > 0:
+            proactive_input.setdefault("current_ts", decision_now)
+            if legacy_cooldown_until > decision_now:
+                proactive_input.setdefault("cooldown_until", legacy_cooldown_until)
+        return build_expression_decision(
+            {
+                "relationship_score": user.get("relationship_score", 0),
+                "relationship_role": role,
+                "relationship_mode": relationship_mode,
+                "relationship_baseline": relationship_baseline,
+                "relationship_stage": relationship_baseline.get("stage_key"),
+                "normal_interaction_band_cap": getattr(self, "normal_interaction_band_cap", "warm"),
+                "current_interaction": interaction,
+                "administrator_override": manual_override,
+                "bot_state": bot_state or {"energy": user.get("bot_energy", 70)},
+                "schedule": schedule or {},
+                "message_intent": message_intent if isinstance(message_intent, dict) else {},
+                "proactive_candidate": proactive_input,
+                "safety_constraints": safety,
+                "content_policy": content_policy or {},
+            }
+        )
+
     def _format_companion_planner_injection(self, user: dict[str, Any]) -> str:
         if not self.enable_mai_style_integration:
             return ""
-        profile = self._relationship_profile(user)
-        sections = ["【私聊互动策略】"]
-        preference = _single_line(profile.get("preference"), 40)
         intent_injection = self._format_intent_relationship_injection(user)
-        if preference and preference != "普通":
-            sections.append(f"相处分寸：{preference}；不催、不突然客气。")
-        elif intent_injection:
-            sections.append("相处分寸：不催、不突然客气。")
-        if intent_injection:
-            sections.append("这轮：" + intent_injection)
-        return "\n\n".join(section for section in sections if section) if len(sections) > 1 else ""
+        if not intent_injection:
+            return ""
+        return "\n\n".join(
+            (
+                "【私聊互动补充】",
+                "相处分寸：不催、不突然客气。",
+                "当前意图补充：" + intent_injection,
+            )
+        )
 
     @staticmethod
     def _private_context_line_is_safe(text: str) -> bool:
@@ -7481,7 +7725,6 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
 
     def _format_intent_relationship_injection(self, user: dict[str, Any]) -> str:
         intent = user.get("intent_profile")
-        state = user.get("relationship_state")
         lines: list[str] = []
         if (
             bool(getattr(self, "enable_intent_emotion_analysis", True))
@@ -7515,20 +7758,6 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     intent_hint = style_hint
                 if intent_hint:
                     lines.append(intent_hint)
-        if isinstance(state, dict) and state.get("mode"):
-            emotion_hint = self._format_emotion_residue_hint(user)
-            if emotion_hint:
-                lines.append(emotion_hint)
-            mode = str(state.get("mode") or "normal")
-            relation_enabled = bool(getattr(self, "enable_relationship_state_machine", True))
-            if relation_enabled and mode in {"backoff", "careful", "warming"}:
-                mode_hint = {
-                    "backoff": "边界感偏强：短一点、低压、不追问。",
-                    "careful": "相处要放轻：先接住,不追问,不讲大道理。",
-                    "warming": "气氛略近：可以自然一点,别过度黏。",
-                }.get(mode, "")
-                if mode_hint:
-                    lines.append(mode_hint)
         recent = self._format_recent_passive_topics_hint(user)
         if recent:
             lines.append("刚用过的切口：\n" + recent)

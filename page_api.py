@@ -62,6 +62,19 @@ from .constants import (
 )
 from .config_migration import _ensure_config_parent_dir
 from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
+from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
+from .relationship_ledger import (
+    migrate_legacy_relationship_score,
+    migrate_relationship_positive_stage_cap,
+    normalize_relationship_mode,
+    normalize_relationship_positive_stage_cap_key,
+    relationship_ledger_summary,
+)
+from .relationship_policy import (
+    normalize_relationship_stage_policy,
+    relationship_stage_for_score,
+    relationship_stage_policy_json,
+)
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
@@ -243,6 +256,47 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
+
+    def _relationship_intimacy_projection(self, value: int) -> dict[str, Any]:
+        policy = (
+            getattr(self.plugin, "relationship_stage_policy", None)
+            if bool(getattr(self.plugin, "enable_custom_relationship_stage_policy", False))
+            else None
+        )
+        return relationship_stage_for_score(value, policy)
+
+    def _relationship_panel(self, user: dict[str, Any]) -> dict[str, Any]:
+        role = self.plugin._private_user_role(user, str(user.get("user_id") or "")) if hasattr(self.plugin, "_private_user_role") else str(user.get("relationship_role") or "friend")
+        mode = normalize_relationship_mode(user.get("relationship_mode"), role)
+        intimacy = self._relationship_intimacy_projection(self._int(user.get("relationship_score")))
+        changes = relationship_ledger_summary(user)
+        intimacy["trend"] = changes.get("trend", "steady")
+        intimacy["recent_delta"] = changes.get("recent_delta", 0)
+        interaction = current_interaction_projection(
+            user.get("current_interaction"),
+            relationship_role=role,
+            relationship_mode=mode,
+            relationship_score=user.get("relationship_score"),
+            normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+            now=time.time(),
+        )
+        expression: dict[str, Any] = {}
+        builder = getattr(self.plugin, "_build_expression_decision_for_user", None)
+        if callable(builder):
+            try:
+                raw = builder(user, passive_reengagement=True)
+                expression = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
+            except Exception:
+                expression = {}
+        return {
+            "relationship_mode": mode,
+            "relationship_intimacy": intimacy,
+            "relationship_changes": changes,
+            "current_interaction": interaction,
+            "expression_decision": expression,
+            "relationship_positive_stage_cap_key": getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded"),
+            "normal_interaction_band_cap": getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+        }
 
     def _photo_reference_preset_names(self) -> tuple[str, ...]:
         preset_provider = getattr(self.plugin, "_photo_generation_scene_presets", None)
@@ -3119,6 +3173,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 changed.update(provider_payload)
             storage_changed = bool({"storage_backend", "storage_sqlite_path"} & set(changed))
             apply_overrides = dict(changed)
+            apply_overrides["__defer_relationship_data_save"] = True
             if storage_changed:
                 apply_overrides["__defer_storage_rebuild"] = True
                 flush_save = getattr(self.plugin, "_flush_scheduled_data_save", None)
@@ -3131,6 +3186,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             else:
                 for key, value in changed.items():
                     self._apply_config_value(key, value, apply_overrides)
+            if apply_overrides.get("__relationship_profile_batch"):
+                try:
+                    await self._apply_relationship_profile_config_batch(apply_overrides)
+                except Exception:
+                    cap_change = apply_overrides.get("__relationship_positive_cap_change")
+                    if isinstance(cap_change, tuple) and len(cap_change) == 2:
+                        old_cap = normalize_relationship_positive_stage_cap_key(cap_change[0])
+                        self._set_config_value("relationship_positive_stage_cap_key", old_cap)
+                        self.plugin.relationship_positive_stage_cap_key = old_cap
+                    interaction_change = apply_overrides.get("__relationship_interaction_cap_change")
+                    if isinstance(interaction_change, tuple) and len(interaction_change) == 2:
+                        old_interaction_cap = normalize_normal_interaction_band_cap(interaction_change[0])
+                        self._set_config_value("normal_interaction_band_cap", old_interaction_cap)
+                        self.plugin.normal_interaction_band_cap = old_interaction_cap
+                    raise
             if "enable_body_monitor_integration" in changed:
                 runtime_task = getattr(self.plugin, "_body_monitor_integration_toggle_task", None)
                 if isinstance(runtime_task, asyncio.Task):
@@ -3145,10 +3215,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "expression_group_application_mode",
                 "expression_group_application_ids",
             }
-            if expression_scope_keys & set(changed):
+            relationship_data_changed = bool(apply_overrides.get("__relationship_data_changed"))
+            if expression_scope_keys & set(changed) or relationship_data_changed:
                 async with self.plugin._data_lock:
                     expression_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
-                    if callable(expression_refresher):
+                    if expression_scope_keys & set(changed) and callable(expression_refresher):
                         expression_refresher()
                     self.plugin._save_data_sync()
             if storage_changed:
@@ -12465,6 +12536,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         role_labeler = getattr(self.plugin, "_private_user_role_label", None)
         role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
         relationship_state = self._emotion_relationship_state_summary(rel_state)
+        relationship_panel = self._relationship_panel(user)
+        relationship_mode = relationship_panel["relationship_mode"]
+        relationship_intimacy = relationship_panel["relationship_intimacy"]
+        current_interaction = relationship_panel["current_interaction"]
+        if relationship_mode == "owner_exclusive":
+            relationship_stage = self._single_line(getattr(self.plugin, "owner_exclusive_label", "专属联结"), 20) or "专属联结"
+            relationship_intimacy["owner_exclusive"] = {
+                "label": relationship_stage,
+                "tone": self._single_line(getattr(self.plugin, "owner_exclusive_tone", "温暖、亲近、稳定"), 120),
+                "fixed": True,
+            }
+        else:
+            relationship_stage = self._single_line((relationship_intimacy.get("phase") or {}).get("label"), 20) or relationship_stage
         pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
         last_emotion_judgement_error = self._single_line(user.get("last_emotion_judgement_error"), 160)
         return {
@@ -12540,6 +12624,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "proactive_sent_count": user.get("proactive_sent_count", 0),
             "relationship_score": user.get("relationship_score", 0),
             "relationship_stage": relationship_stage,
+            "relationship_mode": relationship_mode,
+            "relationship_mode_label": "专属关系" if relationship_mode == "owner_exclusive" else "普通阶段",
+            "relationship_intimacy": relationship_intimacy,
+            "relationship_ledger": relationship_panel["relationship_changes"],
+            "current_interaction": current_interaction,
+            "expression_decision": relationship_panel["expression_decision"],
             "relationship_state": relationship_state,
             "pending_emotion_judgement": pending_emotion_judgement,
             "last_emotion_judgement_error": last_emotion_judgement_error,
@@ -14466,6 +14556,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_personality_iteration_experiment",
             "enable_daily_case_review_experiment",
             "enable_passive_topic_suppression",
+            "enable_custom_relationship_stage_policy",
+            "enable_relationship_content_tiers",
             "enable_relationship_analysis",
             "enable_relationship_state_machine",
             "enable_emotion_simulation",
@@ -16470,6 +16562,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_solar_term_perception",
             "enable_almanac_perception",
             "default_nickname",
+            "default_interaction_band",
+            "enable_custom_relationship_stage_policy",
+            "relationship_stage_policy",
+            "relationship_positive_stage_cap_key",
+            "normal_interaction_band_cap",
+            "enable_relationship_content_tiers",
+            "enable_flirt_content_tier",
+            "enable_adult_content_tier",
+            "adult_content_owner_confirmed",
+            "adult_content_require_turn_consent",
+            "ADULT_CONTENT_PROVIDER_ID",
+            "owner_exclusive_label",
+            "owner_exclusive_tone",
+            "owner_exclusive_address_style",
+            "owner_exclusive_proactive_limit",
+            "relationship_event_window_minutes",
+            "relationship_positive_event_cap",
+            "relationship_negative_event_cap",
+            "relationship_positive_daily_cap",
+            "relationship_decay_grace_days",
+            "relationship_decay_early_per_day",
+            "relationship_decay_middle_per_day",
+            "relationship_decay_late_per_day",
             "default_style",
             "reply_style_prompt",
             "enable_persona_voice_channels",
@@ -18277,7 +18392,181 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             },
         }
 
+    def _relationship_profile_targets(self) -> list[tuple[str, dict[str, Any]]]:
+        targets: list[tuple[str, dict[str, Any]]] = []
+        seen: set[int] = set()
+
+        def add(profile_id: str, profile: Any) -> None:
+            if isinstance(profile, dict) and id(profile) not in seen:
+                targets.append((profile_id, profile))
+                seen.add(id(profile))
+
+        add("", getattr(self.plugin, "_data_default", None))
+        if bool(getattr(self.plugin, "enable_multi_persona_mode", False)):
+            id_getter = getattr(self.plugin, "_persona_profile_ids", None)
+            ensure_profile = getattr(self.plugin, "_ensure_persona_profile", None)
+            persona_ids = id_getter() if callable(id_getter) else []
+            if callable(ensure_profile):
+                for persona_id in persona_ids:
+                    clean_id = str(persona_id or "").strip()
+                    if clean_id:
+                        add(clean_id, ensure_profile(clean_id))
+        else:
+            add("", getattr(self.plugin, "data", None))
+        return targets
+
+    def _save_relationship_profile_target(self, profile_id: str, profile: dict[str, Any]) -> None:
+        snapshot = deepcopy(profile)
+        if profile_id:
+            saver = getattr(self.plugin, "_save_persona_profile_sync", None)
+            if not callable(saver):
+                raise RuntimeError(f"人格 {profile_id} 缺少保存接口")
+            saver(profile_id, snapshot)
+            return
+        writer = getattr(self.plugin, "_write_data_snapshot_sync", None)
+        if not callable(writer):
+            raise RuntimeError("默认资料缺少快照保存接口")
+        writer(snapshot)
+
+    async def _apply_relationship_profile_config_batch(self, overrides: dict[str, Any]) -> None:
+        flush = getattr(self.plugin, "_flush_scheduled_data_save", None)
+        if callable(flush):
+            await flush()
+        cap_change = overrides.get("__relationship_positive_cap_change")
+        interaction_change = overrides.get("__relationship_interaction_cap_change")
+        now = time.time()
+        async with self.plugin._data_lock:
+            targets = self._relationship_profile_targets()
+            snapshots = {profile_id: deepcopy(profile) for profile_id, profile in targets}
+            touched: list[tuple[str, dict[str, Any]]] = []
+            attempted: list[str] = []
+            try:
+                for profile_id, profile in targets:
+                    users = profile.get("users") if isinstance(profile.get("users"), dict) else {}
+                    profile_changed = False
+                    for user in users.values():
+                        if not isinstance(user, dict):
+                            continue
+                        score_result = migrate_legacy_relationship_score(user, created=False, now=now)
+                        profile_changed = profile_changed or bool(score_result.get("changed"))
+                        if isinstance(cap_change, tuple) and len(cap_change) == 2:
+                            previous_cap = user.get("relationship_positive_stage_cap_key")
+                            cap_result = migrate_relationship_positive_stage_cap(
+                                user,
+                                old_cap_key=cap_change[0],
+                                new_cap_key=cap_change[1],
+                                now=now,
+                            )
+                            profile_changed = profile_changed or previous_cap != cap_change[1] or bool(cap_result.get("changed"))
+                        if isinstance(interaction_change, tuple) and len(interaction_change) == 2:
+                            normalized = normalize_normal_interaction_band_cap(interaction_change[1])
+                            before = deepcopy(user.get("current_interaction"))
+                            previous_cap = user.get("normal_interaction_band_cap")
+                            user["current_interaction"] = current_interaction_projection(
+                                before,
+                                relationship_role=user.get("relationship_role"),
+                                relationship_mode=user.get("relationship_mode"),
+                                relationship_score=user.get("relationship_score"),
+                                normal_interaction_band_cap=normalized,
+                                now=now,
+                            )
+                            user["normal_interaction_band_cap"] = normalized
+                            profile_changed = profile_changed or previous_cap != normalized or before != user["current_interaction"]
+                    if profile_changed:
+                        touched.append((profile_id, profile))
+
+                for profile_id, profile in touched:
+                    attempted.append(profile_id)
+                    self._save_relationship_profile_target(profile_id, profile)
+            except Exception:
+                for profile_id, profile in targets:
+                    profile.clear()
+                    profile.update(deepcopy(snapshots[profile_id]))
+                for profile_id in attempted:
+                    try:
+                        self._save_relationship_profile_target(profile_id, snapshots[profile_id])
+                    except Exception as rollback_exc:
+                        logger.error(
+                            "[PrivateCompanionPage] 关系配置人格资料回滚失败: persona=%s error=%s",
+                            profile_id or "default",
+                            self._single_line(rollback_exc, 160),
+                        )
+                raise
+        overrides["__relationship_data_changed"] = False
+
     def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
+        if key == "relationship_stage_policy":
+            normalized = normalize_relationship_stage_policy(value)
+            self._set_config_value(key, relationship_stage_policy_json(normalized))
+            self.plugin.relationship_stage_policy = normalized
+            return
+        if key == "relationship_positive_stage_cap_key":
+            old_key = normalize_relationship_positive_stage_cap_key(
+                getattr(self.plugin, key, "deeply_bonded")
+            )
+            new_key = normalize_relationship_positive_stage_cap_key(value)
+            self._set_config_value(key, new_key)
+            self.plugin.relationship_positive_stage_cap_key = new_key
+            if isinstance(overrides, dict) and overrides.get("__defer_relationship_data_save"):
+                overrides["__relationship_positive_cap_change"] = (old_key, new_key)
+                overrides["__relationship_profile_batch"] = True
+                return
+            users = self.plugin.data.get("users", {}) if isinstance(getattr(self.plugin, "data", None), dict) else {}
+            touched = False
+            if isinstance(users, dict):
+                for user in users.values():
+                    if not isinstance(user, dict):
+                        continue
+                    previous_cap = user.get("relationship_positive_stage_cap_key")
+                    result = migrate_relationship_positive_stage_cap(
+                        user,
+                        old_cap_key=old_key,
+                        new_cap_key=new_key,
+                        now=time.time(),
+                    )
+                    touched = touched or previous_cap != new_key or bool(result.get("changed"))
+            if touched:
+                if isinstance(overrides, dict) and overrides.get("__defer_relationship_data_save"):
+                    overrides["__relationship_data_changed"] = True
+                else:
+                    self.plugin._save_data_sync()
+            return
+        if key == "normal_interaction_band_cap":
+            previous_runtime_cap = normalize_normal_interaction_band_cap(getattr(self.plugin, key, "warm"))
+            normalized = normalize_normal_interaction_band_cap(value)
+            self._set_config_value(key, normalized)
+            self.plugin.normal_interaction_band_cap = normalized
+            if isinstance(overrides, dict) and overrides.get("__defer_relationship_data_save"):
+                overrides["__relationship_interaction_cap_change"] = (
+                    previous_runtime_cap,
+                    normalized,
+                )
+                overrides["__relationship_profile_batch"] = True
+                return
+            users = self.plugin.data.get("users", {}) if isinstance(getattr(self.plugin, "data", None), dict) else {}
+            touched = False
+            if isinstance(users, dict):
+                for user in users.values():
+                    if not isinstance(user, dict):
+                        continue
+                    before = deepcopy(user.get("current_interaction"))
+                    previous_cap = user.get("normal_interaction_band_cap")
+                    user["current_interaction"] = current_interaction_projection(
+                        before,
+                        relationship_role=user.get("relationship_role"),
+                        relationship_mode=user.get("relationship_mode"),
+                        relationship_score=user.get("relationship_score"),
+                        normal_interaction_band_cap=normalized,
+                        now=time.time(),
+                    )
+                    user["normal_interaction_band_cap"] = normalized
+                    touched = touched or previous_cap != normalized or before != user["current_interaction"]
+            if touched:
+                if isinstance(overrides, dict) and overrides.get("__defer_relationship_data_save"):
+                    overrides["__relationship_data_changed"] = True
+                else:
+                    self.plugin._save_data_sync()
+            return
         self._set_config_value(key, value)
         if key == "enable_body_monitor_integration":
             enabled = self._normalize_bool_value(value)
@@ -18427,6 +18716,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "NARRATION_PROVIDER_ID": "narration_provider_id",
             "HISTORY_SUMMARY_PROVIDER_ID": "history_summary_provider_id",
             "RESPONSE_REVIEW_PROVIDER_ID": "response_review_provider_id",
+            "ADULT_CONTENT_PROVIDER_ID": "adult_content_provider_id",
             "SMART_SILENCE_PROVIDER_ID": "smart_silence_provider_id",
             "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": "proactive_persona_judge_provider_id",
             "TROUBLESHOOTING_PROVIDER_ID": "troubleshooting_provider_id",
@@ -19030,6 +19320,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_personality_iteration_experiment",
             "enable_daily_case_review_experiment",
             "enable_passive_topic_suppression",
+            "enable_custom_relationship_stage_policy",
+            "enable_relationship_content_tiers",
             "enable_relationship_analysis",
             "enable_relationship_state_machine",
             "enable_emotion_simulation",
@@ -19227,6 +19519,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "enable_solar_term_perception",
             "enable_almanac_perception",
             "default_nickname",
+            "default_interaction_band",
+            "enable_custom_relationship_stage_policy",
+            "relationship_stage_policy",
+            "relationship_positive_stage_cap_key",
+            "normal_interaction_band_cap",
+            "enable_relationship_content_tiers",
+            "enable_flirt_content_tier",
+            "enable_adult_content_tier",
+            "adult_content_owner_confirmed",
+            "adult_content_require_turn_consent",
+            "ADULT_CONTENT_PROVIDER_ID",
+            "owner_exclusive_label",
+            "owner_exclusive_tone",
+            "owner_exclusive_address_style",
+            "owner_exclusive_proactive_limit",
+            "relationship_event_window_minutes",
+            "relationship_positive_event_cap",
+            "relationship_negative_event_cap",
+            "relationship_positive_daily_cap",
+            "relationship_decay_grace_days",
+            "relationship_decay_early_per_day",
+            "relationship_decay_middle_per_day",
+            "relationship_decay_late_per_day",
             "default_style",
             "reply_style_prompt",
             "enable_persona_voice_channels",
@@ -19641,6 +19956,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         return keys
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
+        if key == "relationship_stage_policy":
+            return relationship_stage_policy_json(value)
+        if key == "relationship_positive_stage_cap_key":
+            return normalize_relationship_positive_stage_cap_key(value)
+        if key == "normal_interaction_band_cap":
+            return normalize_normal_interaction_band_cap(value)
         if key == "enable_body_monitor_integration":
             return self._normalize_bool_value(value)
         if key == "enable_multi_persona_mode":

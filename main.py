@@ -129,7 +129,10 @@ from .helpers import (
     _resolve_timezone_setting,
 )
 from .config_migration import migrate_flat_config_into_schema_groups
+from .companion_interaction_expression import build_expression_decision, content_intent_from_text, expression_decision_prompt
 from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
+from .relationship_ledger import normalize_relationship_positive_stage_cap_key
+from .relationship_policy import normalize_relationship_stage_policy
 from .user_rest_gate import UserRestGateMixin
 
 
@@ -1941,6 +1944,42 @@ class PrivateCompanionPlugin(
         self._load_tts_enhancement_config(c)
         self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
         self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
+        self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")
+        if self.default_interaction_band not in {"avoidant", "hurt", "relaxed", "lively", "warm"}:
+            self.default_interaction_band = "relaxed"
+        self.enable_custom_relationship_stage_policy = self._cfg_bool(c, "enable_custom_relationship_stage_policy", False)
+        self.relationship_stage_policy = normalize_relationship_stage_policy(
+            self._cfg_raw(c, "relationship_stage_policy", [])
+        )
+        self.relationship_positive_stage_cap_key = normalize_relationship_positive_stage_cap_key(
+            self._cfg_raw(c, "relationship_positive_stage_cap_key", "deeply_bonded")
+        )
+        self.normal_interaction_band_cap = self._cfg_str(c, "normal_interaction_band_cap", "warm")
+        if self.normal_interaction_band_cap not in {"relaxed", "lively", "warm"}:
+            self.normal_interaction_band_cap = "warm"
+        self.enable_relationship_content_tiers = self._cfg_bool(c, "enable_relationship_content_tiers", False)
+        self.enable_flirt_content_tier = self._cfg_bool(c, "enable_flirt_content_tier", True)
+        self.enable_adult_content_tier = self._cfg_bool(c, "enable_adult_content_tier", False)
+        self.adult_content_owner_confirmed = self._cfg_bool(c, "adult_content_owner_confirmed", False)
+        self.adult_content_require_turn_consent = self._cfg_bool(c, "adult_content_require_turn_consent", True)
+        self.adult_content_provider_id = self._cfg_str(c, "ADULT_CONTENT_PROVIDER_ID", "")
+        self.owner_exclusive_label = self._cfg_str(c, "owner_exclusive_label", "专属联结", "专属联结")
+        self.owner_exclusive_tone = self._cfg_str(c, "owner_exclusive_tone", "温暖、亲近、稳定", "温暖、亲近、稳定")
+        self.owner_exclusive_address_style = self._cfg_str(
+            c,
+            "owner_exclusive_address_style",
+            "优先使用已确认的专属称呼",
+            "优先使用已确认的专属称呼",
+        )
+        self.owner_exclusive_proactive_limit = self._cfg_int(c, "owner_exclusive_proactive_limit", 6, 0, 30)
+        self.relationship_event_window_minutes = self._cfg_int(c, "relationship_event_window_minutes", 30, 1, 1440)
+        self.relationship_positive_event_cap = self._cfg_int(c, "relationship_positive_event_cap", 4, 1, 30)
+        self.relationship_negative_event_cap = self._cfg_int(c, "relationship_negative_event_cap", 12, 1, 60)
+        self.relationship_positive_daily_cap = self._cfg_int(c, "relationship_positive_daily_cap", 12, 0, 120)
+        self.relationship_decay_grace_days = self._cfg_int(c, "relationship_decay_grace_days", 3, 0, 30)
+        self.relationship_decay_early_per_day = self._cfg_int(c, "relationship_decay_early_per_day", 2, 0, 30)
+        self.relationship_decay_middle_per_day = self._cfg_int(c, "relationship_decay_middle_per_day", 5, 0, 30)
+        self.relationship_decay_late_per_day = self._cfg_int(c, "relationship_decay_late_per_day", 8, 0, 30)
         self.enable_environment_perception = self._cfg_bool(c, "enable_environment_perception", True)
         configured_timezone = _flat_get(c, "environment_perception_timezone", None)
         if configured_timezone in (None, ""):
@@ -11001,7 +11040,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     str(user.get("last_proactive_action") or "message"),
                     text,
                 )
-                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
+                self._apply_relationship_event(
+                    user,
+                    2,
+                    reason_code="proactive_reply",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
                 user["awaiting_reply_since"] = 0
                 user["last_reply_at"] = received_ts
                 user["last_private_reply_at"] = received_ts
@@ -11114,6 +11159,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         )
 
+    def _adult_content_provider_matches(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> bool:
+        configured = _single_line(getattr(self, "adult_content_provider_id", ""), 160).casefold()
+        if not configured:
+            return False
+        return any(part.casefold() == configured for part in self._llm_request_provider_identity_parts(event, req))
+
     def _llm_request_uses_deepseek_family_provider(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> bool:
         identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
         return "deepseek" in identity
@@ -11209,6 +11260,59 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         except Exception:
             return False
+
+    @filter.on_llm_request(priority=-30000)
+    @_multi_persona_event_context
+    async def inject_unified_relationship_expression(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
+        """Inject one fail-closed relationship expression decision before Memory enrichment."""
+        if self is None or req is None or not bool(getattr(self, "enabled", False)):
+            return
+        if not self._safe_event_is_private(event):
+            return
+        try:
+            sender_id = self._canonical_private_user_id(self._safe_event_sender_id(event))
+        except Exception:
+            sender_id = ""
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        current_user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
+        if not isinstance(current_user, dict):
+            return
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        if not callable(expression_builder):
+            return
+        try:
+            expression = expression_builder(
+                current_user,
+                passive_reengagement=True,
+                bot_state={
+                    "energy": current_user.get("bot_energy", 70),
+                    "mood": current_user.get("bot_mood", ""),
+                },
+                message_intent=content_intent_from_text(getattr(event, "message_str", "")),
+                content_policy={
+                    "enabled": bool(getattr(self, "enable_relationship_content_tiers", False)),
+                    "flirt_enabled": bool(getattr(self, "enable_flirt_content_tier", True)),
+                    "adult_enabled": bool(getattr(self, "enable_adult_content_tier", False)),
+                    "adult_owner_confirmed": bool(getattr(self, "adult_content_owner_confirmed", False)),
+                    "require_turn_consent": bool(getattr(self, "adult_content_require_turn_consent", True)),
+                    "private_chat": True,
+                    "local_provider_configured": bool(getattr(self, "adult_content_provider_id", "")),
+                    "local_provider_match": self._adult_content_provider_matches(event, req),
+                },
+            )
+            projection = expression.to_dict() if hasattr(expression, "to_dict") else dict(expression or {})
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 统一表达决策生成失败，使用日常保守默认值: %s", _single_line(exc, 120))
+            projection = build_expression_decision({}).to_dict()
+        try:
+            setattr(req, "_private_companion_expression_decision", projection)
+            setattr(event, "_private_companion_expression_decision", projection)
+        except Exception:
+            pass
+        instruction = expression_decision_prompt(projection)
+        if instruction and hasattr(req, "system_prompt"):
+            current_prompt = str(getattr(req, "system_prompt", "") or "").rstrip()
+            req.system_prompt = f"{current_prompt}\n\n[Companion expression]\n{instruction}".strip()
 
     def _remove_sensitive_screen_tools_from_request(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
         tool_set = getattr(req, "func_tool", None)
@@ -14107,7 +14211,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 )
             rest_silence_applied = self._apply_user_rest_silence_from_message(fast_user, safe_text or text, now=received_ts)
             fast_user["inbound_count"] = _safe_int(fast_user.get("inbound_count"), 0) + 1
-            fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
+            self._apply_relationship_event(
+                fast_user,
+                1,
+                reason_code="fast_inbound",
+                event_id=self._event_message_id(event),
+                now=received_ts,
+            )
             fast_user["episode_message_count"] = _safe_int(fast_user.get("episode_message_count"), 0, 0) + 1
             if _safe_float(fast_user.get("awaiting_reply_since"), 0) > 0:
                 fast_user["reply_count"] = _safe_int(fast_user.get("reply_count"), 0) + 1
@@ -14116,7 +14226,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     str(fast_user.get("last_proactive_action") or "message"),
                     text,
                 )
-                fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 2
+                self._apply_relationship_event(
+                    fast_user,
+                    2,
+                    reason_code="fast_proactive_reply",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
                 fast_user["awaiting_reply_since"] = 0
                 fast_user["last_reply_at"] = received_ts
                 fast_user["last_private_reply_at"] = received_ts
@@ -14129,7 +14245,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if fast_user_is_owner:
                 self._handle_meal_care_inbound(fast_user, safe_text or text, now=received_ts)
             if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
-                fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
+                self._apply_relationship_event(
+                    fast_user,
+                    1,
+                    reason_code="fast_interaction_warmth",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
             self._schedule_data_save()
             if (
                 rest_silence_applied
@@ -14441,7 +14563,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             self._note_morning_greeting_reply(user, now=received_ts or _now_ts())
             if text:
                 user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
-            user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
+            self._apply_relationship_event(
+                user,
+                1,
+                reason_code="inbound",
+                event_id=self._event_message_id(event),
+                now=received_ts,
+            )
             suspended = user.get("suspended_proactive")
             if (
                 isinstance(suspended, dict)
@@ -14461,7 +14589,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     str(user.get("last_proactive_action") or "message"),
                     text,
                 )
-                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
+                self._apply_relationship_event(
+                    user,
+                    2,
+                    reason_code="proactive_reply",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
                 user["awaiting_reply_since"] = 0
                 user["last_reply_at"] = _now_ts()
                 user["last_private_reply_at"] = user["last_reply_at"]
@@ -14581,10 +14715,22 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     }
             care_feedback_applied = bool(text) and user_is_owner and self._apply_care_feedback_to_state(text)
             if care_feedback_applied:
-                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
+                self._apply_relationship_event(
+                    user,
+                    2,
+                    reason_code="care_feedback",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
             interaction_warmth_applied = bool(text) and is_target_user and user_is_owner and self._apply_interaction_warmth_to_state(text, user)
             if interaction_warmth_applied:
-                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
+                self._apply_relationship_event(
+                    user,
+                    1,
+                    reason_code="interaction_warmth",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
             schedule_adjustment_applied = (
                 bool(text)
                 and is_target_user
@@ -14592,9 +14738,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 and self._record_schedule_adjustment_from_interaction(text, user)
             )
             if schedule_adjustment_applied:
-                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
+                self._apply_relationship_event(
+                    user,
+                    1,
+                    reason_code="schedule_adjustment",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
             if food_feedback_applied:
-                user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
+                self._apply_relationship_event(
+                    user,
+                    1,
+                    reason_code="food_feedback",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
 
             response = ""
             if is_target_user:

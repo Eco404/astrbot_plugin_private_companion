@@ -2407,6 +2407,28 @@ TTS 朗读文本：
             setattr(event, "_private_companion_tts_request_applied", True)
         except Exception:
             pass
+        expression = getattr(event, "_private_companion_expression_decision", None)
+        if isinstance(expression, dict):
+            tts_style = _single_line(expression.get("tts_style"), 24)
+            expression_band = _single_line(expression.get("expression_band"), 24)
+            content_tier = _single_line(expression.get("content_tier"), 16) or "normal"
+            if tts_style or expression_band:
+                expression_prompt = (
+                    "【统一陪伴表达的语音上限】\n"
+                    f"当前互动档位={expression_band or 'relaxed'}，TTS 风格上限={tts_style or 'natural'}，"
+                    f"内容尺度={content_tier}。语音只能收敛语气，不能扩大文字内容尺度、切换 Provider 或绕过文本复核。"
+                )
+                placement = append_dynamic_tts_fragment(
+                    "<!-- private_companion_tts_expression_v1 -->",
+                    expression_prompt,
+                    priority=54,
+                )
+                await record_tts_fragment(
+                    "TTS 统一表达上限注入",
+                    "tts.relationship_expression",
+                    expression_prompt,
+                    placement=placement,
+                )
         user_requested_tts = self._event_explicitly_requests_tts(event) or bool(turn_voice_language)
         functional_command_reason = self._tts_functional_command_reason(event)
         if functional_command_reason and not user_requested_tts:

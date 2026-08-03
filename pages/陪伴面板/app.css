@@ -29322,3 +29322,319 @@ pre {
     animation: none !important;
   }
 }
+.companion-intimacy-card {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  box-shadow: var(--shadow-soft);
+}
+
+.companion-intimacy-head,
+.companion-intimacy-meta,
+.current-interaction-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.companion-intimacy-head h3,
+.current-interaction-head h3 {
+  margin: 2px 0 0;
+}
+
+.companion-intimacy-head p,
+.current-interaction-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.relationship-kicker {
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.companion-intimacy-current {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.companion-intimacy-current strong,
+.current-interaction-head > strong {
+  color: var(--accent-strong);
+  font-size: 18px;
+}
+
+.companion-intimacy-current span {
+  color: var(--muted);
+  font: 700 13px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.relationship-stage-bar {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(72px, 1fr));
+  gap: 5px;
+  overflow-x: auto;
+  padding: 18px 1px 7px;
+}
+
+.relationship-stage-segment,
+.interaction-stage-segment {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.relationship-stage-segment {
+  min-width: 72px;
+}
+
+.relationship-stage-segment i,
+.interaction-stage-segment i {
+  display: block;
+  height: 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--line) 84%, white 16%);
+}
+
+.relationship-stage-segment.is-current,
+.interaction-stage-segment.is-current {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.relationship-stage-segment.is-current i,
+.interaction-stage-segment.is-current i {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.relationship-stage-segment.is-disabled,
+.interaction-stage-segment.is-disabled {
+  opacity: 0.42;
+}
+
+.relationship-stage-segment b {
+  position: absolute;
+  top: -17px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 10px;
+}
+
+.companion-intimacy-meta,
+.current-interaction-meta {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.companion-intimacy-form {
+  grid-template-columns: minmax(180px, 300px) auto;
+  align-items: end;
+  margin: 0;
+}
+
+.companion-intimacy-advanced {
+  border-top: 1px dashed var(--line);
+  padding-top: 9px;
+}
+
+.companion-intimacy-advanced summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.companion-intimacy-advanced .companion-intimacy-form {
+  margin-top: 10px;
+}
+
+.current-interaction-card {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 20%, var(--line));
+  padding-top: 13px;
+}
+
+.interaction-stage-bar {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+  padding: 6px 1px;
+}
+
+.current-interaction-meta {
+  display: flex;
+  gap: 5px 12px;
+}
+
+.current-interaction-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.relationship-expression-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.relationship-expression-status span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.relationship-expression-status b {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.feature-param-row-policy {
+  grid-template-columns: 1fr;
+}
+
+.relationship-policy-editor {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.relationship-policy-notice {
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.relationship-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.relationship-policy-stage {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 11px;
+  background: var(--surface);
+}
+
+.relationship-policy-stage > header,
+.relationship-policy-stage > label:nth-of-type(2),
+.relationship-policy-stage > label:nth-of-type(3),
+.relationship-policy-behaviors {
+  grid-column: 1 / -1;
+}
+
+.relationship-policy-stage > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.relationship-policy-stage label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.relationship-policy-stage input,
+.relationship-policy-stage textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.relationship-policy-behaviors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.relationship-policy-behaviors label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.relationship-policy-behaviors input {
+  width: auto;
+}
+
+@media (max-width: 900px) {
+  .relationship-policy-grid,
+  .relationship-expression-status {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .companion-intimacy-head,
+  .current-interaction-head {
+    display: grid;
+  }
+
+  .companion-intimacy-current {
+    justify-items: start;
+  }
+
+  .companion-intimacy-form,
+  .relationship-expression-status,
+  .relationship-policy-grid,
+  .relationship-policy-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .interaction-stage-bar {
+    overflow-x: auto;
+    grid-template-columns: repeat(7, minmax(58px, 1fr));
+  }
+
+  .interaction-stage-segment {
+    min-width: 58px;
+  }
+}
