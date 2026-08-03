@@ -7894,6 +7894,7 @@ Output:
             continuity_key=continuity_key,
             requester_user_id=str(user.get("user_id") or ""),
             reference_image_path=reference_image_path,
+            prompt_format=_single_line(scene.get("prompt_format"), 40),
         )
         if not image_path:
             counted_attempt = self._photo_generation_failure_counts_as_attempt(workflow_note)
@@ -9109,6 +9110,7 @@ Output:
         removed_conflict_details: list[dict[str, Any]] | None = None,
         residual_conflict_details: list[dict[str, Any]] | None = None,
         suggested_scene_preset: str = "",
+        prompt_format: str = "",
     ) -> None:
         try:
             reference_candidate = reference_candidate or {}
@@ -9145,7 +9147,11 @@ Output:
                 "kind": _single_line(workflow_kind, 30),
                 "backend": _single_line(backend, 80),
                 "ok": bool(ok),
-                "prompt_format": self._photo_generation_prompt_format_mode(),
+                "prompt_format": (
+                    self._normalize_photo_generation_prompt_format(prompt_format)
+                    if prompt_format
+                    else self._photo_generation_prompt_format_mode()
+                ),
                 "prompt": _single_line(prompt_text, 900),
                 "path": _path_text(image_path, 1000),
                 "note": _single_line(note, 240),
@@ -9381,6 +9387,7 @@ Output:
         reference_plan: PhotoReferencePlan | None = None,
         reference_fallback: ReferenceFallback | None = None,
         suggested_scene_preset: str = "",
+        prompt_format: str = "",
     ) -> tuple[str, str]:
         prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
         submitted_prompt_hash = hashlib.sha256(
@@ -9426,7 +9433,11 @@ Output:
                     "workflow_kind": _single_line(workflow_kind, 40),
                     "preset_hint": _single_line(suggested_scene_preset, 80),
                     "requested_scene_preset": _single_line(suggested_scene_preset, 80),
-                    "prompt_format": self._photo_generation_prompt_format_mode(),
+                    "prompt_format": (
+                        self._normalize_photo_generation_prompt_format(prompt_format)
+                        if prompt_format
+                        else self._photo_generation_prompt_format_mode()
+                    ),
                     "base_prompt": base_prompt,
                     "scene_context_before": scene_context_before,
                     "scene_context_after": scene_context_after,
@@ -9861,11 +9872,20 @@ Output:
 
         return ", ".join(dict.fromkeys(positive_parts)), ", ".join(dict.fromkeys(negative_parts))
 
-    def _apply_photo_generation_prompt_format(self, prompt_text: str) -> str:
+    def _apply_photo_generation_prompt_format(
+        self,
+        prompt_text: str,
+        *,
+        prompt_format: str = "",
+    ) -> str:
         prompt = str(prompt_text or "").strip()
         if not prompt:
             return ""
-        mode = self._photo_generation_prompt_format_mode()
+        mode = (
+            self._normalize_photo_generation_prompt_format(prompt_format)
+            if prompt_format
+            else self._photo_generation_prompt_format_mode()
+        )
         if mode == "nai":
             # Preserve NovelAI inline syntax ({}/[], weight::tags::, multi-character blocks) as authored.
             positive_match = re.search(
@@ -10617,11 +10637,16 @@ Output:
         suggested_scene_preset: str = "",
         workflow_default_scene_preset: str = "",
         prompt_sections: tuple[PhotoPromptSection, ...] | None = None,
+        prompt_format: str = "",
     ) -> tuple[str, str, str]:
         started = time.time()
         trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
         original_prompt_text = str(prompt_text or "").strip()
-        prompt_format = self._photo_generation_prompt_format_mode()
+        prompt_format = (
+            self._normalize_photo_generation_prompt_format(prompt_format)
+            if prompt_format
+            else self._photo_generation_prompt_format_mode()
+        )
         request_text = str(request_text or original_prompt_text).strip()
         requester_user_id = _single_line(requester_user_id, 80)
         if requester_is_private is None:
@@ -10681,7 +10706,10 @@ Output:
                 "source": reference_intent.source,
             },
         )
-        base_prompt = self._apply_photo_generation_prompt_format(original_prompt_text)
+        base_prompt = self._apply_photo_generation_prompt_format(
+            original_prompt_text,
+            prompt_format=prompt_format,
+        )
         current_user_request = wardrobe_intent.positive_text
         current_user_exclusions = wardrobe_intent.exclusion_text
         normalized_kind = str(workflow_kind or "").strip().lower()
@@ -11059,7 +11087,7 @@ Output:
         resolved_context = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=context_before,
-            prompt_format=self._photo_generation_prompt_format_mode(),
+            prompt_format=prompt_format,
             workflow_kind=workflow_kind,
             reference=reference_candidate or None,
         )
@@ -11178,6 +11206,7 @@ Output:
             reference_removed=resolved_context.reference_removed,
             sanitizer_version=resolved_context.sanitizer_version,
             suggested_scene_preset=suggested_scene_preset,
+            prompt_format=prompt_format,
         )
         self._append_photo_generation_trace_event(
             trace_id,
@@ -11370,6 +11399,7 @@ Output:
                 removed_conflict_details=removed_conflict_details,
                 residual_conflict_details=residual_conflict_details,
                 suggested_scene_preset=suggested_scene_preset,
+                prompt_format=prompt_format,
             )
             self._append_photo_generation_trace_event(
                 trace_id,
@@ -11641,6 +11671,8 @@ Output:
     async def _build_photo_scene_prompt(
         self, user: dict[str, Any], name: str, reason: str
     ) -> dict[str, Any]:
+        prompt_format = self._photo_generation_prompt_format_mode()
+        prompt_format_instruction = self._photo_generation_prompt_format_instruction()
         persona = self._get_default_persona_prompt()
         state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
@@ -11737,7 +11769,7 @@ Output:
 风格要求：{style_instruction}
 
 【提示词表达方式】
-{self._photo_generation_prompt_format_instruction()}
+{prompt_format_instruction}
 
 主动原因：{reason}
 
@@ -11848,6 +11880,7 @@ Output:
             "use_persona_reference": use_persona_reference,
             "subject_owner": subject_owner,
             "scene_context": scene_context,
+            "prompt_format": prompt_format,
         }
 
     def _get_photo_style_instruction(self) -> tuple[str, str]:

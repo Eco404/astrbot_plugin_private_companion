@@ -19,6 +19,7 @@ class _PhotoActionHarness(ProactiveMessageMixin):
         self.enable_photo_text_action = True
         self._data_lock = asyncio.Lock()
         self.reference_received = ""
+        self.prompt_format_received = ""
 
     def _private_user_role(self, _user) -> str:
         return "owner"
@@ -35,6 +36,7 @@ class _PhotoActionHarness(ProactiveMessageMixin):
             "prompt": "single anime girl writing at a desk",
             "caption": "我坐在窗边书桌前认真写字。",
             "use_persona_reference": True,
+            "prompt_format": "nai",
         }
 
     async def _photo_persona_reference_image_for_kind_async(self, *_args, **_kwargs) -> str:
@@ -42,6 +44,7 @@ class _PhotoActionHarness(ProactiveMessageMixin):
 
     async def _generate_photo_image(self, **kwargs):
         self.reference_received = kwargs.get("reference_image_path", "")
+        self.prompt_format_received = kwargs.get("prompt_format", "")
         return "在线图片 API", "C:/generated/result.png", "ok"
 
     def _note_photo_generation_attempt(self, *_args, **_kwargs) -> None:
@@ -262,6 +265,7 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
             "quiet_care",
         )
         self.assertEqual(harness.reference_received, "C:/reference/persona.png")
+        self.assertEqual(harness.prompt_format_received, "nai")
         self.assertIn("人物参考图：已使用", result)
         self.assertIn("图片主体归属：bot", result)
 

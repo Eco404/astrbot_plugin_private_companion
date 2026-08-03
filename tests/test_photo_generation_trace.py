@@ -25,7 +25,8 @@ def _astrbot_stubs() -> dict[str, types.ModuleType]:
         "astrbot.core.platform.message_session", "astrbot.core.platform.message_type",
         "astrbot.core.platform.platform", "astrbot.core.platform.platform_metadata",
         "astrbot.core.provider", "astrbot.core.provider.entities", "astrbot.core.star",
-        "astrbot.core.star.star_handler", "astrbot.core.utils", "astrbot.core.utils.astrbot_path",
+        "astrbot.core.star.star", "astrbot.core.star.star_handler", "astrbot.core.utils",
+        "astrbot.core.utils.astrbot_path",
     )
     modules = {name: types.ModuleType(name) for name in names}
     for name, module in modules.items():
@@ -46,6 +47,7 @@ def _astrbot_stubs() -> dict[str, types.ModuleType]:
     modules["astrbot.api.event"].AstrMessageEvent = type("AstrMessageEvent", (), {})
     modules["astrbot.api.event"].MessageChain = _Stub
     modules["astrbot.api.event"].filter = _Stub
+    modules["astrbot.core.star.star"].star_map = {}
     modules["astrbot.core.utils.astrbot_path"].get_astrbot_data_path = lambda: tempfile.gettempdir()
     return modules
 

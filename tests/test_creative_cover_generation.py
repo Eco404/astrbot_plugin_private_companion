@@ -9,6 +9,23 @@ from pathlib import Path
 from astrbot_plugin_private_companion.creative import CreativeMixin
 
 
+class _SecondAcquireBarrier:
+    def __init__(self) -> None:
+        self.acquire_count = 0
+        self.second_acquire_started = asyncio.Event()
+        self.release_second_acquire = asyncio.Event()
+
+    async def __aenter__(self):
+        self.acquire_count += 1
+        if self.acquire_count == 2:
+            self.second_acquire_started.set()
+            await self.release_second_acquire.wait()
+        return self
+
+    async def __aexit__(self, *_args) -> bool:
+        return False
+
+
 class _CreativeCoverHarness(CreativeMixin):
     def __init__(self, root: str) -> None:
         self.data_dir = root
@@ -103,6 +120,7 @@ class CreativeCoverGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call["workflow_kind"], "text2img")
             self.assertFalse(call["allow_daily_outfit_reference"])
             self.assertEqual(call["reference_image_path"], "")
+            self.assertEqual(call["prompt_format"], "traditional")
             self.assertIn("readable text", call["prompt_text"])
             self.assertTrue(call["prompt_text"].startswith("Positive prompt:"))
             self.assertIn("Negative prompt:", call["prompt_text"])
@@ -140,6 +158,7 @@ class CreativeCoverGenerationTests(unittest.IsolatedAsyncioTestCase):
             call = harness.generate_calls[0]
             self.assertEqual(call["workflow_kind"], "portrait")
             self.assertEqual(call["reference_image_path"], str(reference))
+            self.assertEqual(call["prompt_format"], "natural_language")
             self.assertIn("exactly one person", call["prompt_text"])
             self.assertIn("Do not show any second person", call["prompt_text"])
             self.assertIn("figure inside a mirror/window/portal/screen", call["prompt_text"])
@@ -175,6 +194,32 @@ class CreativeCoverGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Negative prompt:", traditional)
             self.assertFalse(natural.startswith("Positive prompt:"))
             self.assertIn("Create a polished book cover illustration", natural)
+
+    async def test_cover_keeps_prompt_format_snapshot_while_waiting_to_generate(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            harness = _CreativeCoverHarness(root)
+            barrier = _SecondAcquireBarrier()
+            harness._data_lock = barrier
+            harness.photo_generation_prompt_format = "traditional"
+            generation = asyncio.create_task(
+                harness._maybe_generate_creative_cover("project-1")
+            )
+
+            try:
+                await asyncio.wait_for(barrier.second_acquire_started.wait(), timeout=3)
+                harness.photo_generation_prompt_format = "natural_language"
+                barrier.release_second_acquire.set()
+                await asyncio.wait_for(generation, timeout=5)
+            finally:
+                barrier.release_second_acquire.set()
+                if not generation.done():
+                    generation.cancel()
+                await asyncio.gather(generation, return_exceptions=True)
+
+            call = harness.generate_calls[0]
+            self.assertEqual(harness.photo_generation_prompt_format, "natural_language")
+            self.assertEqual(call["prompt_format"], "traditional")
+            self.assertTrue(call["prompt_text"].startswith("Positive prompt:"))
 
     async def test_legacy_generated_person_cover_is_upgraded_once_when_reference_exists(self) -> None:
         with tempfile.TemporaryDirectory() as root:

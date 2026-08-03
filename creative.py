@@ -1502,11 +1502,37 @@ class CreativeMixin:
             )
         )
 
+    def _creative_cover_prompt_format_mode(self, value: Any = "") -> str:
+        raw_value = value if str(value or "").strip() else getattr(
+            self,
+            "photo_generation_prompt_format",
+            "traditional",
+        )
+        format_normalizer = getattr(
+            self,
+            "_normalize_photo_generation_prompt_format",
+            None,
+        )
+        if callable(format_normalizer):
+            normalized = str(format_normalizer(raw_value) or "traditional")
+            return (
+                normalized
+                if normalized in {"traditional", "natural_language", "nai"}
+                else "traditional"
+            )
+        raw_format = str(raw_value or "traditional").strip().lower()
+        return (
+            "natural_language"
+            if raw_format in {"natural", "natural_language", "自然语言", "自然语言描述"}
+            else "traditional"
+        )
+
     def _creative_cover_prompt(
         self,
         project: dict[str, Any],
         *,
         person_reference_available: bool = False,
+        prompt_format: str = "",
     ) -> str:
         chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
         recent_text = " ".join(
@@ -1561,12 +1587,7 @@ class CreativeMixin:
                 "Use a people-free symbolic composition: no people, faces, bodies, silhouettes, portraits, human reflections, "
                 "figures in mirrors/windows/portals/screens, framed photos, statues, or crowds. "
             )
-        format_normalizer = getattr(self, "_normalize_photo_generation_prompt_format", None)
-        if callable(format_normalizer):
-            prompt_format = format_normalizer(getattr(self, "photo_generation_prompt_format", "traditional"))
-        else:
-            raw_format = str(getattr(self, "photo_generation_prompt_format", "traditional") or "traditional").strip().lower()
-            prompt_format = "natural_language" if raw_format in {"natural", "natural_language", "自然语言", "自然语言描述"} else "traditional"
+        prompt_format = self._creative_cover_prompt_format_mode(prompt_format)
         if prompt_format != "natural_language":
             positive_parts = [
                 "polished book cover illustration",
@@ -1660,6 +1681,7 @@ class CreativeMixin:
         project_id = _single_line(project_id, 32)
         if not project_id:
             return None
+        prompt_format = self._creative_cover_prompt_format_mode()
         locks = getattr(self, "_creative_cover_generation_locks", None)
         if not isinstance(locks, dict):
             locks = {}
@@ -1748,6 +1770,7 @@ class CreativeMixin:
             prompt_text = self._creative_cover_prompt(
                 project_snapshot,
                 person_reference_available=bool(reference_image_path),
+                prompt_format=prompt_format,
             )
             style_label, _style_instruction = self._creative_cover_style_instruction(project_snapshot)
             attempt_number = attempts + 1
@@ -1771,6 +1794,7 @@ class CreativeMixin:
                 reference_image_path=reference_image_path,
                 image_size="",
                 allow_daily_outfit_reference=False,
+                prompt_format=prompt_format,
             )
             stored_path = await self._store_creative_cover_image(project_id, generated_path) if generated_path else ""
             now = _now_ts()

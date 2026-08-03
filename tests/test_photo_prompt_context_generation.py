@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sys
@@ -15,8 +16,18 @@ PACKAGE_NAME = "astrbot_plugin_private_companion"
 
 
 class _Logger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
     def __getattr__(self, _name: str):
-        return lambda *args, **kwargs: None
+        def write(message, *args, **_kwargs) -> None:
+            formatted = str(message) % args if args else str(message)
+            self.records.append((_name, formatted))
+
+        return write
+
+
+TEST_LOGGER = _Logger()
 
 
 class _Dummy:
@@ -65,7 +76,7 @@ def _astrbot_stubs() -> dict[str, types.ModuleType]:
         module.__path__ = []
 
     modules["astrbot.api"].AstrBotConfig = dict
-    modules["astrbot.api"].logger = _Logger()
+    modules["astrbot.api"].logger = TEST_LOGGER
     modules["astrbot.api.event"].AstrMessageEvent = _Dummy
     modules["astrbot.api.event"].MessageChain = _Dummy
     modules["astrbot.api.event"].filter = _Dummy()
@@ -344,11 +355,22 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             output.write_bytes(b"generated")
             harness = _PhotoGenerationHarness(str(output))
             harness.photo_generation_prompt_format = "nai"
+            TEST_LOGGER.records.clear()
 
-            await harness._generate_photo_image(
-                workflow_kind="selfie",
-                prompt_text="{1girl}, 1.5::red dress::, -1::text::",
-                session_key="nai-trace-chain-session",
+            with mock.patch.dict(
+                ProactiveMessageMixin._generate_photo_image.__globals__,
+                {"logger": TEST_LOGGER},
+            ):
+                await harness._generate_photo_image(
+                    workflow_kind="selfie",
+                    prompt_text="{1girl}, 1.5::red dress::, -1::text::",
+                    session_key="nai-trace-chain-session",
+                )
+
+            start_log = next(
+                message
+                for level, message in TEST_LOGGER.records
+                if level == "info" and "[PrivateCompanion] 生图开始:" in message
             )
 
             events = [
@@ -380,8 +402,128 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         prompt_event = next(
             event for event in events if event["stage"] == "prompt_composed"
         )
+        backend_event = next(
+            event for event in events if event["stage"] == "backend_selected"
+        )
         self.assertEqual(prompt_event["data"]["prompt_format"], "nai")
+        self.assertEqual(backend_event["data"]["prompt_format"], "nai")
+        self.assertIn("prompt_format=nai", start_log)
         self.assertIn("1.5::red dress::", prompt_event["data"]["submitted_prompt"])
+
+    async def test_invalid_prompt_format_falls_back_to_traditional(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            harness.photo_generation_prompt_format = 'nai\n{"stage":"forged"}'
+
+            await harness._generate_photo_image(
+                workflow_kind="selfie",
+                prompt_text="1girl, red dress",
+                session_key="invalid-format-session",
+            )
+
+            trace_text = (Path(directory) / "photo_generation_trace.txt").read_text(
+                encoding="utf-8"
+            )
+            events = [json.loads(line) for line in trace_text.splitlines()]
+
+        self.assertTrue(
+            all(event["context"]["prompt_format"] == "traditional" for event in events)
+        )
+        for stage in ("prompt_composed", "backend_selected"):
+            event = next(item for item in events if item["stage"] == stage)
+            self.assertEqual(event["data"]["prompt_format"], "traditional")
+        self.assertTrue(harness.backend_calls[0]["prompt"].startswith("Positive prompt:\n"))
+        self.assertEqual(
+            harness.data["recent_photo_generations"][0]["prompt_format"],
+            "traditional",
+        )
+        self.assertNotIn('"stage":"forged"', trace_text)
+
+    async def test_generation_keeps_initial_prompt_format_snapshot_during_hot_reload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            harness.photo_generation_prompt_format = "nai"
+            nai_prompt = "{1girl}, 1.5::red dress::, -1::text::"
+            harness._write_photo_prompt_debug_file = lambda **kwargs: (
+                ProactiveMessageMixin._write_photo_prompt_debug_file(harness, **kwargs)
+            )
+            analysis_started = asyncio.Event()
+            continue_analysis = asyncio.Event()
+            analyze_intent = harness._analyze_photo_reference_intent_async
+
+            async def analyze_after_reload(*args, **kwargs):
+                analysis_started.set()
+                await continue_analysis.wait()
+                return await analyze_intent(*args, **kwargs)
+
+            harness._analyze_photo_reference_intent_async = analyze_after_reload
+            TEST_LOGGER.records.clear()
+            with mock.patch.dict(
+                ProactiveMessageMixin._generate_photo_image.__globals__,
+                {"logger": TEST_LOGGER},
+            ):
+                generation = asyncio.create_task(
+                    harness._generate_photo_image(
+                        workflow_kind="selfie",
+                        prompt_text=nai_prompt,
+                        session_key="prompt-format-hot-reload",
+                    )
+                )
+                try:
+                    await asyncio.wait_for(analysis_started.wait(), timeout=3)
+                    harness.photo_generation_prompt_format = "natural_language"
+                    continue_analysis.set()
+                    await asyncio.wait_for(generation, timeout=5)
+                finally:
+                    continue_analysis.set()
+                    if not generation.done():
+                        generation.cancel()
+                    await asyncio.gather(generation, return_exceptions=True)
+
+            start_log = next(
+                message
+                for level, message in TEST_LOGGER.records
+                if level == "info" and "[PrivateCompanion] 生图开始:" in message
+            )
+
+            backend_prompt = harness.backend_calls[0]["prompt"]
+            events = [
+                json.loads(line)
+                for line in (Path(directory) / "photo_generation_trace.txt")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            debug_path = next((Path(directory) / "photo_prompt_debug").glob("*.json"))
+            debug_payload = json.loads(debug_path.read_text(encoding="utf-8"))
+            recent = harness.data["recent_photo_generations"][0]
+
+        self.assertEqual(harness.photo_generation_prompt_format, "natural_language")
+        self.assertTrue(backend_prompt.startswith("User image request:\n"))
+        self.assertIn("1.5::red dress::", backend_prompt)
+        self.assertNotIn("[User image request]", backend_prompt)
+        self.assertNotIn("Positive prompt:", backend_prompt)
+        self.assertNotIn("Negative prompt:", backend_prompt)
+        self.assertNotIn("Create a single coherent image showing", backend_prompt)
+        self.assertIn("prompt_format=nai", start_log)
+        self.assertTrue(all(event["context"]["prompt_format"] == "nai" for event in events))
+        for stage in ("prompt_composed", "backend_selected"):
+            event = next(item for item in events if item["stage"] == stage)
+            self.assertEqual(event["data"]["prompt_format"], "nai")
+        self.assertEqual(debug_payload["prompt_format"], "nai")
+        self.assertEqual(debug_payload["base_prompt"], nai_prompt)
+        self.assertTrue(debug_payload["final_prompt"].startswith("User image request:\n"))
+        self.assertEqual(
+            debug_payload["submitted_prompt_sha256"],
+            hashlib.sha256(backend_prompt.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(recent["prompt_format"], "nai")
+        self.assertTrue(recent["prompt"].startswith("User image request:"))
 
     async def test_matching_outfit_reference_reaches_debug_trace_responsibility(
         self,

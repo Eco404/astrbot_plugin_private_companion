@@ -429,7 +429,9 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._begin_final_response_persistence(event)
         await event.send(SimpleNamespace(chain=[Plain("直接发送后终止传播")]))
-        await asyncio.sleep(0.06)
+        ledger = event._private_companion_delivery_ledger
+        self.assertIsNotNone(ledger.fallback_task)
+        await asyncio.wait_for(ledger.fallback_task, timeout=1)
 
         plugin._finalize_passive_delivered_response.assert_awaited_once()
         call = plugin._finalize_passive_delivered_response.await_args

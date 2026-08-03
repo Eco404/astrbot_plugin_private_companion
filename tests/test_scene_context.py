@@ -98,6 +98,7 @@ class _PhotoPromptHarness(_SceneHarness, ProactiveMessageMixin):
         self.captured_prompt = ""
         self.photo_prompt_provider_id = ""
         self.mai_style_provider_id = ""
+        self.photo_generation_prompt_format = "traditional"
 
     @staticmethod
     def _get_default_persona_prompt() -> str:
@@ -111,9 +112,8 @@ class _PhotoPromptHarness(_SceneHarness, ProactiveMessageMixin):
     def _format_content_choice_options_for_prompt(_action: str) -> str:
         return "笔记本 / 教室窗边 / 随手自拍"
 
-    @staticmethod
-    def _photo_generation_prompt_format_instruction() -> str:
-        return "输出自然英文提示词。"
+    def _photo_generation_prompt_format_instruction(self) -> str:
+        return f"提示词格式：{self.photo_generation_prompt_format}。"
 
     @staticmethod
     def _deferred_immediate_share_tense_hint(*_args, **_kwargs) -> str:
@@ -212,6 +212,26 @@ class SceneContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("白色衬衫", harness.captured_prompt)
         self.assertIn("只帮助选择自然画面", harness.captured_prompt)
         self.assertIn("当前日程", result["scene_context"])
+
+    async def test_proactive_photo_prompt_keeps_format_snapshot_during_llm_wait(self) -> None:
+        harness = _PhotoPromptHarness(str(self.outfit_path))
+        harness.photo_generation_prompt_format = "nai"
+        original_llm_call = harness._llm_call
+
+        async def switch_format(prompt: str, **kwargs) -> str:
+            self.assertIn("提示词格式：nai。", prompt)
+            harness.photo_generation_prompt_format = "natural_language"
+            return await original_llm_call(prompt, **kwargs)
+
+        harness._llm_call = switch_format
+        result = await harness._build_photo_scene_prompt(
+            harness.data["users"]["10001"],
+            "主人",
+            "activity_share",
+        )
+
+        self.assertEqual(result["prompt_format"], "nai")
+        self.assertEqual(harness.photo_generation_prompt_format, "natural_language")
 
     async def test_proactive_photo_prompt_injects_enabled_relationship_cards(self) -> None:
         harness = _PhotoPromptHarness(str(self.outfit_path))
