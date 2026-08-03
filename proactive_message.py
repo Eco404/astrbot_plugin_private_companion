@@ -525,6 +525,15 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         *,
         now: float,
     ) -> str:
+        relationship_gate = getattr(self, "_current_relationship_gate_mode", None)
+        emotion_gate = getattr(self, "_current_emotion_gate_mode", None)
+        try:
+            if callable(relationship_gate) and relationship_gate(user, now=now) == "backoff":
+                return "expression_contact_boundary"
+            if callable(emotion_gate) and emotion_gate(user, now=now) == "hurt":
+                return "expression_interaction_hurt"
+        except Exception:
+            return "expression_boundary_check_unavailable"
         rest_gate = getattr(self, "_proactive_rest_block_until", None)
         if callable(rest_gate):
             try:
@@ -557,6 +566,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 pass
         quiet_checker = getattr(self, "_is_quiet_time", None)
         insomnia_checker = getattr(self, "_can_send_insomnia_night_message", None)
+        quiet = False
         try:
             quiet = bool(quiet_checker()) if callable(quiet_checker) else False
             insomnia_allowed = bool(insomnia_checker(user)) if callable(insomnia_checker) else False
@@ -564,15 +574,40 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 return "private_companion_quiet_hours"
         except Exception:
             pass
-        relation = user.get("relationship_state")
-        if isinstance(relation, dict):
-            mode = _single_line(relation.get("mode"), 24)
-            blocked_until = max(
-                _safe_float(relation.get("backoff_until"), 0),
-                _safe_float(relation.get("hurt_until"), 0),
+        daily_limit_getter = getattr(self, "_effective_user_daily_limit", None)
+        unlimited_checker = getattr(self, "_proactive_daily_limit_is_unlimited", None)
+        reset_daily = getattr(self, "_reset_daily_counter_if_needed", None)
+        try:
+            if callable(reset_daily):
+                reset_daily(user)
+            if not callable(daily_limit_getter):
+                return "expression_allowance_unavailable"
+            daily_limit = _safe_int(daily_limit_getter(user), 0, 0)
+            unlimited = bool(unlimited_checker(daily_limit)) if callable(unlimited_checker) else False
+            if daily_limit <= 0:
+                return "expression_proactive_budget_zero"
+            if not unlimited and _safe_int(user.get("sent_today"), 0, 0) >= daily_limit:
+                return "expression_proactive_budget_exhausted"
+        except Exception:
+            return "expression_allowance_unavailable"
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        try:
+            if not callable(expression_builder):
+                return "expression_decision_unavailable"
+            decision = expression_builder(
+                user,
+                proactive_candidate={"eligible": True, "dynamic_allowance": daily_limit, "current_ts": now},
+                schedule={"quiet_hours": quiet},
+                message_intent={"requested_content_tier": "normal"},
+                now=now,
             )
-            if mode in {"backoff", "hurt", "refusing"} and blocked_until > now:
-                return "relationship_backoff"
+            projection = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+            if _single_line(projection.get("blocker"), 40):
+                return f"expression_{_single_line(projection.get('blocker'), 40)}"
+            if _safe_int(projection.get("proactive_budget"), 0, 0) <= 0:
+                return "expression_proactive_budget_zero"
+        except Exception:
+            return "expression_decision_unavailable"
         collision_window = max(
             10,
             min(
@@ -2000,10 +2035,31 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         labeler = getattr(self, "_private_user_role_label", None)
         label = labeler(role) if callable(labeler) else ("主要用户" if role == "owner" else "次要用户")
         profile = self._relationship_profile(user if isinstance(user, dict) else {})
-        level = _single_line(profile.get("level"), 20) or "熟悉"
-        preference = _single_line(profile.get("preference"), 20) or "普通"
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        expression: dict[str, Any] = {}
+        if callable(expression_builder):
+            try:
+                decision = expression_builder(
+                    user if isinstance(user, dict) else {},
+                    proactive_candidate={"eligible": True, "daily_allowance": 1},
+                    message_intent={"requested_content_tier": "normal"},
+                )
+                expression = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+            except Exception:
+                expression = {}
         note = _single_line(user.get("proactive_boundary_note"), 80) if isinstance(user, dict) else ""
-        parts = [f"当前用户角色：{label}", f"关系熟悉度：{level}", f"互动偏好：{preference}"]
+        parts: list[str] = []
+        if expression:
+            parts.append(
+                f"统一表达决策：角色={label}，"
+                f"长期阶段={_single_line(profile.get('stage_label'), 20) or '初识'}，"
+                f"档位={_single_line(expression.get('expression_band'), 20) or 'relaxed'}，"
+                f"语气={_single_line(expression.get('tone'), 20) or 'steady'}，"
+                f"追问={'允许' if expression.get('followup') else '关闭'}，"
+                f"主动额度={_safe_int(expression.get('proactive_budget'), 0, 0)}"
+            )
+        else:
+            parts.append(f"统一表达决策不可用：角色={label}，使用低压日常表达")
         if note:
             parts.append(f"用户级备注：{note}")
         return "；".join(parts)
@@ -2721,6 +2777,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         temperature_label = _single_line(temperature.get("label"), 60)
         temperature_score = _safe_float(temperature.get("score"), 0.55)
         motivation = readiness.get("motivation") if isinstance(readiness.get("motivation"), dict) else {}
+        expression_decision = readiness.get("expression_decision") if isinstance(readiness.get("expression_decision"), dict) else {}
 
         lines = ["【这次主动的内在约束】"]
         troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
@@ -2735,13 +2792,23 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if readiness_label or temperature_label:
             lines.append(
                 f"开口欲：{readiness_label or '平稳'} {readiness_score:.2f}；"
-                f"关系温度：{temperature_label or '平稳'} {temperature_score:.2f}。"
+                f"主动表达温度：{temperature_label or '平稳'} {temperature_score:.2f}。"
             )
         if motivation:
             lines.append(
                 f"实验动机调度：{_single_line(motivation.get('label'), 24)} "
                 f"{_safe_float(motivation.get('score'), 0.5):.2f}；"
                 f"{_single_line(motivation.get('detail'), 120)}。"
+            )
+        if expression_decision:
+            lines.append(
+                "统一表达："
+                f"档位={_single_line(expression_decision.get('expression_band'), 24) or 'relaxed'}；"
+                f"语气={_single_line(expression_decision.get('tone'), 24) or 'steady'}；"
+                f"距离={_single_line(expression_decision.get('address_style'), 24) or 'neutral'}；"
+                f"追问={'允许' if expression_decision.get('followup') else '关闭'}；"
+                f"主动额度={_safe_int(expression_decision.get('proactive_budget'), 0, 0)}；"
+                "内容尺度=normal。"
             )
         afterglow = user.get("proactive_afterglow") if isinstance(user.get("proactive_afterglow"), dict) else {}
         if afterglow:
@@ -2847,7 +2914,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             lines.append("对方最近还没回应：不要连续提问，不要控诉，也不要把沉默写成对方故意不理。")
         if "message" == str(action or "message") and not _single_line(action_context, 120):
             lines.append("本轮没有真实媒体或工具结果：正文只围绕聊天内容本身，不描述动作结果。")
-        lines.append("以上只用于决定怎么写，最终正文里不要出现“语义/自然度/压力/风险/开口欲/关系温度/犹豫”等分析词。")
+        lines.append("以上只用于决定怎么写，最终正文里不要出现“语义/自然度/压力/风险/开口欲/主动表达温度/犹豫”等分析词。")
         return "\n".join(lines) if len(lines) > 2 else ""
 
     def _unexecuted_relay_claim_reason(self, text: str, *, action_context: str = "") -> str:
@@ -6475,15 +6542,25 @@ Output:
         if daily_limit <= 0 or (not unlimited and _safe_int(user.get("sent_today"), 0) >= daily_limit):
             return "daily_proactive_limit"
 
-        relation = user.get("relationship_state")
-        if isinstance(relation, dict):
-            mode = _single_line(relation.get("mode"), 24).lower()
-            blocked_until = max(
-                _safe_float(relation.get("backoff_until"), 0),
-                _safe_float(relation.get("hurt_until"), 0),
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        if not callable(expression_builder):
+            return "expression_decision_unavailable"
+        try:
+            decision = expression_builder(
+                user,
+                proactive_candidate={"eligible": True, "dynamic_allowance": daily_limit, "current_ts": now},
+                message_intent={"requested_content_tier": "normal"},
+                now=now,
             )
-            if mode in {"backoff", "hurt", "refusing"} and blocked_until > now:
-                return "relationship_backoff"
+            expression = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+        except Exception:
+            return "expression_decision_unavailable"
+        if _single_line(expression.get("blocker"), 40):
+            return f"expression_{_single_line(expression.get('blocker'), 40)}"
+        if _safe_float(expression.get("proactive_cooldown_until"), 0) > now:
+            return "expression_proactive_cooldown"
+        if _safe_int(expression.get("proactive_budget"), 0, 0) <= 0:
+            return "expression_proactive_budget_zero"
         if bool(user.get("proactive_sending")):
             return "another_proactive_message_is_sending"
         if require_screen and not self._screen_glance_available(user):

@@ -1890,7 +1890,8 @@ class ProactiveEngineMixin:
     def _planned_proactive_model_judge_signature(self, user: dict[str, Any]) -> str:
         persona = _single_line(str(self._get_default_persona_prompt() or ""), 800)
         worldview = _single_line(str(self._format_worldview_adaptation_prompt() or ""), 400)
-        rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
+        interaction = user.get("current_interaction") if isinstance(user.get("current_interaction"), dict) else {}
+        contact = user.get("contact_preference") if isinstance(user.get("contact_preference"), dict) else {}
         semantics = self._planned_proactive_semantics(user)
         ignored = _safe_int(user.get("ignored_streak"), 0, 0)
         parts = [
@@ -1907,7 +1908,8 @@ class ProactiveEngineMixin:
             f"semantic={int(_safe_float(semantics.get('score'), 0.5) * 5)}",
             f"pressure={int(_safe_float(semantics.get('pressure'), 0.4) * 5)}",
             f"risk={int(_safe_float(semantics.get('risk'), 0.0) * 5)}",
-            rel_state.get("mode") if isinstance(rel_state, dict) else "",
+            interaction.get("expression_band") or "",
+            contact.get("mode") or "",
             "ignored=0" if ignored <= 0 else "ignored=1" if ignored == 1 else "ignored=2+",
             persona,
             worldview,
@@ -2099,7 +2101,7 @@ class ProactiveEngineMixin:
 - 连续未回应：{_safe_int(user.get("ignored_streak"), 0, 0)}
 - 最近用户消息：{_single_line(user.get("last_user_message"), 160) or "（无）"}
 - 最近 Bot 消息：{_single_line(user.get("last_companion_message"), 160) or "（无）"}
-- Bot 当前开口欲/关系温度：{_safe_float(inner_readiness.get("score"), 0.55):.2f}｜{_single_line(inner_readiness.get("label"), 60)}｜{_single_line(inner_readiness.get("detail"), 180)}
+- Bot 当前开口欲/主动表达温度：{_safe_float(inner_readiness.get("score"), 0.55):.2f}｜{_single_line(inner_readiness.get("label"), 60)}｜{_single_line(inner_readiness.get("detail"), 180)}
 
 【当前主动计划】
 - source：{self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or "unknown"}
@@ -3575,28 +3577,15 @@ class ProactiveEngineMixin:
                 return False, "已安排下一次候选主动时间"
             if now < pre_gate_next_at:
                 return False, "未到候选主动时间"
-        rel_state = user.get("relationship_state")
-        relationship_blocked = (
-            not is_troubleshooting
-            and
-            self.enable_relationship_state_machine
-            and isinstance(rel_state, dict)
-            and rel_state.get("mode") == "backoff"
-            and _safe_float(rel_state.get("backoff_until"), 0) > _now_ts()
-        )
-        emotion_blocked = (
-            not is_troubleshooting
-            and
-            bool(getattr(self, "enable_emotion_simulation", True))
-            and isinstance(rel_state, dict)
-            and rel_state.get("mode") in {"hurt", "refusing"}
-            and _safe_float(rel_state.get("hurt_until"), 0) > _now_ts()
-        )
+        relationship_mode = self._current_relationship_gate_mode(user, now=now) if not is_troubleshooting else ""
+        emotion_mode = self._current_emotion_gate_mode(user, now=now) if not is_troubleshooting else ""
+        relationship_blocked = relationship_mode == "backoff"
+        emotion_blocked = emotion_mode == "hurt"
         if relationship_blocked or emotion_blocked:
-            gate_until = max(
-                _safe_float(rel_state.get("hurt_until"), 0),
-                _safe_float(rel_state.get("backoff_until"), 0),
-            )
+            interaction = user.get("current_interaction") if isinstance(user.get("current_interaction"), dict) else {}
+            gate_until = _safe_float(interaction.get("expires_at"), 0)
+            if relationship_blocked:
+                gate_until = max(gate_until, now + 6 * 3600)
             before_next_at = _safe_float(user.get("next_proactive_at"), 0)
             adjuster = getattr(self, "_defer_or_clean_emotion_blocked_plan", None)
             if callable(adjuster):
@@ -3611,17 +3600,10 @@ class ProactiveEngineMixin:
                 user["planned_proactive_best_until_at"] = after_next_at + 45 * 60
                 user["planned_proactive_expire_at"] = after_next_at + 90 * 60
             logger.info(
-                "[PrivateCompanion] 情绪/关系闸门拦截主动: user=%s mode=%s score=%s gate_until=%s reason=%s",
-                _single_line(user.get("user_id") or user.get("umo") or user.get("nickname"), 80),
-                _single_line(rel_state.get("mode"), 24),
-                _safe_int(rel_state.get("mood_score"), 0, -100, 100),
+                "[PrivateCompanion] 统一互动/联系边界闸门拦截主动: mode=%s gate_until=%s reason=%s",
+                relationship_mode or emotion_mode,
                 int(gate_until),
-                _single_line(
-                    rel_state.get("last_hurt_reason")
-                    or rel_state.get("last_backoff_reason")
-                    or rel_state.get("last_emotion_reason"),
-                    80,
-                ),
+                _single_line(interaction.get("reason"), 80),
             )
             return False, adjusted_reason
 
@@ -3707,13 +3689,13 @@ class ProactiveEngineMixin:
             self._defer_or_replace_planned_impulse(
                 user,
                 now=now,
-                note="Bot 状态/关系温度偏低,这个念头先忍住: " + _single_line(inner_readiness.get("detail"), 120),
+                note="Bot 状态/主动表达温度偏低,这个念头先忍住: " + _single_line(inner_readiness.get("detail"), 120),
                 delay_minutes=(delay_low, delay_low + 150),
                 block_current=False,
             )
             if _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=now, delay_hours=(2.0, 6.0))
-            return False, "Bot 状态/关系温度偏低,主动念头先收住"
+            return False, "Bot 状态/主动表达温度偏低,主动念头先收住"
         social_relay_note = self._unverified_social_relay_plan_reason(
             user,
             source=planned_source,
@@ -4291,23 +4273,12 @@ class ProactiveEngineMixin:
             blocker=quiet_blocked,
         )
 
-        rel_state = user.get("relationship_state")
-        relationship_blocked = (
-            self.enable_relationship_state_machine
-            and isinstance(rel_state, dict)
-            and rel_state.get("mode") == "backoff"
-            and _safe_float(rel_state.get("backoff_until"), 0) > now
-        )
-        emotion_blocked = (
-            bool(getattr(self, "enable_emotion_simulation", True))
-            and isinstance(rel_state, dict)
-            and rel_state.get("mode") in {"hurt", "refusing"}
-            and _safe_float(rel_state.get("hurt_until"), 0) > now
-        )
+        relationship_mode = self._current_relationship_gate_mode(user, now=now)
+        emotion_mode = self._current_emotion_gate_mode(user, now=now)
+        relationship_blocked = relationship_mode == "backoff"
+        emotion_blocked = emotion_mode == "hurt"
         relation_ok = not (relationship_blocked or emotion_blocked)
-        relation_detail = "状态平稳"
-        if isinstance(rel_state, dict) and rel_state.get("mode"):
-            relation_detail = f"mode={_single_line(rel_state.get('mode'), 24)}"
+        relation_detail = f"mode={relationship_mode or emotion_mode}" if not relation_ok else "状态平稳"
         add(
             "relationship_gate",
             "关系/情绪闸门",
@@ -4387,7 +4358,7 @@ class ProactiveEngineMixin:
         temp_score = _safe_float(temperature.get("score"), 0.55)
         add(
             "relationship_temperature",
-            "关系温度",
+            "主动表达温度",
             temp_score >= 0.34,
             7 if temp_score >= 0.7 else 3 if temp_score >= 0.48 else -16,
             f"{temp_score:.2f}｜{_single_line(temperature.get('label'), 24)}｜{_single_line(temperature.get('detail'), 80)}",

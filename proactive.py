@@ -104,6 +104,8 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .relationship_policy import relationship_stage_for_score
+from .companion_interaction_expression import current_interaction_projection
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -1087,13 +1089,33 @@ class ProactiveMixin:
         max_daily_messages = self._runtime_max_daily_messages()
         if max_daily_messages <= 0 or override == 0:
             return 0
-        if self._proactive_intensity_ignores_daily_limit():
-            return self._PROACTIVE_DAILY_LIMIT_UNLIMITED
-        if override is not None:
-            return override
-        if self._private_user_role(user) == "friend":
-            return min(max_daily_messages, 2) if max_daily_messages > 0 else 0
-        return max(0, max_daily_messages)
+        user_limit = max_daily_messages if override is None else max(0, override)
+        role = self._private_user_role(user)
+        mode = str(user.get("relationship_mode") or "normal")
+        if role == "owner" and mode == "owner_exclusive":
+            stage_limit = _safe_int(getattr(self, "owner_exclusive_proactive_limit", 6), 6, 0, 30)
+        else:
+            policy = (
+                getattr(self, "relationship_stage_policy", None)
+                if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+                else None
+            )
+            stage = relationship_stage_for_score(user.get("relationship_score", 0), policy).get("phase", {})
+            stage_limit = _safe_int(stage.get("proactive_care_limit"), 0, 0, 30)
+        interaction = current_interaction_projection(
+            user.get("current_interaction"),
+            relationship_role=role,
+            relationship_mode=mode,
+            relationship_score=user.get("relationship_score"),
+            normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
+            now=_now_ts(),
+        )
+        if str(interaction.get("expression_band") or "relaxed") in {"avoidant", "hurt"}:
+            dynamic_limit = 0
+        else:
+            ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
+            dynamic_limit = 0 if ignored >= 2 else min(max_daily_messages, 1) if ignored == 1 else max_daily_messages
+        return max(0, min(max_daily_messages, user_limit, stage_limit, dynamic_limit))
 
     def _runtime_max_daily_messages(self) -> int:
         runtime_value = _safe_int(getattr(self, "max_daily_messages", 8), 8, 0, 12)
@@ -1693,16 +1715,14 @@ class ProactiveMixin:
             "score": score,
             "label": label,
             "detail": "；".join(reasons[:4]),
+            "energy": energy,
+            "mood": mood,
         }
 
-    def _relationship_proactive_temperature(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    def _proactive_response_readiness(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
         check_now = _now_ts() if now is None else now
         score = 0.54
         reasons: list[str] = []
-        relationship_score = _safe_int(user.get("relationship_score"), 0, -100, 300)
-        if relationship_score:
-            score += max(-0.08, min(0.14, relationship_score / 500.0))
-            reasons.append(f"关系分{relationship_score}")
         ignored_streak = _safe_int(user.get("ignored_streak"), 0, 0, 20)
         if ignored_streak:
             score -= min(0.32, ignored_streak * 0.08)
@@ -1720,20 +1740,6 @@ class ProactiveMixin:
         if awaiting_since > 0 and check_now - awaiting_since > 4 * 3600:
             score -= 0.08
             reasons.append("上一轮还悬着")
-        rel_state = user.get("relationship_state")
-        mode = str(rel_state.get("mode") or "") if isinstance(rel_state, dict) else ""
-        if mode == "attached":
-            score += 0.08
-            reasons.append("关系贴近")
-        elif mode == "careful":
-            score -= 0.08
-            reasons.append("关系谨慎")
-        elif mode in {"hurt", "refusing", "backoff"}:
-            score -= 0.22
-            reasons.append(f"关系{mode}")
-        if self._private_user_role(user) == "friend":
-            score -= 0.04
-            reasons.append("朋友边界")
         score = max(0.05, min(1.0, score))
         if score >= 0.7:
             label = "温热"
@@ -1744,13 +1750,76 @@ class ProactiveMixin:
         return {
             "score": score,
             "label": label,
-            "detail": "；".join(reasons[:5]) or "互动平稳",
+            "detail": "；".join(reasons[:5]) or "回应节奏平稳",
+        }
+
+    def _relationship_proactive_temperature(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+        drive: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility projection derived from the unified expression decision."""
+        check_now = _now_ts() if now is None else now
+        drive = drive if isinstance(drive, dict) else self._bot_proactive_drive(user, now=check_now)
+        response = self._proactive_response_readiness(user, now=check_now)
+        readiness_score = (
+            _safe_float(drive.get("score"), 0.55) * 0.48
+            + _safe_float(response.get("score"), 0.55) * 0.52
+        )
+        quiet_hours_active = False
+        quiet_end_getter = getattr(self, "_quiet_hours_end_timestamp", None)
+        if callable(quiet_end_getter):
+            try:
+                quiet_hours_active = _safe_float(quiet_end_getter(check_now), 0) > check_now
+            except Exception:
+                quiet_hours_active = False
+        expression_decision: dict[str, Any] = {}
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        if callable(expression_builder):
+            try:
+                decision = expression_builder(
+                    user,
+                    proactive_candidate={
+                        "eligible": True,
+                        "dynamic_allowance": self._effective_user_daily_limit(user),
+                        "readiness_score": int(max(0.0, min(1.0, readiness_score)) * 100),
+                        "current_ts": check_now,
+                    },
+                    bot_state={"energy": drive.get("energy"), "mood": drive.get("mood")},
+                    schedule={"quiet_hours": quiet_hours_active},
+                    message_intent={"requested_content_tier": "normal"},
+                    now=check_now,
+                )
+                expression_decision = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+            except Exception:
+                expression_decision = {}
+        expression_warmth = _safe_float(expression_decision.get("warmth"), 55, 0, 100) / 100.0
+        score = response.get("score", 0.55) * 0.4 + expression_warmth * 0.6
+        if expression_decision and _safe_int(expression_decision.get("proactive_budget"), 0, 0) <= 0:
+            score = min(score, 0.2)
+        score = max(0.05, min(1.0, score))
+        label = "温热" if score >= 0.7 else "偏冷" if score <= 0.38 else "普通"
+        reason_codes = expression_decision.get("reason_codes") if isinstance(expression_decision.get("reason_codes"), (list, tuple)) else []
+        detail = "；".join(_single_line(item, 48) for item in reason_codes[:4]) or str(response.get("detail") or "统一表达平稳")
+        return {
+            "score": score,
+            "label": label,
+            "detail": detail,
+            "expression_band": _single_line(expression_decision.get("expression_band"), 24) or "relaxed",
+            "expression_decision": expression_decision,
+            "response_readiness": response,
         }
 
     def _proactive_inner_readiness(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+        check_now = _now_ts() if now is None else now
         drive = self._bot_proactive_drive(user, now=now)
-        temperature = self._relationship_proactive_temperature(user, now=now)
+        temperature = self._relationship_proactive_temperature(user, now=check_now, drive=drive)
         score = _safe_float(drive.get("score"), 0.55) * 0.48 + _safe_float(temperature.get("score"), 0.55) * 0.52
+        expression_decision = temperature.get("expression_decision") if isinstance(temperature.get("expression_decision"), dict) else {}
+        if expression_decision and _safe_int(expression_decision.get("proactive_budget"), 0, 0) <= 0:
+            score = min(score, 0.2)
         motivation: dict[str, Any] = {}
         if bool(getattr(self, "enable_experimental_motivation_model", False)):
             motivation = self._experimental_proactive_motivation(user, now=now, drive=drive, temperature=temperature)
@@ -1764,6 +1833,8 @@ class ProactiveMixin:
             "drive": drive,
             "temperature": temperature,
         }
+        if expression_decision:
+            result["expression_decision"] = expression_decision
         if motivation:
             result["motivation"] = motivation
             result["detail"] = f"{result['detail']}; 动机:{motivation.get('label')} {motivation.get('detail')}"
@@ -2058,29 +2129,20 @@ class ProactiveMixin:
         return (min_hours, max_hours)
 
     def _current_emotion_gate_mode(self, user: dict[str, Any], *, now: float | None = None) -> str:
-        if not bool(getattr(self, "enable_emotion_simulation", True)):
-            return ""
-        rel_state = user.get("relationship_state")
-        if not isinstance(rel_state, dict):
-            return ""
-        check_now = _now_ts() if now is None else now
-        mode = str(rel_state.get("mode") or "")
-        if mode in {"hurt", "refusing"} and _safe_float(rel_state.get("hurt_until"), 0) <= check_now:
-            return ""
-        if mode in {"hurt", "refusing", "attached"}:
-            return mode
+        projection = self._relationship_proactive_temperature(user, now=now).get("expression_decision")
+        band = _single_line(projection.get("expression_band"), 24) if isinstance(projection, dict) else ""
+        if band == "hurt":
+            return "hurt"
+        if band == "avoidant" and not _single_line(projection.get("blocker"), 40):
+            return "refusing"
         return ""
 
     def _current_relationship_gate_mode(self, user: dict[str, Any], *, now: float | None = None) -> str:
-        rel_state = user.get("relationship_state")
-        if not isinstance(rel_state, dict):
+        projection = self._relationship_proactive_temperature(user, now=now).get("expression_decision")
+        if not isinstance(projection, dict):
             return ""
-        check_now = _now_ts() if now is None else now
-        mode = str(rel_state.get("mode") or "")
-        if mode == "backoff" and bool(getattr(self, "enable_relationship_state_machine", True)):
-            return "backoff" if _safe_float(rel_state.get("backoff_until"), 0) > check_now else ""
-        if mode == "careful" and bool(getattr(self, "enable_relationship_state_machine", True)):
-            return "careful"
+        if _single_line(projection.get("blocker"), 40) == "contact_boundary" or _single_line(projection.get("safety_mode"), 40).startswith("contact_boundary"):
+            return "backoff"
         return ""
 
     @staticmethod
@@ -2215,10 +2277,12 @@ class ProactiveMixin:
             or self._proactive_action_is_intimate(action)
             or self._proactive_text_is_intimate(reason, action, motive, topic)
         )
-        rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
-        hurt_until = _safe_float(rel_state.get("hurt_until"), 0)
-        backoff_until = _safe_float(rel_state.get("backoff_until"), 0)
-        gate_until = max(hurt_until, backoff_until)
+        expression_projection = self._relationship_proactive_temperature(user, now=check_now).get("expression_decision")
+        gate_until = (
+            _safe_float(expression_projection.get("proactive_cooldown_until"), 0)
+            if isinstance(expression_projection, dict)
+            else 0
+        )
         base_after = max(check_now + 90 * 60, gate_until + random.uniform(15 * 60, 75 * 60))
         if intimate or mode in {"refusing", "backoff"}:
             self._mark_planned_candidate_status(user, "deferred", f"情绪 {mode}: 亲密主动候选已清理/延后")

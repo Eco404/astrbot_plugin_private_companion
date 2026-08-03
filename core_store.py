@@ -114,7 +114,15 @@ from .helpers import (
     _strip_persisted_chat_control_tags,
     _today_key,
 )
+from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
 from .config_migration import _ensure_config_parent_dir
+from .relationship_ledger import (
+    apply_natural_relationship_decay,
+    apply_relationship_event,
+    clamp_relationship_positive_stage_cap,
+    normalize_relationship_mode,
+    normalize_relationship_positive_stage_cap_key,
+)
 from .storage.store_manager import StoreManager
 from .planning import (
     build_daily_plan_prompt,
@@ -1436,6 +1444,96 @@ class CoreStoreMixin:
             user["relationship_role"] = role
         return role
 
+    def _ensure_relationship_user_state(self, user: dict[str, Any], *, created: bool = False) -> bool:
+        """Lazily normalize additive relationship fields without migrating user identity or data paths."""
+        before = {
+            "relationship_mode": user.get("relationship_mode"),
+            "relationship_score": user.get("relationship_score"),
+            "relationship_positive_stage_cap_key": user.get("relationship_positive_stage_cap_key"),
+            "normal_interaction_band_cap": user.get("normal_interaction_band_cap"),
+            "current_interaction": deepcopy(user.get("current_interaction")),
+            "relationship_decay_settled_day": user.get("relationship_decay_settled_day"),
+            "relationship_last_decay_stage_drop_at": user.get("relationship_last_decay_stage_drop_at"),
+        }
+        user["relationship_mode"] = normalize_relationship_mode(
+            user.get("relationship_mode"),
+            user.get("relationship_role"),
+        )
+        positive_cap = normalize_relationship_positive_stage_cap_key(
+            getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded")
+        )
+        interaction_cap = normalize_normal_interaction_band_cap(
+            getattr(self, "normal_interaction_band_cap", "warm")
+        )
+        user["relationship_positive_stage_cap_key"] = positive_cap
+        user["normal_interaction_band_cap"] = interaction_cap
+        clamp_relationship_positive_stage_cap(user, cap_key=positive_cap)
+        raw_interaction = user.get("current_interaction")
+        if created and not raw_interaction:
+            raw_interaction = {
+                "expression_band": str(getattr(self, "default_interaction_band", "relaxed") or "relaxed"),
+                "source": "default_profile",
+                "reason": "profile_created",
+                "updated_at": _now_ts(),
+                "expires_at": 0,
+                "manual_override": False,
+            }
+        user["current_interaction"] = current_interaction_projection(
+            raw_interaction,
+            relationship_role=user.get("relationship_role"),
+            relationship_mode=user.get("relationship_mode"),
+            relationship_score=user.get("relationship_score"),
+            normal_interaction_band_cap=interaction_cap,
+            now=_now_ts(),
+        )
+        apply_natural_relationship_decay(
+            user,
+            grace_days=int(getattr(self, "relationship_decay_grace_days", 3)),
+            early_rate=int(getattr(self, "relationship_decay_early_per_day", 2)),
+            middle_rate=int(getattr(self, "relationship_decay_middle_per_day", 5)),
+            late_rate=int(getattr(self, "relationship_decay_late_per_day", 8)),
+            policy=(
+                getattr(self, "relationship_stage_policy", None)
+                if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+                else None
+            ),
+        )
+        after = {
+            "relationship_mode": user.get("relationship_mode"),
+            "relationship_score": user.get("relationship_score"),
+            "relationship_positive_stage_cap_key": user.get("relationship_positive_stage_cap_key"),
+            "normal_interaction_band_cap": user.get("normal_interaction_band_cap"),
+            "current_interaction": user.get("current_interaction"),
+            "relationship_decay_settled_day": user.get("relationship_decay_settled_day"),
+            "relationship_last_decay_stage_drop_at": user.get("relationship_last_decay_stage_drop_at"),
+        }
+        return before != after
+
+    def _apply_relationship_event(
+        self,
+        user: dict[str, Any],
+        delta: int,
+        *,
+        reason_code: str,
+        event_id: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        result = apply_relationship_event(
+            user,
+            delta,
+            reason_code=reason_code,
+            event_id=event_id or None,
+            now=now,
+            positive_daily_cap=int(getattr(self, "relationship_positive_daily_cap", 12)),
+            event_window_seconds=int(getattr(self, "relationship_event_window_minutes", 30)) * 60,
+            positive_event_cap=int(getattr(self, "relationship_positive_event_cap", 4)),
+            negative_event_cap=int(getattr(self, "relationship_negative_event_cap", 12)),
+            positive_stage_cap_key=getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded"),
+        )
+        if result.get("changed"):
+            self._schedule_data_save()
+        return result
+
     def _get_user(self, user_id: str) -> dict[str, Any]:
         original_user_id = str(user_id or "").strip()
         user_id = self._canonical_private_user_id(original_user_id)
@@ -1457,6 +1555,7 @@ class CoreStoreMixin:
             if key not in user:
                 user[key] = deepcopy(default_value)
         self._ensure_private_user_role(user_id, user)
+        relationship_changed = self._ensure_relationship_user_state(user, created=created)
         user.setdefault("manual_enabled", False)
         user.setdefault("manual_disabled", False)
         if (
@@ -1476,6 +1575,8 @@ class CoreStoreMixin:
             user["nickname"] = self.default_nickname
         if not user.get("style"):
             user["style"] = self.default_style
+        if relationship_changed:
+            self._schedule_data_save()
         return user
 
     def _latest_user_activity_ts(self, user: dict[str, Any] | None) -> float:
