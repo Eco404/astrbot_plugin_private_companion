@@ -905,7 +905,11 @@ class GroupObservationMixin:
         blocked_by_guard = bool(injection_guard.get("blocked"))
         group["group_id"] = str(group_id or group.get("group_id") or group.get("id") or "")
         group_name = self._group_name_from_event(event)
-        if group_name and group_name != group["group_id"]:
+        manual_group_name = _single_line(group.get("manual_group_name"), 80)
+        if manual_group_name:
+            group["name"] = manual_group_name
+            group["group_name"] = manual_group_name
+        elif group_name and group_name != group["group_id"]:
             group["name"] = group_name
             group["group_name"] = group_name
             group["last_group_name_seen_at"] = now
@@ -4277,4 +4281,3 @@ avoid 写清楚哪些严肃、排障、工具失败、低落或边界场景不�
         if lines:
             logger.info("[PrivateCompanion] 群黑话联网参考已收集: group=%s term=%s", group_id, term)
         return "\n".join(lines)[:1800]
-

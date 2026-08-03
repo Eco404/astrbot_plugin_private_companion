@@ -39,7 +39,7 @@ _EVENT_REASON_ALIASES = {
 }
 DEFAULT_DECAY_GRACE_DAYS = 3
 RELATIONSHIP_SCORE_SCHEMA_VERSION = 2
-_LEGACY_SCORE_ANCHORS = (
+_LEGACY_SCORE_ANCHORS: tuple[tuple[int, int], ...] = (
     (-120, -1200),
     (-80, -800),
     (-40, -400),
@@ -88,8 +88,10 @@ def relationship_positive_score_cap(value: Any) -> int:
     return _POSITIVE_STAGE_SCORE_MAX[normalize_relationship_positive_stage_cap_key(value)]
 
 
-def _legacy_score_to_current(value: Any) -> int:
-    score = _integer(value) or 0
+def legacy_relationship_score_to_v2(value: Any) -> int:
+    """Translate a legacy score while preserving the old asymmetric stages."""
+    parsed = _integer(value)
+    score = parsed if parsed is not None else 0
     if score <= _LEGACY_SCORE_ANCHORS[0][0]:
         return _LEGACY_SCORE_ANCHORS[0][1]
     if score >= _LEGACY_SCORE_ANCHORS[-1][0]:
@@ -104,54 +106,107 @@ def _legacy_score_to_current(value: Any) -> int:
     return 0
 
 
+def _repair_relationship_score_migration_audits(user: dict[str, Any]) -> bool:
+    """Keep earlier v2 migration audits from being counted as relationship drift."""
+    ledger = user.get("relationship_ledger")
+    if not isinstance(ledger, list):
+        return False
+    changed = False
+    for entry in ledger:
+        if not isinstance(entry, dict) or entry.get("reason_code") != "relationship_score_schema_migration":
+            continue
+        if _integer(entry.get("delta")) != 0:
+            entry["delta"] = 0
+            changed = True
+    return changed
+
+
+def migrate_relationship_score_schema(
+    user: Any,
+    *,
+    created: bool = False,
+    now: Any = None,
+    record_id: Any = None,
+) -> dict[str, Any]:
+    """Idempotently initialize new records or translate one persisted v1 score."""
+    if not isinstance(user, dict):
+        return _result(False, "invalid_user")
+    version = _integer(user.get("relationship_score_schema_version")) or 0
+    repaired = _repair_relationship_score_migration_audits(user)
+    if version >= RELATIONSHIP_SCORE_SCHEMA_VERSION:
+        code = "relationship_score_migration_audit_repaired" if repaired else "relationship_score_schema_current"
+        return _result(repaired, code, score=_score(user.get("relationship_score")))
+
+    if created:
+        user["relationship_score_schema_version"] = RELATIONSHIP_SCORE_SCHEMA_VERSION
+        return _result(True, "relationship_score_schema_initialized", score=_score(user.get("relationship_score")))
+
+    ts = _timestamp(now)
+    parsed_before = _integer(user.get("relationship_score"))
+    before = parsed_before if parsed_before is not None else 0
+    after = legacy_relationship_score_to_v2(before)
+    clean_record_id = str(record_id or user.get("user_id") or "").strip()[:160]
+    metadata = {
+        "source_schema_version": version or 1,
+        "target_schema_version": RELATIONSHIP_SCORE_SCHEMA_VERSION,
+        "mapping": "legacy_piecewise_linear_v1",
+        "score_before": before,
+        "score_after": after,
+        "migrated_at": ts,
+    }
+    if clean_record_id:
+        metadata["record_id"] = clean_record_id
+
+    user["relationship_score"] = after
+    user["relationship_score_schema_version"] = RELATIONSHIP_SCORE_SCHEMA_VERSION
+    user["relationship_score_migration"] = deepcopy(metadata)
+    history = user.setdefault("relationship_score_migration_history", [])
+    if not isinstance(history, list):
+        history = []
+        user["relationship_score_migration_history"] = history
+    history.append(deepcopy(metadata))
+    if len(history) > 20:
+        del history[:-20]
+
+    last_effective = _finite_number(user.get("relationship_last_effective_at")) or 0.0
+    user["relationship_last_effective_at"] = max(last_effective, ts)
+    user["relationship_decay_settled_day"] = ""
+    ledger = user.setdefault("relationship_ledger", [])
+    if not isinstance(ledger, list):
+        ledger = []
+        user["relationship_ledger"] = ledger
+    event_source = (
+        f"relationship_score_schema:{version or 1}:{RELATIONSHIP_SCORE_SCHEMA_VERSION}:"
+        f"{clean_record_id}:{before}:{after}"
+    )
+    entry = {
+        "event_key": sha256(event_source.encode("utf-8")).hexdigest()[:24],
+        "reason_code": "relationship_score_schema_migration",
+        # Scale translation is an audit event, not a relationship change.
+        "delta": 0,
+        "score_before": before,
+        "score_after": after,
+        "created_at": ts,
+        "source": "schema_migration",
+        **deepcopy(metadata),
+    }
+    ledger.append(entry)
+    if len(ledger) > 200:
+        del ledger[:-200]
+    result = _result(True, "relationship_score_schema_migrated", score=after, entry=deepcopy(entry))
+    result["migration"] = deepcopy(metadata)
+    return result
+
+
 def migrate_legacy_relationship_score(
     user: Any,
     *,
     created: bool = False,
     now: Any = None,
+    record_id: Any = None,
 ) -> dict[str, Any]:
-    """Idempotently convert the pre-v2 companion score into the staged scale."""
-    if not isinstance(user, dict):
-        return _result(False, "invalid_user")
-    version = _integer(user.get("relationship_score_schema_version")) or 0
-    before = _score(user.get("relationship_score"))
-    if version >= RELATIONSHIP_SCORE_SCHEMA_VERSION:
-        return _result(False, "relationship_score_schema_current", score=before)
-
-    ts = _timestamp(now)
-    after = before if created else _legacy_score_to_current(before)
-    user["relationship_score"] = after
-    user["relationship_score_schema_version"] = RELATIONSHIP_SCORE_SCHEMA_VERSION
-    user["relationship_score_migration"] = {
-        "schema_from": version,
-        "schema_to": RELATIONSHIP_SCORE_SCHEMA_VERSION,
-        "legacy_score": before,
-        "migrated_score": after,
-        "migrated_at": ts,
-        "created_profile": bool(created),
-    }
-    if not created and after > 0:
-        user["relationship_last_effective_at"] = ts
-    if not created and before != after:
-        ledger = user.setdefault("relationship_ledger", [])
-        if not isinstance(ledger, list):
-            ledger = []
-            user["relationship_ledger"] = ledger
-        entry = {
-            "event_key": f"relationship_score_schema_v{RELATIONSHIP_SCORE_SCHEMA_VERSION}",
-            "reason_code": "relationship_score_schema_migration",
-            "delta": after - before,
-            "score_before": before,
-            "score_after": after,
-            "created_at": ts,
-            "schema_from": version,
-            "schema_to": RELATIONSHIP_SCORE_SCHEMA_VERSION,
-        }
-        ledger.append(entry)
-        if len(ledger) > 200:
-            del ledger[:-200]
-        return _result(True, "legacy_relationship_score_migrated", score=after, delta=after - before, entry=deepcopy(entry))
-    return _result(True, "relationship_score_schema_initialized", score=after)
+    """Backward-compatible name for the relationship score schema migration."""
+    return migrate_relationship_score_schema(user, created=created, now=now, record_id=record_id)
 
 
 def _effective_positive_stage_cap_key(user: dict[str, Any], configured: Any = None) -> str:
@@ -621,7 +676,9 @@ __all__ = [
     "apply_relationship_event",
     "clamp_relationship_positive_stage_cap",
     "is_owner_exclusive",
+    "legacy_relationship_score_to_v2",
     "migrate_legacy_relationship_score",
+    "migrate_relationship_score_schema",
     "migrate_relationship_positive_stage_cap",
     "normalize_relationship_mode",
     "normalize_relationship_positive_stage_cap_key",

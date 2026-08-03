@@ -2415,13 +2415,13 @@
     "invisible": true
   },
   "group_whitelist_ids": {
-    "description": "Legacy flat config: 群聊陪伴白名单群号",
+    "description": "Legacy flat config: 群聊陪伴白名单群 ID",
     "type": "list",
     "default": [],
     "invisible": true
   },
   "group_blacklist_ids": {
-    "description": "Legacy flat config: 群聊陪伴黑名单群号",
+    "description": "Legacy flat config: 群聊陪伴黑名单群 ID",
     "type": "list",
     "default": [],
     "invisible": true
@@ -4062,7 +4062,7 @@
     "invisible": true
   },
   "target_group_ids": {
-    "description": "Legacy flat config: 群聊陪伴目标群号（旧配置，等同白名单）",
+    "description": "Legacy flat config: 群聊陪伴目标群 ID（旧配置，等同白名单）",
     "type": "list",
     "default": [],
     "invisible": true
@@ -7595,18 +7595,18 @@
         }
       },
       "group_whitelist_ids": {
-        "description": "群聊陪伴白名单群号",
+        "description": "群聊陪伴白名单群 ID",
         "type": "list",
-        "hint": "白名单模式下，只有这些群会启用群聊陪伴观察。旧配置 target_group_ids 也会自动作为白名单兼容。",
+        "hint": "白名单模式下，只有这些群会启用群聊陪伴观察。支持 OneBot 数字群号、QQ 官方 group_openid 或完整 GroupMessage UMO；旧配置 target_group_ids 也会自动兼容。",
         "default": [],
         "condition": {
           "enable_group_companion": true
         }
       },
       "group_blacklist_ids": {
-        "description": "群聊陪伴黑名单群号",
+        "description": "群聊陪伴黑名单群 ID",
         "type": "list",
-        "hint": "黑名单模式下，这些群不会启用群聊陪伴观察。",
+        "hint": "黑名单模式下，这些群不会启用群聊陪伴观察。支持 OneBot 数字群号、QQ 官方 group_openid 或完整 GroupMessage UMO。",
         "default": [],
         "condition": {
           "enable_group_companion": true
@@ -11507,9 +11507,9 @@
     "hint": "保留旧配置键用于迁移兼容，通常不需要手动修改。",
     "items": {
       "target_group_ids": {
-        "description": "群聊陪伴目标群号（旧配置，等同白名单）",
+        "description": "群聊陪伴目标群 ID（旧配置，等同白名单）",
         "type": "list",
-        "hint": "兼容旧版本。现在建议改用 group_whitelist_ids；这里填写的群号仍会并入白名单。",
+        "hint": "兼容旧版本。现在建议改用 group_whitelist_ids；这里填写的群 ID 或 GroupMessage UMO 仍会并入白名单。",
         "default": [],
         "invisible": true
       },

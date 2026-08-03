@@ -215,6 +215,26 @@ APPLY_RELATIONSHIP_PROFILE_BATCH = _class_method(
         "time": time,
     },
 )
+RESTORE_RELATIONSHIP_CONFIG_VALUES = _class_method(
+    "page_api.py",
+    "PrivateCompanionPageApi",
+    "_restore_relationship_config_values",
+    {
+        "Any": Any,
+        "normalize_normal_interaction_band_cap": normalize_normal_interaction_band_cap,
+        "normalize_relationship_positive_stage_cap_key": normalize_relationship_positive_stage_cap_key,
+    },
+)
+ROLLBACK_RELATIONSHIP_CONFIG_TRANSACTION = _class_method(
+    "page_api.py",
+    "PrivateCompanionPageApi",
+    "_rollback_relationship_config_transaction",
+    {
+        "Any": Any,
+        "deepcopy": copy.deepcopy,
+        "logger": _Logger(),
+    },
+)
 UPDATE_SETTINGS = _class_method(
     "page_api.py",
     "PrivateCompanionPageApi",
@@ -327,6 +347,7 @@ class _SettingsPlugin:
         self._data_default = self.data
         self.enable_multi_persona_mode = False
         self.saved = 0
+        self.persisted_default = copy.deepcopy(self.data)
 
     def _save_data_sync(self) -> None:
         self.saved += 1
@@ -334,8 +355,9 @@ class _SettingsPlugin:
     async def _flush_scheduled_data_save(self) -> None:
         return None
 
-    def _write_data_snapshot_sync(self, _snapshot: dict[str, Any]) -> None:
+    def _write_data_snapshot_sync(self, snapshot: dict[str, Any]) -> None:
         self.saved += 1
+        self.persisted_default = copy.deepcopy(snapshot)
 
 
 class _SettingsApiHost:
@@ -344,6 +366,8 @@ class _SettingsApiHost:
     _relationship_profile_targets = RELATIONSHIP_PROFILE_TARGETS
     _save_relationship_profile_target = SAVE_RELATIONSHIP_PROFILE_TARGET
     _apply_relationship_profile_config_batch = APPLY_RELATIONSHIP_PROFILE_BATCH
+    _restore_relationship_config_values = RESTORE_RELATIONSHIP_CONFIG_VALUES
+    _rollback_relationship_config_transaction = ROLLBACK_RELATIONSHIP_CONFIG_TRANSACTION
     update_settings = UPDATE_SETTINGS
 
     def __init__(self) -> None:
@@ -569,6 +593,135 @@ def test_settings_batch_persists_both_cap_migrations_once() -> None:
     assert user["relationship_positive_stage_cap_key"] == "close"
     assert user["normal_interaction_band_cap"] == "lively"
     assert user["current_interaction"]["expression_band"] == "lively"
+
+
+def test_settings_batch_rolls_back_profiles_and_runtime_when_config_save_returns_false() -> None:
+    host = _SettingsApiHost()
+    before = copy.deepcopy(host.plugin.data)
+    save_calls: list[dict[str, Any]] = []
+
+    async def save_config() -> bool:
+        save_calls.append(copy.deepcopy(host.config_values))
+        return len(save_calls) > 1
+
+    host._save_config_if_possible = save_config
+    REQUEST.payload = {
+        "settings": {
+            "relationship_positive_stage_cap_key": "close",
+            "normal_interaction_band_cap": "lively",
+        }
+    }
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "已回滚" in result["error"]
+    assert host.plugin.data == before
+    assert host.plugin.persisted_default == before
+    assert host.plugin.relationship_positive_stage_cap_key == "deeply_bonded"
+    assert host.plugin.normal_interaction_band_cap == "warm"
+    assert host.config_values["relationship_positive_stage_cap_key"] == "deeply_bonded"
+    assert host.config_values["normal_interaction_band_cap"] == "warm"
+    assert save_calls == [
+        {
+            "relationship_positive_stage_cap_key": "close",
+            "normal_interaction_band_cap": "lively",
+        },
+        {
+            "relationship_positive_stage_cap_key": "deeply_bonded",
+            "normal_interaction_band_cap": "warm",
+        },
+    ]
+
+
+def test_settings_batch_rolls_back_when_config_save_raises() -> None:
+    host = _SettingsApiHost()
+    before = copy.deepcopy(host.plugin.data)
+    save_calls = 0
+
+    async def save_config() -> bool:
+        nonlocal save_calls
+        save_calls += 1
+        if save_calls == 1:
+            raise OSError("simulated config write failure")
+        return True
+
+    host._save_config_if_possible = save_config
+    REQUEST.payload = {
+        "settings": {
+            "relationship_positive_stage_cap_key": "close",
+            "normal_interaction_band_cap": "lively",
+        }
+    }
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "simulated config write failure" in result["error"]
+    assert save_calls == 2
+    assert host.plugin.data == before
+    assert host.plugin.persisted_default == before
+    assert host.plugin.relationship_positive_stage_cap_key == "deeply_bonded"
+    assert host.plugin.normal_interaction_band_cap == "warm"
+
+
+def test_settings_batch_rolls_back_all_personas_after_mid_save_failure() -> None:
+    host = _SettingsApiHost()
+    default_profile = copy.deepcopy(host.plugin.data)
+    persona_profiles = {
+        "main": copy.deepcopy(host.plugin.data),
+        "alt": copy.deepcopy(host.plugin.data),
+    }
+    host.plugin.enable_multi_persona_mode = True
+    host.plugin._data_default = default_profile
+    host.plugin.data = persona_profiles["main"]
+    host.plugin.persona_profiles = persona_profiles
+    host.plugin.persisted_profiles = {
+        "": copy.deepcopy(default_profile),
+        **{profile_id: copy.deepcopy(profile) for profile_id, profile in persona_profiles.items()},
+    }
+    host.plugin.profile_save_calls = 0
+    host.plugin.fail_profile_save_once = True
+
+    def persona_profile_ids() -> list[str]:
+        return ["main", "alt"]
+
+    def ensure_persona_profile(profile_id: str) -> dict[str, Any]:
+        return host.plugin.persona_profiles[profile_id]
+
+    def write_default(snapshot: dict[str, Any]) -> None:
+        host.plugin.profile_save_calls += 1
+        host.plugin.persisted_profiles[""] = copy.deepcopy(snapshot)
+
+    def save_persona(profile_id: str, snapshot: dict[str, Any]) -> None:
+        host.plugin.profile_save_calls += 1
+        if host.plugin.fail_profile_save_once:
+            host.plugin.fail_profile_save_once = False
+            raise OSError("simulated persona write failure")
+        host.plugin.persisted_profiles[profile_id] = copy.deepcopy(snapshot)
+
+    host.plugin._persona_profile_ids = persona_profile_ids
+    host.plugin._ensure_persona_profile = ensure_persona_profile
+    host.plugin._write_data_snapshot_sync = write_default
+    host.plugin._save_persona_profile_sync = save_persona
+    before_runtime = {
+        "": copy.deepcopy(default_profile),
+        **{profile_id: copy.deepcopy(profile) for profile_id, profile in persona_profiles.items()},
+    }
+    REQUEST.payload = {
+        "settings": {
+            "relationship_positive_stage_cap_key": "close",
+            "normal_interaction_band_cap": "lively",
+        }
+    }
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "simulated persona write failure" in result["error"]
+    assert default_profile == before_runtime[""]
+    assert persona_profiles["main"] == before_runtime["main"]
+    assert persona_profiles["alt"] == before_runtime["alt"]
+    assert host.plugin.persisted_profiles == before_runtime
+    assert host.plugin.relationship_positive_stage_cap_key == "deeply_bonded"
+    assert host.plugin.normal_interaction_band_cap == "warm"
 
 
 def test_zero_rate_decay_settlement_is_reported_for_persistence() -> None:

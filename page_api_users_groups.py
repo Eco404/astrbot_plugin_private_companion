@@ -21,6 +21,12 @@ from .relationship_ledger import (
 
 
 class PrivateCompanionPageApiUsersGroupsMixin:
+    def _normalize_page_group_id(self, value: Any) -> str:
+        normalizer = getattr(self.plugin, "_normalize_group_identity_id", None)
+        if callable(normalizer):
+            return normalizer(value)
+        return self._single_line(value, 160)
+
     async def list_users(self) -> dict[str, Any]:
         start = time.perf_counter()
         try:
@@ -507,9 +513,19 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         return False
 
     def _group_display_name_missing(self, group_id: str, group: dict[str, Any]) -> bool:
+        manual_name = self._single_line(group.get("manual_group_name"), 80)
+        if manual_name:
+            return False
         name = self._single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
         gid = str(group_id or group.get("group_id") or "").strip()
         return not name or name == gid or name == f"群 {gid}" or name.isdigit()
+
+    def _clean_manual_group_display_name(self, value: Any, group_id: str = "") -> str:
+        text = self._single_line(value, 80)
+        gid = str(group_id or "").strip()
+        if not text or text == gid or text == f"群 {gid}":
+            return ""
+        return text
 
     def _clean_group_display_name(self, value: Any, group_id: str = "") -> str:
         text = self._single_line(value, 80)
@@ -672,7 +688,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             if group_id not in found
             and (force or now - self._lookup_float(group.get("last_group_name_lookup_at")) > 5 * 60)
         ]
-        platform_target_ids = {group_id for group_id, _ in missing if group_id}
+        # QQ Official group_openid values are opaque and cannot be queried through
+        # OneBot's get_group_list/get_group_info API. Their names stay event/manual driven.
+        platform_target_ids = {group_id for group_id, _ in missing if group_id.isdigit()}
         try:
             if platform_target_ids:
                 raw_groups = await self._page_call_onebot_action("get_group_list")
@@ -686,7 +704,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         except Exception as exc:
             logger.info("[PrivateCompanionPage] 群列表名称刷新失败: %s", self._single_line(exc, 120))
         if len(found) < len(target_ids) and platform_target_ids:
-            for group_id, _ in missing[:30]:
+            for group_id, _ in [item for item in missing if item[0] in platform_target_ids][:30]:
                 if group_id in found:
                     continue
                 try:
@@ -710,6 +728,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 group = groups.get(group_id)
                 if not isinstance(group, dict):
                     continue
+                if self._single_line(group.get("manual_group_name"), 80):
+                    continue
                 if group_id in platform_target_ids:
                     group["last_group_name_lookup_at"] = now
                 name = found.get(group_id, "")
@@ -726,7 +746,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             if changed:
                 self.plugin._save_data_sync()
     async def get_group(self) -> dict[str, Any]:
-        group_id = str(request.args.get("group_id", "")).strip()
+        group_id = self._normalize_page_group_id(request.args.get("group_id", ""))
         if not group_id:
             return self._error("缺少 group_id")
         try:
@@ -764,7 +784,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return self._error(str(exc))
 
     async def get_group_member_safety(self) -> dict[str, Any]:
-        group_id = str(request.args.get("group_id", "")).strip()
+        group_id = self._normalize_page_group_id(request.args.get("group_id", ""))
         if not group_id:
             return self._error("缺少 group_id")
         try:
@@ -778,7 +798,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             summary = getter(group)
             summary["group_id"] = group_id
             summary["group_name"] = self._single_line(
-                group.get("name") or group.get("group_name") or group.get("display_name"), 80
+                group.get("manual_group_name") or group.get("name") or group.get("group_name") or group.get("display_name"),
+                80,
             )
             return self._ok(summary)
         except Exception as exc:
@@ -787,7 +808,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
 
     async def update_group_member_safety(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
-        group_id = str(payload.get("group_id", "")).strip()
+        group_id = self._normalize_page_group_id(payload.get("group_id", ""))
         user_id = str(payload.get("user_id", "")).strip()
         action = str(payload.get("action", "")).strip().lower()
         if not group_id:
@@ -818,12 +839,32 @@ class PrivateCompanionPageApiUsersGroupsMixin:
 
     async def update_group(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
-        group_id = str(payload.get("group_id", "")).strip()
+        group_id = self._normalize_page_group_id(payload.get("group_id", ""))
         if not group_id:
             return self._error("缺少 group_id")
         try:
             async with self.plugin._data_lock:
                 group = self.plugin._get_group(group_id)
+                if "group_name" in payload or "name" in payload:
+                    previous_manual_name = self._single_line(group.get("manual_group_name"), 80)
+                    manual_name = self._clean_manual_group_display_name(
+                        payload.get("group_name") if "group_name" in payload else payload.get("name"),
+                        group_id,
+                    )
+                    if manual_name:
+                        group["manual_group_name"] = manual_name
+                        group["name"] = manual_name
+                        group["group_name"] = manual_name
+                        group["group_name_source"] = "manual"
+                        group["manual_group_name_updated_at"] = time.time()
+                    else:
+                        group["manual_group_name"] = ""
+                        group.pop("group_name_source", None)
+                        group.pop("manual_group_name_updated_at", None)
+                        if previous_manual_name and self._single_line(group.get("name"), 80) == previous_manual_name:
+                            group.pop("name", None)
+                        if previous_manual_name and self._single_line(group.get("group_name"), 80) == previous_manual_name:
+                            group.pop("group_name", None)
                 if "enabled" in payload:
                     group["enabled"] = bool(payload.get("enabled"))
                 if payload.get("reset_interjection"):
@@ -850,11 +891,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         )
                 if payload.get("clear_observation"):
                     enabled = bool(group.get("enabled", True))
+                    manual_group_name = self._single_line(group.get("manual_group_name"), 80)
                     group.clear()
                     group.update(
                         {
                             "enabled": enabled,
                             "group_id": group_id,
+                            "manual_group_name": manual_group_name,
+                            "name": manual_group_name,
+                            "group_name": manual_group_name,
+                            "group_name_source": "manual" if manual_group_name else "",
                             "message_count": 0,
                             "last_seen": 0,
                             "last_interject_at": 0,
@@ -890,7 +936,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
 
     async def delete_group(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
-        group_id = str(payload.get("group_id", "")).strip()
+        group_id = self._normalize_page_group_id(payload.get("group_id", ""))
         if not group_id:
             return self._error("缺少 group_id")
         try:
@@ -907,8 +953,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 old_expression_application_ids = self._normalize_id_list(
                     getattr(self.plugin, "expression_group_application_ids", []) or []
                 )
-                expression_learning_ids = [item for item in old_expression_learning_ids if item != group_id]
-                expression_application_ids = [item for item in old_expression_application_ids if item != group_id]
+                expression_learning_ids = [
+                    item
+                    for item in old_expression_learning_ids
+                    if self._normalize_page_group_id(item) != group_id
+                ]
+                expression_application_ids = [
+                    item
+                    for item in old_expression_application_ids
+                    if self._normalize_page_group_id(item) != group_id
+                ]
                 removed_expression_scope = (
                     expression_learning_ids != old_expression_learning_ids
                     or expression_application_ids != old_expression_application_ids
@@ -917,12 +971,12 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 whitelist = [
                     str(item).strip()
                     for item in (getattr(self.plugin, "group_whitelist_ids", []) or [])
-                    if str(item).strip() and str(item).strip() != group_id
+                    if str(item).strip() and self._normalize_page_group_id(item) != group_id
                 ]
                 blacklist = [
                     str(item).strip()
                     for item in (getattr(self.plugin, "group_blacklist_ids", []) or [])
-                    if str(item).strip() and str(item).strip() != group_id
+                    if str(item).strip() and self._normalize_page_group_id(item) != group_id
                 ]
                 removed_whitelist = len(whitelist) != len(getattr(self.plugin, "group_whitelist_ids", []) or [])
                 removed_blacklist = len(blacklist) != len(getattr(self.plugin, "group_blacklist_ids", []) or [])
@@ -965,7 +1019,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
 
     async def update_group_slang(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
-        group_id = str(payload.get("group_id", "")).strip()
+        group_id = self._normalize_page_group_id(payload.get("group_id", ""))
         term = self._single_line(payload.get("term"), 40)
         if not group_id:
             return self._error("缺少 group_id")

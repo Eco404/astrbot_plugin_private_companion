@@ -779,11 +779,12 @@ QQ空间 = 公开札记
             <h2>群聊观测</h2>
             <span class="muted">管理群聊观察、名单状态、话题线和插话反馈</span>
           </div>
-          <input id="groupFilter" type="search" placeholder="筛选群号 / 群名" />
+          <input id="groupFilter" type="search" placeholder="筛选群 ID / 群名" />
         </div>
         <div class="group-add-card">
           <form id="addGroupForm" class="inline-form manage-form">
-            <label>群号 <input name="group_id" placeholder="例如 987654321" required /></label>
+            <label>群 ID / UMO <input name="group_id" placeholder="群号、group_openid 或 GroupMessage UMO" required /></label>
+            <label>群名称 <input name="group_name" placeholder="可选" maxlength="80" /></label>
             <label>名单 <select name="list_mode"><option value="whitelist">加入白名单并开始观察</option><option value="none">仅创建群资料（暂不观察）</option><option value="blacklist">加入黑名单</option></select></label>
             <button type="submit">新增群聊</button>
           </form>

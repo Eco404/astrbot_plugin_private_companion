@@ -802,6 +802,33 @@ class AtRelayMixin:
             return canonical if canonical in users else candidate
         return ""
 
+    def _normalize_atrelay_group_target_id(self, value: Any) -> str:
+        normalizer = getattr(self, "_normalize_group_identity_id", None)
+        return normalizer(value) if callable(normalizer) else _single_line(value, 160)
+
+    def _atrelay_known_group_ids(self) -> set[str]:
+        known: set[str] = set()
+
+        def add(value: Any) -> None:
+            group_id = self._normalize_atrelay_group_target_id(value)
+            if group_id:
+                known.add(group_id)
+
+        configured = getattr(self, "_configured_group_ids", None)
+        if callable(configured):
+            try:
+                for group_id in configured():
+                    add(group_id)
+            except Exception:
+                pass
+        data = self.data if isinstance(getattr(self, "data", None), dict) else {}
+        for key in ("groups", "worldbook_group_profiles"):
+            records = data.get(key) if isinstance(data.get(key), dict) else {}
+            for record_id, record in records.items():
+                add(record.get("group_id") if isinstance(record, dict) else record_id)
+                add(record_id)
+        return known
+
     def _atrelay_send_log(self) -> list[dict[str, Any]]:
         log = self.data.setdefault("atrelay_send_log", [])
         if not isinstance(log, list):
@@ -867,9 +894,15 @@ class AtRelayMixin:
         return list(matches.values())[:12]
 
     async def _resolve_atrelay_target_group(self, event: AstrMessageEvent, group_hint: Any = "") -> dict[str, Any]:
-        hint = _single_line(group_hint, 80)
-        if hint.isdigit():
-            return {"status": "success", "group_id": hint, "source": "direct"}
+        hint = _single_line(group_hint, 160)
+        direct_group_id = self._normalize_atrelay_group_target_id(hint)
+        is_group_umo = ":GroupMessage:" in hint
+        if direct_group_id and (
+            direct_group_id.isdigit()
+            or is_group_umo
+            or direct_group_id in self._atrelay_known_group_ids()
+        ):
+            return {"status": "success", "group_id": direct_group_id, "source": "direct"}
         current_group = self._extract_group_id_from_event(event)
         if not hint and current_group:
             return {"status": "success", "group_id": current_group, "source": "current_group"}

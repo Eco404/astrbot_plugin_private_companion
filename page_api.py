@@ -3190,16 +3190,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 try:
                     await self._apply_relationship_profile_config_batch(apply_overrides)
                 except Exception:
-                    cap_change = apply_overrides.get("__relationship_positive_cap_change")
-                    if isinstance(cap_change, tuple) and len(cap_change) == 2:
-                        old_cap = normalize_relationship_positive_stage_cap_key(cap_change[0])
-                        self._set_config_value("relationship_positive_stage_cap_key", old_cap)
-                        self.plugin.relationship_positive_stage_cap_key = old_cap
-                    interaction_change = apply_overrides.get("__relationship_interaction_cap_change")
-                    if isinstance(interaction_change, tuple) and len(interaction_change) == 2:
-                        old_interaction_cap = normalize_normal_interaction_band_cap(interaction_change[0])
-                        self._set_config_value("normal_interaction_band_cap", old_interaction_cap)
-                        self.plugin.normal_interaction_band_cap = old_interaction_cap
+                    self._restore_relationship_config_values(apply_overrides)
                     raise
             if "enable_body_monitor_integration" in changed:
                 runtime_task = getattr(self.plugin, "_body_monitor_integration_toggle_task", None)
@@ -3247,7 +3238,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 clearer()
             config_saved = True
             if changed:
-                config_saved = await self._save_config_if_possible()
+                try:
+                    config_saved = await self._save_config_if_possible()
+                except Exception:
+                    if apply_overrides.get("__relationship_profile_transaction"):
+                        await self._rollback_relationship_config_transaction(apply_overrides)
+                    raise
+                if apply_overrides.get("__relationship_profile_transaction"):
+                    if not config_saved:
+                        await self._rollback_relationship_config_transaction(apply_overrides)
+                        raise RuntimeError("配置保存失败，关系配置及人格资料已回滚")
+                    apply_overrides.pop("__relationship_profile_transaction", None)
             overview = await self.get_overview()
             if overview.get("success"):
                 overview["data"]["changed"] = changed
@@ -13961,7 +13962,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         members = group.get("members") if isinstance(group.get("members"), dict) else {}
         group_for_filter = group
         group_id_text = str(group_id)
-        group_name = self._single_line(group.get("name") or group.get("group_name") or group.get("display_name"), 80)
+        manual_group_name = self._single_line(group.get("manual_group_name"), 80)
+        group_name = self._single_line(
+            manual_group_name or group.get("name") or group.get("group_name") or group.get("display_name"),
+            80,
+        )
         if group_name == group_id_text:
             group_name = ""
         cleaner = getattr(self.plugin, "_cleanup_group_slang_terms", None)
@@ -14009,6 +14014,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "name": group_name,
             "group_name": group_name,
             "display_name": group_name or "未命名群聊",
+            "manual_group_name": manual_group_name,
+            "group_name_source": "manual" if manual_group_name else str(group.get("group_name_source") or "auto"),
             "global_enabled": bool(getattr(self.plugin, "enable_group_companion", False)),
             "enabled": bool(group.get("enabled", True)),
             "allowed_by_mode": self.plugin._group_allowed_by_access_mode(group_id_text),
@@ -18401,11 +18408,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
     def _relationship_profile_targets(self) -> list[tuple[str, dict[str, Any]]]:
         targets: list[tuple[str, dict[str, Any]]] = []
         seen: set[int] = set()
+        seen_profile_ids: set[str] = set()
 
         def add(profile_id: str, profile: Any) -> None:
-            if isinstance(profile, dict) and id(profile) not in seen:
+            if (
+                isinstance(profile, dict)
+                and id(profile) not in seen
+                and profile_id not in seen_profile_ids
+            ):
                 targets.append((profile_id, profile))
                 seen.add(id(profile))
+                seen_profile_ids.add(profile_id)
 
         add("", getattr(self.plugin, "_data_default", None))
         if bool(getattr(self.plugin, "enable_multi_persona_mode", False)):
@@ -18484,21 +18497,94 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 for profile_id, profile in touched:
                     attempted.append(profile_id)
                     self._save_relationship_profile_target(profile_id, profile)
-            except Exception:
+            except Exception as exc:
+                rollback_errors: list[str] = []
                 for profile_id, profile in targets:
                     profile.clear()
                     profile.update(deepcopy(snapshots[profile_id]))
-                for profile_id in attempted:
+                for profile_id in reversed(attempted):
                     try:
                         self._save_relationship_profile_target(profile_id, snapshots[profile_id])
                     except Exception as rollback_exc:
+                        rollback_errors.append(
+                            f"{profile_id or 'default'}: {self._single_line(rollback_exc, 160)}"
+                        )
                         logger.error(
                             "[PrivateCompanionPage] 关系配置人格资料回滚失败: persona=%s error=%s",
                             profile_id or "default",
                             self._single_line(rollback_exc, 160),
                         )
+                if rollback_errors:
+                    raise RuntimeError(
+                        "关系配置人格资料保存失败，且回滚未完整完成: "
+                        + "; ".join(rollback_errors)
+                    ) from exc
                 raise
+        overrides["__relationship_profile_transaction"] = {
+            "targets": targets,
+            "snapshots": snapshots,
+            "persisted_profile_ids": [profile_id for profile_id, _profile in touched],
+        }
         overrides["__relationship_data_changed"] = False
+
+    def _restore_relationship_config_values(self, overrides: dict[str, Any]) -> None:
+        cap_change = overrides.get("__relationship_positive_cap_change")
+        if isinstance(cap_change, tuple) and len(cap_change) == 2:
+            old_cap = normalize_relationship_positive_stage_cap_key(cap_change[0])
+            self._set_config_value("relationship_positive_stage_cap_key", old_cap)
+            self.plugin.relationship_positive_stage_cap_key = old_cap
+        interaction_change = overrides.get("__relationship_interaction_cap_change")
+        if isinstance(interaction_change, tuple) and len(interaction_change) == 2:
+            old_interaction_cap = normalize_normal_interaction_band_cap(interaction_change[0])
+            self._set_config_value("normal_interaction_band_cap", old_interaction_cap)
+            self.plugin.normal_interaction_band_cap = old_interaction_cap
+
+    async def _rollback_relationship_config_transaction(self, overrides: dict[str, Any]) -> None:
+        transaction = overrides.pop("__relationship_profile_transaction", None)
+        profile_rollback_errors: list[str] = []
+        if isinstance(transaction, dict):
+            targets = transaction.get("targets")
+            snapshots = transaction.get("snapshots")
+            persisted_profile_ids = transaction.get("persisted_profile_ids")
+            if isinstance(targets, list) and isinstance(snapshots, dict):
+                async with self.plugin._data_lock:
+                    for profile_id, profile in targets:
+                        snapshot = snapshots.get(profile_id)
+                        if isinstance(profile, dict) and isinstance(snapshot, dict):
+                            profile.clear()
+                            profile.update(deepcopy(snapshot))
+                    if isinstance(persisted_profile_ids, list):
+                        for profile_id in reversed(persisted_profile_ids):
+                            snapshot = snapshots.get(profile_id)
+                            if not isinstance(snapshot, dict):
+                                continue
+                            try:
+                                self._save_relationship_profile_target(profile_id, snapshot)
+                            except Exception as exc:
+                                profile_rollback_errors.append(
+                                    f"{profile_id or 'default'}: {self._single_line(exc, 160)}"
+                                )
+                                logger.error(
+                                    "[PrivateCompanionPage] 配置保存失败后人格资料回滚失败: persona=%s error=%s",
+                                    profile_id or "default",
+                                    self._single_line(exc, 160),
+                                )
+        self._restore_relationship_config_values(overrides)
+        try:
+            rollback_config_saved = await self._save_config_if_possible()
+        except Exception as exc:
+            rollback_config_saved = False
+            logger.error(
+                "[PrivateCompanionPage] 关系配置回滚后旧配置重新保存失败: %s",
+                self._single_line(exc, 160),
+            )
+        if not rollback_config_saved:
+            logger.warning("[PrivateCompanionPage] 关系配置已恢复到运行态，但旧配置未能重新保存")
+        if profile_rollback_errors:
+            raise RuntimeError(
+                "配置保存失败，且人格资料回滚未完整完成: "
+                + "; ".join(profile_rollback_errors)
+            )
 
     def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
         if key == "relationship_stage_policy":

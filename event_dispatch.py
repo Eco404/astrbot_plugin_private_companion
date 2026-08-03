@@ -431,33 +431,42 @@ class EventDispatchMixin:
 
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
         raw = self._event_raw_payload(event)
-        group_id = _single_line(raw.get("group_id"), 80)
-        user_id = _single_line(raw.get("user_id"), 80)
-        if group_id:
-            return f"group:{group_id}"
-        if user_id:
-            return f"private:{user_id}"
+        umo = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+        umo_kind = umo.casefold()
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = False
+        if ":friendmessage:" in umo_kind:
+            is_private = True
+        elif ":groupmessage:" in umo_kind:
+            is_private = False
+        if is_private:
+            try:
+                user_id = _single_line(event.get_sender_id(), 160)
+            except Exception:
+                user_id = _single_line(raw.get("user_id") or raw.get("openid"), 160)
+            return f"private:{user_id}" if user_id else (umo or "unknown")
+
         group_id = self._extract_group_id_from_event(event)
         if group_id:
             return f"group:{group_id}"
-        try:
-            if bool(getattr(event, "is_private_chat", lambda: False)()):
-                sender_id = _single_line(event.get_sender_id(), 80)
-                if sender_id:
-                    return f"private:{sender_id}"
-        except Exception:
-            pass
-        return _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown"
+
+        normalizer = getattr(self, "_normalize_group_identity_id", None)
+        if callable(normalizer):
+            for key in ("group_openid", "group_id", "group", "group_no", "group_uin"):
+                group_id = normalizer(raw.get(key))
+                if group_id:
+                    return f"group:{group_id}"
+        return umo or "unknown"
 
     def _event_sender_id(self, event: AstrMessageEvent) -> str:
         raw = self._event_raw_payload(event)
-        sender_id = _single_line(raw.get("user_id"), 80)
-        if sender_id:
-            return sender_id
         try:
-            return _single_line(event.get_sender_id(), 80)
+            sender_id = _single_line(event.get_sender_id(), 160)
         except Exception:
-            return ""
+            sender_id = ""
+        return sender_id or _single_line(raw.get("user_id") or raw.get("openid"), 160)
 
     def _event_existing_reply_result_preview(self, event: AstrMessageEvent) -> str:
         getter = getattr(event, "get_result", None)
@@ -3667,36 +3676,65 @@ Bot 近期回复：
             self._save_data_sync()
 
     def _extract_group_id_from_event(self, event: AstrMessageEvent) -> str:
-        raw = self._event_raw_payload(event)
-        for key in ("group_id", "group", "group_no", "group_uin"):
-            value = _single_line(raw.get(key), 80)
-            if value and value.isdigit():
-                return value
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        match = re.search(r":GroupMessage:(\d+)", umo)
-        if match:
-            return match.group(1)
-        message_obj = getattr(event, "message_obj", None)
-        for attr in ("group_id", "group", "group_no", "group_uin"):
-            value = getattr(message_obj, attr, None) if message_obj is not None else None
-            if value and str(value).strip().isdigit():
-                return str(value)
         try:
             if bool(getattr(event, "is_private_chat", lambda: False)()):
                 return ""
         except Exception:
             pass
+        if ":friendmessage:" in umo.casefold():
+            return ""
+
+        normalizer = getattr(self, "_normalize_group_identity_id", None)
+
+        def normalize(value: Any) -> str:
+            if callable(normalizer):
+                return normalizer(value)
+            if isinstance(value, (dict, list, tuple, set)):
+                return ""
+            text = _single_line(value, 160)
+            if ":GroupMessage:" in text:
+                text = _single_line(text.rsplit(":GroupMessage:", 1)[-1], 160)
+            return text if text and ":" not in text else ""
+
+        getter = getattr(event, "get_group_id", None)
+        if callable(getter):
+            try:
+                value = normalize(getter())
+                if value:
+                    return value
+            except Exception:
+                pass
+
+        raw = self._event_raw_payload(event)
+        for key in ("group_openid", "group_id", "group", "group_no", "group_uin"):
+            value = normalize(raw.get(key))
+            if value:
+                return value
+        if ":groupmessage:" in umo.casefold():
+            value = normalize(umo)
+            if value:
+                return value
+        message_obj = getattr(event, "message_obj", None)
+        for attr in ("group_openid", "group_id", "group", "group_no", "group_uin"):
+            value = getattr(message_obj, attr, None) if message_obj is not None else None
+            value = normalize(value)
+            if value:
+                return value
         message_type = str(raw.get("message_type") or raw.get("detail_type") or "").lower()
         event_message_type = getattr(event, "message_type", None)
         event_message_type_text = str(getattr(event_message_type, "name", event_message_type) or "").lower()
         is_group_hint = (
             message_type == "group"
             or event_message_type_text in {"group", "group_message", "messagetype.group"}
-            or ":GroupMessage:" in umo
+            or ":groupmessage:" in umo.casefold()
         )
-        session_id = str(getattr(event, "session_id", "") or "").strip()
-        sender_id = _single_line(raw.get("user_id"), 80)
-        if is_group_hint and session_id.isdigit() and session_id != sender_id:
+        session_id = normalize(getattr(event, "session_id", ""))
+        try:
+            sender_id = _single_line(event.get_sender_id(), 160)
+        except Exception:
+            sender_id = _single_line(raw.get("user_id") or raw.get("openid"), 160)
+        if is_group_hint and session_id and session_id != sender_id:
             return session_id
         return ""
 

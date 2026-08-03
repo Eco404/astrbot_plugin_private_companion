@@ -1092,16 +1092,19 @@ class ProactiveMixin:
         user_limit = max_daily_messages if override is None else max(0, override)
         role = self._private_user_role(user)
         mode = str(user.get("relationship_mode") or "normal")
-        if role == "owner" and mode == "owner_exclusive":
-            stage_limit = _safe_int(getattr(self, "owner_exclusive_proactive_limit", 6), 6, 0, 30)
-        else:
+        relationship_is_distant = False
+        if not (role == "owner" and mode == "owner_exclusive"):
             policy = (
                 getattr(self, "relationship_stage_policy", None)
                 if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
                 else None
             )
             stage = relationship_stage_for_score(user.get("relationship_score", 0), policy).get("phase", {})
-            stage_limit = _safe_int(stage.get("proactive_care_limit"), 0, 0, 30)
+            relationship_is_distant = _safe_int(user.get("relationship_score"), 0, -1200, 1200) < 0 or str(
+                stage.get("key") or ""
+            ) in {"deeply_distant", "strongly_distant", "distant"}
+        if relationship_is_distant:
+            return 0
         interaction = current_interaction_projection(
             user.get("current_interaction"),
             relationship_role=role,
@@ -1115,7 +1118,26 @@ class ProactiveMixin:
         else:
             ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
             dynamic_limit = 0 if ignored >= 2 else min(max_daily_messages, 1) if ignored == 1 else max_daily_messages
-        return max(0, min(max_daily_messages, user_limit, stage_limit, dynamic_limit))
+        return max(0, min(max_daily_messages, user_limit, dynamic_limit))
+
+    def _relationship_proactive_soft_target(self, user: dict[str, Any]) -> int:
+        role = self._private_user_role(user)
+        mode = str(user.get("relationship_mode") or "normal")
+        if role == "owner" and mode == "owner_exclusive":
+            return max(1, _safe_int(getattr(self, "owner_exclusive_proactive_limit", 6), 6, 0, 30))
+        policy = (
+            getattr(self, "relationship_stage_policy", None)
+            if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            else None
+        )
+        stage = relationship_stage_for_score(user.get("relationship_score", 0), policy).get("phase", {})
+        if _safe_int(user.get("relationship_score"), 0, -1200, 1200) < 0 or str(stage.get("key") or "") in {
+            "deeply_distant",
+            "strongly_distant",
+            "distant",
+        }:
+            return 0
+        return max(1, _safe_int(stage.get("proactive_care_limit"), 1, 0, 30))
 
     def _runtime_max_daily_messages(self) -> int:
         runtime_value = _safe_int(getattr(self, "max_daily_messages", 8), 8, 0, 12)
@@ -1973,6 +1995,9 @@ class ProactiveMixin:
             return 0.0
         if bool(self._proactive_intensity_effect("ignore_soft_daily_target", False)):
             return float(daily_limit)
+        relationship_target = min(daily_limit, self._relationship_proactive_soft_target(user))
+        if relationship_target <= 0:
+            return 0.0
         state = self.data.get("daily_state", {})
         important_dates = self._get_relevant_important_dates()
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
@@ -1987,9 +2012,9 @@ class ProactiveMixin:
         if important_dates:
             ratio += 0.1 if _safe_int(important_dates[0].get("_days_until"), 0) == 0 else 0.05
         ratio = max(0.45, min(0.95, ratio))
-        if daily_limit == 1:
+        if relationship_target == 1:
             ratio = max(ratio, 0.75)
-        return max(0.6, daily_limit * ratio)
+        return max(0.6, relationship_target * ratio)
 
     def _daily_intensity_factor(self, user: dict[str, Any]) -> float:
         daily_limit = self._effective_user_daily_limit(user)

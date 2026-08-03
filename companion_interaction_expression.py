@@ -84,6 +84,7 @@ class ExpressionDecision:
     followup: bool
     initiative: str
     proactive_budget: int
+    proactive_target: int
     proactive_cooldown_until: float
     tts_style: str
     allowed_behaviors: tuple[str, ...]
@@ -495,11 +496,21 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     candidate_now = _bounded_timestamp(candidate.get("current_ts"))
     readiness_supplied = "readiness_score" in candidate
     readiness_score = _bounded_int(candidate.get("readiness_score"), 100, 0, 100)
+    stage_target = 0
     if "proactive_care_limit" in relationship_baseline:
-        stage_budget = _bounded_int(relationship_baseline.get("proactive_care_limit"), 0, 0, 30)
-        if budget > stage_budget:
-            budget = stage_budget
-            reasons.append("relationship_proactive_cap")
+        configured_target = _bounded_int(relationship_baseline.get("proactive_care_limit"), 0, 0, 30)
+        stage_key = _text(relationship_baseline.get("stage_key"))
+        relationship_is_distant = score < 0 or stage_key in {
+            "deeply_distant",
+            "strongly_distant",
+            "distant",
+        }
+        if relationship_is_distant:
+            budget = 0
+            reasons.append("relationship_distant_proactive_blocked")
+        else:
+            stage_target = max(1, configured_target)
+            reasons.append("relationship_proactive_soft_target")
     initiative = "allowed" if budget else "passive_only"
     if band in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}:
         budget = 0
@@ -548,6 +559,7 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         followup=followup,
         initiative=initiative,
         proactive_budget=budget,
+        proactive_target=stage_target,
         proactive_cooldown_until=proactive_cooldown_until,
         tts_style=tts_style,
         allowed_behaviors=behaviors,
@@ -620,6 +632,16 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
         return "当前表达受边界或安全规则限制：保持简短、低压，不主动扩展或追问。"
     followup = "可以自然追问" if bool(decision.get("followup")) else "不要追问"
     initiative = "允许在合适窗口主动联系" if decision.get("initiative") == "allowed" else "本轮只被动回应"
+    proactive_target = _bounded_int(decision.get("proactive_target"), 0, 0, 30)
+    reason_codes = decision.get("reason_codes") if isinstance(decision.get("reason_codes"), (list, tuple)) else ()
+    proactive_rhythm = (
+        f"本阶段每天约 {proactive_target} 次主动联系只是柔性节奏目标，不是必须凑满或一到即停的硬配额；"
+        "结合真实由头、对方反馈和打扰感自然调整"
+        if proactive_target > 0
+        else "当前关系处于疏离阶段，不主动联系"
+        if "relationship_distant_proactive_blocked" in reason_codes
+        else "当前没有阶段主动节奏目标，按本轮实际边界决定"
+    )
     content_tier = _text(decision.get("content_tier"))
     provider_policy = _text(decision.get("content_provider_policy"))
     if provider_policy == "unmanaged":
@@ -635,7 +657,7 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
         f"语气={str(decision.get('tone') or 'steady')[:24]}，"
         f"称呼距离={str(decision.get('address_style') or 'neutral')[:24]}，"
         f"回复长度={str(decision.get('response_length') or 'balanced')[:24]}；"
-        f"{followup}；{initiative}{f'；{content_instruction}' if content_instruction else ''}。"
+        f"{followup}；{initiative}；{proactive_rhythm}{f'；{content_instruction}' if content_instruction else ''}。"
     )
 
 
@@ -660,6 +682,7 @@ def _blocked_decision(reason: str, blocker: str, inherited_reasons: list[str]) -
         followup=False,
         initiative="blocked",
         proactive_budget=0,
+        proactive_target=0,
         proactive_cooldown_until=0.0,
         tts_style="none",
         allowed_behaviors=(),

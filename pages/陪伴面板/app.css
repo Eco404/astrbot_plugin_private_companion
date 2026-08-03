@@ -5479,6 +5479,7 @@ body.daily-outfit-preview-open {
 
 .group-add-card .inline-form {
   margin-bottom: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
 }
 
 .group-workbench {
@@ -5665,6 +5666,29 @@ body.daily-outfit-preview-open {
 .group-detail-title h2 {
   font-size: 22px;
   overflow-wrap: anywhere;
+}
+
+.group-name-editor {
+  display: flex;
+  gap: 8px;
+  width: min(100%, 420px);
+}
+
+.group-name-editor input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.group-name-editor button {
+  flex: 0 0 auto;
+  height: 38px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 0 12px;
+  background: linear-gradient(180deg, #337d6d 0%, var(--accent-strong) 100%);
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
 }
 
 .eyebrow {
@@ -24699,6 +24723,10 @@ pre {
 
   .group-detail-actions button {
     flex: 1 1 92px;
+  }
+
+  .group-name-editor {
+    width: 100%;
   }
 
   .detail-block-head,

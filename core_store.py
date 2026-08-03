@@ -1319,11 +1319,284 @@ class CoreStoreMixin:
             return ""
         return text
 
+    @staticmethod
+    def _normalize_group_identity_id(value: Any, limit: int = 160) -> str:
+        """Normalize a numeric group ID, opaque platform ID, or GroupMessage UMO."""
+        if isinstance(value, (dict, list, tuple, set)):
+            return ""
+        # The platform prefix is not part of the group identity and must not
+        # consume the opaque session ID's length budget.
+        text = _single_line(value, max(512, limit + 256))
+        if not text:
+            return ""
+        invalid_exact = {
+            "default",
+            "aiocqhttp",
+            "qq_official",
+            "groupmessage",
+            "group_message",
+            "group",
+            "friendmessage",
+            "friend_message",
+            "umo",
+            "uid",
+            "none",
+            "null",
+        }
+        umo_match = re.search(r":groupmessage:", text, re.IGNORECASE)
+        if umo_match:
+            text = _single_line(text[umo_match.end():], limit)
+            if not text or ":" in text:
+                return ""
+        else:
+            text = _single_line(text, limit)
+        lower = text.lower()
+        if lower in invalid_exact or ":" in text:
+            return ""
+        if re.search(r"(friendmessage|groupmessage|unified_msg_origin)", lower):
+            return ""
+        return text
+
+    @staticmethod
+    def _group_merge_list_identity(field: str, item: Any) -> tuple[Any, ...] | None:
+        """Return a stable identity for group history entries when one exists."""
+        if not isinstance(item, dict):
+            try:
+                return ("value", json.dumps(item, ensure_ascii=False, sort_keys=True))
+            except (TypeError, ValueError):
+                return ("value", repr(item))
+
+        if field == "group_episodes":
+            episode_id = item.get("id")
+            if episode_id not in (None, ""):
+                return ("id", str(episode_id))
+            return (
+                "episode",
+                str(item.get("created_ts") or ""),
+                str(item.get("date") or ""),
+                str(item.get("summary") or ""),
+            )
+
+        identity_fields = {
+            "topic_threads": ("signature", "topic_id", "id"),
+            "slang_terms": ("term", "text", "id"),
+            "recent_messages": ("message_id", "id"),
+            "pending_atrelay_tasks": ("task_id", "id"),
+            "group_wakeup_logs": ("trace_id", "id"),
+        }.get(field, ("id", "event_id", "trace_id"))
+        for key in identity_fields:
+            value = item.get(key)
+            if value not in (None, ""):
+                return (key, str(value))
+
+        if field == "recent_messages":
+            return (
+                "message",
+                str(item.get("ts") or ""),
+                str(item.get("sender_id") or ""),
+                str(item.get("text") or ""),
+            )
+        try:
+            return ("value", json.dumps(item, ensure_ascii=False, sort_keys=True))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _group_merge_records_equal(target: dict[str, Any], source: dict[str, Any]) -> bool:
+        """Detect copied alias records so counters are not added twice."""
+        ignored = {"group_id", "umo", "alias_group_ids", "umo_aliases"}
+        target_body = {key: value for key, value in target.items() if key not in ignored}
+        source_body = {key: value for key, value in source.items() if key not in ignored}
+        return target_body == source_body
+
+    def _merge_group_list_values(self, target: list[Any], source: list[Any], field: str) -> None:
+        identities: dict[tuple[Any, ...], int] = {}
+        for index, item in enumerate(target):
+            identity = self._group_merge_list_identity(field, item)
+            if identity is not None:
+                identities.setdefault(identity, index)
+
+        for item in source:
+            identity = self._group_merge_list_identity(field, item)
+            matched_index = identities.get(identity) if identity is not None else None
+            if matched_index is None:
+                target.append(deepcopy(item))
+                if identity is not None:
+                    identities[identity] = len(target) - 1
+                continue
+            existing = target[matched_index]
+            if isinstance(existing, dict) and isinstance(item, dict) and existing != item:
+                self._merge_group_mapping_values(existing, item)
+
+    def _merge_group_mapping_values(
+        self,
+        target: dict[str, Any],
+        source: dict[str, Any],
+        *,
+        numeric_values_are_counts: bool = False,
+    ) -> None:
+        """Recursively merge independently accumulated group observations."""
+        for key, value in source.items():
+            if key == "group_id":
+                continue
+            existing = target.get(key)
+            if isinstance(value, dict):
+                if not isinstance(existing, dict):
+                    if existing in (None, "", [], {}):
+                        target[key] = deepcopy(value)
+                    continue
+                if existing != value:
+                    self._merge_group_mapping_values(
+                        existing,
+                        value,
+                        numeric_values_are_counts=(
+                            key in {"tone", "counts", "counters", "feedback_counts", "reaction_counts"}
+                            or key.endswith("_counts")
+                        ),
+                    )
+                continue
+            if isinstance(value, list):
+                if not isinstance(existing, list):
+                    if existing in (None, "", [], {}):
+                        target[key] = deepcopy(value)
+                    continue
+                self._merge_group_list_values(existing, value, key)
+                continue
+            if isinstance(value, bool):
+                if key not in target:
+                    target[key] = value
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if numeric_values_are_counts or key == "count" or key.endswith("_count") or key.endswith("_today"):
+                    target[key] = _safe_float(existing, 0.0, 0.0) + _safe_float(value, 0.0, 0.0)
+                    if isinstance(existing, int) and isinstance(value, int):
+                        target[key] = int(target[key])
+                elif key == "last_seen" or key.endswith("_at") or key.endswith("_ts"):
+                    target[key] = max(_safe_float(existing, 0.0, 0.0), _safe_float(value, 0.0, 0.0))
+                elif existing in (None, "", 0):
+                    target[key] = deepcopy(value)
+                continue
+            if existing in (None, "", [], {}):
+                target[key] = deepcopy(value)
+
+    def _merge_group_record_values(
+        self,
+        target: dict[str, Any],
+        source: dict[str, Any],
+        alias_id: Any,
+    ) -> None:
+        if target is source:
+            return
+
+        copied_alias = self._group_merge_records_equal(target, source)
+        target_manual = _single_line(target.get("manual_group_name"), 80)
+        source_manual = _single_line(source.get("manual_group_name"), 80)
+        target_manual_updated = _safe_float(target.get("manual_group_name_updated_at"), 0.0, 0.0)
+        source_manual_updated = _safe_float(source.get("manual_group_name_updated_at"), 0.0, 0.0)
+        known_names: list[str] = []
+        for candidate in (
+            *(target.get("group_name_aliases") if isinstance(target.get("group_name_aliases"), list) else []),
+            target_manual,
+            source_manual,
+            source.get("name"),
+            source.get("group_name"),
+        ):
+            name = _single_line(candidate, 80)
+            if name and name not in known_names:
+                known_names.append(name)
+
+        if not copied_alias:
+            self._merge_group_mapping_values(target, source)
+
+        if source_manual and (not target_manual or source_manual_updated > target_manual_updated):
+            target_manual = source_manual
+            target["manual_group_name"] = source_manual
+            if source_manual_updated:
+                target["manual_group_name_updated_at"] = source_manual_updated
+        if known_names:
+            target["group_name_aliases"] = known_names
+        if target_manual:
+            target["manual_group_name"] = target_manual
+            target["name"] = target_manual
+            target["group_name"] = target_manual
+            target["group_name_source"] = "manual"
+
+        aliases = target.setdefault("alias_group_ids", [])
+        if not isinstance(aliases, list):
+            aliases = []
+            target["alias_group_ids"] = aliases
+        source_aliases = source.get("alias_group_ids") if isinstance(source.get("alias_group_ids"), list) else []
+        for candidate in (alias_id, *source_aliases):
+            alias = _single_line(candidate, 512)
+            if alias and alias not in aliases:
+                aliases.append(alias)
+
+        umo_aliases = target.setdefault("umo_aliases", [])
+        if not isinstance(umo_aliases, list):
+            umo_aliases = []
+            target["umo_aliases"] = umo_aliases
+        for candidate in (source.get("umo"), alias_id):
+            umo = _single_line(candidate, 512)
+            if ":groupmessage:" in umo.lower() and umo not in umo_aliases:
+                umo_aliases.append(umo)
+
+    def _canonicalize_group_records(self, canonical_id: str) -> dict[str, Any]:
+        """Re-key and merge equivalent records in the active persona store only."""
+        groups = self.data.setdefault("groups", {})
+        if not isinstance(groups, dict):
+            groups = {}
+            self.data["groups"] = groups
+
+        matches: list[tuple[Any, dict[str, Any]]] = []
+        for raw_key, raw_group in list(groups.items()):
+            if not isinstance(raw_group, dict):
+                continue
+            identities = {
+                self._normalize_group_identity_id(raw_key),
+                self._normalize_group_identity_id(raw_group.get("group_id")),
+                self._normalize_group_identity_id(raw_group.get("umo")),
+            }
+            if canonical_id in identities:
+                matches.append((raw_key, raw_group))
+
+        canonical_group = groups.get(canonical_id)
+        if not isinstance(canonical_group, dict):
+            canonical_group = matches[0][1] if matches else deepcopy(_DEFAULT_GROUP_TEMPLATE)
+            groups[canonical_id] = canonical_group
+
+        for raw_key, source in matches:
+            if source is not canonical_group:
+                self._merge_group_record_values(canonical_group, source, raw_key)
+            elif raw_key != canonical_id:
+                aliases = canonical_group.setdefault("alias_group_ids", [])
+                if not isinstance(aliases, list):
+                    aliases = []
+                    canonical_group["alias_group_ids"] = aliases
+                alias = _single_line(raw_key, 512)
+                if alias and alias not in aliases:
+                    aliases.append(alias)
+            if raw_key != canonical_id:
+                groups.pop(raw_key, None)
+
+        canonical_group["group_id"] = canonical_id
+        return canonical_group
+
     def _merge_user_record_values(self, target: dict[str, Any], source: dict[str, Any], alias_id: str) -> None:
         # Alias records can span the v1/v2 score boundary. Normalize both sides
         # before additive fields are combined so their units never mix.
-        migrate_legacy_relationship_score(target, created=False, now=_now_ts())
-        migrate_legacy_relationship_score(source, created=False, now=_now_ts())
+        migration_now = _now_ts()
+        migrate_legacy_relationship_score(
+            target,
+            created=False,
+            now=migration_now,
+            record_id=target.get("user_id"),
+        )
+        migrate_legacy_relationship_score(
+            source,
+            created=False,
+            now=migration_now,
+            record_id=source.get("user_id") or alias_id,
+        )
         additive_keys = {
             "inbound_count",
             "private_inbound_count",
@@ -1378,10 +1651,23 @@ class CoreStoreMixin:
 
     def _merge_private_user_alias_records(self) -> bool:
         aliases = getattr(self, "private_user_aliases", {}) or {}
-        if not aliases:
-            return False
         users = self.data.setdefault("users", {})
         changed = False
+        migration_now = _now_ts()
+        # Startup maintenance must cover every persisted user, even when no
+        # alias mapping is configured for this installation.
+        for raw_user_id, raw_user in list(users.items()):
+            if not isinstance(raw_user, dict):
+                continue
+            migration = migrate_legacy_relationship_score(
+                raw_user,
+                created=False,
+                now=migration_now,
+                record_id=raw_user_id,
+            )
+            changed = changed or bool(migration.get("changed"))
+        if not aliases:
+            return changed
         for alias_id, canonical_id in list(aliases.items()):
             alias_id = str(alias_id or "").strip()
             canonical_id = self._canonical_private_user_id(canonical_id)
@@ -1390,8 +1676,22 @@ class CoreStoreMixin:
             source = users.get(alias_id)
             if not isinstance(source, dict):
                 continue
+            target_created = canonical_id not in users
             target = users.setdefault(canonical_id, deepcopy(_DEFAULT_USER_TEMPLATE))
             target["user_id"] = canonical_id
+            target_migration = migrate_legacy_relationship_score(
+                target,
+                created=target_created,
+                now=migration_now,
+                record_id=canonical_id,
+            )
+            source_migration = migrate_legacy_relationship_score(
+                source,
+                created=False,
+                now=migration_now,
+                record_id=alias_id,
+            )
+            changed = changed or bool(target_migration.get("changed")) or bool(source_migration.get("changed"))
             self._merge_user_record_values(target, source, alias_id)
             users.pop(alias_id, None)
             changed = True
@@ -1621,7 +1921,12 @@ class CoreStoreMixin:
             "relationship_decay_settled_day": user.get("relationship_decay_settled_day"),
             "relationship_last_decay_stage_drop_at": user.get("relationship_last_decay_stage_drop_at"),
         }
-        migrate_legacy_relationship_score(user, created=created, now=_now_ts())
+        score_migration = migrate_legacy_relationship_score(
+            user,
+            created=created,
+            now=_now_ts(),
+            record_id=user.get("user_id"),
+        )
         user["relationship_mode"] = normalize_relationship_mode(
             user.get("relationship_mode"),
             user.get("relationship_role"),
@@ -1676,7 +1981,7 @@ class CoreStoreMixin:
             "relationship_decay_settled_day": user.get("relationship_decay_settled_day"),
             "relationship_last_decay_stage_drop_at": user.get("relationship_last_decay_stage_drop_at"),
         }
-        return before != after
+        return before != after or bool(score_migration.get("changed"))
 
     def _apply_relationship_event(
         self,
@@ -1687,7 +1992,12 @@ class CoreStoreMixin:
         event_id: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
-        migrate_legacy_relationship_score(user, created=False, now=now)
+        score_migration = migrate_legacy_relationship_score(
+            user,
+            created=False,
+            now=now,
+            record_id=user.get("user_id"),
+        )
         result = apply_relationship_event(
             user,
             delta,
@@ -1701,7 +2011,7 @@ class CoreStoreMixin:
             positive_stage_cap_key=getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded"),
             timezone_name=getattr(self, "environment_perception_timezone", None),
         )
-        if result.get("changed"):
+        if result.get("changed") or score_migration.get("changed"):
             self._schedule_data_save()
         return result
 
@@ -1709,11 +2019,29 @@ class CoreStoreMixin:
         original_user_id = str(user_id or "").strip()
         user_id = self._canonical_private_user_id(original_user_id)
         users = self.data.setdefault("users", {})
+        alias_migration_changed = False
         if original_user_id and original_user_id != user_id and original_user_id in users:
+            target_created = user_id not in users
             target = users.setdefault(user_id, deepcopy(_DEFAULT_USER_TEMPLATE))
             target["user_id"] = user_id
             source = users.pop(original_user_id)
             if isinstance(source, dict):
+                migration_now = _now_ts()
+                target_migration = migrate_legacy_relationship_score(
+                    target,
+                    created=target_created,
+                    now=migration_now,
+                    record_id=user_id,
+                )
+                source_migration = migrate_legacy_relationship_score(
+                    source,
+                    created=False,
+                    now=migration_now,
+                    record_id=original_user_id,
+                )
+                alias_migration_changed = bool(
+                    target_migration.get("changed") or source_migration.get("changed")
+                )
                 self._merge_user_record_values(target, source, original_user_id)
         created = user_id not in users
         user = users.setdefault(user_id, deepcopy(_DEFAULT_USER_TEMPLATE))
@@ -1746,7 +2074,7 @@ class CoreStoreMixin:
             user["nickname"] = self.default_nickname
         if not user.get("style"):
             user["style"] = self.default_style
-        if relationship_changed:
+        if relationship_changed or alias_migration_changed:
             self._schedule_data_save()
         return user
 
@@ -1822,12 +2150,13 @@ class CoreStoreMixin:
         return ids
 
     def _get_group(self, group_id: str) -> dict[str, Any]:
-        groups = self.data.setdefault("groups", {})
-        group = groups.setdefault(group_id, dict(_DEFAULT_GROUP_TEMPLATE))
-        group["group_id"] = group_id
+        canonical_id = self._normalize_group_identity_id(group_id)
+        if not canonical_id:
+            canonical_id = _single_line(group_id, 160)
+        group = self._canonicalize_group_records(canonical_id)
         for key, default_value in _DEFAULT_GROUP_TEMPLATE.items():
             if key not in group:
-                group[key] = default_value.copy() if isinstance(default_value, (dict, list)) else default_value
+                group[key] = deepcopy(default_value)
         group["enabled"] = bool(group.get("enabled", True))
         return group
 
@@ -1840,8 +2169,8 @@ class CoreStoreMixin:
             parts = []
         ids = []
         for part in parts:
-            group_id = str(part).strip()
-            if group_id and group_id.isdigit() and group_id not in ids:
+            group_id = self._normalize_group_identity_id(part)
+            if group_id and group_id not in ids:
                 ids.append(group_id)
         return ids
 

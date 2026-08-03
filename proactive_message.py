@@ -2056,7 +2056,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 f"档位={_single_line(expression.get('expression_band'), 20) or 'relaxed'}，"
                 f"语气={_single_line(expression.get('tone'), 20) or 'steady'}，"
                 f"追问={'允许' if expression.get('followup') else '关闭'}，"
-                f"主动额度={_safe_int(expression.get('proactive_budget'), 0, 0)}"
+                f"当前硬额度={_safe_int(expression.get('proactive_budget'), 0, 0)}，"
+                f"阶段柔性目标={_safe_int(expression.get('proactive_target'), 0, 0)}；"
+                "柔性目标只用于调节频率和打扰感，不要求凑满，也不在达到后机械停发"
             )
         else:
             parts.append(f"统一表达决策不可用：角色={label}，使用低压日常表达")
@@ -2807,7 +2809,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 f"语气={_single_line(expression_decision.get('tone'), 24) or 'steady'}；"
                 f"距离={_single_line(expression_decision.get('address_style'), 24) or 'neutral'}；"
                 f"追问={'允许' if expression_decision.get('followup') else '关闭'}；"
-                f"主动额度={_safe_int(expression_decision.get('proactive_budget'), 0, 0)}；"
+                f"当前硬额度={_safe_int(expression_decision.get('proactive_budget'), 0, 0)}；"
+                f"阶段柔性目标={_safe_int(expression_decision.get('proactive_target'), 0, 0)}；"
+                "结合真实由头、对方反馈和打扰感自然调整，不要求凑满或机械卡线；"
                 "内容尺度=normal。"
             )
         afterglow = user.get("proactive_afterglow") if isinstance(user.get("proactive_afterglow"), dict) else {}

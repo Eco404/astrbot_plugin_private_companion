@@ -15341,7 +15341,8 @@ function groupEffectiveStatus(group) {
 
 function groupIdText(group) {
   const id = String(group?.group_id || "").trim();
-  return id ? `群号 ${id}` : "群号未知";
+  if (!id) return "群 ID 未知";
+  return /^\d+$/.test(id) ? `群号 ${id}` : `群 ID ${id}`;
 }
 
 function groupWakeupCardLine(group) {
@@ -15385,6 +15386,10 @@ async function renderGroupDetail(forceFetch = false) {
       <div class="group-detail-title">
         <span class="eyebrow">群聊详情</span>
         <h2>${escapeHtml(groupName)}</h2>
+        <form id="groupNameForm" class="group-name-editor">
+          <input name="group_name" value="${escapeHtml(detail.manual_group_name || (groupName === "未命名群聊" ? "" : groupName))}" placeholder="群名称" maxlength="80" aria-label="群名称" />
+          <button type="submit">保存名称</button>
+        </form>
         <div class="group-detail-status">
           <span>${escapeHtml(groupIdText(detail))}</span>
           <span class="${groupEffectiveEnabled(detail) ? "ok-text" : "warn-text"}">${escapeHtml(groupEffectiveStatus(detail))}</span>
@@ -15976,6 +15981,18 @@ function groupWakeupLogItem(item) {
 }
 
 function bindGroupActions(detail) {
+  document.querySelector("#groupNameForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await runAction(
+      () => postJson("/group/update", {
+        group_id: detail.group_id,
+        group_name: String(form.get("group_name") || "").trim(),
+      }),
+      "已保存群名称",
+      event.submitter,
+    );
+  });
   document.querySelector("[data-open-member-safety]")?.addEventListener("click", async () => {
     state.groupDetailView = "member-safety";
     state.groupMemberSafety = null;
@@ -32531,19 +32548,22 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const groupId = String(form.get("group_id") || "").trim();
+  const groupName = String(form.get("group_name") || "").trim();
   const listMode = String(form.get("list_mode") || "none");
   if (!groupId) return;
   state.selectedGroupId = groupId;
   state.groupDetailView = "overview";
   state.groupMemberSafety = null;
   const saved = await runAction(async () => {
-    let result = await postJson("/group/update", { group_id: groupId, enabled: true });
+    let result = await postJson("/group/update", { group_id: groupId, group_name: groupName, enabled: true });
+    const normalizedGroupId = String(result?.group_id || groupId).trim();
+    state.selectedGroupId = normalizedGroupId;
     if (listMode !== "none") {
       const group = state.overview?.group || {};
       const whitelist = new Set(group.whitelist || []);
       const blacklist = new Set(group.blacklist || []);
-      if (listMode === "whitelist") whitelist.add(groupId);
-      if (listMode === "blacklist") blacklist.add(groupId);
+      if (listMode === "whitelist") whitelist.add(normalizedGroupId);
+      if (listMode === "blacklist") blacklist.add(normalizedGroupId);
       result = await postJson("/settings/update", {
         group_whitelist_ids: [...whitelist],
         group_blacklist_ids: [...blacklist],

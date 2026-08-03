@@ -267,8 +267,10 @@ class WorldbookMixin:
         content = str(raw.get("content") or "").strip()
         if not name and not content:
             return None
+        template = self._worldbook_entry_template(raw)
+        scope_limit = 160 if template == "group" else 40
         scope = (
-            [_single_line(item, 40).strip() for item in raw.get("scope", []) if _single_line(item, 40).strip()]
+            [_single_line(item, scope_limit).strip() for item in raw.get("scope", []) if _single_line(item, scope_limit).strip()]
             if isinstance(raw.get("scope"), list)
             else []
         )
@@ -279,7 +281,7 @@ class WorldbookMixin:
         )
         gender = _single_line(raw.get("gender") or raw.get("性别"), 40)
         return {
-            "template": self._worldbook_entry_template(raw),
+            "template": template,
             "name": name,
             "gender": gender,
             "enabled": bool(raw.get("enabled", True)),
@@ -330,8 +332,8 @@ class WorldbookMixin:
         groups: dict[str, dict[str, Any]] = {}
         for item in entries:
             template = item.get("template")
-            digit_scopes = [str(scope).strip() for scope in item.get("scope", []) if str(scope).strip().isdigit()]
             if template == "user":
+                digit_scopes = [str(scope).strip() for scope in item.get("scope", []) if str(scope).strip().isdigit()]
                 for user_id in digit_scopes:
                     if user_id in deleted_member_ids:
                         continue
@@ -368,7 +370,12 @@ class WorldbookMixin:
                     profile["enabled"] = bool(profile.get("enabled", True) and item.get("enabled", True))
                     profile["source_entries"].append(item.get("name") or user_id)
             elif template == "group":
-                for group_id in digit_scopes:
+                group_scopes = []
+                for scope in item.get("scope", []):
+                    group_id = self._normalize_group_identity_id(scope)
+                    if group_id and group_id not in group_scopes:
+                        group_scopes.append(group_id)
+                for group_id in group_scopes:
                     if group_id in deleted_group_ids:
                         continue
                     groups[group_id] = {

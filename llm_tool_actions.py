@@ -6527,11 +6527,11 @@ class LlmToolActionsMixin:
             at_user = str(at_qq_list[0])
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
-        target_group = _single_line(group_id, 40)
+        target_group = self._normalize_atrelay_group_target_id(group_id)
         text = self._normalize_atrelay_text(message, limit=800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
-        if not target_group.isdigit():
-            return "发送失败：群号格式不正确"
+        if not target_group:
+            return "发送失败：群 ID 格式不正确"
         if not text:
             return "发送失败：消息内容为空"
         boundary = self._atrelay_boundary_guard(text)
@@ -6663,9 +6663,13 @@ class LlmToolActionsMixin:
         at_user = kwargs.get("at_user") or kwargs.get("at") or kwargs.get("target_user") or kwargs.get("user_id") or ""
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
-        targets = [item for item in self._parse_atrelay_target_list(group_ids, limit=self.atrelay_multi_target_limit) if item.isdigit()]
+        targets = []
+        for item in self._parse_atrelay_target_list(group_ids, limit=self.atrelay_multi_target_limit):
+            target = self._normalize_atrelay_group_target_id(item)
+            if target and target not in targets:
+                targets.append(target)
         if not targets:
-            return "发送失败：没有有效群号"
+            return "发送失败：没有有效群 ID"
         results = []
         for group_id in targets:
             result = await self._pc_send_to_group_impl(
@@ -6712,10 +6716,10 @@ class LlmToolActionsMixin:
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
-        target_group = _single_line(group_id, 40) or self._extract_group_id_from_event(event)
+        target_group = self._normalize_atrelay_group_target_id(group_id) or self._extract_group_id_from_event(event)
         text = self._normalize_atrelay_text(message, limit=800)
-        if not target_group.isdigit():
-            return "挂起失败：群号格式不正确"
+        if not target_group:
+            return "挂起失败：群 ID 格式不正确"
         if not text:
             return "挂起失败：消息内容为空"
         boundary = self._atrelay_boundary_guard(text)
