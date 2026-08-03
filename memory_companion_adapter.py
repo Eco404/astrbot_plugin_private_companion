@@ -979,6 +979,7 @@ class MemoryCompanionAdapterMixin:
         user: dict[str, Any],
         user_id: str,
         text: str,
+        umo: str = "",
         reason: str = "",
         action: str = "message",
         motive: str = "",
@@ -994,7 +995,7 @@ class MemoryCompanionAdapterMixin:
         proactive_recorder = getattr(bridge, "record_proactive_message", None) if bridge is not None else None
         if not callable(visible_turn_recorder) and not callable(proactive_recorder):
             return
-        umo = _single_line(user.get("umo"), 200)
+        umo = _single_line(umo or user.get("umo"), 200)
         if not umo:
             return
         platform = umo.split(":", 1)[0] if ":" in umo else ""

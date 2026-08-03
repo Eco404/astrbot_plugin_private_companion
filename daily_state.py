@@ -17592,7 +17592,10 @@ class DailyStateMixin:
                     delivered_text = self._visible_text_without_tts_reading(text, limit=500)
                     current_after_send["last_proactive_message"] = _single_line(delivered_text, 500)
                     current_after_send["last_proactive_sent_at"] = sent_at
-                    current_after_send["last_proactive_delivery_umo"] = _single_line(send_umo_for_send, 180)
+                    current_after_send["last_proactive_delivery_umo"] = _single_line(
+                        getattr(delivered, "delivery_umo", "") or send_umo_for_send,
+                        180,
+                    )
                     delivery_success_recorder = getattr(self, "_note_private_delivery_success", None)
                     if callable(delivery_success_recorder):
                         delivery_success_recorder(user_id, current_after_send, send_umo_for_send)
@@ -17644,21 +17647,28 @@ class DailyStateMixin:
                     planned_action_for_send or "message",
                     delivery_complete,
                 )
+                delivery_umo = str(
+                    getattr(delivered, "delivery_umo", "") or send_umo_for_send
+                ).strip()
+                assistant_archive_text = self._delivered_assistant_text_from_chain(
+                    list(getattr(delivered, "delivered_chain", ()) or ()),
+                    fallback_text=text,
+                )
                 await self._archive_proactive_message_to_conversation(
                     user=user,
+                    umo=delivery_umo,
                     user_prompt=self._build_proactive_archive_user_prompt(
                         reason=reason,
                         action=effective_action_for_send or planned_action_for_send or "message",
                         motive=planned_motive_for_send,
                         action_summary=action_summary,
                     ),
-                    assistant_response=self._build_proactive_archive_assistant_text(
-                        text=text,
-                        image_path=image_path,
-                        extra_components=extra_components,
-                        action_summary=action_summary,
-                        photo_subject_owner=photo_subject_owner_for_send,
-                    ),
+                    assistant_response=assistant_archive_text,
+                )
+                await self._record_final_assistant_in_livingmemory(
+                    umo=delivery_umo,
+                    assistant_response=assistant_archive_text,
+                    delivery_id=str(audit_id or f"proactive:{user_id}:{_now_ts():.6f}"),
                 )
                 if is_troubleshooting_for_send:
                     async with self._data_lock:
@@ -18044,6 +18054,7 @@ class DailyStateMixin:
                         "user": current_snapshot,
                         "user_id": user_id,
                         "text": visible_text,
+                        "umo": delivery_umo,
                         "reason": reason,
                         "action": current.get("last_proactive_action") or effective_action_for_send or planned_action_for_send or "message",
                         "motive": planned_motive_for_send,

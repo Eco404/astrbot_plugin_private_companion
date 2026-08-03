@@ -58,7 +58,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import file_token_service
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
-from astrbot.core.agent.message import AssistantMessageSegment, TextPart, UserMessageSegment
+from astrbot.core.agent.message import AssistantMessageSegment, UserMessageSegment
 from astrbot.core.db.po import Conversation
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_session import MessageSession
@@ -128,6 +128,10 @@ from .helpers import (
     _today_key,
     normalize_bot_relationship_cards,
 )
+from .final_response_persistence import (
+    FinalResponsePersistenceMixin,
+    collect_proactive_delivery,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -164,6 +168,7 @@ from .photo_reference_intent import (
     ReferenceIntent,
     analyze_indexed_reference_roles,
     analyze_reference_intent,
+    explicitly_excludes_reference_outfit,
 )
 from .photo_reference_plan import (
     PhotoReferencePlan,
@@ -312,6 +317,8 @@ class _ProactiveSendOutcome:
     extra_components_delivered: int = 0
     note: str = ""
     primary_complete: bool = False
+    delivery_umo: str = ""
+    delivered_chain: tuple[Any, ...] = ()
 
     def __bool__(self) -> bool:
         return self.delivered
@@ -410,7 +417,7 @@ class _CapturedFrameworkSendMessage(Exception):
     """Stop the framework agent once its send_message_to_user payload is captured."""
 
 
-class ProactiveMessageMixin:
+class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     """主动消息生成、动作执行和发送链路"""
 
     def _proactive_chat_bridge_user(self, session_id: str) -> tuple[str, dict[str, Any] | None]:
@@ -6638,22 +6645,51 @@ Output:
                 outcome = await self._send_proactive_message_chain(umo, text)
                 if not bool(getattr(outcome, "delivered", False)):
                     continue
+                delivered_text = str(
+                    getattr(outcome, "delivered_text", "") or text
+                ).strip()
+                delivery_umo = str(
+                    getattr(outcome, "delivery_umo", "") or umo
+                ).strip()
+                assistant_archive_text = self._delivered_assistant_text_from_chain(
+                    list(getattr(outcome, "delivered_chain", ()) or ()),
+                    fallback_text=delivered_text,
+                )
                 if getattr(self, "context", None) is not None:
                     await self._archive_proactive_message_to_conversation(
                         user=user,
+                        umo=delivery_umo,
                         user_prompt=self._build_proactive_archive_user_prompt(
                             reason="goodnight_screen_check",
                             action="message",
                             motive=motive,
                             action_summary=safe_context,
                         ),
-                        assistant_response=self._build_proactive_archive_assistant_text(
-                            text=text,
-                            action_summary=safe_context,
-                        ),
+                        assistant_response=assistant_archive_text,
+                    )
+                await self._record_final_assistant_in_livingmemory(
+                    umo=delivery_umo,
+                    assistant_response=assistant_archive_text,
+                    delivery_id=f"goodnight:{user_id}:{_now_ts():.6f}",
+                )
+                memory_companion_recorder = getattr(
+                    self,
+                    "_memory_companion_record_proactive_message",
+                    None,
+                )
+                if callable(memory_companion_recorder):
+                    await memory_companion_recorder(
+                        user=user,
+                        user_id=user_id,
+                        text=delivered_text,
+                        umo=delivery_umo,
+                        reason="goodnight_screen_check",
+                        action="message",
+                        motive=motive,
+                        action_summary=safe_context,
                     )
                 sent_at = _now_ts()
-                visible = self._visible_text_without_tts_reading(text, limit=500)
+                visible = self._visible_text_without_tts_reading(delivered_text, limit=500)
                 async with self._data_lock:
                     current = self._get_user(user_id)
                     self._reset_daily_counter_if_needed(current)
@@ -6665,7 +6701,7 @@ Output:
                     current["last_proactive_reason"] = "goodnight_screen_check"
                     current["last_proactive_action"] = "message"
                     current["last_proactive_motive"] = motive
-                    current["last_proactive_delivery_umo"] = umo
+                    current["last_proactive_delivery_umo"] = delivery_umo
                     current["last_proactive_delivery_inbound_count"] = _safe_int(current.get("inbound_count"), 0)
                     current["goodnight_screen_check_reminded_at"] = sent_at
                     current["goodnight_screen_check_state"] = "reminded"
@@ -10536,6 +10572,9 @@ Output:
         )
         workflow_default_scene_preset = _single_line(workflow_default_scene_preset, 80)
         wardrobe_intent = analyze_photo_wardrobe(request_text)
+        user_requested_outfit_category = (
+            str(wardrobe_intent.target_category or "").strip().lower()
+        )
         reference_intent = await self._analyze_photo_reference_intent_async(
             request_text,
             has_explicit_reference=bool(explicit_reference_paths),
@@ -10632,6 +10671,7 @@ Output:
             explicit_reference_paths=explicit_reference_paths,
             require_existing_paths=True,
             trace_id=trace_id,
+            requested_outfit_category=user_requested_outfit_category,
         )
         self._append_photo_generation_trace_event(
             trace_id,
@@ -10896,7 +10936,10 @@ Output:
             PhotoPromptSection(
                 name="global_fixed_prompt",
                 source="fixed_prompt",
-                positive=f"Additional fixed prompt: {fixed_prompt}" if fixed_prompt else "",
+                positive=f"Additional fixed prompt: {fixed_prompt}"
+                if fixed_prompt
+                else "",
+                protected=True,
             ),
             PhotoPromptSection(
                 name="edit_contract",
@@ -12935,6 +12978,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         reference_intent: ReferenceIntent,
         wardrobe_intent: PhotoWardrobeIntent | None = None,
+        requested_outfit_category: str | None = None,
         allow_daily_outfit: bool = True,
         requester_user_id: str = "",
         session_key: str = "",
@@ -13143,6 +13187,15 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 reference_intent.confidence,
                 reference_intent.source,
             )
+        if requested_outfit_category is None:
+            requested_outfit_category = (
+                str(getattr(wardrobe_intent, "target_category", "") or "")
+                .strip()
+                .lower()
+            )
+        else:
+            requested_outfit_category = str(requested_outfit_category).strip().lower()
+        reference_outfit_excluded = explicitly_excludes_reference_outfit(request_text)
         if reference_intent.source == "workflow_default" and candidates and not paths:
             requested_roles = set(reference_intent.requested_roles)
             for candidate in candidates:
@@ -13150,10 +13203,21 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     str(role or "").strip().lower()
                     for role in (candidate.get("reference_roles") or ())
                 }
+                candidate_category = (
+                    str(candidate.get("outfit_category") or "").strip().lower()
+                )
                 if (
                     bool(candidate.get("outfit_lock_default"))
                     and "outfit" in candidate_roles
                     and "outfit" not in reference_intent.excluded_roles
+                    and not reference_outfit_excluded
+                    and (
+                        not requested_outfit_category
+                        or (
+                            requested_outfit_category != "custom_outfit"
+                            and candidate_category == requested_outfit_category
+                        )
+                    )
                 ):
                     requested_roles.add("outfit")
             if requested_roles != set(reference_intent.requested_roles):
@@ -13164,6 +13228,64 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     reference_intent.confidence,
                     reference_intent.source,
                 )
+        matching_outfit_candidates: list[tuple[dict[str, Any], bool]] = []
+        for candidate in candidates:
+            candidate_roles = {
+                str(role or "").strip().lower()
+                for role in (candidate.get("reference_roles") or ())
+            }
+            uses_available_outfit_role = (
+                "outfit" not in candidate_roles
+                and candidate.get("kind") == "explicit"
+                and not has_indexed_roles
+                and reference_intent.continuity_mode != "edit"
+                and "outfit"
+                in {
+                    str(role or "").strip().lower()
+                    for role in (candidate.get("available_reference_roles") or ())
+                }
+            )
+            declared_roles = candidate_roles | (
+                {"outfit"} if uses_available_outfit_role else set()
+            )
+            if (
+                "outfit" in declared_roles
+                and str(candidate.get("outfit_category") or "").strip().lower()
+                == requested_outfit_category
+            ):
+                matching_outfit_candidates.append(
+                    (candidate, uses_available_outfit_role)
+                )
+        matching_outfit_reference = bool(matching_outfit_candidates)
+        if (
+            requested_outfit_category
+            and requested_outfit_category != "custom_outfit"
+            and matching_outfit_reference
+            and not reference_outfit_excluded
+        ):
+            for candidate, uses_available_outfit_role in matching_outfit_candidates:
+                if uses_available_outfit_role:
+                    candidate_roles = {
+                        str(role or "").strip().lower()
+                        for role in (candidate.get("reference_roles") or ())
+                    }
+                    candidate_roles.add("outfit")
+                    candidate["reference_roles"] = [
+                        role for role in REFERENCE_ROLES if role in candidate_roles
+                    ]
+            requested_roles = set(plan_intent.requested_roles)
+            excluded_roles = set(plan_intent.excluded_roles)
+            requested_roles.add("outfit")
+            excluded_roles.discard("outfit")
+            plan_intent = replace(
+                plan_intent,
+                requested_roles=tuple(
+                    role for role in REFERENCE_ROLES if role in requested_roles
+                ),
+                excluded_roles=tuple(
+                    role for role in REFERENCE_ROLES if role in excluded_roles
+                ),
+            )
         plan = build_photo_reference_plan(plan_intent, candidates)
         if (
             not plan.bindings
@@ -17316,6 +17438,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             ]
         for action, params in attempts:
             if await self._call_onebot_forward_action(client, action, **params):
+                self._confirm_outbound_delivery(
+                    "",
+                    [Plain(segment) for segment in cleaned_segments],
+                )
                 logger.info(
                     "[PrivateCompanion] 分段消息已合并转发发送: source=%s target=%s:%s segments=%s",
                     source or "unknown",
@@ -17549,6 +17675,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 session_obj = self._session_for_platform(session, platform)
                 precise_result = await platform.send_by_session(session_obj, MessageChain(processed_chain))
                 if precise_result is not False:
+                    self._confirm_outbound_delivery(umo, processed_chain)
                     return True
                 precise_error = RuntimeError("精确平台发送返回 False（平台未接受消息）")
                 logger.warning(
@@ -17570,6 +17697,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                         self._describe_send_target(umo, session, platform),
                         self._format_send_exception(e),
                     )
+                    self._confirm_outbound_delivery(umo, processed_chain)
                     return True
                 logger.warning(
                     "[PrivateCompanion] 精确平台发送失败,回退核心发送: target=%s error=%s",
@@ -17584,6 +17712,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         try:
             core_result = await self.context.send_message(core_session, self._build_result_from_chain(processed_chain))
             if core_result is not False:
+                self._confirm_outbound_delivery(umo, processed_chain)
                 return True
             platform_supports = getattr(self, "_platform_supports", None)
             if not callable(platform_supports) or platform_supports("onebot_actions", umo=umo):
@@ -17610,6 +17739,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     self._describe_send_target(umo, session, platform),
                     self._format_send_exception(e),
                 )
+                self._confirm_outbound_delivery(umo, processed_chain)
                 return True
             target = self._describe_send_target(umo, session, platform)
             precise_text = self._format_send_exception(precise_error) or "未尝试或未失败"
@@ -17632,6 +17762,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             ) from core_error
         direct_ok, direct_error = await self._send_chain_components_via_onebot_direct(umo, session, processed_chain)
         if direct_ok:
+            self._confirm_outbound_delivery(umo, processed_chain)
             return True
         if self._is_onebot_event_checker_send_rejection(direct_error):
             raise RuntimeError(self._onebot_event_checker_rejection_summary())
@@ -18039,6 +18170,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 type(exc).__name__,
             )
 
+    @collect_proactive_delivery
     async def _send_proactive_message_chain(
         self,
         umo: str,
@@ -18415,10 +18547,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         user: dict[str, Any],
         user_prompt: str,
         assistant_response: str,
-    ) -> None:
-        umo = str(user.get("umo") or "").strip()
+        umo: str = "",
+    ) -> bool:
+        umo = str(umo or user.get("umo") or "").strip()
         if not umo or not assistant_response:
-            return
+            return False
         for attempt in range(4):
             try:
                 user_msg_obj = UserMessageSegment(content=str(user_prompt or ""))
@@ -18437,19 +18570,20 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 written = await self._conversation_db_operation("archive_proactive_message", _write)
                 if not written:
                     logger.warning("[PrivateCompanion] 主动消息存档失败: 无法获取或创建 AstrBot 会话 history umo=%s", _single_line(umo, 140))
-                    return
+                    return False
                 if attempt > 0:
                     logger.info("[PrivateCompanion] 主动消息写入 AstrBot 会话历史成功: %s retry=%s", umo, attempt)
                 else:
                     logger.info("[PrivateCompanion] 已将主动消息写入 AstrBot 会话历史: %s", umo)
-                return
+                return True
             except Exception as e:
                 text = str(e or "").lower()
                 if ("database is locked" in text or "sqlite3.operationalerror" in text) and attempt < 3:
                     await asyncio.sleep(0.25 * (attempt + 1))
                     continue
                 logger.warning("[PrivateCompanion] 主动消息写入会话历史失败: %s", e)
-                return
+                return False
+        return False
 
     def _format_story_plan_for_prompt(self) -> str:
         plan = self.data.get("daily_story_plan", {})
