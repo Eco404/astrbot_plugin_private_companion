@@ -929,7 +929,7 @@ const providerGuides = {
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: {
     preference: "speed",
     passiveImpact: "async",
-    purpose: "主动计划到点后，先判断这个念头是否贴合当前角色、世界观、关系温度和打扰边界。",
+    purpose: "主动计划到点后，先判断这个念头是否贴合当前角色、世界观、统一表达和打扰边界。",
     fit: "适合 JSON 输出稳定、角色边界感强、短文本判断保守的小到中型模型。",
     fallback: "留空时复用回复/主动复核模型，再回退到陪伴通用模型。",
   },
@@ -1108,6 +1108,8 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 const featureMeta = {
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
   enable_multi_persona_mode: ["多人格支持模式", "按人格隔离资料、日程、状态、日记、用户、群聊和 Token；同一窗口固定使用一个人格，避免串人格。"],
+  enable_custom_relationship_stage_policy: ["亲密度阶段策略", "保留固定八阶段和分数范围，配置每一阶段的标签、语气、称呼尺度与软行为上限。"],
+  enable_relationship_content_tiers: ["关系内容尺度", "把日常、含蓄暧昧和成人私密内容纳入同一表达决策；关系阶段只是必要条件，不会自动授权。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
   enable_companion_memory: ["本地陪伴画像", "在插件内整理当前私聊的偏好、边界和关系线索；跨会话长期记忆依赖外部记忆插件。"],
   enable_expression_learning: ["表达方式学习", "从选定私聊或群聊提取抽象表达特征，并按范围用于私聊被动、私聊主动和群聊回复。"],
@@ -1119,9 +1121,9 @@ const featureMeta = {
   enable_proactive_message_review: ["主动私聊发送前终审", "仅作用于主动私聊，独立按人格、上下文和真实来源判断原样发送、改写或取消。"],
   enable_smart_silence: ["智能沉默", "私聊和群聊发送前判断是否应该收住话题；可只看明确边界，也可交给小模型结合上下文判断。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
-  enable_relationship_analysis: ["模型关系站位分析", "阶段性用完整人格和互动数据复核亲近程度与打扰偏好；可独立关闭模型调用。"],
-  enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
-  enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身被刺到、缓和、恢复和短暂回避的余波。"],
+  enable_relationship_analysis: ["模型关系站位分析", "生成可选兼容画像诊断；不决定长期阶段、好感分或最终表达。"],
+  enable_relationship_state_machine: ["关系距离感", "把边界和回应情况归一为互动状态，再交给统一表达决策。"],
+  enable_emotion_simulation: ["情绪模拟", "维护短期情绪余波，归一后作为统一表达决策的输入。"],
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
   enable_open_loop_tracking: ["未完话头", "记住对话里还留着、之后可能会回头接的事。"],
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
@@ -1243,6 +1245,14 @@ const featureSearchAliases = {
 };
 
 const featureGroups = [
+  {
+    title: "用户与关系",
+    note: "长期亲密度、短期互动状态与内容尺度的统一表达配置。",
+    keys: [
+      "enable_custom_relationship_stage_policy",
+      "enable_relationship_content_tiers",
+    ],
+  },
   {
     title: "通用能力",
     note: "私聊、群聊和主动链路都会参考的状态、媒介、表达学习、收口与发送能力。",
@@ -1531,6 +1541,8 @@ function featureSearchText(key) {
 }
 
 const safeFeatureKeys = [
+  "enable_custom_relationship_stage_policy",
+  "enable_relationship_content_tiers",
   "enable_mai_style_integration",
   "enable_companion_memory",
   "enable_expression_learning",
@@ -1551,6 +1563,27 @@ const safeFeatureKeys = [
 ];
 
 const configLabels = {
+  default_interaction_band: "默认互动状态",
+  relationship_stage_policy: "八阶段策略",
+  relationship_positive_stage_cap_key: "普通用户长期关系上限阶段",
+  normal_interaction_band_cap: "普通用户互动状态上限",
+  enable_flirt_content_tier: "允许含蓄暧昧档",
+  enable_adult_content_tier: "允许成人私密档",
+  adult_content_owner_confirmed: "确认主要用户已成年",
+  adult_content_require_turn_consent: "每轮要求明确同意",
+  ADULT_CONTENT_PROVIDER_ID: "成人私密档指定 Provider",
+  owner_exclusive_label: "主要用户专属关系名称",
+  owner_exclusive_tone: "主要用户专属基础表达",
+  owner_exclusive_address_style: "主要用户专属称呼尺度",
+  owner_exclusive_proactive_limit: "主要用户专属主动阶段上限",
+  relationship_event_window_minutes: "同类事件合并窗口（分钟）",
+  relationship_positive_event_cap: "单次正向事件上限",
+  relationship_negative_event_cap: "单次负向事件上限",
+  relationship_positive_daily_cap: "每日正向增长上限",
+  relationship_decay_grace_days: "自然回落宽限期（天）",
+  relationship_decay_early_per_day: "早期每日回落值",
+  relationship_decay_middle_per_day: "中期每日回落值",
+  relationship_decay_late_per_day: "后期每日回落值",
   photo_generation_trace_max_size_kb: "生图日志单文件大小（KB）",
   photo_generation_trace_backup_count: "生图日志轮转备份数",
   enabled_user_count: "启用私聊对象",
@@ -2140,6 +2173,27 @@ const configLabels = {
 };
 
 const configDescriptions = {
+  default_interaction_band: "只影响之后建立的档案；亲近和爱意只能由主要用户账户使用。",
+  relationship_stage_policy: "固定八阶段键与阈值，只编辑显示、语气、称呼尺度和软行为，不能授予权限。",
+  relationship_positive_stage_cap_key: "普通用户的自动与管理员手动调整均不能超过该阶段；主要用户专属关系不受影响。",
+  normal_interaction_band_cap: "普通用户自动或手动可达到的最高互动状态；亲近和爱意始终只属于主要用户。",
+  enable_flirt_content_tier: "只允许亲密及以上、私聊且当前互动不是回避或受伤时使用非露骨暧昧表达。",
+  enable_adult_content_tier: "只打开成人档资格检查；主要用户、专属关系、爱意、私聊、成年确认、当轮同意和指定 Provider 必须同时成立。",
+  adult_content_owner_confirmed: "仅由管理员在后台确认主要用户已成年；插件不会从亲密度、聊天内容或模型结果推断年龄。",
+  adult_content_require_turn_consent: "开启后每轮都必须在用户当轮消息中识别到明确请求和同意；建议保持开启。",
+  ADULT_CONTENT_PROVIDER_ID: "当前会话必须已经使用此 Provider 才能进入成人档；未配置或不匹配时直接降级。插件二次复核固定使用它，主回复链回退仍由 AstrBot 配置决定。",
+  owner_exclusive_label: "只修改主要用户专属关系的显示名称，不增加管理或安全权限。",
+  owner_exclusive_tone: "专属关系的长期表达基线；当前互动状态仍可使本轮收敛。",
+  owner_exclusive_address_style: "优先沿用双方已确认的专属称呼。",
+  owner_exclusive_proactive_limit: "阶段硬上限，实际次数仍取全局、用户、阶段和动态额度的最小值。",
+  relationship_event_window_minutes: "同一用户的同类互动在该时间内只按一个关系事件结算，避免连续短消息重复刷分。",
+  relationship_positive_event_cap: "单个正向事件最多增加的长期亲密度；最终仍受每日正向增长上限约束。",
+  relationship_negative_event_cap: "单个负向事件最多降低的长期亲密度。",
+  relationship_positive_daily_cap: "每个用户每天由自动互动累计增加的长期亲密度上限；管理员手动调整不占用该额度。",
+  relationship_decay_grace_days: "用户停止互动后先保留的天数；宽限期结束才开始自然回落，专属关系不会回落。",
+  relationship_decay_early_per_day: "超过宽限期后的第一段每日回落值，只让正分向 0 靠近。",
+  relationship_decay_middle_per_day: "长期未互动进入中段后的每日回落值，只让正分向 0 靠近。",
+  relationship_decay_late_per_day: "更长时间未互动后的每日回落值，只让正分向 0 靠近。",
   enable_reaction_expression_experiment: "默认关闭。开启后，主模型仍只生成一次可独立成立的完整文字，并可留下隐藏表情意图；插件清除意图后再按发送方式投递合适图片，绝不会用图片替代正文。",
   reaction_expression_private_enabled: "允许在私聊回复中使用实验性表情表达，仍需通过触发概率、冷却、重复控制和关系边界检查。",
   reaction_expression_proactive_enabled: "允许主动私聊在完整正文后留下隐藏表情意图，再复用相同的概率、冷却、用户停用边界、重复图片与本地图库匹配；不会增加模型调用，已有媒体时不会叠加表情包。",
@@ -2167,7 +2221,7 @@ const configDescriptions = {
   proactive_chat_bridge_review_mode: "轻量本地只做确定性检查，适合追求即时触达；跟随主动终审会按本插件当前主动终审配置加入关系、状态和表达复核，质量更稳，但会多一次模型调用和等待。",
   proactive_chat_bridge_collision_window_seconds: "只防止两套主动链路在很短时间内重复生成和连续发送，不接管 Proactive Chat 的长期频率。建议保持 90 秒；平台或模型较慢时可适当增加。",
   proactive_prompt_template: "自定义主动消息生成提示词。留空使用内置模板；适合把角色口吻、世界观约束和“不要像回复空气”这类要求固定下来。",
-  enable_llm_proactive_persona_judge: "主动计划到点后，先让模型判断这个念头是否符合角色、世界观、关系温度和当下打扰边界；可放行、改写、延后或丢弃。",
+  enable_llm_proactive_persona_judge: "主动计划到点后，先让模型判断这个念头是否符合角色、世界观、统一表达和当下打扰边界；可放行、改写、延后或丢弃。",
   PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "用于主动人格/世界观判定的轻量模型。建议选择 JSON 稳定、判断保守、理解角色边界的小到中型模型。",
   proactive_persona_judge_send_threshold: "模型判定为 send 但分数低于该阈值时，会自动转为延后。越高越克制，越低越容易放行。",
   proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
@@ -2739,6 +2793,37 @@ const advancedCycleSettingKeys = [
 ];
 
 const featureSettingGroups = {
+  enable_custom_relationship_stage_policy: [
+    "relationship_stage_policy",
+    "relationship_positive_stage_cap_key",
+    "normal_interaction_band_cap",
+    "owner_exclusive_label",
+    "owner_exclusive_tone",
+    "owner_exclusive_address_style",
+    "owner_exclusive_proactive_limit",
+    "relationship_event_window_minutes",
+    "relationship_positive_event_cap",
+    "relationship_negative_event_cap",
+    "relationship_positive_daily_cap",
+    "relationship_decay_grace_days",
+    "relationship_decay_early_per_day",
+    "relationship_decay_middle_per_day",
+    "relationship_decay_late_per_day",
+    "enable_emotion_simulation",
+    "enable_llm_emotion_judgement",
+    "emotion_judgement_mode",
+    "EMOTION_JUDGEMENT_PROVIDER_ID",
+    "emotional_gate_hurt_threshold",
+    "emotional_gate_refuse_threshold",
+    "emotional_gate_max_hurt_minutes",
+  ],
+  enable_relationship_content_tiers: [
+    "enable_flirt_content_tier",
+    "enable_adult_content_tier",
+    "adult_content_owner_confirmed",
+    "adult_content_require_turn_consent",
+    "ADULT_CONTENT_PROVIDER_ID",
+  ],
   enable_daily_review: ["daily_review_time", "daily_review_auto_apply_guidance", "enable_daily_case_review_experiment", "daily_review_retention_days"],
   enable_mai_style_integration: [
     "default_style",
@@ -2862,6 +2947,40 @@ const featureSettingSections = {
       title: "人格隔离范围",
       note: "主人格负责兼容其他插件；参与人格分别维护完整资料和日程。",
       keys: ["multi_persona_primary_id", "multi_persona_ids"],
+    },
+  ],
+  enable_custom_relationship_stage_policy: [
+    {
+      title: "长期关系与上限",
+      note: "阶段键与分数范围固定；关系和互动上限下调后按后端规则收敛。",
+      keys: ["relationship_stage_policy", "relationship_positive_stage_cap_key", "normal_interaction_band_cap"],
+    },
+    {
+      title: "主要用户专属关系",
+      note: "只改变长期表达基线和主动阶段上限，不授予额外权限。",
+      keys: ["owner_exclusive_label", "owner_exclusive_tone", "owner_exclusive_address_style", "owner_exclusive_proactive_limit"],
+    },
+    {
+      title: "关系账本与自然回落",
+      note: "所有自动增减统一去重、限幅并记入账本；回落只让正分向 0 靠近。",
+      keys: ["relationship_event_window_minutes", "relationship_positive_event_cap", "relationship_negative_event_cap", "relationship_positive_daily_cap", "relationship_decay_grace_days", "relationship_decay_early_per_day", "relationship_decay_middle_per_day", "relationship_decay_late_per_day"],
+    },
+    {
+      title: "互动状态事件",
+      note: "受伤、边界、安抚、夸奖和亲近事件直接调整七档互动状态。",
+      keys: ["enable_emotion_simulation", "enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_max_hurt_minutes"],
+    },
+  ],
+  enable_relationship_content_tiers: [
+    {
+      title: "普通暧昧",
+      note: "只在亲密及以上的普通私聊中允许非露骨表达；回避或受伤时自动收敛。",
+      keys: ["enable_flirt_content_tier"],
+    },
+    {
+      title: "成人私密边界",
+      note: "成人档不会由关系自动开启；缺少任一条件都会降级。插件二次复核固定使用指定 Provider，主回复链回退仍由 AstrBot 配置决定。",
+      keys: ["enable_adult_content_tier", "adult_content_owner_confirmed", "adult_content_require_turn_consent", "ADULT_CONTENT_PROVIDER_ID"],
     },
   ],
   enable_reply_interception_forward: [
@@ -3580,6 +3699,23 @@ const featureSettingSections = {
 };
 
 const featureSettingTypes = {
+  default_interaction_band: { type: "select", options: [["avoidant", "回避"], ["hurt", "受伤"], ["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
+  relationship_positive_stage_cap_key: { type: "select", options: [["familiar", "熟悉"], ["close", "亲近"], ["intimate", "亲密"], ["deeply_bonded", "深度联结"]] },
+  normal_interaction_band_cap: { type: "select", options: [["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
+  enable_flirt_content_tier: { type: "checkbox" },
+  enable_adult_content_tier: { type: "checkbox" },
+  adult_content_owner_confirmed: { type: "checkbox" },
+  adult_content_require_turn_consent: { type: "checkbox" },
+  ADULT_CONTENT_PROVIDER_ID: { type: "provider" },
+  owner_exclusive_proactive_limit: { type: "number", min: 0, max: 30, step: 1 },
+  relationship_event_window_minutes: { type: "number", min: 1, max: 1440, step: 1 },
+  relationship_positive_event_cap: { type: "number", min: 1, max: 30, step: 1 },
+  relationship_negative_event_cap: { type: "number", min: 1, max: 60, step: 1 },
+  relationship_positive_daily_cap: { type: "number", min: 0, max: 120, step: 1 },
+  relationship_decay_grace_days: { type: "number", min: 0, max: 30, step: 1 },
+  relationship_decay_early_per_day: { type: "number", min: 0, max: 30, step: 1 },
+  relationship_decay_middle_per_day: { type: "number", min: 0, max: 30, step: 1 },
+  relationship_decay_late_per_day: { type: "number", min: 0, max: 30, step: 1 },
   forward_message_mode: { type: "select", options: [["inject", "注入"], ["transcribe", "转述"]] },
   tts_generation_mode: { type: "select", options: [["fast_tag", "快速标签：主模型写私有标签"], ["postprocess", "后处理：判断+翻译模型"]] },
   tts_fishaudio_model: { type: "select", options: [["auto", "自动识别（官方接口默认 S2.1 Free）"], ["s2.1-pro-free", "S2.1 Pro Free"], ["s2.1-pro", "S2.1 Pro"], ["s2-pro", "S2 Pro"], ["s1", "S1 旧版"]] },
@@ -13608,6 +13744,143 @@ function renderUsers() {
   renderUserDetail();
 }
 
+const RELATIONSHIP_INTERACTION_BANDS = [
+  ["avoidant", "回避"],
+  ["hurt", "受伤"],
+  ["relaxed", "放松"],
+  ["lively", "活泼"],
+  ["warm", "温暖"],
+  ["close", "亲近"],
+  ["affectionate", "爱意"],
+];
+
+function normalizedRelationshipStages(value) {
+  return normalizeRelationshipPolicy(value).map((stage) => ({
+    key: String(stage.key || ""),
+    label: String(stage.label || ""),
+    min: Number(stage.min || 0),
+    max: Number(stage.max || 0),
+    description: String(stage.description || ""),
+    tone: String(stage.tone || ""),
+    address_level: String(stage.address_level || ""),
+  }));
+}
+
+function relationshipStageBar(stages, currentKey, value, isOwner) {
+  const items = [
+    ...stages,
+    { key: "owner_exclusive", label: "专属联结", ownerOnly: true },
+  ];
+  return `<div class="relationship-stage-bar" role="img" aria-label="当前亲密度阶段 ${escapeHtml(currentKey || "")}">
+    ${items.map((stage) => {
+      const active = String(stage.key || "") === String(currentKey || "");
+      const disabled = Boolean(stage.ownerOnly && !isOwner);
+      const range = stage.ownerOnly ? "仅主要用户固定模式" : `${stage.min}..${stage.max}`;
+      return `<div class="relationship-stage-segment ${active ? "is-current" : ""} ${disabled ? "is-disabled" : ""}" title="${escapeHtml(`${stage.label || stage.key} · ${range}`)}"><i></i><span>${escapeHtml(stage.label || stage.key)}</span>${active ? `<b>${stage.ownerOnly ? "固定" : escapeHtml(value)}</b>` : ""}</div>`;
+    }).join("")}
+  </div>`;
+}
+
+function normalizedCurrentInteraction(value, isOwner) {
+  const raw = value && typeof value === "object" ? value : {};
+  const knownBands = new Set(RELATIONSHIP_INTERACTION_BANDS.map(([key]) => key));
+  const allowed = new Set(Array.isArray(raw.allowed_bands) ? raw.allowed_bands.map(String) : RELATIONSHIP_INTERACTION_BANDS.slice(0, 5).map(([key]) => key));
+  const capIndex = { relaxed: 2, lively: 3, warm: 4 }[String(raw.normal_interaction_band_cap || "warm")] ?? 4;
+  RELATIONSHIP_INTERACTION_BANDS.forEach(([key], index) => {
+    if ((!isOwner && index > capIndex) || (!isOwner && ["close", "affectionate"].includes(key))) allowed.delete(key);
+  });
+  const requested = String(raw.expression_band || "relaxed");
+  const expressionBand = knownBands.has(requested) && (allowed.has(requested) || isOwner) ? requested : "relaxed";
+  return {
+    expressionBand,
+    label: String(raw.label || Object.fromEntries(RELATIONSHIP_INTERACTION_BANDS)[expressionBand] || "放松"),
+    allowed,
+    source: String(raw.source || "automatic"),
+    operator: String(raw.operator || ""),
+    reason: String(raw.reason || ""),
+    updatedAt: Number(raw.updated_at || 0),
+    expiresAt: Number(raw.expires_at || 0),
+    manualOverride: Boolean(raw.manual_override),
+  };
+}
+
+function relationshipTimeText(value, fallback) {
+  const timestamp = Number(value || 0);
+  return timestamp > 0 ? new Date(timestamp * 1000).toLocaleString() : fallback;
+}
+
+function renderRelationshipStatus(detail) {
+  const intimacy = detail?.relationship_intimacy && typeof detail.relationship_intimacy === "object" ? detail.relationship_intimacy : {};
+  const stages = normalizedRelationshipStages(intimacy.stages);
+  const phase = intimacy.phase && typeof intimacy.phase === "object" ? intimacy.phase : {};
+  const isOwner = detail?.relationship_role === "owner";
+  const exclusive = detail?.relationship_mode === "owner_exclusive";
+  const currentKey = exclusive ? "owner_exclusive" : String(phase.key || "acquaintance");
+  const value = Number.isFinite(Number(intimacy.value)) ? Number(intimacy.value) : Number(detail?.relationship_score || 0);
+  const ownerProjection = intimacy.owner_exclusive && typeof intimacy.owner_exclusive === "object" ? intimacy.owner_exclusive : {};
+  const interaction = normalizedCurrentInteraction(detail?.current_interaction, isOwner);
+  const expression = detail?.expression_decision && typeof detail.expression_decision === "object" ? detail.expression_decision : {};
+  const contentTier = { normal: "日常", flirt: "含蓄暧昧", adult: "成人私密" }[String(expression.content_tier || "normal")] || "日常";
+  const providerPolicy = expression.content_provider_policy === "configured_local_only" ? "指定 Provider 精确匹配" : "当前 Provider";
+  const trend = { up: "近期升温", down: "近期降温", steady: "近期稳定", unknown: "暂无趋势" }[String(intimacy.trend || "unknown")] || "暂无趋势";
+  return `
+    <section class="companion-intimacy-card">
+      <div class="companion-intimacy-head">
+        <div><span class="relationship-kicker">RELATIONSHIP</span><h3>亲密度与互动表达</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : (phase.description || "长期关系使用阶段展示；精确数值仅用于管理员调整。"))}</p></div>
+        <div class="companion-intimacy-current"><strong>${escapeHtml(exclusive ? (ownerProjection.label || "专属联结") : (phase.label || "初识"))}</strong><span>${exclusive ? "固定" : escapeHtml(value)}</span></div>
+      </div>
+      ${relationshipStageBar(stages, currentKey, value, isOwner)}
+      <div class="companion-intimacy-meta">
+        <span>基础语气：${escapeHtml(exclusive ? (ownerProjection.tone || "温暖、亲近、稳定") : (phase.tone || detail.style || "自然"))}</span>
+        <span>称呼尺度：${escapeHtml(exclusive ? (ownerProjection.address_level || "沿用已确认专属称呼") : (phase.address_level || "沿用已确认称呼"))}</span>
+        <span>${escapeHtml(trend)}</span>
+      </div>
+      <form id="relationshipStageForm" class="inline-form companion-intimacy-form">
+        <label>关系阶段
+          <select name="relationship_stage_key">
+            ${stages.map((stage) => `<option value="${escapeHtml(stage.key)}" ${currentKey === stage.key ? "selected" : ""}>${escapeHtml(stage.label)}</option>`).join("")}
+            <option value="owner_exclusive" ${exclusive ? "selected" : ""} ${isOwner ? "" : "disabled"}>专属联结${isOwner ? "" : "（仅主要用户）"}</option>
+          </select>
+        </label>
+        <button type="submit">保存阶段</button>
+      </form>
+      <details class="companion-intimacy-advanced">
+        <summary>精确调整亲密度</summary>
+        <form id="relationshipScoreForm" class="inline-form companion-intimacy-form">
+          <label>亲密度数值 <input id="relationshipScoreNumber" name="relationship_score" type="number" min="-1200" max="1200" step="1" value="${escapeHtml(value)}" required ${exclusive ? "disabled" : ""}></label>
+          <button type="submit" ${exclusive ? "disabled" : ""}>保存数值</button>
+        </form>
+      </details>
+      <section class="current-interaction-card">
+        <div class="current-interaction-head"><div><span class="relationship-kicker">CURRENT INTERACTION</span><h3>当前互动状态</h3><p>短期表达修正，会与长期关系、日程和安全边界共同决定当下语气。</p></div><strong>${escapeHtml(interaction.label)}</strong></div>
+        <div class="interaction-stage-bar" role="img" aria-label="当前互动状态 ${escapeHtml(interaction.label)}">
+          ${RELATIONSHIP_INTERACTION_BANDS.map(([key, label]) => `<div class="interaction-stage-segment ${interaction.expressionBand === key ? "is-current" : ""} ${!interaction.allowed.has(key) ? "is-disabled" : ""}"><i></i><span>${escapeHtml(label)}</span></div>`).join("")}
+        </div>
+        <div class="current-interaction-meta">
+          <span>来源：${escapeHtml(interaction.manualOverride ? "管理员手动" : "自动结算")}</span>
+          <span>原因：${escapeHtml(interaction.reason || "暂无")}</span>
+          <span>更新：${escapeHtml(relationshipTimeText(interaction.updatedAt, "暂无记录"))}</span>
+          <span>到期：${escapeHtml(relationshipTimeText(interaction.expiresAt, "按后续互动解除"))}</span>
+        </div>
+        <form id="currentInteractionForm" class="inline-form companion-intimacy-form">
+          <label>互动状态
+            <select name="current_interaction_band">
+              ${RELATIONSHIP_INTERACTION_BANDS.map(([key, label]) => `<option value="${key}" ${interaction.expressionBand === key ? "selected" : ""} ${interaction.allowed.has(key) ? "" : "disabled"}>${label}${interaction.allowed.has(key) ? "" : "（当前不可用）"}</option>`).join("")}
+            </select>
+          </label>
+          <button type="submit">保存状态</button>
+        </form>
+      </section>
+      <div class="relationship-expression-status">
+        <span><b>表达档位</b>${escapeHtml(expression.expression_band || "relaxed")}</span>
+        <span><b>内容尺度</b>${escapeHtml(contentTier)}</span>
+        <span><b>Provider 规则</b>${escapeHtml(providerPolicy)}</span>
+        <span><b>主动额度</b>${escapeHtml(expression.proactive_budget ?? 0)}</span>
+      </div>
+    </section>
+  `;
+}
+
 async function renderUserDetail(forceFetch = false) {
   const box = $("#userDetail");
   if (!state.selectedUserId) {
@@ -13643,8 +13916,9 @@ async function renderUserDetail(forceFetch = false) {
       <label>每日主动 <input name="proactive_daily_limit" type="number" min="-1" max="30" step="1" value="${escapeHtml(detail.proactive_daily_limit ?? -1)}" /></label>
       <button type="submit">保存</button>
     </form>
+    ${renderRelationshipStatus(detail)}
     <div class="visual-strip">
-      ${scoreGauge("关系分", detail.relationship_score || 0, -20, 40)}
+      ${miniStat("关系阶段", detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识")}
       ${scoreGauge("今日主动", detail.sent_today || 0, 0, proactiveGaugeMax(detail.sent_today, detail.effective_daily_limit, detail.effective_daily_limit_unlimited, state.overview?.private?.max_daily_messages || 8))}
       ${miniStat("片段", detail.dialogue_episode_count || (detail.dialogue_episodes || []).length)}
       ${miniStat("未完话头", Array.isArray(detail.open_loops) ? activeOpenLoopItems(detail.open_loops).length : (detail.open_loop_count || 0))}
@@ -14833,6 +15107,60 @@ function bindUserActions(detail) {
       await renderUserDetail(true);
     }
   };
+  $("#relationshipStageForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const selectedKey = String(new FormData(event.currentTarget).get("relationship_stage_key") || "");
+    const isOwner = detail.relationship_role === "owner";
+    if (selectedKey === "owner_exclusive" && !isOwner) {
+      showToast("专属联结只允许主要用户使用", "error");
+      return;
+    }
+    const stages = normalizedRelationshipStages(detail?.relationship_intimacy?.stages);
+    const stage = stages.find((item) => item.key === selectedKey);
+    const body = {
+      user_id: detail.user_id,
+      relationship_mode: selectedKey === "owner_exclusive" ? "owner_exclusive" : "normal",
+    };
+    if (stage) body.relationship_score = Math.round((stage.min + stage.max) / 2);
+    const saved = await runAction(
+      () => postJson("/user/update", body),
+      selectedKey === "owner_exclusive" ? "已设置专属联结" : "已保存关系阶段",
+      event.submitter,
+      { reload: false },
+    );
+    if (saved) await refreshSelectedUserDetail();
+  });
+  $("#relationshipScoreForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const value = Number($("#relationshipScoreNumber")?.value);
+    if (!Number.isInteger(value) || value < -1200 || value > 1200) {
+      showToast("亲密度必须是 -1200 到 1200 的整数", "error");
+      return;
+    }
+    const saved = await runAction(
+      () => postJson("/user/update", { user_id: detail.user_id, relationship_score: value }),
+      "已保存亲密度",
+      event.submitter,
+      { reload: false },
+    );
+    if (saved) await refreshSelectedUserDetail();
+  });
+  $("#currentInteractionForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const band = String(new FormData(event.currentTarget).get("current_interaction_band") || "");
+    const interaction = normalizedCurrentInteraction(detail?.current_interaction, detail.relationship_role === "owner");
+    if (!interaction.allowed.has(band)) {
+      showToast("该互动状态超过当前用户允许上限", "error");
+      return;
+    }
+    const saved = await runAction(
+      () => postJson("/user/update", { user_id: detail.user_id, current_interaction_band: band }),
+      "已保存互动状态",
+      event.submitter,
+      { reload: false },
+    );
+    if (saved) await refreshSelectedUserDetail();
+  });
   document.querySelector("[data-private-learning-clear]")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     if (!requireSecondClick(button, `private-learning-clear:${detail.user_id}`, "再次点击清空该用户的行为习惯", "再次点击清空")) return;
@@ -14855,6 +15183,10 @@ function bindUserActions(detail) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const selectedRole = form.get("relationship_role");
+    if (detail.relationship_mode === "owner_exclusive" && selectedRole !== "owner") {
+      showToast("请先把专属联结切换为一个普通关系阶段，再修改关系角色", "error");
+      return;
+    }
     await runAction(() => postJson("/user/update", {
       user_id: detail.user_id,
       nickname: form.get("nickname"),
@@ -18761,7 +19093,7 @@ function proactiveReadinessMeta(item) {
     meta.push(`状态：${[readiness.drive_label, readiness.drive_detail].filter(Boolean).join(" · ")}`);
   }
   if (readiness.temperature_label || readiness.temperature_detail) {
-    meta.push(`关系温度：${[readiness.temperature_label, readiness.temperature_detail].filter(Boolean).join(" · ")}`);
+    meta.push(`主动表达温度：${[readiness.temperature_label, readiness.temperature_detail].filter(Boolean).join(" · ")}`);
   }
   const motivation = readiness.motivation || {};
   if (motivation.label || motivation.detail || motivation.score) {
@@ -22299,7 +22631,12 @@ function featureSwitchItem(key) {
   const tempUnlocked = featureTemporarilyUnlockedByProactiveOnly(key);
   const displayOn = checked || tempUnlocked;
   const related = proactiveOnlyRelatedUnlocks(key);
-  const stateText = locked ? (tempUnlocked ? "临时放行" : "已锁定") : checked ? "开启" : "关闭";
+  let stateText = locked ? (tempUnlocked ? "临时放行" : "已锁定") : checked ? "开启" : "关闭";
+  if (!locked && key === "enable_custom_relationship_stage_policy") {
+    const settings = state.overview?.settings || {};
+    const count = normalizeRelationshipPolicy(settings.relationship_stage_policy).length || 8;
+    stateText = `${checked ? "自定义" : "内置"} · ${count} 阶段｜关系上限 ${relationshipStageCapLabel(settings.relationship_positive_stage_cap_key)}｜互动上限 ${normalInteractionCapLabel(settings.normal_interaction_band_cap)}`;
+  }
   const lockNote = tempUnlocked ? "已临时放行，关闭仅保留主动能力后清空" : "仅保留主动能力中，原配置保留";
   const relatedText = related.length ? `建议同步：${related.map((item) => item.label || item.key).join("、")}` : "";
   return `
@@ -22324,6 +22661,14 @@ function featureSwitchItem(key) {
   `;
 }
 
+function relationshipStageCapLabel(key) {
+  return ({ familiar: "熟悉", close: "亲近", intimate: "亲密", deeply_bonded: "深度联结" })[String(key)] || "深度联结";
+}
+
+function normalInteractionCapLabel(key) {
+  return ({ relaxed: "放松", lively: "活泼", warm: "温暖" })[String(key)] || "温暖";
+}
+
 function featureGroupForKey(key) {
   if (["enable_proactive_only_mode", "enable_multi_persona_mode"].includes(key)) return "兼容与隔离";
   const parentKey = topLevelFeatureKey(key);
@@ -22337,6 +22682,26 @@ function featureRelatedSettings(key) {
   const keys = featureSettingGroups[key] || [];
   const fallbackValue = (name) => {
     const defaults = {
+      relationship_stage_policy: [],
+      relationship_positive_stage_cap_key: "deeply_bonded",
+      normal_interaction_band_cap: "warm",
+      enable_flirt_content_tier: true,
+      enable_adult_content_tier: false,
+      adult_content_owner_confirmed: false,
+      adult_content_require_turn_consent: true,
+      ADULT_CONTENT_PROVIDER_ID: "",
+      owner_exclusive_label: "专属联结",
+      owner_exclusive_tone: "温暖、亲近、稳定",
+      owner_exclusive_address_style: "优先使用已确认的专属称呼",
+      owner_exclusive_proactive_limit: 6,
+      relationship_event_window_minutes: 30,
+      relationship_positive_event_cap: 4,
+      relationship_negative_event_cap: 12,
+      relationship_positive_daily_cap: 12,
+      relationship_decay_grace_days: 3,
+      relationship_decay_early_per_day: 2,
+      relationship_decay_middle_per_day: 5,
+      relationship_decay_late_per_day: 8,
       inbound_message_debounce_seconds: 3,
       text_message_debounce_seconds: 8,
       image_message_debounce_seconds: 8,
@@ -22532,6 +22897,15 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return state.featureDraft[name];
     return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
   };
+  if (featureKey === "enable_relationship_content_tiers") {
+    const adultOnly = new Set([
+      "adult_content_owner_confirmed",
+      "adult_content_require_turn_consent",
+      "ADULT_CONTENT_PROVIDER_ID",
+    ]);
+    if (adultOnly.has(settingKey)) return boolSetting("enable_adult_content_tier");
+    return true;
+  }
   if (featureKey === "enable_livingmemory_integration") {
     const livingmemory = state.overview?.livingmemory || {};
     const memoryCompanionActive = Boolean(livingmemory.memory_companion_active);
@@ -22734,6 +23108,13 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       ...(state.featureDraft || {}),
     });
   }
+  if (featureKey === "enable_custom_relationship_stage_policy") {
+    if (settingKey === "emotion_judgement_mode") return boolSetting("enable_llm_emotion_judgement");
+    if (settingKey === "EMOTION_JUDGEMENT_PROVIDER_ID") {
+      return boolSetting("enable_llm_emotion_judgement") && String(valueSetting("emotion_judgement_mode", "suspicious")) !== "off";
+    }
+    return true;
+  }
   if (featureKey === "enable_emotion_simulation") {
     if (settingKey === "emotion_judgement_mode") return boolSetting("enable_llm_emotion_judgement");
     if (settingKey === "EMOTION_JUDGEMENT_PROVIDER_ID") return boolSetting("enable_llm_emotion_judgement") && String(valueSetting("emotion_judgement_mode", "suspicious")) !== "off";
@@ -22816,6 +23197,106 @@ function featureSettingInputType(key, value) {
   if (typeof value === "number") return { type: "number" };
   if (Array.isArray(value)) return { type: "textarea" };
   return { type: "text" };
+}
+
+const DEFAULT_RELATIONSHIP_POLICY = [
+  ["deeply_distant", "极度疏离", -1200, -801, "明显保持距离，只做必要、克制且尊重边界的回应。", "克制、礼貌、低压力，不主动拉近关系", "仅使用姓名、固定称呼或“你”", 0, false, false, false, false],
+  ["strongly_distant", "强烈疏离", -800, -401, "关系处于明显降温期，优先稳住边界和基本礼貌。", "平静、简短、不过度解释", "只使用中性称呼", 0, false, false, false, false],
+  ["distant", "疏离", -400, -1, "保持自然但不过分熟络，避免擅自使用亲昵称呼。", "自然、客气、留有空间", "中性称呼", 0, false, false, false, false],
+  ["acquaintance", "初识", 0, 199, "刚开始相处，友好回应并逐步观察偏好。", "友好、自然、不自来熟", "优先固定称呼、姓名或“你”", 0, false, true, false, false],
+  ["familiar", "熟悉", 200, 599, "已有稳定互动，可以更轻松地接话和续话。", "轻松、友好、带一点熟悉感", "可自然使用昵称", 1, true, true, true, true],
+  ["close", "亲近", 600, 899, "关系稳定亲近，可更自然地关心近况和提及共同经历。", "温暖、亲近、尊重当前节奏", "可使用已确认的亲昵称呼", 2, true, true, true, true],
+  ["intimate", "亲密", 900, 1199, "关系亲密，表达可以柔软、有默契，但仍服从用户边界。", "亲密、柔软、不过度黏人", "可使用双方已接受的亲昵称呼", 3, true, true, true, true],
+  ["deeply_bonded", "深度联结", 1200, 1200, "长期关系达到当前上限，以稳定默契为主，不继续扩大权限。", "默契、温柔、稳定", "使用双方明确认可的专属称呼", 4, true, true, true, true],
+].map(([key, label, min, max, description, tone, address_level, proactive_care_limit, allow_playful_jokes, allow_followup, allow_memory_mention, allow_daily_care]) => ({
+  key, label, min, max, description, tone, address_level, proactive_care_limit,
+  allow_playful_jokes, allow_followup, allow_memory_mention, allow_daily_care,
+}));
+
+const RELATIONSHIP_POLICY_BOOL_FIELDS = [
+  ["allow_playful_jokes", "轻量玩笑"],
+  ["allow_followup", "自然续话"],
+  ["allow_memory_mention", "回忆提及"],
+  ["allow_daily_care", "日常关心"],
+];
+
+function normalizeRelationshipPolicy(value) {
+  let raw = value;
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw); } catch { raw = []; }
+  }
+  if (raw && !Array.isArray(raw) && Array.isArray(raw.stages)) raw = raw.stages;
+  const byKey = new Map((Array.isArray(raw) ? raw : [])
+    .filter((item) => item && typeof item === "object" && item.key)
+    .map((item) => [String(item.key), item]));
+  return DEFAULT_RELATIONSHIP_POLICY.map((defaults) => {
+    const item = byKey.get(defaults.key) || {};
+    const careLimit = Number(item.proactive_care_limit);
+    return {
+      ...defaults,
+      label: String(item.label || defaults.label).slice(0, 20),
+      description: String(item.description || defaults.description).slice(0, 160),
+      tone: String(item.tone || defaults.tone).slice(0, 120),
+      address_level: String(item.address_level || defaults.address_level).slice(0, 100),
+      proactive_care_limit: Number.isFinite(careLimit) ? Math.max(0, Math.min(30, Math.trunc(careLimit))) : defaults.proactive_care_limit,
+      ...Object.fromEntries(RELATIONSHIP_POLICY_BOOL_FIELDS.map(([field]) => [field, typeof item[field] === "boolean" ? item[field] : defaults[field]])),
+    };
+  });
+}
+
+function relationshipPolicyEditor(value) {
+  const stages = normalizeRelationshipPolicy(value);
+  return `
+    <div class="relationship-policy-editor" data-relationship-policy-editor>
+      <textarea data-feature-param="relationship_stage_policy" hidden aria-hidden="true">${escapeHtml(JSON.stringify(stages))}</textarea>
+      <div class="relationship-policy-notice">阶段键与分数范围固定；这里只能调整表达和软行为，不能授予主要用户、跨用户查询或平台动作权限。</div>
+      <div class="relationship-policy-grid">
+        ${stages.map((stage, index) => `
+          <article class="relationship-policy-stage" data-stage-key="${escapeHtml(stage.key)}" data-stage-index="${index}">
+            <header><span>${escapeHtml(`${stage.min}..${stage.max}`)}</span><code>${escapeHtml(stage.key)}</code></header>
+            <label>显示名称<input data-stage-field="label" maxlength="20" value="${escapeHtml(stage.label)}"></label>
+            <label>阶段说明<textarea data-stage-field="description" rows="2" maxlength="160">${escapeHtml(stage.description)}</textarea></label>
+            <label>基础语气<textarea data-stage-field="tone" rows="2" maxlength="120">${escapeHtml(stage.tone)}</textarea></label>
+            <label>称呼尺度<input data-stage-field="address_level" maxlength="100" value="${escapeHtml(stage.address_level)}"></label>
+            <label>主动关心上限<input data-stage-field="proactive_care_limit" type="number" min="0" max="30" step="1" value="${escapeHtml(stage.proactive_care_limit)}"></label>
+            <div class="relationship-policy-behaviors">
+              ${RELATIONSHIP_POLICY_BOOL_FIELDS.map(([field, label]) => `<label><input data-stage-field="${field}" type="checkbox" ${stage[field] ? "checked" : ""}><span>${escapeHtml(label)}</span></label>`).join("")}
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function bindRelationshipPolicyEditor(root = document) {
+  const editor = root.querySelector?.("[data-relationship-policy-editor]");
+  if (!editor) return;
+  const hidden = editor.querySelector('[data-feature-param="relationship_stage_policy"]');
+  const sync = () => {
+    const stages = [...editor.querySelectorAll("[data-stage-key]")].map((card) => {
+      const base = normalizeRelationshipPolicy(hidden?.value)[Number(card.dataset.stageIndex || 0)] || {};
+      const item = { ...base, key: card.dataset.stageKey || base.key || "" };
+      card.querySelectorAll("[data-stage-field]").forEach((input) => {
+        const field = input.dataset.stageField || "";
+        if (!field) return;
+        item[field] = input.type === "checkbox"
+          ? input.checked
+          : input.type === "number"
+            ? Math.max(0, Math.min(30, Number(input.value || 0)))
+            : input.value;
+      });
+      return item;
+    });
+    if (hidden) {
+      hidden.value = JSON.stringify(stages);
+      rememberFeatureParamDraft(hidden);
+    }
+    markFeatureDetailDirty();
+  };
+  editor.querySelectorAll("[data-stage-field]").forEach((input) => {
+    input.addEventListener(input.type === "checkbox" ? "change" : "input", sync);
+  });
 }
 
 function featureTextareaValue(key, value) {
@@ -22963,7 +23444,7 @@ function featureProviderSelect(key, value, accessibility = {}) {
   const known = state.availableProviders.some((item) => item.id === current);
   const customValue = current && !known ? current : "";
   const options = [
-    `<option value="">留空自动回退</option>`,
+    `<option value="">${key === "ADULT_CONTENT_PROVIDER_ID" ? "未配置（成人档不可用）" : "留空自动回退"}</option>`,
     ...state.availableProviders.map((item) => {
       const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
       return `<option value="${escapeHtml(item.id)}" ${item.id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
@@ -23122,6 +23603,10 @@ function featureDependencyLines(key) {
     else if (proactiveChat.installed) dependencies.push(["Proactive Chat", "已检测到插件；开启联动后会优先建立深度运行时桥接"]);
     else dependencies.push(["Proactive Chat", "未检测到；安装后无需修改对方插件，本页联动开关会自动生效"]);
   }
+  if (key === "enable_relationship_content_tiers") {
+    dependencies.push(["关系条件", "长期亲密度阶段 + 当前互动状态"]);
+    dependencies.push(["成人档", "主要用户专属关系 + 成年确认 + 当轮同意 + 指定 Provider"]);
+  }
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
   if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_proactive_message_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_analysis", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
@@ -23154,6 +23639,18 @@ function featureDependencyLines(key) {
 }
 
 const featureDetailGuides = {
+  enable_relationship_content_tiers: {
+    summary: "在统一表达决策里选择日常、含蓄暧昧或成人私密尺度；它不新增关系状态，也不改变既有权限。",
+    trigger: "目标私聊进入主模型请求前，根据当轮明确意图、长期关系、当前互动状态和 Provider 身份共同判定。",
+    enabled: "普通暧昧仍受亲密阶段和互动状态约束；成人档只对已确认的主要用户专属私聊开放，缺条件自动降级。",
+    disabled: "所有请求保持日常档；主动消息、群聊、普通用户和记忆插件上下文始终不获得成人内容授权。",
+  },
+  enable_custom_relationship_stage_policy: {
+    summary: "统一维护长期亲密度阶段、主要用户专属表达、七档互动状态事件和自然回落算法。",
+    trigger: "用户详情展示、真实私聊表达决策、主动预算和页面只读投影时。",
+    enabled: "使用下方阶段表达、事件上限、回落规则和互动状态事件参数；所有结果仍受联系边界与安全约束。",
+    disabled: "使用内置八阶段策略；既有用户分数、安全与权限均不改变。",
+  },
   enable_proactive_only_mode: {
     summary: "让本插件只负责主动来找用户的链路，并可与 Proactive Chat 共享发送出口和主动状态，普通聊天继续放行给 AstrBot 默认主链或其他插件。",
     trigger: "普通私聊、群聊事件和非主动框架 LLM 请求到达时生效。",
@@ -23266,7 +23763,7 @@ const featureDetailGuides = {
     summary: "实验性功能第二项：用驱力、诱因和唤醒适配共同判断主动念头现在值不值得发。",
     trigger: "主动计划到点、主动排障评分和主动正文生成前。",
     enabled: "Bot 会区分内部想开口、外部诱因是否足够、当前唤醒水平是否适合行动；只做轻量调权并显示在主动排障中。",
-    disabled: "主动仍按现有开口欲、关系温度、语义自然度和模型复核判断。",
+    disabled: "主动仍按现有开口欲、统一主动表达温度、语义自然度和模型复核判断。",
   },
   enable_personality_iteration_experiment: {
     summary: "实验性功能第三项：把艾森克 PEN、大五人格、依恋风格和自我决定理论作为角色贴合标尺，帮助用户调整角色设定和运行策略。",
@@ -24438,6 +24935,17 @@ function featureDetailPage(key) {
     .join("");
   const weatherSource = String(state.overview?.settings?.weather_source || "qweather").trim().toLowerCase();
   const settingRow = ({ key: name, value, description }) => {
+    if (name === "relationship_stage_policy") {
+      return `
+        <section class="feature-param-row feature-param-row-policy">
+          <div class="feature-param-main">
+            <header><b>${escapeHtml(configLabel(name))}</b><code>${escapeHtml(name)}</code></header>
+            <p>${escapeHtml(description)}</p>
+          </div>
+          ${relationshipPolicyEditor(value)}
+        </section>
+      `;
+    }
     const accessibility = featureSettingAccessibility(name, `feature-detail-${key}`);
     const usesStandardControl = !["photo_reference_catalog", "bot_relationship_cards"].includes(name);
     const settingLabel = usesStandardControl
@@ -24909,6 +25417,9 @@ function bindFeatureDetailActions() {
   if (state.selectedFeatureKey === "enable_photo_text_action") {
     bindPhotoReferenceManagerActions();
     bindRelationshipCardEditor();
+  }
+  if (state.selectedFeatureKey === "enable_custom_relationship_stage_policy") {
+    bindRelationshipPolicyEditor(detailPage || document);
   }
   bindProactiveOnlyTempUnlockActions();
 }
@@ -27249,14 +27760,14 @@ function experimentalVisualSpec(key) {
       model: "驱力 × 诱因 × 唤醒适配",
       question: "Bot 想开口、值得开口、适合开口，这三件事是否同时成立？",
       flow: [
-        ["采样", "主动计划到点时读取状态、关系温度、候选语义和当前唤醒。"],
-        ["量化", "计算驱力、关系温度、诱因和唤醒适配。"],
+        ["采样", "主动计划到点时读取状态、统一主动表达温度、候选语义和当前唤醒。"],
+        ["量化", "计算驱力、统一主动表达温度、诱因和唤醒适配。"],
         ["合成", "按 25/18/37/20 权重合成综合动机分。"],
         ["验证", "看主动运行态动机和主动链路测试里的实验动机阶段。"],
       ],
       axes: [
         ["驱力", "25%", "内部想开口的推动力。"],
-        ["关系温度", "18%", "当前关系是否适合靠近。"],
+        ["主动表达温度", "18%", "统一表达决策当前是否允许靠近。"],
         ["诱因", "37%", "这条候选有没有具体外部价值。"],
         ["唤醒适配", "20%", "当前状态是否适合行动。"],
       ],
@@ -28073,8 +28584,8 @@ function renderMotivationTheoryVisual() {
   const selected = stateRows[0] || { item: {}, motivation: {} };
   const motivation = selected.motivation || {};
   const factors = [
-    { label: "驱力", weight: 25, value: motivation.drive?.score ?? 0, mapping: "Bot 内部想开口的推动力，受状态、精力、关系温度影响。" },
-    { label: "关系温度", weight: 18, value: motivation.temperature?.score ?? 0, mapping: "当前关系是否适合靠近；未回应、受伤或边界会降低。" },
+    { label: "驱力", weight: 25, value: motivation.drive?.score ?? 0, mapping: "Bot 内部想开口的推动力，受状态和精力影响。" },
+    { label: "主动表达温度", weight: 18, value: motivation.temperature?.score ?? 0, mapping: "由统一表达决策投影；好感、互动、边界与回应节奏共同收敛。" },
     { label: "诱因", weight: 37, value: motivation.incentive?.score ?? 0, mapping: "这条主动有没有具体外部价值；约定、事件、内容分享会提高。" },
     { label: "唤醒适配", weight: 20, value: motivation.arousal?.score ?? 0, mapping: "当前状态是否适合行动；过高像急，过低像没劲。" },
   ];
@@ -28095,7 +28606,7 @@ function renderMotivationTheoryVisual() {
     low: "先收住",
     mid: "观望",
     high: "适合行动",
-    mapping: motivation.detail || "综合分由驱力、关系温度、诱因和唤醒适配加权得到。",
+    mapping: motivation.detail || "综合分由驱力、主动表达温度、诱因和唤醒适配加权得到。",
   });
   const body = `
     <div class="exp-visual-grid two">
@@ -28113,7 +28624,7 @@ function renderMotivationTheoryVisual() {
       </section>
     </div>
   `;
-  return expTheoryVisualShell("理论量化视图", "把主动开口拆成驱力、关系温度、诱因和唤醒适配四个量化因子，并展示它们如何合成最终动机分。", body, selected.item.user_label ? `样本：${selected.item.user_label}` : "暂无样本");
+  return expTheoryVisualShell("理论量化视图", "把主动开口拆成驱力、主动表达温度、诱因和唤醒适配四个量化因子，并展示它们如何合成最终动机分。", body, selected.item.user_label ? `样本：${selected.item.user_label}` : "暂无样本");
 }
 
 function renderPersonalityTheoryVisual() {

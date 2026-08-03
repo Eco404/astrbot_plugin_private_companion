@@ -4224,18 +4224,22 @@ class LlmToolActionsMixin:
                 "近期用户意图："
                 + _single_line(json.dumps(intent_profile, ensure_ascii=False), 260)
             )
-        relationship_state = user.get("relationship_state")
-        if isinstance(relationship_state, dict) and relationship_state:
-            parts.append(
-                "当前关系状态："
-                + _single_line(json.dumps(relationship_state, ensure_ascii=False), 260)
-            )
-        residue_formatter = getattr(self, "_format_emotion_residue_hint", None)
-        if callable(residue_formatter):
+        expression_builder = getattr(self, "_build_expression_decision_for_user", None)
+        if callable(expression_builder):
             try:
-                residue = _single_line(residue_formatter(user), 220)
-                if residue:
-                    parts.append(f"情绪余波：{residue}")
+                decision = expression_builder(
+                    user,
+                    message_intent={"requested_content_tier": "normal"},
+                    passive_reengagement=True,
+                )
+                expression = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+                parts.append(
+                    "统一表达边界："
+                    f"档位={_single_line(expression.get('expression_band'), 24) or 'relaxed'}，"
+                    f"语气={_single_line(expression.get('tone'), 24) or 'steady'}，"
+                    f"追问={'允许' if expression.get('followup') else '关闭'}，"
+                    f"内容尺度={_single_line(expression.get('content_tier'), 16) or 'normal'}"
+                )
             except Exception:
                 pass
         preference = ensure_reaction_expression_state(user).get("preference")

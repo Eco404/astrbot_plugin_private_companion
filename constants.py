@@ -398,6 +398,13 @@ _SIMULATION_FALLBACK_EVENTS = [
 _DEFAULT_USER_TEMPLATE = {
     "enabled": True,
     "relationship_role": "",
+    "relationship_mode": "normal",
+    "relationship_ledger": [],
+    "relationship_daily_totals": {},
+    "relationship_last_effective_at": 0,
+    "relationship_decay_settled_day": "",
+    "relationship_last_decay_stage_drop_at": 0,
+    "current_interaction": {},
     "proactive_daily_limit": -1,
     "proactive_idle_minutes": -1,
     "proactive_min_interval_minutes": -1,

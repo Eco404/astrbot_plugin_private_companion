@@ -202,6 +202,166 @@
         "hint": "开启后 target_user_ids 中的用户会自动建立主动私聊来源。首次使用建议开启。",
         "default": true
       },
+      "default_interaction_band": {
+        "description": "新档案默认互动状态",
+        "type": "string",
+        "options": ["avoidant", "hurt", "relaxed", "lively", "warm"],
+        "labels": ["回避", "受伤", "放松", "活泼", "温暖"],
+        "hint": "只影响之后建立的普通用户档案；亲近和爱意仅允许主要用户账户使用。",
+        "default": "relaxed"
+      },
+      "enable_custom_relationship_stage_policy": {
+        "description": "亲密度阶段策略",
+        "type": "bool",
+        "hint": "关闭时使用内置八阶段策略；开启后使用陪伴面板详情页编辑的自定义标签、语气和软行为。固定阶段键与分数范围不变。",
+        "default": false
+      },
+      "relationship_stage_policy": {
+        "description": "亲密度阶段策略数据",
+        "type": "text",
+        "hint": "由陪伴面板结构化编辑器维护。阶段策略只能调整表达和软行为，不能授予权限。",
+        "default": "",
+        "invisible": true
+      },
+      "relationship_positive_stage_cap_key": {
+        "description": "普通用户正向亲密度阶段上限",
+        "type": "string",
+        "options": ["familiar", "close", "intimate", "deeply_bonded"],
+        "labels": ["熟悉", "亲近", "亲密", "深度联结"],
+        "hint": "普通用户的正向亲密度不会超过所选阶段。下调时既有正分按旧上限与新上限比例只压缩一次；主要用户专属关系和负分不受影响。",
+        "default": "deeply_bonded"
+      },
+      "normal_interaction_band_cap": {
+        "description": "普通用户互动温度上限",
+        "type": "string",
+        "options": ["relaxed", "lively", "warm"],
+        "labels": ["放松", "活泼", "温暖"],
+        "hint": "普通用户的当前互动状态最多到这里。主要用户账户不受此温度上限影响。",
+        "default": "warm"
+      },
+      "enable_relationship_content_tiers": {
+        "description": "关系内容尺度",
+        "type": "bool",
+        "hint": "把日常、含蓄暧昧和成人私密内容纳入统一表达决策。默认关闭；开启也不会仅凭亲密度自动放宽内容。",
+        "default": false
+      },
+      "enable_flirt_content_tier": {
+        "description": "允许含蓄暧昧档",
+        "type": "bool",
+        "hint": "仅在私聊、长期关系至少达到亲密且当前互动不是回避或受伤时允许；始终保持非露骨。",
+        "default": true,
+        "condition": "enable_relationship_content_tiers"
+      },
+      "enable_adult_content_tier": {
+        "description": "允许成人私密档",
+        "type": "bool",
+        "hint": "高风险总开关。还必须满足主要用户、专属关系、爱意互动、私聊、成年确认、当轮明确同意和指定 Provider 精确匹配。",
+        "default": false,
+        "condition": "enable_relationship_content_tiers"
+      },
+      "adult_content_owner_confirmed": {
+        "description": "确认主要用户已成年",
+        "type": "bool",
+        "hint": "这是管理员后台确认，不会从关系分数、用户话术或模型输出自动推断。",
+        "default": false,
+        "condition": "enable_adult_content_tier"
+      },
+      "adult_content_require_turn_consent": {
+        "description": "每轮要求明确同意",
+        "type": "bool",
+        "hint": "建议保持开启。开启后只有当轮消息同时明确请求成人尺度并表达同意时才允许。",
+        "default": true,
+        "condition": "enable_adult_content_tier"
+      },
+      "ADULT_CONTENT_PROVIDER_ID": {
+        "description": "成人私密档指定 Provider",
+        "type": "string",
+        "hint": "当前会话 Provider 必须与此 ID 精确一致；不可用或不匹配时成人档直接降级。插件二次复核固定使用它，主回复链回退仍由 AstrBot 配置决定。",
+        "default": "",
+        "condition": "enable_adult_content_tier",
+        "_special": "select_provider"
+      },
+      "owner_exclusive_label": {
+        "description": "主要用户专属关系名称",
+        "type": "string",
+        "hint": "仅用于主要用户专属关系的显示和表达，不授予额外权限。",
+        "default": "专属联结"
+      },
+      "owner_exclusive_tone": {
+        "description": "主要用户专属基础表达",
+        "type": "string",
+        "hint": "专属关系的长期表达基线；当前互动状态和安全边界仍可使表达收敛。",
+        "default": "温暖、亲近、稳定"
+      },
+      "owner_exclusive_address_style": {
+        "description": "主要用户专属称呼尺度",
+        "type": "string",
+        "hint": "优先沿用用户档案中双方已确认的专属称呼。",
+        "default": "优先使用已确认的专属称呼"
+      },
+      "owner_exclusive_proactive_limit": {
+        "description": "主要用户专属主动阶段上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 30, "step": 1},
+        "hint": "只是阶段硬上限；实际次数仍取全局、用户、阶段和动态额度的最小值。",
+        "default": 6
+      },
+      "relationship_event_window_minutes": {
+        "description": "亲密度事件去重窗口（分钟）",
+        "type": "int",
+        "slider": {"min": 1, "max": 1440, "step": 1},
+        "hint": "同一消息和同一原因只结算一次；缺少消息 ID 时在窗口内去重。",
+        "default": 30
+      },
+      "relationship_positive_event_cap": {
+        "description": "单次正向亲密度上限",
+        "type": "int",
+        "slider": {"min": 1, "max": 30, "step": 1},
+        "hint": "单个事件最多增加多少分。",
+        "default": 4
+      },
+      "relationship_negative_event_cap": {
+        "description": "单次负向亲密度上限",
+        "type": "int",
+        "slider": {"min": 1, "max": 60, "step": 1},
+        "hint": "单个明确负向事件最多扣多少分。普通未回复不会直接扣长期分。",
+        "default": 12
+      },
+      "relationship_positive_daily_cap": {
+        "description": "每日正向亲密度上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 120, "step": 1},
+        "hint": "限制单日累计正向增长；0 表示当天不自动增加。",
+        "default": 12
+      },
+      "relationship_decay_grace_days": {
+        "description": "自然回落宽限天数",
+        "type": "int",
+        "slider": {"min": 0, "max": 30, "step": 1},
+        "hint": "连续多少天没有有效互动时保持不变。",
+        "default": 3
+      },
+      "relationship_decay_early_per_day": {
+        "description": "回落前段每日扣分",
+        "type": "int",
+        "slider": {"min": 0, "max": 30, "step": 1},
+        "hint": "宽限后至第 7 个未互动日每天向 0 回落多少分。",
+        "default": 2
+      },
+      "relationship_decay_middle_per_day": {
+        "description": "回落中段每日扣分",
+        "type": "int",
+        "slider": {"min": 0, "max": 30, "step": 1},
+        "hint": "第 8 至第 14 个未互动日每天向 0 回落多少分。",
+        "default": 5
+      },
+      "relationship_decay_late_per_day": {
+        "description": "回落后段每日扣分",
+        "type": "int",
+        "slider": {"min": 0, "max": 30, "step": 1},
+        "hint": "第 15 个未互动日起每天向 0 回落多少分。",
+        "default": 8
+      },
       "default_nickname": {
         "description": "默认称呼",
         "type": "string",
@@ -6188,7 +6348,7 @@
   "emotion_relationship_config": {
     "description": "意图与关系状态",
     "type": "object",
-    "hint": "维护用户意图、关系温度、回复策略和边界收敛；Bot 自身情绪模拟已移至“实验性功能”。",
+    "hint": "维护用户意图、统一互动表达、回复策略和边界收敛；Bot 自身情绪模拟已移至“实验性功能”。",
     "items": {
       "enable_intent_emotion_analysis": {
         "description": "启用本地意图/情绪快判",
@@ -6202,7 +6362,7 @@
       "enable_relationship_state_machine": {
         "description": "启用关系距离感",
         "type": "bool",
-        "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身被刺到后的短期余波由“实验性功能 → 情绪模拟”单独控制。",
+        "hint": "把用户边界、亲近、冷淡、玩笑和回应情况归一为当前互动状态，再由统一表达决策调整距离、主动额度和相处分寸；不再独立生成第二套关系语气。Bot 自身被刺到后的短期余波由“实验性功能 → 情绪模拟”提供输入。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
@@ -6211,7 +6371,7 @@
       "enable_relationship_analysis": {
         "description": "启用模型关系站位分析",
         "type": "bool",
-        "hint": "阶段性使用完整人格和互动数据，让模型复核陌生/熟悉/亲近及打扰偏好。关闭后不再产生“关系分析”模型 Token；关系距离感、本地边界判断和基于互动次数/回复率的兜底仍可继续工作。",
+        "hint": "阶段性使用完整人格和互动数据生成兼容画像诊断。该结果不决定长期阶段、好感分或最终表达；关闭后不再产生“关系分析”模型 Token，统一关系与表达链路仍可继续工作。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
@@ -11208,7 +11368,7 @@
       "enable_emotion_simulation": {
         "description": "启用情绪模拟",
         "type": "bool",
-        "hint": "实验性情绪余波。维护 Bot 自身短期情绪，例如被刺到后的收敛、缓和后的恢复，以及不满时的短暂回避；会结合四维状态、基本/复合情绪和调节策略影响回复。该项迁入实验性功能但保留原默认值，避免更新后行为突变。",
+        "hint": "实验性情绪余波。维护 Bot 自身短期情绪，例如被刺到后的收敛、缓和后的恢复，以及不满时的短暂回避；四维状态、基本/复合情绪和调节策略会先归一为互动状态，再由统一表达决策影响回复。该项保留原默认值，避免更新后行为突变。",
         "default": true,
         "condition": {
           "enable_mai_style_integration": true

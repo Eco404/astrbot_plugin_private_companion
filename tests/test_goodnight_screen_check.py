@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
+from astrbot_plugin_private_companion.companion_interaction_expression import build_expression_decision
 
 
 class _ScreenPlugin:
@@ -107,6 +108,30 @@ class _GoodnightScreenHarness(ProactiveMessageMixin):
 
     def _screen_glance_available(self, _user: dict) -> bool:
         return self.screen_plugin is not None
+
+    def _build_expression_decision_for_user(
+        self,
+        user: dict,
+        *,
+        proactive_candidate: dict | None = None,
+        now: float | None = None,
+        **_kwargs,
+    ):
+        candidate = dict(proactive_candidate or {})
+        state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
+        mode = str(state.get("mode") or "normal")
+        cooldown = max(float(state.get("hurt_until") or 0), float(state.get("backoff_until") or 0))
+        if cooldown > float(now or 0):
+            candidate["cooldown_until"] = cooldown
+            candidate["current_ts"] = float(now or 0)
+        return build_expression_decision(
+            {
+                "relationship_role": user.get("relationship_role", "friend"),
+                "relationship_mode": user.get("relationship_mode", "normal"),
+                "current_interaction": {"expression_band": mode},
+                "proactive_candidate": candidate,
+            }
+        )
 
     def _get_screen_companion_plugin(self):
         return self.screen_plugin
@@ -278,7 +303,7 @@ class GoodnightScreenProcessTests(unittest.TestCase):
             {"sent_today": 8},
             {"relationship_state": {"mode": "hurt", "hurt_until": 500.0}},
         )
-        expected = ("daily_proactive_limit", "relationship_backoff")
+        expected = ("daily_proactive_limit", "expression_proactive_cooldown")
         for update, state in zip(cases, expected):
             harness = _GoodnightScreenHarness(screen_result='{"state":"active","reason":"仍在操作"}')
             user = self._make_due(harness)

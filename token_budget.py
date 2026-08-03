@@ -991,10 +991,11 @@ class TokenBudgetMixin:
         system_prompt: str | None = None,
         timeout_key: str | None = None,
         timeout_seconds: float | None = None,
+        strict_provider: bool = False,
     ) -> str | None:
         selected_provider = self._resolve_chat_provider_id(provider_id)
         peak_router = getattr(self, "_apply_deepseek_peak_replacement", None)
-        if callable(peak_router) and (str(provider_id or "").strip() or str(getattr(self, "llm_provider_id", "") or "").strip()):
+        if not strict_provider and callable(peak_router) and (str(provider_id or "").strip() or str(getattr(self, "llm_provider_id", "") or "").strip()):
             selected_provider = peak_router(selected_provider)
         task_key = _single_line(task, 40) or self._classify_llm_prompt(prompt)
         budget_exempt = self._is_llm_budget_exempt_task(task_key)
@@ -1009,11 +1010,14 @@ class TokenBudgetMixin:
         if not budget_exempt and self._llm_daily_budget_remaining() == 0:
             self._record_llm_budget_skip(provider_id=selected_provider, task=task_key, prompt=prompt)
             return None
-        provider_key, fallback_provider = self._model_fallback_provider_for_call(
-            task=task_key,
-            primary_provider_id=selected_provider,
-            provider_key=str(timeout_key or ""),
-        )
+        if strict_provider:
+            provider_key, fallback_provider = str(timeout_key or task_key), ""
+        else:
+            provider_key, fallback_provider = self._model_fallback_provider_for_call(
+                task=task_key,
+                primary_provider_id=selected_provider,
+                provider_key=str(timeout_key or ""),
+            )
         if fallback_provider and callable(peak_router):
             fallback_provider = peak_router(fallback_provider)
         candidates = [selected_provider]

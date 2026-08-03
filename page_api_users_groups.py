@@ -11,6 +11,13 @@ from astrbot.api import logger
 from quart import request
 
 from .helpers import _safe_int
+from .companion_interaction_expression import allowed_expression_bands, current_interaction_projection
+from .relationship_ledger import (
+    is_owner_exclusive,
+    normalize_relationship_mode,
+    record_manual_relationship_change,
+    relationship_positive_score_cap,
+)
 
 
 class PrivateCompanionPageApiUsersGroupsMixin:
@@ -43,6 +50,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             if not isinstance(user, dict):
                 return self._error("用户不存在")
             detail = self._user_summary(user_id, user)
+            detail["relationship_panel"] = self._relationship_panel(user)
+            detail["current_interaction"] = detail["relationship_panel"]["current_interaction"]
+            detail["expression_decision"] = detail["relationship_panel"]["expression_decision"]
             route_status_getter = getattr(self.plugin, "_private_delivery_route_status", None)
             delivery_route = route_status_getter(user_id, user) if callable(route_status_getter) else {}
             detail.update(
@@ -75,11 +85,71 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         user_id = str(payload.get("user_id", "")).strip()
         if not user_id:
             return self._error("缺少 user_id")
+        relationship_score = None
+        if "relationship_score" in payload:
+            raw_score = payload.get("relationship_score")
+            if isinstance(raw_score, bool):
+                return self._error("relationship_score must be an integer between -1200 and 1200")
+            try:
+                relationship_score = int(raw_score)
+            except (TypeError, ValueError):
+                return self._error("relationship_score must be an integer between -1200 and 1200")
+            if relationship_score < -1200 or relationship_score > 1200:
+                return self._error("relationship_score must be between -1200 and 1200")
+        requested_mode = str(payload.get("relationship_mode") or "").strip().lower() if "relationship_mode" in payload else None
+        if requested_mode is not None and requested_mode not in {"normal", "owner_exclusive"}:
+            return self._error("relationship_mode must be normal or owner_exclusive")
+        requested_interaction_band = (
+            str(payload.get("current_interaction_band") or "").strip().lower()
+            if "current_interaction_band" in payload
+            else None
+        )
+        interaction_expires_at = 0.0
+        if "current_interaction_expires_at" in payload:
+            raw_expiry = payload.get("current_interaction_expires_at")
+            if isinstance(raw_expiry, bool) or not isinstance(raw_expiry, (int, float)):
+                return self._error("current_interaction_expires_at must be a timestamp")
+            interaction_expires_at = float(raw_expiry)
+            if interaction_expires_at < 0 or interaction_expires_at > time.time() + 366 * 86400:
+                return self._error("current_interaction_expires_at is outside the allowed range")
         try:
             action_message = ""
             async with self.plugin._data_lock:
                 user = self.plugin._get_user(user_id)
                 expression_voice_needs_refresh = False
+                previous_role = self.plugin._private_user_role(user, user_id)
+                previous_mode = normalize_relationship_mode(user.get("relationship_mode"), previous_role)
+                role = previous_role
+                if "relationship_role" in payload:
+                    normalized_role = self.plugin._normalize_private_user_role(payload.get("relationship_role"))
+                    if not normalized_role:
+                        return self._error("relationship_role must be owner or friend")
+                    role = normalized_role
+                next_mode = normalize_relationship_mode(requested_mode if requested_mode is not None else previous_mode, role)
+                if requested_mode == "owner_exclusive" and role != "owner":
+                    return self._error("owner_exclusive relationship requires an owner user")
+                if previous_mode == "owner_exclusive" and role != "owner" and requested_mode != "normal":
+                    return self._error("switch the relationship to a normal stage before changing the owner role")
+                if previous_mode == "owner_exclusive" and requested_mode == "normal" and relationship_score is None:
+                    return self._error("leaving owner_exclusive requires selecting a normal relationship score")
+                if previous_mode == "owner_exclusive" and relationship_score is not None and requested_mode != "normal":
+                    return self._error("owner_exclusive relationship score is frozen; select normal mode first")
+                if next_mode == "owner_exclusive" and relationship_score is not None:
+                    return self._error("owner_exclusive relationship does not accept an exact score")
+                if requested_interaction_band is not None:
+                    if not requested_interaction_band:
+                        return self._error("current_interaction_band is required")
+                    if requested_interaction_band not in allowed_expression_bands(role, next_mode):
+                        return self._error("current interaction band is not allowed for this relationship")
+                    requested_projection = current_interaction_projection(
+                        {"expression_band": requested_interaction_band},
+                        relationship_role=role,
+                        relationship_mode=next_mode,
+                        relationship_score=user.get("relationship_score"),
+                        normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+                    )
+                    if requested_projection.get("expression_band") != requested_interaction_band:
+                        return self._error("current interaction band exceeds the configured user cap")
                 if "enabled" in payload:
                     enabled = bool(payload.get("enabled"))
                     user["enabled"] = enabled
@@ -94,11 +164,57 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if "style" in payload:
                     user["style"] = self._single_line(payload.get("style"), 24)
                 if "relationship_role" in payload:
-                    previous_role = self.plugin._private_user_role(user, user_id)
-                    role = self.plugin._normalize_private_user_role(payload.get("relationship_role"))
-                    if role:
-                        user["relationship_role"] = role
-                        expression_voice_needs_refresh = role != previous_role
+                    user["relationship_role"] = role
+                    expression_voice_needs_refresh = role != previous_role
+                if requested_mode is not None:
+                    user["relationship_mode"] = next_mode
+                    expression_voice_needs_refresh = expression_voice_needs_refresh or next_mode != previous_mode
+                if relationship_score is not None:
+                    previous_score = _safe_int(user.get("relationship_score"), 0, -1200, 1200)
+                    effective_score = relationship_score
+                    if effective_score > 0 and not is_owner_exclusive(user):
+                        effective_score = min(
+                            effective_score,
+                            relationship_positive_score_cap(
+                                getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded")
+                            ),
+                        )
+                    user["relationship_score"] = effective_score
+                    record_manual_relationship_change(
+                        user,
+                        previous_score,
+                        effective_score,
+                        now=time.time(),
+                        reason_code="administrator_manual_relationship_adjustment",
+                    )
+                if requested_interaction_band is not None:
+                    changed_at = time.time()
+                    user["current_interaction"] = current_interaction_projection(
+                        {
+                            "expression_band": requested_interaction_band,
+                            "source": "manual",
+                            "operator": "page_administrator",
+                            "reason": self._single_line(payload.get("current_interaction_reason"), 120) or "administrator_manual_override",
+                            "updated_at": changed_at,
+                            "expires_at": interaction_expires_at,
+                            "manual_override": True,
+                        },
+                        relationship_role=role,
+                        relationship_mode=next_mode,
+                        relationship_score=user.get("relationship_score"),
+                        normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+                        now=changed_at,
+                    )
+                    expression_voice_needs_refresh = True
+                elif role != previous_role or next_mode != previous_mode:
+                    user["current_interaction"] = current_interaction_projection(
+                        user.get("current_interaction"),
+                        relationship_role=role,
+                        relationship_mode=next_mode,
+                        relationship_score=user.get("relationship_score"),
+                        normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+                        now=time.time(),
+                    )
                 if "proactive_daily_limit" in payload:
                     user["proactive_daily_limit"] = _safe_int(payload.get("proactive_daily_limit"), -1, -1, 30)
                 for key in (
@@ -137,7 +253,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     self.plugin._clear_pending_proactive_plan(user)
                 if payload.get("clear_emotion_state"):
                     user["intent_profile"] = {}
-                    user["relationship_state"] = {}
+                    user.pop("relationship_state", None)
+                    user["current_interaction"] = current_interaction_projection(
+                        None,
+                        relationship_role=user.get("relationship_role"),
+                        relationship_mode=user.get("relationship_mode"),
+                        relationship_score=user.get("relationship_score"),
+                        normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+                    )
                 if payload.get("clear_behavior_habits"):
                     user["behavior_habits"] = {}
                 if payload.get("clear_learning"):

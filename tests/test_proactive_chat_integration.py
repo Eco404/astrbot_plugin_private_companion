@@ -54,6 +54,18 @@ class _BridgeHarness(ProactiveMessageMixin):
         self.saved += 1
 
     @staticmethod
+    def _effective_user_daily_limit(_user: dict) -> int:
+        return 8
+
+    @staticmethod
+    def _proactive_daily_limit_is_unlimited(_value: int) -> bool:
+        return False
+
+    @staticmethod
+    def _build_expression_decision_for_user(_user: dict, **_kwargs):
+        return SimpleNamespace(to_dict=lambda: {"proactive_budget": 8, "blocker": ""})
+
+    @staticmethod
     def _sanitize_proactive_text(text: str) -> str:
         return str(text or "").strip()
 
