@@ -14718,12 +14718,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         user["intent_profile"] = intent_profile
                     if self._should_use_llm_emotion_judgement(text, intent_profile):
                         # Model review does not block the current passive reply; it keeps using cached emotion state.
+                        emotion_review_id = uuid.uuid4().hex
                         user["pending_emotion_judgement"] = {
+                            "review_id": emotion_review_id,
                             "text": _single_line(text, 240),
                             "created_at": _now_ts(),
                             "local": deepcopy(intent_profile),
                         }
-                        asyncio.create_task(self._refine_inbound_emotion_with_model(user_id, text, deepcopy(intent_profile)))
+                        asyncio.create_task(
+                            self._refine_inbound_emotion_with_model(
+                                user_id,
+                                text,
+                                deepcopy(intent_profile),
+                                review_id=emotion_review_id,
+                            )
+                        )
                     else:
                         self._update_relationship_state_from_intent(user, intent_profile)
                 if is_target_user and self._cancel_inbound_conflicting_greeting(

@@ -174,7 +174,7 @@ class LearningPageUiTests(unittest.TestCase):
     def test_learning_page_assets_use_current_cache_versions(self) -> None:
         self.assertIn('./app.css?v=20260803-relationship-v2', self.html)
         self.assertIn('./css/polish.css?v=20260731-folio-cascade-v1', self.html)
-        self.assertIn('./app.js?v=20260803-relationship-v2', self.html)
+        self.assertIn('./app.js?v=20260803-emotion-review-v1', self.html)
         self.assertIn(
             './js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1',
             self.html,

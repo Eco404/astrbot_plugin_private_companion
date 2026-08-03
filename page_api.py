@@ -12551,7 +12551,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
         else:
             relationship_stage = self._single_line((relationship_intimacy.get("phase") or {}).get("label"), 20) or relationship_stage
         pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
-        last_emotion_judgement_error = self._single_line(user.get("last_emotion_judgement_error"), 160)
+        last_emotion_judgement = self._emotion_last_judgement_summary(user.get("last_emotion_judgement"))
+        last_emotion_judgement_error = self._emotion_judgement_error_summary(user.get("last_emotion_judgement_error"))
         return {
             "user_id": user_id_text,
             "display_name": display_name,
@@ -12633,6 +12634,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
             "expression_decision": relationship_panel["expression_decision"],
             "relationship_state": relationship_state,
             "pending_emotion_judgement": pending_emotion_judgement,
+            "last_emotion_judgement": last_emotion_judgement,
             "last_emotion_judgement_error": last_emotion_judgement_error,
             "planned_reason": user.get("planned_proactive_reason", ""),
             "planned_action": user.get("planned_proactive_action", ""),
@@ -12749,6 +12751,37 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiQzoneMixin, PrivateCompanio
                 "emotion_reason": self._single_line(local.get("emotion_reason"), 100),
             }
         return result if text or created_at or local else {}
+
+    def _emotion_last_judgement_summary(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        status = self._single_line(value.get("status"), 24)
+        if status not in {"applied", "kept_local", "failed"}:
+            return {}
+        return {
+            "status": status,
+            "outcome": self._single_line(value.get("outcome"), 32),
+            "event": self._single_line(value.get("event"), 32),
+            "target": self._single_line(value.get("target"), 24),
+            "intensity": self._int(value.get("intensity")),
+            "confidence": round(max(0.0, min(1.0, self._float(value.get("confidence")))), 2),
+            "reason": self._single_line(value.get("reason"), 100),
+            "reviewed_at": self._single_line(value.get("reviewed_at"), 32),
+        }
+
+    def _emotion_judgement_error_summary(self, value: Any) -> str:
+        text = self._single_line(value, 160)
+        if not text:
+            return ""
+        if text.startswith("{") or '"event"' in text or '"confidence"' in text:
+            return ""
+        labels = {
+            "request_failed": "模型请求失败",
+            "empty_response": "模型返回为空",
+            "invalid_response": "模型返回格式无效",
+            "empty_or_invalid": "模型返回为空或格式无效",
+        }
+        return labels.get(text, "模型请求或返回格式异常")
 
     def _worldbook_member_for_private_user_locked(
         self,

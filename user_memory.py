@@ -5219,10 +5219,10 @@ class UserMemoryMixin:
             or bool(re.search(r"(别|不要|讨厌|烦|滚|闭嘴|对不起|抱歉|喜欢你|爱你|摸摸|抱抱)", text))
         )
 
-    def _merge_llm_emotion_judgement(self, base_intent: dict[str, Any], payload: Any) -> dict[str, Any] | None:
-        if not isinstance(base_intent, dict) or not isinstance(payload, dict):
+    def _normalize_llm_emotion_judgement_payload(self, payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
             return None
-        event = str(payload.get("event") or payload.get("emotion_event") or "neutral").strip().lower()
+        event = str(payload.get("event") or payload.get("emotion_event") or "").strip().lower()
         aliases = {
             "none": "neutral",
             "normal": "neutral",
@@ -5238,6 +5238,59 @@ class UserMemoryMixin:
         allowed_events = {"neutral", "hurt", "apology", "comfort", "praise", "comfort_need", "external_negative"}
         if event not in allowed_events:
             return None
+        target = str(payload.get("target") or "").strip().lower()
+        target_aliases = {
+            "bot_self": "bot",
+            "assistant": "bot",
+            "character": "bot",
+            "user": "self",
+            "third_party": "other",
+            "unknown": "ambiguous",
+        }
+        target = target_aliases.get(target, target)
+        if target not in {"bot", "self", "other", "ambiguous", "none"}:
+            return None
+        raw_confidence = payload.get("confidence")
+        if isinstance(raw_confidence, bool):
+            return None
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(confidence) or confidence < 0.0 or confidence > 1.0:
+            return None
+        raw_intensity = payload.get("intensity")
+        if isinstance(raw_intensity, bool):
+            return None
+        try:
+            intensity = int(raw_intensity)
+        except (TypeError, ValueError):
+            return None
+        if intensity < 0 or intensity > 100:
+            return None
+        if event == "neutral":
+            intensity = 0
+            target = "none"
+        elif intensity <= 0:
+            intensity = 60
+        return {
+            "event": event,
+            "target": target,
+            "intensity": intensity,
+            "confidence": round(confidence, 2),
+            "reason": _single_line(payload.get("reason"), 100) or "模型复核",
+        }
+
+    def _merge_llm_emotion_judgement(self, base_intent: dict[str, Any], payload: Any) -> dict[str, Any] | None:
+        normalized = self._normalize_llm_emotion_judgement_payload(payload)
+        if not isinstance(base_intent, dict) or not isinstance(normalized, dict):
+            return None
+        event = normalized["event"]
+        target = normalized["target"]
+        intensity = normalized["intensity"]
+        confidence = normalized["confidence"]
+        if confidence < 0.65:
+            return None
         local_source = str(base_intent.get("source") or "")
         local_text = _single_line(base_intent.get("text"), 240)
         if event == "hurt" and (
@@ -5251,31 +5304,10 @@ class UserMemoryMixin:
             )
             if not strong_negative:
                 return None
-        target = str(payload.get("target") or "none").strip().lower()
-        target_aliases = {
-            "bot_self": "bot",
-            "assistant": "bot",
-            "character": "bot",
-            "user": "self",
-            "third_party": "other",
-            "unknown": "ambiguous",
-        }
-        target = target_aliases.get(target, target)
-        if target not in {"bot", "self", "other", "ambiguous", "none"}:
-            target = "ambiguous" if event != "neutral" else "none"
-        confidence = _safe_float(payload.get("confidence"), 0.0, 0.0)
-        if confidence < 0.65:
-            return None
-        intensity = _safe_int(payload.get("intensity"), 0, 0, 100)
-        if event == "neutral":
-            intensity = 0
-            target = "none"
-        elif intensity <= 0:
-            intensity = 60
         if event == "hurt" and target not in {"bot", "ambiguous"}:
             event = "external_negative" if target == "other" else "neutral"
             intensity = 54 if event == "external_negative" else 0
-        reason = _single_line(payload.get("reason"), 80) or "模型复核"
+        reason = normalized["reason"]
         merged = dict(base_intent)
         merged.update(
             {
@@ -5291,10 +5323,18 @@ class UserMemoryMixin:
         )
         return merged
 
-    async def _refine_inbound_emotion_with_model(self, user_id: str, text: str, local_intent: dict[str, Any]) -> None:
+    async def _refine_inbound_emotion_with_model(
+        self,
+        user_id: str,
+        text: str,
+        local_intent: dict[str, Any],
+        *,
+        review_id: str = "",
+    ) -> None:
         cleaned = _single_line(text, 240)
         if not cleaned or not isinstance(local_intent, dict):
             return
+        expected_review_id = _single_line(review_id, 64)
         prompt = f"""
 You classify whether one private inbound message changes the Bot's short-term emotional afterglow. Do not write a reply.
 
@@ -5302,6 +5342,8 @@ Allowed event values: neutral, hurt, apology, comfort, praise, comfort_need, ext
 target must be bot, self, other, ambiguous, or none.
 Only classify hurt when the message clearly targets the Bot/current character. Be conservative with jokes, flirting, logs, code, and quoted text.
 A boundary such as less intimacy, no flirting, no approaching, or no interruptions should normally be neutral; relationship-distance logic handles it separately.
+Calibrate confidence honestly. Values below 0.65 are valid results but will keep the local judgement instead of overriding it.
+Write reason as one short Chinese phrase suitable for a diagnostics panel.
 Return JSON only:
 {{"event":"neutral|hurt|apology|comfort|praise|comfort_need|external_negative","target":"bot|self|other|ambiguous|none","intensity":0-100,"confidence":0.0-1.0,"reason":"brief reason"}}
 
@@ -5313,6 +5355,9 @@ Local classifier result:
 """.strip()
         provider_id = self._emotion_judgement_provider_id()
         raw = ""
+        payload = None
+        normalized = None
+        request_failed = False
         try:
             raw = await self._llm_call(
                 prompt,
@@ -5321,21 +5366,51 @@ Local classifier result:
                 task="emotion_judgement",
             ) or ""
             payload = self._extract_json_payload(raw)
+            normalized = self._normalize_llm_emotion_judgement_payload(payload)
             refined = self._merge_llm_emotion_judgement(local_intent, payload)
         except Exception as exc:
             refined = None
-            logger.debug("[PrivateCompanion] Emotion judgement request failed: %s", _single_line(exc, 120))
+            request_failed = True
+            logger.debug(
+                "[PrivateCompanion] Emotion judgement request failed: error_type=%s",
+                type(exc).__name__,
+            )
         async with self._data_lock:
             user = self._get_user(user_id)
             pending = user.get("pending_emotion_judgement") if isinstance(user.get("pending_emotion_judgement"), dict) else {}
-            if _single_line(pending.get("text"), 240) != cleaned:
+            pending_review_id = _single_line(pending.get("review_id"), 64)
+            if expected_review_id:
+                if pending_review_id != expected_review_id:
+                    return
+            elif pending_review_id or _single_line(pending.get("text"), 240) != cleaned:
                 return
             intent_to_apply = refined if isinstance(refined, dict) else dict(local_intent)
             if self.enable_intent_emotion_analysis:
                 user["intent_profile"] = intent_to_apply
             self._update_relationship_state_from_intent(user, intent_to_apply)
             user["pending_emotion_judgement"] = {}
+            reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M")
             if refined:
+                review_status = "applied"
+                review_outcome = "model_applied"
+            elif normalized:
+                review_status = "kept_local"
+                review_outcome = "low_confidence" if normalized.get("confidence", 0.0) < 0.65 else "local_guard"
+            else:
+                review_status = "failed"
+                review_outcome = "request_failed" if request_failed else ("empty_response" if not raw else "invalid_response")
+            user["last_emotion_judgement"] = {
+                "status": review_status,
+                "outcome": review_outcome,
+                "event": (normalized or {}).get("event", ""),
+                "target": (normalized or {}).get("target", ""),
+                "intensity": (normalized or {}).get("intensity", 0),
+                "confidence": (normalized or {}).get("confidence", 0.0),
+                "reason": (normalized or {}).get("reason", ""),
+                "reviewed_at": reviewed_at,
+            }
+            if refined:
+                user.pop("last_emotion_judgement_error", None)
                 logger.info(
                     "[PrivateCompanion] Emotion judgement completed: user=%s event=%s target=%s intensity=%s confidence=%s reason=%s",
                     user_id,
@@ -5345,8 +5420,17 @@ Local classifier result:
                     refined.get("emotion_confidence"),
                     _single_line(refined.get("emotion_reason"), 80),
                 )
+            elif normalized:
+                user.pop("last_emotion_judgement_error", None)
+                logger.info(
+                    "[PrivateCompanion] Emotion judgement retained local result: user=%s outcome=%s event=%s confidence=%s",
+                    user_id,
+                    review_outcome,
+                    normalized.get("event"),
+                    normalized.get("confidence"),
+                )
             else:
-                user["last_emotion_judgement_error"] = _single_line(raw, 160) if raw else "empty_or_invalid"
+                user["last_emotion_judgement_error"] = review_outcome
             self._save_data_sync()
 
     def _decay_relationship_mood_score(self, state: dict[str, Any], *, now: float | None = None) -> int:

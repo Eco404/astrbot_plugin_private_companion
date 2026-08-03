@@ -14041,6 +14041,22 @@ function userWorldbookBlock(item) {
   `;
 }
 
+function emotionJudgementStatusText(review, error = "") {
+  const value = review && typeof review === "object" && !Array.isArray(review) ? review : {};
+  const confidence = Number(value.confidence || 0);
+  const hasConfidence = Object.prototype.hasOwnProperty.call(value, "confidence") && Number.isFinite(confidence);
+  const confidenceText = hasConfidence ? `｜置信 ${Math.round(confidence * 100)}%` : "";
+  if (value.status === "applied") {
+    return `已完成${value.event ? `｜${value.event}` : ""}${confidenceText}`;
+  }
+  if (value.status === "kept_local") {
+    const outcome = value.outcome === "low_confidence" ? "置信度不足，保留本地判断" : "本地保护生效，保留原判断";
+    return `已完成｜${outcome}${confidenceText}`;
+  }
+  if (value.status === "failed") return error || "模型请求或返回格式异常";
+  return error || "";
+}
+
 function emotionGateBlock(detail) {
   const rel = detail.relationship_state && typeof detail.relationship_state === "object" ? detail.relationship_state : {};
   const intent = detail.intent_profile && typeof detail.intent_profile === "object" ? detail.intent_profile : {};
@@ -14066,10 +14082,14 @@ function emotionGateBlock(detail) {
     ? strategyStack.map((item) => `${item.strategy_label || item.strategy || "-"} ${Number(item.intensity || 0)}`).join("｜")
     : "-";
   const pendingJudgement = detail.pending_emotion_judgement && typeof detail.pending_emotion_judgement === "object" ? detail.pending_emotion_judgement : {};
+  const lastJudgement = detail.last_emotion_judgement && typeof detail.last_emotion_judgement === "object" ? detail.last_emotion_judgement : {};
   const judgementError = String(detail.last_emotion_judgement_error || "").trim();
+  const completedJudgement = emotionJudgementStatusText(lastJudgement, judgementError);
   const judgementText = pendingJudgement.text
     ? `等待模型复核｜${pendingJudgement.text}${pendingJudgement.created_at_text ? `｜${pendingJudgement.created_at_text}` : ""}`
-    : (judgementError ? `上次复核失败｜${judgementError}` : "本地快判或已完成");
+    : (lastJudgement.status === "failed" || judgementError
+      ? `上次复核失败｜${completedJudgement}`
+      : (completedJudgement || "本地快判或已完成"));
   const hurtUntil = Number(rel.hurt_until || 0);
   const now = Math.floor(Date.now() / 1000);
   const remaining = hurtUntil > now ? `${Math.ceil((hurtUntil - now) / 60)} 分钟` : "无";
@@ -30349,7 +30369,9 @@ if (key === "enable_reaction_expression_experiment") {
       const plutchik = asRuntimeObject(rel.plutchik_profile);
       const regulation = asRuntimeObject(rel.emotion_regulation);
       const pending = asRuntimeObject(u.pending_emotion_judgement || rel.pending_emotion_judgement);
+      const review = asRuntimeObject(u.last_emotion_judgement || rel.last_emotion_judgement);
       const error = String(u.last_emotion_judgement_error || rel.last_emotion_judgement_error || "").trim();
+      const reviewText = emotionJudgementStatusText(review, error);
       const mode = String(rel.mode || "normal");
       const moodScore = Number(rel.mood_score || 0);
       const dimStrength = ["pleasantness", "tension", "arousal", "certainty"]
@@ -30361,7 +30383,7 @@ if (key === "enable_reaction_expression_experiment") {
       const activeStrength = activeItems.reduce((max, item) => Math.max(max, Number(item.value || 0)), 0);
       const lastEvent = String(rel.last_emotion_event || "");
       const hasPending = Boolean(pending.text || pending.created_at);
-      const hasError = Boolean(error);
+      const hasError = review.status === "failed" || Boolean(error);
       const hasRegulation = Boolean((regulation.strategy && regulation.strategy !== "none") || Number(regulation.intensity || 0) > 0);
       const hasSample = Object.keys(rel).length > 0 || hasPending || hasError;
       const visible = hasSample && (
@@ -30398,6 +30420,8 @@ if (key === "enable_reaction_expression_experiment") {
         lastReason: rel.last_emotion_reason || rel.last_hurt_reason || "",
         pendingText: pending.text || "",
         pendingAge: pending.created_at_text || "",
+        review,
+        reviewText,
         error,
         hasSample,
         visible,
@@ -30427,7 +30451,7 @@ if (key === "enable_reaction_expression_experiment") {
       <div class="exp-runtime-user-row">
         <div class="exp-runtime-user-head">
           <b>${escapeHtml(u.nick)}</b>
-          <span class="exp-runtime-user-mode ${escapeHtml(u.mode)}">${escapeHtml(u.pendingText ? "等待复核" : (u.error ? "复核失败" : u.modeLabel))}</span>
+          <span class="exp-runtime-user-mode ${escapeHtml(u.mode)}">${escapeHtml(u.pendingText ? "等待复核" : (u.error || u.review?.status === "failed" ? "复核失败" : (u.review?.status ? "复核已完成" : u.modeLabel)))}</span>
         </div>
         <div class="exp-runtime-user-detail">
           ${dimText ? `<span class="exp-runtime-dims">${dimText}</span>` : ""}
@@ -30438,7 +30462,7 @@ if (key === "enable_reaction_expression_experiment") {
           ${u.lastEvent && u.lastEvent !== "neutral" ? `<span>事件：${escapeHtml(u.lastEvent)}</span>` : ""}
           ${u.regulation ? `<span>调节：${escapeHtml(u.regulation)}（${u.regulationIntensity}）</span>` : ""}
           ${u.pendingText ? `<span>\u590d\u6838\u4e2d\uff1a${escapeHtml(u.pendingText)}${u.pendingAge ? `\uff5c${escapeHtml(u.pendingAge)}` : ""}</span>` : ""}
-          ${u.error ? `<span>复核失败：${escapeHtml(u.error)}</span>` : ""}
+          ${u.reviewText ? `<span>模型复核：${escapeHtml(u.reviewText)}</span>` : ""}
           ${u.lastReason ? `<span>原因：${escapeHtml(String(u.lastReason).slice(0, 80))}</span>` : ""}
         </div>
       </div>
