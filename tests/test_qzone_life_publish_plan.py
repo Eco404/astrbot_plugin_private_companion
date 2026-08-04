@@ -26,7 +26,7 @@ except ModuleNotFoundError:
 
 from astrbot_plugin_private_companion.qzone_integration import QzoneMixin
 from astrbot_plugin_private_companion.qzone_media import QzoneIntegrationError
-from astrbot_plugin_private_companion.helpers import _day_start_ts
+from astrbot_plugin_private_companion.helpers import _day_start_ts, _today_key
 
 
 class _PlanHarness(QzoneMixin):
@@ -39,7 +39,7 @@ class _PlanHarness(QzoneMixin):
     qzone_life_publish_min_interval_hours = 0
 
     def __init__(self) -> None:
-        self.data = {"daily_plan": {"date": time.strftime("%Y-%m-%d"), "items": []}}
+        self.data = {"daily_plan": {"date": _today_key(), "items": []}}
 
     def _has_active_insomnia_state(self) -> bool:
         return False
@@ -103,6 +103,31 @@ class _PublishHarness(QzoneMixin):
         pass
 
 
+class _VerifiedPublishHarness(_PublishHarness):
+    def __init__(self) -> None:
+        super().__init__()
+        self.recorded: dict[str, object] = {}
+
+    async def _qzone_publish_post(self, *_args, **_kwargs):
+        return SimpleNamespace(
+            tid="",
+            uin="123",
+            text="短动态",
+            images=[],
+        )
+
+    async def _qzone_verify_published_post(self, *_args, **_kwargs):
+        return {
+            "verified": True,
+            "tid": "verified-feed-id",
+            "images": 0,
+            "message": "已反查到最近说说",
+        }
+
+    async def _qzone_record_published_post(self, text, **kwargs) -> None:
+        self.recorded = {"text": text, **kwargs}
+
+
 class _Event:
     def __init__(self, sender_id: str) -> None:
         self.sender_id = sender_id
@@ -156,7 +181,7 @@ class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
 
     def test_schedule_labels_are_backfilled_after_daily_plan_arrives(self) -> None:
         harness = _PlanHarness()
-        harness.data = {"daily_plan": {"date": time.strftime("%Y-%m-%d"), "items": []}}
+        harness.data = {"daily_plan": {"date": _today_key(), "items": []}}
         now = _day_start_ts(time.time()) + 8 * 60 * 60
         with patch("astrbot_plugin_private_companion.qzone_integration.random.random", return_value=0.0):
             plan = harness._qzone_life_publish_daily_plan({}, now=now)
@@ -288,6 +313,16 @@ class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
         result = await _PublishHarness()._publish_qzone_text("测试说说")
         self.assertFalse(result["success"])
         self.assertTrue(result["delivery_unknown"])
+
+    async def test_verified_feed_id_is_recorded_when_publish_response_has_no_tid(self) -> None:
+        harness = _VerifiedPublishHarness()
+
+        result = await harness._publish_qzone_text("短动态")
+
+        self.assertTrue(result["success"])
+        self.assertEqual("verified-feed-id", result["tid"])
+        self.assertEqual("verified-feed-id", harness.recorded["tid"])
+        self.assertTrue(harness.recorded["verified"])
 
 
 if __name__ == "__main__":

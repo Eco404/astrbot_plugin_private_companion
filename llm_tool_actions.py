@@ -34,7 +34,15 @@ from .helpers import (
     _strip_internal_message_blocks,
 )
 from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_memo_note
-from .qzone_selection import parse_qzone_post_selection
+from .qzone_selection import (
+    QzoneViewTarget,
+    classify_qzone_view_owner,
+    normalize_qzone_uin,
+    normalize_qzone_view_target_scope,
+    parse_qzone_post_selection,
+    qzone_view_owner_is_pronoun_safe,
+    resolve_qzone_view_target,
+)
 from .reaction_expression import (
     append_reaction_expression_outcome,
     classify_reaction_expression_feedback,
@@ -521,19 +529,200 @@ class LlmToolActionsMixin:
         instruction = """
 【QQ 空间动态工具】
 当用户明确要求你查看说说、QQ 空间动态、点赞/评论说说,或要求你发一条说说时,可以使用 Private Companion 的 QQ 空间工具。
-- 查看说说：使用 `pc_qzone_view_feed`。“你/你自己发的”传 `target_scope=self`；“我/我自己发的”传 `target_scope=current_user`，不要把当前用户的动态说成 Bot 自己发的。可用 `selector` 传“最新”“第2条”“最后”或 fid。
+- 查看说说：用户说“我/我的/我自己”时传 `target_scope="current_user"`；说“你/你自己/你的”时传 `target_scope="bot_self"`（兼容 `self`）；有明确 QQ 号时传 `target_scope="explicit_uin"` 和 `target_uin`。用户原话中的明确归属高于模型生成参数，归属确实含糊时再向用户确认。
+- “她/他/TA/自己的”必须先有可确认的前指对象：只有已明确指向当前 Bot 人格时才传 `bot_self`；没有明确前指时先向用户确认，不要把性别、人设或昵称当作 QQ 身份证据。
 - 用户提到“今天下午6点多”“昨天 18:20”等发布时间时，把原话放进 `time_hint`；工具会按作者和时间共同匹配，不要退化成无条件查看最新一条。
-- 用户问自己是否在 Bot 动态下留言，目标仍是 `target_scope=self`；用户问 Bot 是否在用户动态下留言，目标是 `target_scope=current_user`。只依据工具返回的 `comments`、`current_user_commented` 和 `bot_commented` 回答；布尔值为 null 或 `comments_complete=false` 时只能说暂未确认。
+- 用户问自己是否在 Bot 动态下留言，目标仍是 `target_scope=bot_self`；用户问 Bot 是否在用户动态下留言，目标是 `target_scope=current_user`。只依据工具返回的 `comments`、`current_user_commented` 和 `bot_commented` 回答；布尔值为 null 或 `comments_complete=false` 时只能说暂未确认。
+- 查看结果中的 `identity.owner_role`、`identity.owner_uin`、`identity.current_persona_verified` 是归属事实，优先级高于 `author` 昵称。`current_user`、`third_party` 或共享账号中未经核验的当前人格动态，不得说成当前 Bot 人格亲自发布或经历过。
 - 调用前不要先说“看到了/原来是/我还真发了”，也不要连续发送多个“让我看看”；直接调用一次，等结果后再自然回答。只有 `status=success` 且 `target_verified=true` 才能确认看到了目标动态。
 - 发布说说：使用 `pc_qzone_publish_feed`。必须把最终要发布的正文放进 `text` 参数,例如 `{"text":"今天想慢一点。"}`；如需带图,可传 `{"text":"配图说说","images":["本地图片路径或图片URL"]}`；如果用户明确要求“发布刚才/最近生成的生活说说草稿”,可传 `{"use_latest_draft":true}`；不要空调用,不要把草稿当作已发布。
 - 用户明确说“我刚刚给你评论了”“回复我刚才在你空间的评论”时，使用 `pc_qzone_reply_my_comment`。把用户记得的评论关键词放进 `comment_hint`；只有工具返回 `status=replied` 才能说已经回复。返回 `ambiguous`、`not_found` 或 `skipped` 时如实说明，不要猜测或回复错评论。
-- 用户说“你发的说说/你刚发了什么/我看到你发的动态”时，“你”指 Bot 自己，不是当前用户。优先直接依据下方 Bot 自己的发布记录回答，不要反问用户内容，不要让用户自己去看，也不要用默认目标为当前用户的查看工具偷换对象。
+- 用户说“你发的说说/你刚发了什么/我看到你发的动态”时，“你”指 Bot 自己，不是当前用户。优先直接依据下方 Bot 自己的发布记录回答，不要反问用户内容，也不要让用户自己去看；需要查看时使用 `target_scope="bot_self"`，不要把对象不明的查看结果偷换成当前用户或 Bot。
 - 发布内容必须服从当前人格与世界观,但不要泄露私聊隐私、内部状态数值、关系网资料或插件实现。
-- 工具返回 `auth_required`、`target_mismatch`、`target_unverified`、`not_found_time`、`empty` 或 `error` 时，简短说明对应原因，本轮不要用同一条件重复调用；不要假装已经发布、看到、评论或点赞。
+- 工具返回 `auth_required`、`target_mismatch`、`target_unverified`、`invalid_time_hint`、`not_found_time`、`empty` 或 `error` 时，简短说明对应原因，本轮不要用同一条件重复调用；不要假装已经发布、看到、评论或点赞。
 """.strip()
         context_getter = getattr(self, "_qzone_recent_self_publish_chat_context", None)
         recent_context = context_getter() if callable(context_getter) else ""
         return f"{instruction}\n\n{recent_context}".strip() if recent_context else instruction
+
+    @staticmethod
+    def _qzone_view_target_error_message(error: str) -> str:
+        messages = {
+            "missing_target": "无法确认要查看谁的 QQ 空间。请明确是 Bot 自己、当前用户，还是提供目标 QQ 号。",
+            "missing_target_uin": "查看指定 QQ 空间时缺少 target_uin。",
+            "invalid_target_uin": "target_uin 不是合法 QQ 号。",
+            "invalid_legacy_user_id": "user_id 不是合法 QQ 号。",
+            "conflicting_target_uin": "target_uin 与 user_id 指向不同 QQ 号。",
+            "scope_target_conflict": "target_scope 与指定 QQ 号不一致。",
+            "bot_uin_unavailable": "无法获取 Bot 当前登录的 QQ 号，不能确认 Bot 自己的空间。",
+            "sender_uin_unavailable": "无法获取当前用户的 QQ 号，不能确认用户自己的空间。",
+            "invalid_target_scope": "target_scope 无效。",
+        }
+        return messages.get(str(error or ""), "QQ 空间查看对象无法确认。")
+
+    @staticmethod
+    def _qzone_view_owner_guard(owner_role: str) -> str:
+        guards = {
+            "bot_self": "这条动态已按 UIN 确认为 Bot 自己的动态；只能按 Bot 自身经历表述。",
+            "current_user": "这条动态已按 UIN 确认为当前用户的动态；不得表述为 Bot 自己发过或经历过。",
+            "third_party": "这条动态已按 UIN 确认为第三方的动态；不得表述为 Bot 或当前用户自己的经历。",
+            "shared_identity": "Bot 与当前用户使用同一 UIN，无法可靠区分人称；不要使用“我/你”的归属表述。",
+            "identity_mismatch": "返回动态作者与请求目标 UIN 不一致，已停止处理。",
+            "identity_unverified": "返回动态缺少可验证的作者 UIN，已停止处理。",
+        }
+        return guards.get(str(owner_role or ""), "QQ 空间动态归属无法确认。")
+
+    @staticmethod
+    def _qzone_view_normalize_post_text(value: Any) -> str:
+        return re.sub(r"\s+", "", html.unescape(str(value or ""))).strip().casefold()
+
+    def _qzone_view_persona_publish_match_basis(
+        self,
+        post: Any,
+        active_persona: str,
+    ) -> str:
+        if not active_persona:
+            return ""
+        profile_data: Any = None
+        profiles = getattr(self, "_persona_data_profiles", None)
+        if isinstance(profiles, dict):
+            profile_data = profiles.get(active_persona)
+            if not isinstance(profile_data, dict):
+                return ""
+        else:
+            profile_data = getattr(self, "data", None)
+        state = (
+            profile_data.get("qzone_integration")
+            if isinstance(profile_data, dict)
+            else None
+        )
+        records = (
+            state.get("recent_life_publish_texts")
+            if isinstance(state, dict)
+            else None
+        )
+        if not isinstance(records, list):
+            return ""
+
+        post_ids = {
+            _single_line(getattr(post, key, ""), 120)
+            for key in ("tid", "fid")
+        }
+        post_ids.discard("")
+        post_text = self._qzone_view_normalize_post_text(
+            getattr(post, "text", "") or getattr(post, "rt_con", "")
+        )
+        post_time = _safe_float(
+            getattr(post, "create_time", 0) or getattr(post, "abstime", 0),
+            0,
+        )
+        for record in reversed(records):
+            if not isinstance(record, dict) or record.get("verified") is not True:
+                continue
+            recorded_tid = _single_line(record.get("tid"), 120)
+            if recorded_tid and recorded_tid in post_ids:
+                return "verified_publish_tid"
+            recorded_text = self._qzone_view_normalize_post_text(record.get("text"))
+            if not post_text or recorded_text != post_text or len(post_text) < 8:
+                continue
+            # A known-but-different feed id wins over coincidentally equal text.
+            if recorded_tid and post_ids:
+                continue
+            recorded_at = _safe_float(record.get("at"), 0)
+            if post_time <= 0 or recorded_at <= 0:
+                continue
+            if abs(post_time - recorded_at) > 15 * 60:
+                continue
+            return "verified_publish_text"
+        return ""
+
+    def _qzone_view_identity_payload(
+        self,
+        target: QzoneViewTarget,
+        post: Any,
+        *,
+        event: AstrMessageEvent | None = None,
+    ) -> dict[str, Any]:
+        owner_uin = getattr(post, "uin", "")
+        normalized_owner = normalize_qzone_uin(owner_uin)
+        owner_role = classify_qzone_view_owner(target, normalized_owner)
+        multi_persona = bool(getattr(self, "enable_multi_persona_mode", False))
+        active_getter = getattr(self, "_active_persona_scope", None)
+        active_persona = ""
+        if callable(active_getter):
+            try:
+                active_persona = _single_line(active_getter(), 96)
+            except Exception:
+                active_persona = ""
+        if not active_persona and event is not None:
+            active_persona = _single_line(
+                getattr(event, "private_companion_persona_id", ""),
+                96,
+            )
+        persona_match_basis = ""
+        if owner_role == "bot_self" and multi_persona and active_persona:
+            persona_match_basis = self._qzone_view_persona_publish_match_basis(
+                post,
+                active_persona,
+            )
+        current_persona_verified = bool(
+            owner_role == "bot_self"
+            and (not multi_persona or bool(persona_match_basis))
+        )
+        if owner_role == "bot_self" and not multi_persona:
+            persona_match_basis = "single_persona_account"
+        pronoun_safe = qzone_view_owner_is_pronoun_safe(owner_role)
+        if owner_role == "bot_self" and not current_persona_verified:
+            pronoun_safe = False
+        if owner_role in {"identity_mismatch", "identity_unverified", "shared_identity"}:
+            memory_policy = "not_recorded"
+        elif owner_role in {"current_user", "third_party"}:
+            memory_policy = "external_observation_only"
+        elif owner_role == "bot_self" and current_persona_verified:
+            memory_policy = "verified_persona_observation"
+        else:
+            memory_policy = "shared_account_observation"
+        response_guard = self._qzone_view_owner_guard(owner_role)
+        if owner_role == "bot_self" and not current_persona_verified:
+            response_guard = (
+                "这条动态只核验为多人格共享的 Bot 登录 QQ 账号动态，尚未核验为当前人格发布；"
+                "不得表述为当前人格亲自发布或经历过。"
+            )
+        return {
+            "requested_scope": target.scope,
+            "target_uin": str(target.target_uin) if target.target_uin else "",
+            "owner_uin": str(normalized_owner) if normalized_owner else "",
+            "owner_role": owner_role,
+            "owner_matches_target": bool(normalized_owner and normalized_owner == target.target_uin),
+            "pronoun_safe": pronoun_safe,
+            "current_persona_verified": current_persona_verified,
+            "persona_verification_basis": persona_match_basis,
+            "account_scope": "shared" if multi_persona else "single_persona",
+            "memory_policy": memory_policy,
+            "response_guard": response_guard,
+        }
+
+    @staticmethod
+    def _qzone_note_view_memory_boundary(event: AstrMessageEvent | None, identity: dict[str, Any]) -> None:
+        """Do not turn a fetched public feed into Bot autobiographical memory."""
+        if event is None:
+            return
+        observations = getattr(event, "_private_companion_qzone_view_observations", None)
+        if not isinstance(observations, list):
+            observations = []
+            setattr(event, "_private_companion_qzone_view_observations", observations)
+        observations.append(
+            {
+                "requested_scope": str(identity.get("requested_scope") or ""),
+                "owner_role": str(identity.get("owner_role") or ""),
+                "owner_matches_target": bool(identity.get("owner_matches_target")),
+                "current_persona_verified": bool(
+                    identity.get("current_persona_verified")
+                ),
+                "memory_policy": str(identity.get("memory_policy") or ""),
+            }
+        )
+        del observations[:-8]
 
     def _photo_generation_tool_instruction(
         self,
@@ -5537,23 +5726,51 @@ class LlmToolActionsMixin:
         text = _single_line(value, 80).lstrip("oO")
         return text if text.isdigit() else ""
 
+    @staticmethod
+    def _qzone_view_clock_number(value: Any) -> int | None:
+        text = _single_line(value, 8).translate(
+            str.maketrans({"〇": "零", "两": "二", "兩": "二"})
+        )
+        if not text:
+            return None
+        if text.isdigit():
+            return int(text)
+        digits = {
+            "零": 0,
+            "一": 1,
+            "二": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+        }
+        if "十" in text:
+            if text.count("十") != 1:
+                return None
+            left, _, right = text.partition("十")
+            if left and left not in digits:
+                return None
+            if right and right not in digits:
+                return None
+            return (digits.get(left, 1) * 10) + digits.get(right, 0)
+        if all(character in digits for character in text):
+            return int("".join(str(digits[character]) for character in text))
+        return None
+
     def _qzone_view_target_scope(
         self,
         event: AstrMessageEvent,
         *,
         user_id: Any = "",
         target_scope: Any = "",
-        bot_uin: Any = "",
-    ) -> tuple[str, str]:
+        target_uin: Any = "",
+    ) -> tuple[str, bool]:
         requested_user = _single_line(user_id, 80)
-        requested_scope = _single_line(target_scope, 40).lower()
-        self_aliases = {"self", "bot", "bot_self", "me", "自己", "你", "机器人"}
-        user_aliases = {"user", "current_user", "sender", "对方", "用户", "我"}
-        try:
-            sender_id = self._qzone_view_normalize_uin(event.get_sender_id())
-        except Exception:
-            sender_id = ""
-        normalized_bot_uin = self._qzone_view_normalize_uin(bot_uin)
+        requested_target = _single_line(target_uin, 80)
+        requested_scope = _single_line(target_scope, 40)
 
         inbound = _single_line(getattr(event, "message_str", ""), 500)
         user_owns_post = bool(
@@ -5567,26 +5784,26 @@ class LlmToolActionsMixin:
             or re.search(r"我.{0,18}给你.{0,10}(?:回复|评论|留言)", inbound, flags=re.I)
         )
 
-        # The user's ownership wording is more reliable than model-generated tool
-        # arguments. This also repairs older providers that automatically filled
-        # user_id with the current sender for a request about the Bot's own post.
+        # Explicit ownership in the user's wording outranks generated tool args.
         if user_owns_post and not bot_owns_post:
-            return "current_user", sender_id
+            return "current_user", True
         if bot_owns_post and not user_owns_post:
-            return "bot_self", normalized_bot_uin
+            return "bot_self", True
 
-        if requested_user.lower() in self_aliases or requested_scope in self_aliases:
-            return "bot_self", normalized_bot_uin
-        if requested_user.lower() in user_aliases or requested_scope in user_aliases:
-            return "current_user", sender_id
-        explicit_user = self._qzone_view_normalize_uin(requested_user)
-        if explicit_user:
-            return "explicit_user", explicit_user
-        if user_owns_post:
-            return "current_user", sender_id
-        if bot_owns_post:
-            return "bot_self", normalized_bot_uin
-        return "current_user", sender_id
+        normalized_scope = normalize_qzone_view_target_scope(requested_scope)
+        if requested_scope and not normalized_scope:
+            return requested_scope, False
+        if not requested_scope:
+            argument_alias_scope = normalize_qzone_view_target_scope(
+                requested_target or requested_user
+            )
+            if argument_alias_scope and argument_alias_scope != "explicit_uin":
+                return argument_alias_scope, True
+        if normalized_scope == "auto":
+            normalized_scope = "explicit_uin" if (requested_target or requested_user) else "ambiguous"
+        if not normalized_scope:
+            normalized_scope = "explicit_uin" if (requested_target or requested_user) else "ambiguous"
+        return normalized_scope, False
 
     def _qzone_view_time_filter(self, value: Any) -> dict[str, Any]:
         text = _single_line(value, 160)
@@ -5604,6 +5821,15 @@ class LlmToolActionsMixin:
             has_day = True
         elif "昨天" in text or "昨日" in text:
             target_day = (now - timedelta(days=1)).date()
+            has_day = True
+        elif "大后天" in text:
+            target_day = (now + timedelta(days=3)).date()
+            has_day = True
+        elif "后天" in text:
+            target_day = (now + timedelta(days=2)).date()
+            has_day = True
+        elif "明天" in text or "明日" in text or "明晚" in text:
+            target_day = (now + timedelta(days=1)).date()
             has_day = True
         elif "今天" in text or "今日" in text or "今晚" in text:
             has_day = True
@@ -5626,20 +5852,59 @@ class LlmToolActionsMixin:
                     ).date()
                     has_day = True
             except ValueError:
-                return {}
+                return {"parse_error": "invalid_date", "source": text}
 
-        time_match = re.search(
-            r"(?:(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|夜里)\s*)?"
-            r"([01]?\d|2[0-3])\s*(?:点|时|[:：])\s*([0-5]?\d)?",
+        period_pattern = r"凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|夜里"
+        number_pattern = r"[零〇一二两兩三四五六七八九十]{1,3}"
+        boundary_pattern = r"(?![\d零〇一二两兩三四五六七八九十半刻多分])"
+        period_hint_match = re.search(period_pattern, text)
+        period_hint = (
+            period_hint_match.group(0)
+            if period_hint_match
+            else "晚上"
+            if "今晚" in text or "明晚" in text
+            else ""
+        )
+        hour_left_boundary = r"(?<![\d零〇一二两兩三四五六七八九十])"
+        colon_match = re.search(
+            rf"(?:(?P<period>{period_pattern})\s*)?"
+            rf"{hour_left_boundary}(?P<hour>(?:[01]?\d|2[0-3]|{number_pattern}))\s*[:：]\s*"
+            rf"(?P<minute>[0-5]?\d|{number_pattern})\s*分?{boundary_pattern}",
             text,
+        )
+        point_match = re.search(
+            rf"(?:(?P<period>{period_pattern})\s*)?"
+            rf"{hour_left_boundary}(?P<hour>(?:[01]?\d|2[0-3]|{number_pattern}))\s*(?:点|时)\s*"
+            rf"(?:(?P<minute_word>半|一刻|三刻)|"
+            rf"(?P<minute>[0-5]?\d|{number_pattern})\s*分?|"
+            rf"(?P<hour_more>多))?{boundary_pattern}",
+            text,
+        )
+        time_match = colon_match or point_match
+        explicit_clock_marker = bool(
+            re.search(
+                rf"(?:\d|{number_pattern})\s*(?:点|时|[:：])",
+                text,
+            )
         )
         minute_of_day: int | None = None
         tolerance_minutes = 180
         hour_window: tuple[int, int] | None = None
         if time_match:
-            period = time_match.group(1) or ""
-            hour = int(time_match.group(2))
-            minute = int(time_match.group(3) or 0)
+            period = time_match.group("period") or period_hint
+            hour = self._qzone_view_clock_number(time_match.group("hour"))
+            groups = time_match.groupdict()
+            minute_word = groups.get("minute_word") or ""
+            if minute_word == "半":
+                minute = 30
+            elif minute_word == "一刻":
+                minute = 15
+            elif minute_word == "三刻":
+                minute = 45
+            else:
+                minute = self._qzone_view_clock_number(groups.get("minute") or "0")
+            if hour is None or minute is None or hour > 23 or minute > 59:
+                return {"parse_error": "invalid_clock", "source": text}
             if period in {"下午", "傍晚", "晚上", "夜里"} and hour < 12:
                 hour += 12
             elif period == "中午" and hour < 11:
@@ -5647,12 +5912,32 @@ class LlmToolActionsMixin:
             elif period == "凌晨" and hour == 12:
                 hour = 0
             minute_of_day = hour * 60 + minute
-            if "点多" in text:
+            if groups.get("hour_more"):
                 hour_window = (hour * 60, hour * 60 + 59)
                 tolerance_minutes = 59
             else:
                 tolerance_minutes = 90 if re.search(r"(?:左右|前后|大概|约)", text) else 45
-        if not has_day and minute_of_day is None:
+        elif explicit_clock_marker:
+            return {"parse_error": "invalid_clock", "source": text}
+        elif period_hint:
+            hour_window = {
+                "凌晨": (0, 5 * 60 + 59),
+                "清晨": (5 * 60, 8 * 60 + 59),
+                "早上": (6 * 60, 9 * 60 + 59),
+                "上午": (6 * 60, 11 * 60 + 59),
+                "中午": (11 * 60, 13 * 60 + 59),
+                "下午": (12 * 60, 17 * 60 + 59),
+                "傍晚": (17 * 60, 19 * 60 + 59),
+                "晚上": (18 * 60, 23 * 60 + 59),
+                "夜里": (20 * 60, 23 * 60 + 59),
+            }.get(period_hint)
+        if not has_day and minute_of_day is None and hour_window is None:
+            if re.search(
+                r"(?:大后天|后天|明天|明日|明晚|前天|昨天|昨日|今天|今日|今晚|"
+                r"(?:上|下|这|本)?(?:周|星期|礼拜)[一二三四五六日天]?)",
+                text,
+            ):
+                return {"parse_error": "unsupported_time_expression", "source": text}
             return {}
         return {
             "date": target_day.strftime("%Y-%m-%d"),
@@ -5679,13 +5964,14 @@ class LlmToolActionsMixin:
         self,
         event: AstrMessageEvent,
         user_id: str = "",
+        target_scope: str = "",
+        target_uin: str = "",
         pos: int = 0,
         like: bool = False,
         reply: bool = False,
         selector: str = "",
         fid: str = "",
         time_hint: str = "",
-        target_scope: str = "",
         **kwargs: Any,
     ) -> str:
         availability = getattr(self, "_qzone_available", None)
@@ -5706,7 +5992,13 @@ class LlmToolActionsMixin:
                         return value
                 return ""
 
-            requested_user = user_id or alias("target_id", "target", "qq", "uin")
+            requested_user = user_id or alias("legacy_user_id")
+            requested_target_uin = target_uin or alias(
+                "target_id",
+                "target",
+                "qq",
+                "uin",
+            )
             requested_scope = target_scope or alias("scope", "owner", "target_type")
             requested_selector = selector or alias("post_selector", "selection")
             requested_fid = fid or alias("post_id", "tid", "feed_id")
@@ -5719,29 +6011,125 @@ class LlmToolActionsMixin:
                 "publish_time",
                 "time_range",
             )
+            explicit_time_argument = bool(_single_line(requested_time, 160))
             if not requested_time:
                 selector_time = self._qzone_view_time_filter(requested_selector)
-                inbound_time = self._qzone_view_time_filter(getattr(event, "message_str", ""))
-                requested_time = requested_selector if selector_time else (getattr(event, "message_str", "") if inbound_time else "")
+                inbound_message = getattr(event, "message_str", "")
+                inbound_time = self._qzone_view_time_filter(inbound_message)
+                requested_time = (
+                    requested_selector
+                    if selector_time
+                    else inbound_message
+                    if inbound_time
+                    else ""
+                )
             time_filter = self._qzone_view_time_filter(requested_time)
+            if time_filter.get("parse_error") or (explicit_time_argument and not time_filter):
+                return json.dumps(
+                    {
+                        "status": "invalid_time_hint",
+                        "success": False,
+                        "message": "无法可靠识别指定的发布时间，请换成“今天下午六点半”或“2026-08-04 18:30”等表达。",
+                        "requested_time": time_filter.get("source", "") or _single_line(requested_time, 160),
+                        "target_verified": False,
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                        "final_response_instruction": "请用户确认发布时间，不要退化为查看最新动态，也不要声称已看到目标动态。",
+                    },
+                    ensure_ascii=False,
+                )
             aliased_position = alias("position", "index")
-            requested_pos = _safe_int(aliased_position if aliased_position not in (None, "") else pos, 0, 0)
-
-            cookie_header = await self._qzone_get_cookies(event)
-            qzone_context = self._qzone_context_from_cookies(cookie_header)
-            bot_uin = self._qzone_view_normalize_uin(qzone_context.get("uin"))
-            resolved_scope, target = self._qzone_view_target_scope(
+            requested_pos = _safe_int(
+                aliased_position if aliased_position not in (None, "") else pos,
+                0,
+                0,
+            )
+            try:
+                sender_uin = event.get_sender_id() if event is not None else ""
+            except Exception:
+                sender_uin = ""
+            effective_scope, semantic_override = self._qzone_view_target_scope(
                 event,
                 user_id=requested_user,
                 target_scope=requested_scope,
-                bot_uin=bot_uin,
+                target_uin=requested_target_uin,
             )
+            effective_target_uin = "" if semantic_override else requested_target_uin
+            effective_legacy_user = "" if semantic_override else requested_user
+            preliminary_target = resolve_qzone_view_target(
+                target_scope=effective_scope,
+                target_uin=effective_target_uin,
+                legacy_user_id=effective_legacy_user,
+                sender_uin=sender_uin,
+            )
+            if preliminary_target.error and preliminary_target.error != "bot_uin_unavailable":
+                status = "needs_target" if preliminary_target.error in {"missing_target", "missing_target_uin"} else "invalid_target"
+                return json.dumps(
+                    {
+                        "status": status,
+                        "success": False,
+                        "message": self._qzone_view_target_error_message(preliminary_target.error),
+                        "target_verified": False,
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                        "identity": {
+                            "requested_scope": preliminary_target.scope,
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            cookie_header = await self._qzone_get_cookies(event)
+            ctx = self._qzone_context_from_cookies(cookie_header)
+            bot_uin = self._qzone_view_normalize_uin(ctx.get("uin"))
+            target = resolve_qzone_view_target(
+                target_scope=effective_scope,
+                target_uin=effective_target_uin,
+                legacy_user_id=effective_legacy_user,
+                bot_uin=ctx.get("uin"),
+                sender_uin=sender_uin,
+            )
+            if not target.resolved:
+                status = "needs_target" if target.error in {"missing_target", "missing_target_uin"} else "invalid_target"
+                return json.dumps(
+                    {
+                        "status": status,
+                        "success": False,
+                        "message": self._qzone_view_target_error_message(target.error),
+                        "target_verified": False,
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                        "identity": {
+                            "requested_scope": target.scope,
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
             selection = parse_qzone_post_selection(
-                user_id=target,
+                user_id=str(target.target_uin),
                 selector=_single_line(requested_selector, 120),
                 pos=requested_pos,
                 fid=_single_line(requested_fid, 120),
             )
+            selected_uin = normalize_qzone_uin(selection.target_id)
+            if selected_uin != target.target_uin:
+                return json.dumps(
+                    {
+                        "status": "invalid_target",
+                        "success": False,
+                        "message": "selector 中的 QQ 号与已确认的查看对象不一致。",
+                        "target_verified": False,
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                        "identity": {
+                            "requested_scope": target.scope,
+                            "target_uin": str(target.target_uin),
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
             if selection.fid:
                 candidates = await self._qzone_query_feeds(
                     event,
@@ -5781,20 +6169,20 @@ class LlmToolActionsMixin:
                     if created is not None and created.strftime("%Y-%m-%d") == time_filter["date"]:
                         dated_candidates.append((candidate, created))
                 requested_minute = time_filter.get("minute_of_day")
+                hour_window = time_filter.get("hour_window")
+                if isinstance(hour_window, tuple) and len(hour_window) == 2:
+                    start_minute, end_minute = hour_window
+                    dated_candidates = [
+                        item
+                        for item in dated_candidates
+                        if int(start_minute)
+                        <= item[1].hour * 60 + item[1].minute
+                        <= int(end_minute)
+                    ]
                 if requested_minute is None:
                     dated_candidates.sort(key=lambda item: item[1], reverse=True)
                     posts = [dated_candidates[0][0]] if dated_candidates else []
                 else:
-                    hour_window = time_filter.get("hour_window")
-                    if isinstance(hour_window, tuple) and len(hour_window) == 2:
-                        start_minute, end_minute = hour_window
-                        dated_candidates = [
-                            item
-                            for item in dated_candidates
-                            if int(start_minute)
-                            <= item[1].hour * 60 + item[1].minute
-                            <= int(end_minute)
-                        ]
                     dated_candidates.sort(
                         key=lambda item: abs((item[1].hour * 60 + item[1].minute) - int(requested_minute))
                     )
@@ -5813,7 +6201,7 @@ class LlmToolActionsMixin:
                             "success": False,
                             "message": "没有找到发布时间符合该时间提示的说说。",
                             "requested_time": time_filter.get("source", ""),
-                            "target_scope": resolved_scope,
+                            "target_scope": target.scope,
                             "available_times": available_times,
                             "must_not_claim_viewed": True,
                             "should_retry": False,
@@ -5836,47 +6224,50 @@ class LlmToolActionsMixin:
                         "status": "empty",
                         "success": False,
                         "message": "查询结果为空",
-                        "target_scope": resolved_scope,
+                        "target_scope": target.scope,
+                        "target_verified": False,
                         "must_not_claim_viewed": True,
                         "should_retry": False,
+                        "identity": {
+                            "requested_scope": target.scope,
+                            "target_uin": str(target.target_uin),
+                            "memory_policy": "not_recorded",
+                        },
                     },
                     ensure_ascii=False,
                 )
             post = posts[0]
             post_uin = self._qzone_view_normalize_uin(getattr(post, "uin", ""))
-            expected_uin = self._qzone_view_normalize_uin(selection.target_id or target or bot_uin)
-            if not expected_uin or not post_uin:
+            identity = self._qzone_view_identity_payload(
+                target,
+                post,
+                event=event,
+            )
+            owner_role = str(identity.get("owner_role") or "")
+            if owner_role in {"identity_mismatch", "identity_unverified", "shared_identity"}:
+                status = {
+                    "identity_mismatch": "target_mismatch",
+                    "identity_unverified": "target_unverified",
+                    "shared_identity": "identity_ambiguous",
+                }.get(owner_role, owner_role)
                 return json.dumps(
                     {
-                        "status": "target_unverified",
+                        "status": status,
                         "success": False,
-                        "message": "查询结果缺少可核验的作者 QQ，已停止引用该动态。",
-                        "target_scope": resolved_scope,
-                        "expected_uin": expected_uin,
+                        "message": str(identity.get("response_guard") or "QQ 空间动态归属无法确认。"),
+                        "target_scope": target.scope,
+                        "target_verified": False,
+                        "expected_uin": str(target.target_uin or ""),
                         "observed_uin": post_uin,
                         "observed_author": _single_line(getattr(post, "name", ""), 60),
                         "must_not_claim_viewed": True,
                         "should_retry": False,
-                        "final_response_instruction": "无法核验作者归属，不要把该结果说成 Bot 自己或目标用户发布的动态。",
+                        "identity": identity,
+                        "final_response_instruction": str(identity.get("response_guard") or ""),
                     },
                     ensure_ascii=False,
                 )
-            if expected_uin and post_uin and expected_uin != post_uin:
-                return json.dumps(
-                    {
-                        "status": "target_mismatch",
-                        "success": False,
-                        "message": "查询结果作者与目标 QQ 不一致，已停止引用该动态。",
-                        "target_scope": resolved_scope,
-                        "expected_uin": expected_uin,
-                        "observed_uin": post_uin,
-                        "observed_author": _single_line(getattr(post, "name", ""), 60),
-                        "must_not_claim_viewed": True,
-                        "should_retry": False,
-                        "final_response_instruction": "不要把该结果说成 Bot 自己或目标用户发布的动态。",
-                    },
-                    ensure_ascii=False,
-                )
+            self._qzone_note_view_memory_boundary(event, identity)
             action_msg = ""
             if reply:
                 comment = await self._qzone_comment_post(event, post)
@@ -5886,8 +6277,9 @@ class LlmToolActionsMixin:
                 like_result = await self._qzone_like_post(event, post)
                 like_text = "已点赞" if like_result.get("verified") else "点赞请求已受理，等待 QQ 空间同步"
                 action_msg = (action_msg + f"；{like_text}") if action_msg else like_text
+            all_comments = list(getattr(post, "comments", []) or [])
             comments_payload: list[dict[str, Any]] = []
-            for comment in list(getattr(post, "comments", []) or [])[:30]:
+            for comment in all_comments[:30]:
                 comment_uin = self._qzone_view_normalize_uin(getattr(comment, "uin", ""))
                 comment_time = _safe_float(getattr(comment, "create_time", 0), 0)
                 comments_payload.append(
@@ -5900,7 +6292,7 @@ class LlmToolActionsMixin:
                     }
                 )
             raw_post = getattr(post, "raw", None)
-            reported_comment_count = len(comments_payload)
+            reported_comment_count = len(all_comments)
             if isinstance(raw_post, dict):
                 for key in (
                     "cmtnum",
@@ -5932,8 +6324,9 @@ class LlmToolActionsMixin:
                     "like_result": like_result or {},
                     "author": _single_line(getattr(post, "name", ""), 60),
                     "uin": post_uin,
-                    "target_scope": resolved_scope,
+                    "target_scope": target.scope,
                     "target_verified": True,
+                    "identity": identity,
                     "text": _single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 300),
                     "images": list(getattr(post, "images", []) or [])[:6],
                     "fid": _single_line(getattr(post, "fid", "") or getattr(post, "tid", ""), 120),
@@ -5962,7 +6355,7 @@ class LlmToolActionsMixin:
                     "must_not_claim_viewed": False,
                     "should_retry": False,
                     "final_response_instruction": (
-                        "只依据本结果回答。target_scope=bot_self 才能称为 Bot 自己的动态；"
+                        f"只依据本结果回答。{identity.get('response_guard') or ''}"
                         "评论是否存在只依据 comments/current_user_commented/bot_commented；值为 null 或 comments_complete=false 时只能说暂未确认，不要猜测。"
                     ),
                 },
@@ -5970,7 +6363,18 @@ class LlmToolActionsMixin:
             )
         except Exception as exc:
             message = _single_line(exc, 160)
-            auth_required = bool(re.search(r"(?:登录|cookie|p_skey|skey|鉴权|认证).*(?:失效|过期|缺失|为空|失败|绑定)|(?:失效|过期).*(?:登录|cookie)", message, flags=re.I))
+            auth_required = bool(
+                re.search(
+                    r"(?:登录态|登录|cookie|p_skey|skey|鉴权|认证|unauthorized|forbidden)",
+                    message,
+                    flags=re.I,
+                )
+                and re.search(
+                    r"(?:失效|过期|缺失|缺少|为空|失败|未配置|重新绑定|无效|不可用|missing|expired|invalid|unauthorized|forbidden)",
+                    message,
+                    flags=re.I,
+                )
+            )
             return json.dumps(
                 {
                     "status": "auth_required" if auth_required else "error",
