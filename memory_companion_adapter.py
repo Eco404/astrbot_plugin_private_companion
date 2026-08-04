@@ -22,7 +22,7 @@ from .bot_personal_contract import (
     window_for_minutes,
 )
 from .bot_personal_outbox import BotPersonalOutbox
-from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
+from .helpers import _missing_optional_model_dependency, _now_ts, _path_text, _safe_float, _safe_int, _single_line
 from .companion_interaction_expression import current_interaction_projection
 from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
@@ -152,6 +152,76 @@ class MemoryCompanionAdapterMixin:
             if self._memory_companion_optional_dependency_failed(exc, where="create_emotion_producer_context"):
                 return None
             logger.debug("[PrivateCompanion] emotion producer context failed: %s", _single_line(exc, 120))
+            return None
+
+    def _memory_companion_emotion_delivery_context(
+        self,
+        bridge: Any,
+        *,
+        event: Any,
+        user_id: str,
+        user: dict[str, Any] | None,
+    ) -> Any | None:
+        """Bind afterglow delivery to the active, verified private message domain."""
+        private_checker = getattr(self, "_safe_event_is_private", None)
+        if callable(private_checker):
+            try:
+                if not bool(private_checker(event)):
+                    return None
+            except Exception:
+                return None
+        else:
+            is_private = getattr(event, "is_private_chat", None)
+            if not callable(is_private):
+                return None
+            try:
+                if not bool(is_private()):
+                    return None
+            except Exception:
+                return None
+        sender_getter = getattr(self, "_safe_event_sender_id", None)
+        try:
+            sender_id = _single_line(sender_getter(event), 160) if callable(sender_getter) else _single_line(event.get_sender_id(), 160)
+        except Exception:
+            return None
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        try:
+            canonical_sender_id = _single_line(canonicalizer(sender_id), 160) if callable(canonicalizer) else sender_id
+        except Exception:
+            return None
+        verified_user_id = _single_line(user_id, 160)
+        session_id = _single_line(getattr(event, "unified_msg_origin", ""), 220)
+        platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        profile_session = _single_line(user.get("umo"), 220) if isinstance(user, dict) else ""
+        bot_id = self._memory_companion_bridge_bot_id(event)
+        if (
+            not isinstance(user, dict)
+            or not all((bot_id, platform, session_id, canonical_sender_id, verified_user_id))
+            or canonical_sender_id != verified_user_id
+            or profile_session != session_id
+        ):
+            return None
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        creator = getattr(bridge, "create_emotion_delivery_context", None) if bridge is not None else None
+        if capability is None or not callable(creator):
+            return None
+        try:
+            return creator(
+                capability,
+                bot_id=bot_id,
+                scope="private",
+                platform=platform,
+                user_id=verified_user_id,
+                session_id=session_id,
+                allow_cross_window=self._memory_companion_coerce_bool(
+                    getattr(self, "enable_memory_companion_cross_window_emotion", True),
+                    True,
+                ),
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="create_emotion_delivery_context"):
+                return None
+            logger.debug("[PrivateCompanion] emotion delivery context failed: %s", _single_line(exc, 120))
             return None
 
     async def _memory_companion_record_emotion_event(self, event: dict[str, Any]) -> None:
@@ -2266,100 +2336,131 @@ class MemoryCompanionAdapterMixin:
                 return
             logger.debug("[PrivateCompanion] MemoryCompanion QQ 空间发布写入失败: %s", _single_line(exc, 120))
 
-    def _memory_companion_apply_emotional_drift(self, *, session_id: str = "") -> None:
-        """Pull pending emotional drift events from the memory plugin and apply to daily_state.
-
-        This now includes cross-window emotional continuity: if the bot recently
-        touched emotional memories in other sessions, a dampened residue is also
-        applied to the current daily_state, creating a sense of emotional carryover.
-        """
+    async def _memory_companion_apply_emotional_drift(
+        self,
+        *,
+        event: Any,
+        user_id: str,
+        user: dict[str, Any] | None,
+    ) -> None:
+        """Durably project pending memory events into Daily State conditions."""
         if not getattr(self, "enable_memory_companion_emotional_drift", True):
             return
         bridge = self._memory_companion_bridge()
         if bridge is None:
             return
-        getter = getattr(bridge, "get_emotional_events", None)
-        if not callable(getter):
+        lister = getattr(bridge, "list_emotion_events", None)
+        acker = getattr(bridge, "ack_emotion_events", None)
+        if not callable(lister) or not callable(acker):
+            return
+        delivery_context = self._memory_companion_emotion_delivery_context(
+            bridge,
+            event=event,
+            user_id=user_id,
+            user=user,
+        )
+        if delivery_context is None:
             return
         try:
-            events = getter(session_id=session_id, limit=3)
+            delivery = await lister(
+                delivery_context=delivery_context,
+                cursor="",
+                limit=6,
+            )
         except Exception as exc:
-            if self._memory_companion_optional_dependency_failed(exc, where="get_emotional_events"):
+            if self._memory_companion_optional_dependency_failed(exc, where="list_emotion_events"):
                 return
-            logger.debug("[PrivateCompanion] 情绪漂移拉取失败: %s", _single_line(exc, 120))
+            logger.debug("[PrivateCompanion] 情绪余波拉取失败: %s", _single_line(exc, 120))
             return
-        # Cross-window emotional residue: check if there are recent emotional events
-        # from OTHER sessions that should subtly influence the current state
-        cross_window_delta = 0.0
-        cross_window_hints: list[str] = []
-        cross_state_getter = getattr(bridge, "get_recent_emotional_state", None)
-        if callable(cross_state_getter) and getattr(self, "enable_memory_companion_cross_window_emotion", True):
-            try:
-                cross_state = cross_state_getter()
-                if isinstance(cross_state, dict) and cross_state.get("total", 0) > 0:
-                    # Apply a dampened cross-window effect (30% strength)
-                    scar_count = cross_state.get("scar_count", 0)
-                    warm_count = cross_state.get("warm_count", 0)
-                    if scar_count > 0:
-                        cross_window_delta = -min(2.0, scar_count * 0.8)
-                        cross_window_hints.append("低落")
-                    if warm_count > 0:
-                        cross_window_delta += min(1.5, warm_count * 0.5)
-                        cross_window_hints.append("微暖")
-            except Exception as exc:
-                self._memory_companion_optional_dependency_failed(exc, where="get_recent_emotional_state")
-        if not events and not cross_window_hints:
+        events = delivery.get("events", []) if isinstance(delivery, dict) else []
+        if not isinstance(events, list) or not events:
             return
         data = getattr(self, "data", None)
         if not isinstance(data, dict):
             return
-        state = data.get("daily_state")
-        if not isinstance(state, dict):
-            state = {}
-            data["daily_state"] = state
-        try:
-            current_energy = float(state.get("energy") or 0.0)
-        except Exception:
-            current_energy = 0.0
-        total_delta = 0.0
-        mood_hints: list[str] = []
+        conditions = data.setdefault("state_conditions", [])
+        if not isinstance(conditions, list):
+            conditions = []
+            data["state_conditions"] = conditions
+        now = _now_ts()
+        applied_refs: list[dict[str, Any]] = []
+        applied_keys: set[tuple[str, int]] = set()
         for event in events:
-            delta = float(event.get("energy_delta") or 0.0)
-            total_delta += delta
-            hint = _single_line(event.get("mood_hint"), 40)
-            if hint:
-                mood_hints.append(hint)
-        # Add cross-window residue (already dampened)
-        total_delta += cross_window_delta
-        mood_hints.extend(cross_window_hints)
-        # Safety valve: clamp total drift per cycle
-        total_delta = max(-10.0, min(6.0, total_delta))
-        new_energy = max(0.0, min(100.0, current_energy + total_delta))
-        state["energy"] = round(new_energy, 1)
-        # Apply mood drift with safety valve: only shift if hint is significant
-        if mood_hints:
-            current_mood = _single_line(state.get("mood_bias"), 80)
-            dominant_hint = mood_hints[0]
-            if current_mood and dominant_hint not in current_mood:
-                state["mood_bias"] = _single_line(f"{current_mood}，偏{dominant_hint}", 80)
-            elif not current_mood:
-                state["mood_bias"] = dominant_hint
-        drift_log = state.get("mood_drift_log")
-        if not isinstance(drift_log, list):
-            drift_log = []
-            state["mood_drift_log"] = drift_log
-        drift_log.append({
-            "ts": self._memory_companion_now_iso(),
-            "events": [{"type": e.get("event_type"), "delta": e.get("energy_delta"), "hint": _single_line(e.get("mood_hint"), 40)} for e in events],
-            "cross_window_delta": round(cross_window_delta, 2),
-            "total_delta": round(total_delta, 2),
-        })
-        if len(drift_log) > 20:
-            drift_log[:] = drift_log[-20:]
-        logger.debug(
-            "[PrivateCompanion] 情绪漂移已应用: energy=%.1f->%.1f delta=%.1f cross_delta=%.1f hints=%s",
-            current_energy, new_energy, total_delta, cross_window_delta, mood_hints,
-        )
+            if not isinstance(event, dict):
+                continue
+            condition = self._memory_companion_afterglow_condition(event, now=now)
+            if not condition:
+                continue
+            event_id = condition["source_event_id"]
+            replaced = False
+            for index, existing in enumerate(conditions):
+                if isinstance(existing, dict) and existing.get("kind") == "memory_afterglow" and existing.get("source_event_id") == event_id:
+                    conditions[index] = condition
+                    replaced = True
+                    break
+            if not replaced:
+                conditions.append(condition)
+            ref_key = (event_id, condition["source_revision"])
+            if ref_key not in applied_keys:
+                applied_keys.add(ref_key)
+                applied_refs.append({"event_id": event_id, "revision": condition["source_revision"]})
+        if not applied_refs:
+            return
+        composer = getattr(self, "_compose_state_from_conditions", None)
+        saver = getattr(self, "_save_data_sync", None)
+        if not callable(composer) or not callable(saver):
+            return
+        data["daily_state"] = composer(data.get("daily_weather", {}))
+        saver()
+        try:
+            await acker(applied_refs, delivery_context=delivery_context)
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="ack_emotion_events")
+            return
+        logger.debug("[PrivateCompanion] 已应用并确认记忆情绪余波: count=%s", len(applied_refs))
+
+    def _memory_companion_afterglow_condition(self, event: dict[str, Any], *, now: float) -> dict[str, Any] | None:
+        event_id = _single_line(event.get("event_id"), 96)
+        if not event_id:
+            return None
+        try:
+            revision = max(1, min(1000000, int(event.get("revision") or 1)))
+            delta = max(-8.0, min(5.0, float(event.get("energy_delta") or 0.0)))
+            intensity = max(0, min(100, round(float(event.get("intensity") or 0.0))))
+        except (TypeError, ValueError):
+            return None
+        event_type = _single_line(event.get("event_type"), 48)
+        mood_by_type = {
+            "scar_touched": "低落",
+            "warm_memory": "微暖",
+            "vulnerable_resonance": "柔软",
+        }
+        mood = mood_by_type.get(event_type, "平稳")
+        half_life = 1800.0
+        return {
+            "id": f"memory-afterglow-{event_id}",
+            "kind": "memory_afterglow",
+            "title": "记忆余波",
+            "label": "记忆被触动后留下的短暂情绪余波",
+            "mood": mood,
+            "energy_delta": round(delta, 2),
+            "intensity": intensity,
+            "start_ts": now,
+            "end_ts": now + 4 * half_life,
+            "duration_hours": 2,
+            "half_life_seconds": half_life,
+            "cause": "memory_recall_resonance",
+            "phase": "afterglow",
+            "source_event_id": event_id,
+            "source_revision": revision,
+            "trace_id": _single_line(event.get("trace_id"), 96),
+            "modulation": {
+                "valence": max(-1.0, min(1.0, _safe_float(event.get("valence"), 0.0))),
+                "arousal": max(0.0, min(1.0, _safe_float(event.get("arousal"), 0.0))),
+                "vulnerability": max(0.0, min(1.0, _safe_float(event.get("vulnerability"), 0.0))),
+                "confidence": max(0.0, min(1.0, _safe_float(event.get("confidence"), 0.0))),
+            },
+        }
 
     async def _memory_companion_search_open_loops(self, *, session_id: str = "", limit: int = 3) -> list[dict[str, Any]]:
         """Search for unresolved open-loop / promise memories for proactive companionship."""

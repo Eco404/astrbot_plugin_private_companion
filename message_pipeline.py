@@ -284,7 +284,11 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(fast_user, now=received_ts)
         try:
-            self._memory_companion_apply_emotional_drift(session_id=event.unified_msg_origin or "")
+            await self._memory_companion_apply_emotional_drift(
+                event=event,
+                user_id=user_id,
+                user=fast_user,
+            )
             self._memory_companion_attach_private_context(
                 event,
                 user_id=user_id,

@@ -3548,11 +3548,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         umo = str(user.get("umo") or "").strip()
         if not umo:
             return ""
-        # Pull cross-session emotional drift before generating proactive message
-        try:
-            self._memory_companion_apply_emotional_drift(session_id="")
-        except Exception:
-            pass
         prompt = await self._build_framework_proactive_prompt(
             user=user,
             name=name,

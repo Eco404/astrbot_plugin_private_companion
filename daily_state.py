@@ -8609,16 +8609,20 @@ class DailyStateMixin(DailyStateTickMixin):
         values = self._base_state_values(profile)
         weather_text = self._weather_summary_text(weather)
         energy = 75
+        composed_at = _now_ts()
         mood_candidates = []
         health_cause = ""
         for cond in active:
             kind = str(cond.get("kind") or "")
             if kind in values:
                 values[kind] = _single_line(cond.get("label"), 80)
-            energy += _safe_int(cond.get("energy_delta"), 0, -100, 100)
+            energy += self._condition_effective_energy_delta(cond, now=composed_at)
             mood = _single_line(cond.get("mood"), 20)
             if mood and mood != "平稳":
-                mood_candidates.append((mood, _safe_int(cond.get("intensity"), 50, 0, 100)))
+                intensity = _safe_int(cond.get("intensity"), 50, 0, 100)
+                if kind == "memory_afterglow":
+                    intensity = max(0, round(intensity * self._memory_afterglow_decay(cond, now=composed_at)))
+                mood_candidates.append((mood, intensity))
             if kind == "health" and not health_cause:
                 health_cause = _single_line(cond.get("cause"), 120)
         remembered_dream = self._remembered_daily_dream_label()
@@ -8664,6 +8668,21 @@ class DailyStateMixin(DailyStateTickMixin):
             result["location_override_ts"] = existing_override_ts
             result["location_source"] = "dialogue_override"
         return result
+
+    @staticmethod
+    def _memory_afterglow_decay(cond: dict[str, Any], *, now: float) -> float:
+        if str(cond.get("kind") or "") != "memory_afterglow":
+            return 1.0
+        start_ts = _safe_float(cond.get("start_ts"), now)
+        half_life = max(60.0, min(86400.0, _safe_float(cond.get("half_life_seconds"), 1800.0)))
+        age = max(0.0, now - start_ts)
+        return max(0.0, min(1.0, 0.5 ** (age / half_life)))
+
+    def _condition_effective_energy_delta(self, cond: dict[str, Any], *, now: float) -> int:
+        base = _safe_int(cond.get("energy_delta"), 0, -100, 100)
+        if str(cond.get("kind") or "") != "memory_afterglow":
+            return base
+        return int(round(base * self._memory_afterglow_decay(cond, now=now)))
 
     def _build_state_note(
         self,
