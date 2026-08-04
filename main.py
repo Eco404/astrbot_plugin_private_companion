@@ -27,7 +27,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
 from astrbot.api import AstrBotConfig, logger
@@ -136,6 +136,17 @@ from .relationship_policy import normalize_relationship_stage_policy
 
 
 _ACTIVE_PERSONA_ID = contextvars.ContextVar("private_companion_active_persona_id", default="")
+_PERSONA_PROFILE_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"/\\|?*%')
+_WINDOWS_RESERVED_FILENAME_STEMS = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+)
 
 
 def _multi_persona_event_context(function):
@@ -1375,9 +1386,42 @@ class PrivateCompanionPlugin(
 
     @staticmethod
     def _sanitize_persona_id(value: Any) -> str:
-        text = str(value or "").strip()
-        text = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+        text = unicodedata.normalize("NFC", str(value or ""))
+        text = "".join(
+            character
+            for character in text
+            if unicodedata.category(character) not in {"Cc", "Cs"}
+        ).strip()
         return text[:96]
+
+    def _persona_profile_filename(self, persona_id: Any) -> str:
+        """Return a reversible, cross-platform-safe filename for one logical ID."""
+        pid = self._sanitize_persona_id(persona_id)
+        encoded_parts: list[str] = []
+        for character in pid:
+            if (
+                character in _PERSONA_PROFILE_FORBIDDEN_FILENAME_CHARS
+                or unicodedata.category(character).startswith("C")
+            ):
+                encoded_parts.extend(
+                    f"%{byte:02X}" for byte in character.encode("utf-8")
+                )
+            else:
+                encoded_parts.append(character)
+        stem = "".join(encoded_parts)
+        if stem.partition(".")[0].upper() in _WINDOWS_RESERVED_FILENAME_STEMS and stem:
+            stem = f"%{ord(stem[0]):02X}{stem[1:]}"
+        return f"{stem}.json"
+
+    def _persona_id_from_profile_path(self, path: Path) -> str:
+        filename = path.name
+        if not filename.lower().endswith(".json"):
+            return ""
+        try:
+            decoded = unquote(filename[:-5], encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return ""
+        return self._sanitize_persona_id(decoded)
 
     def _configured_multi_persona_ids(self) -> list[str]:
         raw = self._cfg_raw(getattr(self, "config", {}), "multi_persona_ids", [])
@@ -1396,7 +1440,7 @@ class PrivateCompanionPlugin(
         return result
 
     def _persona_profile_path(self, persona_id: str) -> Path:
-        return Path(self._persona_profiles_dir) / f"{self._sanitize_persona_id(persona_id)}.json"
+        return Path(self._persona_profiles_dir) / self._persona_profile_filename(persona_id)
 
     def _ensure_persona_profile(self, persona_id: str) -> dict[str, Any]:
         pid = self._sanitize_persona_id(persona_id) or self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", ""))
@@ -1462,7 +1506,7 @@ class PrivateCompanionPlugin(
                     ids.append(clean)
         try:
             for path in Path(self._persona_profiles_dir).glob("*.json"):
-                clean = self._sanitize_persona_id(path.stem)
+                clean = self._persona_id_from_profile_path(path)
                 if clean and clean not in ids:
                     ids.append(clean)
         except Exception:

@@ -113,7 +113,7 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("white-space: nowrap;", mobile)
 
     def test_assets_use_cache_busted_urls(self) -> None:
-        self.assertIn('./app.css?v=20260803-relationship-v2', self.html)
+        self.assertIn('./app.css?v=20260804-multi-persona-choice-v1', self.html)
         self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_navigation_does_not_force_the_window_scroll_position(self) -> None:

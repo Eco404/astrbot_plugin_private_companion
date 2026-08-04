@@ -256,6 +256,91 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
                 plugin._configured_multi_persona_ids(),
             )
 
+    async def test_unicode_persona_ids_keep_their_full_logical_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+
+            self.assertEqual("星缘-私聊", plugin._sanitize_persona_id("星缘-私聊"))
+            self.assertEqual(
+                "中文 Persona V2",
+                plugin._sanitize_persona_id("中文 Persona V2"),
+            )
+            self.assertEqual("姐姐人格", plugin._sanitize_persona_id("姐\n姐人格"))
+            joined_name = "星缘\u200dAI"
+            self.assertEqual(joined_name, plugin._sanitize_persona_id(joined_name))
+            self.assertEqual(
+                joined_name,
+                plugin._persona_id_from_profile_path(
+                    plugin._persona_profile_path(joined_name)
+                ),
+            )
+
+    async def test_unicode_persona_profile_round_trips_and_is_enumerated(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            persona_id = "星缘-私聊"
+            plugin.multi_persona_primary_id = persona_id
+            plugin.multi_persona_ids = [persona_id, "alt"]
+            plugin.config["multi_persona_ids"] = [persona_id, "alt"]
+
+            profile = plugin._ensure_persona_profile(persona_id)
+            profile["unicode_marker"] = "中文资料"
+            plugin._save_persona_profile_sync(persona_id)
+
+            path = Path(root) / "persona_profiles" / "星缘-私聊.json"
+            self.assertTrue(path.is_file())
+            plugin._persona_data_profiles.clear()
+            self.assertEqual(
+                "中文资料",
+                plugin._ensure_persona_profile(persona_id)["unicode_marker"],
+            )
+            self.assertIn(persona_id, plugin._persona_profile_ids())
+
+            window = "default:FriendMessage:unicode-persona"
+            switched = plugin._switch_persona_for_window(
+                persona_id,
+                window_key=window,
+            )
+            self.assertTrue(switched["switched"])
+            self.assertEqual(persona_id, switched["persona_id"])
+            self.assertEqual(
+                persona_id,
+                plugin.config["multi_persona_window_bindings"][window],
+            )
+
+    async def test_profile_filename_encoding_is_safe_and_reversible(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            persona_id = "../姐姐:主/人格%?"
+            plugin.config["multi_persona_ids"] = ["main", persona_id]
+
+            path = plugin._persona_profile_path(persona_id)
+            self.assertEqual(
+                (Path(root) / "persona_profiles").resolve(),
+                path.parent.resolve(),
+            )
+            self.assertNotIn("/", path.name)
+            self.assertNotIn(":", path.name)
+            self.assertNotIn("?", path.name)
+            plugin._ensure_persona_profile(persona_id)["safe_marker"] = True
+            plugin._save_persona_profile_sync(persona_id)
+
+            plugin._persona_data_profiles.clear()
+            self.assertTrue(plugin._ensure_persona_profile(persona_id)["safe_marker"])
+            self.assertIn(persona_id, plugin._persona_profile_ids())
+
+    async def test_legacy_ascii_profile_filenames_remain_compatible(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+
+            self.assertEqual("main.json", plugin._persona_profile_path("main").name)
+            self.assertEqual("alt.json", plugin._persona_profile_path("alt").name)
+            self.assertNotEqual("CON.json", plugin._persona_profile_path("CON").name)
+            self.assertEqual(
+                "CON",
+                plugin._persona_id_from_profile_path(plugin._persona_profile_path("CON")),
+            )
+
     async def test_removed_profile_is_recoverable_but_not_scheduled_or_bound(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)

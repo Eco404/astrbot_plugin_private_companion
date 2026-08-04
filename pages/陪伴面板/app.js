@@ -4938,6 +4938,24 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function personaDisplayLabel(personaOrId, options = {}) {
+  const input = personaOrId && typeof personaOrId === "object" ? personaOrId : null;
+  const rawId = String(input?.id ?? personaOrId ?? "");
+  const known = (state.roleplayPersonas || []).find((item) => String(item?.id ?? "") === rawId) || null;
+  const persona = { ...(known || {}), ...(input || { id: rawId }) };
+  const id = String(persona.id ?? rawId).trim();
+  const label = String(persona.label || persona.name || "").trim();
+  let display = label || id;
+  if (label && id && label.toLocaleLowerCase().includes(id.toLocaleLowerCase()) === false) {
+    display = `${label} · ${id}`;
+  }
+  const source = options.includeSource ? String(persona.source || "").trim() : "";
+  if (source && !display.toLocaleLowerCase().includes(source.toLocaleLowerCase())) {
+    display = display ? `${display} · ${source}` : source;
+  }
+  return display || "未命名人格";
+}
+
 function cleanInterjectionText(value) {
   const text = String(value ?? "").trim().replace(/^["'“”‘’` ]+|["'“”‘’` ]+$/g, "");
   if (!text || /^[.。…~～\s"'“”‘’`-]{0,12}$/.test(text)) return "";
@@ -7947,12 +7965,12 @@ function setupGuidePersonaSelectHtml() {
   const options = personas.length
     ? personas.map((item) => {
       const id = String(item.id || "");
-      const label = `${item.label || id}${item.source ? ` · ${item.source}` : ""}`;
+      const label = personaDisplayLabel(item, { includeSource: true });
       return `<option value="${escapeHtml(id)}" ${id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
     }).join("")
     : `<option value="">继承 AstrBot 当前配置人格</option>`;
   const currentLabel = personas.length
-    ? (personas.find((p) => String(p.id || "") === current) || {}).label || (current ? current : "继承 AstrBot 当前配置人格")
+    ? (current ? personaDisplayLabel(current, { includeSource: true }) : "继承 AstrBot 当前配置人格")
     : "继承 AstrBot 当前配置人格";
   return `
     <div class="wk-persona-select">
@@ -20645,7 +20663,7 @@ function renderCurrentPersonaStatus(settings) {
   const output = document.getElementById("currentPersonaDisplay");
   if (!output) return;
   const personaId = String(settings.plugin_specific_persona_id || "").trim();
-  const label = personaId ? `插件指定 · ${personaId}` : "AstrBot 当前默认人格";
+  const label = personaId ? `插件指定 · ${personaDisplayLabel(personaId)}` : "AstrBot 当前默认人格";
   if ("value" in output) output.value = label;
   else output.textContent = label;
   output.title = label;
@@ -20659,7 +20677,7 @@ function renderCurrentPersonaStatus(settings) {
   const wrapper = document.createElement("label");
   wrapper.dataset.multiPersonaSwitcher = "true";
   wrapper.className = "setting-inline-control";
-  wrapper.innerHTML = `<span>页面查看人格</span><select aria-label="页面查看人格">${options.map((item) => `<option value="${escapeHtml(item.id)}" ${String(item.id) === current ? "selected" : ""}>${escapeHtml(item.label || item.id)}</option>`).join("")}</select>`;
+  wrapper.innerHTML = `<span>页面查看人格</span><select aria-label="页面查看人格">${options.map((item) => `<option value="${escapeHtml(String(item.id ?? ""))}" ${String(item.id) === current ? "selected" : ""}>${escapeHtml(personaDisplayLabel(item))}</option>`).join("")}</select>`;
   const select = wrapper.querySelector("select");
   select?.addEventListener("change", async () => {
     try {
@@ -20691,13 +20709,13 @@ function renderMultiPersonaSettingsPanel() {
   if (!host) return;
   host.querySelectorAll("[data-multi-persona-migration]").forEach((node) => node.remove());
   if (!state.multiPersona?.enabled) return;
-  const ids = (state.roleplayPersonas || []).map((item) => String(item.id || "").trim()).filter(Boolean);
-  if (ids.length < 2) return;
+  const personas = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
+  if (personas.length < 2) return;
   const keys = ["daily_plan", "daily_state", "bot_diaries", "users", "groups", "memo_notes", "token_usage"];
   const panel = document.createElement("section");
   panel.dataset.multiPersonaMigration = "true";
   panel.className = "feature-param-status";
-  panel.innerHTML = `<b>多人格资料迁移</b><div class="inline-form"><select data-migrate-source>${ids.map((id) => `<option value="${escapeHtml(id)}">源：${escapeHtml(id)}</option>`).join("")}</select><select data-migrate-target>${ids.map((id) => `<option value="${escapeHtml(id)}">目标：${escapeHtml(id)}</option>`).join("")}</select></div><div class="setting-check-list">${keys.map((key) => `<label><input type="checkbox" value="${key}" data-migrate-key checked><span>${escapeHtml({ daily_plan: "日程", daily_state: "状态", bot_diaries: "日记", users: "用户资料", groups: "群资料", memo_notes: "备忘录", token_usage: "Token 记录" }[key] || key)}</span></label>`).join("")}</div><button type="button" data-migrate-submit>迁移选中资料并清理缓存</button>`;
+  panel.innerHTML = `<b>多人格资料迁移</b><div class="inline-form"><select data-migrate-source>${personas.map((item) => `<option value="${escapeHtml(String(item.id ?? ""))}">源：${escapeHtml(personaDisplayLabel(item))}</option>`).join("")}</select><select data-migrate-target>${personas.map((item) => `<option value="${escapeHtml(String(item.id ?? ""))}">目标：${escapeHtml(personaDisplayLabel(item))}</option>`).join("")}</select></div><div class="setting-check-list">${keys.map((key) => `<label><input type="checkbox" value="${key}" data-migrate-key checked><span>${escapeHtml({ daily_plan: "日程", daily_state: "状态", bot_diaries: "日记", users: "用户资料", groups: "群资料", memo_notes: "备忘录", token_usage: "Token 记录" }[key] || key)}</span></label>`).join("")}</div><button type="button" data-migrate-submit>迁移选中资料并清理缓存</button>`;
   const submit = panel.querySelector("[data-migrate-submit]");
   submit?.addEventListener("click", async () => {
     const source = panel.querySelector("[data-migrate-source]")?.value || "";
@@ -20723,7 +20741,7 @@ function renderMultiPersonaTokenSummary(stats) {
   if (!multi?.enabled || !multi.by_persona || typeof multi.by_persona !== "object") return;
   const rows = Object.values(multi.by_persona).map((item) => {
     const total = Number(item?.totals?.total_tokens || 0);
-    return `<span class="token-persona-row"><b>${escapeHtml(item.persona_id || "-")}</b><em>${formatNumber(total)} Token</em></span>`;
+    return `<span class="token-persona-row"><b>${escapeHtml(item.persona_id ? personaDisplayLabel(item.persona_id) : "-")}</b><em>${formatNumber(total)} Token</em></span>`;
   }).join("");
   const box = document.createElement("section");
   box.dataset.multiPersonaTokenSummary = "true";
@@ -21209,7 +21227,7 @@ function renderRoleplayPersonaDraftPanel() {
     <header>
       <div>
         <b>导入预览</b>
-        <span>${escapeHtml(roleplayDraftScopeLabel(scopes))} · ${escapeHtml(result.persona_id ? `指定人格：${result.persona_id}` : "继承 AstrBot 默认人格")} · ${escapeHtml(result.provider_id || "主模型")} · 来源 ${escapeHtml(result.source_chars || 0)} 字</span>
+        <span>${escapeHtml(roleplayDraftScopeLabel(scopes))} · ${escapeHtml(result.persona_id ? `指定人格：${personaDisplayLabel(result.persona_id)}` : "继承 AstrBot 默认人格")} · ${escapeHtml(result.provider_id || "主模型")} · 来源 ${escapeHtml(result.source_chars || 0)} 字</span>
       </div>
       <div class="persona-draft-panel-actions">
         <button type="button" data-roleplay-draft-apply="empty">填入空白项</button>
@@ -22716,17 +22734,18 @@ function bodyMonitorBatchSummary(batch = {}) {
 
 function multiPersonaMigrationDetailCard() {
   const settings = state.overview?.settings || {};
-  const ids = Array.from(new Set([
+  const configuredIds = [
     ...(Array.isArray(settings.multi_persona_ids) ? settings.multi_persona_ids : []),
     ...(state.multiPersona?.profiles || []),
-  ].map((item) => String(item || "").trim()).filter(Boolean)));
+  ].map((item) => String(item || "")).filter((item) => item.trim());
+  const ids = Array.from(new Set(configuredIds));
   const bindings = state.multiPersona?.window_bindings && typeof state.multiPersona.window_bindings === "object"
     ? state.multiPersona.window_bindings
     : {};
-  const options = ids.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("");
+  const options = ids.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(personaDisplayLabel(id))}</option>`).join("");
   const bindingRows = Object.entries(bindings)
     .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
-    .map(([windowKey, personaId]) => `<span><code>${escapeHtml(windowKey)}</code><em>${escapeHtml(personaId)}</em></span>`)
+    .map(([windowKey, personaId]) => `<span><code>${escapeHtml(windowKey)}</code><em>${escapeHtml(personaDisplayLabel(personaId))}</em></span>`)
     .join("");
   const bindingCard = `
     <article class="feature-detail-card multi-persona-binding-card">
@@ -23565,7 +23584,7 @@ function featureSettingInput(key, value, accessibility = {}) {
     return `
       <select data-feature-param="${safeKey}"${accessibilityAttrs}${disabledAttr}>
         <option value="">请选择主人格</option>
-        ${personas.map((item) => `<option value="${escapeHtml(item.id)}"${String(item.id) === current ? " selected" : ""}>${escapeHtml(item.label || item.id)}</option>`).join("")}
+        ${personas.map((item) => `<option value="${escapeHtml(String(item.id ?? ""))}"${String(item.id) === current ? " selected" : ""}>${escapeHtml(personaDisplayLabel(item))}</option>`).join("")}
       </select>
     `;
   }
@@ -23576,8 +23595,8 @@ function featureSettingInput(key, value, accessibility = {}) {
       <div class="multi-persona-choice-list" data-feature-param-group="${safeKey}"${disabled ? " data-disabled=\"true\"" : ""}>
         ${personas.length ? personas.map((item) => `
           <label>
-            <input type="checkbox" data-multi-persona-profile value="${escapeHtml(item.id)}"${selected.has(String(item.id)) ? " checked" : ""}${disabledAttr}>
-            <span>${escapeHtml(item.label || item.id)}</span>
+            <input type="checkbox" data-multi-persona-profile value="${escapeHtml(String(item.id ?? ""))}"${selected.has(String(item.id)) ? " checked" : ""}${disabledAttr}>
+            <span>${escapeHtml(personaDisplayLabel(item))}</span>
           </label>
         `).join("") : '<span class="muted">暂未读取到 AstrBot 人格，请刷新配置页。</span>'}
         <textarea data-feature-param="${safeKey}" hidden>${escapeHtml([...selected].join("\n"))}</textarea>
@@ -29611,7 +29630,7 @@ function renderPersonaStandardizationWorkbench() {
     .join("");
   const baseTemplateText = formatPersonaTemplateForEditing(result?.draft?.template || "");
   const baseResultMeta = result ? [
-    result.persona_id ? `来源人格：${result.persona_id}` : "来源：当前 AstrBot 人格",
+    result.persona_id ? `来源人格：${personaDisplayLabel(result.persona_id)}` : "来源：当前 AstrBot 人格",
     result.provider_id || "主模型",
     `原人格 ${String(result.source_chars || 0)} 字`,
     Number(result.supplement_chars || 0) ? `参考 ${String(result.supplement_chars || 0)} 字` : "",
@@ -29909,7 +29928,7 @@ function renderPersonaStandardizationWorkbench() {
             ${(state.roleplayPersonas || []).length
               ? (state.roleplayPersonas || []).map((item) => {
                 const id = String(item.id || "");
-                const label = `${item.label || id}${item.source ? ` · ${item.source}` : ""}`;
+                const label = personaDisplayLabel(item, { includeSource: true });
                 return `<option value="${escapeHtml(id)}" ${id === String(draft.persona_id || "") ? "selected" : ""}>${escapeHtml(label)}</option>`;
               }).join("")
               : `<option value="">继承 AstrBot 当前配置人格</option>`}

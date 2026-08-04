@@ -110,7 +110,7 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('padding-top: 14px', APP_CSS)
 
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
-        self.assertIn('app.css?v=20260803-relationship-v2', INDEX_HTML)
+        self.assertIn('app.css?v=20260804-multi-persona-choice-v1', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
         self.assertRegex(INDEX_HTML, r'<script src="\./app\.js\?v=[^" ]+"')
 

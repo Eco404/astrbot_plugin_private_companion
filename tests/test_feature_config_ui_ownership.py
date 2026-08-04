@@ -89,6 +89,18 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         duplicates = {key: value for key, value in owners.items() if len(value) > 1}
         self.assertEqual(duplicates, {})
 
+    def test_multi_persona_checkboxes_keep_native_control_dimensions(self) -> None:
+        styles = (ROOT / "pages" / "陪伴面板" / "app.css").read_text(encoding="utf-8")
+        self.assertIn(
+            '.feature-param-control input:not([type="checkbox"]):not([type="radio"]),',
+            styles,
+        )
+        self.assertIn('.multi-persona-choice-list input[type="checkbox"] {', styles)
+        self.assertRegex(
+            styles,
+            r'\.multi-persona-choice-list input\[type="checkbox"\]\s*\{[^}]*width:\s*18px;[^}]*height:\s*18px;',
+        )
+
     def test_previously_missing_settings_have_one_primary_owner(self) -> None:
         expected = {
             "proactive_generation_history_limit": "enable_proactive_only_mode",
