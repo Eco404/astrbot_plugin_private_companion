@@ -132,6 +132,30 @@ class _SnowLumaPresenceClient:
 
 
 class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_segmented_reply_never_keeps_history_media_marker_as_a_bubble(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.enable_tts_enhancement = False
+        event = SimpleNamespace(unified_msg_origin="default:GroupMessage:1097283005")
+        chunks = [
+            [Plain("那我就一直等着呀…")],
+            [Plain("他总舍不得让我等太久的啦")],
+            [Plain('<pc_history_media images="1" />')],
+        ]
+
+        cleaned = plugin._clean_segmented_reply_chunks(event, chunks)
+
+        self.assertEqual(
+            ["那我就一直等着呀…", "他总舍不得让我等太久的啦"],
+            [item[0].text for item in cleaned],
+        )
+        self.assertEqual(
+            "可见正文",
+            plugin._sanitize_segmented_plain_text(
+                event,
+                '可见正文 <pc_history_media images="1" />',
+            ),
+        )
+
     async def test_component_send_reports_core_acceptance(self) -> None:
         harness = _ComponentSendHarness(result=None)
 

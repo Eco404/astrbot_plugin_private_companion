@@ -111,7 +111,7 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
 
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
         self.assertIn('app.css?v=20260803-relationship-v2', INDEX_HTML)
-        self.assertIn('css/polish.css?v=20260731-folio-cascade-v1', INDEX_HTML)
+        self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
         self.assertRegex(INDEX_HTML, r'<script src="\./app\.js\?v=[^" ]+"')
 
 

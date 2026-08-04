@@ -1073,7 +1073,13 @@ class IntegrationStatusMixin:
                 first = endpoint_queue[0] if endpoint_queue else {}
                 first_model = _single_line(first.get("model"), 60) if isinstance(first, dict) else ""
                 return f"在线图片 API 队列 {ready_count}/{len(endpoint_queue)} 可用 / 优先 {first_model or '未填模型'}"
-            prefix = "阿里云百炼" if platform == "bailian" else "在线图片 API"
+            prefix = (
+                "阿里云百炼"
+                if platform == "bailian"
+                else "MiniMax"
+                if platform == "minimax"
+                else "在线图片 API"
+            )
             return f"{prefix} / {external_model or '未填模型'}"
 
         if preferred == "external":

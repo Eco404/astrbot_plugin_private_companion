@@ -570,9 +570,15 @@ class PageSettingNormalizerMixin:
                 "sensenova": "sensenova",
                 "sense-nova": "sensenova",
                 "日日新": "sensenova",
+                "minimax": "minimax",
+                "minimaxi": "minimax",
+                "minimax-ai": "minimax",
+                "minimax_ai": "minimax",
+                "海螺": "minimax",
+                "海螺ai": "minimax",
             }
             mode = aliases.get(mode, mode)
-            return mode if mode in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini"} else "auto"
+            return mode if mode in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini", "minimax"} else "auto"
         return _SETTING_UNHANDLED
 
     def _normalize_page_delivery_setting(self, key: str, value: Any) -> Any:

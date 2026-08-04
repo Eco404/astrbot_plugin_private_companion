@@ -365,6 +365,48 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
             self.assertNotIn(key, config.get("news_config", {}))
             self.assertNotIn(key, config.get("legacy_compat_config", {}))
 
+    def test_private_reading_legacy_keys_migrate_once_without_schema_residue(self):
+        legacy_values = {
+            "enable_jm_cosmos_integration": True,
+            "enable_jm_cosmos_boredom_read": True,
+            "jm_cosmos_min_interval_hours": 36,
+            "jm_cosmos_max_photo_count": 48,
+            "jm_cosmos_share_probability": 0.42,
+            "jm_cosmos_default_keywords": "剧情,日常",
+            "jm_cosmos_blocked_tags": "长篇",
+            "JM_COSMOS_VISION_PROVIDER_ID": "legacy-reading-vision",
+        }
+        config = dict(legacy_values)
+        config["legacy_compat_config"] = dict(legacy_values)
+
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        reading = config["private_reading_config"]
+        self.assertTrue(reading["enable_private_reading_integration"])
+        self.assertTrue(reading["enable_private_reading_boredom_read"])
+        self.assertEqual(reading["private_reading_min_interval_hours"], 36)
+        self.assertEqual(reading["private_reading_max_photo_count"], 48)
+        self.assertEqual(reading["private_reading_share_probability"], 0.42)
+        self.assertEqual(reading["private_reading_default_keywords"], "剧情,日常")
+        self.assertEqual(reading["private_reading_blocked_tags"], "长篇")
+        self.assertEqual(
+            config["model_assignment_config"]["PRIVATE_READING_VISION_PROVIDER_ID"],
+            "legacy-reading-vision",
+        )
+        for key in legacy_values:
+            self.assertNotIn(key, config)
+            self.assertNotIn(key, config["legacy_compat_config"])
+
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        legacy_schema = schema["legacy_compat_config"]["items"]
+        for key in legacy_values:
+            self.assertNotIn(key, schema)
+            self.assertNotIn(key, legacy_schema)
+
     def test_5100_settings_survive_real_config_save_and_reload(self):
         changed_values = {
             "external_link_share_cooldown_hours": 0,

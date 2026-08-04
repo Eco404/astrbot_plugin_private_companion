@@ -219,3 +219,40 @@ def test_alias_records_are_migrated_before_scores_are_added() -> None:
     assert all(item["delta"] == 0 for item in audits)
     assert host._merge_private_user_alias_records() is False
     assert len(merged["relationship_score_migration_history"]) == 2
+
+
+def test_removing_alias_mapping_restores_the_pre_merge_alias_record() -> None:
+    host = _StoreHost(
+        {
+            "canonical": {"user_id": "canonical", "relationship_score": 3},
+            "alias": {"user_id": "alias", "relationship_score": 16},
+        },
+        {"alias": "canonical"},
+    )
+
+    assert host._merge_private_user_alias_records() is True
+    assert "alias" not in host.data["users"]
+    assert host.data["private_user_alias_merge_backups"]["alias"]["source"]["relationship_score"] == 600
+
+    host.private_user_aliases = {}
+    assert host._merge_private_user_alias_records() is True
+    assert host.data["users"]["alias"]["relationship_score"] == 600
+    assert "alias" not in host.data["users"]["canonical"].get("alias_user_ids", [])
+    assert host.data["private_user_alias_merge_backups"] == {}
+    assert host._merge_private_user_alias_records() is False
+
+
+def test_clearing_legacy_alias_mapping_recreates_a_split_identity() -> None:
+    host = _StoreHost(
+        {
+            "canonical": {
+                "user_id": "canonical",
+                "alias_user_ids": ["old-alias"],
+            },
+        },
+        {},
+    )
+
+    assert host._merge_private_user_alias_records() is True
+    assert host.data["users"]["old-alias"]["user_id"] == "old-alias"
+    assert host.data["users"]["canonical"]["alias_user_ids"] == []

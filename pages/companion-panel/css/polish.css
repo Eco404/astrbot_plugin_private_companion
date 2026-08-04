@@ -715,6 +715,26 @@ small {
   color: var(--muted);
 }
 
+.expression-review-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  grid-column: 1 / -1;
+  padding-top: 2px;
+}
+
+.expression-review-batch-bar > span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.expression-review-batch-bar button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
 .expression-review-layout {
   display: grid;
   grid-template-columns: minmax(260px, .72fr) minmax(0, 1.6fr);
@@ -757,6 +777,32 @@ small {
   max-height: min(70vh, 860px);
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.expression-review-queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 4px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.expression-review-select-toggle {
+  align-self: start;
+  min-height: 30px;
+  margin: 10px 4px 0 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.expression-review-select-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .expression-review-queue-item {
@@ -990,6 +1036,12 @@ small {
   .expression-review-queue-item {
     border-right: 1px solid var(--line-soft);
     border-bottom: 0;
+    scroll-snap-align: start;
+  }
+
+  .expression-review-queue-row {
+    min-width: 230px;
+    grid-auto-columns: minmax(0, 1fr) 32px;
     scroll-snap-align: start;
   }
 

@@ -717,7 +717,7 @@ class CommandHandlersMixin:
             "enable_photo_reference_image": {"type": "bool", "label": "启用人设/穿搭参考图一致性"},
             "backup_external_image_api_platform": {
                 "type": "select",
-                "choices": {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini"},
+                "choices": {"auto", "openai", "agnes", "sensenova", "minimax", "bailian", "modelscope", "doubao", "gemini"},
                 "aliases": {
                     "agnes-ai": "agnes",
                     "sapiens": "agnes",
@@ -735,6 +735,10 @@ class CommandHandlersMixin:
                     "google": "gemini",
                     "谷歌": "gemini",
                     "openai兼容": "openai",
+                    "minimaxi": "minimax",
+                    "minimax-ai": "minimax",
+                    "海螺": "minimax",
+                    "海螺ai": "minimax",
                 },
                 "label": "备选在线生图平台",
             },
@@ -2876,6 +2880,7 @@ class CommandHandlersMixin:
                     "规则快判补充提示词：natural_language_photo_extra_prompt，只作用于 rule_fast；全局固定提示词仍看 photo_generation_fixed_prompt。",
                     "提示词表达方式：photo_generation_prompt_format，可选 traditional（传统标签/短语）、natural_language（自然语言描述）或 nai（NAI 联动模式，按 NovelAI 4/4.5 标签语法书写并原样提交），全局作用于实际生图提示词。",
                     "Agnes Image 可选 platform=agnes，推荐 agnes-image-2.1-flash；参考图走 generations + extra_body.image，队列项可配置 1K-4K 与 ratio。",
+                    "MiniMax 可选 platform=minimax，国内站使用 https://api.minimaxi.com/v1/image_generation，模型填写 image-01 或 image-01-live；参考图走同一 JSON 接口的 subject_reference。",
                     "排障页可看最近生图提示词、参考图数量、后端错误和任务状态。",
                 ],
                 "settings": [

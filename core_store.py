@@ -370,6 +370,7 @@ class CoreStoreMixin:
         return {
             "version": DATA_VERSION,
             "users": {},
+            "private_user_alias_merge_backups": {},
             "groups": {},
             "daily_plan": {},
             "daily_plan_history": [],
@@ -445,6 +446,7 @@ class CoreStoreMixin:
     def _ensure_store_defaults(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("version", DATA_VERSION)
         data.setdefault("users", {})
+        data.setdefault("private_user_alias_merge_backups", {})
         data.setdefault("groups", {})
         data.setdefault("daily_plan", {})
         data.setdefault("daily_plan_history", [])
@@ -1654,6 +1656,40 @@ class CoreStoreMixin:
         users = self.data.setdefault("users", {})
         changed = False
         migration_now = _now_ts()
+        backups = self.data.setdefault("private_user_alias_merge_backups", {})
+        if not isinstance(backups, dict):
+            backups = {}
+            self.data["private_user_alias_merge_backups"] = backups
+            changed = True
+
+        # Keep alias records recoverable when an operator removes a mapping later.
+        # The merged canonical record is intentionally retained; only the pre-merge
+        # alias snapshot is restored, so activity recorded after the merge is not lost.
+        active_aliases = {str(alias or "").strip() for alias in aliases}
+        for raw_alias_id, raw_backup in list(backups.items()):
+            alias_id = str(raw_alias_id or "").strip()
+            if not alias_id or alias_id in active_aliases or not isinstance(raw_backup, dict):
+                continue
+            source = raw_backup.get("source")
+            if not isinstance(source, dict):
+                source = deepcopy(_DEFAULT_USER_TEMPLATE)
+            source = deepcopy(source)
+            source["user_id"] = alias_id
+            if alias_id not in users:
+                users[alias_id] = source
+                changed = True
+            canonical_id = str(raw_backup.get("canonical_id") or "").strip()
+            target = users.get(canonical_id)
+            if isinstance(target, dict):
+                target_aliases = target.get("alias_user_ids")
+                if isinstance(target_aliases, list) and alias_id in target_aliases:
+                    target["alias_user_ids"] = [
+                        item for item in target_aliases if str(item or "").strip() != alias_id
+                    ]
+                    changed = True
+            backups.pop(raw_alias_id, None)
+            changed = True
+
         # Startup maintenance must cover every persisted user, even when no
         # alias mapping is configured for this installation.
         for raw_user_id, raw_user in list(users.items()):
@@ -1666,6 +1702,31 @@ class CoreStoreMixin:
                 record_id=raw_user_id,
             )
             changed = changed or bool(migration.get("changed"))
+        # Older versions removed alias records without retaining a snapshot.
+        # Recreate a clean identity from the canonical record's alias list when
+        # that alias is no longer configured, even if other mappings remain.
+        for canonical_id, user in list(users.items()):
+            if not isinstance(user, dict):
+                continue
+            raw_alias_ids = user.get("alias_user_ids")
+            if not isinstance(raw_alias_ids, list):
+                continue
+            kept_alias_ids: list[Any] = []
+            for raw_alias_id in raw_alias_ids:
+                alias_id = str(raw_alias_id or "").strip()
+                if not alias_id or alias_id == str(canonical_id or "").strip():
+                    continue
+                if alias_id in active_aliases:
+                    kept_alias_ids.append(raw_alias_id)
+                    continue
+                if alias_id not in users:
+                    restored = deepcopy(_DEFAULT_USER_TEMPLATE)
+                    restored["user_id"] = alias_id
+                    users[alias_id] = restored
+                changed = True
+            if kept_alias_ids != raw_alias_ids:
+                user["alias_user_ids"] = kept_alias_ids
+                changed = True
         if not aliases:
             return changed
         for alias_id, canonical_id in list(aliases.items()):
@@ -1673,9 +1734,49 @@ class CoreStoreMixin:
             canonical_id = self._canonical_private_user_id(canonical_id)
             if not alias_id or not canonical_id or alias_id == canonical_id:
                 continue
+            backup = backups.get(alias_id)
             source = users.get(alias_id)
+            previous_canonical = (
+                str(backup.get("canonical_id") or "").strip()
+                if isinstance(backup, dict)
+                else ""
+            )
+            if (
+                not isinstance(source, dict)
+                and isinstance(backup, dict)
+                and previous_canonical
+                and previous_canonical != canonical_id
+            ):
+                restored_source = backup.get("source")
+                if isinstance(restored_source, dict):
+                    source = deepcopy(restored_source)
+                    source["user_id"] = alias_id
+                    users[alias_id] = source
+                    changed = True
             if not isinstance(source, dict):
                 continue
+            if isinstance(backup, dict):
+                if previous_canonical and previous_canonical != canonical_id:
+                    previous_target = users.get(previous_canonical)
+                    previous_target_aliases = (
+                        previous_target.get("alias_user_ids")
+                        if isinstance(previous_target, dict)
+                        else None
+                    )
+                    if isinstance(previous_target_aliases, list) and alias_id in previous_target_aliases:
+                        previous_target["alias_user_ids"] = [
+                            item
+                            for item in previous_target_aliases
+                            if str(item or "").strip() != alias_id
+                        ]
+                    changed = True
+                backup["canonical_id"] = canonical_id
+            else:
+                backups[alias_id] = {
+                    "canonical_id": canonical_id,
+                    "source": deepcopy(source),
+                }
+                changed = True
             target_created = canonical_id not in users
             target = users.setdefault(canonical_id, deepcopy(_DEFAULT_USER_TEMPLATE))
             target["user_id"] = canonical_id

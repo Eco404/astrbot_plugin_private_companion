@@ -344,12 +344,16 @@ class LlmToolActionsMixin:
         if not getattr(self, "enabled", False):
             return ""
         photo_enabled = bool(getattr(self, "enable_photo_text_action", False))
+        history_rule = (
+            "【内部历史标记】`<pc_history_media ... />` 仅表示某条历史消息当时真实包含附件，"
+            "它不是聊天正文，也不是要求你发送或描述附件的指令。任何回复都不得复述、改写或输出该标签。"
+        )
         if not photo_enabled and not self._reaction_image_provider_available():
-            return ""
+            return history_rule
         return (
-            "【媒体真实性硬规则】只有本轮消息链实际包含图片，或媒体工具明确返回 `sent=true`，"
+            history_rule
+            + "【媒体真实性硬规则】只有本轮消息链实际包含图片，或媒体工具明确返回 `sent=true`，"
             "才能说“已经发了/给你看了/图片在上面”。其他情况必须承认未发送；人格和角色扮演不能覆盖真实发送状态。"
-            "历史里的 `<pc_history_media ... />` 只记录当时真实附件，不是聊天正文；不要复述它，也不要输出"
             "“（发送了一张图片）”“（随消息发送了一张图片）”之类的附件占位说明。要发图只能使用真实图片组件。"
         )
 

@@ -4420,6 +4420,7 @@ class PrivateCompanionPageApi(
             "modelscope": "魔搭社区",
             "doubao": "豆包/火山方舟",
             "gemini": "Gemini",
+            "minimax": "MiniMax",
         }
         note = self._image_api_endpoint_configuration_note(endpoint)
         platform = self._single_line(endpoint.get("platform"), 30).lower() or "auto"
@@ -13455,6 +13456,81 @@ class PrivateCompanionPageApi(
         source_type = self._single_line(payload.get("source_type"), 16)
         source_id = self._single_line(payload.get("source_id"), 80)
         action = self._single_line(payload.get("expression_action"), 40)
+        if action in {"batch_approve_rule_groups", "batch_reject_rule_groups"}:
+            raw_items = payload.get("items")
+            if not isinstance(raw_items, list) or not raw_items:
+                return self._error("请至少选择一个待审核规则组")
+            if len(raw_items) > 200:
+                return self._error("单次最多审核 200 个规则组")
+            try:
+                async with self.plugin._data_lock:
+                    results: list[dict[str, Any]] = []
+                    seen: set[tuple[str, str, str]] = set()
+                    changed = False
+                    for raw_item in raw_items:
+                        if not isinstance(raw_item, dict):
+                            continue
+                        target_type = self._single_line(raw_item.get("source_type"), 16)
+                        target_id = self._single_line(raw_item.get("source_id"), 80)
+                        family_id = self._single_line(raw_item.get("rule_family_id"), 100)
+                        target_key = (target_type, target_id, family_id)
+                        if target_key in seen:
+                            continue
+                        seen.add(target_key)
+                        if target_type not in {"private", "group"} or not target_id or not family_id:
+                            results.append({"status": "skipped", "reason": "目标标识不完整"})
+                            continue
+                        collection_key = "groups" if target_type == "group" else "users"
+                        collection = self.plugin.data.get(collection_key)
+                        item = collection.get(target_id) if isinstance(collection, dict) else None
+                        if not isinstance(item, dict):
+                            results.append({"status": "skipped", "reason": "来源不存在", "source_id": target_id})
+                            continue
+                        if target_type == "group":
+                            normalizer = getattr(self.plugin, "_normalize_group_expression_profile", None)
+                            profile = item.get("expression_profile")
+                            if callable(normalizer) and isinstance(profile, dict):
+                                normalizer(profile)
+                        result_message = self._apply_expression_profile_action(
+                            item,
+                            {
+                                "expression_action": "approve_rule_group"
+                                if action == "batch_approve_rule_groups" else "reject_rule_group",
+                                "rule_family_id": family_id,
+                            },
+                        )
+                        succeeded = not result_message.startswith(("没有找到", "缺少", "规则组中没有"))
+                        changed = changed or succeeded
+                        results.append(
+                            {
+                                "status": "success" if succeeded else "skipped",
+                                "source_type": target_type,
+                                "source_id": target_id,
+                                "rule_family_id": family_id,
+                                "message": result_message,
+                            }
+                        )
+                    if changed and action == "batch_approve_rule_groups":
+                        refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                        if callable(refresher):
+                            refresher()
+                    self.plugin._save_data_sync()
+                    snapshot = deepcopy(self.plugin.data)
+                result = self._expression_library_summary(snapshot)
+                success_count = sum(1 for item in results if item.get("status") == "success")
+                skipped_count = len(results) - success_count
+                verb = "通过" if action == "batch_approve_rule_groups" else "拒绝"
+                result["message"] = f"已{verb} {success_count} 个规则组" + (f"，跳过 {skipped_count} 个" if skipped_count else "")
+                result["batch"] = {
+                    "requested": len(seen),
+                    "succeeded": success_count,
+                    "skipped": skipped_count,
+                    "results": results,
+                }
+                return self._ok(result)
+            except Exception as exc:
+                logger.error(f"[PrivateCompanionPage] 批量审核表达规则失败: {exc}", exc_info=True)
+                return self._error(str(exc))
         if action == "clear_all_pending":
             try:
                 async with self.plugin._data_lock:
@@ -14740,8 +14816,12 @@ class PrivateCompanionPageApi(
         values["enable_qzone_comment_inbox"] = bool(getattr(self.plugin, "enable_qzone_comment_inbox", False))
         values["enable_qzone_emotional_vent_publish"] = bool(getattr(self.plugin, "enable_qzone_emotional_vent_publish", False))
         values["enable_yesterday_screen_diary_context"] = bool(screen_companion_available and getattr(self.plugin, "enable_yesterday_screen_diary_context", False))
-        values["enable_private_reading_integration"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_integration", False))
-        values["enable_private_reading_boredom_read"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False))
+        values["enable_private_reading_integration"] = bool(
+            private_reading_available and getattr(self.plugin, "enable_private_reading_integration", False)
+        )
+        values["enable_private_reading_boredom_read"] = bool(
+            private_reading_available and getattr(self.plugin, "enable_private_reading_boredom_read", False)
+        )
         values["enable_private_reading_ask_recommendation"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False))
         values["enable_private_reading_vision"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_vision", True))
         values["enable_private_reading_page_comments"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_page_comments", True))
@@ -14842,7 +14922,9 @@ class PrivateCompanionPageApi(
         if not values.get("PLUGIN_VISION_PROVIDER_ID"):
             values["PLUGIN_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "plugin_vision_provider_id", "") or "")
         if not values.get("PRIVATE_READING_VISION_PROVIDER_ID"):
-            values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "jm_cosmos_vision_provider_id", "") or "")
+            values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(
+                getattr(self.plugin, "private_reading_vision_provider_id", "") or ""
+            )
         if not values.get("DREAM_DIARY_PROVIDER_ID"):
             values["DREAM_DIARY_PROVIDER_ID"] = str(getattr(self.plugin, "dream_diary_provider_id", "") or "")
         if not values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"):
@@ -17145,20 +17227,20 @@ class PrivateCompanionPageApi(
         values["private_user_delivery_aliases"] = self._private_alias_config_text("private_user_delivery_aliases")
         values.update(
             {
-                "enable_private_reading_integration": bool(getattr(self.plugin, "enable_jm_cosmos_integration", False)),
-                "enable_private_reading_boredom_read": bool(getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
+                "enable_private_reading_integration": bool(getattr(self.plugin, "enable_private_reading_integration", False)),
+                "enable_private_reading_boredom_read": bool(getattr(self.plugin, "enable_private_reading_boredom_read", False)),
                 "enable_private_reading_ask_recommendation": bool(getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
                 "enable_private_reading_vision": bool(getattr(self.plugin, "enable_private_reading_vision", True)),
                 "enable_private_reading_page_comments": bool(getattr(self.plugin, "enable_private_reading_page_comments", True)),
                 "enable_private_reading_rating": bool(getattr(self.plugin, "enable_private_reading_rating", True)),
                 "enable_private_reading_preference_influence": bool(getattr(self.plugin, "enable_private_reading_preference_influence", True)),
-                "private_reading_min_interval_hours": getattr(self.plugin, "jm_cosmos_min_interval_hours", 18),
-                "private_reading_max_photo_count": getattr(self.plugin, "jm_cosmos_max_photo_count", 60),
-                "private_reading_share_probability": getattr(self.plugin, "jm_cosmos_share_probability", 0.18),
+                "private_reading_min_interval_hours": getattr(self.plugin, "private_reading_min_interval_hours", 18),
+                "private_reading_max_photo_count": getattr(self.plugin, "private_reading_max_photo_count", 60),
+                "private_reading_share_probability": getattr(self.plugin, "private_reading_share_probability", 0.18),
                 "private_reading_ask_probability": getattr(self.plugin, "private_reading_ask_probability", 0.16),
                 "private_reading_preference_min_ratings": getattr(self.plugin, "private_reading_preference_min_ratings", 5),
                 "private_reading_preference_max_terms": getattr(self.plugin, "private_reading_preference_max_terms", 8),
-                "private_reading_default_keywords": getattr(self.plugin, "jm_cosmos_default_keywords", ""),
+                "private_reading_default_keywords": getattr(self.plugin, "private_reading_default_keywords", ""),
                 "private_reading_blocked_tags": getattr(self.plugin, "private_reading_blocked_tags", "連載中,長篇,青年漫"),
                 "group_repeat_trigger_threshold": int(getattr(self.plugin, "group_repeat_trigger_threshold", 4) or 4),
                 "group_repeat_count_distinct_users_only": bool(getattr(self.plugin, "group_repeat_count_distinct_users_only", False)),
@@ -18872,7 +18954,7 @@ class PrivateCompanionPageApi(
             "GROUP_MEMBER_SAFETY_PROVIDER_ID": "group_member_safety_provider_id",
             "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
             "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
-            "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
+            "PRIVATE_READING_VISION_PROVIDER_ID": "private_reading_vision_provider_id",
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
             "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID": "deepseek_peak_replacement_provider_id",
@@ -18922,20 +19004,20 @@ class PrivateCompanionPageApi(
             self.plugin.roleplay_knowledge_source_ids = normalizer(value) if callable(normalizer) else list(value or [])
             return
         private_reading_attr_map = {
-            "enable_private_reading_integration": "enable_jm_cosmos_integration",
-            "enable_private_reading_boredom_read": "enable_jm_cosmos_boredom_read",
+            "enable_private_reading_integration": "enable_private_reading_integration",
+            "enable_private_reading_boredom_read": "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation": "enable_private_reading_ask_recommendation",
             "enable_private_reading_vision": "enable_private_reading_vision",
             "enable_private_reading_page_comments": "enable_private_reading_page_comments",
             "enable_private_reading_rating": "enable_private_reading_rating",
             "enable_private_reading_preference_influence": "enable_private_reading_preference_influence",
-            "private_reading_min_interval_hours": "jm_cosmos_min_interval_hours",
-            "private_reading_max_photo_count": "jm_cosmos_max_photo_count",
-            "private_reading_share_probability": "jm_cosmos_share_probability",
+            "private_reading_min_interval_hours": "private_reading_min_interval_hours",
+            "private_reading_max_photo_count": "private_reading_max_photo_count",
+            "private_reading_share_probability": "private_reading_share_probability",
             "private_reading_ask_probability": "private_reading_ask_probability",
             "private_reading_preference_min_ratings": "private_reading_preference_min_ratings",
             "private_reading_preference_max_terms": "private_reading_preference_max_terms",
-            "private_reading_default_keywords": "jm_cosmos_default_keywords",
+            "private_reading_default_keywords": "private_reading_default_keywords",
             "private_reading_blocked_tags": "private_reading_blocked_tags",
         }
         if key in private_reading_attr_map:
@@ -19264,7 +19346,7 @@ class PrivateCompanionPageApi(
                 elif key in {"external_image_api_platform", "backup_external_image_api_platform"}:
                     normalizer = getattr(self.plugin, "_normalize_external_image_api_platform", None)
                     text = normalizer(text) if callable(normalizer) else text.lower()
-                    if text not in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini"}:
+                    if text not in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini", "minimax"}:
                         text = "auto"
                 setattr(self.plugin, attr, text)
         timeout = self._config_get("external_image_api_timeout_seconds")
@@ -21207,8 +21289,10 @@ class PrivateCompanionPageApi(
         ):
             album = {}
         return {
-            "enabled": bool(available and getattr(self.plugin, "enable_jm_cosmos_integration", False)),
-            "boredom_read_enabled": bool(available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
+            "enabled": bool(available and getattr(self.plugin, "enable_private_reading_integration", False)),
+            "boredom_read_enabled": bool(
+                available and getattr(self.plugin, "enable_private_reading_boredom_read", False)
+            ),
             "ask_recommendation_enabled": bool(available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
             "available": available,
             "last_read_at": self.plugin._format_timestamp_elapsed(state.get("last_read_at", 0)),

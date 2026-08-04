@@ -818,7 +818,7 @@
     "invisible": true
   },
   "PLUGIN_VISION_PROVIDER_ID": {
-    "description": "Legacy flat config: 插件识图模型（私聊/合并消息/识屏）",
+    "description": "Legacy flat config: 插件识图模型（私聊/群聊/合并消息/识屏）",
     "type": "string",
     "default": "",
     "invisible": true
@@ -4322,54 +4322,6 @@
     "default": "",
     "invisible": true
   },
-  "enable_jm_cosmos_integration": {
-    "description": "Legacy flat config: 旧版夹层阅读开关",
-    "type": "bool",
-    "default": false,
-    "invisible": true
-  },
-  "enable_jm_cosmos_boredom_read": {
-    "description": "Legacy flat config: 旧版无聊阅读开关",
-    "type": "bool",
-    "default": false,
-    "invisible": true
-  },
-  "jm_cosmos_min_interval_hours": {
-    "description": "Legacy flat config: 旧版阅读间隔",
-    "type": "string",
-    "default": "",
-    "invisible": true
-  },
-  "jm_cosmos_max_photo_count": {
-    "description": "Legacy flat config: 旧版阅读图片数",
-    "type": "string",
-    "default": "",
-    "invisible": true
-  },
-  "jm_cosmos_share_probability": {
-    "description": "Legacy flat config: 旧版阅读分享概率",
-    "type": "string",
-    "default": "",
-    "invisible": true
-  },
-  "jm_cosmos_default_keywords": {
-    "description": "Legacy flat config: 旧版默认关键词",
-    "type": "string",
-    "default": "",
-    "invisible": true
-  },
-  "jm_cosmos_blocked_tags": {
-    "description": "Legacy flat config: 旧版屏蔽标签",
-    "type": "string",
-    "default": "",
-    "invisible": true
-  },
-  "JM_COSMOS_VISION_PROVIDER_ID": {
-    "description": "Legacy flat config: 旧版夹层阅读视觉模型",
-    "type": "string",
-    "default": "",
-    "invisible": true
-  },
   "FAST_RESPONSE_PROVIDER_ID": {
     "description": "Legacy flat config: 快速响应模型",
     "type": "string",
@@ -4774,9 +4726,9 @@
         "_special": "select_provider"
       },
       "PLUGIN_VISION_PROVIDER_ID": {
-        "description": "插件识图模型（私聊/合并消息/识屏）",
+        "description": "插件识图模型（私聊/群聊/合并消息/识屏）",
         "type": "string",
-        "hint": "快速配置的通用视觉入口。用于私聊单图/表情包转述、引用图片、合并消息图片和识屏；夹层阅读始终使用下方独立的专用模型。",
+        "hint": "快速配置的通用视觉入口。用于私聊单图/表情包转述、群聊图片理解、引用图片、合并消息图片和识屏；夹层阅读始终使用下方独立的专用模型。",
         "default": "",
         "condition": {
           "provider_config_mode": "quick"
@@ -10047,7 +9999,7 @@
       "external_image_api_platform": {
         "description": "在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、agnes、sensenova、bailian、modelscope、doubao、gemini。agnes 适用于 Agnes Image 2.x，会使用官方 /v1/images/generations JSON 协议，并通过 extra_body.image 传参考图；auto 会按地址和模型名自动识别。",
+        "hint": "可填：auto、openai、agnes、sensenova、minimax、bailian、modelscope、doubao、gemini。minimax 使用官方 /v1/image_generation JSON 协议，支持 image-01 / image-01-live 与单张人物参考图；auto 会按地址和模型名自动识别。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true
@@ -10056,7 +10008,7 @@
       "EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "在线图片 API 地址",
         "type": "string",
-        "hint": "Agnes Image 填写 https://apihub.agnes-ai.com/v1，模型使用 agnes-image-2.1-flash；SenseNova 填写 https://token.sensenova.cn/v1。其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
+        "hint": "MiniMax 国内站填写 https://api.minimaxi.com/v1 或完整 https://api.minimaxi.com/v1/image_generation，国际站使用 https://api.minimax.io/v1；旧写法 /v1/image/generation 会自动纠正。Agnes Image 填写 https://apihub.agnes-ai.com/v1；其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -10074,7 +10026,7 @@
       "EXTERNAL_IMAGE_API_MODEL": {
         "description": "在线图片模型",
         "type": "string",
-        "hint": "必须填写该平台的图片模型名。Agnes 推荐 agnes-image-2.1-flash；openai 平台按兼容 images/generations 请求；bailian 可填 qwen-image、wan 系列；modelscope 会提交异步任务；doubao 可填 seedream；gemini 可填支持图片生成的 Gemini/Imagen 模型。",
+        "hint": "必须填写该平台的图片模型名。MiniMax 使用 image-01 或 image-01-live；Agnes 推荐 agnes-image-2.1-flash；openai 平台按兼容 images/generations 请求；bailian 可填 qwen-image、wan 系列；doubao 可填 seedream；gemini 可填支持图片生成的 Gemini/Imagen 模型。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -10083,7 +10035,7 @@
       "external_image_api_size": {
         "description": "在线生图尺寸",
         "type": "string",
-        "hint": "格式如 1024x1024、768x1344。Agnes 队列项还可填写 1K、2K、3K、4K，并在拓展页单独填写 ratio；openai 平台会原样使用，bailian 会转换为 1024*1024 格式。",
+        "hint": "格式如 1024x1024、768x1344。MiniMax image-01 会转换为 width/height；image-01-live 会映射为最接近的官方 aspect_ratio，且不使用仅 image-01 支持的 21:9；Agnes 队列项还可填写 1K、2K、3K、4K。",
         "default": "1024x1024",
         "condition": {
           "enable_photo_text_action": true
@@ -10142,7 +10094,7 @@
       "backup_external_image_api_platform": {
         "description": "备选在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、agnes、sensenova、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
+        "hint": "可填：auto、openai、agnes、sensenova、minimax、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true,
@@ -10152,7 +10104,7 @@
       "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "备选在线图片 API 地址",
         "type": "string",
-        "hint": "主在线图片 API 失败后才会使用。支持 SenseNova U1 Fast、OpenAI 兼容 images、阿里云百炼、魔搭社区、豆包/火山方舟 Seedream 和 Gemini 图片接口。",
+        "hint": "主在线图片 API 失败后才会使用。支持 MiniMax /v1/image_generation、SenseNova U1 Fast、OpenAI 兼容 images、阿里云百炼、魔搭社区、豆包/火山方舟 Seedream 和 Gemini 图片接口。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true,
@@ -10217,7 +10169,7 @@
       "external_image_api_endpoints": {
         "description": "在线生图 API 优先级队列",
         "type": "list",
-        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、ratio、timeout_seconds、custom_headers。Agnes 可用 size=1K-4K 与 ratio=1:1/2:3/16:9 等组合；为空时继续沿用主用/备选字段。",
+        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、ratio、timeout_seconds、custom_headers。MiniMax 可使用 size=1024x1024 或 ratio=1:1/2:3/16:9；Agnes 可用 size=1K-4K；为空时继续沿用主用/备选字段。",
         "default": [],
         "condition": {
           "enable_photo_text_action": true
@@ -11960,62 +11912,6 @@
         "description": "旧版热榜条数",
         "type": "string",
         "hint": "旧版配置项；现在请使用 news_hot_max_items。",
-        "default": "",
-        "invisible": true
-      },
-      "enable_jm_cosmos_integration": {
-        "description": "旧版夹层阅读开关",
-        "type": "bool",
-        "hint": "旧版配置项；现在请使用 enable_private_reading_integration。",
-        "default": false,
-        "invisible": true
-      },
-      "enable_jm_cosmos_boredom_read": {
-        "description": "旧版无聊阅读开关",
-        "type": "bool",
-        "hint": "旧版配置项；现在请使用 enable_private_reading_boredom_read。",
-        "default": false,
-        "invisible": true
-      },
-      "jm_cosmos_min_interval_hours": {
-        "description": "旧版阅读间隔",
-        "type": "string",
-        "hint": "旧版配置项；现在请使用 private_reading_min_interval_hours。",
-        "default": "",
-        "invisible": true
-      },
-      "jm_cosmos_max_photo_count": {
-        "description": "旧版阅读图片数",
-        "type": "string",
-        "hint": "旧版配置项；现在请使用 private_reading_max_photo_count。",
-        "default": "",
-        "invisible": true
-      },
-      "jm_cosmos_share_probability": {
-        "description": "旧版阅读分享概率",
-        "type": "string",
-        "hint": "旧版配置项；现在请使用 private_reading_share_probability。",
-        "default": "",
-        "invisible": true
-      },
-      "jm_cosmos_default_keywords": {
-        "description": "旧版默认关键词",
-        "type": "string",
-        "hint": "旧版配置项；现在请使用 private_reading_default_keywords。",
-        "default": "",
-        "invisible": true
-      },
-      "jm_cosmos_blocked_tags": {
-        "description": "旧版屏蔽标签",
-        "type": "string",
-        "hint": "旧版配置项；现在请使用 private_reading_blocked_tags。",
-        "default": "",
-        "invisible": true
-      },
-      "JM_COSMOS_VISION_PROVIDER_ID": {
-        "description": "旧版夹层阅读视觉模型",
-        "type": "string",
-        "hint": "旧版配置项；现在请使用 PRIVATE_READING_VISION_PROVIDER_ID。",
         "default": "",
         "invisible": true
       }

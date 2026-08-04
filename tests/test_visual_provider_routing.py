@@ -49,7 +49,7 @@ class _PrivateImageRouteHarness(_FallbackRouteMixin, PrivateImageMixin):
 class _PrivateReadingRouteHarness(_FallbackRouteMixin, PrivateReadingMixin):
     def __init__(self, mode: str, fallbacks: dict[str, str]) -> None:
         super().__init__(mode, fallbacks)
-        self.jm_cosmos_vision_provider_id = "reading-vision"
+        self.private_reading_vision_provider_id = "reading-vision"
 
 
 class _FakeVisionProvider:

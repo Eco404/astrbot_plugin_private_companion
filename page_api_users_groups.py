@@ -338,6 +338,11 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         if alias_text:
                             removed_ids.add(alias_text)
                 removed_ids = {item for item in removed_ids if item}
+                merge_backups = self.plugin.data.get("private_user_alias_merge_backups")
+                if isinstance(merge_backups, dict):
+                    for removed_id in removed_ids:
+                        if removed_id in merge_backups:
+                            merge_backups.pop(removed_id, None)
 
                 def keep_expression_scope_ids(raw_values: Any) -> list[str]:
                     kept: list[str] = []

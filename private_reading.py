@@ -281,8 +281,8 @@ class PrivateReadingMixin:
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return False
         return bool(
-            self.enable_jm_cosmos_integration
-            and self.enable_jm_cosmos_boredom_read
+            self.enable_private_reading_integration
+            and self.enable_private_reading_boredom_read
             and self._jm_cosmos_available()
         )
 
@@ -290,7 +290,7 @@ class PrivateReadingMixin:
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return False
         return bool(
-            self.enable_jm_cosmos_integration
+            self.enable_private_reading_integration
             and self.enable_private_reading_ask_recommendation
             and self._jm_cosmos_available()
         )
@@ -311,7 +311,7 @@ class PrivateReadingMixin:
         return 28 <= energy <= 68 and random.random() < 0.22
 
     def _jm_cosmos_keywords_for_user(self, user: dict[str, Any] | None = None) -> list[str]:
-        raw = str(self.jm_cosmos_default_keywords or "纯爱,恋爱,同人")
+        raw = str(self.private_reading_default_keywords or "纯爱,恋爱,同人")
         liked_candidates: list[str] = []
         base_candidates: list[str] = []
         memory_candidates: list[str] = []
@@ -562,7 +562,7 @@ class PrivateReadingMixin:
         inbound_text: str = "",
         user: dict[str, Any] | None = None,
     ) -> str:
-        if not getattr(self, "enable_jm_cosmos_integration", False):
+        if not getattr(self, "enable_private_reading_integration", False):
             return ""
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return ""
@@ -853,7 +853,7 @@ class PrivateReadingMixin:
 
     def _private_reading_visual_provider_route(self) -> tuple[str, str, str]:
         provider_key = self._private_reading_visual_provider_card_key()
-        primary_provider_id = _single_line(getattr(self, "jm_cosmos_vision_provider_id", ""), 160)
+        primary_provider_id = _single_line(getattr(self, "private_reading_vision_provider_id", ""), 160)
         fallback_getter = getattr(self, "_model_fallback_provider_id", None)
         fallback_provider_id = (
             fallback_getter(provider_key, primary_provider_id)
@@ -1165,7 +1165,7 @@ class PrivateReadingMixin:
         signal = self._bookshelf_secret_signal_info(inbound_text)
         if not (
             getattr(self, "enable_private_reading_integration", False)
-            or getattr(self, "enable_jm_cosmos_integration", False)
+            or getattr(self, "enable_private_reading_integration", False)
         ):
             self._log_bookshelf_secret_skip(
                 "feature_disabled",
@@ -1292,7 +1292,7 @@ class PrivateReadingMixin:
             ",".join(signal.get("context_matches") or []) or "-",
             ",".join(signal.get("access_matches") or []) or "-",
             bool(getattr(self, "enable_private_reading_integration", False)),
-            bool(getattr(self, "enable_jm_cosmos_integration", False)),
+            bool(getattr(self, "enable_private_reading_integration", False)),
             _single_line(inbound_text, 120),
         )
 
@@ -1361,12 +1361,12 @@ class PrivateReadingMixin:
         source_pages = self._collect_image_files(source_dir)
         if not source_pages:
             return []
-        if len(source_pages) > max(1, self.jm_cosmos_max_photo_count):
+        if len(source_pages) > max(1, self.private_reading_max_photo_count):
             logger.info(
                 "[PrivateCompanion] 夹层阅读页数超过上限,跳过入柜: album=%s pages=%s limit=%s",
                 album_id,
                 len(source_pages),
-                self.jm_cosmos_max_photo_count,
+                self.private_reading_max_photo_count,
             )
             return []
         target_dir = Path(self.data_dir) / "bookshelf_pages" / re.sub(r"[^0-9A-Za-z_.-]+", "_", album_id)
@@ -1774,7 +1774,7 @@ class PrivateReadingMixin:
         inbound_text: str,
         user: dict[str, Any] | None = None,
     ) -> str:
-        if not getattr(self, "enable_jm_cosmos_integration", False):
+        if not getattr(self, "enable_private_reading_integration", False):
             return ""
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return ""
@@ -1921,7 +1921,7 @@ class PrivateReadingMixin:
                     )
                     continue
                 photo_count = _safe_int(detail.get("photo_count"), 0, 0)
-                if photo_count <= 0 or photo_count > self.jm_cosmos_max_photo_count:
+                if photo_count <= 0 or photo_count > self.private_reading_max_photo_count:
                     continue
                 cover_path = None
                 try:
@@ -1954,17 +1954,17 @@ class PrivateReadingMixin:
                     if not image_files:
                         continue
                     actual_page_count = len(image_files)
-                    if actual_page_count > self.jm_cosmos_max_photo_count:
+                    if actual_page_count > self.private_reading_max_photo_count:
                         break
                     pages = self._copy_bookshelf_album_pages(album_id, source_path)
                     if pages:
                         break
-                if actual_page_count <= 0 or actual_page_count > self.jm_cosmos_max_photo_count:
+                if actual_page_count <= 0 or actual_page_count > self.private_reading_max_photo_count:
                     logger.info(
                         "[PrivateCompanion] 夹层阅读图片数不符合上限: album=%s images=%s limit=%s",
                         album_id,
                         actual_page_count,
-                        self.jm_cosmos_max_photo_count,
+                        self.private_reading_max_photo_count,
                     )
                     continue
                 if not pages:
@@ -2038,7 +2038,7 @@ class PrivateReadingMixin:
             self.data["jm_cosmos_integration"] = {}
             state = self.data["jm_cosmos_integration"]
         now = _now_ts()
-        min_interval = max(4, self.jm_cosmos_min_interval_hours) * 3600
+        min_interval = max(4, self.private_reading_min_interval_hours) * 3600
         if now - _safe_float(state.get("last_read_at"), 0) < min_interval:
             return
         if now - _safe_float(state.get("last_probe_at"), 0) < 45 * 60:
@@ -2068,7 +2068,7 @@ class PrivateReadingMixin:
         state["last_album"] = result
         if isinstance(user, dict) and user_id:
             user["jm_cosmos_reading_context"] = result
-            if random.random() < self.jm_cosmos_share_probability and now - _safe_float(user.get("last_jm_cosmos_share_at"), 0) > 12 * 3600:
+            if random.random() < self.private_reading_share_probability and now - _safe_float(user.get("last_jm_cosmos_share_at"), 0) > 12 * 3600:
                 accepted = self._offer_proactive_candidate(
                     str(user_id),
                     user,
@@ -2099,7 +2099,7 @@ class PrivateReadingMixin:
             self.data["jm_cosmos_integration"] = {}
             state = self.data["jm_cosmos_integration"]
         now = _now_ts()
-        min_interval = max(8, self.jm_cosmos_min_interval_hours) * 3600
+        min_interval = max(8, self.private_reading_min_interval_hours) * 3600
         if now - _safe_float(state.get("last_recommendation_request_at"), 0) < min_interval:
             return
         if now - _safe_float(state.get("last_read_at"), 0) < 6 * 3600:

@@ -1368,16 +1368,8 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     self.qzone_emotional_vent_threshold = self._cfg_int(c, "qzone_emotional_vent_threshold", 90, 40, 100)
     self.qzone_emotional_vent_cooldown_hours = self._cfg_int(c, "qzone_emotional_vent_cooldown_hours", 72, 4, 336)
     self.qzone_emotional_vent_probability = self._cfg_unit_interval(c, "qzone_emotional_vent_probability", 0.35, 0.0)
-    self.enable_jm_cosmos_integration = self._cfg_bool(
-        c,
-        "enable_private_reading_integration",
-        self._cfg_bool(c, "enable_jm_cosmos_integration", False),
-    )
-    self.enable_jm_cosmos_boredom_read = self._cfg_bool(
-        c,
-        "enable_private_reading_boredom_read",
-        self._cfg_bool(c, "enable_jm_cosmos_boredom_read", False),
-    )
+    self.enable_private_reading_integration = self._cfg_bool(c, "enable_private_reading_integration", False)
+    self.enable_private_reading_boredom_read = self._cfg_bool(c, "enable_private_reading_boredom_read", False)
     self.enable_private_reading_ask_recommendation = self._cfg_bool(
         c,
         "enable_private_reading_ask_recommendation",
@@ -1398,25 +1390,10 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
         "enable_private_reading_rating",
         True,
     )
-    self.jm_cosmos_min_interval_hours = self._cfg_int(
-        c,
-        "private_reading_min_interval_hours",
-        self._cfg_int(c, "jm_cosmos_min_interval_hours", 18, 4, 168),
-        4,
-        168,
-    )
-    self.jm_cosmos_max_photo_count = self._cfg_int(
-        c,
-        "private_reading_max_photo_count",
-        self._cfg_int(c, "jm_cosmos_max_photo_count", 60, 8, 120),
-        8,
-        120,
-    )
-    self.jm_cosmos_share_probability = self._cfg_unit_interval(
-        c,
-        "private_reading_share_probability",
-        self._cfg_unit_interval(c, "jm_cosmos_share_probability", 0.18, 0.0),
-        0.0,
+    self.private_reading_min_interval_hours = self._cfg_int(c, "private_reading_min_interval_hours", 18, 4, 168)
+    self.private_reading_max_photo_count = self._cfg_int(c, "private_reading_max_photo_count", 60, 8, 120)
+    self.private_reading_share_probability = self._cfg_unit_interval(
+        c, "private_reading_share_probability", 0.18, 0.0
     )
     self.private_reading_ask_probability = self._cfg_unit_interval(c, "private_reading_ask_probability", 0.16, 0.0)
     self.enable_private_reading_preference_influence = self._cfg_bool(
@@ -1438,40 +1415,13 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
         2,
         20,
     )
-    self.jm_cosmos_default_keywords = self._cfg_str(
-        c,
-        "private_reading_default_keywords",
-        self._cfg_str(c, "jm_cosmos_default_keywords", "纯爱,恋爱,同人"),
+    self.private_reading_default_keywords = self._cfg_str(
+        c, "private_reading_default_keywords", "纯爱,恋爱,同人"
     )
-    self.private_reading_blocked_tags = self._cfg_str(
-        c,
-        "private_reading_blocked_tags",
-        self._cfg_str(c, "jm_cosmos_blocked_tags", "連載中,長篇,青年漫"),
-    )
+    self.private_reading_blocked_tags = self._cfg_str(c, "private_reading_blocked_tags", "連載中,長篇,青年漫")
     self.plugin_vision_provider_id = self._cfg_str(c, "PLUGIN_VISION_PROVIDER_ID", "")
-    self.jm_cosmos_vision_provider_id = self._cfg_str(
-        c,
-        "PRIVATE_READING_VISION_PROVIDER_ID",
-        self._cfg_str(c, "JM_COSMOS_VISION_PROVIDER_ID", ""),
-    )
+    self.private_reading_vision_provider_id = self._cfg_str(c, "PRIVATE_READING_VISION_PROVIDER_ID", "")
     self._apply_quick_provider_defaults()
-    if isinstance(c, dict):
-        legacy_private_reading_keys = {
-            "enable_jm_cosmos_integration": "enable_private_reading_integration",
-            "enable_jm_cosmos_boredom_read": "enable_private_reading_boredom_read",
-            "jm_cosmos_min_interval_hours": "private_reading_min_interval_hours",
-            "jm_cosmos_max_photo_count": "private_reading_max_photo_count",
-            "jm_cosmos_share_probability": "private_reading_share_probability",
-            "jm_cosmos_default_keywords": "private_reading_default_keywords",
-            "jm_cosmos_blocked_tags": "private_reading_blocked_tags",
-            "JM_COSMOS_VISION_PROVIDER_ID": "PRIVATE_READING_VISION_PROVIDER_ID",
-        }
-        for old_key, new_key in legacy_private_reading_keys.items():
-            old_value = self._cfg_raw(c, old_key, None)
-            if old_value is not None:
-                if self._cfg_raw(c, new_key, None) is None:
-                    _set_into_config(c, new_key, old_value)
-                c.pop(old_key, None)
     self.group_episode_refresh_minutes = self._cfg_int(c, "group_episode_refresh_minutes", 180, 30, 1440)
     self.group_slang_summary_minutes = self._cfg_int(c, "group_slang_summary_minutes", 360, 60, 2880)
     self.max_group_topic_threads = self._cfg_int(c, "max_group_topic_threads", 12, 3, 40)

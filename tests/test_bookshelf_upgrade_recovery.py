@@ -262,7 +262,7 @@ class BookshelfUpgradeRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 "jm_cosmos_integration": {"deleted_album_ids": ["dead"]},
             }
             harness = _BookshelfHarness(Path(directory), data)
-            harness.enable_jm_cosmos_integration = True
+            harness.enable_private_reading_integration = True
 
             context = harness._format_bookshelf_reading_context_for_reply("你最近看过什么")
 

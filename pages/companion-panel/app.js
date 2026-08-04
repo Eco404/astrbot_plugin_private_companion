@@ -35,6 +35,7 @@ const state = {
   learningSection: "expressions",
   expressionWorkspaceView: "library",
   selectedExpressionReviewRuleId: "",
+  expressionReviewSelected: new Set(),
   expressionReviewSource: "all",
   expressionReviewType: "all",
   expressionReviewQuery: "",
@@ -1034,7 +1035,7 @@ const providerGuides = {
   PLUGIN_VISION_PROVIDER_ID: {
     preference: "quality",
     passiveImpact: "direct",
-    purpose: "插件自己的通用视觉理解模型，用于私聊图片/表情包、引用图片、合并消息图片和识屏。",
+    purpose: "插件自己的通用视觉理解模型，用于私聊图片/表情包、群聊图片、引用图片、合并消息图片和识屏。",
     fit: "适合确认支持图片输入、视觉描述可靠、能简短转述关键信息的多模态模型。",
     fallback: "留空时先尝试 AstrBot 本体图片转述模型，再回退到工具结果转述或主模型。",
   },
@@ -2653,15 +2654,15 @@ const configDescriptions = {
   local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
   local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
   local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  external_image_api_platform: "可填 auto、openai、agnes、bailian、modelscope、doubao、gemini、sensenova。auto 会根据 API 地址和模型名自动判断；Agnes 使用官方 generations JSON 协议和 extra_body.image 参考图。",
-  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。OpenAI 兼容可填完整 /images/generations 地址或 API 根地址；百炼可填 /api/v1 根地址或完整生图接口；魔搭可填 https://api-inference.modelscope.cn/v1；豆包/火山方舟可填 https://ark.cn-beijing.volces.com/api/v3；Gemini 可填 https://generativelanguage.googleapis.com/v1beta。",
+  external_image_api_platform: "可填 auto、openai、agnes、bailian、modelscope、doubao、gemini、sensenova、minimax。auto 会根据 API 地址和模型名自动判断；MiniMax 使用官方 /v1/image_generation JSON 协议。",
+  EXTERNAL_IMAGE_API_BASE_URL: "在线生图接口地址。MiniMax 国内站可填 https://api.minimaxi.com、https://api.minimaxi.com/v1 或完整的 /v1/image_generation，插件会统一成官方路径；OpenAI 兼容可填完整 /images/generations 地址或 API 根地址。",
   EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
-  EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写普通聊天/文本模型。示例：gpt-image-1、qwen-image、wanx、seedream、gemini-*-image 或 imagen。",
-  external_image_api_size: "在线生图尺寸，例如 1024x1024、768x1344。",
+  EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写普通聊天/文本模型。MiniMax 填 image-01 或 image-01-live；其他示例包括 gpt-image-1、qwen-image、seedream、Gemini 图片模型或 Imagen。",
+  external_image_api_size: "在线生图尺寸，例如 1024x1024、768x1344。MiniMax image-01 会转换为 width/height；image-01-live 会映射到最接近的官方宽高比。",
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
   external_image_api_custom_headers: "可选。每行一个请求头，格式：Key: Value。会追加到在线生图 API 请求；下载同源结果图时也会安全复用。",
   enable_backup_external_image_api: "开启后，主在线图片 API 请求失败、超时或未配置完整时，会先尝试这组备选 API，再回退本地 ComfyUI/SDGen。",
-  backup_external_image_api_platform: "可填 auto、openai、agnes、bailian、modelscope、doubao、gemini、sensenova。含义与主在线生图平台一致，只在备选 API 生效时使用。",
+  backup_external_image_api_platform: "可填 auto、openai、agnes、bailian、modelscope、doubao、gemini、sensenova、minimax。含义与主在线生图平台一致，只在备选 API 生效时使用。",
   BACKUP_EXTERNAL_IMAGE_API_BASE_URL: "备选在线生图接口地址。主在线 API 失败后才会使用。",
   BACKUP_EXTERNAL_IMAGE_API_KEY: "备选在线图片 API 的鉴权 Key。留空则不会启用备选后端。",
   BACKUP_EXTERNAL_IMAGE_API_MODEL: "备选平台的图片模型名，不要填写聊天/文本模型。",
@@ -3906,8 +3907,8 @@ const featureSettingTypes = {
   proactive_chat_bridge_review_mode: { type: "select", options: [["local", "轻量本地（更即时）"], ["follow_proactive_review", "跟随主动终审（更稳）"]] },
   proactive_chat_bridge_collision_window_seconds: { type: "number", min: 10, max: 600, step: 10, unit: "秒" },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"]] },
-  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
-  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["minimax", "MiniMax"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
+  backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["minimax", "MiniMax"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
   BACKUP_EXTERNAL_IMAGE_API_KEY: { type: "password" },
   WEB_EXPLORATION_API_KEY: { type: "password" },
@@ -4075,6 +4076,7 @@ const PHOTO_API_PLATFORM_OPTIONS = [
   ["openai", "OpenAI 兼容"],
   ["agnes", "Agnes Image"],
   ["sensenova", "SenseNova 日日新"],
+  ["minimax", "MiniMax"],
   ["bailian", "阿里云百炼"],
   ["modelscope", "魔搭社区"],
   ["doubao", "豆包/火山方舟"],
@@ -4094,6 +4096,12 @@ function normalizePhotoApiPlatform(value) {
     "sensenova": "sensenova",
     "sense-nova": "sensenova",
     "日日新": "sensenova",
+    "minimax": "minimax",
+    "minimaxi": "minimax",
+    "minimax-ai": "minimax",
+    "minimax_ai": "minimax",
+    "海螺": "minimax",
+    "海螺ai": "minimax",
     "百炼": "bailian",
     "阿里云百炼": "bailian",
     "dashscope": "bailian",
@@ -4306,11 +4314,11 @@ function photoApiEndpointCardHtml(endpoint, index, total, options = {}) {
         </label>
         <label>
           <span>宽高比</span>
-          <input type="text" data-image-api-field="ratio" data-index="${index}" value="${escapeHtml(item.ratio)}" placeholder="Agnes 可填 1:1 / 2:3 / 16:9">
+          <input type="text" data-image-api-field="ratio" data-index="${index}" value="${escapeHtml(item.ratio)}" placeholder="Agnes / MiniMax 可填 1:1 / 2:3 / 16:9">
         </label>
         <label class="wide">
           <span>API 地址</span>
-          <input type="text" data-image-api-field="base_url" data-index="${index}" value="${escapeHtml(item.base_url)}" placeholder="https://.../v1/images/generations">
+          <input type="text" data-image-api-field="base_url" data-index="${index}" value="${escapeHtml(item.base_url)}" placeholder="OpenAI: .../v1；MiniMax: .../v1/image_generation">
         </label>
         <label>
           <span>API Key</span>
@@ -4318,7 +4326,7 @@ function photoApiEndpointCardHtml(endpoint, index, total, options = {}) {
         </label>
         <label>
           <span>图片模型</span>
-          <input type="text" data-image-api-field="model" data-index="${index}" value="${escapeHtml(item.model)}" placeholder="gpt-image-1 / qwen-image / seedream / imagen">
+          <input type="text" data-image-api-field="model" data-index="${index}" value="${escapeHtml(item.model)}" placeholder="gpt-image-1 / image-01 / qwen-image / seedream">
         </label>
         <label>
           <span>超时秒数</span>
@@ -14540,27 +14548,30 @@ function renderExpressionLibraryView() {
 }
 
 function expressionReviewRuleKey(ruleGroup, index = 0) {
-  return String(ruleGroup?.family_id || ruleGroup?.id || `${ruleGroup?.source_type || "private"}:${ruleGroup?.source_id || "unknown"}:group:${index}`);
+  return `${ruleGroup?.source_type || "private"}:${ruleGroup?.source_id || "unknown"}:${ruleGroup?.family_id || ruleGroup?.id || `group:${index}`}`;
 }
 
-function expressionReviewQueueItem(ruleGroup, index, selected) {
+function expressionReviewQueueItem(ruleGroup, index, selected, batchSelected) {
   const group = normalizeExpressionRuleGroup(ruleGroup, index);
   const key = expressionReviewRuleKey(group, index);
   const source = group?.source_name || group?.source_id || "未知来源";
   const preview = group.style_rule?.pattern || group.grammar_rule?.pattern || "尚无可复用结构";
   return `
-    <button type="button" class="expression-review-queue-item ${selected ? "is-selected" : ""}" data-expression-review-rule="${escapeHtml(key)}" aria-pressed="${selected ? "true" : "false"}">
-      <span class="expression-review-queue-top">
-        <span class="expression-review-queue-kinds">
-          ${group.style_rule ? `<span class="expression-kind-badge is-style">表达</span>` : ""}
-          ${group.grammar_rule ? `<span class="expression-kind-badge is-grammar">语法</span>` : ""}
+    <div class="expression-review-queue-row ${batchSelected ? "is-batch-selected" : ""}">
+      <button type="button" class="expression-review-queue-item ${selected ? "is-selected" : ""}" data-expression-review-rule="${escapeHtml(key)}" aria-pressed="${selected ? "true" : "false"}">
+        <span class="expression-review-queue-top">
+          <span class="expression-review-queue-kinds">
+            ${group.style_rule ? `<span class="expression-kind-badge is-style">表达</span>` : ""}
+            ${group.grammar_rule ? `<span class="expression-kind-badge is-grammar">语法</span>` : ""}
+          </span>
+          <small>${escapeHtml(group?.evidence_count || 0)} 条证据</small>
         </span>
-        <small>${escapeHtml(group?.evidence_count || 0)} 条证据</small>
-      </span>
-      <b>${escapeHtml(group?.label || group?.situation || "未命名规则组")}</b>
-      <span>${escapeHtml(preview)}</span>
-      <small>${escapeHtml(source)}</small>
-    </button>
+        <b>${escapeHtml(group?.label || group?.situation || "未命名规则组")}</b>
+        <span>${escapeHtml(preview)}</span>
+        <small>${escapeHtml(source)}</small>
+      </button>
+      <button type="button" class="expression-review-select-toggle" data-expression-review-select="${escapeHtml(key)}" aria-pressed="${batchSelected ? "true" : "false"}" aria-label="${batchSelected ? "取消选择" : "选择"}该规则组">${batchSelected ? "✓" : ""}</button>
+    </div>
   `;
 }
 
@@ -14589,6 +14600,10 @@ function renderExpressionReviewWorkspace() {
   const query = String(state.expressionReviewQuery || "").trim().toLowerCase();
   const rules = allRules.filter((rule) => expressionLibraryItemMatches(rule, source, type, query));
   const keyedRules = rules.map((rule, index) => ({ rule, key: expressionReviewRuleKey(rule, index), index }));
+  const allRuleKeys = new Set(allRules.map((rule, index) => expressionReviewRuleKey(rule, index)));
+  state.expressionReviewSelected = new Set([...state.expressionReviewSelected].filter((key) => allRuleKeys.has(key)));
+  const visibleKeys = new Set(keyedRules.map((item) => item.key));
+  const selectedCount = [...state.expressionReviewSelected].filter((key) => visibleKeys.has(key)).length;
   if (!keyedRules.some((item) => item.key === state.selectedExpressionReviewRuleId)) {
     state.selectedExpressionReviewRuleId = keyedRules[0]?.key || "";
   }
@@ -14628,6 +14643,12 @@ function renderExpressionReviewWorkspace() {
         <input type="search" value="${escapeHtml(state.expressionReviewQuery)}" data-expression-review-search placeholder="情境、表达或来源" />
       </label>
       ${activeFilterCount ? `<button type="button" class="expression-review-reset" data-expression-review-reset>清除筛选</button>` : ""}
+      ${rules.length ? `<div class="expression-review-batch-bar" role="toolbar" aria-label="批量审核工具">
+        <button type="button" class="expression-review-select-all" data-expression-review-select-all aria-pressed="${selectedCount === rules.length}">${selectedCount === rules.length ? "取消全选" : "全选当前结果"}</button>
+        <span>${selectedCount ? `已选 ${selectedCount} 组` : "可多选规则组后统一处理"}</span>
+        <button type="button" class="primary" data-expression-batch-action="approve" ${selectedCount ? "" : "disabled"}>批量通过</button>
+        <button type="button" class="danger-outline" data-expression-batch-action="reject" ${selectedCount ? "" : "disabled"}>批量拒绝</button>
+      </div>` : ""}
     </div>
     ${allRules.length === 0 ? `
       <div class="expression-review-empty" role="status">
@@ -14648,7 +14669,7 @@ function renderExpressionReviewWorkspace() {
         <aside class="expression-review-queue" aria-label="待审核规则列表">
           <div class="expression-review-queue-head"><b>待审核</b><span>${escapeHtml(rules.length)}/${escapeHtml(allRules.length)}</span></div>
           <div class="expression-review-queue-list">
-            ${keyedRules.map((item) => expressionReviewQueueItem(item.rule, item.index, item.key === state.selectedExpressionReviewRuleId)).join("")}
+            ${keyedRules.map((item) => expressionReviewQueueItem(item.rule, item.index, item.key === state.selectedExpressionReviewRuleId, state.expressionReviewSelected.has(item.key))).join("")}
           </div>
         </aside>
         <section class="expression-review-detail" aria-live="polite">
@@ -14667,6 +14688,7 @@ function renderExpressionReviewWorkspace() {
     button.addEventListener("click", () => {
       state.expressionReviewSource = button.dataset.expressionReviewSource || "all";
       state.selectedExpressionReviewRuleId = "";
+      state.expressionReviewSelected.clear();
       renderExpressionReviewWorkspace();
     });
   });
@@ -14674,6 +14696,7 @@ function renderExpressionReviewWorkspace() {
     button.addEventListener("click", () => {
       state.expressionReviewType = button.dataset.expressionReviewType || "all";
       state.selectedExpressionReviewRuleId = "";
+      state.expressionReviewSelected.clear();
       renderExpressionReviewWorkspace();
     });
   });
@@ -14681,6 +14704,7 @@ function renderExpressionReviewWorkspace() {
     const selectionStart = event.currentTarget.selectionStart;
     state.expressionReviewQuery = event.currentTarget.value || "";
     state.selectedExpressionReviewRuleId = "";
+    state.expressionReviewSelected.clear();
     renderExpressionReviewWorkspace();
     const input = root.querySelector("[data-expression-review-search]");
     input?.focus();
@@ -14692,6 +14716,7 @@ function renderExpressionReviewWorkspace() {
       state.expressionReviewType = "all";
       state.expressionReviewQuery = "";
       state.selectedExpressionReviewRuleId = "";
+      state.expressionReviewSelected.clear();
       renderExpressionReviewWorkspace();
     });
   });
@@ -14714,6 +14739,46 @@ function renderExpressionReviewWorkspace() {
           .find((item) => item.dataset.expressionReviewRule === state.selectedExpressionReviewRuleId)
           ?.focus();
       }
+    });
+  });
+  root.querySelectorAll("[data-expression-review-select]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const key = button.dataset.expressionReviewSelect || "";
+      if (!key) return;
+      if (state.expressionReviewSelected.has(key)) state.expressionReviewSelected.delete(key);
+      else state.expressionReviewSelected.add(key);
+      renderExpressionReviewWorkspace();
+    });
+  });
+  root.querySelector("[data-expression-review-select-all]")?.addEventListener("click", () => {
+    const keys = keyedRules.map((item) => item.key);
+    const allSelected = keys.every((key) => state.expressionReviewSelected.has(key));
+    keys.forEach((key) => allSelected ? state.expressionReviewSelected.delete(key) : state.expressionReviewSelected.add(key));
+    renderExpressionReviewWorkspace();
+  });
+  root.querySelectorAll("[data-expression-batch-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const selected = keyedRules.filter((item) => state.expressionReviewSelected.has(item.key));
+      if (!selected.length || !requireSecondClick(button, `expression-batch:${button.dataset.expressionBatchAction || ""}`, "再次点击确认批量审核选中的规则组", "确认批量处理")) return;
+      const action = button.dataset.expressionBatchAction === "approve" ? "batch_approve_rule_groups" : "batch_reject_rule_groups";
+      const updatedLibrary = await runAction(
+        () => postJson("/expression-library/update", {
+          expression_action: action,
+          items: selected.map(({ rule }) => ({
+            source_type: rule?.source_type || "",
+            source_id: rule?.source_id || "",
+            rule_family_id: rule?.family_id || rule?.id || "",
+          })),
+        }),
+        action === "batch_approve_rule_groups" ? `已批量通过 ${selected.length} 组表达` : `已批量拒绝 ${selected.length} 组表达`,
+        button,
+        { reload: false },
+      );
+      if (!updatedLibrary) return;
+      state.expressionReviewSelected.clear();
+      state.expressionLibrary = updatedLibrary;
+      renderExpressionLibraryView();
     });
   });
   root.querySelector("[data-open-expression-library]")?.addEventListener("click", () => switchExpressionWorkspaceView("library", { focus: true }));

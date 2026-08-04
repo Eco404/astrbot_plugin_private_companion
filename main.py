@@ -4783,19 +4783,49 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return True
         return False
 
-    def _clean_segmented_reply_chunks(self, chunks: list[list[Any]]) -> list[list[Any]]:
+    def _sanitize_segmented_plain_text(self, event: AstrMessageEvent, text: Any) -> str:
+        protected_tts_tokens = getattr(event, "_private_companion_tts_block_tokens", None)
+        preserve_private_tts_tokens = (
+            bool(getattr(self, "enable_tts_enhancement", False))
+            and isinstance(protected_tts_tokens, dict)
+            and bool(protected_tts_tokens)
+        )
+        cleaned = _strip_outbound_control_blocks(
+            text,
+            preserve_private_tts_tokens=preserve_private_tts_tokens,
+            allowed_private_tts_tokens=set(protected_tts_tokens.keys())
+            if isinstance(protected_tts_tokens, dict) else None,
+        )
+        if not bool(getattr(self, "enable_tts_enhancement", False)):
+            cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
+        return cleaned
+
+    def _clean_segmented_reply_chunks(
+        self,
+        event: AstrMessageEvent,
+        chunks: list[list[Any]],
+    ) -> list[list[Any]]:
         cleaned_chunks: list[list[Any]] = []
+        removed_internal_control = False
         for chunk in chunks or []:
             cleaned_chunk: list[Any] = []
             for comp in chunk or []:
                 if isinstance(comp, Plain):
-                    text = self._strip_leading_sentence_boundary_artifacts(str(getattr(comp, "text", "") or ""))
+                    original = str(getattr(comp, "text", "") or "")
+                    text = self._sanitize_segmented_plain_text(event, original)
+                    removed_internal_control = removed_internal_control or text != original.strip()
+                    text = self._strip_leading_sentence_boundary_artifacts(text)
                     if text:
                         cleaned_chunk.append(Plain(text))
                     continue
                 cleaned_chunk.append(comp)
             if cleaned_chunk:
                 cleaned_chunks.append(cleaned_chunk)
+        if removed_internal_control:
+            logger.warning(
+                "[PrivateCompanion] 分段前已移除内部控制标记: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
         return cleaned_chunks
 
     def _segment_llm_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> tuple[list[list[Any]], bool, str]:
@@ -4827,7 +4857,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return [], False, ""
         if not changed:
             return [chain], False, full_text
-        return self._clean_segmented_reply_chunks(chunks), True, full_text
+        return self._clean_segmented_reply_chunks(event, chunks), True, full_text
 
     async def _send_segmented_llm_chain_remainder(
         self,
@@ -4965,12 +4995,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         if not isinstance(component, Plain):
                             sanitized_chunk.append(component)
                             continue
+                        original_text = str(getattr(component, "text", "") or "")
+                        visible_text = self._sanitize_segmented_plain_text(event, original_text)
                         cleaned_text, calls = self._strip_plaintext_tool_call_envelopes(
-                            str(getattr(component, "text", "") or "")
+                            visible_text
                         )
                         leaked_tools.extend(str(item.get("name") or "") for item in calls)
                         if cleaned_text:
-                            sanitized_chunk.append(Plain(cleaned_text) if calls else component)
+                            sanitized_chunk.append(
+                                Plain(cleaned_text)
+                                if calls or cleaned_text != original_text else component
+                            )
                     if leaked_tools:
                         logger.warning(
                             "[PrivateCompanion] 分段组件发送前已移除明文工具调用: tools=%s",
@@ -6308,8 +6343,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "sense-nova": "sensenova",
             "日日新": "sensenova",
             "商汤日日新": "sensenova",
+            "minimax": "minimax",
+            "minimaxi": "minimax",
+            "minimax-ai": "minimax",
+            "minimax_ai": "minimax",
+            "海螺": "minimax",
+            "海螺ai": "minimax",
         }
-        return aliases.get(text, text if text in {"auto", "openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova"} else "auto")
+        return aliases.get(text, text if text in {"auto", "openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova", "minimax"} else "auto")
 
     @staticmethod
     def _normalize_external_image_endpoint_enabled(value: Any, default: bool = True) -> bool:
@@ -6409,6 +6450,26 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "apihub.agnes-ai.com" in base_lower or model_lower.startswith("agnes-image-")
         ):
             endpoint["platform"] = "agnes"
+        minimax_official_host = any(
+            host in base_lower
+            for host in ("api.minimaxi.com", "api.minimax.io", "minimaxi.com", "minimax.io")
+        )
+        if (
+            endpoint["platform"] in {"auto", "openai"} and minimax_official_host
+        ) or (
+            endpoint["platform"] == "auto" and model_lower in {"image-01", "image-01-live"}
+        ):
+            endpoint["platform"] = "minimax"
+        if endpoint["platform"] == "minimax" and re.search(
+            r"/v1/(?:image_generation|image/generation|images/generations|images/edits)/?(?:[?#].*)?$",
+            str(endpoint.get("base_url") or ""),
+            flags=re.I,
+        ):
+            base_normalizer = getattr(self, "_normalized_external_image_api_base_url", None)
+            if callable(base_normalizer):
+                normalized_root = base_normalizer(endpoint["base_url"], platform="minimax")
+                if normalized_root:
+                    endpoint["base_url"] = f"{normalized_root.rstrip('/')}/image_generation"
         if endpoint["platform"] == "auto" and ("token.sensenova.cn" in base_lower or model_lower in {"senova-u1-fast", "sensenova-u1-fast"}):
             endpoint["platform"] = "sensenova"
         if endpoint["platform"] == "sensenova" and model_lower == "senova-u1-fast":
@@ -6492,7 +6553,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "dream_provider_id": "DREAM_DIARY_PROVIDER_ID",
             "diary_provider_id": "DREAM_DIARY_PROVIDER_ID",
             "photo_prompt_provider_id": "PHOTO_PROMPT_PROVIDER_ID",
-            "jm_cosmos_vision_provider_id": "PRIVATE_READING_VISION_PROVIDER_ID",
+            "private_reading_vision_provider_id": "PRIVATE_READING_VISION_PROVIDER_ID",
         }
 
         if str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower() != "quick":
@@ -6554,10 +6615,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         # independent prevents a generic image-model change from changing the
         # cost and output quality of bookshelf analysis.
         config = getattr(self, "config", None)
-        self.jm_cosmos_vision_provider_id = self._cfg_str(
+        self.private_reading_vision_provider_id = self._cfg_str(
             config,
             "PRIVATE_READING_VISION_PROVIDER_ID",
-            str(getattr(self, "jm_cosmos_vision_provider_id", "") or ""),
+            str(getattr(self, "private_reading_vision_provider_id", "") or ""),
         )
 
     def _detect_astrbot_version(self) -> str:

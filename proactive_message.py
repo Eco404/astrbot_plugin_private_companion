@@ -197,6 +197,7 @@ from .photo_wardrobe_decision import (
 )
 
 _EXTERNAL_IMAGE_MAX_BYTES = 32 * 1024 * 1024
+_MINIMAX_REFERENCE_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 DEFAULT_NEWS_SOURCES = "\n".join(
     [
@@ -14324,7 +14325,17 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             "apihub.agnes-ai.com" in raw_base or model.startswith("agnes-image-")
         ):
             return "agnes"
-        if platform in {"openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova"}:
+        minimax_official_host = any(
+            host in raw_base
+            for host in ("api.minimaxi.com", "api.minimax.io", "minimaxi.com", "minimax.io")
+        )
+        if (
+            platform in {"auto", "openai"} and minimax_official_host
+        ) or (
+            platform == "auto" and model in {"image-01", "image-01-live"}
+        ):
+            return "minimax"
+        if platform in {"openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova", "minimax"}:
             return platform
         base = self._normalized_external_image_api_base_url(raw_base, platform=platform).lower()
         if "apihub.agnes-ai.com" in base or model.startswith("agnes-image-"):
@@ -14373,6 +14384,30 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             api_root = re.match(r"^(.*?/v1)(?:/images/(?:generations|edits))?$", path, flags=re.I)
             prefix = api_root.group(1) if api_root else "/v1"
             return f"{scheme}://{host or 'apihub.agnes-ai.com'}{prefix}"
+
+        if resolved_platform == "minimax" or any(
+            marker in host for marker in ("api.minimaxi.com", "api.minimax.io", "minimaxi.com", "minimax.io")
+        ):
+            scheme = parsed.scheme or "https"
+            clean_path = path.rstrip("/")
+            # MiniMax uses one JSON endpoint for both text-to-image and
+            # reference-image generation. Normalize legacy slash variants to
+            # the API root so the endpoint builder can append the canonical
+            # ``/image_generation`` path exactly once.
+            root_match = re.match(
+                r"^(.*?/v1)(?:/(?:image_generation|image/generation|images/generations|images/edits))?$",
+                clean_path,
+                flags=re.I,
+            )
+            if root_match:
+                prefix = root_match.group(1)
+            elif re.search(r"/v1(?:/.*)?$", clean_path, flags=re.I):
+                prefix = re.match(r"^(.*?/v1)", clean_path, flags=re.I).group(1)
+            else:
+                prefix = clean_path or "/v1"
+                if not re.search(r"/v1$", prefix, flags=re.I):
+                    prefix = prefix.rstrip("/") + "/v1"
+            return f"{scheme}://{host}{prefix.rstrip('/')}"
 
         console_hosts = {
             "bailian.console.aliyun.com",
@@ -14486,15 +14521,19 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return "Agnes Image"
         if resolved == "sensenova":
             return "SenseNova 日日新"
+        if resolved == "minimax":
+            return "MiniMax"
         return "在线图片 API"
 
     def _external_image_endpoint(self, endpoint_type: str = "generations") -> str:
         platform = self._resolved_external_image_api_platform()
         base = self._normalized_external_image_api_base_url(
-            platform="agnes" if platform == "agnes" else "openai"
+            platform=platform
         ).rstrip("/")
         if not base:
             return ""
+        if platform == "minimax":
+            return f"{base}/image_generation"
         endpoint_type = str(endpoint_type or "generations").strip().lower()
         target = "edits" if endpoint_type == "edits" else "generations"
         if base.endswith(f"/images/{target}"):
@@ -14510,9 +14549,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         candidates = [primary]
         platform = self._resolved_external_image_api_platform()
         base = self._normalized_external_image_api_base_url(
-            platform="agnes" if platform == "agnes" else "openai"
+            platform=platform
         ).rstrip("/")
         endpoint_type = str(endpoint_type or "generations").strip().lower()
+        if platform == "minimax":
+            return [primary]
         target = "edits" if endpoint_type == "edits" else "generations"
         lowered_base = base.lower()
         if (
@@ -15021,6 +15062,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             if lowered in {"senova-u1-fast", "sensenova-u1-fast"}:
                 return ""
             return "SenseNova 日日新信息图模型必须填写官方 Model ID：sensenova-u1-fast"
+        if platform == "minimax":
+            if lowered in {"image-01", "image-01-live"}:
+                return ""
+            return "MiniMax 图片接口必须填写官方 Model ID：image-01 或 image-01-live"
         if lowered.startswith(text_model_prefixes) and not any(token in lowered for token in image_tokens):
             return f"在线图片模型填成了文本/聊天模型：{model}。请改成该平台的图片模型名，例如支持 /images/generations 或 /images/edits 的模型。"
         return ""
@@ -15090,6 +15135,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 f"常见原因：{permission_causes}。返回：{diagnostic_text(raw, 120)}"
             )
         if int(status) == 404:
+            platform_getter = getattr(self, "_resolved_external_image_api_platform", None)
+            if callable(platform_getter) and platform_getter() == "minimax":
+                return (
+                    f"{prefix}{endpoint_note}HTTP 404：未找到 MiniMax 图片接口。"
+                    "官方路径是 /v1/image_generation，请不要使用 /v1/image/generation 或 /images/generations。"
+                    f"返回：{diagnostic_text(raw, 120)}"
+                )
             return (
                 f"{prefix}{endpoint_note}HTTP 404：未找到生图接口。"
                 "请检查在线 API 地址是否需要 /v1，或该代理是否支持 /images/generations。"
@@ -16443,6 +16495,247 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             logger.warning("[PrivateCompanion] Agnes Image 生图失败: %s", safe_error)
             return "", safe_error
 
+    @staticmethod
+    def _normalize_minimax_image_ratio(value: Any) -> str:
+        text = str(value or "").strip().lower().replace("：", ":").replace("/", ":")
+        aliases = {
+            "square": "1:1",
+            "方形": "1:1",
+            "portrait": "3:4",
+            "竖版": "3:4",
+            "landscape": "4:3",
+            "横版": "4:3",
+            "widescreen": "16:9",
+            "宽屏": "16:9",
+        }
+        text = aliases.get(text, text)
+        return text if text in {"1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"} else ""
+
+    def _minimax_image_size_payload(self, image_size: str = "") -> dict[str, Any]:
+        raw = str(image_size or getattr(self, "external_image_api_size", "") or "1024x1024").strip()
+        live_model = str(getattr(self, "external_image_api_model", "")).strip().lower() == "image-01-live"
+        configured_ratio = self._normalize_minimax_image_ratio(
+            getattr(self, "external_image_api_ratio", "")
+        )
+        inline_ratio = ""
+        if "@" in raw:
+            raw, inline_value = raw.rsplit("@", 1)
+            inline_ratio = self._normalize_minimax_image_ratio(inline_value)
+        ratio = inline_ratio or configured_ratio
+        if ratio and not live_model:
+            return {"aspect_ratio": ratio}
+
+        dimensions = re.fullmatch(r"\s*(\d{3,4})\s*[xX*×]\s*(\d{3,4})\s*", raw)
+        width = int(dimensions.group(1)) if dimensions else 1024
+        height = int(dimensions.group(2)) if dimensions else 1024
+        if live_model:
+            live_ratios = {
+                "1:1": 1.0,
+                "16:9": 16 / 9,
+                "4:3": 4 / 3,
+                "3:2": 3 / 2,
+                "2:3": 2 / 3,
+                "3:4": 3 / 4,
+                "9:16": 9 / 16,
+            }
+            target_ratio = ratio or f"{width}:{height}"
+            target_width, target_height = (int(part) for part in target_ratio.split(":"))
+            numeric_ratio = target_width / max(1, target_height)
+            closest = min(live_ratios, key=lambda item: abs(live_ratios[item] - numeric_ratio))
+            return {"aspect_ratio": closest}
+
+        if dimensions:
+            if 512 <= width <= 2048 and 512 <= height <= 2048 and width % 8 == 0 and height % 8 == 0:
+                return {"width": width, "height": height}
+        return {"width": 1024, "height": 1024}
+
+    def _minimax_api_error_note(self, payload: dict[str, Any]) -> str:
+        base_resp = payload.get("base_resp")
+        if not isinstance(base_resp, dict):
+            return ""
+        raw_code = base_resp.get("status_code", 0)
+        try:
+            code = int(raw_code or 0)
+        except (TypeError, ValueError):
+            code = -1
+        if code == 0:
+            return ""
+        labels = {
+            1002: "请求触发限流，请稍后重试",
+            1004: "账号鉴权失败，请检查 API Key",
+            1008: "账号余额不足",
+            1026: "图片描述触发内容安全检查",
+            2013: "请求参数不符合 MiniMax 图片接口要求",
+            2049: "API Key 无效",
+        }
+        message = self._external_image_diagnostic_text(base_resp.get("status_msg"), 160)
+        detail = labels.get(code, "MiniMax 图片接口返回业务错误")
+        return f"{detail}（status_code={code}）" + (f"：{message}" if message else "")
+
+    async def _run_minimax_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        endpoint = self._external_image_endpoint("generations")
+        if not endpoint:
+            return "", "未配置 MiniMax API 地址"
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            return "", "MiniMax 生图提示词为空"
+        if len(prompt) > 1500:
+            logger.info(
+                "[PrivateCompanion] MiniMax 生图提示词超过官方 1500 字符限制，按上限提交: original_chars=%s",
+                len(prompt),
+            )
+            prompt = prompt[:1500]
+
+        payload: dict[str, Any] = {
+            "model": self.external_image_api_model,
+            "prompt": prompt,
+            "response_format": "base64",
+            "n": 1,
+        }
+        payload.update(self._minimax_image_size_payload(image_size))
+        if reference_image_path:
+            path = Path(_path_text(reference_image_path, 1000))
+            if not path.exists() or not path.is_file():
+                return "", "MiniMax 提交前参考图已不可用"
+            if path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+                return "", "MiniMax 参考图格式不支持，请使用 PNG 或 JPEG"
+            try:
+                if path.stat().st_size >= _MINIMAX_REFERENCE_IMAGE_MAX_BYTES:
+                    return "", "MiniMax 参考图需小于 10 MB"
+            except OSError:
+                return "", "MiniMax 参考图读取失败"
+            image_value = await self._reference_image_to_data_url(str(path))
+            if not image_value:
+                return "", "MiniMax 参考图读取失败"
+            payload["subject_reference"] = [
+                {
+                    "type": "character",
+                    "image_file": image_value,
+                }
+            ]
+
+        try:
+            import aiohttp
+
+            headers = {
+                "Authorization": f"Bearer {self.external_image_api_key}",
+                "Content-Type": "application/json",
+            }
+            headers.update(self._external_image_custom_headers())
+            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            last_note = ""
+            retried = False
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for attempt in range(2):
+                    logger.info(
+                        "[PrivateCompanion] MiniMax 图片提交: endpoint=%s model=%s reference=%s dimensions=%s attempt=%s/2 prompt_chars=%s prompt_preview=%s",
+                        self._external_image_diagnostic_text(endpoint, 160),
+                        _single_line(self.external_image_api_model, 80),
+                        bool(reference_image_path),
+                        _single_line(
+                            payload.get("aspect_ratio")
+                            or f"{payload.get('width', '-')}x{payload.get('height', '-')}",
+                            30,
+                        ),
+                        attempt + 1,
+                        len(prompt),
+                        _single_line(prompt, 180),
+                    )
+                    async with session.post(endpoint, headers=headers, json=payload) as response:
+                        text = await response.text()
+                        response_preview = re.sub(
+                            r'("image_base64"\s*:\s*\[\s*")[^"]+',
+                            r'\1[base64 omitted]',
+                            text or "",
+                            flags=re.I,
+                        )
+                        logger.info(
+                            "[PrivateCompanion] MiniMax 图片响应: endpoint=%s status=%s chars=%s preview=%s",
+                            self._external_image_diagnostic_text(endpoint, 160),
+                            response.status,
+                            len(text or ""),
+                            self._external_image_diagnostic_text(response_preview, 220),
+                        )
+                        if response.status >= 400:
+                            last_note = self._external_image_api_error_note(
+                                response.status,
+                                text,
+                                reference=bool(reference_image_path),
+                                endpoint=endpoint,
+                            )
+                            retry_delay = self._external_image_api_transient_retry_delay(response.status)
+                            if attempt == 0 and retry_delay > 0:
+                                retried = True
+                                await asyncio.sleep(retry_delay)
+                                continue
+                            return "", last_note
+                    data = self._extract_json_payload(text) if text else {}
+                    if not isinstance(data, dict):
+                        return "", "MiniMax 图片接口返回格式无效"
+                    last_note = self._minimax_api_error_note(data)
+                    if last_note:
+                        base_resp = data.get("base_resp")
+                        raw_code = base_resp.get("status_code") if isinstance(base_resp, dict) else 0
+                        if attempt == 0 and str(raw_code) == "1002":
+                            retried = True
+                            await asyncio.sleep(1.0)
+                            continue
+                        return "", last_note
+
+                    result_data = data.get("data")
+                    if not isinstance(result_data, dict):
+                        return "", "MiniMax 图片接口未返回 data 图片数据"
+                    candidates: list[Any] = []
+                    for key in ("image_base64", "image_urls"):
+                        values = result_data.get(key)
+                        if isinstance(values, list):
+                            for value in values:
+                                if not value:
+                                    continue
+                                if key == "image_base64" and isinstance(value, str) and not value.lower().startswith("data:image"):
+                                    value = f"data:image/png;base64,{value}"
+                                candidates.append(value)
+                        elif values:
+                            if key == "image_base64" and isinstance(values, str) and not values.lower().startswith("data:image"):
+                                values = f"data:image/png;base64,{values}"
+                            candidates.append(values)
+                    if not candidates:
+                        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+                        failed = _safe_int(metadata.get("failed_count"), 0, 0)
+                        if failed:
+                            return "", f"MiniMax 未返回图片，内容安全检查拦截 {failed} 张"
+                        return "", "MiniMax 图片接口未返回 image_base64 或 image_urls"
+
+                    success_note = "ok"
+                    if reference_image_path:
+                        success_note += "；已使用本地人设参考图"
+                    for candidate in candidates:
+                        saved, note = await self._materialize_external_image_value(
+                            candidate,
+                            session_key=session_key,
+                            success_note=success_note,
+                        )
+                        if saved:
+                            if retried:
+                                note += "；上游短暂错误后重试成功"
+                            return saved, note
+                        last_note = note
+                    return "", last_note or "MiniMax 图片结果解析失败"
+            return "", last_note or "MiniMax 图片接口未返回数据"
+        except asyncio.TimeoutError:
+            return "", self._external_image_timeout_note(reference=bool(reference_image_path))
+        except Exception as exc:
+            safe_error = self._external_image_diagnostic_text(exc, 220)
+            logger.warning("[PrivateCompanion] MiniMax 图片生成失败: %s", safe_error)
+            return "", safe_error
+
     async def _run_external_photo_generation_once(
         self,
         prompt_text: str,
@@ -16537,6 +16830,22 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
+                image_size=image_size,
+            )
+        if platform == "minimax":
+            minimax_reference_path = reference_image_path
+            if not minimax_reference_path:
+                raw_minimax_paths = reference_image_paths
+                if isinstance(raw_minimax_paths, str):
+                    raw_minimax_paths = (raw_minimax_paths,)
+                for raw_path in raw_minimax_paths or ():
+                    minimax_reference_path = _path_text(raw_path, 1000)
+                    if minimax_reference_path:
+                        break
+            return await self._run_minimax_photo_generation(
+                prompt_text,
+                session_key=session_key,
+                reference_image_path=minimax_reference_path,
                 image_size=image_size,
             )
         if platform == "agnes":

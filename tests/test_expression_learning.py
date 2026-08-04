@@ -1603,7 +1603,7 @@ class ExpressionScopeLifecycleTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await self.api.update_user()
 
-        self.assertTrue(result["success"])
+        self.assertTrue(result["success"], result)
         self.assertEqual({}, user["behavior_habits"])
         self.assertEqual([{"id": "keep-expression"}], user["expression_profile"]["rules"])
         self.assertEqual([{"id": "keep-episode"}], user["dialogue_episodes"])
@@ -1644,6 +1644,55 @@ class ExpressionScopeLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, result["data"]["pending_count"])
         self.assertEqual([], self.plugin.data["users"]["owner-1"]["expression_profile"]["pending_samples"])
         self.assertEqual([], self.plugin.data["groups"]["group-1"]["expression_profile"]["pending_samples"])
+
+    async def test_unified_library_can_batch_approve_rule_groups(self):
+        user_profile = self.plugin.data["users"]["owner-1"]["expression_profile"]
+        group_profile = self.plugin.data["groups"]["group-1"]["expression_profile"]
+        user_profile["pending_rules"] = [{
+            "id": "batch-private-style",
+            "family_key": "batch_private",
+            "kind": "style",
+            "situation": "轻松接话时",
+            "pattern": "好呀，那就____",
+            "instruction": "替换占位后自然接话",
+            "evidence_count": 4,
+            "review_status": "pending",
+        }]
+        group_profile["pending_rules"] = [{
+            "id": "batch-group-style",
+            "family_key": "batch_group",
+            "kind": "style",
+            "situation": "群里接梗时",
+            "pattern": "收到，____",
+            "instruction": "补充具体内容后再回应",
+            "evidence_count": 5,
+            "review_status": "pending",
+        }]
+        self.plugin._backfill_expression_rule_families(user_profile)
+        self.plugin._backfill_expression_rule_families(group_profile)
+        private_family = user_profile["pending_rules"][0]["family_id"]
+        group_family = group_profile["pending_rules"][0]["family_id"]
+
+        async with self.app.test_request_context(
+            "/expression-library/update",
+            method="POST",
+            json={
+                "expression_action": "batch_approve_rule_groups",
+                "items": [
+                    {"source_type": "private", "source_id": "owner-1", "rule_family_id": private_family},
+                    {"source_type": "group", "source_id": "group-1", "rule_family_id": group_family},
+                ],
+            },
+        ):
+            result = await self.api.update_expression_library()
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(2, result["data"]["batch"]["succeeded"])
+        self.assertEqual(0, result["data"]["batch"]["skipped"])
+        self.assertEqual([], user_profile["pending_rules"])
+        self.assertEqual([], group_profile["pending_rules"])
+        self.assertEqual(1, len(user_profile["learned_rules"]))
+        self.assertEqual(1, len(group_profile["learned_rules"]))
 
     async def test_semantic_rule_requires_manual_approval_before_use(self):
         profile = self.plugin.data["users"]["owner-1"]["expression_profile"]

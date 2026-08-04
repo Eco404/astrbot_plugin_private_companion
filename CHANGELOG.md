@@ -4,6 +4,25 @@
 
 ## 未发布
 
+## 6.0.4a
+
+### 历史媒体标记防泄漏
+
+- 修复特定场景下模型复述内部历史媒体标记后，被分段发送拆成独立消息直接发给用户的问题，例如 `<pc_history_media images="1" />`。
+- 回复生成与发送前都增加了内部控制标记清理；历史中的真实附件元数据继续保留，不影响后续图片语义理解与上下文注入。
+- 通用提示词补充约束：内部历史媒体标记不是聊天正文，不能被复述、改写或当作“已经发图”的依据。
+
+### 表达学习批量审核
+
+- 学习页表达审核支持多选当前筛选结果，可一次通过或拒绝多个私聊/群聊来源的情境表达与语法习惯规则组。
+
+### MiniMax 图片接口兼容
+
+- 新增 MiniMax 国内站与国际站专用适配，自动识别 `api.minimaxi.com`、`api.minimax.io` 和 `image-01` 系列模型；将旧的 `/v1/image/generation` 与 OpenAI 风格路径统一纠正为官方 `/v1/image_generation`。
+- 文生图按 MiniMax JSON 协议转换尺寸并解析 `data.image_urls` / `data.image_base64`；图生图使用同一端点的 `subject_reference`，不再误走 multipart `/images/edits`。
+- HTTP 200 下仍会检查 MiniMax `base_resp.status_code`，鉴权、余额、限流、参数和内容安全错误会明确进入现有备用端点回退链路。
+- 显式选择 OpenAI 兼容平台时保留聚合代理协议；`image-01-live` 只提交其支持的官方宽高比，避免误传 `width` / `height` 或 `21:9`。
+
 ## 6.0.4
 
 ### 内部架构拆分与稳定性
