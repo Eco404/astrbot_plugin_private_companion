@@ -1136,7 +1136,7 @@ const featureMeta = {
   enable_hunger_state: ["饥饿/胃口状态", "开启后视为可用，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
   enable_qq_presence_sync: ["同步 QQ 在线状态", "让日程细化把在线/忙碌等基础状态同步到 QQ；不包含自定义短状态。"],
   enable_qq_custom_presence_sync: ["同步 QQ 自定义短状态", "默认关闭；仅协议端明确支持时再开启，用于“专注中/休息中”等短状态。"],
-  enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
+  enable_segmented_proactive_reply: ["分段发送", "把文字拆成自然短句，并统一安排语音、图片、@、表情与附件所在的消息链。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
   enable_passive_state_continuity_anchor: ["被动状态连续性锚点", "默认关闭；仅在私聊被动增量注入的状态未变化轮次，注入不超过 300 字的 Bot 当下连续性提示。"],
@@ -1742,6 +1742,11 @@ const configLabels = {
   segmented_proactive_min_segment_chars: "短片段合并阈值",
   segmented_proactive_max_segments: "文本最多分段数",
   segmented_proactive_send_as_forward: "分段后合并发送",
+  segmented_proactive_voice_strategy: "语音位置",
+  segmented_proactive_image_strategy: "图片位置",
+  segmented_proactive_at_strategy: "@ 位置",
+  segmented_proactive_face_strategy: "平台表情位置",
+  segmented_proactive_other_strategy: "其他附件位置",
   segmented_proactive_split_mode: "分段模式",
   segmented_proactive_regex: "分段正则",
   segmented_proactive_split_words: "分段词列表",
@@ -2159,7 +2164,7 @@ const configLabels = {
   reaction_expression_private_enabled: "允许私聊表情表达",
   reaction_expression_proactive_enabled: "允许主动消息表情表达",
   reaction_expression_group_enabled: "允许群聊表情表达",
-  reaction_expression_delivery_mode: "表情表达发送方式",
+  reaction_expression_delivery_mode: "表情包位置",
   reaction_expression_trigger_probability: "表情表达触发概率",
   reaction_expression_cooldown_seconds: "表情表达冷却秒数",
   reaction_expression_low_latency_mode: "低延迟选择模式",
@@ -2198,7 +2203,7 @@ const configDescriptions = {
   reaction_expression_private_enabled: "允许在私聊回复中使用实验性表情表达，仍需通过触发概率、冷却、重复控制和关系边界检查。",
   reaction_expression_proactive_enabled: "允许主动私聊在完整正文后留下隐藏表情意图，再复用相同的概率、冷却、用户停用边界、重复图片与本地图库匹配；不会增加模型调用，已有媒体时不会叠加表情包。",
   reaction_expression_group_enabled: "默认关闭。开启后允许群聊使用，但公开风险高、关系不明确或上下文不足的候选会被降低优先级。",
-  reaction_expression_delivery_mode: "默认先完整发送正文，再单独发送表情包。也可放进正文消息链，最终是否合并展示取决于平台适配器；正文前模式无法在后续正文发送失败时撤回已送达的图片。",
+  reaction_expression_delivery_mode: "与表情表达实验共用。默认先完整发送正文，再单独发送表情包；也可放进正文消息链，或改为正文前发送。",
   reaction_expression_trigger_probability: "通过语境、关系边界和冷却检查后实际尝试选择表情的概率。设为 100% 时不会因模型漏写隐藏标签而丢失已获机会，但仍遵守冷却、重复图片和用户停用边界；想连续发送请同时把冷却设为 0。",
   reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
@@ -2465,11 +2470,16 @@ const configDescriptions = {
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；会保留压缩预览图用于管理，不保留原始大图，也不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
-  segmented_proactive_scope: "插件主动只影响插件主动消息的文本部分；全部 LLM 回复会额外拆普通模型纯文本回复，首段随主链立即发送，剩余片段后台按间隔补发。图片、语音、AT 或工具转述等复杂消息本身不会被拆；插件主动媒体会在文本分段后继续单独发送，创作分享会自动保持整段。",
+  segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复还会处理普通模型回复。文字按规则切分，语音、图片、@、平台表情与附件按各自位置策略编排。",
   segmented_proactive_chat_scope: "控制分段在哪类会话生效：全部、仅私聊或仅群聊。不匹配的会话会保持整条发送。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
   segmented_proactive_max_segments: "一次主动文本最多拆成几条。默认 3，过高会显得刷屏；图片、语音和附加组件不占用这个文本段数。",
   segmented_proactive_send_as_forward: "开启后，切出多段时优先打包成合并转发消息发送；平台不支持时自动回退为普通逐条分段。",
+  segmented_proactive_voice_strategy: "语音默认单独发送。选择嵌入时会和相邻正文进入同一消息链；回复引用始终优先绑定第一段正文。",
+  segmented_proactive_image_strategy: "控制普通图片的位置。表情包素材库生成的图片使用下方“表情包位置”，不会被普通图片设置覆盖。",
+  segmented_proactive_at_strategy: "@ 默认嵌入相邻正文，避免出现一条只有 @ 的空消息。也可以独立发送或明确跟随上下段。",
+  segmented_proactive_face_strategy: "控制平台原生 Face/Emoji 组件，不影响表情包素材库。",
+  segmented_proactive_other_strategy: "文件、视频等其他附件默认单独发送，减少平台对混合消息链的兼容差异。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
   segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号、标题引号和 <image>/<video> 这类尖括号媒体块内部字符会跳过。",
@@ -2860,7 +2870,7 @@ const featureSettingGroups = {
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_busy_reply_gate: ["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
-  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor"],
   enable_passive_state_delta_injection: ["enable_passive_state_continuity_anchor"],
   enable_health_state: ["humanized_state_intensity"],
@@ -3531,6 +3541,12 @@ const featureSettingSections = {
   ],
   enable_segmented_proactive_reply: [
     {
+      title: "组件发送位置",
+      note: "嵌入会与相邻正文进入同一消息链；单独会成为独立消息。回复引用固定跟随第一段正文。",
+      kind: "component-placement",
+      keys: ["segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy"],
+    },
+    {
       title: "切分规则",
       note: "决定主动消息什么时候拆、按什么拆，以及短片段是否并回去。",
       keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words"],
@@ -3901,6 +3917,11 @@ const featureSettingTypes = {
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
   segmented_proactive_send_as_forward: { type: "checkbox" },
+  segmented_proactive_voice_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
+  segmented_proactive_image_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
+  segmented_proactive_at_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
+  segmented_proactive_face_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
+  segmented_proactive_other_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
   segmented_proactive_split_mode: { type: "select", options: [["regex", "正则"], ["words", "分段词列表"]] },
   segmented_proactive_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
   segmented_proactive_content_cleanup_scope: { type: "select", options: [["all", "全段清理"], ["trailing", "仅句尾清理"]] },
@@ -21818,6 +21839,12 @@ function segmentedPreviewValues(root = document) {
     "segmented_proactive_min_segment_chars",
     "segmented_proactive_max_segments",
     "segmented_proactive_send_as_forward",
+    "segmented_proactive_voice_strategy",
+    "segmented_proactive_image_strategy",
+    "segmented_proactive_at_strategy",
+    "segmented_proactive_face_strategy",
+    "reaction_expression_delivery_mode",
+    "segmented_proactive_other_strategy",
     "segmented_proactive_split_mode",
     "segmented_proactive_regex",
     "segmented_proactive_split_words",
@@ -21998,6 +22025,76 @@ function simulateSegmentedProactive(text, values) {
   return { segments, status: `预计发送 ${segments.length} 段；${scopeText}${chatScopeText}${sendText}${protectedText}${replacementText}。` };
 }
 
+function normalizeSegmentedComponentStrategy(value, fallback = "separate") {
+  const aliases = {
+    embed: "inline",
+    embedded: "inline",
+    same_message: "inline",
+    standalone: "separate",
+    separate_before: "separate",
+    separate_after: "separate",
+    follow_previous: "previous",
+    follow_next: "next",
+  };
+  const normalized = aliases[String(value || "").trim().toLowerCase()] || String(value || "").trim().toLowerCase();
+  return ["inline", "separate", "previous", "next"].includes(normalized) ? normalized : fallback;
+}
+
+function segmentedComponentPreviewPlan(values, segments) {
+  const chunks = (segments || []).map((segment, index) => ([{
+    kind: "text",
+    label: `正文 ${index + 1}`,
+    title: String(segment || ""),
+  }]));
+  if (!chunks.length) return { chunks: [], hasMedia: false };
+  const firstTextIndex = () => chunks.findIndex((chunk) => chunk.some((item) => item.kind === "text"));
+  const lastTextIndex = () => {
+    for (let index = chunks.length - 1; index >= 0; index -= 1) {
+      if (chunks[index].some((item) => item.kind === "text")) return index;
+    }
+    return -1;
+  };
+  const placeLeading = (item, strategyValue, fallback) => {
+    const strategy = normalizeSegmentedComponentStrategy(strategyValue, fallback);
+    const target = firstTextIndex();
+    if (["inline", "next"].includes(strategy) && target >= 0) {
+      chunks[target].unshift(item);
+    } else {
+      chunks.splice(Math.max(0, target), 0, [item]);
+    }
+  };
+  const placeTrailing = (item, strategyValue, fallback) => {
+    const strategy = normalizeSegmentedComponentStrategy(strategyValue, fallback);
+    const target = lastTextIndex();
+    if (["inline", "previous"].includes(strategy) && target >= 0) {
+      chunks[target].push(item);
+    } else {
+      chunks.push([item]);
+    }
+  };
+
+  placeLeading({ kind: "at", label: "@" }, values.segmented_proactive_at_strategy, "inline");
+  placeLeading({ kind: "voice", label: "语音" }, values.segmented_proactive_voice_strategy, "separate");
+  const textTarget = firstTextIndex();
+  if (textTarget >= 0) chunks[textTarget].unshift({ kind: "reply", label: "引用" });
+  placeTrailing({ kind: "image", label: "图片" }, values.segmented_proactive_image_strategy, "separate");
+  placeTrailing({ kind: "face", label: "平台表情" }, values.segmented_proactive_face_strategy, "inline");
+  placeTrailing({ kind: "other", label: "附件" }, values.segmented_proactive_other_strategy, "separate");
+
+  const reactionMode = String(values.reaction_expression_delivery_mode || "separate_after");
+  const reaction = { kind: "reaction", label: "表情包" };
+  if (reactionMode === "same_message") {
+    const target = lastTextIndex();
+    if (target >= 0) chunks[target].push(reaction);
+    else chunks.push([reaction]);
+  } else if (reactionMode === "separate_before") {
+    chunks.unshift([reaction]);
+  } else {
+    chunks.push([reaction]);
+  }
+  return { chunks, hasMedia: true };
+}
+
 function segmentedPreviewPanelHtml() {
   return `
     <section class="segmented-preview-panel wide-field" data-segmented-preview-panel>
@@ -22035,6 +22132,15 @@ function renderSegmentedPreview(panel = null) {
       return;
     }
     const segments = result.segments || [];
+    const componentPlan = segmentedComponentPreviewPlan(segmentedPreviewValues(root), segments);
+    const componentFlow = componentPlan.chunks.map((chunk, chunkIndex) => `
+      <span class="segmented-component-message" role="listitem" aria-label="第 ${chunkIndex + 1} 条消息">
+        ${chunk.map((item) => `<span class="segmented-component-chip is-${escapeHtml(item.kind)}"${item.title ? ` title="${escapeHtml(item.title)}"` : ""}>${escapeHtml(item.label)}</span>`).join('<span class="segmented-component-plus">+</span>')}
+      </span>
+    `).join('<span class="segmented-component-separator" aria-hidden="true">|</span>');
+    const forwardComponentNote = segmentedPreviewValues(root).segmented_proactive_send_as_forward
+      ? "含组件时不会打包为纯文本合并转发"
+      : "竖线表示下一条独立消息";
     output.innerHTML = `
       <div class="segmented-preview-summary">
         <span>${escapeHtml(result.status || "")}</span>
@@ -22042,6 +22148,13 @@ function renderSegmentedPreview(panel = null) {
         <span>保护：网址内部不拆，链接结束可断；括号 / 双引号内部不拆</span>
         <span>空格可写作 &lt;space&gt; 或 空格</span>
       </div>
+      <section class="segmented-component-preview" aria-live="polite">
+        <header>
+          <b>组件发送顺序</b>
+          <span>${escapeHtml(forwardComponentNote)}</span>
+        </header>
+        <div class="segmented-component-flow" role="list">${componentFlow}</div>
+      </section>
       <div class="segmented-preview-list">
         ${segments.map((segment, index) => `
           <section class="segmented-preview-segment">
@@ -22100,7 +22213,7 @@ function bindSegmentedPreview(root = document) {
       });
     });
   });
-  const controls = scope.querySelectorAll('[name^="segmented_proactive_"], [name="enable_segmented_proactive_reply"], [name="enable_segmented_proactive_content_cleanup"], [name="enable_segmented_proactive_content_replacement"], [data-feature-param^="segmented_proactive_"], [data-feature-param="enable_segmented_proactive_content_cleanup"], [data-feature-param="enable_segmented_proactive_content_replacement"], [data-feature-detail-toggle="enable_segmented_proactive_reply"]');
+  const controls = scope.querySelectorAll('[name^="segmented_proactive_"], [name="reaction_expression_delivery_mode"], [name="enable_segmented_proactive_reply"], [name="enable_segmented_proactive_content_cleanup"], [name="enable_segmented_proactive_content_replacement"], [data-feature-param^="segmented_proactive_"], [data-feature-param="reaction_expression_delivery_mode"], [data-feature-param="enable_segmented_proactive_content_cleanup"], [data-feature-param="enable_segmented_proactive_content_replacement"], [data-feature-detail-toggle="enable_segmented_proactive_reply"]');
   controls.forEach((control) => {
     if (control.dataset.segmentedConfigBound) return;
     control.dataset.segmentedConfigBound = "1";
@@ -23851,9 +23964,9 @@ const featureDetailGuides = {
     disabled: "不会新增饥饿/胃口状态；吃什么类身体小需求和手动饥饿状态会被拦截。",
   },
   enable_segmented_proactive_reply: {
-    summary: "把纯文本回复按自然聊天节奏拆成短句，并合并过短片段，避免刷屏或突兀附和。",
+    summary: "把文字按自然聊天节奏拆成短句，并统一编排语音、图片、@、平台表情、表情包和其他附件。",
     trigger: "插件主动消息发送时；若作用范围设为全部 LLM，也会处理普通模型纯文本回复。",
-    enabled: "符合条件的文本会按规则拆分，首段先发，剩余片段按自然间隔补发。",
+    enabled: "符合条件的文字会分段；各类组件按独立位置策略进入相邻正文或单独发送，引用只跟随第一段正文。",
     disabled: "符合场景的文本一次性发送完整内容。",
   },
   inject_passive_states: {
@@ -24971,6 +25084,14 @@ function featureDetailPage(key) {
     .map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`)
     .join("");
   const weatherSource = String(state.overview?.settings?.weather_source || "qweather").trim().toLowerCase();
+  const segmentedPlacementKeys = new Set([
+    "segmented_proactive_voice_strategy",
+    "segmented_proactive_image_strategy",
+    "segmented_proactive_at_strategy",
+    "segmented_proactive_face_strategy",
+    "reaction_expression_delivery_mode",
+    "segmented_proactive_other_strategy",
+  ]);
   const settingRow = ({ key: name, value, description }) => {
     if (name === "relationship_stage_policy") {
       return `
@@ -24985,15 +25106,16 @@ function featureDetailPage(key) {
     }
     const accessibility = featureSettingAccessibility(name, `feature-detail-${key}`);
     const usesStandardControl = !["photo_reference_catalog", "bot_relationship_cards"].includes(name);
+    const compactPlacement = key === "enable_segmented_proactive_reply" && segmentedPlacementKeys.has(name);
     const settingLabel = usesStandardControl
       ? `<label id="${accessibility.labelId}" for="${accessibility.controlId}">${escapeHtml(configLabel(name))}</label>`
       : escapeHtml(configLabel(name));
     return `
-      <section class="feature-param-row">
+      <section class="feature-param-row${compactPlacement ? " segmented-component-setting" : ""}">
         <div class="feature-param-main">
           <header>
             <b>${settingLabel}</b>
-            <code>${escapeHtml(name)}</code>
+            ${compactPlacement ? "" : `<code>${escapeHtml(name)}</code>`}
           </header>
           <p id="${accessibility.descriptionId}">${escapeHtml(description)}</p>
         </div>
@@ -25015,7 +25137,7 @@ function featureDetailPage(key) {
         ? environmentWeatherStatusHtml()
         : "";
       return `
-        <section class="feature-param-section">
+        <section class="feature-param-section${section.kind === "component-placement" ? " segmented-component-section" : ""}">
           <header>
             <b>${escapeHtml(section.title || "参数")}</b>
             ${section.note ? `<span>${escapeHtml(section.note)}</span>` : ""}

@@ -4121,6 +4121,36 @@
     "default": false,
     "invisible": true
   },
+  "segmented_proactive_voice_strategy": {
+    "description": "Legacy flat config: 语音组件发送位置",
+    "type": "string",
+    "default": "separate",
+    "invisible": true
+  },
+  "segmented_proactive_image_strategy": {
+    "description": "Legacy flat config: 图片组件发送位置",
+    "type": "string",
+    "default": "separate",
+    "invisible": true
+  },
+  "segmented_proactive_at_strategy": {
+    "description": "Legacy flat config: @ 组件发送位置",
+    "type": "string",
+    "default": "inline",
+    "invisible": true
+  },
+  "segmented_proactive_face_strategy": {
+    "description": "Legacy flat config: 平台表情组件发送位置",
+    "type": "string",
+    "default": "inline",
+    "invisible": true
+  },
+  "segmented_proactive_other_strategy": {
+    "description": "Legacy flat config: 其他附件发送位置",
+    "type": "string",
+    "default": "separate",
+    "invisible": true
+  },
   "segmented_proactive_split_mode": {
     "description": "Legacy flat config: 主动分段模式",
     "type": "string",
@@ -11615,6 +11645,61 @@
         "type": "bool",
         "hint": "开启后，文本被切成多段时会优先打包成合并转发消息发送，减少刷屏；平台不支持或发送失败时会自动回退为普通逐条分段。默认关闭。",
         "default": false,
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_voice_strategy": {
+        "description": "语音组件位置",
+        "type": "string",
+        "hint": "控制语音与相邻正文的发送关系。默认单独发送，引用只跟随正文，不会挂到语音上。",
+        "options": ["inline", "separate", "previous", "next"],
+        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "default": "separate",
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_image_strategy": {
+        "description": "图片组件位置",
+        "type": "string",
+        "hint": "控制普通图片与相邻正文的发送关系；表情包图片仍使用表情表达的专用位置设置。",
+        "options": ["inline", "separate", "previous", "next"],
+        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "default": "separate",
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_at_strategy": {
+        "description": "@ 组件位置",
+        "type": "string",
+        "hint": "默认嵌入相邻正文，避免 @ 被拆成一条没有文字的消息。",
+        "options": ["inline", "separate", "previous", "next"],
+        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "default": "inline",
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_face_strategy": {
+        "description": "平台表情位置",
+        "type": "string",
+        "hint": "控制平台原生 Face/Emoji 组件；不影响表情包素材库发送策略。",
+        "options": ["inline", "separate", "previous", "next"],
+        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "default": "inline",
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_other_strategy": {
+        "description": "其他附件位置",
+        "type": "string",
+        "hint": "文件、视频等未单列组件默认独立发送，减少适配器混合消息兼容问题。",
+        "options": ["inline", "separate", "previous", "next"],
+        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "default": "separate",
         "condition": {
           "enable_segmented_proactive_reply": true
         }

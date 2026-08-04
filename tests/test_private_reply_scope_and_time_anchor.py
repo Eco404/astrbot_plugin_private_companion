@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime
 from types import SimpleNamespace
 
+from astrbot.api.message_components import Plain as MessagePlain
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.user_memory import UserMemoryMixin
 
@@ -120,6 +121,7 @@ class PrivateReplyScopeAndTimeAnchorTests(unittest.IsolatedAsyncioTestCase):
         boundary = plugin._format_private_routine_check_boundary("那……例行检查")
 
         self.assertIn("最多提出一个问题", boundary)
+        self.assertIn("要和后面的承接正文自然写在同一句里", boundary)
         self.assertIn("不要假定用户正在服药", boundary)
         self.assertIn("今天想先检查哪一项", boundary)
         self.assertEqual("", plugin._format_private_routine_check_boundary("上次例行检查结果是什么"))
@@ -133,6 +135,23 @@ class PrivateReplyScopeAndTimeAnchorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(limited))
         self.assertEqual(["第一问", "第二问", "第三问"], [part.text for part in limited[1]])
         self.assertEqual(chunks, plugin._limit_private_routine_check_segments("检查一下这个报错", chunks))
+
+    def test_routine_check_merges_interjection_and_address_lead(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        chunks = [[MessagePlain("唔，比折大人")], [MessagePlain("都凌晨三点半了还来例行检查呀。")]]
+
+        limited = plugin._limit_private_routine_check_segments("例行检查", chunks)
+
+        self.assertEqual(1, len(limited))
+        self.assertEqual("唔，比折大人，都凌晨三点半了还来例行检查呀。", limited[0][0].text)
+
+    def test_routine_check_keeps_normal_short_lead_separate(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        chunks = [[MessagePlain("先接住")], [MessagePlain("再问今天检查哪一项。")]]
+
+        limited = plugin._limit_private_routine_check_segments("例行检查", chunks)
+
+        self.assertEqual(chunks, limited)
 
 if __name__ == "__main__":
     unittest.main()

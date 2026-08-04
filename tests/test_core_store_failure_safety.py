@@ -34,6 +34,12 @@ class _CoreHarness(CoreStoreMixin):
     def _new_store() -> dict:
         return {"users": {}}
 
+    def _configured_target_ids(self) -> list[str]:
+        return ["owner"]
+
+    def _is_bot_self_user_id(self, _user_id: str) -> bool:
+        return False
+
 
 class _StartupHarness(CoreStoreMixin):
     def __init__(self) -> None:
@@ -112,6 +118,68 @@ class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
                 harness._load_data_sync()
 
             self.assertEqual('{"users": ', data_file.read_text(encoding="utf-8"))
+
+    def test_group_only_placeholders_are_removed_from_private_users(self) -> None:
+        harness = _CoreHarness()
+        harness.default_nickname = "主要用户昵称"
+        harness.default_style = "默认语气"
+        harness.data = {
+            "users": {
+                "owner": {"user_id": "owner", "nickname": "主要用户昵称"},
+                "group_sender": {
+                    "user_id": "group_sender",
+                    "nickname": "主要用户昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "relationship_role": "friend",
+                    "recent_group_messages": [{"group_id": "100", "text": "群消息"}],
+                    "reaction_expression": {"last_sent_at": 12},
+                    "last_inbound_umo": "default:GroupMessage:100",
+                },
+            }
+        }
+
+        changed = harness._cleanup_orphan_reaction_expression_users()
+
+        self.assertTrue(changed)
+        self.assertEqual(["owner"], list(harness.data["users"]))
+
+    def test_private_activity_and_manual_records_survive_orphan_cleanup(self) -> None:
+        harness = _CoreHarness()
+        harness.default_nickname = "主要用户昵称"
+        harness.default_style = "默认语气"
+        harness.data = {
+            "users": {
+                "private": {
+                    "user_id": "private",
+                    "nickname": "主要用户昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "relationship_role": "friend",
+                    "last_private_seen": 10,
+                },
+                "manual": {
+                    "user_id": "manual",
+                    "nickname": "主要用户昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "manual_disabled": True,
+                    "relationship_role": "friend",
+                },
+                "profiled": {
+                    "user_id": "profiled",
+                    "nickname": "独立昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "relationship_role": "friend",
+                },
+            }
+        }
+
+        changed = harness._cleanup_orphan_reaction_expression_users()
+
+        self.assertFalse(changed)
+        self.assertEqual({"private", "manual", "profiled"}, set(harness.data["users"]))
 
 
 if __name__ == "__main__":

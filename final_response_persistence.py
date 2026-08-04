@@ -17,7 +17,7 @@ from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
-from .helpers import _now_ts, _single_line
+from .helpers import _format_history_media_marker, _now_ts, _single_line
 
 
 _DELIVERY_TASK_LABELS = frozenset({"segmented_llm_remainder"})
@@ -637,18 +637,12 @@ class FinalResponsePersistenceMixin:
             text = self._actual_text_from_delivered_chain(components)
         image_count = sum(isinstance(component, Image) for component in components)
         record_count = sum(isinstance(component, Record) for component in components)
-        notes: list[str] = []
-        if image_count:
-            notes.append(
-                "发送了一张图片" if image_count == 1 else f"发送了 {image_count} 张图片"
-            )
-        if record_count and not text:
-            notes.append(
-                "发送了一条语音" if record_count == 1 else f"发送了 {record_count} 条语音"
-            )
-        if notes:
-            suffix = "（" + "，".join(notes) + "）"
-            text = f"{text}{suffix}" if text else suffix
+        media_marker = _format_history_media_marker(
+            images=image_count,
+            records=record_count,
+        )
+        if media_marker:
+            text = f"{text}\n{media_marker}" if text else media_marker
         return text.strip()
 
     def _stage_delivered_assistant_for_official_history(

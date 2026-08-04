@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain
 from astrbot.core.agent.message import Message, TextPart
 from astrbot.core.provider.entities import LLMResponse
 
@@ -18,6 +18,7 @@ from astrbot_plugin_private_companion.final_response_persistence import (
     collect_proactive_delivery,
 )
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+from astrbot_plugin_private_companion.helpers import _strip_outbound_control_blocks
 
 
 UMO = "default:FriendMessage:10001"
@@ -153,6 +154,38 @@ class _Harness(ProactiveMessageMixin):
 
 
 class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_delivered_image_is_archived_as_internal_media_marker(self):
+        harness = _Harness()
+
+        archived = harness._delivered_assistant_text_from_chain(
+            [Plain("正文"), Image(file="image.png")]
+        )
+
+        self.assertIn("正文", archived)
+        self.assertIn('<pc_history_media images="1" />', archived)
+        self.assertNotIn("发送了一张图片", archived)
+
+    def test_outbound_cleanup_removes_legacy_and_internal_media_placeholders(self):
+        raw = (
+            "第一段\n（发送了一张图片，发送了 2 条语音）\n"
+            "（发送了一条语音）\n"
+            '<pc_history_media images="1" records="2" />\n第二段'
+        )
+
+        self.assertEqual("第一段\n\n第二段", _strip_outbound_control_blocks(raw))
+
+    def test_proactive_archive_uses_internal_marker_instead_of_visible_placeholder(self):
+        harness = _Harness()
+
+        archived = harness._build_proactive_archive_assistant_text(
+            text="主动正文",
+            image_path="image.png",
+            action_summary="发图",
+        )
+
+        self.assertIn('<pc_history_media images="1" />', archived)
+        self.assertNotIn("随消息发送了一张图片", archived)
+
     async def test_raw_assistant_is_deferred_and_only_delivered_text_is_persisted(self):
         captured: list[str] = []
 

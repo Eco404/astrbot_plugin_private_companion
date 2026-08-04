@@ -10,6 +10,7 @@ from pathlib import Path
 from astrbot_plugin_private_companion.command_handlers import CommandHandlersMixin
 from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
+from astrbot_plugin_private_companion.page_api_settings import PageSettingNormalizerMixin
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,14 +149,19 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
         setting = schema["photo_action_config"]["items"]["command_photo_generation_max_daily"]
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
         page_api = (ROOT / "page_api.py").read_text(encoding="utf-8")
+        page_api_settings = (ROOT / "page_api_settings.py").read_text(encoding="utf-8")
 
         self.assertEqual(setting["default"], 0)
         self.assertIn("0 表示不限量", setting["hint"])
         self.assertIn('title: "用户请求生图"', script)
         self.assertIn('key: "command_photo_generation_max_daily"', script)
-        self.assertGreaterEqual(page_api.count('"command_photo_generation_max_daily"'), 3)
+        self.assertGreaterEqual(
+            (page_api + page_api_settings).count('"command_photo_generation_max_daily"'),
+            3,
+        )
 
         api = PrivateCompanionPageApi(None)
+        self.assertIsInstance(api, PageSettingNormalizerMixin)
         self.assertEqual(api._normalize_setting_value("command_photo_generation_max_daily", -5), 0)
         self.assertEqual(api._normalize_setting_value("command_photo_generation_max_daily", 200), 100)
 

@@ -212,7 +212,7 @@ class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
         delivered = await harness._send_media_proactive_chain(
             UMO,
             "先发出的正文",
-            extra_components=[Plain("模拟媒体组件")],
+            extra_components=[SimpleNamespace(kind="模拟媒体组件")],
         )
 
         self.assertTrue(delivered)
@@ -316,7 +316,8 @@ class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("photo_text", action)
         self.assertTrue(delivered_photo)
-        self.assertIn("随消息发送了一张图片", archived)
+        self.assertIn('<pc_history_media images="1" />', archived)
+        self.assertNotIn("随消息发送了一张图片", archived)
         self.assertIn("图片画面：窗边的自拍", archived)
 
     async def test_ambiguous_onebot_send_does_not_retry_api_alias(self) -> None:

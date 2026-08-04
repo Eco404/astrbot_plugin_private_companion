@@ -29,6 +29,7 @@ from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line, _strip_nonstandard_chat_control_tags
+from .segmented_message import component_kind, component_strategies_from_owner, plan_component_chunks
 
 
 TTS_BLOCK_PATTERN = re.compile(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", re.IGNORECASE | re.DOTALL)
@@ -1925,6 +1926,26 @@ class TtsEnhancementMixin:
     def _tts_visible_text_is_allowed_after_voice(self, text: str) -> bool:
         return self._tts_visible_text_has_chinese(text) or self._tts_visible_text_is_safe_nonlinguistic(text)
 
+    def _tts_visible_text_is_complete_before_voice(self, text: str, spoken: str) -> bool:
+        """Recognize a model-authored Chinese reply placed before its voice block."""
+        cleaned = self._sanitize_tts_visible_text(text)
+        if not cleaned or not self._tts_visible_text_has_chinese(cleaned):
+            return False
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", cleaned))
+        spoken_units = len(
+            re.findall(r"[\u3040-\u30ff\u31f0-\u31ff\u4e00-\u9fffA-Za-z0-9]", str(spoken or ""))
+        )
+        required_cjk = min(16, max(6, (spoken_units + 2) // 3))
+        if cjk_count < required_cjk:
+            return False
+        compact = re.sub(r"[\s，。！？!?,.、~～…]+$", "", cleaned)
+        incomplete_endings = (
+            "我说", "你说", "想说", "要说", "会说", "告诉", "因为", "所以",
+            "但是", "然后", "如果", "虽然", "关于", "至于", "例如", "比如",
+            "以及", "或者", "还是", "要不要", "能不能", "是否",
+        )
+        return bool(compact) and not compact.endswith(incomplete_endings)
+
     def _tts_chinese_visible_fallback_from_mixed(self, text: str) -> str:
         """Extract visible Chinese explanation from a mixed spoken-language fallback."""
         cleaned = self._sanitize_tts_visible_text(text)
@@ -2005,8 +2026,18 @@ TTS 朗读文本：
             pieces.append(normalized[pos:match.end()])
             next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
             visible_after_this_block = normalized[match.end():next_start]
-            if not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block):
-                spoken = self._normalize_tts_spoken_text(match.group(1), provider_kind=provider_kind)
+            spoken = self._normalize_tts_spoken_text(match.group(1), provider_kind=provider_kind)
+            complete_chinese_before_voice = (
+                index == 0
+                and self._tts_visible_text_is_complete_before_voice(
+                    normalized[:match.start()],
+                    spoken,
+                )
+            )
+            if (
+                not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block)
+                and not complete_chinese_before_voice
+            ):
                 visible_translation = await self._translate_tts_spoken_to_chinese(spoken, event, provider_kind=provider_kind)
                 if visible_translation:
                     separator = "\n" if not visible_after_this_block.startswith(("\n", "\r")) else ""
@@ -2178,6 +2209,9 @@ TTS 朗读文本：
         ):
             rules.append(
                 "非中文语音的结构必须完整：每个 </pc_tts> 后都要紧跟非空、自然、与该语音含义一致的中文可见正文；如果无法同时给出中文正文，就不要使用语音标签，直接用普通中文回复。"
+            )
+            rules.append(
+                "语音内容对应的中文释义只放在对应 </pc_tts> 后面；不要先把语音内容完整写成中文再附语音块，也不要在语音块前后重复同一含义。"
             )
         if emotion_rule:
             rules.append(emotion_rule)
@@ -3022,32 +3056,23 @@ TTS 朗读文本：
         return cleaned_chain
 
     def _split_tts_chain_for_ordered_send(self, chain: list[Any]) -> list[list[Any]]:
-        chunks: list[list[Any]] = []
-        current_visible: list[Any] = []
         has_record = False
         has_visible = False
         for comp in chain:
             if isinstance(comp, Record):
                 has_record = True
-                if current_visible:
-                    routing_only = all(
-                        comp_item.__class__.__name__.strip().lower()
-                        in {"at", "reply", "quote", "mention", "mentionuser", "mention_user"}
-                        for comp_item in current_visible
-                    )
-                    if routing_only:
-                        chunks.append(current_visible + [comp])
-                        current_visible = []
-                        continue
-                    chunks.append(current_visible)
-                    current_visible = []
-                chunks.append([comp])
             else:
                 has_visible = True
-                current_visible.append(comp)
-        if current_visible:
-            chunks.append(current_visible)
-        return chunks if has_record and has_visible else [chain]
+        if not has_record or not has_visible:
+            return [chain]
+        chunks, _changed, _split_changed, _full_text = plan_component_chunks(
+            chain,
+            plain_type=Plain,
+            split_text=lambda text: [text],
+            strategies=component_strategies_from_owner(self),
+            classify=component_kind,
+        )
+        return chunks or [chain]
 
     def _tts_record_first_visible_last_chain(self, chain: list[Any]) -> list[Any]:
         if not chain or not any(isinstance(comp, Record) for comp in chain):
@@ -4645,6 +4670,13 @@ Provider 规则：{emotion_rule}
                 pos = match.end()
                 continue
             source_spoken = spoken
+            complete_chinese_before_voice = (
+                index == 0
+                and self._tts_visible_text_is_complete_before_voice(
+                    normalized[:match.start()],
+                    source_spoken,
+                )
+            )
             spoken = self._sanitize_tts_spoken_text(spoken, provider_kind=provider_kind)
             if not spoken:
                 if self._tts_text_is_provider_safety_refusal(source_spoken):
@@ -4702,7 +4734,10 @@ Provider 规则：{emotion_rule}
                 ):
                     next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
                     visible_after_this_block = normalized[match.end():next_start]
-                    if not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block):
+                    if (
+                        not self._tts_visible_text_is_allowed_after_voice(visible_after_this_block)
+                        and not complete_chinese_before_voice
+                    ):
                         visible_translation = (
                             _single_line(fallback_plain, 300)
                             if fallback_plain and self._tts_visible_text_is_allowed_after_voice(fallback_plain)
@@ -4737,7 +4772,7 @@ Provider 规则：{emotion_rule}
                             "[PrivateCompanion] TTS语音组件生成失败,已隐藏朗读文本并保留后置中文: %s",
                             _single_line(spoken, 120),
                         )
-                    else:
+                    elif not complete_chinese_before_voice:
                         visible_translation = await self._translate_tts_spoken_to_chinese(
                             source_spoken,
                             event,

@@ -693,6 +693,71 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("每个 </pc_tts> 后都要紧跟非空", prompt)
         self.assertIn("直接用普通中文回复", prompt)
+        self.assertIn("不要先把语音内容完整写成中文再附语音块", prompt)
+        self.assertIn("不要在语音块前后重复同一含义", prompt)
+
+    async def test_complete_chinese_before_foreign_tts_is_not_translated_again(self):
+        harness = _TtsHarness()
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="不应追加的重复译文")
+        source = (
+            "都凌晨三点半了还来例行检查呀，今天的是浅紫色，带小蝴蝶结的那条啦。"
+            "<tts>[sleepy]もうこんな時間に抜き打ち検査？今日は薄紫だよ。</tts>"
+        )
+
+        result = await harness._ensure_tts_blocks_have_visible_chinese(
+            source,
+            object(),
+            provider_kind="generic",
+        )
+
+        self.assertEqual(source, result)
+        harness._translate_tts_spoken_to_chinese.assert_not_awaited()
+
+    async def test_short_chinese_prefix_does_not_hide_missing_tts_translation(self):
+        harness = _TtsHarness()
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="今天早点休息吧。")
+        source = "我说<tts>今日は早く休んでね。</tts>"
+
+        result = await harness._ensure_tts_blocks_have_visible_chinese(
+            source,
+            object(),
+            provider_kind="generic",
+        )
+
+        self.assertEqual(f"{source}\n今天早点休息吧。", result)
+        harness._translate_tts_spoken_to_chinese.assert_awaited_once()
+
+    async def test_tts_processing_reuses_complete_leading_chinese_as_visible_text(self):
+        harness = _TtsHarness()
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness.tts_conversion_scope = "partial"
+        harness._resolve_tts_synthesis_provider = lambda _event, provider: provider
+        harness._tts_provider_kind = lambda *_args, **_kwargs: "generic"
+        harness._tts_record_component = AsyncMock(return_value=Record(file="voice.wav"))
+        harness._tts_text_needs_language_conversion = lambda *_args, **_kwargs: False
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="不应追加的重复译文")
+        visible = "都凌晨三点半了还来例行检查呀，今天的是浅紫色，带小蝴蝶结的那条啦。"
+
+        components = await harness._process_tts_tags(
+            f"{visible}<tts>[sleepy]もうこんな時間に抜き打ち検査？今日は薄紫だよ。</tts>",
+            object(),
+            provider_settings={},
+            config={},
+        )
+
+        self.assertEqual(
+            [visible],
+            [component.text for component in components if isinstance(component, Plain)],
+        )
+        harness._translate_tts_spoken_to_chinese.assert_not_awaited()
 
     async def test_private_fast_tag_is_demoted_to_plain_text(self):
         harness = _TtsHarness()
@@ -919,14 +984,38 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([record], output)
 
-    def test_routing_component_stays_attached_to_first_voice(self):
+    def test_at_follows_text_when_voice_is_sent_separately(self):
         harness = _TtsHarness()
         chunks = harness._split_tts_chain_for_ordered_send(
             [At(qq="10001"), Record(file="voice.wav"), Plain("对应正文")]
         )
 
         self.assertEqual(
-            [["At", "Record"], ["Plain"]],
+            [["Record"], ["At", "Plain"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+
+    def test_reply_and_at_follow_text_instead_of_first_voice(self):
+        harness = _TtsHarness()
+        reply = Reply(id="quoted-message")
+        chunks = harness._split_tts_chain_for_ordered_send(
+            [reply, At(qq="10001"), Record(file="voice.wav"), Plain("对应正文")]
+        )
+
+        self.assertEqual(
+            [["Record"], ["Reply", "At", "Plain"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+
+    def test_voice_can_be_embedded_with_text(self):
+        harness = _TtsHarness()
+        harness.segmented_proactive_voice_strategy = "inline"
+        chunks = harness._split_tts_chain_for_ordered_send(
+            [Record(file="voice.wav"), Plain("对应正文")]
+        )
+
+        self.assertEqual(
+            [["Record", "Plain"]],
             [[type(item).__name__ for item in chunk] for chunk in chunks],
         )
 

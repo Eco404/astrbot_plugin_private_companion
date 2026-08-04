@@ -41,8 +41,10 @@ class CycleInjectionTests(unittest.TestCase):
         harness = _CycleInjectionHarness("处于生理期,能量偏低,想少说重话")
         prompt = harness._format_state_for_prompt(harness.data["daily_state"])
         self.assertIn("边界：这是 Bot 的拟人化/模拟状态，不是用户事实、现实证据或长期记忆", prompt)
-        self.assertIn("影响：精力稍低、回复更短更慢、措辞更谨慎，情绪感受稍敏锐", prompt)
+        self.assertIn("影响：周期会相对牵制可用精力和身体耐受，回复更短更慢、措辞更谨慎，情绪感受稍敏锐", prompt)
         self.assertIn("一定程度上降低私聊与群聊主动频率", prompt)
+        self.assertIn("心理能量是睡眠、健康、互动等因素合成后的总体可用程度", prompt)
+        self.assertIn("较高能量与敏感底色可以同时成立", prompt)
         self.assertIn("周期状态：Bot 当前的模拟身体状态处于女性生理期", prompt)
         self.assertIn("这是 Bot 自己的状态，不是用户的状态，也不是用户造成的", prompt)
         self.assertNotIn("生理期,能量", prompt)
@@ -62,6 +64,8 @@ class CycleInjectionTests(unittest.TestCase):
         self.assertIn("Bot 接近女性生理期阶段", hint)
         self.assertIn("回复更短更慢", hint)
         self.assertIn("轻微降低私聊与群聊主动频率", hint)
+        self.assertIn("心理能量是多项状态合成后的总体可用程度", hint)
+        self.assertIn("不要把两者混成同一个指标", hint)
         self.assertIn("这是 Bot 自己的模拟身体状态", hint)
 
     def test_cycle_phase_applies_moderate_private_and_group_frequency_bias(self) -> None:

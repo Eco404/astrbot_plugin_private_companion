@@ -349,6 +349,8 @@ class LlmToolActionsMixin:
         return (
             "【媒体真实性硬规则】只有本轮消息链实际包含图片，或媒体工具明确返回 `sent=true`，"
             "才能说“已经发了/给你看了/图片在上面”。其他情况必须承认未发送；人格和角色扮演不能覆盖真实发送状态。"
+            "历史里的 `<pc_history_media ... />` 只记录当时真实附件，不是聊天正文；不要复述它，也不要输出"
+            "“（发送了一张图片）”“（随消息发送了一张图片）”之类的附件占位说明。要发图只能使用真实图片组件。"
         )
 
     def _reaction_asset_library(self):
@@ -2913,8 +2915,13 @@ class LlmToolActionsMixin:
                 user_id = ""
             if user_id and callable(getattr(self, "_command_photo_quota_left", None)):
                 async with self._data_lock:
-                    user = self._get_user(user_id)
-                    if self._is_target_private_user(user_id, user):
+                    users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+                    existing_user = users.get(user_id) if isinstance(users, dict) else None
+                    if self._is_target_private_user(
+                        user_id,
+                        existing_user if isinstance(existing_user, dict) else None,
+                    ):
+                        user = self._get_user(user_id)
                         self._note_command_photo_generation_attempt(user, image_path=image_path)
                         self._save_data_sync()
         sent = False
@@ -4112,7 +4119,9 @@ class LlmToolActionsMixin:
     @staticmethod
     def _reaction_expression_lookup_cache_revision(provider: Any) -> str:
         """Return a cheap catalog revision so UI edits do not leave stale hits alive."""
-        revision_getter = getattr(provider, "lookup_revision", None)
+        revision_getter = getattr(provider, "selection_revision", None)
+        if not callable(revision_getter):
+            revision_getter = getattr(provider, "lookup_revision", None)
         if callable(revision_getter):
             try:
                 return str(revision_getter() or "")

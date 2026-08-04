@@ -52,6 +52,11 @@ class SegmentedConfigSaveTests(unittest.TestCase):
                 "segmented_proactive_min_segment_chars": 6,
                 "segmented_proactive_max_segments": 5,
                 "segmented_proactive_send_as_forward": True,
+                "segmented_proactive_voice_strategy": "separate",
+                "segmented_proactive_image_strategy": "next",
+                "segmented_proactive_at_strategy": "inline",
+                "segmented_proactive_face_strategy": "previous",
+                "segmented_proactive_other_strategy": "separate",
                 "segmented_proactive_split_mode": "words",
                 "segmented_proactive_regex": "test-regex",
                 "segmented_proactive_split_words": ["。", "！"],
@@ -93,6 +98,11 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             "segmented_proactive_min_segment_chars": 6,
             "segmented_proactive_max_segments": 5,
             "segmented_proactive_send_as_forward": True,
+            "segmented_proactive_voice_strategy": "separate",
+            "segmented_proactive_image_strategy": "next",
+            "segmented_proactive_at_strategy": "inline",
+            "segmented_proactive_face_strategy": "previous",
+            "segmented_proactive_other_strategy": "separate",
             "segmented_proactive_split_mode": "words",
             "segmented_proactive_split_words": ["。", "！", "<newline>"],
             "enable_segmented_proactive_content_cleanup": True,
@@ -127,6 +137,30 @@ class SegmentedConfigSaveTests(unittest.TestCase):
                 self.assertTrue(group_key, key)
                 self.assertEqual(reloaded[group_key][key], normalized, f"{key} grouped")
                 self.assertEqual(_flat_get(reloaded, key), normalized, f"{key} reload")
+
+    def test_component_strategy_aliases_and_invalid_values_are_normalized(self) -> None:
+        api = PrivateCompanionPageApi(SimpleNamespace(config={}))
+
+        self.assertEqual(
+            "inline",
+            api._normalize_setting_value("segmented_proactive_voice_strategy", "嵌入"),
+        )
+        self.assertEqual(
+            "previous",
+            api._normalize_setting_value("segmented_proactive_image_strategy", "跟随上段"),
+        )
+        self.assertEqual(
+            "next",
+            api._normalize_setting_value("segmented_proactive_at_strategy", "follow_next"),
+        )
+        self.assertEqual(
+            "inline",
+            api._normalize_setting_value("segmented_proactive_face_strategy", "invalid"),
+        )
+        self.assertEqual(
+            "separate",
+            api._normalize_setting_value("segmented_proactive_other_strategy", "invalid"),
+        )
 
 
 if __name__ == "__main__":

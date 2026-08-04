@@ -1697,52 +1697,62 @@ class CoreStoreMixin:
             changed = True
         return changed
 
-    def _cleanup_orphan_reaction_expression_users(self) -> bool:
-        """Remove old group-reaction placeholders from the private-user table.
-
-        Earlier reaction-expression code stored every group sender through
-        ``_get_user``.  Only records with no private route, no activity, no
-        manual ownership and the configured fallback nickname are eligible;
-        real private users and explicitly managed users stay untouched.
-        """
-        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
-        if not isinstance(users, dict) or not users:
+    def _private_user_has_private_footprint(self, user_id: str, user: dict[str, Any]) -> bool:
+        """Whether a stored user has evidence that it belongs in private chat."""
+        if not user_id or not isinstance(user, dict):
             return False
-
         try:
-            configured_targets = {str(item).strip() for item in self._configured_target_ids() if str(item).strip()}
+            configured_targets = {
+                str(item).strip()
+                for item in self._configured_target_ids()
+                if str(item).strip()
+            }
         except Exception:
             configured_targets = set()
-        default_nickname = _single_line(getattr(self, "default_nickname", ""), 40)
-        removed: list[str] = []
+        if user_id in configured_targets:
+            return True
+        if bool(user.get("enabled")) or bool(user.get("manual_enabled")) or bool(user.get("manual_disabled")):
+            return True
+        if self._normalize_private_user_role(user.get("relationship_role")) == "owner":
+            return True
 
-        text_activity_keys = (
-            "umo",
-            "bound_delivery_umo",
-            "last_user_message",
-            "last_companion_message",
-            "last_proactive_reason",
-            "last_proactive_action",
-            "last_proactive_behavior_summary",
-            "last_proactive_motive",
-            "last_proactive_skip_reason",
-        )
+        for key in ("umo", "bound_delivery_umo", "preferred_delivery_umo"):
+            route = _single_line(user.get(key), 300)
+            if route and ":GroupMessage:" not in route:
+                return True
+        routes = user.get("private_delivery_routes")
+        if isinstance(routes, (dict, list)) and routes:
+            return True
+
         numeric_activity_keys = (
             "last_seen",
             "last_activity_at",
             "last_sent",
             "last_user_message_at",
             "last_companion_message_at",
-            "last_proactive_skip_at",
             "last_reply_at",
-            "private_inbound_count",
             "last_private_seen",
             "last_private_activity_at",
             "last_private_reply_at",
+            "private_inbound_count",
             "inbound_count",
             "reply_count",
             "proactive_sent_count",
         )
+        if any(_safe_float(user.get(key), 0.0, 0.0) > 0 for key in numeric_activity_keys):
+            return True
+
+        text_activity_keys = (
+            "last_user_message",
+            "last_companion_message",
+            "last_proactive_reason",
+            "last_proactive_action",
+            "last_proactive_behavior_summary",
+            "last_proactive_motive",
+        )
+        if any(bool(_single_line(user.get(key), 240)) for key in text_activity_keys):
+            return True
+
         structured_activity_keys = (
             "companion_memory",
             "expression_profile",
@@ -1750,7 +1760,6 @@ class CoreStoreMixin:
             "relationship_state",
             "persona_relationship",
             "dialogue_episodes",
-            "recent_group_messages",
             "open_loops",
             "action_preferences",
             "action_consequences",
@@ -1761,10 +1770,8 @@ class CoreStoreMixin:
             "llm_timer_event",
             "planned_event_chain",
             "greetings_sent",
+            "behavior_habits",
         )
-
-        def has_text(value: Any) -> bool:
-            return bool(_single_line(value, 240))
 
         def has_structured_activity(value: Any) -> bool:
             if isinstance(value, dict):
@@ -1775,35 +1782,51 @@ class CoreStoreMixin:
                 return bool(value.strip())
             return value not in (None, False, 0)
 
+        if any(has_structured_activity(user.get(key)) for key in structured_activity_keys):
+            return True
+        aliases = user.get("alias_user_ids")
+        if isinstance(aliases, list) and any(_single_line(item, 160) for item in aliases):
+            return True
+        if _safe_float(user.get("relationship_score"), 0.0) != 0:
+            return True
+
+        default_nickname = _single_line(getattr(self, "default_nickname", ""), 40)
+        nickname = _single_line(user.get("nickname"), 40)
+        if nickname and nickname != default_nickname:
+            return True
+        default_style = _single_line(getattr(self, "default_style", ""), 120)
+        style = _single_line(user.get("style"), 120)
+        return bool(style and style != default_style)
+
+    def _cleanup_orphan_reaction_expression_users(self) -> bool:
+        """Remove group-only placeholders from the private-user table.
+
+        Old group observation and reaction paths could create a user record and
+        then attach transient group caches to it.  Those caches are not private
+        chat evidence; explicitly managed users and records with real private
+        activity remain untouched.
+        """
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(users, dict) or not users:
+            return False
+        removed: list[str] = []
+
         for raw_user_id, user in list(users.items()):
             user_id = self._canonical_private_user_id(str(raw_user_id or "").strip())
             if not user_id or not isinstance(user, dict):
                 continue
-            if user_id in configured_targets or self._is_bot_self_user_id(user_id):
+            if self._is_bot_self_user_id(user_id):
                 continue
-            if bool(user.get("enabled")) or bool(user.get("manual_enabled")) or bool(user.get("manual_disabled")):
-                continue
-            if self._private_user_role(user, user_id) == "owner":
-                continue
-            nickname = _single_line(user.get("nickname"), 40)
-            if nickname and default_nickname and nickname != default_nickname:
-                continue
-            if any(has_text(user.get(key)) for key in text_activity_keys):
-                continue
-            if any(_safe_float(user.get(key), 0.0, 0.0) > 0 for key in numeric_activity_keys):
-                continue
-            if any(has_structured_activity(user.get(key)) for key in structured_activity_keys):
-                continue
-            aliases = user.get("alias_user_ids")
-            if isinstance(aliases, list) and any(_single_line(item, 160) for item in aliases):
+            if self._private_user_has_private_footprint(user_id, user):
                 continue
             users.pop(raw_user_id, None)
             removed.append(user_id)
 
         if removed:
             logger.info(
-                "[PrivateCompanion] 已清理群聊反应遗留的私聊占位记录: count=%s",
+                "[PrivateCompanion] 已清理群聊链路遗留的私聊占位记录: count=%s ids=%s",
                 len(removed),
+                ",".join(removed[:12]),
             )
             return True
         return False

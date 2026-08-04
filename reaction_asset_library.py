@@ -129,6 +129,7 @@ class ReactionAssetLibrary:
         self._lookup_revision_value = ""
         self._lookup_has_enabled_assets = False
         self._lookup_revision_checked_at = 0.0
+        self._selection_revision = 0
         self.images_dir.mkdir(parents=True, exist_ok=True)
 
     def _empty_catalog(self) -> dict[str, Any]:
@@ -295,9 +296,9 @@ class ReactionAssetLibrary:
     def lookup_revision(self) -> str:
         """Return a stable revision for fields that affect runtime matching.
 
-        Usage counters are intentionally excluded: marking an image as used must
-        not invalidate an otherwise reusable lookup result, while edits to name,
-        tags, enabled state, scopes, or the backing file should do so.
+        Usage counters are intentionally excluded from this catalog revision.
+        ``selection_revision`` layers an in-process usage generation over it,
+        while edits to matching fields or backing files change this base value.
         """
         with self._lock:
             now = time.monotonic()
@@ -356,6 +357,11 @@ class ReactionAssetLibrary:
             self._lookup_has_enabled_assets = has_enabled_assets
             self._lookup_revision_checked_at = now
             return revision
+
+    def selection_revision(self) -> str:
+        """Include in-process usage changes in reaction selection cache keys."""
+        with self._lock:
+            return f"{self.lookup_revision()}:usage-{self._selection_revision}"
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -926,7 +932,8 @@ class ReactionAssetLibrary:
             candidate_queries = _query_list(candidate_text, limit=8)
         with self._lock:
             candidates = [self._normalize_item(raw) for raw in self._load()["items"]]
-        ranked: list[tuple[float, dict[str, Any], Path, list[str]]] = []
+        ranked: list[tuple[float, float, dict[str, Any], Path, list[str]]] = []
+        now = time.time()
         for item in candidates:
             path = self._path_for(item)
             if not item["enabled"] or scope_text not in item["scopes"] or path is None or not path.is_file():
@@ -968,12 +975,37 @@ class ReactionAssetLibrary:
                     score += 0.08
             if not query_tokens and not query_text:
                 score += 0.1
-            score += min(item["usage_count"], 20) * 0.002
-            ranked.append((score, item, path, matched_phrases))
+            relevance_score = score
+            diversity_penalty = min(item["usage_count"], 20) * 0.004
+            last_used_at = _safe_float(item.get("last_used_at"), 0.0, 0.0)
+            if last_used_at > 0:
+                age_seconds = max(0.0, now - last_used_at)
+                if age_seconds < 6 * 3600:
+                    diversity_penalty += 1.1 * (1.0 - age_seconds / (6 * 3600))
+                elif age_seconds < 24 * 3600:
+                    diversity_penalty += 0.18 * (
+                        1.0 - (age_seconds - 6 * 3600) / (18 * 3600)
+                    )
+            ranked.append(
+                (
+                    relevance_score - diversity_penalty,
+                    relevance_score,
+                    item,
+                    path,
+                    matched_phrases,
+                )
+            )
         if not ranked:
             return None
-        ranked.sort(key=lambda row: (row[0], row[1]["updated_at"]), reverse=True)
-        score, item, path, matched_phrases = ranked[0]
+        best_relevance = max(row[1] for row in ranked)
+        relevance_floor = best_relevance - 0.75
+        if query_tokens:
+            relevance_floor = max(0.28, relevance_floor)
+        eligible = [row for row in ranked if row[1] >= relevance_floor]
+        if not eligible:
+            return None
+        eligible.sort(key=lambda row: (row[0], row[2]["updated_at"]), reverse=True)
+        _selection_score, score, item, path, matched_phrases = eligible[0]
         # A weak lexical match is not enough to force an image into the conversation.
         if query_tokens and score < 0.28:
             return None
@@ -1018,6 +1050,7 @@ class ReactionAssetLibrary:
                 break
             if changed:
                 self._save(catalog, lookup_changed=False)
+                self._selection_revision += 1
             return changed
 
     def rescan(self) -> dict[str, Any]:

@@ -414,9 +414,12 @@ class GroupImageUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('enable_group_image_wakeup: "图片命中唤醒 Bot"', script)
         self.assertIn('group_image: "群聊图片"', script)
         self.assertIn('group_image_vision: "群聊图片识别"', script)
-        main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-        self.assertIn('image_wakeup = await image_wakeup_getter(event, sender_id=sender_id)', main_source)
-        self.assertIn('"trigger": "group_wakeup_image_word"', main_source)
+        message_pipeline_source = (ROOT / "message_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'image_wakeup = await image_wakeup_getter(event, sender_id=sender_id)',
+            message_pipeline_source,
+        )
+        self.assertIn('"trigger": "group_wakeup_image_word"', message_pipeline_source)
 
 
 if __name__ == "__main__":

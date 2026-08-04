@@ -114,6 +114,7 @@ from .dreaming import (
 )
 from .helpers import (
     _date_key,
+    _format_history_media_marker,
     _normalize_outbound_punctuation_flow,
     _normalize_photo_subject_owner,
     _now_ts,
@@ -145,6 +146,11 @@ from .planning import (
     pick_detail_segment,
 )
 from .scene_context import infer_companion_scene_category
+from .segmented_message import (
+    component_kind,
+    component_strategies_from_owner,
+    plan_component_chunks,
+)
 from .token_budget import _looks_like_upstream_llm_error_response
 from .reaction_expression import (
     normalize_reaction_expression_intent,
@@ -4827,6 +4833,7 @@ Rules:
 - Relative dates such as yesterday must be supported by the recent conversation or an explicitly dated reliable source.
 - Preserve real media context. Do not claim an image exists when none is attached.
 - A rewrite must be shorter or similarly sized and must not add new factual claims.
+- A rewrite must preserve the candidate's concrete communicative purpose. Never collapse a meaningful reminder, question, warning, or check-in into a standalone filler such as “嗯。”, “哦。”, “唔。”, or “诶。”. If no complete rewrite is better, choose send and keep the candidate unchanged.
 - If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
 - If the candidate or any model output contains a Provider/API error, policy refusal, sensitive-word notice, policy URL, or internal diagnostic, choose drop with an empty text; never translate, quote, or polish it.
 - When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.
@@ -4925,6 +4932,20 @@ Output:
                 has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
             )
             reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
+            if re.fullmatch(
+                r"[嗯哦唔呃诶欸啊呀哎噢喔哈]+[。！？!?…~～]*",
+                re.sub(r"\s+", "", reviewed_text),
+            ):
+                logger.warning(
+                    "[PrivateCompanion] 主动发送前复核改写退化为单独语气词，已保留原候选: before=%s after=%s",
+                    _single_line(text, 120),
+                    _single_line(reviewed_text, 40),
+                )
+                return {
+                    "decision": "send",
+                    "text": "",
+                    "reason": "复核改写丢失原消息用途，保留完整候选",
+                }
             reviewed_text, repaired_address = self._repair_proactive_recipient_address(
                 reviewed_text,
                 user,
@@ -17929,24 +17950,31 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         image_delivered = False
         extra_components_delivered = 0
         primary_complete = False
+        failure_note = ""
 
         def outcome(*, note: str = "") -> _ProactiveSendOutcome:
             delivered_text = "\n".join(item for item in delivered_segments if item).strip()
             delivered = bool(delivered_text or image_delivered or extra_components_delivered)
+            resolved_note = _single_line(note or failure_note, 240)
             return _ProactiveSendOutcome(
                 delivered=delivered,
-                complete=bool(delivered and complete and not note),
+                complete=bool(delivered and complete and not resolved_note),
                 delivered_text=delivered_text,
                 image_delivered=image_delivered,
                 extra_components_delivered=extra_components_delivered,
-                note=_single_line(note, 240),
+                note=resolved_note,
                 primary_complete=primary_complete,
             )
 
-        has_prebuilt_voice = any(isinstance(component, Record) for component in (extra_components or []))
+        outbound_components = [
+            component for component in (extra_components or []) if component is not None
+        ]
+        has_prebuilt_voice = any(
+            isinstance(component, Record) for component in outbound_components
+        )
         if self._contains_inline_image_tag(text):
             image_path = ""
-            extra_components = []
+            outbound_components = []
         if text:
             await self._maybe_send_input_status(umo, text)
         if media_delivery_mode == "same_message":
@@ -17975,7 +18003,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             combined_chain = self._build_outbound_chain(
                 text,
                 image_path,
-                extra_components=extra_components,
+                extra_components=outbound_components,
             )
             combined_chain = self._with_optional_reply(
                 combined_chain,
@@ -17985,7 +18013,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             if sent:
                 delivered_segments.append(text)
                 image_delivered = bool(image_path and os.path.exists(image_path))
-                extra_components_delivered = len(extra_components or [])
+                extra_components_delivered = len(outbound_components)
                 primary_complete = True
             else:
                 complete = False
@@ -18014,119 +18042,208 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 len(segments),
                 [len(segment) for segment in segments],
             )
-        if len(segments) <= 1:
-            outbound_text = segments[0] if segments else ""
-            if quote_message_id and self._quote_skip_reason_for_short_reply(outbound_text):
-                quote_message_id = ""
-            if outbound_text:
-                recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
-                if recalled_message_id:
-                    logger.info("[PrivateCompanion] 触发消息已撤回，取消主动文本发送: umo=%s message_id=%s", umo, recalled_message_id)
-                    complete = False
-                    return outcome(note="触发消息已撤回")
-                sent = await self._send_chain_components(
-                    umo,
-                    self._with_optional_reply(
-                        [
-                            self._proactive_plain_segment_component(
-                                outbound_text,
-                                full_text=text,
-                                index=0,
-                                count=1,
-                                suppress_tts=has_prebuilt_voice,
-                            )
-                        ],
-                        quote_message_id,
-                    ),
-                )
-                if sent:
-                    delivered_segments.append(outbound_text)
-                else:
-                    complete = False
-                quote_message_id = ""
-        else:
-            recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
-            if recalled_message_id:
-                logger.info("[PrivateCompanion] 触发消息已撤回，取消主动合并分段发送: umo=%s message_id=%s", umo, recalled_message_id)
-                complete = False
-                return outcome(note="触发消息已撤回")
-            if await self._send_segmented_proactive_forward_message(umo, segments, source="proactive_media_text"):
-                delivered_segments.extend(segments)
-                quote_message_id = ""
+        if quote_message_id and segments and self._quote_skip_reason_for_short_reply(segments[0]):
+            quote_message_id = ""
+
+        image_exists = bool(image_path and os.path.exists(image_path))
+        path_image_component: Any | None = None
+        if image_exists:
+            image_chain = self._build_outbound_chain("", image_path)
+            path_image_component = next(
+                (component for component in image_chain if isinstance(component, Image)),
+                None,
+            )
+            image_exists = path_image_component is not None
+
+        leading_components: list[Any] = []
+        trailing_components: list[Any] = []
+        for component in outbound_components:
+            if component_kind(component) in {"voice", "at", "reply"}:
+                leading_components.append(component)
             else:
-                for index, segment in enumerate(segments):
-                    if index == 0 and quote_message_id and self._quote_skip_reason_for_short_reply(segment):
-                        quote_message_id = ""
-                    recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
-                    if recalled_message_id:
-                        logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
-                        complete = False
-                        return outcome(note=f"第 {index + 1} 段发送前触发消息已撤回")
-                    segment_comp = self._proactive_plain_segment_component(
-                        segment,
-                        full_text=text,
-                        index=index,
-                        count=len(segments),
-                        suppress_tts=has_prebuilt_voice,
+                trailing_components.append(component)
+
+        source_chain: list[Any] = list(leading_components)
+        if segments:
+            source_chain.append(Plain(text))
+        source_chain.extend(trailing_components)
+        if path_image_component is not None:
+            source_chain.append(path_image_component)
+        if quote_message_id:
+            source_chain = self._with_optional_reply(source_chain, quote_message_id)
+
+        strategies = component_strategies_from_owner(self)
+        strategies["reaction"] = (
+            "inline" if media_delivery_mode == "same_message" else "separate"
+        )
+        chunks, _changed, _split_changed, _full_text = plan_component_chunks(
+            source_chain,
+            plain_type=Plain,
+            split_text=lambda _value: list(segments),
+            strategies=strategies,
+            classify=component_kind,
+        )
+
+        primary_components: list[Plain] = []
+        for chunk in chunks:
+            for component_index, component in enumerate(chunk):
+                if not isinstance(component, Plain) or len(primary_components) >= len(segments):
+                    continue
+                segment_index = len(primary_components)
+                segment_component = self._proactive_plain_segment_component(
+                    segments[segment_index],
+                    full_text=text,
+                    index=segment_index,
+                    count=len(segments),
+                    suppress_tts=has_prebuilt_voice,
+                )
+                try:
+                    object.__setattr__(
+                        segment_component,
+                        "_private_companion_proactive_primary_text",
+                        True,
                     )
-                    chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
-                    try:
-                        sent = await self._send_chain_components(umo, chain)
-                    except Exception as exc:
-                        if not delivered_segments:
-                            raise
-                        complete = False
-                        logger.warning(
-                            "[PrivateCompanion] 主动媒体文本部分送达后后续分段失败，不再整条重试: umo=%s index=%s error=%s",
-                            _single_line(umo, 140),
-                            index + 1,
-                            _single_line(exc, 180),
-                        )
-                        return outcome(note=f"第 {index + 1} 段发送失败：{_single_line(exc, 160)}")
-                    if sent:
-                        delivered_segments.append(segment)
-                    else:
-                        complete = False
-                    quote_message_id = ""
-                    if index < len(segments) - 1:
-                        await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
-        primary_complete = bool(complete and delivered_segments)
-        has_media = bool((extra_components or []) or (image_path and os.path.exists(image_path)))
-        if require_complete_text_before_media and has_media and (
-            not complete or not delivered_segments
-        ):
-            return outcome(note="主动正文未完整送达，已跳过表情图片")
+                except Exception:
+                    pass
+                chunk[component_index] = segment_component
+                primary_components.append(segment_component)
+
+        has_media = bool(outbound_components or image_exists)
         if has_media:
             logger.info(
-                "[PrivateCompanion] 主动媒体发送: text_segments=%s image=%s extra_components=%s",
+                "[PrivateCompanion] 主动媒体已按组件策略规划: text_segments=%s chunks=%s image=%s extra_components=%s strategies=%s",
                 len(segments),
-                bool(image_path and os.path.exists(image_path)),
-                len(extra_components or []),
+                len(chunks),
+                image_exists,
+                len(outbound_components),
+                strategies,
             )
-            recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
-            if recalled_message_id:
-                logger.info("[PrivateCompanion] 触发消息已撤回，取消主动媒体发送: umo=%s message_id=%s", umo, recalled_message_id)
+        if not chunks:
+            complete = False
+            return outcome(note="主动正文与媒体均为空")
+
+        remaining_extra_components = list(outbound_components)
+        delivered_primary_count = 0
+
+        def chunk_primary_texts(chunk: list[Any]) -> list[str]:
+            return [
+                str(getattr(component, "text", "") or "").strip()
+                for component in chunk
+                if isinstance(component, Plain)
+                and bool(
+                    getattr(
+                        component,
+                        "_private_companion_proactive_primary_text",
+                        False,
+                    )
+                )
+                and str(getattr(component, "text", "") or "").strip()
+            ]
+
+        for chunk_index, chunk in enumerate(chunks):
+            primary_texts = chunk_primary_texts(chunk)
+            chunk_has_reaction = any(
+                component_kind(component) == "reaction" for component in chunk
+            )
+            primary_complete = bool(
+                segments and delivered_primary_count >= len(segments)
+            )
+            if (
+                require_complete_text_before_media
+                and chunk_has_reaction
+                and not primary_complete
+            ):
                 complete = False
-                return outcome(note="媒体发送前触发消息已撤回")
-            media_chain = self._build_outbound_chain("", image_path, extra_components=extra_components)
-            media_chain = self._with_optional_reply(media_chain, quote_message_id)
+                return outcome(note="主动正文未完整送达，已跳过表情图片")
+
+            recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(
+                trigger_message_id
+            )
+            if recalled_message_id:
+                logger.info(
+                    "[PrivateCompanion] 触发消息已撤回，停止主动组件发送: umo=%s message_id=%s chunk=%s/%s",
+                    umo,
+                    recalled_message_id,
+                    chunk_index + 1,
+                    len(chunks),
+                )
+                complete = False
+                return outcome(note=f"第 {chunk_index + 1} 条发送前触发消息已撤回")
+
             try:
-                media_sent = await self._send_chain_components(umo, media_chain)
+                sent = await self._send_chain_components(umo, chunk)
             except Exception as exc:
-                if not delivered_segments:
+                has_delivered_content = bool(
+                    delivered_segments or image_delivered or extra_components_delivered
+                )
+                has_future_primary = any(
+                    chunk_primary_texts(candidate)
+                    for candidate in chunks[chunk_index + 1 :]
+                )
+                if not primary_texts and has_future_primary:
+                    complete = False
+                    failure_note = failure_note or (
+                        f"第 {chunk_index + 1} 条组件发送失败：{_single_line(exc, 160)}"
+                    )
+                    logger.warning(
+                        "[PrivateCompanion] 主动前置组件发送失败，继续发送正文: umo=%s chunk=%s error=%s",
+                        _single_line(umo, 140),
+                        chunk_index + 1,
+                        _single_line(exc, 180),
+                    )
+                    continue
+                if not has_delivered_content:
                     raise
                 complete = False
                 logger.warning(
-                    "[PrivateCompanion] 主动文本已送达但媒体发送失败，不再重复文本: umo=%s error=%s",
+                    "[PrivateCompanion] 主动组件部分送达后后续发送失败，不再整条重试: umo=%s chunk=%s error=%s",
                     _single_line(umo, 140),
+                    chunk_index + 1,
                     _single_line(exc, 180),
                 )
-                return outcome(note=f"媒体发送失败：{_single_line(exc, 160)}")
-            if media_sent:
-                image_delivered = bool(image_path and os.path.exists(image_path))
-                extra_components_delivered = len(extra_components or [])
-            else:
+                return outcome(
+                    note=f"第 {chunk_index + 1} 条发送失败：{_single_line(exc, 160)}"
+                )
+
+            if not sent:
                 complete = False
+                failure_note = failure_note or f"第 {chunk_index + 1} 条未被平台接受"
+                continue
+
+            if primary_texts:
+                delivered_segments.extend(primary_texts)
+                delivered_primary_count += len(primary_texts)
+            if path_image_component is not None and any(
+                component is path_image_component for component in chunk
+            ):
+                image_delivered = True
+            for sent_component in chunk:
+                matched_index = next(
+                    (
+                        index
+                        for index, candidate in enumerate(remaining_extra_components)
+                        if sent_component is candidate
+                    ),
+                    -1,
+                )
+                if matched_index >= 0:
+                    remaining_extra_components.pop(matched_index)
+                    extra_components_delivered += 1
+
+            primary_complete = bool(
+                segments and delivered_primary_count >= len(segments)
+            )
+            if primary_texts and any(
+                chunk_primary_texts(candidate)
+                for candidate in chunks[chunk_index + 1 :]
+            ):
+                await asyncio.sleep(
+                    await self._calc_segmented_proactive_interval(primary_texts[-1])
+                )
+
+        primary_complete = bool(
+            segments and delivered_primary_count >= len(segments)
+        )
         return outcome()
 
     @staticmethod
@@ -18336,6 +18453,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 text,
             )
             if reaction_component is not None:
+                try:
+                    object.__setattr__(
+                        reaction_component,
+                        "_private_companion_reaction_expression",
+                        True,
+                    )
+                except Exception:
+                    pass
                 if isinstance(reaction_pending, dict):
                     reaction_pending["delivery_mode"] = reaction_delivery_mode
                 if reaction_delivery_mode == "separate_before":
@@ -18619,8 +18744,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         original_is_receipt = self._is_proactive_delivery_receipt_text(text)
         message_text = self._visible_text_without_tts_reading(text, limit=1000)
         attachment_notes: list[str] = []
+        history_image_count = 0
+        history_record_count = 0
         if image_path:
-            attachment_notes.append("随消息发送了一张图片")
+            history_image_count += 1
             photo_caption = ""
             if "：" in str(action_summary or "") or ":" in str(action_summary or ""):
                 photo_caption = _single_line(re.split(r"[:：]", str(action_summary), maxsplit=1)[-1], 220)
@@ -18639,11 +18766,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     if note:
                         tts_notes.append(note)
             if image_components:
-                attachment_notes.append(
-                    "随消息发送了一张图片"
-                    if len(image_components) == 1
-                    else f"随消息发送了 {len(image_components)} 张图片"
-                )
+                history_image_count += len(image_components)
                 photo_caption = ""
                 if "：" in str(action_summary or "") or ":" in str(action_summary or ""):
                     photo_caption = _single_line(re.split(r"[:：]", str(action_summary), maxsplit=1)[-1], 220)
@@ -18655,12 +18778,19 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             if tts_notes:
                 attachment_notes.extend(tts_notes[:3])
             record_count = sum(1 for comp in extra_components if isinstance(comp, Record))
+            history_record_count += record_count
             other_count = len(extra_components) - len(image_components) - record_count
             if other_count > 0:
                 attachment_notes.append(f"随消息发送了 {other_count} 个附加消息组件")
         if attachment_notes:
             suffix = "（" + ",".join(attachment_notes) + "）"
             message_text = f"{message_text}{suffix}" if message_text else suffix
+        media_marker = _format_history_media_marker(
+            images=history_image_count,
+            records=history_record_count,
+        )
+        if media_marker:
+            message_text = f"{message_text}\n{media_marker}" if message_text else media_marker
         if message_text:
             return message_text
         if original_is_receipt:

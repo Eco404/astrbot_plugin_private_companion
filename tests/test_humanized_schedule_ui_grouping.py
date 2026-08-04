@@ -12,6 +12,7 @@ class HumanizedScheduleUiGroupingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
+        cls.index = (ROOT / "pages" / "陪伴面板" / "index.html").read_text(encoding="utf-8")
 
     def test_schedule_switches_are_embedded_in_humanized_life(self) -> None:
         self.assertIn('enable_humanized_states: ["拟人生活状态"', self.script)
@@ -93,6 +94,12 @@ class HumanizedScheduleUiGroupingTests(unittest.TestCase):
         for key in ("enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity"):
             self.assertIn(f'"{key}",', self.script)
         self.assertIn("preserveFeatureParamDraft();", self.script)
+
+    def test_energy_and_mood_are_presented_as_independent_dimensions(self) -> None:
+        self.assertIn('id="lifeEnergy"', self.index)
+        self.assertIn('id="lifeMood"', self.index)
+        self.assertIn('$("#lifeEnergy")', self.script)
+        self.assertIn('$("#lifeMood")', self.script)
 
 
 if __name__ == "__main__":

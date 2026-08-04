@@ -181,6 +181,38 @@ class ReactionAssetLibraryTests(unittest.TestCase):
         self.assertIn("捂脸", result["candidate_queries"])
         self.assertIn("捂脸", result["matched_queries"])
 
+    def test_find_softly_rotates_recently_used_equally_relevant_assets(self) -> None:
+        first = self.library.import_blobs(
+            [("开心一号.png", PNG_BYTES)],
+            metadata={"tags": ["开心", "回应"], "scopes": ["private"]},
+        )["items"][0]
+        second = self.library.import_blobs(
+            [("开心二号.png", PNG_BYTES + b"\x00")],
+            metadata={"tags": ["开心", "回应"], "scopes": ["private"]},
+        )["items"][0]
+
+        initial = self.library.find("开心回应", scope="private")
+        self.assertIsNotNone(initial)
+        self.assertTrue(self.library.mark_used(initial["image_id"]))
+        rotated = self.library.find("开心回应", scope="private")
+
+        self.assertIsNotNone(rotated)
+        self.assertNotEqual(initial["image_id"], rotated["image_id"])
+        self.assertEqual(
+            {f"pc-local:{first['id']}", f"pc-local:{second['id']}"},
+            {initial["image_id"], rotated["image_id"]},
+        )
+
+    def test_selection_revision_changes_after_delivery_without_changing_catalog_revision(self) -> None:
+        item = self.library.import_blobs([("开心.png", PNG_BYTES)])["items"][0]
+        catalog_revision = self.library.lookup_revision()
+        selection_revision = self.library.selection_revision()
+
+        self.assertTrue(self.library.mark_used(item["id"]))
+
+        self.assertEqual(catalog_revision, self.library.lookup_revision())
+        self.assertNotEqual(selection_revision, self.library.selection_revision())
+
     def test_lookup_revision_reuses_hot_cache_and_tracks_matching_edits(self) -> None:
         item = self.library.import_blobs(
             [("开心.png", PNG_BYTES)],

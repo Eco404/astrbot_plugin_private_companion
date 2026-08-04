@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.event_dispatch import EventDispatchMixin
+from astrbot_plugin_private_companion.proactive import ProactiveMixin
 from astrbot_plugin_private_companion.user_rest_gate import UserRestGateMixin
 
 
@@ -29,6 +30,21 @@ class RestHarness(UserRestGateMixin, EventDispatchMixin):
 class UserRestGroupActivityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = RestHarness()
+
+    def test_proactive_mixin_reuses_the_canonical_rest_gate(self) -> None:
+        self.assertTrue(issubclass(ProactiveMixin, UserRestGateMixin))
+        for method_name in (
+            "_apply_user_rest_silence_from_message",
+            "_detect_user_rest_silence_until",
+            "_next_user_rest_morning_ts",
+            "_user_rest_signal_should_block_current_reply",
+            "_user_rest_silence_until",
+            "_user_rest_text_is_meta_discussion",
+            "_user_rest_text_is_quoted_or_report",
+        ):
+            with self.subTest(method=method_name):
+                self.assertNotIn(method_name, ProactiveMixin.__dict__)
+                self.assertIs(getattr(ProactiveMixin, method_name), getattr(UserRestGateMixin, method_name))
 
     def test_group_activity_after_sleep_signal_clears_rest(self) -> None:
         user = {

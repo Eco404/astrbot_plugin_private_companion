@@ -137,6 +137,17 @@ class _SourceCorruptingReviewHarness(_ProactivePersonaHarness):
         return await super()._llm_call(prompt, **kwargs)
 
 
+class _DegenerateReviewHarness(_ProactivePersonaHarness):
+    async def _llm_call(self, prompt, **kwargs):
+        self.captured_prompt = prompt
+        if kwargs.get("task") == "proactive_send_review":
+            return json.dumps(
+                {"decision": "rewrite", "text": "哦。", "reason": "更简短"},
+                ensure_ascii=False,
+            )
+        return await super()._llm_call(prompt, **kwargs)
+
+
 class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_persona_cache_is_isolated_by_session(self):
         harness = _PersonaCacheHarness()
@@ -193,6 +204,23 @@ class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("send", result["decision"])
         self.assertIn("用户刚刚在控制面板明确发起了一次主动消息链路测试", harness.captured_prompt)
         self.assertIn("Do not drop solely because it is late", harness.captured_prompt)
+
+    async def test_final_review_keeps_complete_candidate_when_rewrite_becomes_filler(self):
+        harness = _DegenerateReviewHarness()
+        original = "暴雨预警又升级啦，你已经平安到家了吗？"
+
+        result = await harness._review_proactive_message_send_decision(
+            {"umo": "session-weather", "nickname": "小林", "user_id": "1"},
+            original,
+            reason="weather_alert",
+            action="message",
+            motive="确认回家安全",
+            topic="暴雨预警升级",
+        )
+
+        self.assertEqual("send", result["decision"])
+        self.assertEqual("", result["text"])
+        self.assertIn("Never collapse", harness.captured_prompt)
 
     async def test_final_review_cannot_replace_verified_bilibili_link(self):
         harness = _SourceCorruptingReviewHarness()

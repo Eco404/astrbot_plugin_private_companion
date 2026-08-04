@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from astrbot.api.message_components import Plain, Record
+from astrbot.api.message_components import At, Image, Plain, Record
 
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
@@ -61,6 +61,10 @@ class _MediaSendHarness(ProactiveMessageMixin):
         self.sent.append(chain)
         return True
 
+    @staticmethod
+    async def _calc_segmented_proactive_interval(_segment):
+        return 0.0
+
 
 class ProactiveVoiceTtsDedupTests(unittest.IsolatedAsyncioTestCase):
     async def test_prebuilt_voice_suppresses_tts_for_companion_text(self):
@@ -76,10 +80,75 @@ class ProactiveVoiceTtsDedupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(outcome)
         self.assertTrue(outcome.complete)
         self.assertEqual(2, len(harness.sent))
-        text_component = harness.sent[0][0]
+        self.assertIs(record, harness.sent[0][0])
+        text_component = harness.sent[1][0]
         self.assertIsInstance(text_component, Plain)
         self.assertTrue(text_component._private_companion_skip_tts_enhancement)
-        self.assertIs(record, harness.sent[1][0])
+
+    async def test_inline_prebuilt_voice_shares_the_text_message_chain(self):
+        harness = _MediaSendHarness()
+        harness.segmented_proactive_voice_strategy = "inline"
+        record = Record(file="voice.wav")
+
+        outcome = await harness._send_media_proactive_chain(
+            "default:FriendMessage:10001",
+            "这是主动语音对应的可见正文。",
+            extra_components=[record],
+        )
+
+        self.assertTrue(outcome.complete)
+        self.assertEqual(1, len(harness.sent))
+        self.assertEqual(
+            ["Record", "Plain"],
+            [type(component).__name__ for component in harness.sent[0]],
+        )
+        self.assertTrue(
+            harness.sent[0][1]._private_companion_skip_tts_enhancement
+        )
+        self.assertEqual(1, outcome.extra_components_delivered)
+
+    async def test_proactive_image_respects_separate_and_inline_strategies(self):
+        for strategy, expected in (
+            ("separate", [["Plain"], ["Image"]]),
+            ("inline", [["Plain", "Image"]]),
+        ):
+            with self.subTest(strategy=strategy):
+                harness = _MediaSendHarness()
+                harness.segmented_proactive_image_strategy = strategy
+                image = Image(file="photo.png")
+
+                outcome = await harness._send_media_proactive_chain(
+                    "default:FriendMessage:10001",
+                    "图片说明。",
+                    extra_components=[image],
+                )
+
+                self.assertTrue(outcome.complete)
+                self.assertEqual(
+                    expected,
+                    [
+                        [type(component).__name__ for component in chain]
+                        for chain in harness.sent
+                    ],
+                )
+                self.assertEqual(1, outcome.extra_components_delivered)
+
+    async def test_proactive_at_defaults_to_the_text_message_chain(self):
+        harness = _MediaSendHarness()
+        mention = At(qq="10001")
+
+        outcome = await harness._send_media_proactive_chain(
+            "default:GroupMessage:20001",
+            "请看这里。",
+            extra_components=[mention],
+        )
+
+        self.assertTrue(outcome.complete)
+        self.assertEqual(1, len(harness.sent))
+        self.assertEqual(
+            ["At", "Plain"],
+            [type(component).__name__ for component in harness.sent[0]],
+        )
 
     async def test_tts_hook_does_not_convert_marked_proactive_text(self):
         harness = _TtsHarness()

@@ -441,6 +441,7 @@ def _text_looks_garbled(text: Any) -> bool:
 def _strip_internal_message_blocks(text: Any) -> str:
     normalized = str(text or "")
     normalized = _strip_group_member_safety_markers(normalized)
+    normalized = _strip_history_media_markers(normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
@@ -450,6 +451,41 @@ def _strip_internal_message_blocks(text: Any) -> str:
     normalized = _strip_nonstandard_chat_control_tags(normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _format_history_media_marker(*, images: int = 0, records: int = 0) -> str:
+    """Encode delivered media as context metadata instead of chat-like prose."""
+    image_count = _safe_int(images, 0, 0, 999)
+    record_count = _safe_int(records, 0, 0, 999)
+    attributes: list[str] = []
+    if image_count:
+        attributes.append(f'images="{image_count}"')
+    if record_count:
+        attributes.append(f'records="{record_count}"')
+    if not attributes:
+        return ""
+    return f"<pc_history_media {' '.join(attributes)} />"
+
+
+def _strip_history_media_markers(text: Any) -> str:
+    """Remove internal media metadata and legacy chat-like attachment notes."""
+    normalized = str(text or "")
+    normalized = re.sub(
+        r"<pc_history_media\b[^>]*>(?:[\s\S]*?</pc_history_media\s*>)?",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"[（(]\s*(?:(?:随消息)?发送(?:了)?\s*(?:(?:一张|\d+\s*张)\s*图片|"
+        r"(?:一条|\d+\s*条)\s*语音)\s*(?:[，,]\s*)?)+[）)]",
+        "",
+        normalized,
+    )
+    normalized = re.sub(r"[ \t]+([，,。！？!?；;：:、~～…])", r"\1", normalized)
+    normalized = re.sub(r"\n[ \t]+", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
 
 
 _CHAT_SELF_CLOSING_TAG_ALLOWLIST = (
@@ -535,6 +571,7 @@ def _strip_outbound_control_blocks(
 ) -> str:
     normalized = str(text or "")
     normalized = _strip_group_member_safety_markers(normalized)
+    normalized = _strip_history_media_markers(normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     if preserve_private_tts_tokens and allowed_private_tts_tokens:
         allowed = {str(token) for token in allowed_private_tts_tokens if str(token)}

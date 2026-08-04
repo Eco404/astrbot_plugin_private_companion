@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import json
 import re
 from html import unescape
 from html.parser import HTMLParser
 from types import SimpleNamespace
 from typing import Any
+
+from .qzone_json import load_qzone_json
 
 
 class _QzoneFeedHtmlParser(HTMLParser):
@@ -461,21 +462,10 @@ def parse_qzone_h5_index_html(html_content: str) -> dict[str, Any]:
     object_text = _balanced_object(source, data_match.end() - 1) if data_match else ""
     payload: dict[str, Any] = {}
     if object_text:
-        normalized = object_text.replace("undefined", "null")
         try:
-            parsed = json.loads(normalized)
+            parsed = load_qzone_json(object_text)
         except Exception:
-            try:
-                relaxed = re.sub(r",\s*([}\]])", r"\1", normalized)
-                relaxed = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', relaxed)
-                parsed = json.loads(relaxed)
-            except Exception:
-                try:
-                    import json5  # type: ignore
-
-                    parsed = json5.loads(normalized)
-                except Exception:
-                    parsed = {}
+            parsed = {}
         if isinstance(parsed, dict):
             payload = parsed
     return {"token": token, "payload": payload}

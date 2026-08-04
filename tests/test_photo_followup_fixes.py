@@ -349,7 +349,8 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
             action_summary="发图：我坐在窗边书桌前认真写字。",
             photo_subject_owner="bot",
         )
-        self.assertIn("随消息发送了一张图片", archived)
+        self.assertIn('<pc_history_media images="1" />', archived)
+        self.assertNotIn("随消息发送了一张图片", archived)
         self.assertIn("图片画面：我坐在窗边书桌前认真写字", archived)
         self.assertIn("图片主体：Bot/当前人格", archived)
 

@@ -18,6 +18,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _day_start_ts, _now_ts, _path_text, _safe_float, _safe_int, _single_line, _today_key
+from .qzone_json import load_qzone_json
 from .qzone_media import QzoneIntegrationError, QzoneMediaMixin
 
 
@@ -756,18 +757,7 @@ class QzoneMixin(QzoneMediaMixin):
 
     @staticmethod
     def _qzone_load_response_payload(payload: str) -> dict[str, Any]:
-        normalized = str(payload or "").replace("undefined", "null")
-        try:
-            parsed = json.loads(normalized)
-        except Exception:
-            try:
-                relaxed = re.sub(r",\s*([}\]])", r"\1", normalized)
-                relaxed = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', relaxed)
-                parsed = json.loads(relaxed)
-            except Exception:
-                import json5  # type: ignore
-
-                parsed = json5.loads(normalized)
+        parsed = load_qzone_json(payload)
         if isinstance(parsed, dict):
             return parsed
         return {"code": -1, "message": "接口响应不是对象"}

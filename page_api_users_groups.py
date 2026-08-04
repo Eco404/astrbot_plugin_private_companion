@@ -32,6 +32,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         try:
             limit = self._query_int("limit", 80, 1, 300)
             async with self.plugin._data_lock:
+                cleaner = getattr(self.plugin, "_cleanup_orphan_reaction_expression_users", None)
+                if callable(cleaner) and cleaner():
+                    self.plugin._save_data_sync()
                 users = self.plugin.data.get("users", {})
                 if not isinstance(users, dict):
                     users = {}
