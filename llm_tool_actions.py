@@ -34,7 +34,14 @@ from .helpers import (
     _strip_internal_message_blocks,
 )
 from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_memo_note
-from .qzone_selection import parse_qzone_post_selection
+from .qzone_selection import (
+    QzoneViewTarget,
+    classify_qzone_view_owner,
+    normalize_qzone_uin,
+    parse_qzone_post_selection,
+    qzone_view_owner_is_pronoun_safe,
+    resolve_qzone_view_target,
+)
 from .reaction_expression import (
     append_reaction_expression_outcome,
     classify_reaction_expression_feedback,
@@ -521,16 +528,79 @@ class LlmToolActionsMixin:
         instruction = """
 【QQ 空间动态工具】
 当用户明确要求你查看说说、QQ 空间动态、点赞/评论说说,或要求你发一条说说时,可以使用 Private Companion 的 QQ 空间工具。
-- 查看说说：使用 `pc_qzone_view_feed`。不知道目标 QQ 时默认当前用户；可用 `selector` 传“最新”“第2条”“最后”或 fid。
+- 查看说说：使用 `pc_qzone_view_feed` 前必须确定查看对象。用户说“我/我的/我自己”时传 `target_scope="current_user"`；说“你/你自己/你的”时传 `target_scope="bot_self"`；有明确 QQ 号时传 `target_scope="explicit_uin"` 和 `target_uin`。不要省略对象并让工具猜测。
+- “她/他/TA/自己的”必须先有可确认的前指对象：只有已明确指向当前 Bot 人格时才传 `bot_self`；没有明确前指时先向用户确认，不要把性别、人设或昵称当作 QQ 身份证据。
+- 查看结果中的 `identity.owner_role` 和 `identity.owner_uin` 是归属事实，优先级高于 `author` 昵称。`current_user` 或 `third_party` 的动态绝不能说成 Bot 自己发的，也不能当作 Bot 经历写入记忆。
 - 发布说说：使用 `pc_qzone_publish_feed`。必须把最终要发布的正文放进 `text` 参数,例如 `{"text":"今天想慢一点。"}`；如需带图,可传 `{"text":"配图说说","images":["本地图片路径或图片URL"]}`；如果用户明确要求“发布刚才/最近生成的生活说说草稿”,可传 `{"use_latest_draft":true}`；不要空调用,不要把草稿当作已发布。
 - 用户明确说“我刚刚给你评论了”“回复我刚才在你空间的评论”时，使用 `pc_qzone_reply_my_comment`。把用户记得的评论关键词放进 `comment_hint`；只有工具返回 `status=replied` 才能说已经回复。返回 `ambiguous`、`not_found` 或 `skipped` 时如实说明，不要猜测或回复错评论。
-- 用户说“你发的说说/你刚发了什么/我看到你发的动态”时，“你”指 Bot 自己，不是当前用户。优先直接依据下方 Bot 自己的发布记录回答，不要反问用户内容，不要让用户自己去看，也不要用默认目标为当前用户的查看工具偷换对象。
+- 用户说“你发的说说/你刚发了什么/我看到你发的动态”时，“你”指 Bot 自己，不是当前用户。优先直接依据下方 Bot 自己的发布记录回答，不要反问用户内容，也不要让用户自己去看；需要查看时使用 `target_scope="bot_self"`，不要把对象不明的查看结果偷换成当前用户或 Bot。
 - 发布内容必须服从当前人格与世界观,但不要泄露私聊隐私、内部状态数值、关系网资料或插件实现。
 - 工具失败时简短说明失败原因,不要假装已经发布或点赞。
 """.strip()
         context_getter = getattr(self, "_qzone_recent_self_publish_chat_context", None)
         recent_context = context_getter() if callable(context_getter) else ""
         return f"{instruction}\n\n{recent_context}".strip() if recent_context else instruction
+
+    @staticmethod
+    def _qzone_view_target_error_message(error: str) -> str:
+        messages = {
+            "missing_target": "无法确认要查看谁的 QQ 空间。请明确是 Bot 自己、当前用户，还是提供目标 QQ 号。",
+            "missing_target_uin": "查看指定 QQ 空间时缺少 target_uin。",
+            "invalid_target_uin": "target_uin 不是合法 QQ 号。",
+            "invalid_legacy_user_id": "user_id 不是合法 QQ 号。",
+            "conflicting_target_uin": "target_uin 与 user_id 指向不同 QQ 号。",
+            "scope_target_conflict": "target_scope 与指定 QQ 号不一致。",
+            "bot_uin_unavailable": "无法获取 Bot 当前登录的 QQ 号，不能确认 Bot 自己的空间。",
+            "sender_uin_unavailable": "无法获取当前用户的 QQ 号，不能确认用户自己的空间。",
+            "invalid_target_scope": "target_scope 无效。",
+        }
+        return messages.get(str(error or ""), "QQ 空间查看对象无法确认。")
+
+    @staticmethod
+    def _qzone_view_owner_guard(owner_role: str) -> str:
+        guards = {
+            "bot_self": "这条动态已按 UIN 确认为 Bot 自己的动态；只能按 Bot 自身经历表述。",
+            "current_user": "这条动态已按 UIN 确认为当前用户的动态；不得表述为 Bot 自己发过或经历过。",
+            "third_party": "这条动态已按 UIN 确认为第三方的动态；不得表述为 Bot 或当前用户自己的经历。",
+            "shared_identity": "Bot 与当前用户使用同一 UIN，无法可靠区分人称；不要使用“我/你”的归属表述。",
+            "identity_mismatch": "返回动态作者与请求目标 UIN 不一致，已停止处理。",
+            "identity_unverified": "返回动态缺少可验证的作者 UIN，已停止处理。",
+        }
+        return guards.get(str(owner_role or ""), "QQ 空间动态归属无法确认。")
+
+    @staticmethod
+    def _qzone_view_identity_payload(target: QzoneViewTarget, owner_uin: Any) -> dict[str, Any]:
+        normalized_owner = normalize_qzone_uin(owner_uin)
+        owner_role = classify_qzone_view_owner(target, normalized_owner)
+        return {
+            "requested_scope": target.scope,
+            "target_uin": str(target.target_uin) if target.target_uin else "",
+            "owner_uin": str(normalized_owner) if normalized_owner else "",
+            "owner_role": owner_role,
+            "owner_matches_target": bool(normalized_owner and normalized_owner == target.target_uin),
+            "pronoun_safe": qzone_view_owner_is_pronoun_safe(owner_role),
+            "memory_policy": "skip_long_term",
+            "response_guard": LlmToolActionsMixin._qzone_view_owner_guard(owner_role),
+        }
+
+    @staticmethod
+    def _qzone_note_view_memory_boundary(event: AstrMessageEvent | None, identity: dict[str, Any]) -> None:
+        """Do not turn a fetched public feed into Bot autobiographical memory."""
+        if event is None:
+            return
+        observations = getattr(event, "_private_companion_qzone_view_observations", None)
+        if not isinstance(observations, list):
+            observations = []
+            setattr(event, "_private_companion_qzone_view_observations", observations)
+        observations.append(
+            {
+                "requested_scope": str(identity.get("requested_scope") or ""),
+                "owner_role": str(identity.get("owner_role") or ""),
+                "owner_matches_target": bool(identity.get("owner_matches_target")),
+            }
+        )
+        del observations[:-8]
+        setattr(event, "_private_companion_skip_long_term_memory", True)
 
     def _photo_generation_tool_instruction(
         self,
@@ -5532,6 +5602,8 @@ class LlmToolActionsMixin:
         self,
         event: AstrMessageEvent,
         user_id: str = "",
+        target_scope: str = "",
+        target_uin: str = "",
         pos: int = 0,
         like: bool = False,
         reply: bool = False,
@@ -5548,29 +5620,131 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
         if not callable(availability) and not self.enable_qzone_integration:
             return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
-        target = _single_line(user_id, 40)
-        if not target:
-            try:
-                target = str(event.get_sender_id())
-            except Exception:
-                target = ""
         try:
-            selection = parse_qzone_post_selection(user_id=target, selector=selector, pos=pos, fid=fid)
+            try:
+                sender_uin = event.get_sender_id() if event is not None else ""
+            except Exception:
+                sender_uin = ""
+            preliminary_target = resolve_qzone_view_target(
+                target_scope=target_scope,
+                target_uin=target_uin,
+                legacy_user_id=user_id,
+                sender_uin=sender_uin,
+            )
+            if preliminary_target.error and preliminary_target.error != "bot_uin_unavailable":
+                status = "needs_target" if preliminary_target.error in {"missing_target", "missing_target_uin"} else "invalid_target"
+                return json.dumps(
+                    {
+                        "status": status,
+                        "message": self._qzone_view_target_error_message(preliminary_target.error),
+                        "identity": {
+                            "requested_scope": preliminary_target.scope,
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            cookie_header = await self._qzone_get_cookies(event)
+            ctx = self._qzone_context_from_cookies(cookie_header)
+            target = resolve_qzone_view_target(
+                target_scope=target_scope,
+                target_uin=target_uin,
+                legacy_user_id=user_id,
+                bot_uin=ctx.get("uin"),
+                sender_uin=sender_uin,
+            )
+            if not target.resolved:
+                status = "needs_target" if target.error in {"missing_target", "missing_target_uin"} else "invalid_target"
+                return json.dumps(
+                    {
+                        "status": status,
+                        "message": self._qzone_view_target_error_message(target.error),
+                        "identity": {
+                            "requested_scope": target.scope,
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            selection = parse_qzone_post_selection(
+                user_id=str(target.target_uin),
+                selector=selector,
+                pos=pos,
+                fid=fid,
+            )
+            selected_uin = normalize_qzone_uin(selection.target_id)
+            if selected_uin != target.target_uin:
+                return json.dumps(
+                    {
+                        "status": "invalid_target",
+                        "message": "selector 中的 QQ 号与已确认的查看对象不一致。",
+                        "identity": {
+                            "requested_scope": target.scope,
+                            "target_uin": str(target.target_uin),
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
             if selection.fid:
-                candidates = await self._qzone_query_feeds(event, target_id=selection.target_id or None, pos=0, num=20, with_detail=True)
+                candidates = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=0,
+                    num=20,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
                 posts = [
                     item for item in candidates
                     if str(getattr(item, "tid", "") or "") == selection.fid
                     or str(self._qzone_post_value(item, "fid", "") or "") == selection.fid
                 ][:1]
             elif selection.is_last:
-                candidates = await self._qzone_query_feeds(event, target_id=selection.target_id or None, pos=0, num=10, with_detail=True)
+                candidates = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=0,
+                    num=10,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
                 posts = candidates[-1:] if candidates else []
             else:
-                posts = await self._qzone_query_feeds(event, target_id=selection.target_id or None, pos=max(0, int(selection.pos or 0)), num=1, with_detail=True)
+                posts = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=max(0, int(selection.pos or 0)),
+                    num=1,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
             if not posts:
-                return json.dumps({"status": "empty", "message": "查询结果为空"}, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "empty",
+                        "message": "查询结果为空",
+                        "identity": {
+                            "requested_scope": target.scope,
+                            "target_uin": str(target.target_uin),
+                            "memory_policy": "not_recorded",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
             post = posts[0]
+            identity = self._qzone_view_identity_payload(target, getattr(post, "uin", ""))
+            owner_role = str(identity.get("owner_role") or "")
+            if owner_role in {"identity_mismatch", "identity_unverified", "shared_identity"}:
+                return json.dumps(
+                    {
+                        "status": "identity_ambiguous" if owner_role == "shared_identity" else owner_role,
+                        "message": str(identity.get("response_guard") or "QQ 空间动态归属无法确认。"),
+                        "identity": identity,
+                    },
+                    ensure_ascii=False,
+                )
+            self._qzone_note_view_memory_boundary(event, identity)
             action_msg = ""
             if reply:
                 comment = await self._qzone_comment_post(event, post)
@@ -5587,6 +5761,7 @@ class LlmToolActionsMixin:
                     "like_result": like_result or {},
                     "author": _single_line(getattr(post, "name", ""), 60),
                     "uin": str(getattr(post, "uin", "") or ""),
+                    "identity": identity,
                     "text": _single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 300),
                     "images": list(getattr(post, "images", []) or [])[:6],
                 },

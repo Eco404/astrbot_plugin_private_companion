@@ -307,6 +307,57 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
             harness.conversation_manager.history[-1]["content"],
         )
 
+    async def test_qzone_view_reply_skips_long_term_memory_but_keeps_official_history(self):
+        captured: list[str] = []
+
+        async def livingmemory_handler(_event, response):
+            captured.append(response.completion_text)
+
+        handler = SimpleNamespace(
+            handler=livingmemory_handler,
+            handler_name="handle_memory_reflection",
+            handler_module_path=LIVING_MODULE,
+        )
+        memory_companion_handler = SimpleNamespace(
+            handler=livingmemory_handler,
+            handler_name="capture_assistant_response",
+            handler_module_path=MEMORY_COMPANION_MODULE,
+        )
+        plugins = {
+            LIVING_MODULE: SimpleNamespace(
+                name="LivingMemory", activated=True, reserved=False
+            ),
+            MEMORY_COMPANION_MODULE: SimpleNamespace(
+                name="MemoryCompanion", activated=True, reserved=False
+            ),
+        }
+        harness = _Harness()
+        event = _Event()
+        event._private_companion_skip_long_term_memory = True
+        event._private_companion_livingmemory_plugin_names = ("LivingMemory",)
+        event._private_companion_memory_companion_plugin_names = ("MemoryCompanion",)
+
+        with patch(
+            "astrbot_plugin_private_companion.final_response_persistence.star_handlers_registry",
+            _Registry([handler, memory_companion_handler]),
+        ), patch(
+            "astrbot_plugin_private_companion.final_response_persistence.star_map",
+            plugins,
+        ):
+            written = await harness._finalize_passive_delivered_response(
+                event,
+                chain=[Plain("这条说说属于当前用户，不是 Bot 的经历。")],
+            )
+
+        self.assertTrue(written)
+        self.assertEqual([], captured)
+        self.assertEqual([], harness.memory_companion_captured)
+        self.assertEqual(
+            "这条说说属于当前用户，不是 Bot 的经历。",
+            harness.conversation_manager.history[-1]["content"],
+        )
+        self.assertTrue(event._private_companion_delivery_persisted)
+
     async def test_proactive_placeholder_stays_out_of_livingmemory(self):
         captured: list[str] = []
 

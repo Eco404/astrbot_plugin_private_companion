@@ -884,6 +884,14 @@ class FinalResponsePersistenceMixin:
             )
             return False
 
+    @staticmethod
+    def _final_response_skips_long_term_memory(event: AstrMessageEvent | None) -> bool:
+        """Keep externally observed Qzone content out of semantic memory sinks."""
+        return bool(
+            event is not None
+            and getattr(event, "_private_companion_skip_long_term_memory", False)
+        )
+
     async def _finalize_passive_delivered_response(
         self,
         event: AstrMessageEvent,
@@ -931,23 +939,31 @@ class FinalResponsePersistenceMixin:
             or self._event_message_id(event)
             or f"passive:{id(event)}"
         )
-        memory_written = await self._record_final_assistant_in_livingmemory(
-            umo=str(getattr(event, "unified_msg_origin", "") or ""),
-            assistant_response=response_text,
-            delivery_id=delivery_id,
-            event=event,
-        )
+        skip_long_term_memory = self._final_response_skips_long_term_memory(event)
+        memory_written = False
         memory_companion_written = False
-        if bool(
-            getattr(event, "_private_companion_memory_companion_plugin_names", ())
-        ):
-            memory_companion_written = bool(
-                await self._memory_companion_record_confirmed_assistant_message(
-                    event,
-                    content=response_text,
-                    delivery_id=delivery_id,
-                )
+        if skip_long_term_memory:
+            logger.info(
+                "[PrivateCompanion] 本回合包含 QQ 空间查看结果，跳过长期记忆写入: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 140),
             )
+        else:
+            memory_written = await self._record_final_assistant_in_livingmemory(
+                umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                assistant_response=response_text,
+                delivery_id=delivery_id,
+                event=event,
+            )
+            if bool(
+                getattr(event, "_private_companion_memory_companion_plugin_names", ())
+            ):
+                memory_companion_written = bool(
+                    await self._memory_companion_record_confirmed_assistant_message(
+                        event,
+                        content=response_text,
+                        delivery_id=delivery_id,
+                    )
+                )
         if official_written or memory_written or memory_companion_written:
             setattr(event, "_private_companion_delivery_persisted", True)
         return official_written or memory_written or memory_companion_written
