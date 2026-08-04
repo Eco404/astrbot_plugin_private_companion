@@ -6,6 +6,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 APP_JS = (PLUGIN_ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
 APP_CSS = (PLUGIN_ROOT / "pages" / "陪伴面板" / "app.css").read_text(encoding="utf-8")
 INDEX_HTML = (PLUGIN_ROOT / "pages" / "陪伴面板" / "index.html").read_text(encoding="utf-8")
+PAGE_API = (PLUGIN_ROOT / "page_api.py").read_text(encoding="utf-8")
 
 
 class PhotoReferenceWebUiTests(unittest.TestCase):
@@ -109,10 +110,101 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('border-top: 1px solid var(--line-soft)', APP_CSS)
         self.assertIn('padding-top: 14px', APP_CSS)
 
+    def test_guided_questions_open_only_from_the_add_reference_dialog(self) -> None:
+        self.assertIn('data-photo-reference-add-open', APP_JS)
+        self.assertIn('<dialog class="photo-reference-add-dialog" data-photo-reference-add-dialog>', APP_JS)
+        self.assertIn('grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;align-items:stretch', APP_CSS)
+        self.assertIn('.photo-reference-add-form>footer button{flex:0 0 auto;width:auto;white-space:nowrap}', APP_CSS)
+        self.assertIn('.photo-reference-guided-tabs button{flex:0 0 auto;width:auto', APP_CSS)
+        self.assertIn('.photo-reference-guided-templates button{flex:0 0 auto;width:auto', APP_CSS)
+        dialog_start = APP_JS.index('<dialog class="photo-reference-add-dialog"')
+        dialog_end = APP_JS.index('</dialog>', dialog_start)
+        dialog_markup = APP_JS[dialog_start:dialog_end]
+        self.assertIn('data-photo-reference-guided-host', dialog_markup)
+        self.assertIn('addDialog.showModal()', APP_JS)
+        self.assertIn('addDialog.close()', APP_JS)
+        manager_start = APP_JS.index('function bindPhotoReferenceManagerActions()')
+        manager_end = APP_JS.index('function bindPhotoApiEndpointEditor', manager_start)
+        manager_actions = APP_JS[manager_start:manager_end]
+        self.assertNotIn(
+            'if (!manager || state.featureDetailSubpage !== "photo_reference_library") return;\n  renderGuidedPhotoReferenceEditor();',
+            manager_actions,
+        )
+
+    def test_guided_metadata_answers_use_plain_language_choice_controls(self) -> None:
+        for field_name in (
+            "outfit_category",
+            "prefer_scenes",
+            "prefer_times",
+            "avoid_scenes",
+            "avoid_times",
+            "preferred_preset",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertNotIn(f'<input name="{field_name}"', APP_JS)
+        for field_name in (
+            "core_anchor",
+            "wardrobe_change",
+            "location_change",
+            "pose_change",
+            "outfit_behavior",
+            "outfit_category",
+            "prefer_none",
+            "prefer_scenes",
+            "prefer_times",
+            "avoid_none",
+            "avoid_scenes",
+            "avoid_times",
+            "preferred_preset",
+            "fallback_policy",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertIn(f'guidedPhotoReferenceChoiceGroup("{field_name}"', APP_JS)
+        self.assertIn('type="${type}"', APP_JS)
+        self.assertIn('name="${escapeHtml(name)}"', APP_JS)
+        self.assertIn('data-photo-guided-answer-label', APP_JS)
+
+    def test_guided_questionnaire_uses_eight_redundant_plain_language_questions(self) -> None:
+        questions = (
+            "1. 这张图最不能丢的特点是什么？",
+            "2. 换一身衣服后，这张图还适合用吗？",
+            "3. 换到其他地点后，这张图还适合用吗？",
+            "4. 动作改变后，这张图还适合用吗？",
+            "5. 哪些情况应该优先用这张图？",
+            "6. 哪些情况容易用错这张图？",
+            "7. 没有完全匹配的图片时，应该怎么处理？",
+            "8. 图中的穿搭应该怎么处理？",
+        )
+        for question in questions:
+            with self.subTest(question=question):
+                self.assertIn(f"<legend>{question}</legend>", APP_JS)
+        for repeated_identity_answer in (
+            'value: "yes_identity", label: "适合，主要看人物长相"',
+            'value: "yes_outfit", label: "适合，主要看人物穿搭"',
+            'value: "yes_style", label: "适合，主要看画面风格"',
+        ):
+            self.assertGreaterEqual(APP_JS.count(repeated_identity_answer), 2)
+
+    def test_guided_review_declares_and_uses_the_configured_main_model(self) -> None:
+        self.assertIn('state.overview?.providers?.LLM_PROVIDER_ID', APP_JS)
+        self.assertIn('审批将调用 WebUI“模型配置”中的主模型', APP_JS)
+        self.assertIn('postJson("/photo_reference/metadata/review"', APP_JS)
+        self.assertIn('questionnaire: guidedPhotoReferenceQuestionnaire(root)', APP_JS)
+        self.assertIn('compiled.review?.status === "approved"', APP_JS)
+        self.assertIn('主模型 ${compiled.review.provider_id', APP_JS)
+        review_start = PAGE_API.index("async def review_photo_reference_metadata")
+        review_end = PAGE_API.index("async def run_photo_reference_selection_trial", review_start)
+        review_endpoint = PAGE_API[review_start:review_end]
+        self.assertIn('getattr(self.plugin, "llm_provider_id", "")', review_endpoint)
+        self.assertIn('task="photo_reference_metadata_review"', review_endpoint)
+        self.assertIn('strict_provider=True', review_endpoint)
+        self.assertIn('必须是 WebUI“模型配置”中的主模型', review_endpoint)
+        self.assertNotIn("._task_provider(", review_endpoint)
+
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
-        self.assertIn('app.css?v=20260804-multi-persona-choice-v1', INDEX_HTML)
+        self.assertIn('app.css?v=20260804-reference-guided-dialog-v2', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
-        self.assertRegex(INDEX_HTML, r'<script src="\./app\.js\?v=[^" ]+"')
+        self.assertIn('app.js?v=20260804-reference-guided-dialog-v2', INDEX_HTML)
 
 
 if __name__ == "__main__":

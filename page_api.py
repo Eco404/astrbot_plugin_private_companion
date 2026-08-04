@@ -93,7 +93,12 @@ from .photo_reference_catalog import (
     project_reference_candidate,
     validate_and_serialize,
 )
-from .photo_reference_metadata import compile_reference_metadata
+from .photo_reference_metadata import (
+    build_reference_metadata_review_prompt,
+    compile_reference_metadata,
+    merge_reference_questionnaire_evidence,
+    normalize_reviewed_reference_intent,
+)
 from .photo_reference_selection import run_photo_selection_trial
 from .reference_assets import (
     REFERENCE_ASSET_MAX_BYTES,
@@ -463,6 +468,7 @@ class PrivateCompanionPageApi(
             ("/photo_reference/list", self.list_photo_references, ["GET"], "Private Companion Page photo reference list"),
             ("/photo_reference/image_data", self.get_photo_reference_image_data, ["GET"], "Private Companion Page photo reference image data"),
             ("/photo_reference/metadata/compile", self.compile_photo_reference_metadata, ["POST"], "Compile guided photo reference metadata"),
+            ("/photo_reference/metadata/review", self.review_photo_reference_metadata, ["POST"], "Review and merge guided photo reference answers"),
             ("/photo_reference/selection_trial", self.run_photo_reference_selection_trial, ["POST"], "Run side-effect-free photo reference selection trial"),
             ("/reference_asset/list", self.list_reference_assets, ["GET"], "Private Companion Page scoped visual reference assets"),
             ("/reference_asset/image_data", self.get_reference_asset_image_data, ["GET"], "Private Companion Page scoped visual reference image data"),
@@ -2203,6 +2209,116 @@ class PrivateCompanionPageApi(
             return self._ok(result.to_dict())
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 编译参考图元数据失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def review_photo_reference_metadata(self) -> dict[str, Any]:
+        """Cross-review redundant questionnaire evidence, then compile without saving."""
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是对象")
+        questionnaire = payload.get("questionnaire") or payload.get("answers") or {}
+        if not isinstance(questionnaire, dict) or not isinstance(questionnaire.get("answers"), list):
+            return self._error("必须提供参考图问答 questionnaire.answers")
+        presets = payload.get("available_presets") or self._photo_reference_preset_names()
+        presets = [str(item).strip() for item in presets if str(item).strip()]
+        local_suggestion = merge_reference_questionnaire_evidence(questionnaire)
+        reviewed_intent = dict(local_suggestion)
+        review_status = "local_fallback"
+        provider_id = self._single_line(getattr(self.plugin, "llm_provider_id", ""), 160)
+        review_summary = "模型审批不可用，已按问答证据完成本地合并。"
+        review_warning = ""
+        decisions: list[dict[str, Any]] = []
+        model_conflicts: list[str] = []
+        use_model_value = payload.get("use_model", True)
+        use_model = str(use_model_value).strip().lower() not in {"0", "false", "no", "off"}
+        caller = getattr(self.plugin, "_llm_call", None)
+        if use_model and callable(caller) and provider_id:
+            system_prompt, user_prompt = build_reference_metadata_review_prompt(
+                questionnaire,
+                local_suggestion,
+                available_presets=presets,
+            )
+            try:
+                # 维护约束：这里审批的 LLM 必须是 WebUI“模型配置”中的主模型
+                # （plugin.llm_provider_id）。不要改用 _task_provider，也不要允许高峰替换或备用模型接管。
+                raw = await caller(
+                    user_prompt,
+                    max_tokens=1400,
+                    provider_id=provider_id,
+                    task="photo_reference_metadata_review",
+                    system_prompt=system_prompt,
+                    strict_provider=True,
+                )
+                if raw is None:
+                    raise ValueError("模型调用未返回结果")
+                parsed = self._loads_json_object(raw)
+                reviewed_intent = normalize_reviewed_reference_intent(
+                    parsed,
+                    local_suggestion,
+                    available_presets=presets,
+                )
+                review_status = "approved"
+                review_summary = self._single_line(parsed.get("review_summary"), 300) or "模型已交叉审批并合并问答证据。"
+                raw_decisions = parsed.get("responsibility_decisions")
+                if isinstance(raw_decisions, list):
+                    for raw_decision in raw_decisions[:12]:
+                        if not isinstance(raw_decision, dict):
+                            continue
+                        decisions.append(
+                            {
+                                "responsibility": self._single_line(raw_decision.get("responsibility"), 40),
+                                "verdict": self._single_line(raw_decision.get("verdict"), 40),
+                                "evidence_question_ids": [
+                                    self._single_line(item, 80)
+                                    for item in list(raw_decision.get("evidence_question_ids") or ())[:8]
+                                    if self._single_line(item, 80)
+                                ],
+                                "reason": self._single_line(raw_decision.get("reason"), 240),
+                            }
+                        )
+                raw_conflicts = parsed.get("conflicts")
+                if isinstance(raw_conflicts, list):
+                    model_conflicts = [
+                        self._single_line(item, 240)
+                        for item in raw_conflicts[:12]
+                        if self._single_line(item, 240)
+                    ]
+            except Exception as exc:
+                review_warning = f"模型审批失败，已使用本地证据合并：{self._single_line(exc, 180)}"
+                logger.warning("[PrivateCompanionPage] 参考图问答模型审批失败: %s", exc, exc_info=True)
+        elif not use_model:
+            review_warning = "本次请求关闭了模型审批，已使用本地证据合并。"
+        elif not provider_id:
+            review_warning = "模型配置中的主模型（LLM_PROVIDER_ID）未配置，已使用本地证据合并。"
+        else:
+            review_warning = "当前插件运行态无法调用模型，已使用本地证据合并。"
+
+        try:
+            result = compile_reference_metadata(
+                reviewed_intent,
+                presets,
+                saved=payload.get("saved"),
+            ).to_dict()
+            editor_intent = result["metadata"].setdefault("editor_intent", {})
+            editor_intent["questionnaire"] = local_suggestion.get("questionnaire") or questionnaire
+            editor_intent["approval"] = {
+                "status": review_status,
+                "provider_id": provider_id,
+                "summary": review_summary,
+                "decisions": decisions,
+            }
+            result["review"] = {
+                "status": review_status,
+                "provider_id": provider_id,
+                "summary": review_summary,
+                "warning": review_warning,
+                "responsibility_decisions": decisions,
+                "conflicts": model_conflicts,
+                "evidence": local_suggestion.get("evidence") or {},
+            }
+            return self._ok(result)
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 审批后编译参考图元数据失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def run_photo_reference_selection_trial(self) -> dict[str, Any]:
