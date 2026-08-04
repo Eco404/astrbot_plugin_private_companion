@@ -157,8 +157,9 @@ class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
     def test_schedule_labels_are_backfilled_after_daily_plan_arrives(self) -> None:
         harness = _PlanHarness()
         harness.data = {"daily_plan": {"date": time.strftime("%Y-%m-%d"), "items": []}}
+        now = _day_start_ts(time.time()) + 8 * 60 * 60
         with patch("astrbot_plugin_private_companion.qzone_integration.random.random", return_value=0.0):
-            plan = harness._qzone_life_publish_daily_plan({}, now=time.time())
+            plan = harness._qzone_life_publish_daily_plan({}, now=now)
         self.assertTrue(all(not item.get("schedule_label") for item in plan["items"]))
         harness.data["daily_plan"]["items"] = [{"time": "18:00", "activity": "晚饭后散步"}]
         self.assertTrue(harness._qzone_backfill_plan_schedule_labels(plan))

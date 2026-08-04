@@ -35,7 +35,7 @@ class BookshelfTransitionUiTests(unittest.TestCase):
     def test_stale_unlocked_snapshot_is_dropped_when_server_count_changes(self):
         self.assertIn("const overviewBookshelfCount = Number(overview?.bookshelf?.jm_album_count);", self.script)
         self.assertIn("unlockedBookshelfCount !== overviewBookshelfCount", self.script)
-        self.assertIn("state.bookshelfUnlocked = null;", self.script)
+        self.assertIn("setBookshelfUnlocked(null);", self.script)
         self.assertIn('state.bookshelfAccessToken = "";', self.script)
 
 

@@ -382,6 +382,8 @@ class CoreStoreMixin:
             "dream_fragments": [],
             "daily_dream": {},
             "diary_generated_day": "",
+            "daily_diary_deleted_days": [],
+            "daily_diary_delete_revision": 0,
             "daily_diary_failed_day": "",
             "daily_diary_failed_at": 0,
             "daily_diary_last_error": "",
@@ -458,6 +460,8 @@ class CoreStoreMixin:
         data.setdefault("dream_fragments", [])
         data.setdefault("daily_dream", {})
         data.setdefault("diary_generated_day", "")
+        data.setdefault("daily_diary_deleted_days", [])
+        data.setdefault("daily_diary_delete_revision", 0)
         data.setdefault("daily_diary_failed_day", "")
         data.setdefault("daily_diary_failed_at", 0)
         data.setdefault("daily_diary_last_error", "")

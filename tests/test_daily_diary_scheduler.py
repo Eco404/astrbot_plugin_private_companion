@@ -53,6 +53,10 @@ class DailyDiarySchedulerTests(unittest.TestCase):
         self.harness.data["diary_generated_day"] = "2026-07-28"
         self.assertIsNone(self.harness._next_daily_diary_due_in_seconds(self.now))
 
+    def test_manually_deleted_diary_does_not_request_same_day_wakeup(self) -> None:
+        self.harness.data["daily_diary_deleted_days"] = ["2026-07-28"]
+        self.assertIsNone(self.harness._next_daily_diary_due_in_seconds(self.now))
+
     def test_failed_diary_waits_for_existing_retry_cooldown(self) -> None:
         failed_at = datetime(2026, 7, 28, 23, 10, 0, tzinfo=timezone.utc).timestamp()
         self.harness.data.update(

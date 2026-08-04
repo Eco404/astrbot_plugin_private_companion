@@ -1435,6 +1435,7 @@ class PrivateImageMixin:
         *,
         image_path: str,
         caption: str = "",
+        reaction_image: bool = False,
     ) -> dict[str, Any]:
         marker = getattr(self, "_mark_private_companion_skip_reaction_expression", None)
         if callable(marker):
@@ -1445,7 +1446,26 @@ class PrivateImageMixin:
             if callable(caption_sanitizer)
             else _single_line(_strip_internal_message_blocks(caption), 120)
         )
-        chain = self._build_outbound_chain(visible_caption, image_path)
+        if reaction_image:
+            builder = getattr(self, "_build_reaction_image_component", None)
+            try:
+                reaction_component = (
+                    builder(event, image_path)
+                    if callable(builder)
+                    else None
+                )
+            except Exception:
+                reaction_component = None
+            chain = (
+                self._build_outbound_chain(
+                    visible_caption,
+                    extra_components=[reaction_component],
+                )
+                if reaction_component is not None
+                else self._build_outbound_chain(visible_caption, image_path)
+            )
+        else:
+            chain = self._build_outbound_chain(visible_caption, image_path)
 
         def send_error_is_ambiguous(error: BaseException) -> bool:
             if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError)):

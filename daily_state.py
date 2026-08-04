@@ -587,7 +587,10 @@ class DailyStateMixin(DailyStateTickMixin):
             return None
         request_day = _today_key()
         async with self._data_lock:
+            delete_revision_at_start = self._daily_diary_delete_revision()
             if not force and self.data.get("diary_generated_day") == request_day:
+                return None
+            if not force and self._daily_diary_was_manually_deleted(request_day):
                 return None
             if not force and self.data.get("daily_diary_failed_day") == request_day:
                 failed_at = _safe_float(self.data.get("daily_diary_failed_at"), 0, 0)
@@ -619,10 +622,53 @@ class DailyStateMixin(DailyStateTickMixin):
                 diary["date"] = diary_day
         memory_payload: dict[str, str] | None = None
         async with self._data_lock:
+            deleted_now = (
+                self._daily_diary_was_manually_deleted(request_day)
+                or self._daily_diary_was_manually_deleted(diary_day)
+            )
+            deleted_during_generation = (
+                deleted_now
+                and self._daily_diary_delete_revision() != delete_revision_at_start
+            )
+            if deleted_now and (not force or deleted_during_generation):
+                logger.info(
+                    "[PrivateCompanion] 日记生成期间该日期被手动删除，已丢弃生成结果: request_day=%s diary_day=%s force=%s",
+                    request_day,
+                    diary_day,
+                    force,
+                )
+                return None
             diaries = self.data.setdefault("bot_diaries", [])
-            if not isinstance(diaries, list):
-                diaries = []
+            if isinstance(diaries, dict):
+                migrated_diaries: list[Any] = []
+                for stored_date, stored_diary in diaries.items():
+                    fallback_date = _single_line(stored_date, 64)
+                    if isinstance(stored_diary, dict):
+                        migrated_diary = deepcopy(stored_diary)
+                        if fallback_date and not _single_line(migrated_diary.get("date"), 64):
+                            migrated_diary["date"] = fallback_date
+                    elif isinstance(stored_diary, str):
+                        migrated_diary = {"body": stored_diary}
+                        if fallback_date:
+                            migrated_diary["date"] = fallback_date
+                    else:
+                        # Keep uncommon JSON-compatible legacy values recoverable instead of dropping them.
+                        migrated_diary = {"legacy_value": deepcopy(stored_diary)}
+                        if fallback_date:
+                            migrated_diary["date"] = fallback_date
+                    migrated_diaries.append(migrated_diary)
+                diaries = migrated_diaries
                 self.data["bot_diaries"] = diaries
+                logger.info(
+                    "[PrivateCompanion] 已无损迁移旧字典日记存储: entries=%s",
+                    len(diaries),
+                )
+            elif not isinstance(diaries, list):
+                logger.error(
+                    "[PrivateCompanion] 日记记录结构异常，已保留原数据并放弃写入本次生成结果: storage=%s",
+                    type(diaries).__name__,
+                )
+                return None
             if not force and self.data.get("diary_generated_day") == diary_day:
                 return next(
                     (
@@ -652,6 +698,13 @@ class DailyStateMixin(DailyStateTickMixin):
             # bug cannot make the scheduler call the LLM again and again.
             previous_generated_day = _single_line(self.data.get("diary_generated_day"), 16)
             self.data["diary_generated_day"] = max(previous_generated_day, diary_day)
+            deleted_days = self.data.get("daily_diary_deleted_days")
+            if isinstance(deleted_days, list):
+                self.data["daily_diary_deleted_days"] = [
+                    value
+                    for value in deleted_days
+                    if _single_line(value, 16) != diary_day
+                ]
             self.data["daily_diary_failed_day"] = ""
             self.data["daily_diary_failed_at"] = 0
             self.data["daily_diary_last_error"] = ""
@@ -1894,6 +1947,23 @@ class DailyStateMixin(DailyStateTickMixin):
             return
         await self._apply_detail_presence_status(segment, snapshot)
 
+    def _daily_diary_was_manually_deleted(self, day: Any) -> bool:
+        date_key = _single_line(day, 16)
+        if not date_key:
+            return False
+        deleted_days = self.data.get("daily_diary_deleted_days")
+        if isinstance(deleted_days, str):
+            deleted_days = [deleted_days]
+        if not isinstance(deleted_days, list):
+            return False
+        return any(_single_line(value, 16) == date_key for value in deleted_days)
+
+    def _daily_diary_delete_revision(self) -> int:
+        try:
+            return max(0, int(self.data.get("daily_diary_delete_revision") or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     def _is_daily_diary_due(self) -> bool:
         diary_minutes = self._parse_hhmm_to_minutes(self.daily_diary_time)
         if diary_minutes is None:
@@ -1909,6 +1979,8 @@ class DailyStateMixin(DailyStateTickMixin):
         now_dt = self._environment_fromtimestamp(check_now)
         today = now_dt.strftime("%Y-%m-%d")
         if _single_line(self.data.get("diary_generated_day"), 16) == today:
+            return None
+        if self._daily_diary_was_manually_deleted(today):
             return None
 
         diary_minutes = self._parse_hhmm_to_minutes(self.daily_diary_time)

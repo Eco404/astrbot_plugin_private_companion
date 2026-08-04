@@ -521,12 +521,15 @@ class LlmToolActionsMixin:
         instruction = """
 【QQ 空间动态工具】
 当用户明确要求你查看说说、QQ 空间动态、点赞/评论说说,或要求你发一条说说时,可以使用 Private Companion 的 QQ 空间工具。
-- 查看说说：使用 `pc_qzone_view_feed`。不知道目标 QQ 时默认当前用户；可用 `selector` 传“最新”“第2条”“最后”或 fid。
+- 查看说说：使用 `pc_qzone_view_feed`。“你/你自己发的”传 `target_scope=self`；“我/我自己发的”传 `target_scope=current_user`，不要把当前用户的动态说成 Bot 自己发的。可用 `selector` 传“最新”“第2条”“最后”或 fid。
+- 用户提到“今天下午6点多”“昨天 18:20”等发布时间时，把原话放进 `time_hint`；工具会按作者和时间共同匹配，不要退化成无条件查看最新一条。
+- 用户问自己是否在 Bot 动态下留言，目标仍是 `target_scope=self`；用户问 Bot 是否在用户动态下留言，目标是 `target_scope=current_user`。只依据工具返回的 `comments`、`current_user_commented` 和 `bot_commented` 回答；布尔值为 null 或 `comments_complete=false` 时只能说暂未确认。
+- 调用前不要先说“看到了/原来是/我还真发了”，也不要连续发送多个“让我看看”；直接调用一次，等结果后再自然回答。只有 `status=success` 且 `target_verified=true` 才能确认看到了目标动态。
 - 发布说说：使用 `pc_qzone_publish_feed`。必须把最终要发布的正文放进 `text` 参数,例如 `{"text":"今天想慢一点。"}`；如需带图,可传 `{"text":"配图说说","images":["本地图片路径或图片URL"]}`；如果用户明确要求“发布刚才/最近生成的生活说说草稿”,可传 `{"use_latest_draft":true}`；不要空调用,不要把草稿当作已发布。
 - 用户明确说“我刚刚给你评论了”“回复我刚才在你空间的评论”时，使用 `pc_qzone_reply_my_comment`。把用户记得的评论关键词放进 `comment_hint`；只有工具返回 `status=replied` 才能说已经回复。返回 `ambiguous`、`not_found` 或 `skipped` 时如实说明，不要猜测或回复错评论。
 - 用户说“你发的说说/你刚发了什么/我看到你发的动态”时，“你”指 Bot 自己，不是当前用户。优先直接依据下方 Bot 自己的发布记录回答，不要反问用户内容，不要让用户自己去看，也不要用默认目标为当前用户的查看工具偷换对象。
 - 发布内容必须服从当前人格与世界观,但不要泄露私聊隐私、内部状态数值、关系网资料或插件实现。
-- 工具失败时简短说明失败原因,不要假装已经发布或点赞。
+- 工具返回 `auth_required`、`target_mismatch`、`target_unverified`、`not_found_time`、`empty` 或 `error` 时，简短说明对应原因，本轮不要用同一条件重复调用；不要假装已经发布、看到、评论或点赞。
 """.strip()
         context_getter = getattr(self, "_qzone_recent_self_publish_chat_context", None)
         recent_context = context_getter() if callable(context_getter) else ""
@@ -5393,6 +5396,7 @@ class LlmToolActionsMixin:
                     event,
                     image_path=image_path,
                     caption=visible_caption,
+                    reaction_image=True,
                 )
             except Exception as exc:
                 delivery = {
@@ -5528,6 +5532,149 @@ class LlmToolActionsMixin:
             ensure_ascii=False,
         )
 
+    @staticmethod
+    def _qzone_view_normalize_uin(value: Any) -> str:
+        text = _single_line(value, 80).lstrip("oO")
+        return text if text.isdigit() else ""
+
+    def _qzone_view_target_scope(
+        self,
+        event: AstrMessageEvent,
+        *,
+        user_id: Any = "",
+        target_scope: Any = "",
+        bot_uin: Any = "",
+    ) -> tuple[str, str]:
+        requested_user = _single_line(user_id, 80)
+        requested_scope = _single_line(target_scope, 40).lower()
+        self_aliases = {"self", "bot", "bot_self", "me", "自己", "你", "机器人"}
+        user_aliases = {"user", "current_user", "sender", "对方", "用户", "我"}
+        try:
+            sender_id = self._qzone_view_normalize_uin(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        normalized_bot_uin = self._qzone_view_normalize_uin(bot_uin)
+
+        inbound = _single_line(getattr(event, "message_str", ""), 500)
+        user_owns_post = bool(
+            re.search(r"(?:我自己(?:的)?|我的)(?:\s*QQ)?(?:空间|动态|说说)", inbound, flags=re.I)
+            or re.search(r"我.{0,14}(?:发了|发的|发布的).{0,10}(?:动态|说说)", inbound, flags=re.I)
+            or re.search(r"你.{0,12}(?:在|给).{0,8}我(?:的)?(?:动态|说说).{0,8}(?:回复|评论|留言)", inbound, flags=re.I)
+        )
+        bot_owns_post = bool(
+            re.search(r"(?:你自己(?:的)?|你的)(?:\s*QQ)?(?:空间|动态|说说)", inbound, flags=re.I)
+            or re.search(r"你.{0,18}(?:发了|发的|发布了|发布的).{0,10}(?:动态|说说)", inbound, flags=re.I)
+            or re.search(r"我.{0,18}给你.{0,10}(?:回复|评论|留言)", inbound, flags=re.I)
+        )
+
+        # The user's ownership wording is more reliable than model-generated tool
+        # arguments. This also repairs older providers that automatically filled
+        # user_id with the current sender for a request about the Bot's own post.
+        if user_owns_post and not bot_owns_post:
+            return "current_user", sender_id
+        if bot_owns_post and not user_owns_post:
+            return "bot_self", normalized_bot_uin
+
+        if requested_user.lower() in self_aliases or requested_scope in self_aliases:
+            return "bot_self", normalized_bot_uin
+        if requested_user.lower() in user_aliases or requested_scope in user_aliases:
+            return "current_user", sender_id
+        explicit_user = self._qzone_view_normalize_uin(requested_user)
+        if explicit_user:
+            return "explicit_user", explicit_user
+        if user_owns_post:
+            return "current_user", sender_id
+        if bot_owns_post:
+            return "bot_self", normalized_bot_uin
+        return "current_user", sender_id
+
+    def _qzone_view_time_filter(self, value: Any) -> dict[str, Any]:
+        text = _single_line(value, 160)
+        if not text:
+            return {}
+        now_getter = getattr(self, "_environment_now", None)
+        try:
+            now = now_getter() if callable(now_getter) else datetime.now()
+        except Exception:
+            now = datetime.now()
+        target_day = now.date()
+        has_day = False
+        if "前天" in text:
+            target_day = (now - timedelta(days=2)).date()
+            has_day = True
+        elif "昨天" in text or "昨日" in text:
+            target_day = (now - timedelta(days=1)).date()
+            has_day = True
+        elif "今天" in text or "今日" in text or "今晚" in text:
+            has_day = True
+        else:
+            full_date = re.search(r"(?<!\d)(\d{4})[年./-](\d{1,2})[月./-](\d{1,2})(?:日)?(?!\d)", text)
+            short_date = re.search(r"(?<!\d)(\d{1,2})月(\d{1,2})日?(?!\d)", text)
+            try:
+                if full_date:
+                    target_day = datetime(
+                        int(full_date.group(1)),
+                        int(full_date.group(2)),
+                        int(full_date.group(3)),
+                    ).date()
+                    has_day = True
+                elif short_date:
+                    target_day = datetime(
+                        now.year,
+                        int(short_date.group(1)),
+                        int(short_date.group(2)),
+                    ).date()
+                    has_day = True
+            except ValueError:
+                return {}
+
+        time_match = re.search(
+            r"(?:(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|夜里)\s*)?"
+            r"([01]?\d|2[0-3])\s*(?:点|时|[:：])\s*([0-5]?\d)?",
+            text,
+        )
+        minute_of_day: int | None = None
+        tolerance_minutes = 180
+        hour_window: tuple[int, int] | None = None
+        if time_match:
+            period = time_match.group(1) or ""
+            hour = int(time_match.group(2))
+            minute = int(time_match.group(3) or 0)
+            if period in {"下午", "傍晚", "晚上", "夜里"} and hour < 12:
+                hour += 12
+            elif period == "中午" and hour < 11:
+                hour += 12
+            elif period == "凌晨" and hour == 12:
+                hour = 0
+            minute_of_day = hour * 60 + minute
+            if "点多" in text:
+                hour_window = (hour * 60, hour * 60 + 59)
+                tolerance_minutes = 59
+            else:
+                tolerance_minutes = 90 if re.search(r"(?:左右|前后|大概|约)", text) else 45
+        if not has_day and minute_of_day is None:
+            return {}
+        return {
+            "date": target_day.strftime("%Y-%m-%d"),
+            "minute_of_day": minute_of_day,
+            "tolerance_minutes": tolerance_minutes,
+            "hour_window": hour_window,
+            "source": text,
+        }
+
+    def _qzone_view_post_datetime(self, post: Any) -> datetime | None:
+        timestamp = _safe_float(
+            getattr(post, "create_time", 0) or getattr(post, "abstime", 0),
+            0,
+        )
+        if timestamp <= 0:
+            return None
+        converter = getattr(self, "_environment_fromtimestamp", None)
+        try:
+            return converter(timestamp) if callable(converter) else datetime.fromtimestamp(timestamp)
+        except Exception:
+            return None
+
     async def _pc_qzone_view_feed_impl(
         self,
         event: AstrMessageEvent,
@@ -5537,6 +5684,9 @@ class LlmToolActionsMixin:
         reply: bool = False,
         selector: str = "",
         fid: str = "",
+        time_hint: str = "",
+        target_scope: str = "",
+        **kwargs: Any,
     ) -> str:
         availability = getattr(self, "_qzone_available", None)
         if callable(availability) and not availability(event):
@@ -5548,29 +5698,185 @@ class LlmToolActionsMixin:
             return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
         if not callable(availability) and not self.enable_qzone_integration:
             return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
-        target = _single_line(user_id, 40)
-        if not target:
-            try:
-                target = str(event.get_sender_id())
-            except Exception:
-                target = ""
         try:
-            selection = parse_qzone_post_selection(user_id=target, selector=selector, pos=pos, fid=fid)
+            def alias(*names: str) -> Any:
+                for name in names:
+                    value = kwargs.get(name)
+                    if value not in (None, ""):
+                        return value
+                return ""
+
+            requested_user = user_id or alias("target_id", "target", "qq", "uin")
+            requested_scope = target_scope or alias("scope", "owner", "target_type")
+            requested_selector = selector or alias("post_selector", "selection")
+            requested_fid = fid or alias("post_id", "tid", "feed_id")
+            requested_time = time_hint or alias(
+                "time",
+                "datetime",
+                "date",
+                "date_time",
+                "published_at",
+                "publish_time",
+                "time_range",
+            )
+            if not requested_time:
+                selector_time = self._qzone_view_time_filter(requested_selector)
+                inbound_time = self._qzone_view_time_filter(getattr(event, "message_str", ""))
+                requested_time = requested_selector if selector_time else (getattr(event, "message_str", "") if inbound_time else "")
+            time_filter = self._qzone_view_time_filter(requested_time)
+            aliased_position = alias("position", "index")
+            requested_pos = _safe_int(aliased_position if aliased_position not in (None, "") else pos, 0, 0)
+
+            cookie_header = await self._qzone_get_cookies(event)
+            qzone_context = self._qzone_context_from_cookies(cookie_header)
+            bot_uin = self._qzone_view_normalize_uin(qzone_context.get("uin"))
+            resolved_scope, target = self._qzone_view_target_scope(
+                event,
+                user_id=requested_user,
+                target_scope=requested_scope,
+                bot_uin=bot_uin,
+            )
+            selection = parse_qzone_post_selection(
+                user_id=target,
+                selector=_single_line(requested_selector, 120),
+                pos=requested_pos,
+                fid=_single_line(requested_fid, 120),
+            )
             if selection.fid:
-                candidates = await self._qzone_query_feeds(event, target_id=selection.target_id or None, pos=0, num=20, with_detail=True)
+                candidates = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=0,
+                    num=20,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
                 posts = [
                     item for item in candidates
                     if str(getattr(item, "tid", "") or "") == selection.fid
                     or str(self._qzone_post_value(item, "fid", "") or "") == selection.fid
                 ][:1]
             elif selection.is_last:
-                candidates = await self._qzone_query_feeds(event, target_id=selection.target_id or None, pos=0, num=10, with_detail=True)
+                candidates = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=0,
+                    num=10,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
                 posts = candidates[-1:] if candidates else []
+            elif time_filter and selection.pos == 0:
+                candidates = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=0,
+                    num=30,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
+                dated_candidates: list[tuple[Any, datetime]] = []
+                for candidate in candidates:
+                    created = self._qzone_view_post_datetime(candidate)
+                    if created is not None and created.strftime("%Y-%m-%d") == time_filter["date"]:
+                        dated_candidates.append((candidate, created))
+                requested_minute = time_filter.get("minute_of_day")
+                if requested_minute is None:
+                    dated_candidates.sort(key=lambda item: item[1], reverse=True)
+                    posts = [dated_candidates[0][0]] if dated_candidates else []
+                else:
+                    hour_window = time_filter.get("hour_window")
+                    if isinstance(hour_window, tuple) and len(hour_window) == 2:
+                        start_minute, end_minute = hour_window
+                        dated_candidates = [
+                            item
+                            for item in dated_candidates
+                            if int(start_minute)
+                            <= item[1].hour * 60 + item[1].minute
+                            <= int(end_minute)
+                        ]
+                    dated_candidates.sort(
+                        key=lambda item: abs((item[1].hour * 60 + item[1].minute) - int(requested_minute))
+                    )
+                    nearest = dated_candidates[0] if dated_candidates else None
+                    nearest_diff = (
+                        abs((nearest[1].hour * 60 + nearest[1].minute) - int(requested_minute))
+                        if nearest
+                        else 10**9
+                    )
+                    posts = [nearest[0]] if nearest and nearest_diff <= int(time_filter["tolerance_minutes"]) else []
+                if not posts:
+                    available_times = [item[1].strftime("%Y-%m-%d %H:%M") for item in dated_candidates[:8]]
+                    return json.dumps(
+                        {
+                            "status": "not_found_time",
+                            "success": False,
+                            "message": "没有找到发布时间符合该时间提示的说说。",
+                            "requested_time": time_filter.get("source", ""),
+                            "target_scope": resolved_scope,
+                            "available_times": available_times,
+                            "must_not_claim_viewed": True,
+                            "should_retry": False,
+                            "final_response_instruction": "如实说明没有匹配到该时间的动态，不要把最新一条或其他作者的动态冒充目标。",
+                        },
+                        ensure_ascii=False,
+                    )
             else:
-                posts = await self._qzone_query_feeds(event, target_id=selection.target_id or None, pos=max(0, int(selection.pos or 0)), num=1, with_detail=True)
+                posts = await self._qzone_query_feeds(
+                    event,
+                    target_id=selection.target_id or None,
+                    pos=max(0, int(selection.pos or 0)),
+                    num=1,
+                    with_detail=True,
+                    cookie_header=cookie_header,
+                )
             if not posts:
-                return json.dumps({"status": "empty", "message": "查询结果为空"}, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "empty",
+                        "success": False,
+                        "message": "查询结果为空",
+                        "target_scope": resolved_scope,
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                    },
+                    ensure_ascii=False,
+                )
             post = posts[0]
+            post_uin = self._qzone_view_normalize_uin(getattr(post, "uin", ""))
+            expected_uin = self._qzone_view_normalize_uin(selection.target_id or target or bot_uin)
+            if not expected_uin or not post_uin:
+                return json.dumps(
+                    {
+                        "status": "target_unverified",
+                        "success": False,
+                        "message": "查询结果缺少可核验的作者 QQ，已停止引用该动态。",
+                        "target_scope": resolved_scope,
+                        "expected_uin": expected_uin,
+                        "observed_uin": post_uin,
+                        "observed_author": _single_line(getattr(post, "name", ""), 60),
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                        "final_response_instruction": "无法核验作者归属，不要把该结果说成 Bot 自己或目标用户发布的动态。",
+                    },
+                    ensure_ascii=False,
+                )
+            if expected_uin and post_uin and expected_uin != post_uin:
+                return json.dumps(
+                    {
+                        "status": "target_mismatch",
+                        "success": False,
+                        "message": "查询结果作者与目标 QQ 不一致，已停止引用该动态。",
+                        "target_scope": resolved_scope,
+                        "expected_uin": expected_uin,
+                        "observed_uin": post_uin,
+                        "observed_author": _single_line(getattr(post, "name", ""), 60),
+                        "must_not_claim_viewed": True,
+                        "should_retry": False,
+                        "final_response_instruction": "不要把该结果说成 Bot 自己或目标用户发布的动态。",
+                    },
+                    ensure_ascii=False,
+                )
             action_msg = ""
             if reply:
                 comment = await self._qzone_comment_post(event, post)
@@ -5580,20 +5886,107 @@ class LlmToolActionsMixin:
                 like_result = await self._qzone_like_post(event, post)
                 like_text = "已点赞" if like_result.get("verified") else "点赞请求已受理，等待 QQ 空间同步"
                 action_msg = (action_msg + f"；{like_text}") if action_msg else like_text
+            comments_payload: list[dict[str, Any]] = []
+            for comment in list(getattr(post, "comments", []) or [])[:30]:
+                comment_uin = self._qzone_view_normalize_uin(getattr(comment, "uin", ""))
+                comment_time = _safe_float(getattr(comment, "create_time", 0), 0)
+                comments_payload.append(
+                    {
+                        "comment_id": _single_line(getattr(comment, "comment_id", ""), 100),
+                        "author": _single_line(getattr(comment, "name", ""), 60),
+                        "uin": comment_uin,
+                        "text": _single_line(getattr(comment, "content", ""), 240),
+                        "published_at": self._qzone_post_time_text(comment_time) if comment_time > 0 else "",
+                    }
+                )
+            raw_post = getattr(post, "raw", None)
+            reported_comment_count = len(comments_payload)
+            if isinstance(raw_post, dict):
+                for key in (
+                    "cmtnum",
+                    "commentnum",
+                    "comment_num",
+                    "commentcount",
+                    "comment_count",
+                    "replynum",
+                ):
+                    if key in raw_post:
+                        reported_comment_count = max(
+                            reported_comment_count,
+                            _safe_int(raw_post.get(key), 0, 0),
+                        )
+            comments_complete = reported_comment_count <= len(comments_payload)
+            try:
+                requester_uin = self._qzone_view_normalize_uin(event.get_sender_id())
+            except Exception:
+                requester_uin = ""
+            published_ts = _safe_float(
+                getattr(post, "create_time", 0) or getattr(post, "abstime", 0),
+                0,
+            )
             return json.dumps(
                 {
                     "status": "success",
+                    "success": True,
                     "action": action_msg,
                     "like_result": like_result or {},
                     "author": _single_line(getattr(post, "name", ""), 60),
-                    "uin": str(getattr(post, "uin", "") or ""),
+                    "uin": post_uin,
+                    "target_scope": resolved_scope,
+                    "target_verified": True,
                     "text": _single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 300),
                     "images": list(getattr(post, "images", []) or [])[:6],
+                    "fid": _single_line(getattr(post, "fid", "") or getattr(post, "tid", ""), 120),
+                    "published_at": self._qzone_post_time_text(published_ts) if published_ts > 0 else "",
+                    "published_ts": int(published_ts) if published_ts > 0 else 0,
+                    "requested_time": time_filter.get("source", "") if time_filter else "",
+                    "comments_loaded": comments_complete or bool(comments_payload),
+                    "comments_complete": comments_complete,
+                    "reported_comment_count": reported_comment_count,
+                    "comment_count": len(comments_payload),
+                    "comments": comments_payload,
+                    "current_user_commented": (
+                        True
+                        if requester_uin and any(item.get("uin") == requester_uin for item in comments_payload)
+                        else False
+                        if comments_complete
+                        else None
+                    ),
+                    "bot_commented": (
+                        True
+                        if bot_uin and any(item.get("uin") == bot_uin for item in comments_payload)
+                        else False
+                        if comments_complete
+                        else None
+                    ),
+                    "must_not_claim_viewed": False,
+                    "should_retry": False,
+                    "final_response_instruction": (
+                        "只依据本结果回答。target_scope=bot_self 才能称为 Bot 自己的动态；"
+                        "评论是否存在只依据 comments/current_user_commented/bot_commented；值为 null 或 comments_complete=false 时只能说暂未确认，不要猜测。"
+                    ),
                 },
                 ensure_ascii=False,
             )
         except Exception as exc:
-            return json.dumps({"status": "error", "message": _single_line(exc, 160)}, ensure_ascii=False)
+            message = _single_line(exc, 160)
+            auth_required = bool(re.search(r"(?:登录|cookie|p_skey|skey|鉴权|认证).*(?:失效|过期|缺失|为空|失败|绑定)|(?:失效|过期).*(?:登录|cookie)", message, flags=re.I))
+            return json.dumps(
+                {
+                    "status": "auth_required" if auth_required else "error",
+                    "success": False,
+                    "message": message or "QQ 空间查询失败",
+                    "retryable": not auth_required,
+                    "should_retry": False,
+                    "must_not_claim_viewed": True,
+                    "final_response_instruction": (
+                        "QQ 空间登录态已失效；如实说明需要重新绑定 Cookie，本轮不要重复调用，也不要声称已经看到动态或评论。"
+                        if auth_required
+                        else "如实说明本次查询失败，本轮不要用同一参数连续重试，也不要声称已经看到动态或评论。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
 
     async def _pc_qzone_publish_feed_impl(self, event: AstrMessageEvent, text: str = "", **kwargs) -> str:
         availability = getattr(self, "_qzone_available", None)

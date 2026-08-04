@@ -595,6 +595,14 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         "separate_before",
     }:
         self.reaction_expression_delivery_mode = "separate_after"
+    self.reaction_expression_image_format = self._cfg_str(
+        c,
+        "reaction_expression_image_format",
+        "image",
+        "image",
+    ).lower()
+    if self.reaction_expression_image_format not in {"image", "qq_emoji"}:
+        self.reaction_expression_image_format = "image"
     self.enable_maslow_motivation_experiment = self._cfg_bool(c, "enable_maslow_motivation_experiment", False)
     self.enable_maslow_schedule_influence = self._cfg_bool(c, "enable_maslow_schedule_influence", False)
     self.maslow_motivation_strength = self._cfg_int(c, "maslow_motivation_strength", 35, 0, 100)

@@ -454,6 +454,7 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(harness.delivery_kwargs["caption"], "今天的穿搭……就是普通的居家服啦。")
+        self.assertFalse(harness.delivery_kwargs.get("reaction_image", False))
         self.assertEqual(event._private_companion_photo_tool_sent_caption, "今天的穿搭……就是普通的居家服啦。")
 
     async def test_edit_with_reference_keeps_edit_workflow_kind(self) -> None:

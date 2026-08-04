@@ -1321,6 +1321,12 @@
     "default": "separate_after",
     "invisible": true
   },
+  "reaction_expression_image_format": {
+    "description": "Legacy flat config: 表情包图片格式",
+    "type": "string",
+    "default": "image",
+    "invisible": true
+  },
   "reaction_expression_trigger_probability": {
     "description": "Legacy flat config: 表情表达触发概率",
     "type": "float",
@@ -11233,6 +11239,23 @@
           "正文前单独发送"
         ],
         "hint": "控制自动表情表达与正文的投递顺序。默认先完整发送正文，再单独发送表情包；同一消息链模式会把图片放进正文消息链，平台最终是否合并展示取决于适配器；正文前单独发送无法在后续正文投递失败时撤回已经送达的图片。用户明确调用图库工具的发送行为不受此项影响。",
+        "condition": {
+          "enable_reaction_expression_experiment": true
+        }
+      },
+      "reaction_expression_image_format": {
+        "description": "表情包图片格式",
+        "type": "string",
+        "default": "image",
+        "options": [
+          "image",
+          "qq_emoji"
+        ],
+        "labels": [
+          "普通图片（兼容）",
+          "QQ 表情格式（OneBot）"
+        ],
+        "hint": "控制本插件图库表情包的图片段格式。普通图片兼容所有平台；QQ 表情格式仅在 OneBot/NapCat 会话中使用，QQ 官方机器人及其他平台会自动回退为普通图片。自动表情、主动表情和显式图库工具共用此设置，普通生图不受影响。",
         "condition": {
           "enable_reaction_expression_experiment": true
         }

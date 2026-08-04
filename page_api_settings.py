@@ -119,6 +119,9 @@ class PageSettingNormalizerMixin:
                 if mode in {"separate_after", "same_message", "separate_before"}
                 else "separate_after"
             )
+        if key == "reaction_expression_image_format":
+            image_format = str(value or "image").strip().lower()
+            return image_format if image_format in {"image", "qq_emoji"} else "image"
         expression_modes = {
             "expression_private_learning_source_mode": ({"owner", "selected", "all"}, "owner"),
             "expression_group_learning_source_mode": ({"disabled", "selected", "all"}, "disabled"),

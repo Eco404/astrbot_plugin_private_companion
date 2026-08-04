@@ -33,10 +33,18 @@ from xml.etree import ElementTree as ET
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 try:
-    from astrbot.api.message_components import At, Image, Plain, Record, Reply
+    from astrbot.api.message_components import (
+        At,
+        BaseMessageComponent,
+        ComponentType,
+        Image,
+        Plain,
+        Record,
+        Reply,
+    )
 except ImportError:
     from astrbot.api.message_components import At, Image, Plain
-    from astrbot.core.message.components import Record
+    from astrbot.core.message.components import BaseMessageComponent, ComponentType, Record
     try:
         from astrbot.api.message_components import Reply
     except ImportError:
@@ -322,6 +330,41 @@ from .planning import (
 )
 
 _private_companion_plugin: Any | None = None
+
+
+class _OneBotReactionImage(BaseMessageComponent):
+    """OneBot image segment that preserves QQ's emoji-image subtype flag."""
+
+    type: ComponentType = ComponentType.Image
+    file: str
+    path: str
+    url: str = ""
+    sub_type: int = 1
+    payload_file: str
+    _private_companion_reaction_expression = True
+
+    def __init__(self, path: str) -> None:
+        resolved = str(Path(path).resolve(strict=True))
+        payload = base64.b64encode(Path(resolved).read_bytes()).decode("ascii")
+        super().__init__(
+            file=resolved,
+            path=resolved,
+            url="",
+            sub_type=1,
+            payload_file=f"base64://{payload}",
+        )
+
+    def toDict(self) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "data": {"file": self.payload_file, "sub_type": self.sub_type},
+        }
+
+    async def to_dict(self) -> dict[str, Any]:
+        return self.toDict()
+
+    def __repr__(self) -> str:
+        return f"_OneBotReactionImage(path={self.path!r}, sub_type={self.sub_type})"
 
 
 
@@ -1664,13 +1707,57 @@ class PrivateCompanionPlugin(
         selected = [str(key).strip() for key in keys if str(key).strip()]
         if not selected:
             selected = ["daily_plan", "daily_state", "bot_diaries", "users", "groups", "memo_notes", "token_usage"]
-        for key in selected:
+        migration_keys = list(selected)
+        if "bot_diaries" in migration_keys:
+            for companion_key in (
+                "diary_generated_day",
+                "daily_diary_deleted_days",
+                "daily_diary_delete_revision",
+            ):
+                if companion_key not in migration_keys:
+                    migration_keys.append(companion_key)
+        for key in migration_keys:
             source_settings = source_next.get("persona_settings") if isinstance(source_next.get("persona_settings"), dict) else {}
             target_settings = target_next.setdefault("persona_settings", {})
             if key in source_settings:
                 target_settings[key] = deepcopy(source_settings[key])
             elif key in source_next:
                 target_next[key] = deepcopy(source_next[key])
+        if "bot_diaries" in migration_keys:
+            diaries = source_next.get("bot_diaries")
+            diary_days: list[str] = []
+            if isinstance(diaries, list):
+                diary_days = [
+                    _single_line(item.get("date"), 16)
+                    for item in diaries
+                    if isinstance(item, dict)
+                ]
+            elif isinstance(diaries, dict):
+                diary_days = [
+                    _single_line(
+                        (item.get("date") if isinstance(item, dict) else "") or stored_date,
+                        16,
+                    )
+                    for stored_date, item in diaries.items()
+                ]
+            valid_days = [day for day in diary_days if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day)]
+            source_marker = _single_line(source_next.get("diary_generated_day"), 16)
+            target_next["diary_generated_day"] = (
+                source_marker
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", source_marker)
+                else max(valid_days, default="")
+            )
+            source_deleted_days = source_next.get("daily_diary_deleted_days")
+            target_next["daily_diary_deleted_days"] = deepcopy(
+                source_deleted_days if isinstance(source_deleted_days, list) else []
+            )
+            try:
+                target_next["daily_diary_delete_revision"] = max(
+                    0,
+                    int(source_next.get("daily_diary_delete_revision") or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                target_next["daily_diary_delete_revision"] = 0
         self._clear_persona_runtime_cache(source_next)
         self._clear_persona_runtime_cache(target_next)
         try:
@@ -1690,7 +1777,7 @@ class PrivateCompanionPlugin(
         source_data.update(source_next)
         target_data.clear()
         target_data.update(target_next)
-        return {"ok": True, "source_persona_id": source, "target_persona_id": target, "keys": selected, "cache_cleared": True}
+        return {"ok": True, "source_persona_id": source, "target_persona_id": target, "keys": migration_keys, "cache_cleared": True}
 
     async def _migrate_persona_profile_async(
         self,
@@ -2779,10 +2866,22 @@ class PrivateCompanionPlugin(
                 )
             return
         try:
-            try:
-                image_component = Image.fromFileSystem(image_path)
-            except AttributeError:
-                image_component = Image.from_file_system(image_path)
+            builder = getattr(self, "_build_reaction_image_component", None)
+            if callable(builder):
+                image_component = builder(event, image_path)
+            else:
+                try:
+                    image_component = Image.fromFileSystem(image_path)
+                except AttributeError:
+                    image_component = Image.from_file_system(image_path)
+                try:
+                    object.__setattr__(
+                        image_component,
+                        "_private_companion_reaction_expression",
+                        True,
+                    )
+                except Exception:
+                    pass
         except Exception as exc:
             await self._settle_reaction_expression_attachment_data(
                 pending,
@@ -2794,15 +2893,6 @@ class PrivateCompanionPlugin(
                 type(exc).__name__,
             )
             return
-        try:
-            setattr(
-                image_component,
-                "_private_companion_reaction_expression",
-                True,
-            )
-        except Exception:
-            pass
-
         delivery_mode = self._reaction_expression_delivery_mode()
         pending["delivery_mode"] = delivery_mode
         pending["component"] = image_component
@@ -2869,6 +2959,62 @@ class PrivateCompanionPlugin(
             return "separate_after"
         return mode
 
+    def _reaction_expression_image_format(self) -> str:
+        image_format = _single_line(
+            getattr(self, "reaction_expression_image_format", "image"),
+            24,
+        ).lower()
+        return image_format if image_format in {"image", "qq_emoji"} else "image"
+
+    @staticmethod
+    def _is_reaction_image_component(component: Any) -> bool:
+        return isinstance(component, Image) or bool(
+            getattr(component, "_private_companion_reaction_expression", False)
+            and callable(getattr(component, "toDict", None))
+        )
+
+    def _build_reaction_image_component(
+        self,
+        event: AstrMessageEvent | None,
+        image_path: str,
+    ) -> Any:
+        format_getter = getattr(self, "_reaction_expression_image_format", None)
+        image_format = (
+            format_getter()
+            if callable(format_getter)
+            else _single_line(
+                getattr(self, "reaction_expression_image_format", "image"),
+                24,
+            ).lower()
+        )
+        platform_getter = getattr(self, "_platform_kind_for_event", None)
+        platform_kind = (
+            platform_getter(event)
+            if image_format == "qq_emoji" and callable(platform_getter)
+            else "generic"
+        )
+        if image_format == "qq_emoji" and platform_kind == "onebot":
+            try:
+                return _OneBotReactionImage(image_path)
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] QQ表情格式组件构建失败,回退普通图片: error_type=%s",
+                    type(exc).__name__,
+                )
+        try:
+            component = Image.fromFileSystem(image_path)
+        except AttributeError:
+            component = Image.from_file_system(image_path)
+        try:
+            object.__setattr__(
+                component,
+                "_private_companion_reaction_expression",
+                True,
+            )
+        except Exception:
+            pass
+        return component
+
     async def _send_reaction_expression_component_separately(
         self,
         event: AstrMessageEvent,
@@ -2933,7 +3079,7 @@ class PrivateCompanionPlugin(
                 reference,
                 _single_line(getattr(component, "text", ""), 1000),
             )
-        if isinstance(component, Image):
+        if PrivateCompanionPlugin._is_reaction_image_component(component):
             reference = _single_line(
                 getattr(component, "file", "")
                 or getattr(component, "url", "")
@@ -3111,7 +3257,7 @@ class PrivateCompanionPlugin(
         if not expected_path:
             return False
         for item in flattened:
-            if not isinstance(item, Image):
+            if not PrivateCompanionPlugin._is_reaction_image_component(item):
                 continue
             for attr in ("file", "path", "url"):
                 raw_value = _path_text(getattr(item, attr, ""), 1000)
@@ -5369,6 +5515,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         reply: bool = False,
         selector: str = "",
         fid: str = "",
+        time_hint: str = "",
+        target_scope: str = "",
+        **kwargs,
     ) -> str:
         """查看某位用户 QQ 空间说说,可按需点赞或评论。
 
@@ -5379,10 +5528,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             reply(boolean): 可选,是否按工具内部规则尝试评论。
             selector(string): 可选,自然语言选择器,如“最新”“第2条”“最后”；也可以填 fid。
             fid(string): 可选,明确指定说说 fid。
+            time_hint(string): 可选,发布时间提示,如“今天下午6点多”或“18:20”。
+            target_scope(string): 可选,self 表示 Bot 自己的空间,current_user 表示当前用户的空间。
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
-        return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply, selector=selector, fid=fid)
+        return await self._pc_qzone_view_feed_impl(
+            event,
+            user_id=user_id,
+            pos=pos,
+            like=like,
+            reply=reply,
+            selector=selector,
+            fid=fid,
+            time_hint=time_hint,
+            target_scope=target_scope,
+            **kwargs,
+        )
 
     @filter.llm_tool(name="pc_qzone_publish_feed")
     @_multi_persona_event_context

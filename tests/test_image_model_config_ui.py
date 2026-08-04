@@ -35,9 +35,23 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertNotIn("renderProviders(context);", toolbar_binding)
         self.assertIn('button.setAttribute("aria-pressed"', self.script)
         self.assertIn(
-            './js/panels/provider-tree.js?v=20260731-test-diagnostics-v1',
+            './js/panels/provider-tree.js?v=20260804-private-reading-capability-v1',
             self.html,
         )
+
+    def test_private_reading_provider_ui_follows_runtime_capability(self) -> None:
+        summary = self.provider_tree.split("function renderProviderSummary", 1)[1].split(
+            "function deepseekPeakProviderControl", 1
+        )[0]
+        flow = self.provider_tree.split("function renderProviderFlow", 1)[1].split(
+            "function providerGroupMarkup", 1
+        )[0]
+        capability_check = 'visibleConfigKey("PRIVATE_READING_VISION_PROVIDER_ID")'
+        self.assertIn(capability_check, summary)
+        self.assertIn("readingVisionAvailable", summary)
+        self.assertIn(capability_check, flow)
+        self.assertIn("readingVisionNode", flow)
+        self.assertNotIn("JM 本子", summary)
 
     def test_authoritative_overview_clears_saved_provider_drafts(self) -> None:
         apply_overview = self.script.split("function applyOverviewData", 1)[1].split(

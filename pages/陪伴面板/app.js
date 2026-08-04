@@ -21,6 +21,7 @@ const state = {
   tokenStats: null,
   tokenStatsPartial: false,
   bookshelfUnlocked: null,
+  bookshelfPersonaId: "",
   bookshelfAccessToken: "",
   memoNotes: null,
   selectedBook: null,
@@ -28,6 +29,7 @@ const state = {
   creativeEditing: false,
   selectedBookSpreadIndex: 0,
   selectedDiaryDate: "",
+  selectedDiaryKey: "",
   selectedBrowsingIndex: 0,
   memoFilter: "active",
   memoEditorId: "",
@@ -2166,6 +2168,7 @@ const configLabels = {
   reaction_expression_proactive_enabled: "允许主动消息表情表达",
   reaction_expression_group_enabled: "允许群聊表情表达",
   reaction_expression_delivery_mode: "表情包位置",
+  reaction_expression_image_format: "表情包图片格式",
   reaction_expression_trigger_probability: "表情表达触发概率",
   reaction_expression_cooldown_seconds: "表情表达冷却秒数",
   reaction_expression_low_latency_mode: "低延迟选择模式",
@@ -2205,6 +2208,7 @@ const configDescriptions = {
   reaction_expression_proactive_enabled: "允许主动私聊在完整正文后留下隐藏表情意图，再复用相同的概率、冷却、用户停用边界、重复图片与本地图库匹配；不会增加模型调用，已有媒体时不会叠加表情包。",
   reaction_expression_group_enabled: "默认关闭。开启后允许群聊使用，但公开风险高、关系不明确或上下文不足的候选会被降低优先级。",
   reaction_expression_delivery_mode: "与表情表达实验共用。默认先完整发送正文，再单独发送表情包；也可放进正文消息链，或改为正文前发送。",
+  reaction_expression_image_format: "普通图片兼容所有平台；QQ 表情格式仅在 OneBot/NapCat 会话中生效，QQ 官方机器人及其他平台自动回退普通图片。只影响本插件图库表情包，不影响普通生图。",
   reaction_expression_trigger_probability: "通过语境、关系边界和冷却检查后实际尝试选择表情的概率。设为 100% 时不会因模型漏写隐藏标签而丢失已获机会，但仍遵守冷却、重复图片和用户停用边界；想连续发送请同时把冷却设为 0。",
   reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
@@ -2862,7 +2866,7 @@ const featureSettingGroups = {
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "proactive_generation_history_limit", "proactive_history_context_mode", "proactive_history_recent_raw_count", "proactive_history_max_chars", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_multi_persona_mode: ["multi_persona_primary_id", "multi_persona_ids"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
-  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled", "reaction_expression_delivery_mode", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
+  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled", "reaction_expression_delivery_mode", "reaction_expression_image_format", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", ...advancedCycleSettingKeys, "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
@@ -3487,8 +3491,8 @@ const featureSettingSections = {
     },
     {
       title: "发送方式",
-      note: "默认先完整发送正文，再单独发送表情包；也可按会话体验改为同一消息链或正文前单独发送。",
-      keys: ["reaction_expression_delivery_mode"],
+      note: "控制表情包与正文的位置及图片格式；QQ 表情格式仅对 OneBot/NapCat 生效，其他平台自动回退。",
+      keys: ["reaction_expression_delivery_mode", "reaction_expression_image_format"],
     },
     {
       title: "触发节奏",
@@ -3870,6 +3874,7 @@ const featureSettingTypes = {
   reaction_expression_proactive_enabled: { type: "checkbox" },
   reaction_expression_group_enabled: { type: "checkbox" },
   reaction_expression_delivery_mode: { type: "select", options: [["separate_after", "正文后单独发送（推荐）"], ["same_message", "与正文同一消息链"], ["separate_before", "正文前单独发送"]] },
+  reaction_expression_image_format: { type: "select", options: [["image", "普通图片（兼容）"], ["qq_emoji", "QQ 表情格式（OneBot）"]] },
   reaction_expression_trigger_probability: { type: "number", min: 0, max: 100, step: 1 },
   reaction_expression_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 10 },
   reaction_expression_low_latency_mode: { type: "checkbox" },
@@ -5184,13 +5189,14 @@ function selectedPagePersonaId() {
 }
 
 function scopePagePersonaRequest(path, options, method) {
-  const personaId = selectedPagePersonaId();
-  if (!personaId || /^\/(?:persona\/(?:switch|migrate)|roleplay\/personas)(?:[/?]|$)/.test(path)) {
+  const selectedPersonaId = selectedPagePersonaId();
+  if (/^\/(?:persona\/(?:switch|migrate)|roleplay\/personas)(?:[/?]|$)/.test(path)) {
     return { path, options };
   }
   if (method === "GET") {
+    if (!selectedPersonaId) return { path, options };
     const url = new URL(path, "https://astrbot-plugin-page.local/");
-    url.searchParams.set("_persona_id", personaId);
+    url.searchParams.set("_persona_id", selectedPersonaId);
     return { path: `${url.pathname}${url.search}`, options };
   }
   let payload = options.body || {};
@@ -5202,6 +5208,8 @@ function scopePagePersonaRequest(path, options, method) {
     }
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) payload = {};
+  const personaId = String(payload._persona_id || selectedPersonaId || "").trim();
+  if (!personaId) return { path, options };
   return {
     path,
     options: { ...options, body: JSON.stringify({ ...payload, _persona_id: personaId }) },
@@ -5790,23 +5798,28 @@ function applyOverviewData(overview) {
       current: current || overview.multi_persona.current || overview.multi_persona.primary || "",
     };
   }
-  const unlockedBooks = Array.isArray(state.bookshelfUnlocked?.secret_books)
-    ? state.bookshelfUnlocked.secret_books
+  const activePersonaId = activeBookshelfPersonaId();
+  if (state.bookshelfUnlocked && activePersonaId && state.bookshelfPersonaId !== activePersonaId) {
+    setBookshelfUnlocked(null);
+    state.bookshelfAccessToken = "";
+    resetBookshelfSelection();
+  }
+  const currentUnlockedBookshelf = bookshelfUnlockedForCurrentPersona();
+  const unlockedBooks = Array.isArray(currentUnlockedBookshelf?.secret_books)
+    ? currentUnlockedBookshelf.secret_books
     : null;
   const overviewBookshelfCount = Number(overview?.bookshelf?.jm_album_count);
   const unlockedBookshelfCount = unlockedBooks
     ? unlockedBooks.filter((item) => item?.kind === "jm_album").length
     : 0;
   if (
-    state.bookshelfUnlocked?.unlocked
+    currentUnlockedBookshelf?.unlocked
     && Number.isFinite(overviewBookshelfCount)
     && unlockedBookshelfCount !== overviewBookshelfCount
   ) {
-    state.bookshelfUnlocked = null;
+    setBookshelfUnlocked(null);
     clearBookshelfAccessToken();
-    state.selectedBook = null;
-    state.selectedBookSpreadIndex = 0;
-    state.bookshelfPage = "shelf";
+    resetBookshelfSelection();
   }
   state.overview = overview;
   const overviewMemoNotes = overview?.bookshelf?.memo_notes;
@@ -17612,9 +17625,36 @@ function renderCreativeStatusBar(selector, chips) {
   }).join("");
 }
 
+function activeBookshelfPersonaId() {
+  return state.multiPersona?.enabled ? selectedPagePersonaId() : "";
+}
+
+function bookshelfUnlockedForCurrentPersona() {
+  if (!state.bookshelfUnlocked) return null;
+  const personaId = activeBookshelfPersonaId();
+  if (personaId && state.bookshelfPersonaId !== personaId) return null;
+  return state.bookshelfUnlocked;
+}
+
+function setBookshelfUnlocked(bookshelf) {
+  state.bookshelfUnlocked = bookshelf || null;
+  state.bookshelfPersonaId = bookshelf ? activeBookshelfPersonaId() : "";
+  return state.bookshelfUnlocked;
+}
+
+function resetBookshelfSelection() {
+  state.selectedBook = null;
+  state.bookshelfPage = "shelf";
+  state.creativeEditing = false;
+  state.selectedBookSpreadIndex = 0;
+  state.selectedDiaryDate = "";
+  state.selectedDiaryKey = "";
+  state.selectedBrowsingIndex = 0;
+}
+
 function renderBookshelf() {
   const creative = state.overview?.creative || {};
-  const bookshelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
+  const bookshelf = bookshelfUnlockedForCurrentPersona() || state.overview?.bookshelf || {};
   const privateReading = state.overview?.private_reading || {};
   const settings = state.overview?.settings || {};
   $("#bookshelfPublicCount").textContent = bookshelf.public_count ?? creative.project_count ?? 0;
@@ -17973,9 +18013,9 @@ async function saveSelectedBookshelfReadingState() {
       page: currentPage,
       total_pages: pages.length,
       bookmark,
-      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+      access_token: state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || "",
     });
-    state.bookshelfUnlocked = result.bookshelf || state.bookshelfUnlocked;
+    setBookshelfUnlocked(result.bookshelf || bookshelfUnlockedForCurrentPersona());
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
     const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(book.album_id));
     if (updated) state.selectedBook = updated;
@@ -18332,7 +18372,7 @@ function renderBookPreferenceEditor(book) {
 }
 
 function allBookshelfBooks() {
-  const bookshelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
+  const bookshelf = bookshelfUnlockedForCurrentPersona() || state.overview?.bookshelf || {};
   return [
     ...(bookshelf.public_books || []),
     ...(bookshelf.secret_books || []),
@@ -18485,7 +18525,9 @@ function selectBookshelfBook(bookId) {
       state.selectedBookSpreadIndex = 0;
       if (book.kind === "diary") {
         const entries = Array.isArray(book.entries) ? book.entries : [];
-        state.selectedDiaryDate = entries[entries.length - 1]?.date || "";
+        const latest = entries[entries.length - 1] || {};
+        state.selectedDiaryDate = latest.date || "";
+        state.selectedDiaryKey = latest.entry_key || latest.date || "";
       }
       if (book.kind === "browsing") {
         const entries = Array.isArray(book.entries) ? book.entries : [];
@@ -18496,6 +18538,18 @@ function selectBookshelfBook(bookId) {
       if (book.kind === "creative") void ensureCreativeProjectDetail(book);
     },
   });
+}
+
+function selectDiaryEntry(value) {
+  const selected = String(value || "");
+  if (state.selectedBook?.kind !== "diary") {
+    state.selectedDiaryDate = selected;
+    return;
+  }
+  const entries = Array.isArray(state.selectedBook.entries) ? state.selectedBook.entries : [];
+  const entry = entries.find((item) => String(item.entry_key || item.date || "") === selected);
+  state.selectedDiaryKey = selected;
+  state.selectedDiaryDate = entry?.date || "";
 }
 
 function renderBookDetailPanel() {
@@ -18517,9 +18571,17 @@ function renderBookDetailPanel() {
   const entryBook = ["diary", "browsing"].includes(book.kind || "");
   const diaryEntries = entryBook && Array.isArray(book.entries) ? book.entries : [];
   const selectedDiaryDate = state.selectedDiaryDate || diaryEntries[diaryEntries.length - 1]?.date || "";
-  const diaryEntry = diaryEntries.find((entry) => entry.date === selectedDiaryDate) || diaryEntries[diaryEntries.length - 1] || null;
+  const selectedDiaryKey = state.selectedDiaryKey || diaryEntries[diaryEntries.length - 1]?.entry_key || selectedDiaryDate;
+  const diaryEntry = (book.kind === "diary"
+    ? diaryEntries.find((entry) => String(entry.entry_key || entry.date || "") === selectedDiaryKey)
+    : diaryEntries.find((entry) => entry.date === selectedDiaryDate))
+    || diaryEntries[diaryEntries.length - 1]
+    || null;
   if (entryBook && diaryEntry && state.selectedDiaryDate !== diaryEntry.date) {
     state.selectedDiaryDate = diaryEntry.date;
+  }
+  if (book.kind === "diary" && diaryEntry) {
+    state.selectedDiaryKey = String(diaryEntry.entry_key || diaryEntry.date || "");
   }
   const displayTitle = entryBook && diaryEntry
     ? (book.kind === "diary" ? `${diaryEntry.date} 的日记` : (diaryEntry.title || diaryEntry.date || "浏览记录"))
@@ -18531,7 +18593,11 @@ function renderBookDetailPanel() {
       <label class="diary-date-picker">
         <span>${book.kind === "diary" ? "日期" : "记录"}</span>
         <select data-diary-date>
-          ${diaryEntries.slice().reverse().map((entry) => `<option value="${escapeHtml(entry.date)}"${entry.date === state.selectedDiaryDate ? " selected" : ""}>${escapeHtml(entry.date)}</option>`).join("")}
+          ${diaryEntries.slice().reverse().map((entry) => {
+            const value = book.kind === "diary" ? String(entry.entry_key || entry.date || "") : String(entry.date || "");
+            const selected = book.kind === "diary" ? value === state.selectedDiaryKey : entry.date === state.selectedDiaryDate;
+            return `<option value="${escapeHtml(value)}"${selected ? " selected" : ""}>${escapeHtml(entry.date || "某天")}</option>`;
+          }).join("")}
         </select>
       </label>
     `
@@ -18577,8 +18643,9 @@ function renderBookDetailPanel() {
         data-book-kind="${escapeHtml(book.kind || "")}"
         data-book-id="${escapeHtml(book.id || "")}"
         data-book-album-id="${escapeHtml(book.album_id || "")}"
-        data-book-title="${escapeHtml(book.title || "")}"
-        data-book-date="${escapeHtml(book.kind === "diary" ? (state.selectedDiaryDate || "") : "")}">
+       data-book-title="${escapeHtml(book.title || "")}"
+        data-book-date="${escapeHtml(book.kind === "diary" ? (state.selectedDiaryDate || "") : "")}"
+        data-book-entry-key="${escapeHtml(book.kind === "diary" ? (diaryEntry?.entry_key || state.selectedDiaryKey || "") : "")}">
         ${escapeHtml(book.kind === "diary" ? "删除当前日记" : "从书柜移除")}
       </button>
     </div>
@@ -18774,9 +18841,10 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
 }
 
 function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
-  const rows = Array.isArray(entries) ? entries : [];
-  const current = selectedEntry || rows[rows.length - 1] || {};
-  const currentDate = current.date || state.selectedDiaryDate || "";
+ const rows = Array.isArray(entries) ? entries : [];
+ const current = selectedEntry || rows[rows.length - 1] || {};
+ const currentDate = current.date || state.selectedDiaryDate || "";
+  const currentKey = String(current.entry_key || currentDate || state.selectedDiaryKey || "");
   const tags = Array.isArray(current.tags) && current.tags.length
     ? `<div class="book-tags">${current.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`
     : "";
@@ -18800,8 +18868,8 @@ function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
             <b>${escapeHtml(rows.length)}</b>
           </header>
           <div class="diary-date-list">
-            ${rows.slice().reverse().map((entry) => `
-              <button type="button" data-diary-jump="${escapeHtml(entry.date || "")}" class="${entry.date === currentDate ? "is-active" : ""}">
+           ${rows.slice().reverse().map((entry) => `
+              <button type="button" data-diary-jump="${escapeHtml(entry.entry_key || entry.date || "")}" class="${String(entry.entry_key || entry.date || "") === currentKey ? "is-active" : ""}">
                 <b>${escapeHtml(entry.date || "某天")}</b>
                 <span>${escapeHtml(shortName(entry.intro || entry.content || "没有摘要", 34))}</span>
               </button>
@@ -18820,9 +18888,10 @@ function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
             <span>${escapeHtml(book.created || "夹层日记")}</span>
             <button type="button" class="danger-outline" data-book-delete
               data-book-kind="diary"
-              data-book-id="${escapeHtml(book.id || "")}"
-              data-book-title="${escapeHtml(book.title || "")}"
-              data-book-date="${escapeHtml(currentDate)}">删除当前日记</button>
+             data-book-id="${escapeHtml(book.id || "")}"
+             data-book-title="${escapeHtml(book.title || "")}"
+              data-book-date="${escapeHtml(currentDate)}"
+              data-book-entry-key="${escapeHtml(currentKey)}">删除当前日记</button>
           </footer>
         </section>
       </div>
@@ -18924,11 +18993,13 @@ function readBookshelfAccessStorage() {
     const stored = JSON.parse(raw);
     const token = String(stored?.token || "").trim();
     const expiresAt = Number(stored?.expiresAt || 0);
+    const personaId = String(stored?.personaId || "").trim();
     if (!token || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
       localStorage.removeItem(BOOKSHELF_ACCESS_STORAGE_KEY);
       return null;
     }
-    return { token, expiresAt };
+    if (personaId && personaId !== activeBookshelfPersonaId()) return null;
+    return { token, expiresAt, personaId };
   } catch (error) {
     return null;
   }
@@ -18943,7 +19014,11 @@ function persistBookshelfAccess(bookshelf = {}) {
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
   state.bookshelfAccessToken = token;
   try {
-    localStorage.setItem(BOOKSHELF_ACCESS_STORAGE_KEY, JSON.stringify({ token, expiresAt }));
+    localStorage.setItem(BOOKSHELF_ACCESS_STORAGE_KEY, JSON.stringify({
+      token,
+      expiresAt,
+      personaId: activeBookshelfPersonaId(),
+    }));
   } catch (error) {}
   return true;
 }
@@ -18954,32 +19029,36 @@ function clearBookshelfAccessToken() {
 }
 
 async function restoreBookshelfAccess() {
-  if (state.bookshelfUnlocked?.unlocked && state.bookshelfAccessToken) return true;
+  if (bookshelfUnlockedForCurrentPersona()?.unlocked && state.bookshelfAccessToken) return true;
+  const requestPersonaId = activeBookshelfPersonaId();
   const stored = readBookshelfAccessStorage();
   if (!stored) return false;
-  state.bookshelfAccessToken = stored.token;
   try {
-    const result = await postJson("/bookshelf/session", { access_token: stored.token });
+    const result = await postJson("/bookshelf/session", {
+      access_token: stored.token,
+      _persona_id: requestPersonaId,
+    });
+    if (activeBookshelfPersonaId() !== requestPersonaId) return false;
     const bookshelf = result?.bookshelf;
     if (!bookshelf?.unlocked) throw new Error("夹层会话无效");
-    state.bookshelfUnlocked = bookshelf;
+    state.bookshelfAccessToken = stored.token;
+    setBookshelfUnlocked(bookshelf);
     persistBookshelfAccess(bookshelf);
     if (bookshelf.memo_notes) applyMemoPayload(bookshelf.memo_notes);
-    state.selectedBook = null;
-    state.bookshelfPage = "shelf";
+    resetBookshelfSelection();
     renderBookshelf();
     setBookshelfUnlockMessage("已恢复今日的夹层访问", "ok");
     return true;
   } catch (error) {
+    if (activeBookshelfPersonaId() !== requestPersonaId) return false;
     const message = String(error?.message || "");
     if (/访问已过期|会话无效/.test(message)) {
       clearBookshelfAccessToken();
     } else {
       state.bookshelfAccessToken = "";
     }
-    state.bookshelfUnlocked = null;
-    state.selectedBook = null;
-    state.bookshelfPage = "shelf";
+    setBookshelfUnlocked(null);
+    resetBookshelfSelection();
     renderBookshelf();
     return false;
   }
@@ -20684,6 +20763,9 @@ function renderCurrentPersonaStatus(settings) {
       const result = await postJson("/persona/switch", { persona_id: select.value });
       state.multiPersona.current = result.persona_id || select.value;
       try { sessionStorage.setItem(PAGE_PERSONA_STORAGE_KEY, state.multiPersona.current); } catch (_error) {}
+      setBookshelfUnlocked(null);
+      state.bookshelfAccessToken = "";
+      resetBookshelfSelection();
       state.users = [];
       state.groups = [];
       state.selectedUserId = "";
@@ -23025,6 +23107,7 @@ function featureRelatedSettings(key) {
       reaction_expression_proactive_enabled: true,
       reaction_expression_group_enabled: false,
       reaction_expression_delivery_mode: "separate_after",
+      reaction_expression_image_format: "image",
       reaction_expression_trigger_probability: 0.2,
       reaction_expression_cooldown_seconds: 180,
       reaction_expression_low_latency_mode: true,
@@ -32046,7 +32129,7 @@ document.addEventListener("click", async (event) => {
   }
   const diaryJump = element?.closest("[data-diary-jump]");
   if (diaryJump) {
-    state.selectedDiaryDate = diaryJump.dataset.diaryJump || "";
+    selectDiaryEntry(diaryJump.dataset.diaryJump || "");
     renderBookDetailPanel();
     return;
   }
@@ -32092,12 +32175,13 @@ async function deleteSelectedBookshelfItem(button = null) {
   const albumId = dataset.bookAlbumId || book.album_id || "";
   const title = dataset.bookTitle || book.title || "";
   const diaryDate = kind === "diary" ? (dataset.bookDate || state.selectedDiaryDate || "") : "";
+  const diaryEntryKey = kind === "diary" ? (dataset.bookEntryKey || state.selectedDiaryKey || "") : "";
   if (!kind) {
     alert("没有找到当前书籍，请刷新拓展页后再试。");
     return;
   }
   const label = kind === "diary" && diaryDate ? `${diaryDate} 的日记` : (title || "这本书");
-  if (kind !== "jm_album" && !requireSecondClick(button, `book:${kind}:${itemId}:${diaryDate}`, `再次点击删除「${label}」`, "再次点击删除")) return;
+  if (kind !== "jm_album" && !requireSecondClick(button, `book:${kind}:${itemId}:${diaryEntryKey || diaryDate}`, `再次点击删除「${label}」`, "再次点击删除")) return;
   if (button) {
     button.disabled = true;
     button.textContent = "移除中...";
@@ -32120,7 +32204,7 @@ async function deleteSelectedBookshelfItem(button = null) {
         shelf.public_count = shelf.public_books.length;
       };
       removeCreative(state.overview?.bookshelf);
-      removeCreative(state.bookshelfUnlocked);
+      removeCreative(bookshelfUnlockedForCurrentPersona());
       if (state.overview?.creative) {
         const items = Array.isArray(state.overview.creative.items) ? state.overview.creative.items : [];
         state.overview.creative.items = items.filter((item) => String(item.id || "") !== String(itemId));
@@ -32141,7 +32225,8 @@ async function deleteSelectedBookshelfItem(button = null) {
       album_id: albumId,
       title,
       date: diaryDate,
-      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+      entry_key: diaryEntryKey,
+      access_token: state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || "",
     });
     if (!result.changed) {
       showToast("没有找到要移除的书柜条目，请刷新拓展页后再试。", "error");
@@ -32151,11 +32236,9 @@ async function deleteSelectedBookshelfItem(button = null) {
       }
       return;
     }
-    state.bookshelfUnlocked = result.bookshelf || null;
+    setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
-    state.selectedBook = null;
-    state.bookshelfPage = "shelf";
-    state.selectedBookSpreadIndex = 0;
+    resetBookshelfSelection();
     renderBookshelf();
     showToast(kind === "diary" ? "日记已删除。" : "已从书柜移除。");
   } catch (error) {
@@ -32181,9 +32264,9 @@ async function rateSelectedBookshelfItem(button = null) {
       album_id: albumId,
       rating,
       reason,
-      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+      access_token: state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || "",
     });
-    state.bookshelfUnlocked = result.bookshelf || null;
+    setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
     const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
     if (updated) state.selectedBook = updated;
@@ -32209,9 +32292,9 @@ async function updateSelectedBookshelfTags(form) {
       album_id: albumId,
       liked_tags: likedTags,
       disliked_tags: dislikedTags,
-      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+      access_token: state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || "",
     });
-    state.bookshelfUnlocked = result.bookshelf || null;
+    setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
     const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
     if (updated) state.selectedBook = updated;
@@ -32250,9 +32333,9 @@ async function rereadSelectedBookshelfItem(button = null) {
   await runAction(async () => {
     const result = await postJson("/bookshelf/comments/update", {
       album_id: albumId,
-      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+      access_token: state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || "",
     });
-    state.bookshelfUnlocked = result.bookshelf || null;
+    setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
     const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
     if (updated) state.selectedBook = updated;
@@ -32394,7 +32477,7 @@ document.addEventListener("change", (event) => {
   }
   const target = event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !target.matches("[data-diary-date]")) return;
-  state.selectedDiaryDate = target.value;
+  selectDiaryEntry(target.value);
   renderBookDetailPanel();
 });
 
@@ -32484,12 +32567,11 @@ $("#bookshelfUnlockForm").addEventListener("submit", async (event) => {
   setBookshelfUnlockMessage("正在验证...", "");
   try {
     const result = await postJson("/bookshelf/unlock", { password });
-    state.bookshelfUnlocked = result.bookshelf || null;
+    setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || "";
     persistBookshelfAccess(result.bookshelf || {});
     if (result.bookshelf?.memo_notes) applyMemoPayload(result.bookshelf.memo_notes);
-    state.selectedBook = null;
-    state.bookshelfPage = "shelf";
+    resetBookshelfSelection();
     renderBookshelf();
     $("#bookshelfPassword").value = "";
     setBookshelfUnlockMessage("密码正确，已打开", "ok");

@@ -151,12 +151,17 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
             source = plugin._ensure_persona_profile("main")
             target = plugin._ensure_persona_profile("alt")
             target["runtime_cache"] = {"old": True}
+            source["daily_diary_deleted_days"] = ["2026-08-02"]
+            source["daily_diary_delete_revision"] = 7
 
             migrated = await plugin._migrate_persona_profile_async("main", "alt", [])
 
             self.assertTrue(migrated["ok"])
             self.assertIn("bot_diaries", migrated["keys"])
             self.assertEqual(source["bot_diaries"], target["bot_diaries"])
+            self.assertEqual("2026-08-03", target["diary_generated_day"])
+            self.assertEqual(["2026-08-02"], target["daily_diary_deleted_days"])
+            self.assertEqual(7, target["daily_diary_delete_revision"])
             self.assertNotIn("runtime_cache", target)
             stored = (Path(root) / "persona_profiles" / "alt.json").read_text(
                 encoding="utf-8"

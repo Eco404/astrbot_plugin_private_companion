@@ -18665,10 +18665,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 await settle(pending, sent=False, reason="attachment_file_missing")
             return None, None
         try:
-            try:
-                image_component = Image.fromFileSystem(image_path)
-            except AttributeError:
-                image_component = Image.from_file_system(image_path)
+            builder = getattr(self, "_build_reaction_image_component", None)
+            if callable(builder):
+                image_component = builder(event, image_path)
+            else:
+                try:
+                    image_component = Image.fromFileSystem(image_path)
+                except AttributeError:
+                    image_component = Image.from_file_system(image_path)
         except Exception as exc:
             await settle(pending, sent=False, reason="attachment_component_failed")
             logger.warning(
@@ -18960,8 +18964,17 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         return "【主动承接占位】用户还没发来新消息；下一条是 Bot 主动发出的内容。后续如果用户回应，顺着上一条主动消息自然接住就好。"
 
     @staticmethod
+    def _proactive_component_is_image(component: Any) -> bool:
+        return isinstance(component, Image) or bool(
+            getattr(component, "_private_companion_reaction_expression", False)
+        )
+
+    @staticmethod
     def _proactive_components_contain_image(components: list[Any] | None) -> bool:
-        return any(isinstance(component, Image) for component in (components or []))
+        return any(
+            ProactiveMessageMixin._proactive_component_is_image(component)
+            for component in (components or [])
+        )
 
     def _build_actual_proactive_delivery_summary(
         self,
@@ -18977,7 +18990,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             parts.append(f"文字消息：{visible_text}")
 
         image_count = int(bool(image_path)) + sum(
-            1 for component in (extra_components or []) if isinstance(component, Image)
+            1
+            for component in (extra_components or [])
+            if self._proactive_component_is_image(component)
         )
         if image_count:
             photo_caption = ""
@@ -19001,7 +19016,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         other_count = sum(
             1
             for component in (extra_components or [])
-            if not isinstance(component, (Image, Record))
+            if not self._proactive_component_is_image(component)
+            and not isinstance(component, Record)
         )
         if other_count:
             parts.append(f"{other_count} 个附加消息组件已发送")
@@ -19068,7 +19084,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if extra_components:
             tts_notes: list[str] = []
             note_builder = getattr(self, "_tts_component_log_note", None)
-            image_components = [comp for comp in extra_components if isinstance(comp, Image)]
+            image_components = [
+                comp
+                for comp in extra_components
+                if self._proactive_component_is_image(comp)
+            ]
             for comp in extra_components:
                 if isinstance(comp, Record) and callable(note_builder):
                     note = _single_line(note_builder(comp), 220)

@@ -30,6 +30,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
             "reaction_expression_delivery_mode",
+            "reaction_expression_image_format",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_semantic_trigger_enabled",
@@ -50,6 +51,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
             "reaction_expression_delivery_mode",
+            "reaction_expression_image_format",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_semantic_trigger_enabled",
@@ -77,6 +79,11 @@ class ReactionExpressionUiTests(unittest.TestCase):
             ["正文后单独发送（推荐）", "与正文同一消息链", "正文前单独发送"],
             items["reaction_expression_delivery_mode"]["labels"],
         )
+        self.assertEqual("image", items["reaction_expression_image_format"]["default"])
+        self.assertEqual(
+            ["image", "qq_emoji"],
+            items["reaction_expression_image_format"]["options"],
+        )
         self.assertEqual(0.2, items["reaction_expression_trigger_probability"]["default"])
         self.assertEqual({"min": 0, "max": 1, "step": 0.01}, items["reaction_expression_trigger_probability"]["slider"])
         self.assertEqual(180, items["reaction_expression_cooldown_seconds"]["default"])
@@ -102,6 +109,7 @@ class ReactionExpressionUiTests(unittest.TestCase):
             "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
             "reaction_expression_delivery_mode",
+            "reaction_expression_image_format",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_semantic_trigger_enabled",
@@ -112,6 +120,10 @@ class ReactionExpressionUiTests(unittest.TestCase):
         self.assertIn('reaction_expression_trigger_probability: { type: "number", min: 0, max: 100, step: 1 }', self.script)
         self.assertIn(
             'reaction_expression_delivery_mode: { type: "select", options: [["separate_after", "正文后单独发送（推荐）"], ["same_message", "与正文同一消息链"], ["separate_before", "正文前单独发送"]] }',
+            self.script,
+        )
+        self.assertIn(
+            'reaction_expression_image_format: { type: "select", options: [["image", "普通图片（兼容）"], ["qq_emoji", "QQ 表情格式（OneBot）"]] }',
             self.script,
         )
         self.assertIn('reaction_expression_candidate_limit: { type: "number", min: 1, max: 16, step: 1 }', self.script)

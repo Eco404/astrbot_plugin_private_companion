@@ -204,6 +204,7 @@ class _ReactionHarness(SceneContextMixin, LlmToolActionsMixin):
         }
         self.saved = False
         self.deliveries = 0
+        self.last_delivery_kwargs: dict[str, object] = {}
         self.enable_reaction_expression_experiment = False
         self.reaction_expression_private_enabled = True
         self.reaction_expression_group_enabled = False
@@ -218,8 +219,9 @@ class _ReactionHarness(SceneContextMixin, LlmToolActionsMixin):
     def _reaction_asset_library(self):
         return self._owned_reaction_library
 
-    async def _deliver_generated_image_to_event(self, *_args, **_kwargs):
+    async def _deliver_generated_image_to_event(self, *_args, **kwargs):
         self.deliveries += 1
+        self.last_delivery_kwargs = dict(kwargs)
         return {
             "sent": self.sent,
             "destination": "current",
@@ -1285,6 +1287,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(payload["success"])
         self.assertTrue(payload["sent"])
+        self.assertTrue(harness.last_delivery_kwargs["reaction_image"])
         self.assertEqual(self.image_path, payload["path"])
         self.assertIn(PHOTO_TOOL_SILENT_SENTINEL, payload["final_response_instruction"])
         self.assertNotIn("smart_imagesender_skip_proactive_emoji", event.extras)

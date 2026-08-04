@@ -247,6 +247,7 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
             reaction_expression_proactive_enabled=True,
             reaction_expression_group_enabled=False,
             reaction_expression_delivery_mode="separate_after",
+            reaction_expression_image_format="image",
             reaction_expression_trigger_probability=0.2,
             reaction_expression_cooldown_seconds=180,
             reaction_expression_low_latency_mode=True,
@@ -267,6 +268,7 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
             "reaction_expression_proactive_enabled",
             "reaction_expression_group_enabled",
             "reaction_expression_delivery_mode",
+            "reaction_expression_image_format",
             "reaction_expression_trigger_probability",
             "reaction_expression_cooldown_seconds",
             "reaction_expression_low_latency_mode",
@@ -292,12 +294,17 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         )
         api._apply_config_value("reaction_expression_candidate_limit", candidate_limit)
         api._apply_config_value("reaction_expression_delivery_mode", delivery_mode)
+        image_format = api._normalize_setting_value(
+            "reaction_expression_image_format", "QQ_EMOJI"
+        )
+        api._apply_config_value("reaction_expression_image_format", image_format)
 
         self.assertTrue(plugin.enable_reaction_expression_experiment)
         self.assertEqual(0.2, plugin.reaction_expression_trigger_probability)
         self.assertEqual(1.0, full_probability)
         self.assertEqual(16, plugin.reaction_expression_candidate_limit)
         self.assertEqual("same_message", plugin.reaction_expression_delivery_mode)
+        self.assertEqual("qq_emoji", plugin.reaction_expression_image_format)
 
     def test_proactive_chat_status_reports_installation_mode_and_last_sync(self) -> None:
         plugin = SimpleNamespace(

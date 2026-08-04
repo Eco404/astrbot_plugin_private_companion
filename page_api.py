@@ -8053,6 +8053,124 @@ class PrivateCompanionPageApi(
             album_id = self._single_line(key[3:], limit)
         return album_id
 
+    def _bookshelf_diary_date_key(self, value: Any) -> str:
+        text = self._single_line(value, 64)
+        if not text:
+            return ""
+        match = re.search(
+            r"(?<!\d)(\d{4})\s*(?:-|/|\.|年)\s*(\d{1,2})\s*(?:-|/|\.|月)\s*(\d{1,2})(?:日)?(?!\d)",
+            text,
+        )
+        if match:
+            try:
+                return datetime(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                ).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        return text
+
+    def _bookshelf_diary_entry_key(
+        self,
+        value: Any,
+        fallback_date: Any = "",
+        duplicate_index: int = 0,
+    ) -> str:
+        if isinstance(value, dict):
+            stored_id = self._single_line(value.get("entry_key") or value.get("id"), 160)
+            seed: Any = {"stored_id": stored_id} if stored_id else value
+        elif isinstance(value, str):
+            seed = {"body": value}
+        else:
+            seed = {"value": str(value)}
+        key_payload = {
+            "fallback_date": self._single_line(fallback_date, 64),
+            "entry": seed,
+        }
+        if duplicate_index > 0:
+            key_payload["duplicate_index"] = duplicate_index
+        serialized = json.dumps(
+            key_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+        return f"diary:{digest}"
+
+    def _bookshelf_next_diary_entry_key(
+        self,
+        value: Any,
+        fallback_date: Any,
+        occurrences: dict[str, int],
+    ) -> str:
+        base_key = self._bookshelf_diary_entry_key(value, fallback_date)
+        duplicate_index = occurrences.get(base_key, 0)
+        occurrences[base_key] = duplicate_index + 1
+        if duplicate_index == 0:
+            return base_key
+        return self._bookshelf_diary_entry_key(value, fallback_date, duplicate_index)
+
+    def _bookshelf_diary_entries(self, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            source = [("", item) for item in value]
+            sort_by_date = False
+        elif isinstance(value, dict):
+            source = list(value.items())
+            sort_by_date = True
+        else:
+            return []
+
+        entries: list[dict[str, Any]] = []
+        entry_key_occurrences: dict[str, int] = {}
+        for fallback_date, raw in source:
+            entry_key = self._bookshelf_next_diary_entry_key(
+                raw,
+                fallback_date,
+                entry_key_occurrences,
+            )
+            if isinstance(raw, dict):
+                item = deepcopy(raw)
+            elif isinstance(raw, str) and raw.strip():
+                item = {"body": raw.strip()}
+            else:
+                continue
+            diary_date = self._bookshelf_diary_date_key(item.get("date") or fallback_date)
+            item["date"] = diary_date or "某天"
+            item["entry_key"] = entry_key
+            if not item.get("body"):
+                item["body"] = item.get("content") or item.get("text") or ""
+            entries.append(item)
+        if sort_by_date:
+            entries.sort(
+                key=lambda item: (
+                    self._bookshelf_diary_date_key(item.get("date")) == "某天",
+                    self._bookshelf_diary_date_key(item.get("date")),
+                    self._single_line(item.get("entry_key"), 80),
+                )
+            )
+        return entries
+
+    def _remember_deleted_diary_day(self, date_key: str) -> None:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_key):
+            return
+        stored = self.plugin.data.get("daily_diary_deleted_days")
+        values = stored if isinstance(stored, list) else []
+        normalized: list[str] = []
+        for value in [*values, date_key]:
+            day = self._bookshelf_diary_date_key(value)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and day not in normalized:
+                normalized.append(day)
+        self.plugin.data["daily_diary_deleted_days"] = normalized[-90:]
+        try:
+            revision = max(0, int(self.plugin.data.get("daily_diary_delete_revision") or 0))
+        except (TypeError, ValueError, OverflowError):
+            revision = 0
+        self.plugin.data["daily_diary_delete_revision"] = revision + 1
+
     def _is_bookshelf_jm_album(self, item: Any) -> bool:
         if not isinstance(item, dict):
             return False
@@ -8104,13 +8222,29 @@ class PrivateCompanionPageApi(
         if callable(marker):
             marker()
 
-    def _bookshelf_access_tokens(self) -> dict[str, float]:
+    def _bookshelf_access_persona_id(self) -> str:
+        active_getter = getattr(self.plugin, "_active_persona_scope", None)
+        active = self._single_line(active_getter() if callable(active_getter) else "", 96)
+        if active:
+            return active
+        if bool(getattr(self.plugin, "enable_multi_persona_mode", False)):
+            return self._single_line(getattr(self.plugin, "_page_current_persona_id", ""), 96)
+        return ""
+
+    def _bookshelf_access_tokens(self) -> dict[str, Any]:
         store = getattr(self.plugin, "_bookshelf_access_tokens", None)
         if not isinstance(store, dict):
             store = {}
             setattr(self.plugin, "_bookshelf_access_tokens", store)
         now = time.time()
-        for token, expires_at in list(store.items()):
+        current_persona = self._bookshelf_access_persona_id()
+        for token, raw_entry in list(store.items()):
+            if isinstance(raw_entry, dict):
+                expires_at = self._float(raw_entry.get("expires_at"))
+            else:
+                # Runtime tokens created before persona binding are safe only in
+                # single-persona mode because their original owner is unknowable.
+                expires_at = self._float(raw_entry) if not current_persona else 0.0
             if self._float(expires_at) <= now:
                 store.pop(token, None)
         return store
@@ -8144,7 +8278,18 @@ class PrivateCompanionPageApi(
             expires_at = self._float(raw.get("expires_at"))
             if not re.fullmatch(r"[0-9a-f]{64}", digest) or expires_at <= 0:
                 continue
-            entries.append({"token_hash": digest, "expires_at": expires_at})
+            persona_id = self._single_line(raw.get("persona_id"), 96)
+            if not persona_id:
+                # A persisted token already lives inside the active persona's data
+                # profile. Bind legacy records to that profile on read.
+                persona_id = self._bookshelf_access_persona_id()
+            entries.append(
+                {
+                    "token_hash": digest,
+                    "expires_at": expires_at,
+                    "persona_id": persona_id,
+                }
+            )
         return entries
 
     def _persist_bookshelf_access_token(self, token: str, expires_at: float) -> None:
@@ -8159,15 +8304,23 @@ class PrivateCompanionPageApi(
         if not digest or expires_at <= 0:
             return
         now = time.time()
+        persona_id = self._bookshelf_access_persona_id()
         entries = [
             entry
             for entry in self._bookshelf_persisted_access_entries()
             if self._float(entry.get("expires_at")) > now
             and not hmac.compare_digest(str(entry.get("token_hash") or ""), digest)
         ]
-        entries.insert(0, {"token_hash": digest, "expires_at": float(expires_at)})
+        entries.insert(
+            0,
+            {
+                "token_hash": digest,
+                "expires_at": float(expires_at),
+                "persona_id": persona_id,
+            },
+        )
         secret["web_access"] = {
-            "version": 1,
+            "version": 2,
             "tokens": entries[:BOOKSHELF_ACCESS_TOKEN_MAX_PERSISTED],
             "updated_at": now,
         }
@@ -8181,27 +8334,40 @@ class PrivateCompanionPageApi(
             return 0.0
         runtime_tokens = self._bookshelf_access_tokens()
         now = time.time()
+        persona_id = self._bookshelf_access_persona_id()
         for entry in self._bookshelf_persisted_access_entries():
             entry_digest = str(entry.get("token_hash") or "")
-            if hmac.compare_digest(entry_digest, digest):
+            entry_persona = self._single_line(entry.get("persona_id"), 96)
+            if entry_persona == persona_id and hmac.compare_digest(entry_digest, digest):
                 expires_at = self._float(entry.get("expires_at"))
                 if expires_at > now:
                     # Persisted records are authoritative for tokens that were
                     # explicitly saved, even if this process still has an older
                     # in-memory expiry cached for the same token.
-                    runtime_tokens[token_text] = expires_at
+                    runtime_tokens[token_text] = {
+                        "expires_at": expires_at,
+                        "persona_id": persona_id,
+                    }
                     return expires_at
                 runtime_tokens.pop(token_text, None)
                 return 0.0
-        runtime_expiry = runtime_tokens.get(token_text)
-        if runtime_expiry and self._float(runtime_expiry) > now:
-            return self._float(runtime_expiry)
+        runtime_entry = runtime_tokens.get(token_text)
+        if isinstance(runtime_entry, dict):
+            runtime_expiry = self._float(runtime_entry.get("expires_at"))
+            runtime_persona = self._single_line(runtime_entry.get("persona_id"), 96)
+            if runtime_persona == persona_id and runtime_expiry > now:
+                return runtime_expiry
+        elif not persona_id and self._float(runtime_entry) > now:
+            return self._float(runtime_entry)
         return 0.0
 
     def _issue_bookshelf_access_token(self, *, persist: bool = False) -> str:
         token = secrets.token_urlsafe(24)
         expires_at = time.time() + BOOKSHELF_ACCESS_TOKEN_TTL_SECONDS
-        self._bookshelf_access_tokens()[token] = expires_at
+        self._bookshelf_access_tokens()[token] = {
+            "expires_at": expires_at,
+            "persona_id": self._bookshelf_access_persona_id(),
+        }
         if persist:
             self._persist_bookshelf_access_token(token, expires_at)
         return token
@@ -8322,6 +8488,8 @@ class PrivateCompanionPageApi(
         album_payload_id = self._single_line(payload.get("album_id"), 80)
         title_payload = self._single_line(payload.get("title"), 120)
         date_key = self._single_line(payload.get("date"), 32)
+        diary_date_key = self._bookshelf_diary_date_key(date_key)
+        diary_entry_key = self._single_line(payload.get("entry_key") or payload.get("diary_key"), 80)
         try:
             async with self.plugin._data_lock:
                 changed = False
@@ -8337,16 +8505,62 @@ class PrivateCompanionPageApi(
                     ]
                     changed = len(self.plugin.data["creative_projects"]) != before
                 elif kind == "diary":
-                    diaries = self.plugin.data.setdefault("bot_diaries", [])
-                    if not isinstance(diaries, list):
-                        diaries = []
-                    before = len(diaries)
-                    self.plugin.data["bot_diaries"] = [
-                        item
-                        for item in diaries
-                        if not (isinstance(item, dict) and self._single_line(item.get("date"), 32) == date_key)
-                    ]
-                    changed = len(self.plugin.data["bot_diaries"]) != before
+                    if not diary_entry_key and not diary_date_key:
+                        return self._error("缺少要删除的日记标识")
+                    diaries = self.plugin.data.get("bot_diaries", [])
+                    storage_type = type(diaries).__name__
+                    deleted_dates: set[str] = set()
+                    entry_key_occurrences: dict[str, int] = {}
+
+                    def should_delete(item: Any, fallback_date: Any = "") -> bool:
+                        candidate_date = self._bookshelf_diary_date_key(
+                            (item.get("date") or fallback_date) if isinstance(item, dict) else fallback_date
+                        )
+                        if diary_entry_key:
+                            candidate_entry_key = self._bookshelf_next_diary_entry_key(
+                                item,
+                                fallback_date,
+                                entry_key_occurrences,
+                            )
+                            matched = candidate_entry_key == diary_entry_key
+                        elif diary_date_key == "某天":
+                            matched = not candidate_date
+                        else:
+                            matched = candidate_date == diary_date_key
+                        if matched and re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate_date):
+                            deleted_dates.add(candidate_date)
+                        return matched
+
+                    if isinstance(diaries, list):
+                        kept = [item for item in diaries if not should_delete(item)]
+                        changed = len(kept) != len(diaries)
+                        if changed:
+                            self.plugin.data["bot_diaries"] = kept
+                    elif isinstance(diaries, dict):
+                        kept_dict: dict[Any, Any] = {}
+                        for stored_date, item in diaries.items():
+                            if should_delete(item, stored_date):
+                                changed = True
+                                continue
+                            kept_dict[stored_date] = item
+                        if changed:
+                            self.plugin.data["bot_diaries"] = kept_dict
+                    else:
+                        return self._error("日记记录结构异常，已停止删除以避免覆盖原数据")
+                    if changed:
+                        if not deleted_dates and re.fullmatch(r"\d{4}-\d{2}-\d{2}", diary_date_key):
+                            deleted_dates.add(diary_date_key)
+                        for deleted_date in sorted(deleted_dates):
+                            self._remember_deleted_diary_day(deleted_date)
+                    remaining = len(self.plugin.data.get("bot_diaries", []))
+                    logger.info(
+                        "[PrivateCompanionPage] 日记删除: changed=%s date=%s entry=%s storage=%s remaining=%s",
+                        changed,
+                        diary_date_key,
+                        diary_entry_key,
+                        storage_type,
+                        remaining,
+                    )
                 elif kind == "jm_album":
                     album_id = album_payload_id or item_id.removeprefix("jm-")
                     album_id = album_id.removeprefix("jm-").removeprefix("jm_album:")
@@ -21370,7 +21584,7 @@ class PrivateCompanionPageApi(
                 except Exception as exc:
                     logger.debug("[PrivateCompanionPage] 夹层响应内本地书页恢复失败: %s", self._single_line(exc, 160))
         projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
-        diaries = data.get("bot_diaries") if isinstance(data.get("bot_diaries"), list) else []
+        diaries = self._bookshelf_diary_entries(data.get("bot_diaries"))
         shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
         jm_state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
         deleted_jm_ids = self._bookshelf_deleted_album_ids(jm_state)
@@ -21579,6 +21793,7 @@ class PrivateCompanionPageApi(
                 content = body or "\n\n".join(part for part in (summary, share_seed) if part)
                 diary_entries.append(
                     {
+                        "entry_key": self._single_line(item.get("entry_key"), 80),
                         "date": self._single_line(item.get("date"), 24) or "某天",
                         "generated_at": self._single_line(item.get("generated_at"), 32),
                         "title": f"{self._single_line(item.get('date'), 24) or '某天'}",

@@ -208,6 +208,36 @@ class DailyStateGenerationSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, today_entries[0])
         self.assertEqual(len(harness.data["bot_diaries"]), 2)
 
+    async def test_next_generation_preserves_legacy_dictionary_diaries(self) -> None:
+        harness = _DiaryHarness()
+        harness.data["bot_diaries"] = {
+            "2026-07-21": {
+                "content": "旧格式正文一",
+                "metadata": {"mood": "平静"},
+            },
+            "2026/7/22": "旧格式正文二",
+        }
+
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            result = await harness._ensure_daily_diary(force=False)
+
+        self.assertIsInstance(result, dict)
+        self.assertIsInstance(harness.data["bot_diaries"], list)
+        self.assertEqual(3, len(harness.data["bot_diaries"]))
+        self.assertEqual(
+            {
+                "date": "2026-07-21",
+                "content": "旧格式正文一",
+                "metadata": {"mood": "平静"},
+            },
+            harness.data["bot_diaries"][0],
+        )
+        self.assertEqual(
+            {"date": "2026/7/22", "body": "旧格式正文二"},
+            harness.data["bot_diaries"][1],
+        )
+        self.assertEqual("刷新后的正文", harness.data["bot_diaries"][2]["body"])
+
     async def test_concurrent_normal_diary_generation_runs_model_once(self) -> None:
         harness = _DiaryHarness()
         harness.block_generation = True
@@ -254,6 +284,82 @@ class DailyStateGenerationSafetyTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(next_day_entries), 1)
         self.assertEqual(next_day_entries[0]["body"], "刷新后的正文")
+
+    async def test_manually_deleted_today_diary_is_not_automatically_recreated(self) -> None:
+        harness = _DiaryHarness()
+        harness.data["daily_diary_deleted_days"] = ["2026-07-23"]
+
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            result = await harness._ensure_daily_diary(force=False)
+
+        self.assertIsNone(result)
+        self.assertEqual(0, harness.generate_count)
+        self.assertEqual([], harness.data["bot_diaries"])
+
+    async def test_force_refresh_restores_deleted_today_diary(self) -> None:
+        harness = _DiaryHarness()
+        harness.data["daily_diary_deleted_days"] = ["2026-07-23"]
+
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            result = await harness._ensure_daily_diary(force=True)
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(1, harness.generate_count)
+        self.assertEqual([], harness.data["daily_diary_deleted_days"])
+        self.assertEqual(["2026-07-23"], [item["date"] for item in harness.data["bot_diaries"]])
+
+    async def test_deleted_day_does_not_block_next_day_generation(self) -> None:
+        harness = _DiaryHarness()
+        harness.data["daily_diary_deleted_days"] = ["2026-07-23"]
+
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            await harness._ensure_daily_diary(force=False)
+
+        harness.generated_diary["date"] = "2026-07-24"
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-24"):
+            result = await harness._ensure_daily_diary(force=False)
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(1, harness.generate_count)
+        self.assertEqual(["2026-07-23"], harness.data["daily_diary_deleted_days"])
+        self.assertEqual(["2026-07-24"], [item["date"] for item in harness.data["bot_diaries"]])
+
+    async def test_delete_during_generation_discards_inflight_result(self) -> None:
+        harness = _DiaryHarness()
+        harness.block_generation = True
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            task = asyncio.create_task(harness._ensure_daily_diary(force=False))
+            await harness.generation_started.wait()
+            async with harness._data_lock:
+                harness.data["daily_diary_deleted_days"] = ["2026-07-23"]
+            harness.generation_release.set()
+            result = await task
+
+        self.assertIsNone(result)
+        self.assertEqual([], harness.data["bot_diaries"])
+        self.assertEqual("", harness.data["diary_generated_day"])
+
+    async def test_delete_during_force_refresh_wins_over_inflight_result(self) -> None:
+        harness = _DiaryHarness()
+        harness.data["bot_diaries"] = [
+            {"date": "2026-07-23", "body": "刷新前的正文"},
+        ]
+        harness.data["diary_generated_day"] = "2026-07-23"
+        harness.block_generation = True
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value="2026-07-23"):
+            task = asyncio.create_task(harness._ensure_daily_diary(force=True))
+            await harness.generation_started.wait()
+            async with harness._data_lock:
+                harness.data["bot_diaries"] = []
+                harness.data["daily_diary_deleted_days"] = ["2026-07-23"]
+                harness.data["daily_diary_delete_revision"] = 1
+            harness.generation_release.set()
+            result = await task
+
+        self.assertIsNone(result)
+        self.assertEqual([], harness.data["bot_diaries"])
+        self.assertEqual(["2026-07-23"], harness.data["daily_diary_deleted_days"])
+        self.assertEqual(1, harness.data["daily_diary_delete_revision"])
 
 
 if __name__ == "__main__":

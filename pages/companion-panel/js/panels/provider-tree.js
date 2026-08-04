@@ -369,8 +369,14 @@ window.PrivateCompanionProviderTree = (() => {
     const genericVision = providerConfigMode === "quick"
       ? (providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述")
       : (providers.NARRATION_PROVIDER_ID || "工具结果转述 / 主模型");
+    const readingVisionAvailable = visibleConfigKey("PRIVATE_READING_VISION_PROVIDER_ID");
     const readingVision = providers.PRIVATE_READING_VISION_PROVIDER_ID || "未配置";
-    const vision = `通用：${genericVision} · JM 本子：${readingVision}`;
+    const vision = readingVisionAvailable
+      ? `通用：${genericVision} · 夹层阅读：${readingVision}`
+      : `通用：${genericVision}`;
+    const visionHint = readingVisionAvailable
+      ? "通用识图与夹层阅读识图使用独立 Provider"
+      : "当前仅显示已安装能力使用的视觉通道";
     document.getElementById("providerSummary").innerHTML = `
       <div class="provider-cost-notice">
         <b>成本提醒</b>
@@ -383,7 +389,7 @@ window.PrivateCompanionProviderTree = (() => {
       <div class="provider-summary-card"><span>低延迟优先项</span><b>${speedRecommended}</b><small>卡顿时优先检查这些项</small></div>
       ${requiredMissing ? `<div class="provider-summary-card warn"><span>未配置专用项</span><b>${requiredMissing}</b><small>这些任务留空时不会回退</small></div>` : ""}
       <div class="provider-summary-card"><span>可选 Provider</span><b>${available}</b><small>${escapeHtml(available ? "来自 AstrBot 当前配置" : "暂无可选项，可手动输入 ID")}</small></div>
-      <div class="provider-summary-card"><span>视觉通道</span><b>${escapeHtml(vision)}</b><small>通用识图与 JM 本子识图使用独立 Provider</small></div>
+      <div class="provider-summary-card"><span>视觉通道</span><b>${escapeHtml(vision)}</b><small>${escapeHtml(visionHint)}</small></div>
     `;
   }
 
@@ -506,6 +512,12 @@ window.PrivateCompanionProviderTree = (() => {
     const mai = resolveProviderId(context, "MAI_STYLE_PROVIDER_ID", providers) || main;
     const pluginVision = providers.NARRATION_PROVIDER_ID || "跟随工具结果转述 / 主模型";
     if (mode === "quick") {
+      const readingVisionNode = visibleConfigKey("PRIVATE_READING_VISION_PROVIDER_ID")
+        ? `
+          <span class="flow-arrow">·</span>
+          <span class="flow-node primary">夹层阅读识图<br><b>${escapeHtml(providers.PRIVATE_READING_VISION_PROVIDER_ID || "未配置")}</b></span>
+        `
+        : "";
       document.getElementById("providerFlow").innerHTML = `
         <div class="flow-lane">
           <span class="flow-node primary">快速响应<br><b>${escapeHtml(fast)}</b></span>
@@ -515,8 +527,7 @@ window.PrivateCompanionProviderTree = (() => {
           <span class="flow-node primary">创作模型<br><b>${escapeHtml(creative)}</b></span>
           <span class="flow-arrow">·</span>
           <span class="flow-node primary">插件识图<br><b>${escapeHtml(quickVision)}</b></span>
-          <span class="flow-arrow">·</span>
-          <span class="flow-node primary">夹层阅读识图<br><b>${escapeHtml(providers.PRIVATE_READING_VISION_PROVIDER_ID || "未配置")}</b></span>
+          ${readingVisionNode}
         </div>
         <div class="flow-tasks"><span class="flow-node inherited">当前为快速配置<br><b>细分任务会按场景套用上方入口</b></span></div>
       `;
