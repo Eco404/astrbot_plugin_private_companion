@@ -414,6 +414,8 @@ _DEFAULT_USER_TEMPLATE = {
     "relationship_decay_settled_day": "",
     "relationship_last_decay_stage_drop_at": 0,
     "current_interaction": {},
+    "emotion_event_ledger": [],
+    "last_emotion_event": {},
     "proactive_daily_limit": -1,
     "proactive_idle_minutes": -1,
     "proactive_min_interval_minutes": -1,

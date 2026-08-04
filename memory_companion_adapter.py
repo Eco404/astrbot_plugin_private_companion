@@ -93,6 +93,80 @@ class MemoryCompanionAdapterMixin:
                 return self._memory_companion_coerce_bool(value, True)
         return True
 
+    def _memory_companion_emotion_producer_capability(self, bridge: Any) -> Any | None:
+        """Return the live, non-serializable capability issued by MemoryCompanion."""
+        if bridge is None:
+            return None
+        if (
+            getattr(self, "_memory_companion_emotion_capability_bridge", None) is bridge
+            and getattr(self, "_memory_companion_emotion_producer_capability_cache", None) is not None
+        ):
+            return getattr(self, "_memory_companion_emotion_producer_capability_cache")
+        register = getattr(bridge, "register_emotion_producer", None)
+        if not callable(register):
+            return None
+        try:
+            capability = register(type(self))
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="register_emotion_producer"):
+                return None
+            logger.debug("[PrivateCompanion] emotion producer registration failed: %s", _single_line(exc, 120))
+            return None
+        if capability is None:
+            return None
+        self._memory_companion_emotion_capability_bridge = bridge
+        self._memory_companion_emotion_producer_capability_cache = capability
+        return capability
+
+    def _memory_companion_emotion_producer_context(self, bridge: Any, event: Any) -> Any | None:
+        """Bind a mirror write to one authoritative private Companion domain."""
+        if not isinstance(event, dict):
+            return None
+        actor = event.get("actor_ref") if isinstance(event.get("actor_ref"), dict) else {}
+        bot_id = _single_line(event.get("bot_id"), 160)
+        platform = _single_line(event.get("platform"), 80)
+        scope = _single_line(event.get("scope"), 24).lower()
+        user_id = _single_line(actor.get("id"), 160)
+        session_id = _single_line(event.get("session_id"), 220)
+        if (
+            scope != "private"
+            or _single_line(actor.get("kind"), 24).lower() != "user"
+            or not all((bot_id, platform, user_id, session_id))
+            or not session_id.startswith(f"{platform}:")
+        ):
+            return None
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        creator = getattr(bridge, "create_emotion_producer_context", None) if bridge is not None else None
+        if capability is None or not callable(creator):
+            return None
+        try:
+            return creator(
+                capability,
+                bot_id=bot_id,
+                scope="private",
+                platform=platform,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="create_emotion_producer_context"):
+                return None
+            logger.debug("[PrivateCompanion] emotion producer context failed: %s", _single_line(exc, 120))
+            return None
+
+    async def _memory_companion_record_emotion_event(self, event: dict[str, Any]) -> None:
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_emotion_event", None) if bridge is not None else None
+        producer_context = self._memory_companion_emotion_producer_context(bridge, event)
+        if not callable(recorder) or producer_context is None:
+            return
+        try:
+            await recorder(dict(event or {}), producer_context=producer_context)
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_emotion_event"):
+                return
+            logger.debug("[PrivateCompanion] emotion event mirror failed: %s", _single_line(exc, 120))
+
     def _memory_companion_degraded_status(self, reason: str, **extra: Any) -> dict[str, Any]:
         status = {
             "available": False,

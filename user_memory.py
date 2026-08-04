@@ -109,6 +109,7 @@ from .companion_interaction_expression import (
     build_expression_decision,
     current_interaction_projection,
 )
+from .emotion_event_ledger import record_recent_emotion_event
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -5477,6 +5478,80 @@ Local classifier result:
         state["mood_updated_ts"] = now
         return score
 
+    def _record_interaction_emotion_event(
+        self,
+        user: dict[str, Any],
+        intent: dict[str, Any],
+        *,
+        band: str,
+        reason_code: str,
+        status: str = "applied",
+        expires_at: float = 0.0,
+    ) -> dict[str, Any] | None:
+        emotion_event = str(intent.get("emotion_event") or "neutral").strip().lower()
+        inbound_intent = str(intent.get("intent") or "chat").strip().lower()
+        event_type = emotion_event if emotion_event != "neutral" else inbound_intent
+        if event_type not in {
+            "hurt", "apology", "comfort", "praise", "comfort_need", "external_negative",
+            "play", "intimacy", "boundary",
+        }:
+            return None
+        user_id = _single_line(user.get("user_id") or user.get("id"), 120)
+        session_id = _single_line(user.get("umo"), 220)
+        platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        target = _single_line(intent.get("emotion_target"), 24).lower() or "none"
+        target_ref = (
+            {"kind": "bot", "id": "self", "role": "bot_self"}
+            if target in {"bot", "ambiguous"}
+            else {
+                "kind": "user" if target == "self" else "other",
+                "id": user_id if target == "self" else "",
+                "role": target,
+            }
+        )
+        message_fingerprint = hashlib.sha256(
+            _single_line(intent.get("text"), 500).encode("utf-8", errors="ignore")
+        ).hexdigest()
+        event, created = record_recent_emotion_event(
+            user,
+            {
+                "producer_plugin": "private_companion",
+                "origin_kind": "interaction",
+                "platform": platform,
+                "bot_id": self._memory_companion_bridge_bot_id(),
+                "scope": "private",
+                "session_id": session_id,
+                "actor_ref": {"kind": "user", "id": user_id, "role": "speaker"},
+                "target_ref": target_ref,
+                "event_type": event_type,
+                "intensity": _safe_int(intent.get("emotion_intensity"), 0, 0, 100),
+                "confidence": _safe_float(intent.get("emotion_confidence"), intent.get("confidence") or 0.0, 0.0),
+                "source_rule": _single_line(intent.get("emotion_rule") or intent.get("source"), 80),
+                "occurred_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "expires_at": datetime.fromtimestamp(expires_at).astimezone().isoformat(timespec="seconds") if expires_at else "",
+                "dedupe_key": f"{session_id}|{message_fingerprint}|{event_type}",
+                "message_fingerprint": message_fingerprint,
+                "applied_interaction": band,
+                "status": status,
+                "reason_codes": [reason_code, _single_line(intent.get("emotion_rule"), 64)],
+            },
+        )
+        if not created:
+            return event
+        mirror = getattr(self, "_memory_companion_record_emotion_event", None)
+        if callable(mirror):
+            operation = mirror(event)
+            try:
+                creator = getattr(self, "_create_lifecycle_background_task", None)
+                task = creator(operation, label="emotion_event_mirror") if callable(creator) else asyncio.create_task(operation)
+                if task is None:
+                    raise RuntimeError("background task unavailable")
+            except Exception:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+        return event
+
     def _settle_current_interaction_from_intent(self, user: dict[str, Any], intent: dict[str, Any]) -> None:
         """Settle the short-term expression authority from one private-chat event.
 
@@ -5553,6 +5628,15 @@ Local classifier result:
         if existing.get("manual_override") and (
             not existing.get("expires_at") or _safe_float(existing.get("expires_at"), 0) > now
         ):
+            event_recorder = getattr(self, "_record_interaction_emotion_event", None)
+            if callable(event_recorder):
+                event_recorder(
+                    user, intent,
+                    band=str(existing.get("expression_band") or "relaxed"),
+                    reason_code="manual_override_retained",
+                    status="ignored",
+                    expires_at=_safe_float(existing.get("expires_at"), 0),
+                )
             user["current_interaction"] = existing
             return
 
@@ -5595,9 +5679,27 @@ Local classifier result:
             and _safe_float(existing.get("expires_at"), 0) > now
             and str(existing.get("expression_band") or "relaxed") != "relaxed"
         ):
+            event_recorder = getattr(self, "_record_interaction_emotion_event", None)
+            if callable(event_recorder):
+                event_recorder(
+                    user, intent,
+                    band=str(existing.get("expression_band") or "relaxed"),
+                    reason_code="active_interaction_retained",
+                    status="ignored",
+                    expires_at=_safe_float(existing.get("expires_at"), 0),
+                )
             user["current_interaction"] = existing
             return
 
+        event_recorder = getattr(self, "_record_interaction_emotion_event", None)
+        emotion_event_record = event_recorder(
+            user,
+            intent,
+            band=band,
+            reason_code=reason_code,
+            status="applied",
+            expires_at=expires_at,
+        ) if callable(event_recorder) else None
         user["current_interaction"] = current_interaction_projection(
             {
                 "expression_band": band,
@@ -5606,6 +5708,8 @@ Local classifier result:
                 "updated_at": now,
                 "expires_at": expires_at,
                 "manual_override": False,
+                "last_event_id": (emotion_event_record or {}).get("event_id", ""),
+                "trace_id": (emotion_event_record or {}).get("trace_id", ""),
             },
             relationship_role=role,
             relationship_mode=relationship_mode,

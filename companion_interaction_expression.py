@@ -648,6 +648,8 @@ def current_interaction_projection(
         "normal_interaction_band_cap": normal_cap,
         "allowed_bands": list(allowed),
         "reason_codes": reason_codes,
+        "last_event_id": _bounded_text(raw.get("last_event_id"), 96),
+        "trace_id": _bounded_text(raw.get("trace_id"), 96),
     }
 
 
