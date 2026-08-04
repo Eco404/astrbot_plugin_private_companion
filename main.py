@@ -7293,9 +7293,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         *,
         priority: int = 50,
         source: str = "",
+        force_dynamic: bool = False,
     ) -> bool:
         position = self._normalize_passive_injection_position(getattr(self, "passive_injection_position", "prompt"))
-        if position == "system_prompt":
+        if position == "system_prompt" and not force_dynamic:
             return False
         content = str(text or "").strip()
         if not content:
@@ -10751,9 +10752,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             pass
         instruction = expression_decision_prompt(projection)
-        if instruction and hasattr(req, "system_prompt"):
-            current_prompt = str(getattr(req, "system_prompt", "") or "").rstrip()
-            req.system_prompt = f"{current_prompt}\n\n[Companion expression]\n{instruction}".strip()
+        if instruction:
+            self._append_turn_prompt_fragment_by_position(
+                req,
+                "<!-- private_companion_expression_decision_v1 -->",
+                f"[Companion expression]\n{instruction}",
+                priority=5,
+                source="expression_decision",
+                force_dynamic=True,
+            )
 
     def _remove_sensitive_screen_tools_from_request(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
         tool_set = getattr(req, "func_tool", None)
