@@ -71,6 +71,7 @@ const state = {
   featureDetailParamDraft: {},
   featureDetailSubpage: "",
   photoReferenceManagerDraft: null,
+  photoReferenceEditingIndex: -1,
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
   photoReferenceLibraryError: "",
@@ -24648,6 +24649,95 @@ function guidedPhotoReferenceQuestionnaire(root = document.querySelector("[data-
   };
 }
 
+function guidedPhotoReferenceManualOverride(root) {
+  if (!root?.querySelector('[name="manual_override_enabled"]')?.checked) return null;
+  const raw = String(root.querySelector('[name="manual_override_json"]')?.value || "").trim();
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("专家覆盖必须是 JSON 对象");
+  return parsed;
+}
+
+function guidedPhotoReferenceTrialCandidates(root, reviewedMetadata) {
+  const managerItems = photoReferenceManagerItems();
+  const current = [
+    currentPhotoPersonaReference(),
+    ...managerItems,
+  ]
+    .filter((item) => item && normalizePhotoReferenceSource(item.source))
+    .map((item) => canonicalPhotoReference(item, item.kind));
+  const source = String(root?.closest("form")?.elements?.source?.value || "").trim();
+  if (!source) return current;
+  if (!reviewedMetadata || typeof reviewedMetadata !== "object") return current;
+  const editingIndex = Number(state.photoReferenceEditingIndex);
+  const editingItem = Number.isInteger(editingIndex) && editingIndex >= 0 ? managerItems[editingIndex] : null;
+  const editingExisting = Boolean(editingItem);
+  const existingIndex = editingExisting
+    ? current.findIndex((item) => item.id === editingItem.id)
+    : current.findIndex((item) => item.source === source);
+  const draft = canonicalPhotoReference({
+      id: editingExisting ? editingItem.id : (existingIndex >= 0 ? current[existingIndex].id : "draft_reference"),
+      kind: "library",
+      source,
+      note: String(root?.closest("form")?.elements?.note?.value || "").trim(),
+      metadata: {
+        ...reviewedMetadata,
+        metadata_source: "guided_editor_draft",
+      },
+    }, "library");
+  if (existingIndex >= 0) current[existingIndex] = draft;
+  else current.push(draft);
+  return current;
+}
+
+function applyGuidedPhotoReferenceDraft(root, item) {
+  if (!root || !item) return;
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const manualOverride = metadata.editor_intent?.manual_override;
+  const manualOverrideToggle = root.querySelector('[name="manual_override_enabled"]');
+  if (manualOverrideToggle) manualOverrideToggle.checked = Boolean(manualOverride);
+  const manualOverrideInput = root.querySelector('[name="manual_override_json"]');
+  if (manualOverrideInput) manualOverrideInput.value = manualOverride ? JSON.stringify(manualOverride, null, 2) : "";
+  const questionnaire = metadata.editor_intent?.questionnaire;
+  if (Array.isArray(questionnaire?.answers)) {
+    root.querySelectorAll("input[type='checkbox'], input[type='radio']").forEach((input) => { input.checked = false; });
+    questionnaire.answers.forEach((answer) => {
+      (Array.isArray(answer?.selections) ? answer.selections : []).forEach((selection) => {
+        const field = String(selection?.field || "");
+        const value = String(selection?.value || "");
+        const input = Array.from(root.querySelectorAll(`[name="${CSS.escape(field)}"]`))
+          .find((candidate) => candidate.value === value);
+        if (input) input.checked = true;
+      });
+    });
+    return;
+  }
+  const setValues = (name, values) => {
+    const selected = new Set(Array.isArray(values) ? values : [values]);
+    root.querySelectorAll(`[name="${name}"]`).forEach((input) => { input.checked = selected.has(input.value); });
+  };
+  const fallbackValue = {
+    matching_only: "strict",
+    fallback_identity_only: "fallback_identity",
+    fallback_allowed: "fallback_any",
+    disabled: "disabled",
+  }[String(metadata.selection_eligibility || "matching_only")] || "strict";
+  setValues("core_anchor", metadata.reference_roles || ["identity"]);
+  setValues("wardrobe_change", "needs_confirmation");
+  setValues("location_change", "needs_confirmation");
+  setValues("pose_change", "needs_confirmation");
+  setValues("prefer_none", (metadata.scene_categories?.length || metadata.time_categories?.length || metadata.preferred_preset) ? [] : ["none"]);
+  setValues("prefer_scenes", metadata.scene_categories || []);
+  setValues("prefer_times", metadata.time_categories || []);
+  setValues("avoid_none", (metadata.excluded_scene_categories?.length || metadata.excluded_time_categories?.length) ? [] : ["none"]);
+  setValues("avoid_scenes", metadata.excluded_scene_categories || []);
+  setValues("avoid_times", metadata.excluded_time_categories || []);
+  setValues("preferred_preset", metadata.preferred_preset || "");
+  setValues("fallback_policy", fallbackValue);
+  setValues("outfit_behavior", metadata.outfit_lock_default ? "preserve_unless_explicit_change" : (metadata.outfit_category ? "reference_without_lock" : "ignore"));
+  setValues("outfit_category", metadata.outfit_category || "unspecified");
+}
+
 function guidedPhotoReferenceChoiceGroup(name, options, { type = "checkbox", checked = [] } = {}) {
   const selected = new Set(Array.isArray(checked) ? checked : [checked]);
   return options.map((option) => `
@@ -24672,7 +24762,7 @@ function renderGuidedPhotoReferenceEditor() {
   const outfitOptions = photoReferenceFieldOptions("outfit_categories");
   const presetOptions = photoReferenceFieldOptions("presets");
   host.innerHTML = `
-    <section class="photo-reference-guided-editor" data-photo-reference-guided-editor>
+    <section class="photo-reference-guided-editor" data-photo-reference-guided-editor data-photo-guided-active-tab="answers">
       <div class="photo-reference-guided-tabs" role="tablist" aria-label="参考图配置步骤">
         <button type="button" class="active" data-photo-guided-tab="answers">使用方式</button>
         <button type="button" data-photo-guided-tab="result">生成数据</button>
@@ -24711,6 +24801,7 @@ function renderGuidedPhotoReferenceEditor() {
               { value: "conditional", label: "视情况而定，穿搭只是其中一部分" },
               { value: "no_outfit_core", label: "不适合，这套穿搭就是重点" },
               { value: "irrelevant", label: "这张图看不出或不涉及穿搭" },
+              { value: "needs_confirmation", label: "需要确认，旧配置无法判断" },
             ], { type: "radio", checked: "yes_identity" })}
           </div>
         </fieldset>
@@ -24724,6 +24815,7 @@ function renderGuidedPhotoReferenceEditor() {
               { value: "conditional", label: "视情况而定，类似地点仍可使用" },
               { value: "no_scene_core", label: "不适合，这个地点和背景就是重点" },
               { value: "irrelevant", label: "这张图没有明确地点或背景" },
+              { value: "needs_confirmation", label: "需要确认，旧配置无法判断" },
             ], { type: "radio", checked: "yes_identity" })}
           </div>
         </fieldset>
@@ -24737,6 +24829,7 @@ function renderGuidedPhotoReferenceEditor() {
               { value: "small_change", label: "小幅改变可以，大幅改变不合适" },
               { value: "no_pose_core", label: "不适合，这个动作和构图就是重点" },
               { value: "irrelevant", label: "这张图没有明确动作要求" },
+              { value: "needs_confirmation", label: "需要确认，旧配置无法判断" },
             ], { type: "radio", checked: "yes_identity" })}
           </div>
         </fieldset>
@@ -24778,11 +24871,18 @@ function renderGuidedPhotoReferenceEditor() {
             ], { type: "radio", checked: "unspecified" })}
           </div></div>
         </fieldset>
+        <details class="photo-reference-guided-expert">
+          <summary>专家覆盖</summary>
+          <label class="photo-reference-guided-choice"><input type="checkbox" name="manual_override_enabled" /><span><b>启用专家覆盖</b></span></label>
+          <textarea name="manual_override_json" spellcheck="false" placeholder='{"reference_roles":["identity"]}'></textarea>
+        </details>
         <button type="button" class="photo-reference-guided-preview" data-photo-guided-compile>调用主模型审批并查看结果</button>
       </div>
       <div data-photo-guided-panel="result" hidden><pre data-photo-guided-result>尚未编译</pre></div>
       <div data-photo-guided-panel="trial" hidden>
         <label>真实对话用户原话<textarea name="trial_text" placeholder="晚上了，在卧室穿着睡衣给我拍一张吧"></textarea></label>
+        <label>上下文<select name="trial_context_mode"><option value="current">当前用户与会话</option><option value="blank">空白上下文</option><option value="custom">自定义上下文</option></select></label>
+        <label data-photo-guided-custom-context hidden>自定义上下文<textarea name="trial_custom_context"></textarea></label>
         <label>试跑次数<select name="trial_runs"><option value="1">1 次</option><option value="3">3 次稳定性检查</option></select></label>
         <button type="button" data-photo-guided-trial>运行无副作用试跑</button>
         <pre data-photo-guided-trial-result>尚未试跑</pre>
@@ -24790,6 +24890,7 @@ function renderGuidedPhotoReferenceEditor() {
     </section>`;
   const root = host.querySelector("[data-photo-reference-guided-editor]");
   const setTab = (tab) => {
+    root.dataset.photoGuidedActiveTab = tab;
     host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.classList.toggle("active", button.dataset.photoGuidedTab === tab));
     host.querySelectorAll("[data-photo-guided-panel]").forEach((panel) => { panel.hidden = panel.dataset.photoGuidedPanel !== tab; });
   };
@@ -24815,6 +24916,7 @@ function renderGuidedPhotoReferenceEditor() {
     setQuestionValues("outfit_behavior", template.outfit);
     setQuestionValues("outfit_category", template.category);
     root.querySelectorAll("[data-photo-guided-template]").forEach((item) => item.setAttribute("aria-pressed", item === button ? "true" : "false"));
+    scheduleLocalPreview();
   }));
   const bindNoneChoice = (noneName, optionNames) => {
     const none = root.querySelector(`[name="${noneName}"]`);
@@ -24829,11 +24931,41 @@ function renderGuidedPhotoReferenceEditor() {
   };
   bindNoneChoice("prefer_none", ["prefer_scenes", "prefer_times", "preferred_preset"]);
   bindNoneChoice("avoid_none", ["avoid_scenes", "avoid_times"]);
+  let localPreviewTimer = null;
+  let localPreviewRevision = 0;
+  const scheduleLocalPreview = () => {
+    const revision = ++localPreviewRevision;
+    window.clearTimeout(localPreviewTimer);
+    localPreviewTimer = window.setTimeout(async () => {
+      try {
+        const result = await postJson("/photo_reference/metadata/review", {
+          questionnaire: guidedPhotoReferenceQuestionnaire(root),
+          available_presets: state.photoReferenceLibraryStatus?.options?.presets || [],
+          manual_override: guidedPhotoReferenceManualOverride(root),
+          use_model: false,
+        });
+        if (revision === localPreviewRevision) {
+          host.querySelector("[data-photo-guided-result]").textContent = JSON.stringify(result, null, 2);
+        }
+      } catch (_error) {
+        // The explicit approval action below owns user-visible errors.
+      }
+    }, 180);
+  };
+  root.addEventListener("change", (event) => {
+    if (event.target.matches("input[type='checkbox'], input[type='radio'], select")) scheduleLocalPreview();
+  });
+  root.querySelector('[name="manual_override_json"]')?.addEventListener("input", scheduleLocalPreview);
+  const contextMode = host.querySelector('[name="trial_context_mode"]');
+  contextMode?.addEventListener("change", () => {
+    const custom = host.querySelector("[data-photo-guided-custom-context]");
+    if (custom) custom.hidden = contextMode.value !== "custom";
+  });
   host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.photoGuidedTab)));
   host.querySelector("[data-photo-guided-compile]")?.addEventListener("click", async (event) => {
     setActionBusy(event.currentTarget, true);
     try {
-      const result = await postJson("/photo_reference/metadata/review", { questionnaire: guidedPhotoReferenceQuestionnaire(root), available_presets: state.photoReferenceLibraryStatus?.options?.presets || [] });
+      const result = await postJson("/photo_reference/metadata/review", { questionnaire: guidedPhotoReferenceQuestionnaire(root), available_presets: state.photoReferenceLibraryStatus?.options?.presets || [], manual_override: guidedPhotoReferenceManualOverride(root) });
       host.querySelector("[data-photo-guided-result]").textContent = JSON.stringify(result, null, 2);
       setTab("result");
     } catch (error) {
@@ -24842,10 +24974,34 @@ function renderGuidedPhotoReferenceEditor() {
       setActionBusy(event.currentTarget, false);
     }
   });
-  host.querySelector("[data-photo-guided-trial]")?.addEventListener("click", async () => {
-    const text = host.querySelector('[name="trial_text"]')?.value || "";
-    const result = await postJson("/photo_reference/selection_trial", { request_text: text, runs: Number(host.querySelector('[name="trial_runs"]')?.value || 1) });
-    host.querySelector("[data-photo-guided-trial-result]").textContent = JSON.stringify(result, null, 2);
+  host.querySelector("[data-photo-guided-trial]")?.addEventListener("click", async (event) => {
+    setActionBusy(event.currentTarget, true);
+    try {
+      const text = host.querySelector('[name="trial_text"]')?.value || "";
+      const compiled = await postJson("/photo_reference/metadata/review", {
+        questionnaire: guidedPhotoReferenceQuestionnaire(root),
+        available_presets: state.photoReferenceLibraryStatus?.options?.presets || [],
+        manual_override: guidedPhotoReferenceManualOverride(root),
+      });
+      if (!compiled?.metadata || typeof compiled.metadata !== "object") throw new Error("没有返回可试跑的选图规则");
+      const trialCandidates = guidedPhotoReferenceTrialCandidates(root, compiled.metadata);
+      const expectedSource = String(root?.closest("form")?.elements?.source?.value || "").trim();
+      const expectedReference = trialCandidates.find((item) => item.source === expectedSource);
+      const result = await postJson("/photo_reference/selection_trial", {
+        request_text: text,
+        user_id: state.selectedUserId || "",
+        context_mode: host.querySelector('[name="trial_context_mode"]')?.value || "current",
+        ambient_context: host.querySelector('[name="trial_context_mode"]')?.value === "custom" ? (host.querySelector('[name="trial_custom_context"]')?.value || "") : "",
+        runs: Number(host.querySelector('[name="trial_runs"]')?.value || 1),
+        expected_reference_id: expectedReference?.id || "",
+        candidates: trialCandidates,
+      });
+      host.querySelector("[data-photo-guided-trial-result]").textContent = JSON.stringify(result, null, 2);
+    } catch (error) {
+      showToast(`试跑失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(event.currentTarget, false);
+    }
   });
 }
 
@@ -25242,6 +25398,7 @@ function photoReferenceManagerCard(item, index) {
     preferredPreset ? `预设 ${preferredPreset}` : "",
   ].filter(Boolean);
   const roleShortcuts = photoReferenceRoleShortcuts();
+  const summary = note || (responsibilityTags.length ? responsibilityTags.join(" · ") : "尚未配置引导使用方式");
   return `
     <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}">
       ${photoReferencePreviewHtml("library", source, `参考图 ${index + 1}`)}
@@ -25255,15 +25412,15 @@ function photoReferenceManagerCard(item, index) {
           </div>
         </header>
         ${responsibilityTags.length ? `<div class="photo-reference-responsibilities">${responsibilityTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
-        <label>
+        <label hidden aria-hidden="true">
           <span>图片路径或 URL</span>
           <input type="text" data-photo-reference-source data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" />
         </label>
-        <label>
+        <label hidden aria-hidden="true">
           <span>用途注释</span>
           <textarea data-photo-reference-note data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea>
         </label>
-        <details class="photo-reference-metadata-editor">
+        <details class="photo-reference-metadata-editor" hidden aria-hidden="true">
           <summary>
             <span>参考职责与服装裁决</span>
             <small>展开后可指定这张图在生图时负责保留哪些信息。留空表示不限制或由系统决定。</small>
@@ -25313,6 +25470,10 @@ function photoReferenceManagerCard(item, index) {
             <small>选择使用这张图时优先套用的生图场景预设；用户明确要求优先，冲突或失效预设不会静默替代用户要求。</small>
           </label>
         </details>
+        <p class="photo-reference-item-summary">${escapeHtml(summary)}</p>
+        <div class="photo-reference-item-actions">
+          <button type="button" data-photo-reference-configure data-index="${index}">配置使用方式</button>
+        </div>
       </div>
     </article>
   `;
@@ -26022,20 +26183,36 @@ function bindPhotoReferenceManagerActions() {
   const addDialog = manager.querySelector("[data-photo-reference-add-dialog]");
   const closeAddDialog = () => {
     state.photoReferenceAddDialogOpen = false;
+    state.photoReferenceEditingIndex = -1;
     if (addDialog?.open) addDialog.close();
   };
-  const openAddDialog = () => {
+  const openAddDialog = (editingIndex = -1) => {
     if (!addDialog) return;
     state.photoReferenceAddDialogOpen = true;
+    state.photoReferenceEditingIndex = Number.isInteger(editingIndex) ? editingIndex : -1;
     renderGuidedPhotoReferenceEditor();
+    const form = addDialog.querySelector("[data-photo-reference-add-form]");
+    const editingItem = state.photoReferenceEditingIndex >= 0 ? photoReferenceManagerItems()[state.photoReferenceEditingIndex] : null;
+    if (form) {
+      form.elements.source.value = editingItem?.source || "";
+      form.elements.note.value = editingItem?.note || "";
+      const title = form.querySelector("header h3");
+      if (title) title.textContent = editingItem ? "配置参考图使用方式" : "添加参考图";
+      const submit = form.querySelector('button[type="submit"]');
+      if (submit) submit.textContent = editingItem ? "应用到图库草稿" : "添加到图库";
+      applyGuidedPhotoReferenceDraft(form.querySelector("[data-photo-reference-guided-editor]"), editingItem);
+    }
     if (!addDialog.open) addDialog.showModal();
     addDialog.querySelector('[name="source"]')?.focus();
   };
-  manager.querySelector("[data-photo-reference-add-open]")?.addEventListener("click", openAddDialog);
+  manager.querySelector("[data-photo-reference-add-open]")?.addEventListener("click", () => openAddDialog(-1));
+  manager.querySelectorAll("[data-photo-reference-configure]").forEach((button) => {
+    button.addEventListener("click", () => openAddDialog(Number(button.dataset.index)));
+  });
   manager.querySelectorAll("[data-photo-reference-add-close]").forEach((button) => button.addEventListener("click", closeAddDialog));
-  addDialog?.addEventListener("cancel", () => { state.photoReferenceAddDialogOpen = false; });
-  addDialog?.addEventListener("close", () => { state.photoReferenceAddDialogOpen = false; });
-  if (state.photoReferenceAddDialogOpen) openAddDialog();
+  addDialog?.addEventListener("cancel", () => { state.photoReferenceAddDialogOpen = false; state.photoReferenceEditingIndex = -1; });
+  addDialog?.addEventListener("close", () => { state.photoReferenceAddDialogOpen = false; state.photoReferenceEditingIndex = -1; });
+  if (state.photoReferenceAddDialogOpen) openAddDialog(state.photoReferenceEditingIndex);
 
   manager.querySelector("[data-photo-reference-back]")?.addEventListener("click", () => {
     syncPhotoReferenceManagerDraft();
@@ -26115,17 +26292,23 @@ function bindPhotoReferenceManagerActions() {
     const source = String(form.elements.source?.value || "").trim();
     const note = String(form.elements.note?.value || "").trim();
     const items = photoReferenceManagerItems();
+    const editingIndex = state.photoReferenceEditingIndex;
+    const editingExisting = Number.isInteger(editingIndex) && editingIndex >= 0 && Boolean(items[editingIndex]);
     if (!source) return;
-    if (items.length >= 24) {
+    if (!editingExisting && items.length >= 24) {
       showToast("参考图库已达到 24 张上限", "error");
       return;
     }
-    if (items.some((item) => String(item.source || "").trim() === source)) {
+    if (items.some((item, index) => index !== editingIndex && String(item.source || "").trim() === source)) {
       showToast("这张图片已经在参考图库中", "error");
       return;
     }
     const questionnaire = guidedPhotoReferenceQuestionnaire(form.querySelector("[data-photo-reference-guided-editor]"));
     const selections = questionnaire.answers.flatMap((answer) => answer.selections);
+    if (selections.some((item) => item.value === "needs_confirmation")) {
+      showToast("请先确认旧配置中无法还原的使用方式", "error");
+      return;
+    }
     const outfitBehavior = selections.find((item) => item.field === "outfit_behavior")?.value || "unsure";
     const outfitCategory = selections.find((item) => item.field === "outfit_category")?.value || "unspecified";
     if (["reference_without_lock", "preserve_unless_explicit_change"].includes(outfitBehavior) && outfitCategory === "unspecified") {
@@ -26137,27 +26320,31 @@ function bindPhotoReferenceManagerActions() {
       const compiled = await postJson("/photo_reference/metadata/review", {
         questionnaire,
         available_presets: state.photoReferenceLibraryStatus?.options?.presets || [],
+        manual_override: guidedPhotoReferenceManualOverride(form.querySelector("[data-photo-reference-guided-editor]")),
       });
       if (!compiled?.metadata || typeof compiled.metadata !== "object") throw new Error("没有返回可保存的选图规则");
-      items.push({
-        id: newPhotoReferenceId(),
+      const nextItem = {
+        id: editingExisting ? items[editingIndex].id : newPhotoReferenceId(),
         kind: "library",
         source,
         note,
         metadata: { ...compiled.metadata },
-      });
+      };
+      if (editingExisting) items[editingIndex] = nextItem;
+      else items.push(nextItem);
       state.photoReferenceAddDialogOpen = false;
+      state.photoReferenceEditingIndex = -1;
       if (addDialog?.open) addDialog.close();
       syncPhotoReferenceManagerDraft();
       renderFeatureSwitches();
       showToast(
         compiled.review?.status === "approved"
-          ? `主模型 ${compiled.review.provider_id || "LLM_PROVIDER_ID"} 已审批，参考图已加入待保存图库`
-          : `${compiled.review?.warning || "主模型未完成审批，已使用本地证据合并"} 参考图已加入待保存图库`,
+          ? `主模型 ${compiled.review.provider_id || "LLM_PROVIDER_ID"} 已审批，参考图规则已写入待保存图库`
+          : `${compiled.review?.warning || "主模型未完成审批，已使用本地证据合并"} 参考图规则已写入待保存图库`,
         "ok",
       );
     } catch (error) {
-      showToast(`添加失败：${error.message}`, "error");
+      showToast(`配置失败：${error.message}`, "error");
     } finally {
       setActionBusy(event.submitter, false);
     }

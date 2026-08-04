@@ -49,7 +49,7 @@ _SCENE_CATEGORIES = {
     "beach",
 }
 _TIME_CATEGORIES = {"morning", "daytime", "afternoon", "evening", "night", "bedtime"}
-_SELECTION_ELIGIBILITY = {"matching_only", "fallback_allowed", "disabled"}
+_SELECTION_ELIGIBILITY = {"matching_only", "fallback_identity_only", "fallback_allowed", "disabled"}
 
 
 @dataclass(frozen=True)
@@ -173,7 +173,7 @@ def merge_reference_questionnaire_evidence(
     }
     fallback_values = {
         "strict": "matching_only",
-        "fallback_identity": "fallback_allowed",
+        "fallback_identity": "fallback_identity_only",
         "fallback_any": "fallback_allowed",
         "disabled": "disabled",
         "unsure": "matching_only",
@@ -263,6 +263,8 @@ def normalize_reviewed_reference_intent(
     def reviewed_list(container: Mapping[str, Any], key: str, allowed: set[str], fallback_value: Any) -> list[str]:
         if key in container:
             valid = _filtered_review_values(container.get(key), allowed)
+            if isinstance(container.get(key), (list, tuple, set)):
+                return valid
             if valid:
                 return valid
         return _filtered_review_values(fallback_value, allowed)
@@ -392,6 +394,35 @@ def compile_reference_metadata(
 ) -> CompileResult:
     """Compile editor answers without writing to the catalog."""
     answers = dict(intent or {})
+    manual_override = dict(answers.get("manual_override") or {}) if isinstance(answers.get("manual_override"), Mapping) else {}
+    if manual_override:
+        if "reference_roles" in manual_override:
+            answers["preserve"] = manual_override["reference_roles"]
+        if "outfit_category" in manual_override:
+            category = str(manual_override.get("outfit_category") or "").strip().lower()
+            answers["outfit_category"] = category if category in _OUTFIT_CATEGORIES else ""
+        if "outfit_lock_default" in manual_override:
+            answers["outfit_behavior"] = (
+                "preserve_unless_explicit_change"
+                if bool(manual_override.get("outfit_lock_default"))
+                else "reference_without_lock"
+            )
+        prefer_override = dict(_as_mapping(answers.get("prefer")))
+        avoid_override = dict(_as_mapping(answers.get("avoid")))
+        if "scene_categories" in manual_override:
+            prefer_override["scenes"] = [item for item in _values(manual_override["scene_categories"]) if item in _SCENE_CATEGORIES]
+        if "time_categories" in manual_override:
+            prefer_override["times"] = [item for item in _values(manual_override["time_categories"]) if item in _TIME_CATEGORIES]
+        if "excluded_scene_categories" in manual_override:
+            avoid_override["scenes"] = [item for item in _values(manual_override["excluded_scene_categories"]) if item in _SCENE_CATEGORIES]
+        if "excluded_time_categories" in manual_override:
+            avoid_override["times"] = [item for item in _values(manual_override["excluded_time_categories"]) if item in _TIME_CATEGORIES]
+        answers["prefer"] = prefer_override
+        answers["avoid"] = avoid_override
+        if "selection_eligibility" in manual_override:
+            answers["selection_eligibility"] = manual_override["selection_eligibility"]
+        if "preferred_preset" in manual_override:
+            answers["preferred_preset"] = manual_override["preferred_preset"]
     roles = _roles(answers)
     outfit_behavior = _behavior(answers.get("outfit_behavior")) if "outfit" in roles else "ignore"
     prefer = _as_mapping(answers.get("prefer"))
@@ -417,6 +448,11 @@ def compile_reference_metadata(
     if "outfit" in roles and not str(answers.get("outfit_category") or "").strip() and outfit_behavior != "ignore":
         conflicts.append("已选择穿搭职责，但没有填写服装类型")
 
+    selection_eligibility = str(
+        answers.get("selection_eligibility") or answers.get("fallback") or "matching_only"
+    ).strip()
+    if selection_eligibility not in _SELECTION_ELIGIBILITY:
+        selection_eligibility = "matching_only"
     metadata: dict[str, Any] = {
         "editor_intent": {
             "version": 1,
@@ -424,7 +460,8 @@ def compile_reference_metadata(
             "outfit_behavior": outfit_behavior,
             "prefer": {"scenes": scenes, "times": times},
             "avoid": {"scenes": excluded_scenes, "times": excluded_times},
-            "fallback": str(answers.get("fallback") or "matching_only"),
+            "fallback": selection_eligibility,
+            **({"manual_override": manual_override} if manual_override else {}),
         },
         "reference_roles": roles,
         "outfit_category": (
@@ -437,12 +474,52 @@ def compile_reference_metadata(
         "excluded_scene_categories": excluded_scenes,
         "time_categories": times,
         "excluded_time_categories": excluded_times,
-        "selection_eligibility": str(answers.get("selection_eligibility") or "matching_only"),
+        "selection_eligibility": selection_eligibility,
         "preferred_preset": preset,
-        "metadata_source": "guided_editor",
+        "metadata_source": "manual_override" if manual_override else "guided_editor",
     }
+    normalized_questionnaire = answers.get("questionnaire") if isinstance(answers.get("questionnaire"), Mapping) else {}
+    answer_sources: dict[str, list[str]] = {}
+    for answer in list(normalized_questionnaire.get("answers") or ()):
+        if not isinstance(answer, Mapping):
+            continue
+        question_id = str(answer.get("id") or "").strip()
+        question_text = str(answer.get("question") or question_id).strip()
+        for selection in list(answer.get("selections") or ()):
+            if not isinstance(selection, Mapping):
+                continue
+            field_name = str(selection.get("field") or "").strip()
+            label = str(selection.get("label") or selection.get("value") or "").strip()
+            if field_name and label:
+                source = f"{question_text}：{label}" if question_text else label
+                answer_sources.setdefault(field_name, []).append(source)
+
+    source_fields = {
+        "reference_roles": ("core_anchor", "wardrobe_change", "location_change", "pose_change", "outfit_behavior"),
+        "outfit_category": ("outfit_category",),
+        "outfit_lock_default": ("outfit_behavior",),
+        "scene_categories": ("prefer_scenes",),
+        "excluded_scene_categories": ("avoid_scenes",),
+        "time_categories": ("prefer_times",),
+        "excluded_time_categories": ("avoid_times",),
+        "selection_eligibility": ("fallback_policy",),
+        "preferred_preset": ("preferred_preset",),
+    }
+
+    def field_source(field: str) -> str:
+        if field in manual_override:
+            return "manual_override"
+        sources = list(
+            dict.fromkeys(
+                source
+                for source_field in source_fields.get(field, (field,))
+                for source in answer_sources.get(source_field, ())
+            )
+        )
+        return "；".join(sources) or "规则合并"
+
     fields = tuple(
-        MetadataField(field, value, "回答：" + field, _ROLE_LABELS.get(field, field))
+        MetadataField(field, value, field_source(field), _ROLE_LABELS.get(field, field))
         for field, value in (
             ("reference_roles", roles),
             ("outfit_category", metadata["outfit_category"]),

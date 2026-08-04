@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from quart import Quart
@@ -39,6 +40,138 @@ class _PhotoReferencePagePlugin:
 class PhotoReferenceLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.app = Quart(__name__)
+
+    async def test_metadata_review_calls_webui_main_model_strictly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.llm_provider_id = "webui-main-provider"
+            captured: dict[str, object] = {}
+
+            async def llm_call(prompt: str, **kwargs: object) -> str:
+                captured["prompt"] = prompt
+                captured.update(kwargs)
+                return json.dumps(
+                    {
+                        "intent": {
+                            "preserve": ["identity"],
+                            "outfit_behavior": "reference_without_lock",
+                            "outfit_category": "",
+                            "prefer": {"scenes": [], "times": []},
+                            "avoid": {"scenes": [], "times": []},
+                            "selection_eligibility": "matching_only",
+                            "preferred_preset": "",
+                        },
+                        "responsibility_decisions": [],
+                        "conflicts": [],
+                        "review_summary": "人物外貌职责证据一致。",
+                    },
+                    ensure_ascii=False,
+                )
+
+            plugin._llm_call = llm_call
+            api = PrivateCompanionPageApi(plugin)
+            payload = {
+                "questionnaire": {
+                    "version": 2,
+                    "answers": [
+                        {
+                            "id": "core_anchor",
+                            "question": "这张图最不能丢的特点是什么？",
+                            "selections": [
+                                {
+                                    "field": "core_anchor",
+                                    "value": "identity",
+                                    "label": "人物长相",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "available_presets": ["自拍"],
+            }
+
+            async with self.app.test_request_context("/", method="POST", json=payload):
+                result = await api.review_photo_reference_metadata()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["review"]["status"], "approved")
+        self.assertEqual(captured["provider_id"], "webui-main-provider")
+        self.assertEqual(captured["task"], "photo_reference_metadata_review")
+        self.assertIs(captured["strict_provider"], True)
+
+    async def test_selection_trial_captures_native_main_model_tool_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.llm_provider_id = "webui-main-provider"
+            captured: dict[str, object] = {}
+
+            async def llm_generate(**kwargs: object) -> SimpleNamespace:
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    tools_call_name=["pc_generate_photo"],
+                    tools_call_args=[{"kind": "selfie", "prompt": "卧室自拍", "scene_preset": "睡前"}],
+                )
+
+            plugin.context = SimpleNamespace(llm_generate=llm_generate)
+            api = PrivateCompanionPageApi(plugin)
+            result = await api._photo_reference_selection_trial_model_runner(
+                "给我拍一张",
+                {"_trial_context_snapshot": "当前人格：测试人格"},
+            )
+
+        self.assertEqual(result["status"], "captured")
+        self.assertEqual(result["tool_name"], "pc_generate_photo")
+        self.assertEqual(result["arguments"]["kind"], "selfie")
+        self.assertEqual(captured["chat_provider_id"], "webui-main-provider")
+        self.assertEqual(captured["prompt"], "给我拍一张")
+        tools = captured["tools"]
+        self.assertEqual([tool.name for tool in tools.tools], ["pc_generate_photo"])
+        self.assertIsNone(tools.tools[0].handler)
+
+    async def test_selection_trial_context_includes_persona_and_recent_conversation(self) -> None:
+        class ConversationManager:
+            async def get_curr_conversation_id(self, umo: str) -> str:
+                self.last_umo = umo
+                return "conversation-1"
+
+            async def get_conversation(self, umo: str, conversation_id: str) -> SimpleNamespace:
+                self.loaded = (umo, conversation_id)
+                return SimpleNamespace(
+                    history=json.dumps(
+                        [
+                            {"role": "user", "content": "刚才说想看卧室自拍"},
+                            {"role": "assistant", "content": "等我一下"},
+                        ],
+                        ensure_ascii=False,
+                    )
+                )
+
+        class PersonaManager:
+            @staticmethod
+            def get_persona(persona_id: str) -> dict[str, str]:
+                return {"system_prompt": f"人格正文：{persona_id}"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.master_id = "user-1"
+            plugin._page_current_persona_id = "persona-1"
+            plugin.data = {
+                "users": {"user-1": {"user_id": "user-1", "nickname": "维护者", "umo": "test:FriendMessage:user-1"}},
+                "daily_state": {"location": "bedroom"},
+                "daily_plan": {"current": "rest"},
+            }
+            plugin.context = SimpleNamespace(
+                conversation_manager=ConversationManager(),
+                persona_manager=PersonaManager(),
+            )
+            api = PrivateCompanionPageApi(plugin)
+            snapshot = await api._photo_reference_trial_context_snapshot(
+                {"context_mode": "current", "user_id": "user-1"}
+            )
+
+        self.assertIn("人格正文：persona-1", snapshot)
+        self.assertIn("刚才说想看卧室自拍", snapshot)
+        self.assertIn("test:FriendMessage:user-1", snapshot)
 
     async def test_list_reports_persona_library_order_and_availability(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -380,7 +513,7 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', self.styles)
         self.assertIn('@media (max-width: 520px)', self.styles)
         self.assertIn('.photo-reference-manager[hidden]', self.styles)
-        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v2', self.html)
+        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v5', self.html)
         self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_structured_metadata_round_trip_keeps_explicit_false_lock(self) -> None:

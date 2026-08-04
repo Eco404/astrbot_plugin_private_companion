@@ -141,6 +141,54 @@ class PhotoReferenceMetadataTests(unittest.TestCase):
         self.assertEqual(reviewed["selection_eligibility"], "matching_only")
         self.assertEqual(reviewed["preferred_preset"], "自拍")
 
+    def test_llm_review_can_explicitly_clear_local_preferences(self) -> None:
+        reviewed = normalize_reviewed_reference_intent(
+            {
+                "intent": {
+                    "preserve": ["identity"],
+                    "prefer": {"scenes": [], "times": []},
+                    "avoid": {"scenes": [], "times": []},
+                }
+            },
+            {
+                "preserve": ["identity"],
+                "prefer": {"scenes": ["home"], "times": ["night"]},
+                "avoid": {"scenes": ["school"], "times": ["daytime"]},
+            },
+        )
+        self.assertEqual(reviewed["prefer"], {"scenes": [], "times": []})
+        self.assertEqual(reviewed["avoid"], {"scenes": [], "times": []})
+
+    def test_compiled_field_sources_name_questions_and_selected_answers(self) -> None:
+        result = compile_reference_metadata(
+            {
+                "preserve": ["identity"],
+                "questionnaire": {
+                    "version": 2,
+                    "answers": [
+                        {
+                            "id": "core_anchor",
+                            "question": "这张图最不能丢的特点是什么？",
+                            "selections": [
+                                {"field": "core_anchor", "value": "identity", "label": "人物长相"}
+                            ],
+                        },
+                        {
+                            "id": "fallback_policy",
+                            "question": "没有完全匹配时怎么办？",
+                            "selections": [
+                                {"field": "fallback_policy", "value": "fallback_identity", "label": "人物长相匹配时兜底"}
+                            ],
+                        },
+                    ],
+                },
+                "selection_eligibility": "fallback_identity_only",
+            }
+        )
+        fields = {item.field: item.source for item in result.fields}
+        self.assertIn("这张图最不能丢的特点是什么？：人物长相", fields["reference_roles"])
+        self.assertEqual(fields["selection_eligibility"], "没有完全匹配时怎么办？：人物长相匹配时兜底")
+
     def test_review_prompt_contains_question_evidence_and_strict_schema(self) -> None:
         system_prompt, user_prompt = build_reference_metadata_review_prompt(
             {
@@ -160,6 +208,26 @@ class PhotoReferenceMetadataTests(unittest.TestCase):
         self.assertIn("不要发明", system_prompt)
         self.assertIn("这张图最不能丢的特点是什么？", user_prompt)
         self.assertIn('"responsibility_decisions"', user_prompt)
+
+    def test_expert_override_is_explicit_and_keeps_questionnaire(self) -> None:
+        result = compile_reference_metadata(
+            {
+                "preserve": ["identity", "outfit"],
+                "outfit_behavior": "preserve_unless_explicit_change",
+                "outfit_category": "sleepwear",
+                "manual_override": {
+                    "reference_roles": ["identity"],
+                    "scene_categories": ["home"],
+                    "selection_eligibility": "fallback_allowed",
+                },
+            }
+        )
+        self.assertEqual(result.metadata["reference_roles"], ["identity"])
+        self.assertEqual(result.metadata["scene_categories"], ["home"])
+        self.assertEqual(result.metadata["metadata_source"], "manual_override")
+        self.assertEqual(result.metadata["editor_intent"]["manual_override"]["reference_roles"], ["identity"])
+        sources = {item.field: item.source for item in result.fields}
+        self.assertEqual(sources["reference_roles"], "manual_override")
 
 
 if __name__ == "__main__":

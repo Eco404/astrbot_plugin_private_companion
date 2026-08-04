@@ -21815,6 +21815,23 @@ textarea {
   padding-top: 8px;
 }
 
+.photo-reference-metadata-editor[hidden],
+.photo-reference-item-body > label[hidden] {
+  display: none !important;
+}
+
+.photo-reference-item-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.photo-reference-item-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .photo-reference-metadata-editor[open] {
   display: grid;
   gap: 10px;
@@ -29899,4 +29916,6 @@ pre {
 .photo-reference-guided-help{margin-top:0;color:var(--muted);font-size:12px;line-height:1.55}
 .photo-reference-guided-model-note{margin:0 0 12px;padding:9px 10px;border-left:3px solid var(--accent);background:var(--surface);color:var(--ink);font-size:12px;line-height:1.5}
 .photo-reference-guided-model-note code{overflow-wrap:anywhere;color:var(--accent);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+.photo-reference-guided-expert{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:12px}.photo-reference-guided-expert summary{cursor:pointer;font-size:12px;font-weight:800}.photo-reference-guided-expert .photo-reference-guided-choice{margin-top:10px!important}.photo-reference-guided-expert textarea{margin-top:8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+@media(min-width:900px){.photo-reference-guided-editor{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);align-items:start;gap:0 18px}.photo-reference-guided-tabs{grid-column:1/-1}.photo-reference-guided-editor:not([data-photo-guided-active-tab="trial"])>[data-photo-guided-panel="answers"],.photo-reference-guided-editor:not([data-photo-guided-active-tab="trial"])>[data-photo-guided-panel="result"]{display:block!important;min-width:0}.photo-reference-guided-editor>[data-photo-guided-panel="result"]{position:sticky;top:0}.photo-reference-guided-editor>[data-photo-guided-panel="trial"]{grid-column:1/-1}}
 @media(max-width:700px){.photo-reference-add-dialog{width:calc(100vw - 16px);max-height:calc(100vh - 16px)}.photo-reference-add-form{max-height:calc(100vh - 18px)}.photo-reference-add-form>.photo-reference-add-body{padding:13px}.photo-reference-add-basics,.photo-reference-guided-choices{grid-template-columns:1fr}.photo-reference-guided-choice-section{grid-template-columns:1fr;gap:3px}.photo-reference-guided-choice-section>b{padding-top:4px}}

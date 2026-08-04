@@ -412,8 +412,8 @@ def _strict_reference(
         errors,
     )
     eligibility = _clean_text(item.get("selection_eligibility"), 40).lower() or "matching_only"
-    if eligibility not in {"matching_only", "fallback_allowed", "disabled"}:
-        _append_error(errors, f"{prefix}.selection_eligibility", "必须是 matching_only、fallback_allowed 或 disabled")
+    if eligibility not in {"matching_only", "fallback_identity_only", "fallback_allowed", "disabled"}:
+        _append_error(errors, f"{prefix}.selection_eligibility", "必须是 matching_only、fallback_identity_only、fallback_allowed 或 disabled")
         eligibility = "matching_only"
     raw_intent = item.get("editor_intent")
     editor_intent = dict(raw_intent) if isinstance(raw_intent, dict) else None

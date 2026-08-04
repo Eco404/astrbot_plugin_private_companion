@@ -22,7 +22,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
 from astrbot.api import logger
@@ -99,7 +99,7 @@ from .photo_reference_metadata import (
     merge_reference_questionnaire_evidence,
     normalize_reviewed_reference_intent,
 )
-from .photo_reference_selection import run_photo_selection_trial
+from .photo_reference_selection import SelectionResult, run_photo_selection_trial
 from .reference_assets import (
     REFERENCE_ASSET_MAX_BYTES,
     REFERENCE_ASSET_MAX_PER_OWNER,
@@ -2211,6 +2211,254 @@ class PrivateCompanionPageApi(
             logger.error(f"[PrivateCompanionPage] 编译参考图元数据失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def _photo_reference_selection_trial_model_runner(
+        self,
+        request_text: str,
+        request_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Capture a native tool call from the configured main model without execution."""
+        caller = getattr(getattr(self.plugin, "context", None), "llm_generate", None)
+        # 维护者注意：这里必须直接调用 AstrBot Context.llm_generate，并固定使用
+        # WebUI“模型配置”中的主模型 plugin.llm_provider_id。该 API 只返回 Function Calling，
+        # 不会执行 handler=None 的 pc_generate_photo 试跑工具，也不得改用任务/备用模型。
+        provider_id = self._single_line(getattr(self.plugin, "llm_provider_id", ""), 160)
+        if not callable(caller) or not provider_id:
+            return {"tool_name": "", "arguments": {}, "status": "model_unavailable"}
+        ambient_context = self._multi_line(request_payload.get("_trial_context_snapshot"), 7000)
+        system_prompt = (
+            "你正在进行无副作用的生图工具决策试跑。只有用户明确要求生成、拍摄、制作或修改图片时，"
+            "才调用 pc_generate_photo；普通聊天不要调用。调用时根据原话填写 kind、prompt、scene_preset，"
+            "但不要声称图片已经生成或发送。系统只会捕获工具参数，不会执行工具。"
+        )
+        if ambient_context:
+            system_prompt += "\n\n以下是本次只读上下文快照：\n" + ambient_context
+        try:
+            from astrbot.core.agent.tool import FunctionTool, ToolSet
+
+            trial_tool = FunctionTool(
+                name="pc_generate_photo",
+                description="用户明确要求生成、拍摄、制作图片或基于参考图改图时调用。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "要生成或修改的完整画面要求。"},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["text2img", "selfie", "sticker", "edit"],
+                            "description": "角色出镜用 selfie，表情包用 sticker，改图用 edit。",
+                        },
+                        "reference_image_path": {"type": "string", "description": "可选参考图路径或 URL。"},
+                        "image_size": {"type": "string", "description": "可选图片尺寸。"},
+                        "send": {"type": "boolean", "description": "正式调用时是否发送；试跑不会执行。"},
+                        "caption": {"type": "string", "description": "正式发送时随图显示的文字。"},
+                        "scene_preset": {"type": "string", "description": "可选场景预设建议。"},
+                    },
+                    "required": ["prompt", "kind"],
+                    "additionalProperties": False,
+                },
+                handler=None,
+            )
+            response = await caller(
+                chat_provider_id=provider_id,
+                prompt=request_text,
+                tools=ToolSet([trial_tool]),
+                max_tokens=320,
+                system_prompt=system_prompt,
+            )
+        except Exception as exc:
+            logger.info("[PrivateCompanionPage] 参考图试跑主模型工具判断失败: %s", exc)
+            return {
+                "tool_name": "",
+                "arguments": {},
+                "status": "model_error",
+                "error": self._single_line(exc, 180),
+            }
+        raw_names = getattr(response, "tools_call_name", None) or []
+        raw_arguments = getattr(response, "tools_call_args", None) or []
+        names = [raw_names] if isinstance(raw_names, str) else list(raw_names)
+        arguments_list = [raw_arguments] if isinstance(raw_arguments, Mapping) else list(raw_arguments)
+        try:
+            index = next(i for i, name in enumerate(names) if self._single_line(name, 80) == "pc_generate_photo")
+        except StopIteration:
+            return {"tool_name": "", "arguments": {}, "status": "no_tool_call"}
+        arguments = arguments_list[index] if index < len(arguments_list) else {}
+        return {
+            "tool_name": "pc_generate_photo",
+            "arguments": dict(arguments) if isinstance(arguments, Mapping) else {},
+            "status": "captured",
+        }
+
+    async def _photo_reference_trial_conversation_snapshot(self, umo: str) -> list[dict[str, str]]:
+        """Read recent conversation history without creating or updating a session."""
+        if not umo:
+            return []
+        manager = getattr(getattr(self.plugin, "context", None), "conversation_manager", None)
+        if manager is None:
+            return []
+        try:
+            conversation_id = await manager.get_curr_conversation_id(umo)
+            if not conversation_id:
+                return []
+            conversation = await manager.get_conversation(umo, conversation_id)
+        except Exception as exc:
+            logger.debug("[PrivateCompanionPage] 参考图试跑读取会话失败: %s", self._single_line(exc, 120))
+            return []
+        raw_history = getattr(conversation, "history", "") if conversation is not None else ""
+        if isinstance(raw_history, str):
+            try:
+                history = json.loads(raw_history or "[]")
+            except Exception:
+                history = []
+        else:
+            history = raw_history
+        if not isinstance(history, list):
+            return []
+        messages: list[dict[str, str]] = []
+        remaining_chars = 3000
+        for item in reversed(history[-12:]):
+            if not isinstance(item, Mapping):
+                continue
+            role = self._single_line(item.get("role") or "unknown", 20)
+            content = item.get("content")
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, Mapping) and part.get("type") == "text" and part.get("text"):
+                        parts.append(str(part.get("text")))
+                content = " ".join(parts)
+            text = self._single_line(content, 500)
+            if text:
+                text = text[:remaining_chars]
+                messages.append({"role": role, "content": text})
+                remaining_chars -= len(role) + len(text)
+                if remaining_chars <= 0:
+                    break
+        messages.reverse()
+        return messages
+
+    async def _photo_reference_trial_context_snapshot(self, request_payload: Mapping[str, Any]) -> str:
+        """Build the read-only WebUI trial snapshot; never create users or sessions."""
+        mode = self._single_line(request_payload.get("context_mode") or "current", 20).lower()
+        if mode == "blank":
+            return ""
+        provided = self._multi_line(
+            request_payload.get("ambient_context") or request_payload.get("context_snapshot"),
+            4000,
+        )
+        if mode == "custom":
+            return "【维护者自定义上下文】\n" + provided if provided else ""
+        plugin_data = getattr(self.plugin, "data", {})
+        data = plugin_data if isinstance(plugin_data, Mapping) else {}
+        user_id = self._single_line(
+            request_payload.get("user_id") or getattr(self.plugin, "master_id", ""),
+            120,
+        )
+        user: Mapping[str, Any] = {}
+        raw_users = data.get("users")
+        if isinstance(raw_users, Mapping):
+            candidate = raw_users.get(user_id)
+            user = candidate if isinstance(candidate, Mapping) else {}
+        elif isinstance(raw_users, list):
+            user = next(
+                (
+                    item
+                    for item in raw_users
+                    if isinstance(item, Mapping) and self._single_line(item.get("user_id") or item.get("id"), 120) == user_id
+                ),
+                {},
+            )
+        umo = self._single_line(request_payload.get("umo"), 240)
+        if not umo and user:
+            umo = self._single_line(
+                user.get("bound_delivery_umo")
+                or user.get("preferred_delivery_umo")
+                or user.get("last_inbound_umo")
+                or user.get("umo")
+                or user.get("last_umo")
+                or user.get("last_unified_msg_origin"),
+                240,
+            )
+        if not umo:
+            resolver = getattr(self.plugin, "_private_delivery_umo_for_user_id", None)
+            try:
+                umo = self._single_line(resolver(user_id) if callable(resolver) else "", 240)
+            except Exception:
+                umo = ""
+        persona_id = self._single_line(
+            request_payload.get("_persona_id")
+            or getattr(self.plugin, "_page_current_persona_id", "")
+            or getattr(self.plugin, "plugin_specific_persona_id", ""),
+            120,
+        )
+        try:
+            persona_prompt, effective_persona_id = await self._roleplay_persona_prompt_for_id(persona_id, umo)
+        except Exception as exc:
+            logger.debug("[PrivateCompanionPage] 参考图试跑读取人格失败: %s", self._single_line(exc, 120))
+            persona_prompt, effective_persona_id = "", persona_id
+        daily_state = data.get("daily_state") if isinstance(data.get("daily_state"), Mapping) else {}
+        daily_plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), Mapping) else {}
+        snapshot = {
+            "persona": {
+                "id": effective_persona_id or persona_id,
+                "prompt": self._multi_line(persona_prompt, 3000),
+            },
+            "conversation": {
+                "umo": umo,
+                "recent_messages": await self._photo_reference_trial_conversation_snapshot(umo),
+            },
+            "user": {
+                key: user.get(key)
+                for key in ("user_id", "nickname", "relationship", "last_interaction", "recent_topic")
+                if user.get(key) not in (None, "", [], {})
+            },
+            "daily_state": self._multi_line(json.dumps(daily_state, ensure_ascii=False, default=str), 1200),
+            "daily_plan": self._multi_line(json.dumps(daily_plan, ensure_ascii=False, default=str), 1600),
+        }
+        generated = self._multi_line(json.dumps(snapshot, ensure_ascii=False, default=str), 9000)
+        return "\n".join(item for item in (provided, generated) if item)
+
+    async def _photo_reference_selection_trial_selector(
+        self,
+        selection_request: Mapping[str, Any],
+        candidates: tuple[Mapping[str, Any], ...],
+        rule_selection: SelectionResult,
+    ) -> SelectionResult:
+        """Run the production selector against the page draft without traces or generation."""
+        selector = getattr(self.plugin, "_select_photo_reference_candidate_async", None)
+        # 维护者注意：试跑中的正式选图也固定使用 WebUI 模型配置的主模型，
+        # selection_strict_provider=True 禁止任务模型或备用模型替换本次判断。
+        provider_id = self._single_line(getattr(self.plugin, "llm_provider_id", ""), 160)
+        if not callable(selector):
+            return rule_selection
+        kind = self._single_line(selection_request.get("kind") or "text2img", 24).lower()
+        workflow_kind = "selfie" if kind == "sticker" else kind
+        try:
+            selected = await selector(
+                workflow_kind,
+                requester_user_id=self._single_line(selection_request.get("user_id"), 120),
+                request_text=self._multi_line(selection_request.get("prompt") or selection_request.get("request_text"), 1200),
+                ambient_context=self._multi_line(selection_request.get("ambient_context"), 7000),
+                suggested_scene_preset=self._single_line(selection_request.get("scene_preset"), 80),
+                candidate_overrides=[dict(item) for item in candidates],
+                selection_provider_id=provider_id,
+                selection_strict_provider=True,
+                return_selection_result=True,
+                trace_id="",
+            )
+            if isinstance(selected, SelectionResult):
+                return selected
+        except Exception as exc:
+            logger.info("[PrivateCompanionPage] 参考图试跑正式选图失败，使用规则兜底: %s", exc)
+            return SelectionResult(
+                selected=rule_selection.selected,
+                candidates=rule_selection.candidates,
+                selection_source="rule_fallback",
+                selection_reason=f"trial_selector_error:{type(exc).__name__}",
+                fallback_id=rule_selection.fallback_id,
+                model_attempted=True,
+            )
+        return rule_selection
+
     async def review_photo_reference_metadata(self) -> dict[str, Any]:
         """Cross-review redundant questionnaire evidence, then compile without saving."""
         payload = await request.get_json(silent=True) or {}
@@ -2223,6 +2471,9 @@ class PrivateCompanionPageApi(
         presets = [str(item).strip() for item in presets if str(item).strip()]
         local_suggestion = merge_reference_questionnaire_evidence(questionnaire)
         reviewed_intent = dict(local_suggestion)
+        manual_override = payload.get("manual_override")
+        if isinstance(manual_override, Mapping) and manual_override:
+            reviewed_intent["manual_override"] = dict(manual_override)
         review_status = "local_fallback"
         provider_id = self._single_line(getattr(self.plugin, "llm_provider_id", ""), 160)
         review_summary = "模型审批不可用，已按问答证据完成本地合并。"
@@ -2294,6 +2545,9 @@ class PrivateCompanionPageApi(
             review_warning = "当前插件运行态无法调用模型，已使用本地证据合并。"
 
         try:
+            if isinstance(manual_override, Mapping) and manual_override:
+                reviewed_intent["manual_override"] = dict(manual_override)
+            reviewed_intent["questionnaire"] = local_suggestion.get("questionnaire") or questionnaire
             result = compile_reference_metadata(
                 reviewed_intent,
                 presets,
@@ -2338,12 +2592,18 @@ class PrivateCompanionPageApi(
             ]
         request_payload = dict(payload)
         request_payload["request_text"] = request_text
+        context_snapshot = await self._photo_reference_trial_context_snapshot(request_payload)
+        request_payload["_trial_context_snapshot"] = context_snapshot
+        request_payload["ambient_context"] = context_snapshot
         runner = getattr(self.plugin, "photo_selection_trial_runner", None)
+        if not callable(runner):
+            runner = self._photo_reference_selection_trial_model_runner
         try:
             report = await run_photo_selection_trial(
                 request_payload,
                 candidates=candidates,
                 tool_runner=runner if callable(runner) else None,
+                selection_runner=self._photo_reference_selection_trial_selector,
                 runs=max(1, min(3, _safe_int(payload.get("runs"), 1, 1))),
             )
             return self._ok(report.to_dict())
