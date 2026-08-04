@@ -24621,6 +24621,72 @@ function photoReferenceMetadataFromObject(rawItem) {
   return metadata;
 }
 
+function guidedPhotoReferenceAnswers() {
+  const root = document.querySelector("[data-photo-reference-guided-editor]");
+  if (!root) return {};
+  const values = (name) => String(root.querySelector(`[name="${name}"]`)?.value || "")
+    .split(/[,，、\s]+/).map((item) => item.trim()).filter(Boolean);
+  return {
+    preserve: Array.from(root.querySelectorAll('[name="preserve"]:checked')).map((input) => input.value),
+    outfit_behavior: root.querySelector('[name="outfit_behavior"]')?.value || "ignore",
+    outfit_category: root.querySelector('[name="outfit_category"]')?.value || "",
+    prefer: { scenes: values("prefer_scenes"), times: values("prefer_times") },
+    avoid: { scenes: values("avoid_scenes"), times: values("avoid_times") },
+    preferred_preset: root.querySelector('[name="preferred_preset"]')?.value || "",
+    selection_eligibility: root.querySelector('[name="selection_eligibility"]')?.value || "matching_only",
+  };
+}
+
+function renderGuidedPhotoReferenceEditor() {
+  const host = document.querySelector("[data-photo-reference-guided-host]");
+  if (!host) return;
+  host.innerHTML = `
+    <section class="photo-reference-guided-editor" data-photo-reference-guided-editor>
+      <div class="photo-reference-guided-tabs" role="tablist">
+        <button type="button" class="active" data-photo-guided-tab="answers">使用方式</button>
+        <button type="button" data-photo-guided-tab="result">生成数据</button>
+        <button type="button" data-photo-guided-tab="trial">选图试跑</button>
+      </div>
+      <div data-photo-guided-panel="answers">
+        <p class="photo-reference-guided-help">回答“这张图应该怎么使用”，系统会实时编译规范元数据。保存前不会改变配置。</p>
+        <fieldset><legend>选中后应沿用哪些内容？</legend>
+          ${[["identity","人物外貌"],["outfit","穿搭"],["pose","动作姿势"],["scene","场景背景"],["style","画面风格"]].map(([value,label]) => `<label><input type="checkbox" name="preserve" value="${value}"> ${label}</label>`).join("")}
+        </fieldset>
+        <label>穿搭使用方式<select name="outfit_behavior"><option value="ignore">完全不参考图中穿搭</option><option value="reference_without_lock">可以参考，但不要求保持</option><option value="preserve_unless_explicit_change">通常保持，除非用户明确要求换装</option></select></label>
+        <label>服装类型<input name="outfit_category" placeholder="例如 sleepwear"></label>
+        <label>优先场景<input name="prefer_scenes" placeholder="home, bedroom"></label>
+        <label>优先时间<input name="prefer_times" placeholder="night, bedtime"></label>
+        <label>排除场景<input name="avoid_scenes" placeholder="school, outdoor"></label>
+        <label>排除时间<input name="avoid_times"></label>
+        <label>首选预设<input name="preferred_preset"></label>
+        <label>选图资格<select name="selection_eligibility"><option value="matching_only">只在匹配时使用</option><option value="fallback_allowed">无匹配时允许兜底</option><option value="disabled">暂不参与选图</option></select></label>
+        <button type="button" data-photo-guided-compile>编译并预览</button>
+      </div>
+      <div data-photo-guided-panel="result" hidden><pre data-photo-guided-result>尚未编译</pre></div>
+      <div data-photo-guided-panel="trial" hidden>
+        <label>真实对话用户原话<textarea name="trial_text" placeholder="晚上了，在卧室穿着睡衣给我拍一张吧"></textarea></label>
+        <label>试跑次数<select name="trial_runs"><option value="1">1 次</option><option value="3">3 次稳定性检查</option></select></label>
+        <button type="button" data-photo-guided-trial>运行无副作用试跑</button>
+        <pre data-photo-guided-trial-result>尚未试跑</pre>
+      </div>
+    </section>`;
+  const setTab = (tab) => {
+    host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.classList.toggle("active", button.dataset.photoGuidedTab === tab));
+    host.querySelectorAll("[data-photo-guided-panel]").forEach((panel) => { panel.hidden = panel.dataset.photoGuidedPanel !== tab; });
+  };
+  host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.photoGuidedTab)));
+  host.querySelector("[data-photo-guided-compile]")?.addEventListener("click", async () => {
+    const result = await postJson("/photo_reference/metadata/compile", { intent: guidedPhotoReferenceAnswers(), available_presets: state.photoReferenceLibraryStatus?.options?.presets || [] });
+    host.querySelector("[data-photo-guided-result]").textContent = JSON.stringify(result?.data || result, null, 2);
+    setTab("result");
+  });
+  host.querySelector("[data-photo-guided-trial]")?.addEventListener("click", async () => {
+    const text = host.querySelector('[name="trial_text"]')?.value || "";
+    const result = await postJson("/photo_reference/selection_trial", { request_text: text, runs: Number(host.querySelector('[name="trial_runs"]')?.value || 1) });
+    host.querySelector("[data-photo-guided-trial-result]").textContent = JSON.stringify(result?.data || result, null, 2);
+  });
+}
+
 function newPhotoReferenceId() {
   const value = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `library_${value.replaceAll("-", "")}`;
@@ -25106,6 +25172,7 @@ function photoReferenceManagerPageHtml(open) {
           <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
         </div>
       </header>
+      <div data-photo-reference-guided-host></div>
 
       <section class="photo-reference-persona" aria-labelledby="photoReferencePersonaTitle">
         <div>
@@ -25770,6 +25837,7 @@ function bindPhotoReferenceManagerActions() {
     renderFeatureSwitches();
   });
   if (!manager || state.featureDetailSubpage !== "photo_reference_library") return;
+  renderGuidedPhotoReferenceEditor();
 
   manager.querySelector("[data-photo-reference-back]")?.addEventListener("click", () => {
     syncPhotoReferenceManagerDraft();

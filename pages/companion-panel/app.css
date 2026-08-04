@@ -29852,3 +29852,15 @@ pre {
     min-width: 58px;
   }
 }
+/* Guided reference metadata editor */
+.photo-reference-guided-editor{margin:16px 0;padding:16px;border:1px solid var(--border,#d9dee8);background:var(--surface,#fff);border-radius:8px}
+.photo-reference-guided-tabs{display:flex;gap:8px;border-bottom:1px solid var(--border,#d9dee8);margin-bottom:14px}
+.photo-reference-guided-tabs button{border:0;background:transparent;padding:8px 12px;cursor:pointer;color:inherit}
+.photo-reference-guided-tabs button.active{border-bottom:2px solid var(--accent,#4676ff);font-weight:600}
+.photo-reference-guided-editor fieldset{display:flex;flex-wrap:wrap;gap:12px;border:0;padding:0;margin:10px 0}
+.photo-reference-guided-editor label{display:flex;flex-direction:column;gap:5px;margin:8px 0;max-width:420px}
+.photo-reference-guided-editor fieldset label{flex-direction:row;align-items:center}
+.photo-reference-guided-editor input,.photo-reference-guided-editor select,.photo-reference-guided-editor textarea{min-height:34px;padding:6px 8px;border:1px solid var(--border,#d9dee8);border-radius:4px;background:var(--input,#fff);color:inherit}
+.photo-reference-guided-editor textarea{min-height:72px;min-width:min(100%,560px)}
+.photo-reference-guided-editor pre{white-space:pre-wrap;max-height:420px;overflow:auto;padding:12px;background:var(--code-bg,#f5f7fb);border-radius:4px}
+.photo-reference-guided-help{margin-top:0;color:var(--muted,#687386)}
