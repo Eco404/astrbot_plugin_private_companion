@@ -223,7 +223,7 @@ class C6CapabilityMatrixTests(unittest.TestCase):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         self.assertIsInstance(schema, dict)
         schema_keys = set(schema)
-        source = _source("main.py", "page_api.py")
+        source = _source("main.py", "page_api.py", "plugin_bootstrap.py")
         for task, config_key in OPTIONAL_TASKS.items():
             self.assertIn(config_key, schema_keys, f"optional C6 task {task} lost schema key {config_key}")
             self.assertRegex(source, rf"\b{re.escape(config_key)}\b", f"optional C6 task {task} is not routed")

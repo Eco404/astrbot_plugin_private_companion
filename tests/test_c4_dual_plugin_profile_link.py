@@ -6,10 +6,25 @@ from pathlib import Path
 import sys
 import tempfile
 import types
+import unittest
 
 
 COMPANION_ROOT = Path(__file__).resolve().parents[1]
-MEMORY_ROOT = COMPANION_ROOT.parents[1] / "astrbot_plugin_memory_companion-main"
+
+
+def _memory_root() -> Path:
+    candidates = (
+        COMPANION_ROOT.parent / "memory-official",
+        COMPANION_ROOT.parent / "memory",
+        COMPANION_ROOT.parents[1] / "astrbot_plugin_memory_companion-main",
+    )
+    for candidate in candidates:
+        if (candidate / "core" / "bridge.py").is_file():
+            return candidate
+    raise unittest.SkipTest("requires a checked-out MemoryCompanion peer repository")
+
+
+MEMORY_ROOT = _memory_root()
 
 
 def _load_modules():
