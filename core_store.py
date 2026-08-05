@@ -126,6 +126,7 @@ from .relationship_ledger import (
 )
 from .storage.store_manager import StoreManager
 from .person_context_contract import empty_person_store, ensure_person_store
+from .unified_profile_service import ensure_new_profile_capabilities, migrate_legacy_capabilities
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -531,6 +532,14 @@ class CoreStoreMixin:
         data.setdefault("daily_review_completed_day", "")
         data.setdefault("daily_review_case_audit", [])
         ensure_person_store(data)
+        # Legacy profiles retain their effective durable permissions once.
+        # Creation paths below install a separate default-closed state for new
+        # identities, so a user starting a DM cannot manufacture authority.
+        migrate_legacy_capabilities(
+            data,
+            operation_id="req036-capability-v1",
+            dry_run=False,
+        )
         return data
 
     @staticmethod
@@ -2258,8 +2267,6 @@ class CoreStoreMixin:
         now: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Create a minimal private profile without granting implicit authority."""
-        if not bool(getattr(self, "enable_auto_user_profile_creation", False)):
-            return None, False
         canonical_user_id = self._canonical_private_user_id(str(user_id or "").strip())
         if not canonical_user_id or self._is_bot_self_user_id(canonical_user_id):
             return None, False
@@ -2269,7 +2276,14 @@ class CoreStoreMixin:
         users = self.data.setdefault("users", {})
         existing = users.get(canonical_user_id) if isinstance(users, dict) else None
         if isinstance(existing, dict):
+            # A legacy/migrated profile remains addressable even when automatic
+            # creation is disabled.  Its REQ-036 capability state, not a DM,
+            # decides whether the conversation may proceed.
+            if isinstance(existing.get("unified_profile_capabilities"), dict):
+                ensure_new_profile_capabilities(existing)
             return existing, False
+        if not bool(getattr(self, "enable_auto_user_profile_creation", False)):
+            return None, False
 
         user = self._get_user(canonical_user_id)
         created_at = float(now if now is not None else _now_ts())
@@ -2280,15 +2294,15 @@ class CoreStoreMixin:
         # must not bypass the ledger or overwrite an explicitly configured role.
         user["nickname"] = self._auto_profile_nickname(canonical_user_id, sender_display_name)
         user["style"] = _single_line(getattr(self, "default_style", "温柔"), 24) or "温柔"
-        auto_enabled = bool(getattr(self, "auto_enable_companion_for_new_users", False))
-        user["auto_enabled"] = auto_enabled
+        user["auto_enabled"] = False
         user["manual_enabled"] = False
         user["manual_disabled"] = False
-        user["enabled"] = bool(auto_enabled or canonical_user_id in set(self._configured_target_ids()))
-        proactive_enabled = bool(getattr(self, "default_proactive_enabled", False))
-        proactive_limit = _safe_int(getattr(self, "default_proactive_daily_limit", 0), 0, 0, 30)
-        user["proactive_daily_limit"] = proactive_limit if proactive_enabled and auto_enabled else 0
-        user["proactive_boundary_note"] = "" if auto_enabled else "自动建档默认不主动触达"
+        user["enabled"] = False
+        user["private_memory_enabled"] = False
+        user["cross_group_memory_enabled"] = False
+        user["proactive_daily_limit"] = 0
+        user["proactive_boundary_note"] = "自动建档默认不主动触达"
+        ensure_new_profile_capabilities(user)
         user["last_seen"] = max(_safe_float(user.get("last_seen"), 0), created_at)
         user["last_activity_at"] = max(_safe_float(user.get("last_activity_at"), 0), created_at)
         self._note_private_user_umo(canonical_user_id, user, getattr(event, "unified_msg_origin", ""))

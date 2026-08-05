@@ -84,8 +84,8 @@ class GroupObservationProfileTests(unittest.TestCase):
         self.assertFalse(profile["private_memory_enabled"])
         self.assertFalse(profile["cross_group_memory_enabled"])
         self.assertFalse(profile["p4_eligible"])
-        self.assertEqual(0, profile["affinity_score"])
-        self.assertEqual("neutral", profile["relationship_state"])
+        self.assertNotIn("affinity_score", profile)
+        self.assertNotIn("relationship_state", profile)
         self.assertNotIn("users", host.data)
         self.assertIsNone(host._worldbook_profile_by_user_id("10001"))
         self.assertEqual("QQ昵称", host._worldbook_profile_by_user_id("10001", include_observation=True)["name"])
@@ -114,7 +114,7 @@ class GroupObservationProfileTests(unittest.TestCase):
         profile = host._ensure_worldbook_group_observation_profile(
             group_id="group-a", sender_id="10001", qq_nickname="QQ昵称", group_card="群名片"
         )
-        before = {key: profile[key] for key in ("affinity_score", "relationship_state", "group_aliases")}
+        before = {key: profile.get(key) for key in ("affinity_score", "relationship_state", "group_aliases")}
 
         self.assertTrue(
             host._confirm_worldbook_observation_profile_name(
@@ -123,8 +123,8 @@ class GroupObservationProfileTests(unittest.TestCase):
         )
         self.assertEqual("小雪", profile["name"])
         self.assertIn("QQ昵称", profile["aliases"])
-        self.assertEqual(before["affinity_score"], profile["affinity_score"])
-        self.assertEqual(before["relationship_state"], profile["relationship_state"])
+        self.assertEqual(before["affinity_score"], profile.get("affinity_score"))
+        self.assertEqual(before["relationship_state"], profile.get("relationship_state"))
         self.assertEqual(before["group_aliases"], profile["group_aliases"])
         self.assertFalse(profile["proactive_contact_enabled"])
         self.assertFalse(profile["p4_eligible"])

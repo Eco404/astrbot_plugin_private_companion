@@ -107,6 +107,8 @@ from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _
 from .relationship_policy import relationship_stage_for_score
 from .companion_interaction_expression import current_interaction_projection
 from .user_rest_gate import UserRestGateMixin
+from .unified_profile_service import capability_summary as req036_capability_summary
+from .unified_profile_service import update_capabilities as req036_update_capabilities
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -597,6 +599,13 @@ class ProactiveMixin(UserRestGateMixin):
     def _user_enabled_for_proactive(self, user_id: str, user: dict[str, Any] | None = None) -> bool:
         if not isinstance(user, dict):
             return False
+        req036_gate = getattr(self, "_req036_proactive_private_allowed", None)
+        if callable(req036_gate):
+            try:
+                if not bool(req036_gate(user)):
+                    return False
+            except Exception:
+                return False
         if user.get("enabled") is False or user.get("manual_disabled"):
             return False
         return self._is_target_private_user(user_id, user)
@@ -1574,10 +1583,32 @@ class ProactiveMixin(UserRestGateMixin):
             if user.get("manual_disabled"):
                 self._clear_pending_proactive_plan(user)
                 continue
-            user["enabled"] = True
+            capabilities = user.get("unified_profile_capabilities")
+            if not isinstance(capabilities, dict):
+                # ``target_user_ids`` is an administrator-managed legacy
+                # permission source, not an inbound-DM signal.  Convert it
+                # once when materializing a target record; future syncs only
+                # read the frozen capability state and cannot reopen a user.
+                req036_update_capabilities(
+                    user,
+                    {
+                        "private_companion_enabled": True,
+                        "proactive_private_enabled": _safe_int(user.get("proactive_daily_limit"), 0, 0) > 0,
+                    },
+                    actor_authorized=True,
+                    grant_source="legacy_configured_target_migration",
+                    actor_id="startup_migration",
+                    target_identity=user_id,
+                    reason_code="legacy_configured_target_migration",
+                )
+            capability = req036_capability_summary(user)
+            user["enabled"] = bool(capability.get("private_companion_enabled"))
             user["target_user"] = True
             user.setdefault("nickname", self.default_nickname)
-            self._ensure_private_user_umo(user_id, user)
+            if user["enabled"]:
+                self._ensure_private_user_umo(user_id, user)
+            else:
+                self._clear_pending_proactive_plan(user)
             if self._user_enabled_for_proactive(user_id, user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=_now_ts())
 

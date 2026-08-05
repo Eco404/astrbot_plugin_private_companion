@@ -6,6 +6,10 @@ import unittest
 
 from astrbot_plugin_private_companion.interaction_utils import InteractionUtilsMixin
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+from astrbot_plugin_private_companion.unified_profile_service import (
+    default_capabilities,
+    private_companion_gate,
+)
 
 
 class _Event:
@@ -29,7 +33,9 @@ class _Event:
 class _Harness(InteractionUtilsMixin):
     def __init__(self) -> None:
         self.require_private_opt_in = True
-        self.data = {"users": {}}
+        capabilities = default_capabilities(grant_source="legacy_effective_migration")
+        capabilities["private_companion_enabled"] = True
+        self.data = {"users": {"openid-owner": {"unified_profile_capabilities": capabilities}}}
         self._data_lock = asyncio.Lock()
         self.replies: list[str] = []
         self.save_count = 0
@@ -38,6 +44,29 @@ class _Harness(InteractionUtilsMixin):
     @staticmethod
     def _qzone_note_event_bot(event) -> None:
         return None
+
+    @staticmethod
+    def _sender_display_name(_event) -> str:
+        return "测试用户"
+
+    def _ensure_auto_private_user_profile(self, _event, *, user_id: str, **_kwargs):
+        return self._get_user(user_id), False
+
+    @staticmethod
+    def _req036_attach_unified_profile_context(_event, **_kwargs) -> dict:
+        return {"state": "profile_exact"}
+
+    @staticmethod
+    def _schedule_data_save() -> None:
+        return None
+
+    @staticmethod
+    def _req036_private_gate_for_user(user: dict) -> dict:
+        return private_companion_gate(user, "固定拒绝文本")
+
+    async def _req036_reject_unauthorized_private_event(self, event, gate: dict) -> None:
+        await self._reply(event, str(gate["reply"]))
+        event.stop_event()
 
     def _get_user(self, user_id: str) -> dict:
         return self.data["users"].setdefault(user_id, {})

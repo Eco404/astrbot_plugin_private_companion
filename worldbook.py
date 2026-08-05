@@ -513,8 +513,6 @@ class WorldbookMixin:
                 "private_memory_enabled": False,
                 "cross_group_memory_enabled": False,
                 "p4_eligible": False,
-                "affinity_score": 0,
-                "relationship_state": "neutral",
                 "auto_registered_ts": now,
             }
             profiles[sender_id] = profile
@@ -527,8 +525,9 @@ class WorldbookMixin:
         profile["private_memory_enabled"] = False
         profile["cross_group_memory_enabled"] = False
         profile["p4_eligible"] = False
-        profile.setdefault("affinity_score", 0)
-        profile.setdefault("relationship_state", "neutral")
+        # New group observation records retain only group-local aliases and
+        # observations.  They never become a second personal relationship
+        # ledger; old compatibility fields may remain in existing records.
         profile.setdefault("profile_origin", "group_observation")
         profile.setdefault("projection_kind", "group_observation")
         profile.setdefault("identity_type", "qq")

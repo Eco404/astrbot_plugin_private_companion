@@ -165,10 +165,16 @@ class GroupObservationIngressTests(unittest.IsolatedAsyncioTestCase):
         plugin._message_debounce_command_text = Mock(return_value=False)
         plugin._sender_display_name = Mock(return_value="用户")
         plugin._capture_group_observation_event = AsyncMock(return_value=True)
+        plugin.data = {"users": {}}
+        plugin._data_lock = asyncio.Lock()
+        plugin._canonical_private_user_id = Mock(return_value="user-1")
+        plugin._req036_attach_unified_profile_context = Mock(return_value={"state": "profile_exact"})
+        plugin._schedule_data_save = Mock()
 
         await plugin.capture_group_observation_early(event)
 
         plugin._capture_group_observation_event.assert_awaited_once()
+        plugin._req036_attach_unified_profile_context.assert_called_once()
         self.assertFalse(event._stopped)
 
     def test_observer_priority_and_group_form_default_are_explicit(self) -> None:

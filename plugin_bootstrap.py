@@ -38,6 +38,7 @@ from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
 from .segmented_message import normalize_component_strategy
 from .unified_person_registry import UnifiedPersonRegistry
+from .unified_profile_service import DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
 
 DEFAULT_AI_DAILY_MORNING_UID = "3706929260006322"
 DEFAULT_AI_DAILY_JUYA_UID = "285286947"
@@ -321,6 +322,15 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.default_nickname_strategy = "platform_display_name"
     self.default_proactive_enabled = self._cfg_bool(c, "default_proactive_enabled", False)
     self.default_proactive_daily_limit = self._cfg_int(c, "default_proactive_daily_limit", 0, 0, 30)
+    self.private_companion_disabled_reply = self._cfg_str(
+        c,
+        "private_companion_disabled_reply",
+        DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
+        DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
+    )
+    self.portrait_global_mode = self._cfg_str(c, "portrait_global_mode", "disabled", "disabled")
+    if self.portrait_global_mode not in {"disabled", "use_existing", "learn_and_use"}:
+        self.portrait_global_mode = "disabled"
     self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
     self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))

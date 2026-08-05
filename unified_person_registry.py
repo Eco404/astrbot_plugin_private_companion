@@ -129,6 +129,10 @@ def _root(store: dict[str, Any]) -> dict[str, Any]:
         root["audit_events"] = []
     if not isinstance(root.get("operations"), dict):
         root["operations"] = {}
+    if not isinstance(root.get("binding_checkpoints"), dict):
+        root["binding_checkpoints"] = {}
+    if not isinstance(root.get("detached_identity_links"), dict):
+        root["detached_identity_links"] = {}
     return root
 
 
@@ -361,6 +365,15 @@ class UnifiedPersonRegistry:
                 "identity_assurance": "observed", "status": "active",
                 "created_at": now, "updated_at": now, "last_operation_id": op,
             }
+            root["binding_checkpoints"][f"{person_id}:{key}"] = {
+                "person_id": person_id,
+                "identity_key": key,
+                "origin_identity_key": key,
+                "relationship_score": stored["affinity_score"],
+                "created_at": now,
+                "operation_id": op,
+                "source_event_count": 0,
+            }
             root["audit_events"].append({"event_id": op, "action": "create_or_link", "actor_id": actor, "person_id": person_id, "at": now})
             projection = build_person_projection(self._store, person_id)
             if projection is None or validate_projection(projection):
@@ -386,14 +399,190 @@ class UnifiedPersonRegistry:
             prior = root["identity_links"].get(key)
             if isinstance(prior, dict) and prior.get("person_id") != person_id:
                 return {"ok": False, "state": "invalid", "code": "identity_conflict", "person_id": person_id}
-            root["identity_links"][key] = {"identity_key": key, "identity": normalized, "person_id": person_id, "identity_assurance": "explicit_linked", "status": "active", "updated_at": _now(), "last_operation_id": op}
+            if isinstance(prior, dict) and prior.get("person_id") == person_id and prior.get("status") == "active":
+                projection = build_person_projection(self._store, person_id)
+                return {
+                    "ok": bool(projection and not validate_projection(projection)),
+                    "state": "resolved" if projection and not validate_projection(projection) else "invalid",
+                    "code": "already_linked",
+                    "person_id": person_id,
+                    "identity_key": key,
+                    "projection": projection,
+                    "changed": False,
+                }
+            now = _now()
+            root["identity_links"][key] = {"identity_key": key, "identity": normalized, "person_id": person_id, "identity_assurance": "explicit_linked", "status": "active", "updated_at": now, "last_operation_id": op}
             if key not in profile.setdefault("identity_keys", []):
                 profile["identity_keys"].append(key)
             profile["identity_assurance"] = "explicit_linked"
             profile["projection_revision"] = int(profile.get("projection_revision") or 1) + 1
-            profile["updated_at"] = _now()
+            profile["updated_at"] = now
+            root["binding_checkpoints"][f"{person_id}:{key}"] = {
+                "person_id": person_id,
+                "identity_key": key,
+                "origin_identity_key": str(profile.get("resolved_identity_key") or key),
+                "relationship_score": int(profile.get("affinity_score") or 0),
+                "created_at": now,
+                "operation_id": op,
+                "source_event_count": 0,
+            }
+            root["audit_events"].append({"event_id": op, "action": "link_identity", "actor_id": str(actor_id), "person_id": person_id, "at": now})
             projection = build_person_projection(self._store, person_id)
             return {"ok": bool(projection and not validate_projection(projection)), "state": "resolved" if projection and not validate_projection(projection) else "invalid", "code": "identity_linked", "person_id": person_id, "identity_key": key, "projection": projection, "changed": True}
+
+    def unlink_identity(
+        self,
+        person_id: str,
+        identity: dict[str, Any],
+        operation_id: str = "",
+        actor_id: str = "companion",
+        *,
+        dry_run: bool = True,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Detach one explicit identity without inventing a profile split.
+
+        Relationship totals, portrait facts, and suppression markers are never
+        copied here.  The checkpoint tells an administrator whether a later
+        source-event replay can make the split deterministic.
+        """
+        try:
+            person_id = _text(person_id, "person_id")
+            normalized = _identity(identity)
+            op = _operation_id(operation_id)
+            actor = _text(actor_id, "actor_id", 120)
+        except ValueError:
+            return {"ok": False, "state": "invalid", "code": "invalid_request", "person_id": ""}
+        if not op:
+            return {"ok": False, "state": "pending", "code": "explicit_operation_required", "person_id": person_id}
+        key = build_identity_key(normalized)
+        operation_key = f"req036.unlink:{op}"
+        with _LOCK:
+            root = _root(self._store)
+            prior_operation = root["operations"].get(operation_key)
+            if isinstance(prior_operation, dict):
+                return deepcopy(prior_operation)
+            profile = root["profiles"].get(person_id)
+            link = root["identity_links"].get(key)
+            if not isinstance(profile, dict) or not isinstance(link, dict) or link.get("person_id") != person_id:
+                return {"ok": False, "state": "pending", "code": "identity_not_linked", "person_id": person_id, "identity_key": key}
+            identity_keys = [item for item in profile.get("identity_keys", []) if isinstance(item, str)]
+            checkpoint = root["binding_checkpoints"].get(f"{person_id}:{key}")
+            checkpoint = deepcopy(checkpoint) if isinstance(checkpoint, dict) else {}
+            replay_count = int(checkpoint.get("source_event_count") or 0)
+            ambiguity_count = 0
+            if key == profile.get("resolved_identity_key") or len(identity_keys) <= 1:
+                ambiguity_count = 1
+            result = {
+                "ok": ambiguity_count == 0,
+                "state": "resolved" if ambiguity_count == 0 else "pending",
+                "code": "migration_dry_run" if dry_run and ambiguity_count == 0 else (
+                    "split_manual_review_required" if ambiguity_count else "identity_unlinked"
+                ),
+                "person_id": person_id,
+                "identity_key": key,
+                "source_event_count": replay_count,
+                "replayable_event_count": replay_count,
+                "ambiguity_count": ambiguity_count,
+                "checkpoint": checkpoint,
+                "changed": False,
+            }
+            if dry_run or ambiguity_count:
+                return result
+            now = _now()
+            root["detached_identity_links"][key] = {
+                **deepcopy(link),
+                "status": "detached",
+                "detached_at": now,
+                "detached_by": actor,
+                "detach_operation_id": op,
+            }
+            root["identity_links"].pop(key, None)
+            profile["identity_keys"] = [item for item in identity_keys if item != key]
+            profile["projection_revision"] = int(profile.get("projection_revision") or 1) + 1
+            profile["updated_at"] = now
+            root["audit_events"].append({"event_id": op, "action": "unlink_identity", "actor_id": actor, "person_id": person_id, "at": now})
+            result.update({"ok": True, "state": "resolved", "code": "identity_unlinked", "changed": True})
+            root["operations"][operation_key] = deepcopy(result)
+            return result
+
+    def record_identity_source_event(
+        self,
+        person_id: str,
+        identity_key: str,
+        source_scope: str,
+        event_fingerprint: str,
+        *,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        """Record a hash-only source event for a later deterministic split.
+
+        The registry never receives message text.  A bounded fingerprint list
+        gives unlink dry-runs a replay count without turning identity storage
+        into a second chat archive.
+        """
+        try:
+            person_id = _text(person_id, "person_id")
+            identity_key = _text(identity_key, "identity_key", 160)
+            source_scope = _text(source_scope or "private", "source_scope", 120)
+            event_fingerprint = _text(event_fingerprint, "event_fingerprint", 80)
+        except ValueError:
+            return {"ok": False, "code": "invalid_request"}
+        if re.fullmatch(r"[0-9a-f]{64}", event_fingerprint) is None:
+            return {"ok": False, "code": "invalid_request"}
+        with _LOCK:
+            root = _root(self._store)
+            link = root["identity_links"].get(identity_key)
+            checkpoint_key = f"{person_id}:{identity_key}"
+            checkpoint = root["binding_checkpoints"].get(checkpoint_key)
+            if not isinstance(link, dict) or link.get("person_id") != person_id or not isinstance(checkpoint, dict):
+                return {"ok": False, "code": "identity_not_linked"}
+            seen = checkpoint.get("source_event_fingerprints")
+            if not isinstance(seen, list):
+                seen = []
+                checkpoint["source_event_fingerprints"] = seen
+            if event_fingerprint in seen:
+                return {
+                    "ok": True,
+                    "code": "source_event_idempotent_replay",
+                    "source_event_count": int(checkpoint.get("source_event_count") or len(seen)),
+                }
+            seen.append(event_fingerprint)
+            del seen[:-512]
+            checkpoint["source_event_count"] = len(seen)
+            checkpoint["last_source_scope"] = source_scope
+            checkpoint["last_source_event_at"] = _now()
+            if operation_id:
+                checkpoint["last_source_operation_id"] = _text(operation_id, "operation_id", 120)
+            return {"ok": True, "code": "source_event_recorded", "source_event_count": len(seen)}
+
+    def preview_person_merge(self, source_person_id: str, target_person_id: str, operation_id: str = "", **_: Any) -> dict[str, Any]:
+        """Expose conflicts without merging two existing people automatically."""
+        try:
+            source_person_id = _text(source_person_id, "source_person_id")
+            target_person_id = _text(target_person_id, "target_person_id")
+            operation_id = _operation_id(operation_id)
+        except ValueError:
+            return {"ok": False, "code": "invalid_request"}
+        with _LOCK:
+            root = _root(self._store)
+            source = root["profiles"].get(source_person_id)
+            target = root["profiles"].get(target_person_id)
+            if not isinstance(source, dict) or not isinstance(target, dict) or source_person_id == target_person_id:
+                return {"ok": False, "code": "invalid_request"}
+            conflicts = [
+                field for field in ("affinity_score", "owner_mode", "relation_policy_id")
+                if source.get(field) != target.get(field)
+            ]
+            return {
+                "ok": False,
+                "code": "merge_manual_review_required",
+                "operation_id": operation_id,
+                "source_person_id": source_person_id,
+                "target_person_id": target_person_id,
+                "conflicts": conflicts,
+                "write_count": 0,
+            }
 
     def read_projection(self, person_id: str) -> dict[str, Any] | None:
         with _LOCK:

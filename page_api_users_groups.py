@@ -56,6 +56,31 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     users = {}
                 user_items = [(user_id, dict(user)) for user_id, user in users.items() if isinstance(user, dict)]
             items = [self._user_summary(user_id, user) for user_id, user in user_items]
+            # Source records remain available for replay and explicit unlink,
+            # but one resolved person has one administrative list card.  The
+            # secondary source IDs are exposed as aliases rather than a
+            # competing private profile.
+            projected: dict[str, dict[str, Any]] = {}
+            deduped: list[dict[str, Any]] = []
+            for item in items:
+                person_id = self._single_line(item.get("unified_person_id"), 80)
+                if not person_id:
+                    deduped.append(item)
+                    continue
+                existing = projected.get(person_id)
+                if existing is None:
+                    item["alias_user_ids"] = []
+                    projected[person_id] = item
+                    deduped.append(item)
+                    continue
+                aliases = existing.setdefault("alias_user_ids", [])
+                if not isinstance(aliases, list):
+                    aliases = []
+                    existing["alias_user_ids"] = aliases
+                source_id = self._single_line(item.get("user_id"), 80)
+                if source_id and source_id != self._single_line(existing.get("user_id"), 80) and source_id not in aliases:
+                    aliases.append(source_id)
+            items = deduped
             items.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             if elapsed_ms > 1200:
@@ -120,10 +145,80 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     },
                 }
             )
+            portrait_status_reader = getattr(self.plugin, "_req036_portrait_bridge_status_for_user", None)
+            detail["portrait_bridge"] = (
+                await portrait_status_reader(user)
+                if callable(portrait_status_reader)
+                else {"available": False, "code": "bridge_unavailable", "last_synced_at": "", "portrait_revision": 0}
+            )
             return self._ok(detail)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取用户详情失败: {exc}", exc_info=True)
             return self._error(str(exc))
+    async def link_unified_identity(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        person_id = self._single_line(payload.get("person_id"), 80)
+        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        if not person_id or not identity or not operation_id:
+            return self._error("person_id、identity 和 operation_id 均为必填项")
+        try:
+            async with self.plugin._data_lock:
+                result = self.plugin.unified_person_registry.link_identity(
+                    person_id,
+                    identity,
+                    operation_id=operation_id,
+                    actor_id="page_administrator",
+                )
+                if result.get("changed"):
+                    self.plugin._schedule_data_save()
+            return self._ok({"result": result})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 统一身份链接失败: %s", exc)
+            return self._error("统一身份链接失败")
+
+    async def unlink_unified_identity(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        person_id = self._single_line(payload.get("person_id"), 80)
+        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        dry_run = bool(payload.get("dry_run", True))
+        if not person_id or not identity or not operation_id:
+            return self._error("person_id、identity 和 operation_id 均为必填项")
+        try:
+            async with self.plugin._data_lock:
+                result = self.plugin.unified_person_registry.unlink_identity(
+                    person_id,
+                    identity,
+                    operation_id=operation_id,
+                    actor_id="page_administrator",
+                    dry_run=dry_run,
+                )
+                if result.get("changed"):
+                    self.plugin._schedule_data_save()
+            return self._ok({"result": result})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 统一身份解绑失败: %s", exc)
+            return self._error("统一身份解绑失败")
+
+    async def preview_unified_identity_merge(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        source_person_id = self._single_line(payload.get("source_person_id"), 80)
+        target_person_id = self._single_line(payload.get("target_person_id"), 80)
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        if not source_person_id or not target_person_id or not operation_id:
+            return self._error("source_person_id、target_person_id 和 operation_id 均为必填项")
+        try:
+            result = self.plugin.unified_person_registry.preview_person_merge(
+                source_person_id,
+                target_person_id,
+                operation_id=operation_id,
+            )
+            return self._ok({"result": result})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 统一人物合并预览失败: %s", exc)
+            return self._error("统一人物合并预览失败")
+
     async def update_user(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         user_id = str(payload.get("user_id", "")).strip()
@@ -198,15 +293,36 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     )
                     if requested_projection.get("expression_band") != requested_interaction_band:
                         return self._error("current interaction band exceeds the configured user cap")
+                capability_changes = {}
                 if "enabled" in payload:
-                    enabled = bool(payload.get("enabled"))
-                    user["enabled"] = enabled
+                    capability_changes["private_companion_enabled"] = bool(payload.get("enabled"))
+                for capability_key in (
+                    "private_companion_enabled",
+                    "proactive_private_enabled",
+                    "portrait_mode",
+                ):
+                    if capability_key in payload:
+                        capability_changes[capability_key] = payload.get(capability_key)
+                if capability_changes:
+                    updater = getattr(self.plugin, "_req036_update_capabilities", None)
+                    if not callable(updater):
+                        return self._error("统一用户权限服务不可用")
+                    capability_result = updater(
+                        user,
+                        capability_changes,
+                        actor_id="page_administrator",
+                        target_identity=user_id,
+                        reason_code="page_administrator_update",
+                    )
+                    if not bool(capability_result.get("ok")):
+                        return self._error(str(capability_result.get("code") or "权限更新失败"))
+                    enabled = bool(capability_result["capabilities"].get("private_companion_enabled"))
                     user["manual_enabled"] = enabled
                     user["manual_disabled"] = not enabled
                     user["auto_enabled"] = False
                     if enabled:
                         self.plugin._ensure_private_user_umo(user_id, user)
-                    if not enabled:
+                    else:
                         self.plugin._clear_pending_proactive_plan(user)
                 if "nickname" in payload:
                     user["nickname"] = self._single_line(payload.get("nickname"), 24)

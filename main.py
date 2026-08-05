@@ -138,6 +138,19 @@ from .person_context_contract import (
     build_identity_key,
     contract_self_check as person_contract_self_check,
 )
+from .unified_profile_contract import (
+    build_person_ref as req036_build_person_ref,
+    build_profile_dto as req036_build_profile_dto,
+    build_portrait_request as req036_build_portrait_request,
+    validate_profile_dto as req036_validate_profile_dto,
+)
+from .unified_profile_service import (
+    DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
+    capability_summary as req036_capability_summary,
+    private_companion_gate as req036_private_companion_gate,
+    proactive_private_gate as req036_proactive_private_gate,
+    update_capabilities as req036_update_capabilities,
+)
 from .context_orchestration import build_context, project_context
 from .p4_shadow import build_p4_shadow
 from .p4_affinity_confinement import apply_legacy_relationship_delta
@@ -2111,6 +2124,259 @@ class PrivateCompanionPlugin(
 
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self.unified_person_registry.read_projection(person_id)
+
+    def _req036_private_gate_for_user(self, user: Any) -> dict[str, Any]:
+        return req036_private_companion_gate(
+            user,
+            getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
+        )
+
+    def _req036_migrate_configured_target_capability(self, user_id: Any, user: Any) -> bool:
+        """Materialize the one-time legacy target grant without reopening an explicit decision."""
+        if not isinstance(user, dict) or isinstance(user.get("unified_profile_capabilities"), dict):
+            return False
+        if bool(user.get("manual_disabled")):
+            return False
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        raw_user_id = _single_line(user_id, 120)
+        if callable(canonicalizer):
+            try:
+                raw_user_id = _single_line(canonicalizer(raw_user_id), 120)
+            except Exception:
+                return False
+        if not raw_user_id:
+            return False
+        configured_targets = getattr(self, "_configured_target_ids", None)
+        if not callable(configured_targets):
+            return False
+        try:
+            target_ids = set()
+            for target in configured_targets():
+                target_id = _single_line(target, 120)
+                if callable(canonicalizer):
+                    target_id = _single_line(canonicalizer(target_id), 120)
+                if target_id:
+                    target_ids.add(target_id)
+        except Exception:
+            return False
+        if raw_user_id not in target_ids:
+            return False
+        result = req036_update_capabilities(
+            user,
+            {
+                "private_companion_enabled": True,
+                "proactive_private_enabled": _safe_int(user.get("proactive_daily_limit"), 0, 0) > 0,
+            },
+            actor_authorized=True,
+            grant_source="legacy_configured_target_migration",
+            actor_id="compatibility_migration",
+            target_identity=raw_user_id,
+            reason_code="legacy_configured_target_migration",
+        )
+        return bool(result.get("ok"))
+
+    def _req036_capability_summary_for_user(self, user: Any) -> dict[str, Any]:
+        return req036_capability_summary(
+            user,
+            global_portrait_mode=getattr(self, "portrait_global_mode", "disabled"),
+        )
+
+    def _req036_proactive_private_allowed(self, user: Any) -> bool:
+        return bool(req036_proactive_private_gate(user).get("allowed"))
+
+    def _req036_update_capabilities(
+        self,
+        user: dict[str, Any],
+        changes: dict[str, Any],
+        *,
+        actor_id: str = "page_administrator",
+        target_identity: str = "",
+        reason_code: str = "administrator_update",
+    ) -> dict[str, Any]:
+        return req036_update_capabilities(
+            user,
+            changes,
+            actor_authorized=True,
+            grant_source="administrator",
+            actor_id=actor_id,
+            target_identity=target_identity,
+            reason_code=reason_code,
+        )
+
+    def _req036_attach_unified_profile_context(
+        self,
+        event: Any,
+        *,
+        user: dict[str, Any] | None = None,
+        group_id: str = "",
+        source: str = "observation",
+    ) -> dict[str, Any]:
+        """Attach the smallest exact-person context for Memory's read-only use."""
+        identity = self._unified_person_event_identity(event)
+        if not identity:
+            return {"state": "identity_pending", "code": "identity_pending"}
+        resolution = self.resolve_unified_person_identity(identity)
+        if resolution.get("state") != "resolved":
+            profile = user if isinstance(user, dict) else {}
+            created = self.create_unified_person_for_event(
+                event,
+                operation_id=f"req036.{source}:{str(resolution.get('identity_key') or '')[-24:]}",
+                profile={
+                    "display_name": _single_line(profile.get("nickname"), 80),
+                    "affinity_score": _safe_int(profile.get("relationship_score"), 0, -1200, 1200),
+                    "owner_mode": "owner" if _single_line(profile.get("relationship_role"), 40) == "owner" else "not_owner",
+                    "relation_policy_id": _single_line(profile.get("relationship_mode"), 40) or "default_friend",
+                },
+            )
+            if created.get("state") != "resolved":
+                return {"state": "identity_pending", "code": str(created.get("code") or "identity_pending")}
+            resolution = self.resolve_unified_person_identity(identity)
+        projection = resolution.get("projection") if isinstance(resolution.get("projection"), dict) else None
+        if not isinstance(projection, dict):
+            return {"state": "identity_pending", "code": "projection_missing"}
+        person_id = _single_line(projection.get("person_id"), 80)
+        if isinstance(user, dict) and person_id:
+            user["unified_person_id"] = person_id
+            user["unified_profile_projection_revision"] = int(projection.get("projection_revision") or 1)
+        group_scope = ""
+        if group_id and person_id:
+            platform = _single_line(identity.get("subject_namespace"), 80).split(":", 1)[0]
+            group_scope = f"group:{platform}:{_single_line(group_id, 80)}" if platform else ""
+            if group_scope:
+                self.unified_person_registry.upsert_group_overlay(
+                    person_id,
+                    group_scope,
+                    {
+                        "alias": _single_line((user or {}).get("nickname"), 80),
+                        "source": "group_observation",
+                        "public": True,
+                    },
+                    operation_id=f"req036.overlay:{person_id[-12:]}:{_single_line(group_id, 40)}",
+                    actor_id="companion",
+                )
+        if person_id:
+            event_id = _single_line(self._event_message_id(event), 120)
+            event_origin = _single_line(getattr(event, "unified_msg_origin", ""), 200)
+            source_fingerprint = hashlib.sha256(
+                f"req036:{source}:{group_scope or 'private'}:{event_id or event_origin}".encode("utf-8", errors="ignore")
+            ).hexdigest()
+            self.unified_person_registry.record_identity_source_event(
+                person_id,
+                _single_line(projection.get("resolved_identity_key"), 160),
+                group_scope or "private",
+                source_fingerprint,
+                operation_id=f"req036.source:{source}:{source_fingerprint[:24]}",
+            )
+        dto = req036_build_profile_dto(
+            person_ref=req036_build_person_ref(projection),
+            identity_summary={"display_name": _single_line((user or {}).get("nickname"), 80)},
+            expression_summary={
+                "relationship_score": _safe_int((user or {}).get("relationship_score"), 0, -1200, 1200),
+                "relationship_role": _single_line((user or {}).get("relationship_role"), 40) or "friend",
+            },
+            capability_summary=self._req036_capability_summary_for_user(user),
+            context_overlays={"group_scope": group_scope} if group_scope else {},
+            bridge_status={"state": "ready", "source": "companion"},
+        )
+        errors = req036_validate_profile_dto(dto)
+        if errors:
+            return {"state": "degraded", "code": "bridge_contract_mismatch", "errors": errors}
+        try:
+            setattr(event, "private_companion_unified_profile_context", dto)
+        except Exception:
+            return {"state": "degraded", "code": "bridge_unavailable"}
+        return {"state": "profile_exact", "code": "profile_exact", "dto": dto, "person_id": person_id}
+
+    async def _req036_reject_unauthorized_private_event(self, event: Any, gate: dict[str, Any]) -> None:
+        """Reply before any LLM, bridge, tool, portrait, or relationship path."""
+        try:
+            setattr(event, "private_companion_req036_denied", True)
+            setattr(event, "private_companion_req036_denial_code", str(gate.get("code") or "private_companion_disabled"))
+        except Exception:
+            pass
+        await self._reply(event, str(gate.get("reply") or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY))
+        event.stop_event()
+
+    @staticmethod
+    def _req036_group_portrait_query_kind(text: Any) -> str:
+        value = _single_line(text, 240)
+        probe_patterns = (
+            r"喜欢(?:吃|喝|玩|看|听)?什么",
+            r"爱(?:吃|喝|玩|看|听)什么",
+            r"(?:有|有什么|有啥|有哪些).{0,8}(?:爱好|兴趣|偏好|习惯)",
+            r"(?:爱好|兴趣|偏好|习惯|口味|画像)",
+        )
+        if not any(re.search(pattern, value) for pattern in probe_patterns):
+            return ""
+        if re.search(
+            r"(?:^|[\s，,：:])(?:我|我的|本人|俺|咱)(?:[^，,。！？!?]{0,20})"
+            r"(?:喜欢(?:吃|喝|玩|看|听)?什么|爱(?:吃|喝|玩|看|听)什么|"
+            r"(?:有|有什么|有啥|有哪些).{0,8}(?:爱好|兴趣|偏好|习惯)|(?:爱好|兴趣|偏好|习惯|口味|画像))",
+            value,
+        ):
+            return "self"
+        return "third_party"
+
+    async def _req036_read_group_self_portrait(self, event: Any) -> str:
+        dto = getattr(event, "private_companion_unified_profile_context", None)
+        if not isinstance(dto, dict):
+            return "这部分画像暂时不可用。"
+        person_ref = dto.get("person_ref") if isinstance(dto.get("person_ref"), dict) else {}
+        person_id = _single_line(person_ref.get("person_id"), 80)
+        overlays = dto.get("context_overlays") if isinstance(dto.get("context_overlays"), dict) else {}
+        scope = _single_line(overlays.get("group_scope"), 80)
+        if not scope.startswith("group:"):
+            return "这部分画像暂时不可用。"
+        request = req036_build_portrait_request(
+            person_ref=person_ref,
+            requester_person_id=person_id,
+            target_person_id=person_id,
+            scope=scope,
+            purpose="summarize_to_subject",
+        )
+        bridge = self._memory_companion_bridge()
+        reader = getattr(bridge, "read_unified_profile_portrait", None) if bridge is not None else None
+        if not callable(reader):
+            return "这部分画像暂时不可用。"
+        try:
+            result = reader(request, limit=5)
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+        except Exception:
+            return "这部分画像暂时不可用。"
+        if not isinstance(result, dict) or not result.get("ok"):
+            return "这部分画像暂时不可用。"
+        summaries = [
+            _single_line(item.get("summary"), 80)
+            for item in result.get("items", [])
+            if isinstance(item, dict) and _single_line(item.get("summary"), 80)
+        ]
+        return "我目前只记得这些公开的低敏偏好：" + "；".join(summaries[:5]) if summaries else "我还没有整理出可公开的低敏画像。"
+
+    async def _req036_portrait_bridge_status_for_user(self, user: Any) -> dict[str, Any]:
+        """Read synchronization state only; facts stay in Memory's admin UI."""
+        source = user if isinstance(user, dict) else {}
+        person_id = _single_line(source.get("unified_person_id"), 80)
+        if not person_id:
+            return {"available": False, "code": "identity_pending", "last_synced_at": "", "portrait_revision": 0}
+        bridge = self._memory_companion_bridge()
+        reader = getattr(bridge, "unified_profile_portrait_status", None) if bridge is not None else None
+        if not callable(reader):
+            return {"available": False, "code": "bridge_unavailable", "last_synced_at": "", "portrait_revision": 0}
+        try:
+            result = reader(person_id)
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+        except Exception:
+            return {"available": False, "code": "bridge_degraded", "last_synced_at": "", "portrait_revision": 0}
+        if not isinstance(result, dict):
+            return {"available": False, "code": "bridge_degraded", "last_synced_at": "", "portrait_revision": 0}
+        return {
+            "available": bool(result.get("ok")),
+            "code": _single_line(result.get("code"), 80) or "bridge_degraded",
+            "last_synced_at": _single_line(result.get("last_synced_at"), 80),
+            "portrait_revision": _safe_int(result.get("portrait_revision"), 0, 0),
+        }
 
     def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
         return self.unified_person_registry.read_p4_effect_state(person_id)
@@ -10615,6 +10881,52 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             return False
 
+    @filter.on_llm_request(priority=-40000)
+    @_multi_persona_event_context
+    async def guard_req036_private_capability_before_llm(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Fail closed before any Provider, Memory, tool, or relationship hook runs."""
+        if self is None or event is None:
+            return
+        try:
+            if not bool(event.is_private_chat()):
+                return
+        except Exception:
+            return
+        if bool(getattr(event, "private_companion_req036_denied", False)):
+            event.stop_event()
+            return
+        try:
+            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+        except Exception:
+            user_id = ""
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        user = users.get(user_id) if user_id and isinstance(users, dict) else None
+        gate = self._req036_private_gate_for_user(user)
+        if gate.get("allowed"):
+            return
+        if req is not None:
+            for attribute, value in (
+                ("system_prompt", ""),
+                ("prompt", ""),
+                ("contexts", []),
+                ("extra_user_content_parts", []),
+                ("func_tool", None),
+                ("tools", []),
+                ("images", []),
+                ("image_urls", []),
+            ):
+                try:
+                    setattr(req, attribute, value)
+                except Exception:
+                    pass
+        await self._req036_reject_unauthorized_private_event(event, gate)
+
     @filter.on_llm_request(priority=-30000)
     async def enforce_p4_live_confinement_before_enrichment(
         self,
@@ -11811,6 +12123,37 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """管理私聊陪伴状态、日程、记忆、风格、重要日期和可选外部动作。"""
         if self is None:
             return
+        try:
+            is_private = bool(event.is_private_chat())
+        except Exception:
+            is_private = False
+        if is_private:
+            user_id = str(event.get_sender_id())
+            sender_name_reader = getattr(self, "_sender_display_name", None)
+            if callable(sender_name_reader):
+                sender_display_name = _single_line(sender_name_reader(event), 40)
+            else:
+                sender_display_name = _single_line(user_id, 40)
+            async with self._data_lock:
+                private_user, _ = self._ensure_auto_private_user_profile(
+                    event,
+                    user_id=user_id,
+                    sender_display_name=sender_display_name,
+                    now=_now_ts(),
+                )
+                migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
+                if callable(migrator):
+                    migrator(user_id, private_user)
+                self._req036_attach_unified_profile_context(
+                    event,
+                    user=private_user if isinstance(private_user, dict) else None,
+                    source="private_command",
+                )
+                self._schedule_data_save()
+                private_gate = self._req036_private_gate_for_user(private_user)
+            if not private_gate.get("allowed"):
+                await self._req036_reject_unauthorized_private_event(event, private_gate)
+                return
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
         args = raw_text.replace("\u3000", " ").split(maxsplit=2)
@@ -12583,6 +12926,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             sender_name=self._sender_display_name(event),
             text=text,
         )
+        async with self._data_lock:
+            users = self.data.get("users", {}) if isinstance(self.data, dict) else {}
+            canonical_sender_id = self._canonical_private_user_id(sender_id)
+            observed_user = users.get(canonical_sender_id) if isinstance(users, dict) else None
+            self._req036_attach_unified_profile_context(
+                event,
+                user=observed_user if isinstance(observed_user, dict) else None,
+                group_id=group_id,
+                source="group_observation",
+            )
+            self._schedule_data_save()
         self._start_group_image_understanding(
             event,
             group_id=group_id,
@@ -12632,6 +12986,45 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 sender_id,
             )
             self._stop_group_member_safety_event(event)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=180000)
+    @_multi_persona_event_context
+    async def guard_req036_group_portrait_queries(self, event: AstrMessageEvent, *args, **kwargs):
+        """Reject third-party portrait probing before any retrieval or LLM hook."""
+        if self is None or bool(getattr(event, "_private_companion_member_safety_blocked", False)):
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id:
+            return
+        text = self._group_observation_event_text(event)
+        kind = self._req036_group_portrait_query_kind(text)
+        if not kind:
+            return
+        if kind == "third_party":
+            await self._reply(event, "这个我不方便替别人整理啦。")
+            event.stop_event()
+            return
+        # An observation-disabled group must not become a wording bypass.  It
+        # still does not receive normal group capture; this narrow explicit
+        # self-query only prepares a minimal identity/scene reference for the
+        # low-sensitivity, same-person Memory request below.
+        if not isinstance(getattr(event, "private_companion_unified_profile_context", None), dict):
+            try:
+                sender_id = self._canonical_private_user_id(str(event.get_sender_id()))
+            except Exception:
+                sender_id = ""
+            async with self._data_lock:
+                users = self.data.get("users", {}) if isinstance(self.data, dict) else {}
+                user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
+                self._req036_attach_unified_profile_context(
+                    event,
+                    user=user if isinstance(user, dict) else None,
+                    group_id=group_id,
+                    source="group_portrait_query",
+                )
+                self._schedule_data_save()
+        await self._reply(event, await self._req036_read_group_self_portrait(event))
+        event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @_multi_persona_event_context

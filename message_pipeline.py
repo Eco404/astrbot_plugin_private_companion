@@ -26,7 +26,6 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         # 戳一戳会以私聊空文本事件进入 AstrBot；不要让空消息保护误拦截。
         logger.debug("[PrivateCompanion] 私聊戳一戳 notice 已放行给专用插件")
         return
-    self._qzone_note_event_bot(event)
     received_ts = _now_ts()
     user_id = str(event.get_sender_id())
     self_id = self._event_self_id(event)
@@ -35,17 +34,26 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         return
     sender_display_name = _single_line(self._sender_display_name(event), 40)
     text = _single_line(event.message_str, 120)
-    if text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
-        return
-    if self._message_debounce_command_text(event, text):
-        return
     async with self._data_lock:
-        _, auto_profile_created = self._ensure_auto_private_user_profile(
+        private_user, auto_profile_created = self._ensure_auto_private_user_profile(
             event,
             user_id=user_id,
             sender_display_name=sender_display_name,
             now=received_ts,
         )
+        migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
+        if callable(migrator):
+            migrator(user_id, private_user)
+        self._req036_attach_unified_profile_context(
+            event,
+            user=private_user if isinstance(private_user, dict) else None,
+            source="private_auto",
+        )
+        # The identity registry and compatibility projection are durable even
+        # for an unauthorized sender; only the subsequent companion path is
+        # denied.  Coalesced persistence keeps that automatic archival state.
+        self._schedule_data_save()
+        private_gate = self._req036_private_gate_for_user(private_user)
     if auto_profile_created:
         logger.info(
             "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s auto_enabled=%s",
@@ -53,6 +61,17 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             _single_line(self._platform_kind_for_event(event), 40),
             bool(getattr(self, "auto_enable_companion_for_new_users", False)),
         )
+    if not private_gate.get("allowed"):
+        await self._req036_reject_unauthorized_private_event(event, private_gate)
+        return
+    # All remaining private handlers are authorized-only.  In particular an
+    # unrecognized sender must not write Qzone notes, debounce state, Memory
+    # context, tools, portrait evidence, or relationship entries first.
+    self._qzone_note_event_bot(event)
+    if text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
+        return
+    if self._message_debounce_command_text(event, text):
+        return
     existing_reply_preview = self._event_existing_reply_result_preview(event)
     if existing_reply_preview:
         preview_user_id = self._canonical_private_user_id(user_id)
