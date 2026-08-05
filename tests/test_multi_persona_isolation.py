@@ -17,6 +17,7 @@ from astrbot_plugin_private_companion.main import (
     _multi_persona_event_context,
 )
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
+from astrbot_plugin_private_companion.plugin_identity import PLUGIN_ID
 
 
 def _plugin_harness(root: str) -> PrivateCompanionPlugin:
@@ -60,6 +61,26 @@ def _plugin_harness(root: str) -> PrivateCompanionPlugin:
     return plugin
 
 
+def _unified_group_event(*, timestamp: int = 100) -> SimpleNamespace:
+    raw_message = {
+        "post_type": "message",
+        "message_type": "group",
+        "time": timestamp,
+        "user_id": "user-1",
+        "group_id": "group-1",
+        "self_id": "bot-1",
+        "message": "不应进入统一身份存储的原始消息",
+    }
+    return SimpleNamespace(
+        unified_msg_origin="onebot:GroupMessage:group-1",
+        message_str="不应进入统一身份存储的原始消息",
+        message_obj=SimpleNamespace(raw_message=raw_message, message_id=""),
+        get_sender_id=lambda: "user-1",
+        get_platform_name=lambda: "onebot",
+        is_private_chat=lambda: False,
+    )
+
+
 @_multi_persona_event_context
 async def _record_event_persona(plugin, event, delay: float = 0.01):
     active = plugin._active_persona_scope()
@@ -80,6 +101,166 @@ class _ConversationManager:
 
 
 class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unified_identity_group_scope_and_p3_are_persona_scoped(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            plugin.target_platform = "onebot"
+            plugin._known_bot_self_ids = lambda: {"bot-1"}
+            plugin._extract_group_id_from_event = lambda _event: "group-1"
+
+            snapshots: dict[str, dict[str, object]] = {}
+            for persona_id in ("main", "alt"):
+                token = plugin._activate_persona_id(persona_id)
+                try:
+                    event = _unified_group_event(timestamp=100)
+                    identity = plugin._unified_person_event_identity(event)
+                    attached = plugin._req036_attach_unified_profile_context(
+                        event,
+                        user={"nickname": "测试用户"},
+                        group_id="group-1",
+                        source="group_observation",
+                    )
+                    context = plugin.build_unified_person_context(event)
+                    snapshots[persona_id] = {
+                        "identity": identity,
+                        "attached": attached,
+                        "context": context,
+                    }
+                finally:
+                    plugin._deactivate_persona_for_event(token)
+
+            main_identity = snapshots["main"]["identity"]
+            alt_identity = snapshots["alt"]["identity"]
+            self.assertIsInstance(main_identity, dict)
+            self.assertIsInstance(alt_identity, dict)
+            main_instance = main_identity["companion_instance_id"]
+            alt_instance = alt_identity["companion_instance_id"]
+            self.assertNotEqual(main_instance, alt_instance)
+            self.assertTrue(main_instance.startswith(f"{PLUGIN_ID}:persona:"))
+            self.assertTrue(alt_instance.startswith(f"{PLUGIN_ID}:persona:"))
+
+            main_person_id = snapshots["main"]["attached"]["person_id"]
+            alt_person_id = snapshots["alt"]["attached"]["person_id"]
+            self.assertNotEqual(main_person_id, alt_person_id)
+            for persona_id, instance_id in (
+                ("main", main_instance),
+                ("alt", alt_instance),
+            ):
+                persona_domain = instance_id.removeprefix(f"{PLUGIN_ID}:")
+                attached = snapshots[persona_id]["attached"]
+                context = snapshots[persona_id]["context"]
+                dto_scope = attached["dto"]["context_overlays"]["group_scope"]
+                self.assertTrue(dto_scope.endswith(f":{persona_domain}"))
+                self.assertTrue(context["group_scope"].endswith(f":{persona_domain}"))
+                self.assertEqual(
+                    instance_id,
+                    context["p3"]["slots"]["persona"]["payload"]["companion_instance_id"],
+                )
+
+    async def test_single_persona_unified_identity_and_scope_keep_legacy_values(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            plugin.enable_multi_persona_mode = False
+            plugin.target_platform = "onebot"
+            plugin._known_bot_self_ids = lambda: {"bot-1"}
+
+            identity = plugin._unified_person_event_identity(_unified_group_event())
+
+            self.assertEqual(PLUGIN_ID, identity["companion_instance_id"])
+            self.assertEqual(
+                "group:onebot:group-1",
+                plugin._unified_persona_scoped_value("group:onebot:group-1"),
+            )
+
+    async def test_source_events_without_message_ids_use_content_free_event_anchors(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            plugin.target_platform = "onebot"
+            plugin._known_bot_self_ids = lambda: {"bot-1"}
+            token = plugin._activate_persona_id("main")
+            try:
+                first_event = _unified_group_event(timestamp=100)
+                second_event = _unified_group_event(timestamp=100)
+                first = plugin._req036_attach_unified_profile_context(
+                    first_event,
+                    user={"nickname": "测试用户"},
+                    group_id="group-1",
+                    source="group_observation",
+                )
+                plugin._req036_attach_unified_profile_context(
+                    second_event,
+                    user={"nickname": "测试用户"},
+                    group_id="group-1",
+                    source="group_observation",
+                )
+                plugin._req036_attach_unified_profile_context(
+                    first_event,
+                    user={"nickname": "测试用户"},
+                    group_id="group-1",
+                    source="group_observation",
+                )
+
+                person_id = first["person_id"]
+                identity_key = first["dto"]["person_ref"]["resolved_identity_key"]
+                checkpoint = plugin.data["unified_person"]["binding_checkpoints"][
+                    f"{person_id}:{identity_key}"
+                ]
+                self.assertEqual(2, checkpoint["source_event_count"])
+                self.assertEqual(2, len(checkpoint["source_event_fingerprints"]))
+                self.assertNotIn(
+                    "不应进入统一身份存储的原始消息",
+                    repr(plugin.data["unified_person"]),
+                )
+            finally:
+                plugin._deactivate_persona_for_event(token)
+
+    async def test_disabled_portrait_capability_never_calls_memory_reader(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            reader = AsyncMock(return_value={"ok": True, "items": [{"summary": "偏好"}]})
+            plugin._memory_companion_bridge = lambda: SimpleNamespace(
+                read_unified_profile_portrait=reader
+            )
+            person_id = "person_" + "a" * 24
+            person_ref = {
+                "person_id": person_id,
+                "resolved_identity_key": "chat-origin-v1:" + "b" * 64,
+                "projection_revision": 1,
+                "identity_assurance": "observed",
+                "profile_status": "active",
+            }
+            for capability_summary in (
+                {},
+                {"portrait_usage_enabled": False},
+                {"portrait_usage_enabled": "true"},
+            ):
+                with self.subTest(capability_summary=capability_summary):
+                    event = SimpleNamespace(
+                        private_companion_unified_profile_context={
+                            "person_ref": person_ref,
+                            "capability_summary": capability_summary,
+                            "context_overlays": {"group_scope": "group:onebot:group-1"},
+                        }
+                    )
+                    self.assertEqual(
+                        "智能画像当前未开启。",
+                        await plugin._req036_read_group_self_portrait(event),
+                    )
+            reader.assert_not_called()
+
+            enabled_event = SimpleNamespace(
+                private_companion_unified_profile_context={
+                    "person_ref": person_ref,
+                    "capability_summary": {"portrait_usage_enabled": True},
+                    "context_overlays": {"group_scope": "group:onebot:group-1"},
+                }
+            )
+            self.assertIn(
+                "偏好",
+                await plugin._req036_read_group_self_portrait(enabled_event),
+            )
+            reader.assert_awaited_once()
+
     async def test_primary_inherits_legacy_store_and_secondary_starts_blank(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)

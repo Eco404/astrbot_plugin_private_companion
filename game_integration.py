@@ -564,8 +564,8 @@ class GameIntegrationMixin:
         persona_id = self._game_current_persona_id()
         context = self._game_user_context_descriptor(user, persona_id)
         scopes = self._game_scope_store(user)
-        matches: list[dict[str, Any]] = []
-        for raw_state in scopes.values():
+        matches: list[tuple[int, dict[str, Any]]] = []
+        for order, raw_state in enumerate(scopes.values()):
             state = self._game_normalize_stored_state(raw_state)
             if not state:
                 continue
@@ -574,22 +574,25 @@ class GameIntegrationMixin:
                 for key in ("persona_id", "scope", "conversation_id")
             ):
                 if not game or self._game_clean_text(state.get("game"), 40).lower() == self._game_clean_text(game, 40).lower():
-                    matches.append(state)
+                    matches.append((order, state))
         if matches:
             now = time.time()
             active = [
-                state
-                for state in matches
-                if self._game_finite_float(state.get("expires_at"), 0.0) > now
+                item
+                for item in matches
+                if self._game_finite_float(item[1].get("expires_at"), 0.0) > now
             ]
             candidates = active or matches
             return max(
                 candidates,
-                key=lambda state: max(
-                    self._game_finite_float(state.get("updated_at"), 0.0),
-                    self._game_finite_float(state.get("last_event_at"), 0.0),
+                key=lambda item: (
+                    max(
+                        self._game_finite_float(item[1].get("updated_at"), 0.0),
+                        self._game_finite_float(item[1].get("last_event_at"), 0.0),
+                    ),
+                    item[0],
                 ),
-            )
+            )[1]
         if context is None and not scopes:
             legacy = user.get("game_afterglow")
             return self._game_normalize_stored_state(legacy)
@@ -1159,6 +1162,9 @@ class GameIntegrationMixin:
                     },
                 }
                 self._game_add_processed_id(updated, event_id, now)
+                # Moving an updated scope to the end gives equal timestamps a
+                # stable write-order tie-breaker without changing stored data.
+                scopes.pop(descriptor["scope_key"], None)
                 scopes[descriptor["scope_key"]] = updated
                 self._game_prune_scope_store(
                     scopes,

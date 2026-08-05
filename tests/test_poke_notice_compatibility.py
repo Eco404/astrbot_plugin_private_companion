@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+from astrbot_plugin_private_companion.unified_profile_service import default_capabilities
 
 
 class _PokeEvent:
@@ -25,6 +27,10 @@ class _PokeEvent:
     def stop_event(self) -> None:
         self.stopped = True
 
+    @staticmethod
+    def get_sender_id() -> str:
+        return "10001"
+
 
 class PokeNoticeCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -42,6 +48,14 @@ class PokeNoticeCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_poke_bypasses_empty_message_guard(self) -> None:
         event = _PokeEvent()
+        capabilities = default_capabilities()
+        capabilities["private_companion_enabled"] = True
+        user = {"unified_profile_capabilities": capabilities}
+        self.plugin._data_lock = asyncio.Lock()
+        self.plugin._ensure_auto_private_user_profile = lambda *_args, **_kwargs: (user, False)
+        self.plugin._req036_migrate_configured_target_capability = lambda *_args, **_kwargs: False
+        self.plugin._req036_attach_unified_profile_context = lambda *_args, **_kwargs: {"state": "profile_exact"}
+        self.plugin._schedule_data_save = lambda *_args, **_kwargs: None
 
         await self.plugin.on_private_message(event)
 

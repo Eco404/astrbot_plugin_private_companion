@@ -7,6 +7,7 @@ import unittest
 from astrbot_plugin_private_companion.interaction_utils import InteractionUtilsMixin
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
+from astrbot_plugin_private_companion.unified_profile_service import private_companion_gate
 
 
 class _Event:
@@ -34,7 +35,21 @@ class _Harness(InteractionUtilsMixin, TtsEnhancementMixin):
         self.target_user_ids = ["owner"]
         self.config = {"tts_voice_language": "ja"}
         self.tts_voice_language = "ja"
-        self.data = {"users": {"owner": {}, "member": {}}}
+        self.data = {
+            "users": {
+                "owner": {
+                    "unified_profile_capabilities": {
+                        "schema_version": 1,
+                        "private_companion_enabled": True,
+                        "proactive_private_enabled": False,
+                        "portrait_mode": "disabled",
+                        "portrait_mode_override": "follow_global",
+                        "grant_source": "legacy_configured_target_migration",
+                    }
+                },
+                "member": {},
+            }
+        }
         self._data_lock = asyncio.Lock()
         self.replies: list[str] = []
         self.save_count = 0
@@ -56,6 +71,25 @@ class _Harness(InteractionUtilsMixin, TtsEnhancementMixin):
 
     def _get_user(self, user_id: str) -> dict:
         return self.data.setdefault("users", {}).setdefault(user_id, {})
+
+    @staticmethod
+    def _sender_display_name(event) -> str:
+        return str(event.get_sender_id())
+
+    def _ensure_auto_private_user_profile(self, _event, *, user_id: str, **_kwargs):
+        return self._get_user(user_id), False
+
+    @staticmethod
+    def _req036_attach_unified_profile_context(_event, **_kwargs) -> dict:
+        return {"state": "profile_exact"}
+
+    @staticmethod
+    def _schedule_data_save() -> None:
+        return None
+
+    @staticmethod
+    def _req036_private_gate_for_user(user: dict) -> dict:
+        return private_companion_gate(user)
 
     @staticmethod
     def _note_private_user_umo(user_id: str, user: dict, umo: str) -> None:

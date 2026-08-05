@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import threading
 import re
 from typing import Any
@@ -40,12 +41,22 @@ except ImportError:
 _LOCK = threading.RLock()
 _FORBIDDEN = {
     "raw_prompt", "prompt", "private_object", "private_object_ref", "object",
-    "chat_text", "content", "messages", "transcript", "database",
+    "chat_text", "chat_history", "conversation", "conversation_text", "content",
+    "evidence_body", "evidence_text", "message_history", "message_text", "messages",
+    "raw_content", "transcript", "database",
 }
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_KEY_SEPARATOR_RE = re.compile(r"[\s\-./:]+")
 _IDENTITY_FIELDS = (
     "companion_instance_id", "bot_account_id", "adapter_instance_id",
     "subject_namespace", "platform_subject_id",
 )
+_IDENTITY_ASSURANCE_RANK = {
+    "unverified": 0,
+    "observed": 1,
+    "verified": 2,
+    "explicit_linked": 3,
+}
 _P4_EFFECT_VERSION = 1
 _P4_EFFECT_ALLOWED_FIELDS = frozenset({
     "event_id", "occurred_at", "kind", "source_kind", "target_kind", "authority",
@@ -69,18 +80,29 @@ def _now() -> str:
 
 def _safe(value: Any, depth: int = 0) -> Any:
     """Copy only bounded JSON-like values and drop context-bearing fields."""
-    if depth > 2 or value is None or isinstance(value, bool):
+    if depth > 2:
+        return None
+    if value is None or isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
-        return value[:240]
+        return " ".join(_CONTROL_CHARACTER_RE.sub(" ", value).split())[:240]
     if isinstance(value, (list, tuple)):
-        return [_safe(item, depth + 1) for item in list(value)[:16]]
+        result = []
+        for item in list(value)[:16]:
+            safe = _safe(item, depth + 1)
+            if safe not in (None, "", [], {}):
+                result.append(safe)
+        return result
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in list(value.items())[:32]:
-            name = str(key).strip().lower()
+            if not isinstance(key, str) or _CONTROL_CHARACTER_RE.search(key):
+                continue
+            name = _KEY_SEPARATOR_RE.sub("_", key.strip().lower()).strip("_")
             if not name or name in _FORBIDDEN:
                 continue
             safe = _safe(item, depth + 1)
@@ -94,7 +116,7 @@ def _text(value: Any, field: str, limit: int = 200) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field}_invalid")
     value = value.strip()
-    if not value or "\x00" in value or len(value) > limit:
+    if not value or _CONTROL_CHARACTER_RE.search(value) or len(value) > limit:
         raise ValueError(f"{field}_invalid")
     return value
 
@@ -140,12 +162,31 @@ def _root(store: dict[str, Any]) -> dict[str, Any]:
         root["audit_events"] = []
     if not isinstance(root.get("operations"), dict):
         root["operations"] = {}
+    if not isinstance(root.get("binding_checkpoints"), dict):
+        root["binding_checkpoints"] = {}
+    if not isinstance(root.get("detached_identity_links"), dict):
+        root["detached_identity_links"] = {}
     return root
 
 
 def _fingerprint(value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _person_identity_assurance(root: dict[str, Any], person_id: str) -> str:
+    """Derive profile assurance from the person's remaining active links."""
+    assurances: list[str] = []
+    for link in root["identity_links"].values():
+        if not isinstance(link, dict) or link.get("person_id") != person_id or link.get("status") != "active":
+            continue
+        assurance = link.get("identity_assurance")
+        assurances.append(
+            assurance
+            if isinstance(assurance, str) and assurance in _IDENTITY_ASSURANCE_RANK
+            else "observed"
+        )
+    return max(assurances, key=_IDENTITY_ASSURANCE_RANK.__getitem__) if assurances else "unverified"
 
 
 def _contains_forbidden_key(value: Any) -> bool:
@@ -290,6 +331,10 @@ class UnifiedPersonRegistry:
             raise ValueError("store_invalid")
         self._store = store
 
+    def is_bound_to(self, store: Any) -> bool:
+        """Report whether this lightweight facade targets the active persona store."""
+        return self._store is store
+
     def status(self) -> dict[str, Any]:
         with _LOCK:
             try:
@@ -338,6 +383,17 @@ class UnifiedPersonRegistry:
         safe_profile = _safe(profile or {})
         if not isinstance(safe_profile, dict):
             safe_profile = {}
+        display_name = safe_profile.get("display_name")
+        if not isinstance(display_name, str) or not display_name:
+            display_name = "unknown_person"
+        aliases = safe_profile.get("aliases")
+        aliases = [item for item in aliases if isinstance(item, str) and item] if isinstance(aliases, list) else []
+        relation_policy_id = safe_profile.get("relation_policy_id")
+        if not isinstance(relation_policy_id, str) or not relation_policy_id:
+            relation_policy_id = "default_friend"
+        owner_mode = safe_profile.get("owner_mode")
+        if owner_mode not in {"owner", "not_owner"}:
+            owner_mode = "not_owner"
         key = build_identity_key(normalized)
         person_id = person_id_for_identity(normalized)
         with _LOCK:
@@ -348,6 +404,15 @@ class UnifiedPersonRegistry:
                 projection = build_person_projection(self._store, existing_id)
                 state = "resolved" if projection and not validate_projection(projection) else "invalid"
                 return {"ok": state == "resolved", "state": state, "code": "already_linked", "person_id": existing_id, "identity_key": key, "projection": projection, "changed": False}
+            if person_id in root["profiles"]:
+                return {
+                    "ok": False,
+                    "state": "invalid",
+                    "code": "person_record_conflict",
+                    "person_id": person_id,
+                    "identity_key": key,
+                    "changed": False,
+                }
             now = _now()
             stored = {
                 "person_id": person_id,
@@ -357,10 +422,10 @@ class UnifiedPersonRegistry:
                 "profile_status": "active",
                 # The contract requires a non-empty display name.  Keep the
                 # fallback generic; never derive it from message content.
-                "display_name": str(safe_profile.get("display_name") or "unknown_person"),
-                "aliases": safe_profile.get("aliases") if isinstance(safe_profile.get("aliases"), list) else [],
-                "relation_policy_id": str(safe_profile.get("relation_policy_id") or "default_friend"),
-                "owner_mode": str(safe_profile.get("owner_mode") or "not_owner"),
+                "display_name": display_name,
+                "aliases": aliases,
+                "relation_policy_id": relation_policy_id,
+                "owner_mode": owner_mode,
                 "affinity_score": _safe_affinity_score(safe_profile.get("affinity_score")),
                 "group_overlay_ref": "",
                 "projection_revision": 1,
@@ -372,10 +437,28 @@ class UnifiedPersonRegistry:
                 "identity_assurance": "observed", "status": "active",
                 "created_at": now, "updated_at": now, "last_operation_id": op,
             }
-            root["audit_events"].append({"event_id": op, "action": "create_or_link", "actor_id": actor, "person_id": person_id, "at": now})
             projection = build_person_projection(self._store, person_id)
             if projection is None or validate_projection(projection):
-                return {"ok": False, "state": "invalid", "code": "projection_invalid", "person_id": person_id}
+                root["identity_links"].pop(key, None)
+                root["profiles"].pop(person_id, None)
+                return {
+                    "ok": False,
+                    "state": "invalid",
+                    "code": "projection_invalid",
+                    "person_id": person_id,
+                    "identity_key": key,
+                    "changed": False,
+                }
+            root["binding_checkpoints"][f"{person_id}:{key}"] = {
+                "person_id": person_id,
+                "identity_key": key,
+                "origin_identity_key": key,
+                "relationship_score": stored["affinity_score"],
+                "created_at": now,
+                "operation_id": op,
+                "source_event_count": 0,
+            }
+            root["audit_events"].append({"event_id": op, "action": "create_or_link", "actor_id": actor, "person_id": person_id, "at": now})
             return {"ok": True, "state": "resolved", "code": "created", "person_id": person_id, "identity_key": key, "projection": projection, "changed": True}
 
     def link_identity(self, person_id: str, identity: dict[str, Any], operation_id: str = "", actor_id: str = "companion", **_: Any) -> dict[str, Any]:
@@ -394,17 +477,266 @@ class UnifiedPersonRegistry:
             profile = root["profiles"].get(person_id)
             if not isinstance(profile, dict):
                 return {"ok": False, "state": "pending", "code": "person_not_found", "person_id": person_id}
+            try:
+                current_projection = build_person_projection(self._store, person_id)
+            except (TypeError, ValueError, OverflowError):
+                current_projection = None
+            identity_keys = profile.get("identity_keys")
+            if (
+                current_projection is None
+                or validate_projection(current_projection)
+                or not isinstance(identity_keys, list)
+                or any(not isinstance(item, str) for item in identity_keys)
+            ):
+                return {
+                    "ok": False,
+                    "state": "invalid",
+                    "code": "person_record_invalid",
+                    "person_id": person_id,
+                    "identity_key": key,
+                    "changed": False,
+                }
             prior = root["identity_links"].get(key)
             if isinstance(prior, dict) and prior.get("person_id") != person_id:
                 return {"ok": False, "state": "invalid", "code": "identity_conflict", "person_id": person_id}
-            root["identity_links"][key] = {"identity_key": key, "identity": normalized, "person_id": person_id, "identity_assurance": "explicit_linked", "status": "active", "updated_at": _now(), "last_operation_id": op}
-            if key not in profile.setdefault("identity_keys", []):
-                profile["identity_keys"].append(key)
+            if isinstance(prior, dict) and prior.get("person_id") == person_id and prior.get("status") == "active":
+                projection = build_person_projection(self._store, person_id)
+                return {
+                    "ok": bool(projection and not validate_projection(projection)),
+                    "state": "resolved" if projection and not validate_projection(projection) else "invalid",
+                    "code": "already_linked",
+                    "person_id": person_id,
+                    "identity_key": key,
+                    "projection": projection,
+                    "changed": False,
+                }
+            now = _now()
+            root["identity_links"][key] = {"identity_key": key, "identity": normalized, "person_id": person_id, "identity_assurance": "explicit_linked", "status": "active", "updated_at": now, "last_operation_id": op}
+            if key not in identity_keys:
+                identity_keys.append(key)
             profile["identity_assurance"] = "explicit_linked"
             profile["projection_revision"] = int(profile.get("projection_revision") or 1) + 1
-            profile["updated_at"] = _now()
+            profile["updated_at"] = now
+            root["binding_checkpoints"][f"{person_id}:{key}"] = {
+                "person_id": person_id,
+                "identity_key": key,
+                "origin_identity_key": str(profile.get("resolved_identity_key") or key),
+                "relationship_score": _safe_affinity_score(profile.get("affinity_score")),
+                "created_at": now,
+                "operation_id": op,
+                "source_event_count": 0,
+            }
+            root["audit_events"].append({"event_id": op, "action": "link_identity", "actor_id": str(actor_id), "person_id": person_id, "at": now})
             projection = build_person_projection(self._store, person_id)
             return {"ok": bool(projection and not validate_projection(projection)), "state": "resolved" if projection and not validate_projection(projection) else "invalid", "code": "identity_linked", "person_id": person_id, "identity_key": key, "projection": projection, "changed": True}
+
+    def unlink_identity(
+        self,
+        person_id: str,
+        identity: dict[str, Any],
+        operation_id: str = "",
+        actor_id: str = "companion",
+        *,
+        dry_run: bool = True,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Detach one explicit identity without inventing a profile split.
+
+        Relationship totals, portrait facts, and suppression markers are never
+        copied here.  The checkpoint tells an administrator whether a later
+        source-event replay can make the split deterministic.
+        """
+        try:
+            person_id = _text(person_id, "person_id")
+            normalized = _identity(identity)
+            op = _operation_id(operation_id)
+            actor = _text(actor_id, "actor_id", 120)
+        except ValueError:
+            return {"ok": False, "state": "invalid", "code": "invalid_request", "person_id": ""}
+        if not op:
+            return {"ok": False, "state": "pending", "code": "explicit_operation_required", "person_id": person_id}
+        key = build_identity_key(normalized)
+        operation_key = f"req036.unlink:{op}"
+        request_fingerprint = _fingerprint({
+            "person_id": person_id,
+            "identity_key": key,
+            "actor_id": actor,
+        })
+        with _LOCK:
+            root = _root(self._store)
+            prior_operation = root["operations"].get(operation_key)
+            if isinstance(prior_operation, dict):
+                if "request_fingerprint" in prior_operation or "result" in prior_operation:
+                    if prior_operation.get("request_fingerprint") != request_fingerprint:
+                        return {
+                            "ok": False,
+                            "state": "invalid",
+                            "code": "operation_id_conflict",
+                            "operation_id": op,
+                            "person_id": person_id,
+                            "identity_key": key,
+                            "changed": False,
+                        }
+                    cached_result = prior_operation.get("result")
+                    if not isinstance(cached_result, dict):
+                        return {
+                            "ok": False,
+                            "state": "invalid",
+                            "code": "operation_record_corrupt",
+                            "operation_id": op,
+                            "person_id": person_id,
+                            "identity_key": key,
+                            "changed": False,
+                        }
+                    return deepcopy(cached_result)
+                # Compatibility with records written before request-bound
+                # operation envelopes were introduced.
+                if prior_operation.get("person_id") != person_id or prior_operation.get("identity_key") != key:
+                    return {
+                        "ok": False,
+                        "state": "invalid",
+                        "code": "operation_id_conflict",
+                        "operation_id": op,
+                        "person_id": person_id,
+                        "identity_key": key,
+                        "changed": False,
+                    }
+                return deepcopy(prior_operation)
+            if operation_key in root["operations"]:
+                return {
+                    "ok": False,
+                    "state": "invalid",
+                    "code": "operation_record_corrupt",
+                    "operation_id": op,
+                    "person_id": person_id,
+                    "identity_key": key,
+                    "changed": False,
+                }
+            profile = root["profiles"].get(person_id)
+            link = root["identity_links"].get(key)
+            if not isinstance(profile, dict) or not isinstance(link, dict) or link.get("person_id") != person_id:
+                return {"ok": False, "state": "pending", "code": "identity_not_linked", "person_id": person_id, "identity_key": key}
+            identity_keys = [item for item in profile.get("identity_keys", []) if isinstance(item, str)]
+            checkpoint = root["binding_checkpoints"].get(f"{person_id}:{key}")
+            checkpoint = deepcopy(checkpoint) if isinstance(checkpoint, dict) else {}
+            replay_count = int(checkpoint.get("source_event_count") or 0)
+            ambiguity_count = 0
+            if key == profile.get("resolved_identity_key") or len(identity_keys) <= 1:
+                ambiguity_count = 1
+            result = {
+                "ok": ambiguity_count == 0,
+                "state": "resolved" if ambiguity_count == 0 else "pending",
+                "code": "migration_dry_run" if dry_run and ambiguity_count == 0 else (
+                    "split_manual_review_required" if ambiguity_count else "identity_unlinked"
+                ),
+                "person_id": person_id,
+                "identity_key": key,
+                "source_event_count": replay_count,
+                "replayable_event_count": replay_count,
+                "ambiguity_count": ambiguity_count,
+                "checkpoint": checkpoint,
+                "changed": False,
+            }
+            if dry_run or ambiguity_count:
+                return result
+            now = _now()
+            root["detached_identity_links"][key] = {
+                **deepcopy(link),
+                "status": "detached",
+                "detached_at": now,
+                "detached_by": actor,
+                "detach_operation_id": op,
+            }
+            root["identity_links"].pop(key, None)
+            profile["identity_keys"] = [item for item in identity_keys if item != key]
+            profile["identity_assurance"] = _person_identity_assurance(root, person_id)
+            profile["projection_revision"] = int(profile.get("projection_revision") or 1) + 1
+            profile["updated_at"] = now
+            root["audit_events"].append({"event_id": op, "action": "unlink_identity", "actor_id": actor, "person_id": person_id, "at": now})
+            result.update({"ok": True, "state": "resolved", "code": "identity_unlinked", "changed": True})
+            root["operations"][operation_key] = {
+                "request_fingerprint": request_fingerprint,
+                "result": deepcopy(result),
+            }
+            return result
+
+    def record_identity_source_event(
+        self,
+        person_id: str,
+        identity_key: str,
+        source_scope: str,
+        event_fingerprint: str,
+        *,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        """Record a hash-only source event for a later deterministic split.
+
+        The registry never receives message text.  A bounded fingerprint list
+        gives unlink dry-runs a replay count without turning identity storage
+        into a second chat archive.
+        """
+        try:
+            person_id = _text(person_id, "person_id")
+            identity_key = _text(identity_key, "identity_key", 160)
+            source_scope = _text(source_scope or "private", "source_scope", 120)
+            event_fingerprint = _text(event_fingerprint, "event_fingerprint", 80)
+        except ValueError:
+            return {"ok": False, "code": "invalid_request"}
+        if re.fullmatch(r"[0-9a-f]{64}", event_fingerprint) is None:
+            return {"ok": False, "code": "invalid_request"}
+        with _LOCK:
+            root = _root(self._store)
+            link = root["identity_links"].get(identity_key)
+            checkpoint_key = f"{person_id}:{identity_key}"
+            checkpoint = root["binding_checkpoints"].get(checkpoint_key)
+            if not isinstance(link, dict) or link.get("person_id") != person_id or not isinstance(checkpoint, dict):
+                return {"ok": False, "code": "identity_not_linked"}
+            seen = checkpoint.get("source_event_fingerprints")
+            if not isinstance(seen, list):
+                seen = []
+                checkpoint["source_event_fingerprints"] = seen
+            if event_fingerprint in seen:
+                return {
+                    "ok": True,
+                    "code": "source_event_idempotent_replay",
+                    "source_event_count": int(checkpoint.get("source_event_count") or len(seen)),
+                }
+            seen.append(event_fingerprint)
+            del seen[:-512]
+            checkpoint["source_event_count"] = len(seen)
+            checkpoint["last_source_scope"] = source_scope
+            checkpoint["last_source_event_at"] = _now()
+            if operation_id:
+                checkpoint["last_source_operation_id"] = _text(operation_id, "operation_id", 120)
+            return {"ok": True, "code": "source_event_recorded", "source_event_count": len(seen)}
+
+    def preview_person_merge(self, source_person_id: str, target_person_id: str, operation_id: str = "", **_: Any) -> dict[str, Any]:
+        """Expose conflicts without merging two existing people automatically."""
+        try:
+            source_person_id = _text(source_person_id, "source_person_id")
+            target_person_id = _text(target_person_id, "target_person_id")
+            operation_id = _operation_id(operation_id)
+        except ValueError:
+            return {"ok": False, "code": "invalid_request"}
+        with _LOCK:
+            root = _root(self._store)
+            source = root["profiles"].get(source_person_id)
+            target = root["profiles"].get(target_person_id)
+            if not isinstance(source, dict) or not isinstance(target, dict) or source_person_id == target_person_id:
+                return {"ok": False, "code": "invalid_request"}
+            conflicts = [
+                field for field in ("affinity_score", "owner_mode", "relation_policy_id")
+                if source.get(field) != target.get(field)
+            ]
+            return {
+                "ok": False,
+                "code": "merge_manual_review_required",
+                "operation_id": operation_id,
+                "source_person_id": source_person_id,
+                "target_person_id": target_person_id,
+                "conflicts": conflicts,
+                "write_count": 0,
+            }
 
     def read_projection(self, person_id: str) -> dict[str, Any] | None:
         with _LOCK:

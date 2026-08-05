@@ -217,9 +217,23 @@
       "auto_enable_companion_for_new_users": {
         "description": "自动接管新用户陪伴",
         "type": "bool",
-        "hint": "仅在已开启新用户最小档案时生效。默认关闭，关闭时只建档并继续放行 AstrBot 默认主链。",
+        "hint": "兼容旧配置。REQ-036 下新建档案仍默认关闭私聊陪伴，必须由管理员在用户档案中明确授权。",
         "default": false,
         "condition": "enable_auto_user_profile_creation"
+      },
+      "private_companion_disabled_reply": {
+        "description": "未授权私聊回复",
+        "type": "string",
+        "hint": "私聊陪伴未获管理员授权时直接发送的固定文本。为空或无效时使用内置默认文本；此分支不会调用 LLM、Memory、工具、画像或关系结算。",
+        "default": "老大不让我跟陌生人说话哦。"
+      },
+      "portrait_global_mode": {
+        "description": "全局智能画像模式",
+        "type": "string",
+        "options": ["disabled", "use_existing", "learn_and_use"],
+        "labels": ["关闭智能画像", "仅使用已有画像", "持续学习与使用"],
+        "hint": "默认关闭。管理员可在单个用户档案中选择跟随全局或显式覆盖；画像不能授予私聊或主动联系权限。",
+        "default": "disabled"
       },
       "auto_profile_platforms": {
         "description": "自动建档平台",

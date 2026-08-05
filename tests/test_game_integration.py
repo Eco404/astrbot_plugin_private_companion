@@ -905,7 +905,11 @@ async def test_malformed_numbers_and_untrusted_context_fall_back_safely() -> Non
 
 
 @pytest.mark.asyncio
-async def test_latest_active_game_is_selected_within_current_conversation() -> None:
+async def test_latest_active_game_is_selected_within_current_conversation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "astrbot_plugin_private_companion.game_integration.time.time",
+        lambda: 1_000.0,
+    )
     host = GameHarness([game_assessment(), game_assessment()])
     session_id = "default:FriendMessage:10001"
     first = round_event("event-1")

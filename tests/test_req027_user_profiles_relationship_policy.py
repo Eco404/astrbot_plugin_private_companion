@@ -46,6 +46,23 @@ def _load_platform_compat():
     return module
 
 
+def _load_unified_profile_service():
+    package_name = "req027_unified_profile_package"
+    package = ModuleType(package_name)
+    package.__path__ = [str(ROOT)]
+    sys.modules[package_name] = package
+    spec = importlib.util.spec_from_file_location(
+        f"{package_name}.unified_profile_service",
+        ROOT / "unified_profile_service.py",
+        submodule_search_locations=[],
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_class_methods(filename: str, class_name: str, names: set[str], namespace: dict[str, Any]) -> dict[str, Any]:
     path = ROOT / filename
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -78,6 +95,7 @@ CORE_METHODS = _load_class_methods(
         ) if str(value).strip() else default,
         "_safe_float": lambda value, default=0.0: float(value or default),
         "_now_ts": lambda: 123.0,
+        "ensure_new_profile_capabilities": _load_unified_profile_service().ensure_new_profile_capabilities,
     },
 )
 

@@ -13824,7 +13824,8 @@ function renderLearning() {
 function renderUsers() {
   const keyword = ($("#userFilter").value || "").trim().toLowerCase();
   const rows = state.users.filter((user) => {
-    const text = `${user.user_id} ${user.nickname} ${user.umo}`.toLowerCase();
+    const aliases = Array.isArray(user.alias_user_ids) ? user.alias_user_ids.join(" ") : "";
+    const text = `${user.user_id} ${user.nickname} ${user.umo} ${aliases}`.toLowerCase();
     return !keyword || text.includes(keyword);
   });
   $("#userRows").innerHTML = rows.length
@@ -14018,9 +14019,10 @@ async function renderUserDetail(forceFetch = false) {
       return;
     }
   }
+  const privateEnabled = Boolean(detail.private_companion_enabled ?? detail.enabled);
   box.innerHTML = `
     <div class="toolbar">
-      <button data-user-action="toggle">${escapeHtml(detail.enabled ? "停用私聊陪伴" : "启用私聊陪伴")}</button>
+      <button data-user-action="toggle">${escapeHtml(privateEnabled ? "停用私聊陪伴" : "启用私聊陪伴")}</button>
       <button data-user-action="reset_daily">重置今日额度</button>
       <button data-user-action="clear_schedule">清空主动计划</button>
       <button data-user-action="clear_emotion_state">重置情绪状态</button>
@@ -14048,6 +14050,8 @@ async function renderUserDetail(forceFetch = false) {
     </div>
     <div class="detail-grid">
       ${renderRelationshipPanel(detail.relationship_panel)}
+      ${renderUnifiedProfileCapabilityPanel(detail)}
+      ${renderPortraitBridgeStatus(detail.portrait_bridge)}
       ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
@@ -14063,6 +14067,63 @@ async function renderUserDetail(forceFetch = false) {
     </div>
   `;
   bindUserActions(detail);
+}
+
+function portraitModeLabel(mode) {
+  return {
+    disabled: "关闭智能画像",
+    use_existing: "仅使用已有画像",
+    learn_and_use: "持续学习与使用",
+    follow_global: "跟随全局设置",
+  }[String(mode || "")] || "关闭智能画像";
+}
+
+function renderUnifiedProfileCapabilityPanel(detail) {
+  const capabilities = detail?.capability_summary && typeof detail.capability_summary === "object" ? detail.capability_summary : {};
+  const privateEnabled = Boolean(capabilities.private_companion_enabled ?? detail?.private_companion_enabled ?? detail?.enabled);
+  const proactiveEnabled = Boolean(capabilities.proactive_private_enabled ?? detail?.proactive_private_enabled);
+  const effectiveProactive = Boolean(capabilities.effective_proactive_private_enabled ?? detail?.proactive_contact_enabled);
+  const override = String(detail?.portrait_mode_override || "follow_global") === "explicit"
+    ? String(capabilities.portrait_mode || detail?.portrait_mode || "disabled")
+    : "follow_global";
+  const effectivePortraitMode = String(capabilities.portrait_mode || detail?.portrait_mode || "disabled");
+  const personId = String(detail?.unified_person_id || "");
+  return `
+    <section class="detail-block unified-profile-capabilities">
+      <header class="detail-block-head"><div><h2>统一档案与当前身份权限</h2><p>仅管理员可修改；关联身份不会自动获得私聊或主动权限。</p></div><span class="badge ${privateEnabled ? "ok" : "off"}">${escapeHtml(privateEnabled ? "私聊已授权" : "私聊未授权")}</span></header>
+      <form id="unifiedProfileCapabilitiesForm" class="inline-form">
+        <label><input name="private_companion_enabled" type="checkbox" ${privateEnabled ? "checked" : ""} /> 私聊陪伴</label>
+        <label><input name="proactive_private_enabled" type="checkbox" ${proactiveEnabled ? "checked" : ""} /> 主动私聊</label>
+        <label>智能画像
+          <select name="portrait_mode">
+            <option value="follow_global" ${override === "follow_global" ? "selected" : ""}>跟随全局设置</option>
+            <option value="disabled" ${override === "disabled" ? "selected" : ""}>关闭智能画像</option>
+            <option value="use_existing" ${override === "use_existing" ? "selected" : ""}>仅使用已有画像</option>
+            <option value="learn_and_use" ${override === "learn_and_use" ? "selected" : ""}>持续学习与使用</option>
+          </select>
+        </label>
+        <button type="submit">保存权限</button>
+      </form>
+      <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd><dt>主动联系</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : proactiveEnabled ? "等待私聊陪伴授权" : "关闭")}</dd></dl>
+    </section>
+  `;
+}
+
+function renderPortraitBridgeStatus(value) {
+  const status = value && typeof value === "object" ? value : {};
+  const available = Boolean(status.available);
+  const code = String(status.code || "bridge_unavailable");
+  const syncedAt = String(status.last_synced_at || "");
+  const revision = Number(status.portrait_revision || 0);
+  return detailBlock(
+    "画像同步状态",
+    available ? "画像事实和治理入口由 Memory 独立维护；本页不缓存或显示旧画像正文。" : "Memory 当前不可用或身份尚未精确投影；为避免陈旧披露，本页不会回显任何画像摘要。",
+    [
+      ["Bridge", available ? "可用" : code],
+      ["最近同步", syncedAt || "暂无"],
+      ["画像版本", revision ? `r${revision}` : "暂无"],
+    ],
+  );
 }
 
 function renderEmotionDiagnostics(detail) {
@@ -14135,6 +14196,11 @@ function renderUserP4RuntimeStatus(status) {
 
 function renderPrivateDeliveryRoute(detail) {
   const route = detail?.delivery_route && typeof detail.delivery_route === "object" ? detail.delivery_route : {};
+  if (route.reason === "private_companion_disabled" || !Boolean(detail?.private_companion_enabled ?? detail?.enabled)) {
+    return detailBlock("主动投递会话", "私聊陪伴当前关闭；主动联系不会因群聊观察或画像模式而自动开启。", [
+      ["主动联系", "关闭"],
+    ]);
+  }
   const recentError = String(route.recent_error || "").trim();
   const errorLabel = route.recent_error_recovered ? "最近错误（已恢复）" : "最近错误";
   const routeCount = Number(route.route_count || 0);
@@ -15378,6 +15444,28 @@ function bindUserActions(detail) {
       await renderUserDetail(true);
     }
   };
+  const capabilityForm = $("#unifiedProfileCapabilitiesForm");
+  capabilityForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const saved = await runAction(
+      () => postJson("/user/update", {
+        user_id: detail.user_id,
+        private_companion_enabled: form.get("private_companion_enabled") === "on",
+        proactive_private_enabled: form.get("proactive_private_enabled") === "on",
+        portrait_mode: String(form.get("portrait_mode") || "follow_global"),
+      }),
+      "已保存统一档案权限",
+      event.submitter,
+      { reload: false },
+    );
+    if (saved) {
+      const index = state.users.findIndex((item) => item.user_id === detail.user_id);
+      if (index >= 0) state.users[index] = { ...state.users[index], ...saved };
+      renderUsers();
+      await refreshSelectedUserDetail();
+    }
+  });
   $("#relationshipStageForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const selectedKey = String(new FormData(event.currentTarget).get("relationship_stage_key") || "");
@@ -15458,13 +15546,15 @@ function bindUserActions(detail) {
       showToast("请先把专属联结切换为一个普通关系阶段，再修改关系角色", "error");
       return;
     }
-    await runAction(() => postJson("/user/update", {
+    const body = {
       user_id: detail.user_id,
       nickname: form.get("nickname"),
       style: form.get("style"),
       relationship_role: selectedRole,
-      proactive_daily_limit: Number(form.get("proactive_daily_limit") || -1),
-    }), "已保存私聊对象", event.submitter);
+    };
+    const proactiveDailyLimit = form.get("proactive_daily_limit");
+    if (proactiveDailyLimit !== null) body.proactive_daily_limit = Number(proactiveDailyLimit || -1);
+    await runAction(() => postJson("/user/update", body), "已保存私聊对象", event.submitter);
     await refreshSelectedUserDetail();
   });
   document.querySelectorAll("[data-user-action]").forEach((button) => {

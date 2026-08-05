@@ -587,6 +587,9 @@ class PrivateCompanionPageApi(
             ("/user", self.get_user, ["GET"], "Private Companion Page user detail"),
             ("/user/update", self.update_user, ["POST"], "Private Companion Page update user"),
             ("/user/delete", self.delete_user, ["POST"], "Private Companion Page delete user"),
+            ("/user/identity/link", self.link_unified_identity, ["POST"], "Private Companion Page explicit unified identity link"),
+            ("/user/identity/unlink", self.unlink_unified_identity, ["POST"], "Private Companion Page unified identity unlink preview/apply"),
+            ("/user/identity/merge-preview", self.preview_unified_identity_merge, ["POST"], "Private Companion Page unified person merge preview"),
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),
@@ -13544,6 +13547,18 @@ class PrivateCompanionPageApi(
         pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
         last_emotion_judgement = self._emotion_last_judgement_summary(user.get("last_emotion_judgement"))
         last_emotion_judgement_error = self._emotion_judgement_error_summary(user.get("last_emotion_judgement_error"))
+        capability_getter = getattr(self.plugin, "_req036_capability_summary_for_user", None)
+        capability_summary = capability_getter(user) if callable(capability_getter) else {
+            "private_companion_enabled": bool(user.get("private_companion_enabled", user.get("enabled", False))),
+            "proactive_private_enabled": False,
+            "effective_proactive_private_enabled": False,
+            "portrait_mode": "disabled",
+            "portrait_learning_enabled": False,
+            "portrait_usage_enabled": False,
+            "grant_source": "legacy",
+            "blocked_reasons": [],
+        }
+        private_companion_enabled = bool(capability_summary.get("private_companion_enabled"))
         return {
             "user_id": user_id_text,
             "display_name": display_name,
@@ -13553,7 +13568,19 @@ class PrivateCompanionPageApi(
             "identity_label": self._single_line((platform_profile or {}).get("identity_label"), 60),
             "stable_platform_identity": bool(platform_kind == "qq_official" or is_qq_user),
             "source": source,
-            "enabled": bool(user.get("enabled", True)),
+            "enabled": private_companion_enabled,
+            "private_companion_enabled": private_companion_enabled,
+            "proactive_private_enabled": bool(capability_summary.get("proactive_private_enabled")),
+            "portrait_mode": self._single_line(capability_summary.get("portrait_mode"), 40) or "disabled",
+            "portrait_learning_enabled": bool(capability_summary.get("portrait_learning_enabled")),
+            "portrait_usage_enabled": bool(capability_summary.get("portrait_usage_enabled")),
+            "portrait_mode_override": self._single_line(
+                (user.get("unified_profile_capabilities") if isinstance(user.get("unified_profile_capabilities"), dict) else {}).get("portrait_mode_override"),
+                40,
+            ) or "follow_global",
+            "capability_summary": capability_summary,
+            "unified_person_id": self._single_line(user.get("unified_person_id"), 80),
+            "proactive_contact_enabled": bool(capability_summary.get("effective_proactive_private_enabled")),
             "relationship_role": role,
             "relationship_role_label": role_label,
             "nickname": user.get("nickname", ""),
