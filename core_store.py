@@ -1312,10 +1312,14 @@ class CoreStoreMixin:
 
     @staticmethod
     def _normalize_private_identity_id(value: Any, limit: int = 128) -> str:
-        text = _single_line(value, limit)
+        if isinstance(value, (dict, list, tuple, set)):
+            return ""
+        # Parse the transport wrapper before applying the identity length
+        # limit. Otherwise a long adapter/platform prefix can truncate the
+        # opaque session ID and create a second, colliding user record.
+        text = _single_line(value, max(512, limit + 256))
         if not text:
             return ""
-        lower = text.lower()
         invalid_exact = {
             "default",
             "aiocqhttp",
@@ -1331,16 +1335,19 @@ class CoreStoreMixin:
             "none",
             "null",
         }
-        if lower in invalid_exact:
-            return ""
-        if ":FriendMessage:" in text:
-            session_id = _single_line(text.rsplit(":FriendMessage:", 1)[-1], limit)
+        umo_match = re.search(r":friendmessage:", text, re.IGNORECASE)
+        if umo_match:
+            session_id = _single_line(text[umo_match.end():], limit)
             if not session_id or ":" in session_id:
                 return ""
             session_lower = session_id.lower()
             if session_lower in invalid_exact or re.search(r"(friendmessage|groupmessage|unified_msg_origin)", session_lower):
                 return ""
             return session_id
+        text = _single_line(text, limit)
+        lower = text.lower()
+        if lower in invalid_exact:
+            return ""
         if ":" in text:
             return ""
         if re.search(r"(friendmessage|groupmessage|unified_msg_origin)", lower):
@@ -1682,6 +1689,42 @@ class CoreStoreMixin:
         users = self.data.setdefault("users", {})
         changed = False
         migration_now = _now_ts()
+
+        def merge_transport_identity_records() -> bool:
+            """Fold legacy full-UMO user keys into their stable private identity."""
+            normalizer = getattr(self, "_normalize_private_identity_id", None)
+            if not callable(normalizer):
+                return False
+            transport_changed = False
+            for raw_user_id, source in list(users.items()):
+                raw_id = str(raw_user_id or "").strip()
+                if ":FriendMessage:" not in raw_id or not isinstance(source, dict):
+                    continue
+                normalized_id = normalizer(raw_id)
+                canonical_id = self._canonical_private_user_id(normalized_id) if normalized_id else ""
+                if not canonical_id or canonical_id == raw_id:
+                    continue
+                target = users.get(canonical_id)
+                if isinstance(target, dict):
+                    self._merge_user_record_values(target, source, raw_id)
+                else:
+                    target = source
+                    users[canonical_id] = target
+                target["user_id"] = canonical_id
+                raw_aliases = target.get("alias_user_ids")
+                if isinstance(raw_aliases, list):
+                    target["alias_user_ids"] = [
+                        item for item in raw_aliases if str(item or "").strip() != raw_id
+                    ]
+                users.pop(raw_user_id, None)
+                transport_changed = True
+                logger.info(
+                    "[PrivateCompanion] 已归一旧私聊 UMO 用户键: old=%s user=%s",
+                    _single_line(raw_id, 120),
+                    _single_line(canonical_id, 80),
+                )
+            return transport_changed
+
         backups = self.data.setdefault("private_user_alias_merge_backups", {})
         if not isinstance(backups, dict):
             backups = {}
@@ -1754,7 +1797,7 @@ class CoreStoreMixin:
                 user["alias_user_ids"] = kept_alias_ids
                 changed = True
         if not aliases:
-            return changed
+            return merge_transport_identity_records() or changed
         for alias_id, canonical_id in list(aliases.items()):
             alias_id = str(alias_id or "").strip()
             canonical_id = self._canonical_private_user_id(canonical_id)
@@ -1822,7 +1865,7 @@ class CoreStoreMixin:
             self._merge_user_record_values(target, source, alias_id)
             users.pop(alias_id, None)
             changed = True
-        return changed
+        return merge_transport_identity_records() or changed
 
     def _private_user_has_private_footprint(self, user_id: str, user: dict[str, Any]) -> bool:
         """Whether a stored user has evidence that it belongs in private chat."""
@@ -2173,6 +2216,13 @@ class CoreStoreMixin:
 
     def _get_user(self, user_id: str) -> dict[str, Any]:
         original_user_id = str(user_id or "").strip()
+        # Some platform adapters expose the complete private UMO as sender_id.
+        # Keep the conversation route in ``umo`` but use its stable session ID
+        # as the private-user record key, so the identity page never treats a
+        # transport origin as a QQ user.
+        normalized_identity = self._normalize_private_identity_id(original_user_id)
+        if normalized_identity:
+            original_user_id = normalized_identity
         user_id = self._canonical_private_user_id(original_user_id)
         users = self.data.setdefault("users", {})
         alias_migration_changed = False
@@ -2271,7 +2321,10 @@ class CoreStoreMixin:
         now: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Create a minimal private profile without granting implicit authority."""
-        canonical_user_id = self._canonical_private_user_id(str(user_id or "").strip())
+        raw_user_id = str(user_id or "").strip()
+        identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
+        normalized_user_id = identity_normalizer(raw_user_id) if callable(identity_normalizer) else ""
+        canonical_user_id = self._canonical_private_user_id(normalized_user_id or raw_user_id)
         if not canonical_user_id or self._is_bot_self_user_id(canonical_user_id):
             return None, False
         platform_kind = self._platform_kind_for_event(event)

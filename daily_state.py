@@ -6021,6 +6021,18 @@ class DailyStateMixin(DailyStateTickMixin):
         events.sort(key=lambda value: rank_getter(value.get("alert", {})), reverse=True)
         return events[:12]
 
+    def _weather_alert_event_captured_at(self, event: dict[str, Any]) -> float:
+        """Return the best available observation time for a pending alert."""
+        if not isinstance(event, dict):
+            return 0.0
+        captured_at = _safe_float(event.get("captured_at"), 0)
+        if captured_at > 0:
+            return captured_at
+        alert = event.get("alert") if isinstance(event.get("alert"), dict) else {}
+        return self._weather_alert_time_ts(
+            alert.get("issued_time") or alert.get("effective_time") or alert.get("onset_time")
+        )
+
     def _weather_alert_append_pending_events(self, events: list[dict[str, Any]]) -> None:
         state = self.data.setdefault("weather_alert_awareness", {})
         if not isinstance(state, dict):
@@ -6042,13 +6054,17 @@ class DailyStateMixin(DailyStateTickMixin):
             if key and key not in known:
                 pending.append(deepcopy(event))
                 known.add(key)
-        # Keep the queue bounded while preserving the newest/highest priority
-        # entries. Old undelivered entries are not allowed to grow forever.
-        cutoff = _now_ts() - 48 * 3600
+        # Weather changes are time-sensitive. An outage or a disabled daily
+        # quota must not turn yesterday's alert into today's proactive message.
+        cutoff = _now_ts() - 6 * 3600
         pending[:] = [
             item
             for item in pending
-            if isinstance(item, dict) and _safe_float(item.get("captured_at"), 0) >= cutoff
+            if isinstance(item, dict)
+            and (
+                self._weather_alert_event_captured_at(item) <= 0
+                or self._weather_alert_event_captured_at(item) >= cutoff
+            )
         ]
         pending.sort(
             key=lambda item: _qweather_alert_rank(
@@ -6100,6 +6116,12 @@ class DailyStateMixin(DailyStateTickMixin):
         for event in pending:
             if not isinstance(event, dict):
                 continue
+            alert = event.get("alert") if isinstance(event.get("alert"), dict) else {}
+            captured_at = self._weather_alert_event_captured_at(event)
+            if captured_at > 0 and now - captured_at > 6 * 3600:
+                continue
+            if alert and self._weather_alert_is_expired(alert, now=now) and event.get("kind") not in {"cancelled", "resolved", "expired"}:
+                continue
             delivered = event.get("delivered_user_ids")
             if not isinstance(delivered, list):
                 delivered = []
@@ -6108,7 +6130,6 @@ class DailyStateMixin(DailyStateTickMixin):
                 if user_id in delivered:
                     continue
                 scheduled, lifetime = self._weather_alert_candidate_delay(event, now=now)
-                alert = event.get("alert") if isinstance(event.get("alert"), dict) else {}
                 level = _qweather_alert_text(alert.get("color") or alert.get("color_code") or alert.get("severity"), 24)
                 topic = _qweather_alert_text(
                     f"{level}{event.get('event') or '天气'}{event.get('status') or '有变化'}",

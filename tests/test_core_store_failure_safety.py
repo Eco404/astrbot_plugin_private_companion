@@ -59,7 +59,77 @@ class _StartupHarness(CoreStoreMixin):
         return None
 
 
+class _IdentityCoreHarness(CoreStoreMixin):
+    def __init__(self) -> None:
+        self.data = {"users": {}}
+        self.private_user_aliases: dict[str, str] = {}
+        self.default_nickname = "你"
+        self.default_style = "温柔"
+        self.default_nickname_strategy = "platform_display_name"
+        self.enable_auto_user_profile_creation = True
+
+    @staticmethod
+    def _ensure_private_user_role(_user_id: str, _user: dict) -> bool:
+        return False
+
+    @staticmethod
+    def _ensure_relationship_user_state(_user: dict, *, created: bool = False) -> bool:
+        return False
+
+    @staticmethod
+    def _configured_target_ids() -> list[str]:
+        return []
+
+    @staticmethod
+    def _is_target_private_user(_user_id: str, _user: dict | None = None) -> bool:
+        return False
+
+    @staticmethod
+    def _is_bot_self_user_id(_user_id: str) -> bool:
+        return False
+
+    @staticmethod
+    def _platform_kind_for_event(_event: object) -> str:
+        return "qq_official"
+
+    @staticmethod
+    def _note_private_user_umo(_user_id: str, user: dict, umo: str) -> None:
+        user["last_inbound_umo"] = umo
+
+    @staticmethod
+    def _schedule_data_save() -> None:
+        return None
+
+
 class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
+    def test_official_full_umo_parses_identity_after_long_transport_prefix(self) -> None:
+        openid = "openid-owner-with-stable-suffix"
+        full_umo = f"official-{'x' * 160}:friendmessage:{openid}"
+
+        normalized = _IdentityCoreHarness._normalize_private_identity_id(full_umo)
+
+        self.assertEqual(openid, normalized)
+
+    def test_official_full_umo_uses_stable_identity_for_runtime_and_auto_profile(self) -> None:
+        full_umo = "official-instance:FriendMessage:openid-owner"
+
+        runtime_harness = _IdentityCoreHarness()
+        direct = runtime_harness._get_user(full_umo)
+
+        auto_harness = _IdentityCoreHarness()
+        profile, created = auto_harness._ensure_auto_private_user_profile(
+            SimpleNamespace(unified_msg_origin=full_umo),
+            user_id=full_umo,
+            sender_display_name="主人",
+        )
+
+        self.assertEqual({"openid-owner"}, set(runtime_harness.data["users"]))
+        self.assertEqual("openid-owner", direct["user_id"])
+        self.assertEqual({"openid-owner"}, set(auto_harness.data["users"]))
+        self.assertEqual("openid-owner", profile["user_id"])
+        self.assertEqual(full_umo, profile["last_inbound_umo"])
+        self.assertTrue(created)
+
     async def test_startup_diary_check_does_not_force_generation(self) -> None:
         harness = _StartupHarness()
 

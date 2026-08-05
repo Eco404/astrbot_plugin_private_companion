@@ -172,8 +172,9 @@ def plan_component_chunks(
 ) -> tuple[list[list[Any]], bool, bool, str]:
     """Split text and place media around the nearest text message.
 
-    Reply/quote components are always bound to the first text-bearing chunk. This
-    keeps a leading voice or image from becoming the quoted message by accident.
+    Reply/quote components are only bound to the first text-bearing chunk. When
+    the result is media-only, discard the quote so adapters cannot turn it into
+    an orphan quote card or attach it to a leading voice/image message.
     """
     source_chain = list(chain or [])
     reply_components: list[Any] = []
@@ -241,12 +242,10 @@ def plan_component_chunks(
                 for index, chunk in enumerate(chunks)
                 if any(isinstance(item, plain_type) for item in chunk)
             ),
-            0 if chunks else -1,
+            -1,
         )
         if target_index >= 0:
             chunks[target_index] = [*reply_components, *chunks[target_index]]
-        else:
-            chunks = [list(reply_components)]
 
     chunks = [chunk for chunk in chunks if chunk]
 
@@ -276,7 +275,7 @@ def bind_reply_components_to_first_text(
     classify: Callable[[Any], str] = component_kind,
     reply_components: list[Any] | None = None,
 ) -> tuple[list[list[Any]], bool]:
-    """Move all reply components to the first text chunk without duplication."""
+    """Move reply components to the first text chunk, dropping media-only quotes."""
     replies = list(reply_components or [])
     cleaned: list[list[Any]] = []
     changed = False
@@ -300,12 +299,10 @@ def bind_reply_components_to_first_text(
             for index, chunk in enumerate(cleaned)
             if any(isinstance(item, plain_type) for item in chunk)
         ),
-        0 if cleaned else -1,
+        -1,
     )
     if target_index >= 0:
         cleaned[target_index] = [*replies, *cleaned[target_index]]
-    else:
-        cleaned = [list(replies)]
     return cleaned, True
 
 

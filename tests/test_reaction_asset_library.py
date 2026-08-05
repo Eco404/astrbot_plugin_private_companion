@@ -203,6 +203,41 @@ class ReactionAssetLibraryTests(unittest.TestCase):
             {initial["image_id"], rotated["image_id"]},
         )
 
+    def test_find_uses_learned_asset_affinity_after_relevance_ties(self) -> None:
+        preferred = self.library.import_blobs(
+            [("开心偏好.png", PNG_BYTES)],
+            metadata={"tags": ["开心", "回应"], "scopes": ["private"]},
+        )["items"][0]
+        other = self.library.import_blobs(
+            [("开心普通.png", PNG_BYTES + b"\x01")],
+            metadata={"tags": ["开心", "回应"], "scopes": ["private"]},
+        )["items"][0]
+
+        result = self.library.find(
+            "开心回应",
+            scope="private",
+            selection_signature="intent-happy",
+            selection_preferences={
+                "intent_signature": "intent-happy",
+                "assets": [
+                    {
+                        "key": f"pc-local:{preferred['id']}",
+                        "score": 6,
+                        "intent_score": 4,
+                    },
+                    {
+                        "key": f"pc-local:{other['id']}",
+                        "score": -4,
+                        "intent_score": -2,
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(f"pc-local:{preferred['id']}", result["image_id"])
+        self.assertGreater(result["preference_bias"], 0)
+
     def test_selection_revision_changes_after_delivery_without_changing_catalog_revision(self) -> None:
         item = self.library.import_blobs([("开心.png", PNG_BYTES)])["items"][0]
         catalog_revision = self.library.lookup_revision()
@@ -426,6 +461,77 @@ class ReactionAssetRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["found"])
             self.assertFalse(result["sent"])
             self.assertEqual(f"pc-local:{imported['items'][0]['id']}", result["image_id"])
+
+    async def test_runtime_lookup_cache_isolated_by_selection_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            library = ReactionAssetLibrary(folder)
+            preferred = library.import_blobs(
+                [("开心偏好.png", PNG_BYTES)],
+                metadata={"tags": ["开心", "回应"], "scopes": ["private"]},
+            )["items"][0]
+            other = library.import_blobs(
+                [("开心普通.png", PNG_BYTES + b"\x01")],
+                metadata={"tags": ["开心", "回应"], "scopes": ["private"]},
+            )["items"][0]
+            harness = _RuntimeHarness(folder)
+
+            def preferences(positive_id: str, negative_id: str) -> dict[str, object]:
+                return {
+                    "intent_signature": "intent-happy",
+                    "assets": [
+                        {
+                            "key": f"pc-local:{positive_id}",
+                            "score": 8,
+                            "intent_score": 4,
+                        },
+                        {
+                            "key": f"pc-local:{negative_id}",
+                            "score": -8,
+                            "intent_score": -4,
+                        },
+                    ],
+                }
+
+            preferred_lookup = json.loads(
+                await harness._pc_find_reaction_image_impl(
+                    _RuntimeEvent(),
+                    query="开心回应",
+                    send=False,
+                    low_latency=True,
+                    selection_preferences=preferences(preferred["id"], other["id"]),
+                    selection_signature="intent-happy",
+                )
+            )
+            other_preferences = preferences(other["id"], preferred["id"])
+            other_lookup = json.loads(
+                await harness._pc_find_reaction_image_impl(
+                    _RuntimeEvent(),
+                    query="开心回应",
+                    send=False,
+                    low_latency=True,
+                    selection_preferences=other_preferences,
+                    selection_signature="intent-happy",
+                )
+            )
+            cached_other_lookup = json.loads(
+                await harness._pc_find_reaction_image_impl(
+                    _RuntimeEvent(),
+                    query="开心回应",
+                    send=False,
+                    low_latency=True,
+                    selection_preferences=other_preferences,
+                    selection_signature="intent-happy",
+                )
+            )
+
+            self.assertEqual(
+                f"pc-local:{preferred['id']}",
+                preferred_lookup["image_id"],
+            )
+            self.assertEqual(f"pc-local:{other['id']}", other_lookup["image_id"])
+            self.assertFalse(preferred_lookup["cache_hit"])
+            self.assertFalse(other_lookup["cache_hit"])
+            self.assertTrue(cached_other_lookup["cache_hit"])
 
 
 if __name__ == "__main__":

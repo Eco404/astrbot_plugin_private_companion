@@ -242,6 +242,52 @@ class ProactiveExpiryLifecycleTests(unittest.TestCase):
         self.assertEqual(pool[0]["repeat_count"], 2)
         self.assertEqual(pool[0]["merged_trigger_count"], 1)
 
+    def test_weather_candidate_does_not_survive_into_the_next_day(self) -> None:
+        harness = _LifecycleHarness()
+        now = datetime.now(TZ).timestamp()
+        harness.data["proactive_candidate_pool"] = [{
+            "id": "old-weather",
+            "user_id": "10001",
+            "source": "weather_alert",
+            "reason": "weather_alert",
+            "status": "accepted",
+            "created_ts": now - 24 * 3600,
+            "scheduled_ts": now - 24 * 3600,
+            "last_seen_ts": now - 60,
+            "expire_at": now - 23 * 3600,
+        }]
+
+        pool = harness._cleanup_proactive_candidate_pool(now=now)
+
+        self.assertEqual([], pool)
+
+    def test_fresh_weather_candidate_merges_but_old_one_starts_a_new_record(self) -> None:
+        harness = _LifecycleHarness()
+        now = datetime.now(TZ).timestamp()
+        base = {
+            "origin_event_id": "weather:event-1",
+            "source": "weather_alert",
+            "reason": "weather_alert",
+            "action": "message",
+            "topic": "外面开始下雨",
+            "expire_at": now + 3600,
+        }
+        first = harness._record_proactive_candidate("10001", dict(base), status="blocked")
+        first["created_ts"] = now - 150 * 60
+        first["last_seen_ts"] = now - 60 * 60
+        first["scheduled_ts"] = now - 60 * 60
+
+        merged = harness._record_proactive_candidate("10001", dict(base), status="blocked")
+        self.assertEqual(first["id"], merged["id"])
+        self.assertEqual(merged["repeat_count"], 2)
+
+        first["last_seen_ts"] = now - 3 * 3600
+        first["created_ts"] = now - 3 * 3600
+        first["scheduled_ts"] = now - 3 * 3600
+        fresh_event = dict(base, origin_event_id="weather:event-2")
+        new_record = harness._record_proactive_candidate("10001", fresh_event, status="blocked")
+        self.assertNotEqual(first["id"], new_record["id"])
+
     def test_cross_midnight_quiet_hours_return_same_day_end(self) -> None:
         harness = _LifecycleHarness()
         harness.quiet_hours = "23:00-10:30"

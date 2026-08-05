@@ -108,7 +108,15 @@ class _ReactionLibrary:
     def has_enabled_assets(self) -> bool:
         return True
 
-    def find(self, query: str, *, context: str, scope: str) -> dict[str, Any] | None:
+    def find(
+        self,
+        query: str,
+        *,
+        context: str,
+        scope: str,
+        selection_preferences: Any = None,
+        selection_signature: str = "",
+    ) -> dict[str, Any] | None:
         self.calls.append((query, context, scope))
         return self.result
 
@@ -136,6 +144,13 @@ class _ReactionHost:
     @staticmethod
     def _reaction_expression_lookup_cache_revision(_library: object) -> int:
         return 1
+
+    @staticmethod
+    def _reaction_expression_selection_revision(
+        _selection_preferences: object,
+        _selection_signature: object = "",
+    ) -> str:
+        return ""
 
     @staticmethod
     def _reaction_expression_lookup_cache_get(_key: str) -> None:

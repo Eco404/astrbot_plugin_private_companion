@@ -467,6 +467,50 @@ class QqOfficialPlatformAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(summary["is_qq_user"])
         self.assertTrue(summary["display_name"].startswith("QQ 官方 · "))
 
+    def test_official_openid_is_accepted_as_worldbook_identity(self) -> None:
+        plugin = _PagePlugin()
+        plugin.data["users"][OFFICIAL_OPENID] = {"umo": OFFICIAL_UMO}
+        page = PrivateCompanionPageApi(plugin)
+
+        self.assertTrue(page._worldbook_known_opaque_member_id(OFFICIAL_OPENID))
+        self.assertTrue(page._worldbook_member_id_valid(OFFICIAL_OPENID, allow_opaque=True))
+        self.assertTrue(
+            page._worldbook_setup_member_id_valid(
+                OFFICIAL_OPENID,
+                target_ids=[OFFICIAL_OPENID],
+                target_platform="qq_official",
+            )
+        )
+        screenshot_openid = "2BEEB3934D9528AC571554425261FCAB"
+        self.assertTrue(
+            page._worldbook_setup_member_id_valid(
+                screenshot_openid,
+                target_ids=[screenshot_openid],
+                target_platform="qq_official",
+            )
+        )
+        self.assertFalse(page._worldbook_member_id_valid("abc", allow_opaque=True))
+
+    def test_unknown_opaque_worldbook_identity_stays_rejected(self) -> None:
+        page = PrivateCompanionPageApi(_PagePlugin())
+
+        self.assertFalse(page._worldbook_member_id_valid(OFFICIAL_OPENID))
+        self.assertFalse(page._worldbook_known_opaque_member_id(OFFICIAL_OPENID))
+        self.assertFalse(
+            page._worldbook_setup_member_id_valid(
+                OFFICIAL_OPENID,
+                target_ids=[OFFICIAL_OPENID],
+                target_platform="aiocqhttp",
+            )
+        )
+        self.assertFalse(
+            page._worldbook_setup_member_id_valid(
+                OFFICIAL_OPENID,
+                target_ids=["another-user"],
+                target_platform="qq_official",
+            )
+        )
+
     def test_overview_reports_automatic_qq_official_adaptation(self) -> None:
         harness = _PlatformHarness(_FakePlatform(), target_platform="qq_official")
         harness.data["users"][OFFICIAL_OPENID] = {"umo": OFFICIAL_UMO}

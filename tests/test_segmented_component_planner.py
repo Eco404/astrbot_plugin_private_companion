@@ -102,6 +102,31 @@ class SegmentedComponentPlannerTests(unittest.TestCase):
             [[type(item).__name__ for item in chunk] for chunk in chunks],
         )
 
+    def test_reply_binding_drops_quote_when_voice_has_no_text_companion(self):
+        chunks, changed = bind_reply_components_to_first_text(
+            [[Reply(id="message-voice"), Record(file="voice.wav")]],
+            plain_type=Plain,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [["Record"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+
+    def test_component_plan_drops_quote_from_voice_only_result(self):
+        chunks, changed, _split_changed, full_text = self._plan(
+            [Reply(id="message-voice"), Record(file="voice.wav")],
+            voice="separate",
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual("", full_text)
+        self.assertEqual(
+            [["Record"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+
     def test_component_kind_and_strategy_aliases_are_version_tolerant(self):
         class Face:
             pass
@@ -162,6 +187,30 @@ class SegmentedQuoteBindingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 [type(component).__name__ for component in chunk]
                 for chunk in event._private_companion_tts_reply_remainder["chunks"]
             ],
+        )
+
+    async def test_voice_only_reply_drops_orphan_quote_component(self):
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        result = SimpleNamespace(
+            chain=[Reply(id="message-voice"), Record(file="voice.wav")],
+            is_llm_result=lambda: True,
+        )
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            @staticmethod
+            def get_result():
+                return result
+
+        await PrivateCompanionPlugin.attach_group_reply_quote(plugin, Event())
+
+        self.assertEqual(
+            ["Record"],
+            [type(component).__name__ for component in result.chain],
         )
 
 

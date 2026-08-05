@@ -111,6 +111,44 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             [item.chain[0].text for item in event.sent],
         )
 
+    async def test_voice_only_tts_removes_reply_left_without_visible_text(self):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_delivery_mode = "voice_only"
+        harness.enable_segmented_proactive_reply = False
+        harness.segmented_proactive_scope = "proactive_only"
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(
+            return_value=[Record(file="voice.wav")]
+        )
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(chain=list(chain))
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+            _private_companion_tts_request_applied = True
+
+            def __init__(self):
+                self.result = SimpleNamespace(
+                    chain=[Reply(id="trigger-message"), Plain("需要转成语音的正文")]
+                )
+
+            def get_result(self):
+                return self.result
+
+            def set_result(self, value):
+                self.result = value
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual(
+            ["Record"],
+            [type(component).__name__ for component in event.result.chain],
+        )
+        harness._maybe_convert_plain_reply_to_tts.assert_awaited_once_with(
+            "需要转成语音的正文",
+            event,
+        )
+
     def test_reaction_intent_keeps_complete_plain_text_in_one_chunk(self):
         harness = _TtsHarness()
         harness.enable_segmented_proactive_reply = True
@@ -574,10 +612,9 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         harness.tts_conversion_scope = "full"
         harness.tts_frequency_control_mode = "global"
         harness.tts_constraint_mode = "weak"
-        harness.auto_voice_enabled = True
+        harness.auto_voice_enabled = False
         harness._tts_auto_voice_last_at = {}
-        harness._auto_voice_trigger_reason = lambda _text, _event: (True, "auto")
-        harness._tts_trigger_probability_allows = lambda _event, reason="": True
+        harness._tts_trigger_probability_allows = lambda _event, reason="": False
         harness._process_tts_tags = AsyncMock(return_value=[Record(file="voice.wav")])
         event = SimpleNamespace(
             unified_msg_origin="test-session",
@@ -588,7 +625,33 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         result = await harness._maybe_convert_plain_reply_to_tts("我会念给你听。", event)
 
         self.assertTrue(any(isinstance(component, Record) for component in result))
-        harness._process_tts_tags.assert_awaited_once()
+        call = harness._process_tts_tags.await_args
+        self.assertEqual("<tts>我会念给你听。</tts>", call.args[0])
+
+    def test_retry_and_missing_tag_phrases_are_explicit_voice_requests(self):
+        harness = _TtsHarness()
+        messages = (
+            "语音标签还是漏了",
+            "语音没发成",
+            "补发一下语音",
+            "语音重新发一次",
+            "不要再漏语音了",
+            "语音别再漏了",
+            "今天是不是没给我发原版语音",
+            "给我发语音",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                signal, _matched, _raw = harness._event_tts_request_signal(
+                    SimpleNamespace(message_str=message)
+                )
+                self.assertEqual("positive", signal)
+
+        signal, _matched, _raw = harness._event_tts_request_signal(
+            SimpleNamespace(message_str="今天不要发语音")
+        )
+        self.assertEqual("negative", signal)
 
     def test_tts_component_metadata_survives_pydantic_components(self):
         harness = _TtsHarness()
@@ -806,6 +869,50 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("完整保留", fallback)
         self.assertIn("测试用户晚安", fallback)
 
+    def test_full_scope_preserves_canonical_foreign_tag_and_visible_translation(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_conversion_scope = "full"
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        source = "<tts>ちゃんと聞いてるよ。ゆっくり話してね。</tts>我有在好好听哦，你慢慢说。"
+
+        markup, fallback = harness._enforce_full_tts_scope_markup(source)
+
+        self.assertEqual(source, markup)
+        self.assertEqual("", fallback)
+
+    async def test_canonical_foreign_full_tag_does_not_retranslate_visible_transcript(self):
+        harness = _TtsHarness()
+        harness.tts_conversion_scope = "full"
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness._resolve_tts_synthesis_provider = lambda _event, provider: provider
+        harness._tts_provider_kind = lambda *_args, **_kwargs: "generic"
+        harness._tts_record_component = AsyncMock(return_value=Record(file="voice.wav"))
+        harness._convert_text_to_spoken_language = AsyncMock(return_value="不应调用")
+        spoken = "ちゃんと聞いてるよ。ゆっくり話してね。"
+        visible = "我有在好好听哦，你慢慢说。"
+        source = f"<tts>{spoken}</tts>{visible}"
+
+        markup, fallback = harness._enforce_full_tts_scope_markup(source)
+        components = await harness._process_tts_tags(
+            markup,
+            object(),
+            provider_settings={},
+            config={},
+            fallback_plain=fallback,
+        )
+
+        self.assertEqual(spoken, harness._tts_record_component.await_args.args[0])
+        harness._convert_text_to_spoken_language.assert_not_awaited()
+        self.assertEqual(
+            [visible],
+            [item.text for item in components if isinstance(item, Plain)],
+        )
+
     def test_full_scope_does_not_silently_truncate_long_reply(self):
         harness = _TtsHarness()
         harness.tts_generation_mode = "fast_tag"
@@ -872,6 +979,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前转换范围：全量转换", prompt)
         self.assertIn("唯一一对<pc_tts>", prompt)
         self.assertIn("ゆっくり話してね。</pc_tts>我有在好好听哦，你慢慢说", prompt)
+        self.assertIn("这段中文是显示译文，不是未朗读的额外正文", prompt)
         self.assertNotIn("一小段", prompt)
         self.assertNotIn("</pc_tts>这件事可以一点点拆开", prompt)
 
@@ -893,7 +1001,207 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("当前是全量转换", request.system_prompt)
         self.assertIn("是否将整条回复转成语音", request.system_prompt)
+        self.assertIn("不要把准备送入语音的日语或英语朗读稿直接写进普通正文", request.system_prompt)
+        self.assertIn("visible_text 保持用户看得懂的正文", request.system_prompt)
+        self.assertIn("不要预告或确认", request.system_prompt)
         self.assertNotIn("其中一小段", request.system_prompt)
+
+    async def test_postprocess_explicit_retry_guides_but_does_not_override_model_decision(self):
+        harness = _TtsHarness()
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        harness.tts_extra_prompt = ""
+        harness._legacy_nondefault_tts_prompt = lambda: ""
+        harness._get_tts_conversion_provider = AsyncMock(return_value=object())
+        harness._format_tts_persona_voice_context = AsyncMock(return_value="")
+        harness._tts_provider_text_chat = AsyncMock(
+            return_value=SimpleNamespace(
+                completion_text=(
+                    '{"use_tts": false, "reason": "误判为普通文字", '
+                    '"visible_text": "好き、好き、大好き", "voice_text": ""}'
+                )
+            )
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="test-session",
+            message_str="语音标签还是漏了",
+        )
+
+        converted = await harness._postprocess_text_to_tts_markup(
+            "好き、好き、大好き",
+            event,
+            provider_kind="generic",
+            full=True,
+        )
+
+        self.assertEqual("", converted)
+        prompt = harness._tts_provider_text_chat.await_args.args[1]
+        self.assertIn("规则线索为 positive", prompt)
+        self.assertIn("优先 use_tts=true", prompt)
+        self.assertIn("仍可 use_tts=false", prompt)
+        self.assertIn("不要预告或确认", prompt)
+
+    async def test_postprocess_missing_conversion_model_keeps_plain_reply(self):
+        harness = _TtsHarness()
+        harness._get_tts_conversion_provider = AsyncMock(return_value=None)
+        event = SimpleNamespace(
+            unified_msg_origin="test-session",
+            message_str="补发语音",
+        )
+
+        converted = await harness._postprocess_text_to_tts_markup(
+            "这次只说真正要说的内容。",
+            event,
+            provider_kind="generic",
+            full=True,
+        )
+
+        self.assertEqual("", converted)
+
+    async def test_postprocess_fallback_translates_unwrapped_foreign_plain_reply(self):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(return_value=[])
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="今天早点休息吧。")
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(chain=list(chain))
+
+        class Event:
+            unified_msg_origin = "test-session"
+            _private_companion_tts_request_applied = True
+
+            def __init__(self):
+                self.result = SimpleNamespace(chain=[Plain("今日は早く休んでね。")])
+
+            def get_result(self):
+                return self.result
+
+            def set_result(self, value):
+                self.result = value
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual("今天早点休息吧。", event.result.chain[0].text)
+        harness._translate_tts_spoken_to_chinese.assert_awaited_once()
+
+    async def test_postprocess_keeps_explicit_foreign_text_reply(self):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(return_value=[])
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="不应替换")
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(chain=list(chain))
+
+        class Event:
+            unified_msg_origin = "test-session"
+            _private_companion_tts_request_applied = True
+            _private_companion_tts_voice_language = "ja"
+            message_str = "请用日语文字回复我"
+
+            def __init__(self):
+                self.result = SimpleNamespace(chain=[Plain("今日は早く休んでね。")])
+
+            def get_result(self):
+                return self.result
+
+            def set_result(self, value):
+                self.result = value
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual("今日は早く休んでね。", event.result.chain[0].text)
+        harness._translate_tts_spoken_to_chinese.assert_not_awaited()
+
+    async def test_postprocess_voice_language_request_does_not_keep_foreign_plain_leak(self):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(return_value=[])
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="今天早点休息吧。")
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(chain=list(chain))
+
+        class Event:
+            unified_msg_origin = "test-session"
+            _private_companion_tts_request_applied = True
+            _private_companion_tts_voice_language = "ja"
+            message_str = "请用日语语音说"
+
+            def __init__(self):
+                self.result = SimpleNamespace(chain=[Plain("今日は早く休んでね。")])
+
+            def get_result(self):
+                return self.result
+
+            def set_result(self, value):
+                self.result = value
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual("今天早点休息吧。", event.result.chain[0].text)
+        harness._translate_tts_spoken_to_chinese.assert_awaited_once()
+
+    async def test_explicit_foreign_text_request_keeps_spoken_text_after_successful_tts(self):
+        harness = _TtsHarness()
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        spoken = "今日は早く休んでね。"
+        event = SimpleNamespace(
+            message_str="请用日语文字回复我",
+            _private_companion_tts_voice_language="ja",
+        )
+
+        output = await harness._finalize_tts_delivery_chain(
+            [Record(file="voice.wav"), Plain("今天早点休息吧。")],
+            event=event,
+            provider_kind="generic",
+            fallback_plain="今天早点休息吧。",
+            successful_spoken=[spoken],
+            suppress_visible=False,
+        )
+
+        self.assertEqual(["Record", "Plain"], [type(item).__name__ for item in output])
+        self.assertEqual(spoken, output[1].text)
+
+    async def test_postprocess_replaces_foreign_plain_component_returned_by_tts_fallback(self):
+        harness = _TtsHarness()
+        harness.enabled = True
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        harness._maybe_convert_plain_reply_to_tts = AsyncMock(
+            return_value=[Plain("今日は早く休んでね。")]
+        )
+        harness._translate_tts_spoken_to_chinese = AsyncMock(return_value="今天早点休息吧。")
+        harness._build_result_from_chain = lambda chain: SimpleNamespace(chain=list(chain))
+
+        class Event:
+            unified_msg_origin = "test-session"
+            _private_companion_tts_request_applied = True
+
+            def __init__(self):
+                self.result = SimpleNamespace(chain=[Plain("今日は早く休んでね。")])
+
+            def get_result(self):
+                return self.result
+
+            def set_result(self, value):
+                self.result = value
+
+        event = Event()
+        await harness.apply_tts_enhancement_before_send(event)
+
+        self.assertEqual("今天早点休息吧。", event.result.chain[0].text)
+        harness._translate_tts_spoken_to_chinese.assert_awaited_once()
 
     async def test_plain_conversion_full_scope_rejects_partial_model_markup(self):
         harness = _TtsHarness()
@@ -1004,6 +1312,17 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [["Record"], ["Reply", "At", "Plain"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+
+    def test_voice_only_chain_drops_reply_instead_of_sending_orphan_quote(self):
+        harness = _TtsHarness()
+        chunks = harness._split_tts_chain_for_ordered_send(
+            [Reply(id="quoted-message"), Record(file="voice.wav")]
+        )
+
+        self.assertEqual(
+            [["Record"]],
             [[type(item).__name__ for item in chunk] for chunk in chunks],
         )
 

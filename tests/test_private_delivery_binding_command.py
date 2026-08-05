@@ -6,6 +6,8 @@ import unittest
 
 from astrbot_plugin_private_companion.interaction_utils import InteractionUtilsMixin
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+from astrbot_plugin_private_companion.core_store import CoreStoreMixin
+from astrbot_plugin_private_companion.proactive import ProactiveMixin
 from astrbot_plugin_private_companion.unified_profile_service import (
     default_capabilities,
     private_companion_gate,
@@ -13,15 +15,15 @@ from astrbot_plugin_private_companion.unified_profile_service import (
 
 
 class _Event:
-    def __init__(self, text: str, *, private: bool = True) -> None:
+    def __init__(self, text: str, *, private: bool = True, sender_id: str = "openid-owner") -> None:
         self.message_str = text
         self.unified_msg_origin = "official:FriendMessage:openid-owner" if private else "official:GroupMessage:group-1"
         self.private = private
+        self.sender_id = sender_id
         self.stopped = False
 
-    @staticmethod
-    def get_sender_id() -> str:
-        return "openid-owner"
+    def get_sender_id(self) -> str:
+        return self.sender_id
 
     def is_private_chat(self) -> bool:
         return self.private
@@ -71,6 +73,8 @@ class _Harness(InteractionUtilsMixin):
     def _get_user(self, user_id: str) -> dict:
         return self.data["users"].setdefault(user_id, {})
 
+    _normalize_private_identity_id = staticmethod(CoreStoreMixin._normalize_private_identity_id)
+
     @staticmethod
     def _note_private_user_umo(user_id: str, user: dict, umo: str) -> None:
         user["last_inbound_umo"] = umo
@@ -97,6 +101,16 @@ class _Harness(InteractionUtilsMixin):
 
     async def _reply_with_optional_media(self, event, text: str, *args, **kwargs) -> None:
         self.replies.append(str(text))
+
+
+class _BindingHarness(ProactiveMixin):
+    @staticmethod
+    def _private_umo_session_id(umo: str) -> str:
+        return str(umo).rsplit(":FriendMessage:", 1)[-1] if ":FriendMessage:" in str(umo) else ""
+
+    @staticmethod
+    def _note_private_user_umo(_user_id: str, user: dict, umo: str) -> None:
+        user["last_inbound_umo"] = umo
 
 
 class PrivateDeliveryBindingCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -127,6 +141,53 @@ class PrivateDeliveryBindingCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], harness.calls)
         self.assertIn("私聊窗口", harness.replies[0])
         self.assertTrue(event.stopped)
+
+    async def test_binding_bootstrap_keeps_private_and_proactive_capabilities_closed(self) -> None:
+        harness = _Harness()
+        harness.data["users"]["openid-owner"]["unified_profile_capabilities"] = default_capabilities()
+
+        await self._run(harness, "陪伴 绑定主动消息")
+
+        self.assertEqual(["bind"], harness.calls)
+        capabilities = harness.data["users"]["openid-owner"]["unified_profile_capabilities"]
+        self.assertFalse(capabilities["private_companion_enabled"])
+        self.assertFalse(capabilities["proactive_private_enabled"])
+        self.assertNotIn("固定拒绝文本", harness.replies)
+
+    async def test_non_binding_command_stays_denied_during_bootstrap(self) -> None:
+        harness = _Harness()
+        harness.data["users"]["openid-owner"]["unified_profile_capabilities"] = default_capabilities()
+
+        event = await self._run(harness, "陪伴 状态")
+
+        self.assertEqual([], harness.calls)
+        self.assertEqual(["固定拒绝文本"], harness.replies)
+        self.assertTrue(event.stopped)
+
+    async def test_command_normalizes_full_umo_sender_id_before_loading_user(self) -> None:
+        harness = _Harness()
+        full_umo = "official:FriendMessage:openid-from-umo"
+        event = _Event("陪伴 绑定主动消息", sender_id=full_umo)
+        event.unified_msg_origin = full_umo
+
+        await PrivateCompanionPlugin.companion_command(harness, event)
+
+        self.assertIn("openid-from-umo", harness.data["users"])
+        self.assertNotIn(full_umo, harness.data["users"])
+
+    def test_binding_records_route_without_silently_enabling_target(self) -> None:
+        harness = object.__new__(_BindingHarness)
+        user = {"user_id": "openid-owner", "enabled": False}
+        umo = "official:FriendMessage:openid-owner"
+
+        changed, message = harness._bind_private_delivery_umo("openid-owner", user, umo)
+
+        self.assertTrue(changed)
+        self.assertFalse(user["enabled"])
+        self.assertNotIn("manual_enabled", user)
+        self.assertNotIn("target_user", user)
+        self.assertEqual(umo, user["bound_delivery_umo"])
+        self.assertIn("配置引导", message)
 
 
 if __name__ == "__main__":

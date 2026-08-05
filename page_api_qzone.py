@@ -152,14 +152,17 @@ class PrivateCompanionPageApiQzoneMixin:
                 final_own_only = bool(posts) and all(int(getattr(post, "uin", 0) or 0) == viewer_uin for post in posts)
                 logger.info(
                     "[PrivateCompanionPage] QQ 空间好友动态读取: source=%s page=%s token=%s "
-                    "h5_candidates=%s h5_parsed=%s legacy_candidates=%s legacy_parsed=%s final=%s own_only=%s",
+                    "h5_candidates=%s h5_parsed=%s h5_official_skipped=%s "
+                    "legacy_candidates=%s legacy_parsed=%s legacy_official_skipped=%s final=%s own_only=%s",
                     source,
                     page,
                     bool(qzonetoken),
                     h5_diagnostics.get("candidate_count", 0),
                     h5_diagnostics.get("parsed_count", 0),
+                    h5_diagnostics.get("skipped_official_promotion", 0),
                     legacy_diagnostics.get("candidate_count", 0),
                     legacy_diagnostics.get("parsed_count", 0),
+                    legacy_diagnostics.get("skipped_official_promotion", 0),
                     len(posts),
                     final_own_only,
                 )

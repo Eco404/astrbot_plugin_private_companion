@@ -14,6 +14,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _safe_float, _safe_int, _single_line
+from .qzone_recent_parser import is_official_qzone_promotion
 
 __all__ = ("QzoneFeedMixin",)
 
@@ -195,6 +196,8 @@ class QzoneFeedMixin:
         posts: list[Any] = []
         for msg in msglist:
             if not isinstance(msg, dict):
+                continue
+            if is_official_qzone_promotion(msg.get("name") or msg.get("nickname") or msg.get("nick")):
                 continue
             images: list[str] = []
             for image in msg.get("pic", []) if isinstance(msg.get("pic"), list) else []:

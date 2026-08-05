@@ -6060,6 +6060,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     if delay > 0:
                         await asyncio.sleep(delay)
                     new_activity = self._scope_has_new_inbound_activity(scope, started_at, ignore_self=True)
+                    if new_activity and source == "reaction_expression":
+                        # A reaction expression is one already-started reply:
+                        # keep its text bubbles together before the image hook
+                        # runs, even if an adapter reports a mid-delivery event.
+                        logger.debug(
+                            "[PrivateCompanion] 表情正文补发期间检测到新活动，继续发送剩余组件: scope=%s sent=%s/%s",
+                            scope or "unknown",
+                            max(0, sent_index - 1),
+                            total,
+                        )
+                        new_activity = False
                     if new_activity and self._segmented_should_finish_after_new_activity(prev, preview):
                         logger.info(
                             "[PrivateCompanion] 会话已有新消息，但上一段未收口，允许补发一段分段收尾: source=%s scope=%s prev=%s next=%s",
@@ -12460,8 +12471,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             is_private = bool(event.is_private_chat())
         except Exception:
             is_private = False
+        raw_command_text = str(getattr(event, "message_str", "") or "")
+        bootstrap_args = raw_command_text.replace("\u3000", " ").split(maxsplit=2)
+        bootstrap_action = bootstrap_args[1].strip() if len(bootstrap_args) >= 2 else ""
+        bootstrap_value = bootstrap_args[2].strip() if len(bootstrap_args) >= 3 else ""
+        bootstrap_normalizer = getattr(self, "_normalize_companion_command_action", None)
+        if callable(bootstrap_normalizer):
+            bootstrap_action, _ = bootstrap_normalizer(
+                bootstrap_action,
+                bootstrap_value,
+            )
+        private_delivery_bind_actions = {"绑定主动消息", "绑定主动会话", "绑定会话"}
+        is_private_delivery_bootstrap = bootstrap_action in private_delivery_bind_actions
         if is_private:
-            user_id = str(event.get_sender_id())
+            raw_user_id = str(event.get_sender_id() or "").strip()
+            identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
+            user_id = identity_normalizer(raw_user_id) if callable(identity_normalizer) else raw_user_id
+            user_id = user_id or raw_user_id
             sender_name_reader = getattr(self, "_sender_display_name", None)
             if callable(sender_name_reader):
                 sender_display_name = _single_line(sender_name_reader(event), 40)
@@ -12478,14 +12504,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 if callable(migrator):
                     migrator(user_id, private_user)
                 private_gate = self._req036_private_gate_for_user(private_user)
-                if private_gate.get("allowed"):
+                if private_gate.get("allowed") or is_private_delivery_bootstrap:
                     self._req036_attach_unified_profile_context(
                         event,
                         user=private_user if isinstance(private_user, dict) else None,
                         source="private_command",
                     )
                     self._schedule_data_save()
-            if not private_gate.get("allowed"):
+            if not private_gate.get("allowed") and not is_private_delivery_bootstrap:
                 await self._req036_reject_unauthorized_private_event(event, private_gate)
                 return
         self._qzone_note_event_bot(event)
@@ -12524,7 +12550,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *qweather_location_view_actions,
             *qweather_location_unbind_actions,
         }
-        private_delivery_bind_actions = {"绑定主动消息", "绑定主动会话", "绑定会话"}
         private_delivery_view_actions = {"查看主动路由", "查看主动绑定", "主动路由", "主动绑定"}
         private_delivery_unbind_actions = {"解绑主动消息", "解绑主动会话", "解绑会话"}
         private_delivery_actions = {
@@ -12650,7 +12675,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             event.stop_event()
             return
 
-        user_id = str(event.get_sender_id())
+        raw_user_id = str(event.get_sender_id() or "").strip()
+        identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
+        user_id = identity_normalizer(raw_user_id) if callable(identity_normalizer) else raw_user_id
+        user_id = user_id or raw_user_id
         async with self._data_lock:
             user = self._get_user(user_id)
             self._note_private_user_umo(user_id, user, event.unified_msg_origin)

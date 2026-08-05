@@ -120,6 +120,9 @@ PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 IMAGE_CACHE_THUMBNAIL_MAX_EDGE = 160
 IMAGE_CACHE_THUMBNAIL_QUALITY = 78
 PHOTO_REFERENCE_PREVIEW_MAX_BYTES = 20 * 1024 * 1024
+# The guided editor must never leave a WebUI request waiting forever when the
+# configured main model or its upstream connection stops responding.
+PHOTO_REFERENCE_METADATA_REVIEW_TIMEOUT_SECONDS = 60.0
 # Reference assets are an independent store for member/role/knowledge images. Keep
 # the limits generous enough for a small visual knowledge base while preventing
 # an accidental page upload from exhausting the plugin data directory.
@@ -444,6 +447,64 @@ class PrivateCompanionPageApi(
             )
             return ()
         return tuple(str(name) for name in presets.keys()) if isinstance(presets, dict) else ()
+
+    def _photo_reference_metadata_review_timeout(self, provider_id: str) -> float:
+        """Resolve a bounded timeout for the guided metadata approval call."""
+        resolver = getattr(self.plugin, "_model_timeout_seconds_for_call", None)
+        if callable(resolver):
+            try:
+                configured = resolver(
+                    task="photo_reference_metadata_review",
+                    provider_id=provider_id,
+                    timeout_key="LLM_PROVIDER_ID",
+                )
+                if configured is not None:
+                    value = float(configured)
+                    if math.isfinite(value) and value >= 5.0:
+                        return min(600.0, value)
+            except Exception:
+                pass
+        return PHOTO_REFERENCE_METADATA_REVIEW_TIMEOUT_SECONDS
+
+    async def _photo_reference_metadata_review_call(
+        self,
+        caller: Any,
+        user_prompt: str,
+        *,
+        system_prompt: str,
+        provider_id: str,
+        timeout: float,
+    ) -> Any:
+        """Run the approval call without waiting for a non-cooperative cancellation."""
+        task = self._create_page_background_task(
+            caller(
+                user_prompt,
+                max_tokens=1400,
+                provider_id=provider_id,
+                task="photo_reference_metadata_review",
+                system_prompt=system_prompt,
+                timeout_key="LLM_PROVIDER_ID",
+                strict_provider=True,
+            ),
+            label="photo_reference_metadata_review",
+        )
+        if task is None:
+            raise RuntimeError("参考图模型审批任务未启动")
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if task in done:
+            return task.result()
+        task.cancel()
+
+        def consume_late_failure(completed: asyncio.Task[Any]) -> None:
+            if completed.cancelled():
+                return
+            try:
+                completed.exception()
+            except Exception:
+                pass
+
+        task.add_done_callback(consume_late_failure)
+        raise asyncio.TimeoutError
 
     def _create_page_background_task(self, operation: Any, *, label: str) -> asyncio.Task | None:
         creator = getattr(self.plugin, "_create_lifecycle_background_task", None)
@@ -2746,16 +2807,17 @@ class PrivateCompanionPageApi(
                 local_suggestion,
                 available_presets=presets,
             )
+            review_timeout = self._photo_reference_metadata_review_timeout(provider_id)
             try:
                 # 维护约束：这里审批的 LLM 必须是 WebUI“模型配置”中的主模型
                 # （plugin.llm_provider_id）。不要改用 _task_provider，也不要允许高峰替换或备用模型接管。
-                raw = await caller(
+                # 审批任务标识：task="photo_reference_metadata_review"；固定主模型：strict_provider=True。
+                raw = await self._photo_reference_metadata_review_call(
+                    caller,
                     user_prompt,
-                    max_tokens=1400,
-                    provider_id=provider_id,
-                    task="photo_reference_metadata_review",
                     system_prompt=system_prompt,
-                    strict_provider=True,
+                    provider_id=provider_id,
+                    timeout=review_timeout,
                 )
                 if raw is None:
                     raise ValueError("模型调用未返回结果")
@@ -2791,6 +2853,15 @@ class PrivateCompanionPageApi(
                         for item in raw_conflicts[:12]
                         if self._single_line(item, 240)
                     ]
+            except asyncio.TimeoutError:
+                review_warning = (
+                    f"模型审批超时（超过 {review_timeout:.0f} 秒未返回），已使用本地证据合并。"
+                )
+                logger.warning(
+                    "[PrivateCompanionPage] 参考图问答模型审批超时: provider=%s timeout=%.1fs",
+                    self._single_line(provider_id, 160),
+                    review_timeout,
+                )
             except Exception as exc:
                 review_warning = f"模型审批失败，已使用本地证据合并：{self._single_line(exc, 180)}"
                 logger.warning("[PrivateCompanionPage] 参考图问答模型审批失败: %s", exc, exc_info=True)
@@ -3053,8 +3124,11 @@ class PrivateCompanionPageApi(
 
     def _reference_asset_owner_error(self, scope: str, owner_id: str) -> str:
         if scope == "relation_user":
-            if not self._worldbook_member_id_valid(owner_id):
-                return "关系网参考图归属必须是有效 QQ 号或受支持的外部身份键"
+            if not self._worldbook_member_id_valid(
+                owner_id,
+                allow_opaque=self._worldbook_known_opaque_member_id(owner_id),
+            ):
+                return "关系网参考图归属必须是有效 QQ 号、平台身份 ID 或受支持的外部身份键"
             return ""
         if scope == "relation_role":
             if not normalize_reference_owner_id(scope, owner_id):
@@ -9871,8 +9945,11 @@ class PrivateCompanionPageApi(
                     self.plugin._save_data_sync()
                     data = deepcopy(self.plugin.data)
                     return self._ok({"changed": changed, "message": "已删除关系节点", "worldbook": self._worldbook_summary(data)})
-                if not self._worldbook_member_id_valid(user_id):
-                    return self._error("关系节点必须使用有效 QQ 号或 B 站外部身份键")
+                if not self._worldbook_member_id_valid(
+                    user_id,
+                    allow_opaque=self._worldbook_known_opaque_member_id(user_id),
+                ):
+                    return self._error("关系节点必须使用有效 QQ 号、平台身份 ID 或 B 站外部身份键")
                 linked_qq_user_id = self._single_line(
                     payload.get("linked_qq_user_id") or payload.get("bound_qq_user_id") or payload.get("qq_user_id"),
                     40,
@@ -11166,11 +11243,12 @@ class PrivateCompanionPageApi(
         group_interjection = self._single_line(draft.get("groupInterjection"), 40) or "observe"
         group_wake_enhancement = proactive_group and bool_value("groupWakeEnhancement", False)
         worldbook_enabled = bool_value("worldbookEnabled", True)
+        target_platform = text_value("targetPlatform", 80) or "aiocqhttp"
 
         settings: dict[str, Any] = {
             "provider_config_mode": "quick",
             "target_user_ids": target_ids,
-            "target_platform": text_value("targetPlatform", 80) or "aiocqhttp",
+            "target_platform": target_platform,
             "quiet_hours": text_value("quietHours", 80) or "23:00-08:30",
             "require_private_opt_in": bool_value("requirePrivateOptIn", True),
             "proactive_intensity_preset": self._single_line(draft.get("privateIntensity"), 40) or "off",
@@ -11245,8 +11323,12 @@ class PrivateCompanionPageApi(
         worldbook_user_id = self._normalize_worldbook_member_id(text_value("worldbookUserId", 80))
         worldbook_name = self._single_line(draft.get("worldbookNickname"), 80)
         worldbook_should_save = bool(worldbook_enabled and worldbook_user_id and (worldbook_name or text_value("worldbookContent", 2000)))
-        if worldbook_should_save and not self._worldbook_member_id_valid(worldbook_user_id):
-            return self._error("关系网词条必须使用有效 QQ 号或外部身份键")
+        if worldbook_should_save and not self._worldbook_setup_member_id_valid(
+            worldbook_user_id,
+            target_ids=target_ids,
+            target_platform=target_platform,
+        ):
+            return self._error("关系网词条必须使用有效 QQ 号、平台身份 ID 或外部身份键")
         worldbook_aliases = [
             self._single_line(item, 40)
             for item in re.split(r"[\n,，、;；]+", text_value("worldbookAliases", 1200))
@@ -21397,8 +21479,7 @@ class PrivateCompanionPageApi(
             return text
         return re.sub(r"[^A-Za-z0-9_:-]+", "_", text)[:80]
 
-    @staticmethod
-    def _worldbook_member_id_valid(user_id: str) -> bool:
+    def _worldbook_member_id_valid(self, user_id: str, *, allow_opaque: bool = False) -> bool:
         if user_id.isdigit():
             return len(user_id) >= 5
         lowered = user_id.lower()
@@ -21406,7 +21487,59 @@ class PrivateCompanionPageApi(
             return bool(re.fullmatch(r"bili:\d{2,}", lowered))
         if lowered.startswith("bili_live_"):
             return bool(re.fullmatch(r"bili_live_[A-Za-z0-9_-]{6,64}", user_id))
+        # QQ 官方等平台使用稳定但不可枚举的 openid/平台用户 ID。只在
+        # 调用方已确认其来自受支持平台时放行，避免把任意文本当成节点键。
+        return bool(allow_opaque and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{4,79}", user_id))
+
+    def _worldbook_known_opaque_member_id(self, user_id: str) -> bool:
+        """Return whether an opaque node key is already tied to QQ Official."""
+        candidate = self._single_line(user_id, 80)
+        if not candidate:
+            return False
+        users = self.plugin.data.get("users") if isinstance(getattr(self.plugin, "data", None), dict) else {}
+        if isinstance(users, dict):
+            user = users.get(candidate)
+            if isinstance(user, dict):
+                umo = self._single_line(user.get("umo"), 240)
+                profile_getter = getattr(self.plugin, "_platform_profile", None)
+                if callable(profile_getter):
+                    try:
+                        profile = profile_getter(umo=umo)
+                    except Exception:
+                        profile = {}
+                    if isinstance(profile, dict) and profile.get("kind") == "qq_official":
+                        return True
+        profiles = self.plugin.data.get("worldbook_member_profiles") if isinstance(getattr(self.plugin, "data", None), dict) else {}
+        if isinstance(profiles, dict):
+            profile = profiles.get(candidate)
+            if isinstance(profile, dict) and str(profile.get("identity_type") or "").lower() == "external":
+                return True
         return False
+
+    def _worldbook_setup_member_id_valid(
+        self,
+        user_id: str,
+        *,
+        target_ids: list[str],
+        target_platform: str,
+    ) -> bool:
+        platform_getter = getattr(self.plugin, "_platform_profile", None)
+        platform_profile = {}
+        if callable(platform_getter):
+            try:
+                platform_profile = platform_getter(kind=target_platform)
+            except Exception:
+                platform_profile = {}
+        allow_opaque = bool(
+            user_id
+            and user_id in target_ids
+            and isinstance(platform_profile, dict)
+            and platform_profile.get("kind") == "qq_official"
+        )
+        return self._worldbook_member_id_valid(
+            user_id,
+            allow_opaque=allow_opaque or self._worldbook_known_opaque_member_id(user_id),
+        )
 
     def _bind_worldbook_external_member_locked(
         self,

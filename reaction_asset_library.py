@@ -901,7 +901,15 @@ class ReactionAssetLibrary:
             tokens.extend(chunk[index : index + 2] for index in range(len(chunk) - 1))
         return list(dict.fromkeys(tokens))[:80]
 
-    def find(self, query: Any, *, context: Any = "", scope: str = "private") -> dict[str, Any] | None:
+    def find(
+        self,
+        query: Any,
+        *,
+        context: Any = "",
+        scope: str = "private",
+        selection_preferences: Any = None,
+        selection_signature: Any = "",
+    ) -> dict[str, Any] | None:
         query_text = _single_line(query, 500)
         context_text = _single_line(context, 1000)
         scope_text = _single_line(scope, 20).casefold() or "private"
@@ -930,9 +938,44 @@ class ReactionAssetLibrary:
                 flags=re.IGNORECASE,
             )[0]
             candidate_queries = _query_list(candidate_text, limit=8)
+        preference_rows: list[dict[str, Any]] = []
+        if isinstance(selection_preferences, dict):
+            raw_rows = selection_preferences.get("assets")
+            if isinstance(raw_rows, list):
+                preference_rows = [row for row in raw_rows if isinstance(row, dict)]
+            elif isinstance(raw_rows, dict):
+                preference_rows = [
+                    {"key": key, **value}
+                    for key, value in raw_rows.items()
+                    if isinstance(value, dict)
+                ]
+        preference_by_key = {
+            _single_line(row.get("key"), 180): row
+            for row in preference_rows
+            if _single_line(row.get("key"), 180)
+        }
+
+        def preference_bias(item: dict[str, Any]) -> float:
+            if not preference_by_key:
+                return 0.0
+            keys = {
+                _single_line(item.get("id"), 180),
+                f"pc-local:{_single_line(item.get('id'), 160)}",
+            }
+            matched = next(
+                (preference_by_key[key] for key in keys if key in preference_by_key),
+                None,
+            )
+            if not isinstance(matched, dict):
+                return 0.0
+            total_score = _safe_float(matched.get("score"), 0.0, -20.0, 20.0)
+            intent_score = _safe_float(matched.get("intent_score"), 0.0, -8.0, 8.0)
+            # A same-intent preference has more weight, but never enough to
+            # rescue a weak lexical match or overturn a clear topic mismatch.
+            return max(-1.2, min(1.2, total_score * 0.06 + intent_score * 0.16))
         with self._lock:
             candidates = [self._normalize_item(raw) for raw in self._load()["items"]]
-        ranked: list[tuple[float, float, dict[str, Any], Path, list[str]]] = []
+        ranked: list[tuple[float, float, dict[str, Any], Path, list[str], float]] = []
         now = time.time()
         for item in candidates:
             path = self._path_for(item)
@@ -986,13 +1029,15 @@ class ReactionAssetLibrary:
                     diversity_penalty += 0.18 * (
                         1.0 - (age_seconds - 6 * 3600) / (18 * 3600)
                     )
+            learned_bias = preference_bias(item)
             ranked.append(
                 (
-                    relevance_score - diversity_penalty,
+                    relevance_score - diversity_penalty + learned_bias,
                     relevance_score,
                     item,
                     path,
                     matched_phrases,
+                    learned_bias,
                 )
             )
         if not ranked:
@@ -1005,7 +1050,7 @@ class ReactionAssetLibrary:
         if not eligible:
             return None
         eligible.sort(key=lambda row: (row[0], row[2]["updated_at"]), reverse=True)
-        _selection_score, score, item, path, matched_phrases = eligible[0]
+        _selection_score, score, item, path, matched_phrases, learned_bias = eligible[0]
         # A weak lexical match is not enough to force an image into the conversation.
         if query_tokens and score < 0.28:
             return None
@@ -1027,6 +1072,7 @@ class ReactionAssetLibrary:
                 else "本插件素材库按标签、情绪和沟通用途匹配"
             ),
             "confidence": round(confidence, 3),
+            "preference_bias": round(learned_bias, 3),
             "provider": "private_companion_library",
         }
 

@@ -24,6 +24,10 @@ REACTION_EXPRESSION_STATE_TEMPLATE: dict[str, Any] = {
         "last_feedback_at": 0.0,
     },
     "feedback_events": [],
+    # Per-asset feedback is intentionally small and bounded by the recorder.
+    # It lets matching prefer a user's known choices without overriding the
+    # semantic relevance of the current request.
+    "asset_preferences": {},
     "feedback_target": {},
     "feedback_targets": {},
     "reservation": {},
@@ -117,6 +121,66 @@ def reaction_expression_effective_probability(
     )
     factor = max(0.35, min(1.35, 1.0 + score * 0.06))
     return max(0.0, min(1.0, base * factor))
+
+
+def reaction_expression_selection_preferences(
+    state: dict[str, Any],
+    *,
+    intent_signature: Any = "",
+    limit: int = 24,
+) -> dict[str, Any]:
+    """Return compact learned asset affinity data for the current lookup.
+
+    The matcher receives only a bounded snapshot. This keeps persisted user
+    state from becoming an unbounded lookup payload while retaining the most
+    useful positive/negative choices.
+    """
+    if not isinstance(state, dict):
+        return {}
+    raw = state.get("asset_preferences")
+    if not isinstance(raw, dict):
+        return {}
+    signature = _single_line(intent_signature, 40)
+    rows: list[dict[str, Any]] = []
+    for raw_key, raw_item in raw.items():
+        if not isinstance(raw_item, dict):
+            continue
+        key = _single_line(raw_key, 180)
+        if not key:
+            continue
+        score = _safe_int(raw_item.get("score"), 0, -20, 20)
+        positive = _safe_int(raw_item.get("positive_count"), 0, 0, 1000)
+        negative = _safe_int(raw_item.get("negative_count"), 0, 0, 1000)
+        intent_scores = raw_item.get("intent_scores")
+        selected_intent_score = 0
+        if signature and isinstance(intent_scores, dict):
+            selected_intent_score = _safe_int(intent_scores.get(signature), 0, -8, 8)
+        if not score and not selected_intent_score and not positive and not negative:
+            continue
+        rows.append(
+            {
+                "key": key,
+                "score": score,
+                "positive_count": positive,
+                "negative_count": negative,
+                "intent_score": selected_intent_score,
+            }
+        )
+    if not rows:
+        return {}
+    rows.sort(
+        key=lambda item: (
+            abs(_safe_int(item.get("score"), 0, -20, 20))
+            + abs(_safe_int(item.get("intent_score"), 0, -8, 8)) * 2,
+            _safe_int(item.get("positive_count"), 0, 0),
+            _safe_int(item.get("negative_count"), 0, 0),
+        ),
+        reverse=True,
+    )
+    return {
+        "intent_signature": signature,
+        "assets": rows[: max(1, min(_safe_int(limit, 24, 1, 64), 64))],
+    }
 
 
 def _candidate_query_list(value: Any, *, limit: int) -> list[str]:
@@ -797,6 +861,58 @@ def record_reaction_expression_feedback(
     count_key = "positive_count" if normalized_signal == "positive" else "negative_count"
     preference[count_key] = _safe_int(preference.get(count_key), 0, 0) + 1
     preference["last_feedback_at"] = float(now)
+
+    asset_key = _single_line(target.get("image_id") or target.get("image_key"), 180)
+    target_signature = _single_line(target.get("intent_signature"), 40)
+    asset_preferences = state.get("asset_preferences")
+    if not isinstance(asset_preferences, dict):
+        asset_preferences = {}
+        state["asset_preferences"] = asset_preferences
+    if asset_key:
+        asset_preference = asset_preferences.get(asset_key)
+        if not isinstance(asset_preference, dict):
+            asset_preference = {}
+            asset_preferences[asset_key] = asset_preference
+        asset_preference["score"] = max(
+            -20,
+            min(20, _safe_int(asset_preference.get("score"), 0, -20, 20) + delta),
+        )
+        asset_preference[count_key] = _safe_int(
+            asset_preference.get(count_key), 0, 0
+        ) + 1
+        asset_preference["last_feedback_at"] = float(now)
+        intent_scores = asset_preference.get("intent_scores")
+        if not isinstance(intent_scores, dict):
+            intent_scores = {}
+            asset_preference["intent_scores"] = intent_scores
+        if target_signature:
+            intent_scores[target_signature] = max(
+                -8,
+                min(8, _safe_int(intent_scores.get(target_signature), 0, -8, 8) + delta),
+            )
+            if len(intent_scores) > 24:
+                recent_signatures = sorted(
+                    intent_scores,
+                    key=lambda value: abs(_safe_int(intent_scores.get(value), 0, -8, 8)),
+                    reverse=True,
+                )[:24]
+                asset_preference["intent_scores"] = {
+                    value: intent_scores[value] for value in recent_signatures
+                }
+        if len(asset_preferences) > 64:
+            keep_keys = sorted(
+                asset_preferences,
+                key=lambda value: _safe_float(
+                    asset_preferences.get(value, {}).get("last_feedback_at")
+                    if isinstance(asset_preferences.get(value), dict)
+                    else 0,
+                    0.0,
+                ),
+                reverse=True,
+            )[:64]
+            state["asset_preferences"] = {
+                value: asset_preferences[value] for value in keep_keys
+            }
 
     events = state.get("feedback_events")
     if not isinstance(events, list):

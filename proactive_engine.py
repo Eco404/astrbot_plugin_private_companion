@@ -443,13 +443,38 @@ class ProactiveEngineMixin:
             created = _safe_float(item.get("created_ts"), 0)
             scheduled = _safe_float(item.get("scheduled_ts"), 0)
             status = str(item.get("status") or "")
-            ttl = 36 * 3600 if status in {"accepted", "sent"} else 18 * 3600
+            short_lived = self._proactive_candidate_is_short_lived(item)
+            ttl = (
+                6 * 3600
+                if short_lived and status in {"accepted", "sent"}
+                else 3 * 3600
+                if short_lived
+                else 36 * 3600
+                if status in {"accepted", "sent"}
+                else 18 * 3600
+            )
+            expire_at = _safe_float(item.get("expire_at"), 0)
+            if short_lived and expire_at > 0 and now > expire_at + 2 * 3600:
+                continue
             anchor = max(created, scheduled)
             if anchor > 0 and now - anchor <= ttl:
                 kept.append(item)
         kept, _ = self._apply_per_user_pending_candidate_cap(kept)
         self.data["proactive_candidate_pool"] = self._trim_proactive_candidate_total(kept, limit=600)
         return self.data["proactive_candidate_pool"]
+
+    @staticmethod
+    def _proactive_candidate_is_short_lived(item: dict[str, Any]) -> bool:
+        """Weather and environment transitions must not survive into another day."""
+        if not isinstance(item, dict):
+            return False
+        values = {
+            _single_line(item.get("source"), 40).strip().lower(),
+            _single_line(item.get("reason"), 40).strip().lower(),
+            _single_line(item.get("planned_proactive_source"), 40).strip().lower(),
+            _single_line(item.get("planned_proactive_reason"), 40).strip().lower(),
+        }
+        return bool(values & {"weather_alert", "environment_change"})
 
     def _proactive_impulse_pool(self, user: dict[str, Any]) -> list[dict[str, Any]]:
         raw = user.get("proactive_impulses")
@@ -2914,7 +2939,16 @@ class ProactiveEngineMixin:
                 )
                 if not same_origin and not self._topic_signature_similar(signature, str(existing.get("signature") or "")):
                     continue
-                if now - _safe_float(existing.get("last_seen_ts") or existing.get("created_ts"), 0) > 18 * 3600:
+                existing_short_lived = self._proactive_candidate_is_short_lived(existing)
+                incoming_short_lived = reason in {"weather_alert", "environment_change"} or source in {
+                    "weather_alert",
+                    "environment_change",
+                }
+                merge_horizon = 2 * 3600 if existing_short_lived or incoming_short_lived else 18 * 3600
+                if now - _safe_float(existing.get("last_seen_ts") or existing.get("created_ts"), 0) > merge_horizon:
+                    continue
+                existing_expire_at = _safe_float(existing.get("expire_at"), 0)
+                if (existing_short_lived or incoming_short_lived) and existing_expire_at > 0 and now > existing_expire_at + 2 * 3600:
                     continue
                 repeat_limit = self._candidate_repeat_count_limit(status)
                 previous_repeat = _safe_int(existing.get("repeat_count"), 1, 1)

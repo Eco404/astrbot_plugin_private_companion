@@ -635,13 +635,27 @@ class EventDispatchMixin:
 
     def _note_inbound_activity_for_scope(self, event: AstrMessageEvent) -> None:
         raw = self._event_raw_payload(event)
-        if raw.get("post_type") == "notice":
+        post_type = str(raw.get("post_type") or "").strip().lower()
+        # ``message_sent`` is an outbound delivery acknowledgement on several
+        # adapters. It must not advance the inbound activity watermark while
+        # delayed reply segments are waiting to be delivered.
+        if post_type in {"notice", "message_sent", "outbound", "send"}:
             return
+        message_obj = getattr(event, "message_obj", None)
+        for owner in (event, message_obj):
+            if owner is None:
+                continue
+            for attr in ("is_self", "from_self", "is_outbound", "outbound", "is_sent"):
+                marker = getattr(owner, attr, None)
+                if isinstance(marker, bool) and marker:
+                    return
         scope = self._event_scope_key(event)
         if not scope or scope == "unknown":
             return
         sender_id = self._event_sender_id(event)
         self_id = self._event_self_id(event)
+        if sender_id and self_id and sender_id == self_id:
+            return
         noted_at = _now_ts()
         try:
             setattr(event, "_private_companion_inbound_ts", noted_at)

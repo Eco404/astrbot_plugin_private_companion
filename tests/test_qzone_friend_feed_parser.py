@@ -10,16 +10,24 @@ from astrbot_plugin_private_companion.qzone_recent_parser import (
     parse_qzone_h5_index_html,
     parse_recent_feeds,
 )
+from astrbot_plugin_private_companion.qzone_feed import QzoneFeedMixin
 
 
-def _legacy_feed(*, uin: int, key: str, text: str, appid: str = "311") -> dict:
+def _legacy_feed(
+    *,
+    uin: int,
+    key: str,
+    text: str,
+    appid: str = "311",
+    nickname: str | None = None,
+) -> dict:
     return {
         "uin": uin,
         "key": key,
         "appid": appid,
         "typeid": "0",
         "abstime": 1784772000,
-        "nickname": f"用户{uin}",
+        "nickname": nickname or f"用户{uin}",
         "html": (
             f'<li data-uin="{uin}" data-key="{key}">'
             f'<div class="f-info">{text}</div>'
@@ -30,7 +38,14 @@ def _legacy_feed(*, uin: int, key: str, text: str, appid: str = "311") -> dict:
     }
 
 
-def _h5_feed(*, uin: int, cellid: str, text: str, appid: int = 311) -> dict:
+def _h5_feed(
+    *,
+    uin: int,
+    cellid: str,
+    text: str,
+    appid: int = 311,
+    nickname: str | None = None,
+) -> dict:
     return {
         "comm": {
             "time": 1784772001,
@@ -40,7 +55,7 @@ def _h5_feed(*, uin: int, cellid: str, text: str, appid: int = 311) -> dict:
             "orglikekey": f"https://user.qzone.qq.com/{uin}/mood/{cellid}",
             "ugcrightkey": cellid,
         },
-        "userinfo": {"uin": uin, "nickname": f"好友{uin}"},
+        "userinfo": {"uin": uin, "nickname": nickname or f"好友{uin}"},
         "id": {"cellid": cellid},
         "summary": {"summary": text, "hasmore": False},
         "pic": {
@@ -58,6 +73,16 @@ def _h5_feed(*, uin: int, cellid: str, text: str, appid: int = 311) -> dict:
 
 
 class QzoneFriendFeedParserTests(unittest.TestCase):
+    def test_legacy_msglist_filters_official_qzone_promotion(self) -> None:
+        posts = QzoneFeedMixin()._qzone_parse_feeds(
+            [
+                {"uin": 10016, "tid": "official", "name": "官方 Qzone", "content": "推广"},
+                {"uin": 10017, "tid": "friend", "name": "普通好友", "content": "动态"},
+            ]
+        )
+
+        self.assertEqual([10017], [post.uin for post in posts])
+
     def test_legacy_data_data_list_is_kept(self) -> None:
         payload = {"data": {"data": [_legacy_feed(uin=10001, key="legacy-1", text="旧接口好友动态")]}}
 
@@ -105,6 +130,33 @@ class QzoneFriendFeedParserTests(unittest.TestCase):
         self.assertEqual(1, len(posts))
         self.assertEqual("202", posts[0].appid)
         self.assertEqual("其他可展示动态", posts[0].text)
+
+    def test_official_qzone_promotion_is_filtered_with_diagnostics(self) -> None:
+        payload = {
+            "vFeeds": [
+                _h5_feed(uin=10010, cellid="official-ad", text="游戏推广", nickname="官方 QZONE"),
+                _h5_feed(uin=10011, cellid="friend", text="好友动态", nickname="普通好友"),
+            ]
+        }
+        diagnostics: dict = {}
+
+        posts = parse_recent_feeds(payload, diagnostics)
+
+        self.assertEqual([10011], [post.uin for post in posts])
+        self.assertEqual(1, diagnostics["skipped_official_promotion"])
+        self.assertEqual(1, diagnostics["parsed_count"])
+
+    def test_similar_nickname_is_not_filtered(self) -> None:
+        payload = {
+            "vFeeds": [
+                _h5_feed(uin=10012, cellid="similar-a", text="普通动态", nickname="官方Qzone助手"),
+                _h5_feed(uin=10013, cellid="similar-b", text="普通动态", nickname="QQ空间官方"),
+            ]
+        }
+
+        posts = parse_recent_feeds(payload)
+
+        self.assertEqual([10012, 10013], [post.uin for post in posts])
 
     def test_mixed_self_and_friends_does_not_collapse_to_self(self) -> None:
         payload = {
@@ -205,6 +257,23 @@ class _QzonePageHarness(PrivateCompanionPageApiQzoneMixin):
 
 
 class QzoneFriendFeedPageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_friend_feed_excludes_official_qzone_promotion(self) -> None:
+        plugin = _QzonePagePlugin(
+            {
+                "vFeeds": [
+                    _h5_feed(uin=10014, cellid="official-ad", text="游戏推广", nickname="官方Qzone"),
+                    _h5_feed(uin=10015, cellid="friend", text="好友动态", nickname="普通好友"),
+                ]
+            }
+        )
+        harness = _QzonePageHarness(plugin)
+        app = Quart(__name__)
+
+        async with app.test_request_context("/qzone/feed?scope=friends&page=1"):
+            result = await harness.get_qzone_feed()
+
+        self.assertEqual([10015], [item["uin"] for item in result["items"]])
+
     async def test_h5_friend_feed_does_not_make_legacy_request(self) -> None:
         plugin = _QzonePagePlugin(
             {"vFeeds": [_h5_feed(uin=10008, cellid="h5-friend", text="H5 好友动态")]}

@@ -60,6 +60,7 @@ from .reaction_expression import (
     reaction_expression_image_key,
     reaction_expression_image_keys,
     reaction_expression_reservation_owned,
+    reaction_expression_selection_preferences,
     reaction_expression_scope_state,
     record_reaction_expression_feedback,
     record_reaction_expression_sent,
@@ -4394,6 +4395,59 @@ class LlmToolActionsMixin:
         except (OSError, TypeError, ValueError):
             return ""
 
+    @staticmethod
+    def _reaction_expression_selection_revision(
+        selection_preferences: Any,
+        selection_signature: Any = "",
+    ) -> str:
+        """Hash the bounded preference snapshot used by reaction selection."""
+        if not isinstance(selection_preferences, dict):
+            return ""
+        signature = _single_line(
+            selection_signature or selection_preferences.get("intent_signature"),
+            40,
+        )
+        raw_assets = selection_preferences.get("assets")
+        rows: list[dict[str, Any]] = []
+        if isinstance(raw_assets, dict):
+            raw_assets = [
+                {"key": key, **value}
+                for key, value in raw_assets.items()
+                if isinstance(value, dict)
+            ]
+        if isinstance(raw_assets, list):
+            for raw_item in raw_assets:
+                if not isinstance(raw_item, dict):
+                    continue
+                key = _single_line(raw_item.get("key"), 180)
+                if not key:
+                    continue
+                rows.append(
+                    {
+                        "key": key,
+                        "score": _safe_int(raw_item.get("score"), 0, -20, 20),
+                        "positive_count": _safe_int(
+                            raw_item.get("positive_count"), 0, 0, 1000
+                        ),
+                        "negative_count": _safe_int(
+                            raw_item.get("negative_count"), 0, 0, 1000
+                        ),
+                        "intent_score": _safe_int(
+                            raw_item.get("intent_score"), 0, -8, 8
+                        ),
+                    }
+                )
+        if not rows:
+            return ""
+        rows.sort(key=lambda item: item["key"])
+        payload = json.dumps(
+            {"intent_signature": signature, "assets": rows},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _reaction_expression_lookup_cache_get(
         self,
         key: tuple[int, str, str, bool, str, str],
@@ -4723,6 +4777,10 @@ class LlmToolActionsMixin:
                     ),
                     ensure_ascii=False,
                 )
+            selection_preferences = reaction_expression_selection_preferences(
+                state,
+                intent_signature=signature,
+            )
             reserve_reaction_expression_intent(
                 scoped_state,
                 intent,
@@ -4759,6 +4817,8 @@ class LlmToolActionsMixin:
             caption="",
             low_latency=low_latency,
             internal_attachment=True,
+            selection_preferences=selection_preferences,
+            selection_signature=signature,
         )
         try:
             lookup = json.loads(raw_lookup)
@@ -5385,8 +5445,21 @@ class LlmToolActionsMixin:
         low_latency: bool = False,
         internal_attachment: bool = False,
         context: str = "",
+        selection_preferences: Any = None,
+        selection_signature: str = "",
     ) -> str:
         scope = self._reaction_expression_scope(event)
+        preference_snapshot = (
+            selection_preferences if isinstance(selection_preferences, dict) else {}
+        )
+        preference_signature = _single_line(
+            selection_signature or preference_snapshot.get("intent_signature"),
+            40,
+        )
+        preference_revision = self._reaction_expression_selection_revision(
+            preference_snapshot,
+            preference_signature,
+        )
         query_text = _single_line(query, 500)
         if not query_text:
             getter = getattr(event, "get_message_str", None)
@@ -5526,13 +5599,16 @@ class LlmToolActionsMixin:
         lookup_error_type = ""
         lookup = dict(owned_lookup) if isinstance(owned_lookup, dict) else None
         if lookup is None:
+            lookup_revision = self._reaction_expression_lookup_cache_revision(library)
+            if preference_revision:
+                lookup_revision = f"{lookup_revision}|preference:{preference_revision}"
             cache_key = self._reaction_expression_lookup_cache_key(
                 library,
                 query_text,
                 lookup_context,
                 meme_filter,
                 scope,
-                self._reaction_expression_lookup_cache_revision(library),
+                lookup_revision,
             )
             lookup = (
                 self._reaction_expression_lookup_cache_get(cache_key)
@@ -5548,6 +5624,8 @@ class LlmToolActionsMixin:
                     query_text,
                     context=lookup_context,
                     scope=scope,
+                    selection_preferences=preference_snapshot,
+                    selection_signature=preference_signature,
                 )
                 if lookup is None:
                     lookup = {

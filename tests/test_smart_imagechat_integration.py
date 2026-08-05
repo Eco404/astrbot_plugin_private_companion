@@ -132,12 +132,27 @@ class _OwnedReactionLibraryAdapter:
 
     def __init__(self, api: _FakeSmartImageAPI) -> None:
         self.api = api
+        self.selection_calls: list[dict[str, object]] = []
 
     @staticmethod
     def has_enabled_assets() -> bool:
         return True
 
-    def find(self, query: str, *, context: str = "", scope: str = "private"):
+    def find(
+        self,
+        query: str,
+        *,
+        context: str = "",
+        scope: str = "private",
+        selection_preferences: object = None,
+        selection_signature: str = "",
+    ):
+        self.selection_calls.append(
+            {
+                "preferences": selection_preferences,
+                "signature": selection_signature,
+            }
+        )
         return asyncio.run(
             self.api.find_image(
                 None,
@@ -1412,6 +1427,44 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("sent", state["recent_outcomes"][-1]["status"])
         self.assertEqual("reaction_expression_experiment", harness.users["10001"]["last_photo_share_snapshot"]["reason"])
 
+    async def test_proactive_reaction_passes_current_user_asset_preferences(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enable_reaction_experiment()
+        state = ensure_reaction_expression_state(harness.users["10001"])
+        state["asset_preferences"] = {
+            "reaction-1": {
+                "score": 6,
+                "positive_count": 2,
+                "negative_count": 0,
+                "intent_scores": {},
+            }
+        }
+        event = _FakeEvent()
+
+        self.assertTrue(await harness._preauthorize_reaction_expression_prompt(event))
+        payload = json.loads(
+            await harness._pc_reaction_expression_impl(
+                event,
+                purpose="轻轻吐槽",
+                emotion="无语但亲近",
+                intensity=2,
+            )
+        )
+
+        self.assertTrue(payload["sent"])
+        self.assertEqual(1, len(harness._owned_reaction_library.selection_calls))
+        selection = harness._owned_reaction_library.selection_calls[0]
+        self.assertTrue(selection["signature"])
+        self.assertEqual(
+            selection["signature"],
+            selection["preferences"]["intent_signature"],
+        )
+        self.assertEqual(
+            "reaction-1",
+            selection["preferences"]["assets"][0]["key"],
+        )
+
     async def test_attach_only_prepares_without_sending_and_settles_after_confirmation(self) -> None:
         api = _FakeSmartImageAPI(self.image_path)
         harness = _ReactionHarness(api)
@@ -2348,6 +2401,45 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(private_key, group_key)
         self.assertNotEqual(private_key, edited_key)
+
+    def test_selection_revision_is_stable_and_changes_with_user_affinity(self) -> None:
+        first = {
+            "intent_signature": "intent-happy",
+            "assets": [
+                {"key": "asset-b", "score": -2, "intent_score": -1},
+                {"key": "asset-a", "score": 5, "intent_score": 3},
+            ],
+        }
+        reordered = {
+            "intent_signature": "intent-happy",
+            "assets": [
+                {"key": "asset-a", "score": 5, "intent_score": 3},
+                {"key": "asset-b", "score": -2, "intent_score": -1},
+            ],
+        }
+        changed = {
+            "intent_signature": "intent-happy",
+            "assets": [
+                {"key": "asset-a", "score": -5, "intent_score": -3},
+                {"key": "asset-b", "score": 2, "intent_score": 1},
+            ],
+        }
+
+        first_revision = LlmToolActionsMixin._reaction_expression_selection_revision(
+            first,
+            "intent-happy",
+        )
+        reordered_revision = LlmToolActionsMixin._reaction_expression_selection_revision(
+            reordered,
+            "intent-happy",
+        )
+        changed_revision = LlmToolActionsMixin._reaction_expression_selection_revision(
+            changed,
+            "intent-happy",
+        )
+
+        self.assertEqual(first_revision, reordered_revision)
+        self.assertNotEqual(first_revision, changed_revision)
 
     def test_first_group_opt_out_creates_only_the_needed_feedback_user(self) -> None:
         harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))

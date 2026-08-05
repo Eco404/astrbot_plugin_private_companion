@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 
@@ -191,6 +192,22 @@ class WeatherAlertLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(harness.offered))
         self.assertEqual("owner", harness.offered[0][0])
         self.assertEqual("orange", harness.offered[0][1]["context"]["alert"]["color_code"])
+
+    async def test_yesterdays_pending_alert_is_discarded_before_delivery(self) -> None:
+        harness = _AlertLifecycleHarness()
+        now = datetime.now(timezone.utc).timestamp()
+        harness.data["weather_alert_awareness"]["pending_events"] = [{
+            "event_key": "new:old-alert:fingerprint",
+            "kind": "new",
+            "captured_at": now - timedelta(days=1).total_seconds(),
+            "alert": {"id": "old-alert", "color_code": "orange"},
+        }]
+
+        offered = harness._queue_weather_alert_pending_events(now=now)
+
+        self.assertEqual(0, offered)
+        self.assertEqual([], harness.offered)
+        self.assertEqual([], harness.data["weather_alert_awareness"]["pending_events"])
 
 
 if __name__ == "__main__":

@@ -34,6 +34,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _single_line(value: Any, limit: int = 160) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
+class _Logger:
+    @staticmethod
+    def info(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
 def _class_method(method_name: str, namespace: dict[str, Any]) -> Any:
     path = ROOT / "core_store.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -76,7 +86,9 @@ MERGE_ALIAS_RECORDS = _class_method(
     {
         "_DEFAULT_USER_TEMPLATE": DEFAULT_USER,
         "_now_ts": lambda: NOW,
+        "_single_line": _single_line,
         "deepcopy": copy.deepcopy,
+        "logger": _Logger(),
         "migrate_legacy_relationship_score": migrate_legacy_relationship_score,
     },
 )
@@ -86,6 +98,14 @@ class _StoreHost:
     _canonical_private_user_id = CANONICAL_USER_ID
     _merge_user_record_values = MERGE_USER_RECORDS
     _merge_private_user_alias_records = MERGE_ALIAS_RECORDS
+
+    @staticmethod
+    def _normalize_private_identity_id(value: Any, limit: int = 128) -> str:
+        text = _single_line(value, max(limit, 512))
+        if ":FriendMessage:" in text:
+            session_id = _single_line(text.rsplit(":FriendMessage:", 1)[-1], limit)
+            return session_id if session_id and ":" not in session_id else ""
+        return _single_line(text, limit) if ":" not in text else ""
 
     def __init__(self, users: dict[str, Any], aliases: dict[str, str] | None = None) -> None:
         self.data = {"users": copy.deepcopy(users)}
@@ -219,6 +239,32 @@ def test_alias_records_are_migrated_before_scores_are_added() -> None:
     assert all(item["delta"] == 0 for item in audits)
     assert host._merge_private_user_alias_records() is False
     assert len(merged["relationship_score_migration_history"]) == 2
+
+
+def test_startup_folds_legacy_full_umo_user_key_into_stable_identity() -> None:
+    full_umo = "default_official:FriendMessage:openid-owner"
+    host = _StoreHost(
+        {
+            "openid-owner": {"user_id": "openid-owner", "relationship_score": 0},
+            full_umo: {
+                "user_id": full_umo,
+                "relationship_score": 0,
+                "umo": full_umo,
+                "bound_delivery_umo": full_umo,
+                "manual_enabled": True,
+            },
+        }
+    )
+
+    assert host._merge_private_user_alias_records() is True
+    assert set(host.data["users"]) == {"openid-owner"}
+    merged = host.data["users"]["openid-owner"]
+    assert merged["user_id"] == "openid-owner"
+    assert merged["umo"] == full_umo
+    assert merged["bound_delivery_umo"] == full_umo
+    assert merged["manual_enabled"] is True
+    assert full_umo not in merged.get("alias_user_ids", [])
+    assert host._merge_private_user_alias_records() is False
 
 
 def test_removing_alias_mapping_restores_the_pre_merge_alias_record() -> None:

@@ -312,6 +312,12 @@ def _structured_feed_identity(feed: dict[str, Any], html_content: str) -> tuple[
     return uin, tid, name
 
 
+def is_official_qzone_promotion(name: Any) -> bool:
+    """Return whether a feed author is the built-in Qzone promotion account."""
+    normalized_name = re.sub(r"\s+", "", str(name or "")).casefold()
+    return normalized_name == "官方qzone".casefold()
+
+
 def _structured_feed_common(feed: dict[str, Any]) -> dict[str, Any]:
     common = _first_value(feed, "comm", "common", "cell_comm")
     return common if isinstance(common, dict) else {}
@@ -478,6 +484,7 @@ def parse_recent_feeds(data: dict[str, Any], diagnostics: dict[str, Any] | None 
         "containers": containers[:12],
         "candidate_count": len(feeds),
         "parsed_count": 0,
+        "skipped_official_promotion": 0,
         "skipped_missing_identity": 0,
         "skipped_empty_content": 0,
         "skipped_duplicate": 0,
@@ -490,6 +497,9 @@ def parse_recent_feeds(data: dict[str, Any], diagnostics: dict[str, Any] | None 
         html_content = str(_first_value(feed, "html", "feedhtml", "feed_html", "html_content") or "")
         common = _structured_feed_common(feed)
         uin, tid, name = _structured_feed_identity(feed, html_content)
+        if is_official_qzone_promotion(name):
+            stats["skipped_official_promotion"] += 1
+            continue
         if not uin or not tid:
             stats["skipped_missing_identity"] += 1
             continue
