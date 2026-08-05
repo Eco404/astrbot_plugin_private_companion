@@ -10755,7 +10755,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if instruction:
             self._append_turn_prompt_fragment_by_position(
                 req,
-                "<!-- private_companion_expression_decision_v1 -->",
+                "<!-- private_companion_expression_decision_v2 -->",
                 f"[Companion expression]\n{instruction}",
                 priority=5,
                 source="expression_decision",

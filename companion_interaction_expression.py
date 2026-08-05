@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover
     from affect_modulation_contract import normalize_affect_modulation
 
 
-EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v1"
+EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v2"
 CONTENT_TIERS = ("normal", "flirt", "adult")
 CONTENT_TIER_LABELS = {"normal": "日常", "flirt": "含蓄暧昧", "adult": "成人私密"}
 _CONTENT_STAGE_INDEX = {
@@ -103,6 +103,12 @@ class ExpressionDecision:
     proactive_cooldown_until: float
     tts_style: str
     affect_modulation: Mapping[str, Any]
+    pacing: str
+    directness: str
+    validation_style: str
+    self_disclosure: str
+    humor_mode: str
+    topic_initiative: str
     allowed_behaviors: tuple[str, ...]
     safety_mode: str
     blocker: str | None
@@ -600,6 +606,49 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         owner_exclusive=owner_exclusive,
         reasons=reasons,
     )
+    pacing = (
+        "slow"
+        if low_energy or down_mood or modulation["arousal"] <= 0.2
+        else "bright"
+        if modulation["arousal"] >= 0.7 and band == ExpressionBand.LIVELY
+        else "steady"
+    )
+    directness = (
+        "indirect"
+        if band in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}
+        else "direct"
+        if band in {ExpressionBand.LIVELY, ExpressionBand.AFFECTIONATE}
+        else "natural"
+    )
+    validation_style = (
+        "acknowledge"
+        if band in {ExpressionBand.AVOIDANT, ExpressionBand.HURT, ExpressionBand.RELAXED}
+        else "support_first"
+    )
+    if modulation["vulnerability"] >= 0.65:
+        validation_style = "support_first"
+    self_disclosure = (
+        "allowed"
+        if owner_account and band in {ExpressionBand.CLOSE, ExpressionBand.AFFECTIONATE}
+        else "light"
+        if "shared_ritual" in behaviors
+        else "none"
+    )
+    humor_mode = "off"
+    if (
+        "light_humor" in behaviors
+        and not low_energy
+        and not down_mood
+        and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}
+    ):
+        humor_mode = "playful" if band == ExpressionBand.LIVELY else "light"
+    topic_initiative = (
+        "reply_only"
+        if not followup
+        else "shared_topic"
+        if "shared_ritual" in behaviors
+        else "followup"
+    )
     return ExpressionDecision(
         contract=EXPRESSION_CONTRACT_VERSION,
         expression_band=band.value,
@@ -617,6 +666,12 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         proactive_cooldown_until=proactive_cooldown_until,
         tts_style=tts_style,
         affect_modulation=modulation,
+        pacing=pacing,
+        directness=directness,
+        validation_style=validation_style,
+        self_disclosure=self_disclosure,
+        humor_mode=humor_mode,
+        topic_initiative=topic_initiative,
         allowed_behaviors=behaviors,
         safety_mode="contact_boundary_passive" if contact_boundary else "normal",
         blocker=None,
@@ -732,12 +787,20 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
         content_instruction = "内容尺度=含蓄暧昧；可以亲密和调情，但保持非露骨，不描写成人性行为"
     else:
         content_instruction = "内容尺度=日常；不要主动升级为暧昧或成人内容"
+    dimensions = (
+        f"节奏={str(decision.get('pacing') or 'steady')[:12]}，"
+        f"直接度={str(decision.get('directness') or 'natural')[:12]}，"
+        f"回应={str(decision.get('validation_style') or 'none')[:16]}，"
+        f"自述={str(decision.get('self_disclosure') or 'none')[:16]}，"
+        f"幽默={str(decision.get('humor_mode') or 'off')[:12]}，"
+        f"话题={str(decision.get('topic_initiative') or 'reply_only')[:16]}"
+    )
     return (
         f"当前互动表达：{EXPRESSION_BAND_LABELS[band.value]}；"
         f"语气={str(decision.get('tone') or 'steady')[:24]}，"
         f"称呼距离={str(decision.get('address_style') or 'neutral')[:24]}，"
         f"回复长度={str(decision.get('response_length') or 'balanced')[:24]}；"
-        f"{followup}；{initiative}；{proactive_rhythm}{f'；{content_instruction}' if content_instruction else ''}。"
+        f"{followup}；{initiative}；{proactive_rhythm}；{dimensions}{f'；{content_instruction}' if content_instruction else ''}。"
     )
 
 
@@ -766,6 +829,12 @@ def _blocked_decision(reason: str, blocker: str, inherited_reasons: list[str]) -
         proactive_cooldown_until=0.0,
         tts_style="none",
         affect_modulation=normalize_affect_modulation({}),
+        pacing="slow",
+        directness="indirect",
+        validation_style="none",
+        self_disclosure="none",
+        humor_mode="off",
+        topic_initiative="reply_only",
         allowed_behaviors=(),
         safety_mode=reason,
         blocker=blocker,

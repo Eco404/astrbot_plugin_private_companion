@@ -310,14 +310,52 @@ class PrivateCompanionPageApi(
             normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
             now=time.time(),
         )
-        expression: dict[str, Any] = {}
+        expression: dict[str, Any] = {
+            "contract": "companion_interaction_expression.v2",
+            "status": "configured_projection",
+            "expression_band": interaction.get("expression_band") or "relaxed",
+            "tone": "steady",
+            "response_length": "balanced",
+            "initiative": "passive_only",
+            "pacing": "steady",
+            "directness": "natural",
+            "validation_style": "none",
+            "self_disclosure": "none",
+            "humor_mode": "off",
+            "topic_initiative": "reply_only",
+            "safety_mode": "live_event_not_evaluated",
+            "blocker": "",
+            "reason_codes": [],
+        }
         builder = getattr(self.plugin, "_build_expression_decision_for_user", None)
         if callable(builder):
             try:
                 raw = builder(user, passive_reengagement=True)
-                expression = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
+                raw_projection = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
+                if isinstance(raw_projection, dict):
+                    expression.update(raw_projection)
             except Exception:
-                expression = {}
+                pass
+        dimension_defaults = {
+            "pacing": "steady",
+            "directness": "natural",
+            "validation_style": "none",
+            "self_disclosure": "none",
+            "humor_mode": "off",
+            "topic_initiative": "reply_only",
+        }
+        dimension_values = {
+            "pacing": {"slow", "steady", "bright"},
+            "directness": {"indirect", "natural", "direct"},
+            "validation_style": {"none", "acknowledge", "support_first"},
+            "self_disclosure": {"none", "light", "allowed"},
+            "humor_mode": {"off", "light", "playful"},
+            "topic_initiative": {"reply_only", "followup", "shared_topic"},
+        }
+        expression["contract"] = "companion_interaction_expression.v2"
+        for key, allowed in dimension_values.items():
+            value = self._single_line(expression.get(key), 20)
+            expression[key] = value if value in allowed else dimension_defaults[key]
         inbound = max(0, self._int(user.get("inbound_count")))
         proactive = max(0, self._int(user.get("proactive_sent_count")))
         replies = max(0, self._int(user.get("reply_count")))

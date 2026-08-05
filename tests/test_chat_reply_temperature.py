@@ -73,7 +73,7 @@ class ReplyTemperatureTests(unittest.TestCase):
             and node.name == "inject_unified_relationship_expression"
         )
         self.assertIn("_private_companion_expression_decision", ast.unparse(expression_hook))
-        self.assertIn("private_companion_expression_decision_v1", source)
+        self.assertIn("private_companion_expression_decision_v2", source)
         helper = next(
             node for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_bounded_p4_reply_temperature_signals"

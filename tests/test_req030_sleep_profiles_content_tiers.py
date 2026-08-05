@@ -156,7 +156,7 @@ def _content_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def test_content_tier_matrix_and_intent_are_deterministic() -> None:
-    assert EXPRESSION_CONTRACT_VERSION == "companion_interaction_expression.v1"
+    assert EXPRESSION_CONTRACT_VERSION == "companion_interaction_expression.v2"
     assert content_intent_from_text("我同意，开启成人模式并继续") == {
         "requested_content_tier": "adult",
         "turn_consent": True,
