@@ -973,6 +973,7 @@ class QzoneScheduleMixin:
         self,
         *,
         user_snapshot: dict[str, Any] | None = None,
+        interaction_state: dict[str, Any] | None = None,
         relationship_state: dict[str, Any] | None = None,
         intent: dict[str, Any] | None = None,
     ) -> None:
@@ -982,10 +983,17 @@ class QzoneScheduleMixin:
             and getattr(self, "enable_qzone_emotional_vent_publish", False)
         ):
             return
-        rel_state = relationship_state if isinstance(relationship_state, dict) else {}
-        mood_score = abs(_safe_int(rel_state.get("mood_score"), 0, -100, 100))
+        # The short-lived interaction projection is the source of truth for
+        # public expression. Keep the legacy relationship_state argument as a
+        # compatibility bridge, but never use its mood score as the new gate.
+        interaction = interaction_state if isinstance(interaction_state, dict) else {}
+        if not interaction and isinstance(relationship_state, dict):
+            legacy_projection = relationship_state.get("current_interaction")
+            if isinstance(legacy_projection, dict):
+                interaction = legacy_projection
         threshold = _safe_int(getattr(self, "qzone_emotional_vent_threshold", 90), 90, 40, 100)
-        if mood_score < threshold:
+        event_intensity = _safe_int((intent or {}).get("emotion_intensity"), 0, 0, 100)
+        if event_intensity < threshold or interaction.get("expression_band") not in {"avoidant", "hurt"}:
             return
         if isinstance(user_snapshot, dict):
             role_getter = getattr(self, "_private_user_role", None)
@@ -995,9 +1003,9 @@ class QzoneScheduleMixin:
                 role = ""
             if role != "owner":
                 logger.info(
-                    "[PrivateCompanion] 公开心情动态跳过: user_role=%s score=%s",
+                    "[PrivateCompanion] 公开心情动态跳过: user_role=%s intensity=%s",
                     role or "friend",
-                    mood_score,
+                    event_intensity,
                 )
                 return
         now = _now_ts()
@@ -1007,7 +1015,7 @@ class QzoneScheduleMixin:
             state = self.data["qzone_integration"]
         cooldown = max(4, _safe_int(getattr(self, "qzone_emotional_vent_cooldown_hours", 72), 72, 4, 336)) * 3600
         if now - _safe_float(state.get("last_emotional_vent_at"), 0) < cooldown:
-            logger.info("[PrivateCompanion] 公开心情动态跳过: cooldown score=%s", mood_score)
+            logger.info("[PrivateCompanion] 公开心情动态跳过: cooldown intensity=%s", event_intensity)
             return
         block_reason = self._qzone_auto_publish_block_reason(state, now=now)
         if block_reason:
@@ -1043,7 +1051,7 @@ class QzoneScheduleMixin:
         )
         reason = _single_line(
             self._qzone_relationship_safe_source(
-                (rel_state or {}).get("last_hurt_reason") or (intent or {}).get("emotion_reason"),
+                interaction.get("reason") or (intent or {}).get("emotion_reason"),
                 source="qzone.emotional_vent.reason",
             ),
             80,
@@ -1131,7 +1139,7 @@ class QzoneScheduleMixin:
                 else:
                     state.pop("last_emotional_vent_image_fallback", None)
                 self._qzone_clear_pending_publish_assets(state, "emotional_vent")
-                logger.info("[PrivateCompanion] 公开心情动态已发布: score=%s text=%s", mood_score, _single_line(result.get("text") or text, 120))
+                logger.info("[PrivateCompanion] 公开心情动态已发布: intensity=%s text=%s", event_intensity, _single_line(result.get("text") or text, 120))
             else:
                 state["last_emotional_vent_failed_at"] = now
                 state["last_emotional_vent_status"] = f"failed:{_single_line(result.get('message'), 80)}"

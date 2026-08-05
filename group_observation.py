@@ -915,6 +915,23 @@ class GroupObservationMixin:
             group["last_group_name_seen_at"] = now
         group["last_seen"] = now
         group["message_count"] = _safe_int(group.get("message_count"), 0, 0) + 1
+        qq_nickname = ""
+        nickname_getter = getattr(self, "_sender_qq_nickname", None)
+        if callable(nickname_getter) and event is not None:
+            try:
+                qq_nickname = _single_line(nickname_getter(event), 40)
+            except Exception:
+                qq_nickname = ""
+        if self.enable_group_member_profiles:
+            profile_ensurer = getattr(self, "_ensure_worldbook_group_observation_profile", None)
+            if callable(profile_ensurer):
+                profile_ensurer(
+                    group_id=str(group_id or group.get("group_id") or ""),
+                    sender_id=sender_id,
+                    qq_nickname=qq_nickname,
+                    group_card=sender_name,
+                    now=now,
+                )
         sender_role = self._group_sender_role_from_event(event) if event is not None else "unknown"
         if event is not None:
             self._observe_group_role_from_event(
@@ -933,7 +950,7 @@ class GroupObservationMixin:
             "sender_id": sender_id,
             "name": _single_line(sender_name, 30) or sender_id,
             "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
-            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id)),
+            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id, include_observation=True)),
             "group_role": sender_role,
             "group_role_label": self._GROUP_ROLE_LABELS.get(sender_role, "未知"),
             "text": cleaned,
@@ -994,8 +1011,9 @@ class GroupObservationMixin:
                     events.append({"ts": now, "old": previous_display_name, "new": display_name})
                     del events[:-12]
             member["name"] = _single_line(sender_name, 30) or member.get("name") or sender_id
+            member["qq_nickname"] = qq_nickname or _single_line(member.get("qq_nickname"), 30)
             member["identity_name"] = self._group_member_identity_name(sender_id, sender_name, limit=30)
-            member["identity_known"] = bool(self._worldbook_profile_by_user_id(sender_id))
+            member["identity_known"] = bool(self._worldbook_profile_by_user_id(sender_id, include_observation=True))
             member.pop("identity_note", None)
             member.pop("boundary_note", None)
             member["count"] = _safe_int(member.get("count"), 0, 0) + 1
@@ -1998,7 +2016,7 @@ class GroupObservationMixin:
             add(member.get("display_name"))
             add(member.get("nickname"))
             add(member.get("card"))
-            profile = self._worldbook_profile_by_user_id(str(user_id))
+            profile = self._worldbook_profile_by_user_id(str(user_id), include_observation=True)
             if isinstance(profile, dict):
                 add(profile.get("name"))
                 for key in ("aliases", "observed_names"):
@@ -2360,7 +2378,7 @@ class GroupObservationMixin:
             "sender_id": sender_id,
             "name": _single_line(sender_name, 30) or sender_id,
             "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
-            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id)),
+            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id, include_observation=True)),
             "ts": now,
             "text": _single_line(text, 80),
         }

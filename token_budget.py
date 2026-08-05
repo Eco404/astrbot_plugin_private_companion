@@ -835,6 +835,18 @@ class TokenBudgetMixin:
                 provider_id = self._provider_id_from_instance(provider)
                 if provider_id:
                     return provider_id
+        # get_using_provider 拿不到时再兜两层：AstrBot 已经选出了默认对话模型
+        # （启动日志会打印 "Selected ... as default chat model provider"），
+        # 插件这边不该因为一条取值路径不通就整个放弃；否则所有没有显式配置
+        # provider 的任务（日程、日记）会静默退化成模板兜底，且无从归因。
+        fallback_id = self._chat_provider_id_from_registry(context)
+        if fallback_id:
+            logger.info("[PrivateCompanion] 默认对话 Provider 经注册表兜底解析: %s", fallback_id)
+            return fallback_id
+        logger.warning(
+            "[PrivateCompanion] 无法解析默认对话 Provider：get_using_provider 与注册表兜底都没有结果；"
+            "未显式配置 provider 的模型任务将退化为模板兜底"
+        )
         return ""
 
     @staticmethod
@@ -858,6 +870,51 @@ class TokenBudgetMixin:
 
     def _resolve_chat_provider_id(self, provider_id: str | None = None, *, umo: str = "") -> str:
         return str(provider_id or self.llm_provider_id or self._default_chat_provider_id(umo) or "").strip()
+
+    def _chat_provider_id_from_registry(self, context: Any) -> str:
+        """从 AstrBot Provider 注册表/配置里兜底取一个已加载的对话 Provider。"""
+        get_all = getattr(context, "get_all_providers", None)
+        if callable(get_all):
+            try:
+                providers = get_all() or []
+            except Exception:
+                providers = []
+            for provider in providers:
+                provider_id = self._provider_id_from_instance(provider)
+                if provider_id:
+                    return provider_id
+
+        config = None
+        getter = getattr(context, "get_config", None)
+        if callable(getter):
+            try:
+                config = getter()
+            except Exception:
+                config = None
+        settings = config.get("provider_settings") if isinstance(config, dict) else None
+        if isinstance(settings, dict):
+            value = _single_line(settings.get("default_provider_id"), 160)
+            # 配置里存在 default provider 不代表实例已经装载；启动竞态时
+            # 必须通过注册表确认，避免把“未就绪”误报成可用。
+            if value and self._provider_instance_exists(context, value):
+                return value
+        return ""
+
+    @staticmethod
+    def _provider_instance_exists(context: Any, provider_id: str) -> bool:
+        getter = getattr(context, "get_provider_by_id", None)
+        if not callable(getter):
+            return False
+        try:
+            return getter(provider_id) is not None
+        except Exception:
+            return False
+
+    def _chat_provider_ready(self) -> bool:
+        """Return whether an explicit or currently loaded chat Provider is ready."""
+        if _single_line(getattr(self, "llm_provider_id", ""), 160):
+            return True
+        return bool(self._default_chat_provider_id())
 
     @staticmethod
     def _normalize_model_timeout_overrides(value: Any) -> dict[str, int]:

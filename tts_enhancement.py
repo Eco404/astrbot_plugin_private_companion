@@ -309,6 +309,38 @@ class TtsEnhancementMixin:
     behavior surface but maps identity and prompts to private_companion concepts.
     """
 
+    def _create_tts_background_task(self, operation: Any, *, label: str) -> asyncio.Task | None:
+        creator = getattr(self, "_create_lifecycle_background_task", None)
+        if callable(creator):
+            task = creator(operation, label=label)
+            if task is None:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+            return task
+        try:
+            task = asyncio.create_task(operation, name=f"private-companion-tts-{label}")
+        except RuntimeError:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
+
+        def consume(done_task: asyncio.Task) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] TTS background task failed: label=%s error=%s",
+                    label,
+                    _single_line(exc, 160),
+                )
+
+        task.add_done_callback(consume)
+        return task
+
     def _load_tts_enhancement_config(self, config: Any) -> None:
         self.enable_tts_enhancement = self._cfg_bool(config, "enable_tts_enhancement", False)
         raw_synthesis_backend = self._cfg_str(
@@ -2091,6 +2123,22 @@ TTS 朗读文本：
             return True
         return bool(cjk_count >= 6 and kana_count < max(2, int(cjk_count * 0.35)))
 
+    @staticmethod
+    def _tts_expression_style_context(event: Any) -> str:
+        decision = getattr(event, "_private_companion_expression_decision", None)
+        if not isinstance(decision, dict):
+            return ""
+        return (
+            "统一表达投影："
+            f"tts={_single_line(decision.get('tts_style'), 16) or 'neutral'}；"
+            f"节奏={_single_line(decision.get('pacing'), 16) or 'steady'}；"
+            f"直接度={_single_line(decision.get('directness'), 16) or 'natural'}；"
+            f"回应={_single_line(decision.get('validation_style'), 20) or 'none'}；"
+            f"自述={_single_line(decision.get('self_disclosure'), 16) or 'none'}；"
+            f"幽默={_single_line(decision.get('humor_mode'), 16) or 'off'}；"
+            f"话题={_single_line(decision.get('topic_initiative'), 20) or 'reply_only'}。"
+        )
+
     def _build_tts_rule_prompt(self, provider_kind: str = "generic", *, event: Any = None) -> str:
         voice_lang = self._tts_voice_language_for_event(event)
         lang = self._tts_language_label(voice_language=voice_lang)
@@ -2446,11 +2494,13 @@ TTS 朗读文本：
             tts_style = _single_line(expression.get("tts_style"), 24)
             expression_band = _single_line(expression.get("expression_band"), 24)
             content_tier = _single_line(expression.get("content_tier"), 16) or "normal"
+            expression_context = self._tts_expression_style_context(event)
             if tts_style or expression_band:
                 expression_prompt = (
                     "【统一陪伴表达的语音上限】\n"
                     f"当前互动档位={expression_band or 'relaxed'}，TTS 风格上限={tts_style or 'natural'}，"
-                    f"内容尺度={content_tier}。语音只能收敛语气，不能扩大文字内容尺度、切换 Provider 或绕过文本复核。"
+                    f"内容尺度={content_tier}。{expression_context}\n"
+                    "语音只能收敛语气，不能扩大文字内容尺度、切换 Provider 或绕过文本复核。"
                 )
                 placement = append_dynamic_tts_fragment(
                     "<!-- private_companion_tts_expression_v1 -->",
@@ -2844,11 +2894,7 @@ TTS 朗读文本：
                     pending["chunks"],
                     started_at=remainder_started_at,
                 )
-                task_creator = getattr(self, "_create_lifecycle_background_task", None)
-                if callable(task_creator):
-                    task_creator(remainder, label="tts_reply_remainder")
-                else:
-                    asyncio.create_task(remainder)
+                self._create_tts_background_task(remainder, label="tts_reply_remainder")
             else:
                 setattr(
                     event,
@@ -3846,6 +3892,7 @@ TTS 朗读文本：
             return await self._postprocess_text_to_tts_markup(source, event, provider_kind=provider_kind, full=full)
         extra = _single_line(getattr(self, "main_user_mention_voice_prompt", ""), 500) if self._event_mentions_main_user_with_keyword(event) else ""
         persona_context = await self._format_tts_persona_voice_context(event)
+        expression_context = self._tts_expression_style_context(event)
         emotion_rule = self._tts_emotion_tag_rule(
             provider_kind,
             subject="<pc_tts> 内",
@@ -3881,6 +3928,7 @@ TTS 朗读文本：
 Provider 规则：{emotion_rule}
 补充要求：{extra or "无"}
 {persona_context}
+{expression_context}
 
 原回复：
 {source}
@@ -3918,6 +3966,7 @@ Provider 规则：{emotion_rule}
         if not extra:
             extra = self._legacy_nondefault_tts_prompt()
         persona_context = await self._format_tts_persona_voice_context(event)
+        expression_context = self._tts_expression_style_context(event)
         if voice_lang == "zh":
             language_rule = "voice_text 必须是自然中文。"
             visible_rule = "visible_text 仍是最终可见中文文本；如果和 voice_text 一样，可以保持同一句。"
@@ -3954,6 +4003,7 @@ Provider 规则：{emotion_rule}
 本轮自动语音概率线索：{probability_hint}
 补充规则：{extra or "无"}
 {persona_context}
+{expression_context}
 
 判断规则：
 - 你要自己根据用户原话、规则线索和回复内容判断用户是否在要求或期待语音；规则快判只是线索，不是最终结论。
@@ -4392,7 +4442,10 @@ Provider 规则：{emotion_rule}
         is_live_reply = source == "bili_live_auto_reply"
         visible_text = subtitle_text or spoken_text
         subtitle_task = (
-            asyncio.create_task(self._post_tts_live_subtitle(visible_text))
+            self._create_tts_background_task(
+                self._post_tts_live_subtitle(visible_text),
+                label="tts_live_subtitle",
+            )
             if is_live_reply
             else None
         )
@@ -5041,13 +5094,14 @@ Provider 规则：{emotion_rule}
             return result
 
         result["audio_path"] = str(audio_file)
-        asyncio.create_task(
+        self._create_tts_background_task(
             self._after_tts_audio_generated(
                 str(audio_file),
                 sanitized,
                 source=source or "external_realtime",
                 allow_local_playback=play_local,
-            )
+            ),
+            label="tts_audio_postprocess",
         )
         return result
 
@@ -5255,12 +5309,13 @@ Provider 规则：{emotion_rule}
             return None
         final_ref = str(audio_path)
         if not defer_delivery_effects:
-            asyncio.create_task(
+            self._create_tts_background_task(
                 self._after_tts_audio_generated(
                     str(audio_path),
                     sanitized,
                     source=source or "private_companion",
-                )
+                ),
+                label="tts_audio_postprocess",
             )
         if provider_settings.get("use_file_service", False):
             callback_api_base = str((config or {}).get("callback_api_base", "") or "").strip()

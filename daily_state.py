@@ -106,6 +106,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize_photo_subject_owner, _now_ts, _path_text, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .affect_modulation import compose_affect_modulation
 from .daily_state_tick import DailyStateTickMixin
 from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
 from .planning import (
@@ -733,6 +734,12 @@ class DailyStateMixin(DailyStateTickMixin):
             if isinstance(story_plan, dict):
                 self.data["daily_story_plan"] = story_plan
             self._save_data_sync()
+        diary_recorder = getattr(self, "_memory_companion_record_daily_diary", None)
+        if callable(diary_recorder):
+            try:
+                await diary_recorder(diary)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] Bot Personal 日记归档失败: %s", _single_line(exc, 160))
         if memory_payload:
             try:
                 await self._memory_companion_record_dream_fragment(**memory_payload)
@@ -8675,16 +8682,20 @@ class DailyStateMixin(DailyStateTickMixin):
         values = self._base_state_values(profile)
         weather_text = self._weather_summary_text(weather)
         energy = 75
+        composed_at = _now_ts()
         mood_candidates = []
         health_cause = ""
         for cond in active:
             kind = str(cond.get("kind") or "")
             if kind in values:
                 values[kind] = _single_line(cond.get("label"), 80)
-            energy += _safe_int(cond.get("energy_delta"), 0, -100, 100)
+            energy += self._condition_effective_energy_delta(cond, now=composed_at)
             mood = _single_line(cond.get("mood"), 20)
             if mood and mood != "平稳":
-                mood_candidates.append((mood, _safe_int(cond.get("intensity"), 50, 0, 100)))
+                intensity = _safe_int(cond.get("intensity"), 50, 0, 100)
+                if kind == "memory_afterglow":
+                    intensity = max(0, round(intensity * self._memory_afterglow_decay(cond, now=composed_at)))
+                mood_candidates.append((mood, intensity))
             if kind == "health" and not health_cause:
                 health_cause = _single_line(cond.get("cause"), 120)
         remembered_dream = self._remembered_daily_dream_label()
@@ -8725,11 +8736,27 @@ class DailyStateMixin(DailyStateTickMixin):
             "energy": energy,
             "note": note,
             "conditions": active,
+            "affect_modulation": compose_affect_modulation(active, now=composed_at),
         }
         if override_active:
             result["location_override_ts"] = existing_override_ts
             result["location_source"] = "dialogue_override"
         return result
+
+    @staticmethod
+    def _memory_afterglow_decay(cond: dict[str, Any], *, now: float) -> float:
+        if str(cond.get("kind") or "") != "memory_afterglow":
+            return 1.0
+        start_ts = _safe_float(cond.get("start_ts"), now)
+        half_life = max(60.0, min(86400.0, _safe_float(cond.get("half_life_seconds"), 1800.0)))
+        age = max(0.0, now - start_ts)
+        return max(0.0, min(1.0, 0.5 ** (age / half_life)))
+
+    def _condition_effective_energy_delta(self, cond: dict[str, Any], *, now: float) -> int:
+        base = _safe_int(cond.get("energy_delta"), 0, -100, 100)
+        if str(cond.get("kind") or "") != "memory_afterglow":
+            return base
+        return int(round(base * self._memory_afterglow_decay(cond, now=now)))
 
     def _build_state_note(
         self,
@@ -8825,7 +8852,13 @@ class DailyStateMixin(DailyStateTickMixin):
         )
         if not text:
             return False
-        if re.search(r"睡醒|醒来|醒后|刚醒|起床|不睡|没睡|未睡|还没睡|睡不着|失眠", text):
+        if re.search(r"继续睡|睡回去|重新入睡|再次入睡|回笼觉", text):
+            return True
+        if re.search(
+            r"自然醒|睡醒|醒来|醒后|刚醒|醒了|已醒|醒着|清醒|睁眼|起床|起身|洗漱|"
+            r"不睡|没睡|未睡|还没睡|睡不着|失眠",
+            text,
+        ):
             return False
         return bool(
             re.search(
@@ -9512,12 +9545,38 @@ class DailyStateMixin(DailyStateTickMixin):
                 if isinstance(current_tasks, dict):
                     current_tasks.pop(scope, None)
 
+        operation = _runner()
+        creator = getattr(self, "_create_lifecycle_background_task", None)
         try:
-            task = asyncio.create_task(_runner())
-            tasks[scope] = task
-            self._default_persona_prompt_refresh_task = task
+            task = (
+                creator(operation, label="default_persona_prompt_refresh")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-persona-prompt-refresh")
+            )
+            if task is not None:
+                tasks[scope] = task
+                self._default_persona_prompt_refresh_task = task
+                if not callable(creator):
+                    def consume(done_task: asyncio.Task) -> None:
+                        try:
+                            done_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "[PrivateCompanion] 默认人格后台刷新失败: %s",
+                                _single_line(exc, 160),
+                            )
+
+                    task.add_done_callback(consume)
+            else:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
         except RuntimeError:
-            pass
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
 
     def _format_plugin_persona_request_injection(self) -> str:
         specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
@@ -13513,6 +13572,10 @@ class DailyStateMixin(DailyStateTickMixin):
             timer_event.pop("cancel_requested_at", None)
             return False
         if task is None:
+            try:
+                operation.close()
+            except Exception:
+                pass
             timer_event.pop("cancel_requested_at", None)
             return False
         return True

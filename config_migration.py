@@ -67,6 +67,9 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "response_review_mode": ("passive_review_mode",),
 }
 
+# Independent from the legacy LivingMemory compatibility switch.
+MEMORY_COMPANION_BRIDGE_KEY = "enable_memory_companion_bridge"
+
 LEGACY_PROACTIVE_ACTION_FLAG_KEYS: dict[str, str] = {
     "photo_text": "enable_photo_text_action",
     "screen_peek": "enable_screen_glance_action",
@@ -1003,6 +1006,44 @@ def _coerce_bool(value: Any) -> bool:
 
 
 def _save_config_after_schema_migration(config: Any, *, logger: Any | None = None) -> None:
+    def schedule(result: Any) -> bool:
+        if not (asyncio.iscoroutine(result) or hasattr(result, "__await__")):
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            if logger is not None:
+                logger.debug("[PrivateCompanion] config migration async save skipped: no event loop")
+            return True
+        tasks = getattr(config, "_private_companion_config_save_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            try:
+                setattr(config, "_private_companion_config_save_tasks", tasks)
+            except Exception:
+                tasks = None
+        task = loop.create_task(result, name="private-companion-config-save")
+        if isinstance(tasks, set):
+            tasks.add(task)
+
+        def consume(done_task: asyncio.Task) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                if logger is not None:
+                    logger.warning("[PrivateCompanion] config migration async save failed: %s", _single_line(exc, 160))
+            finally:
+                if isinstance(tasks, set):
+                    tasks.discard(done_task)
+
+        task.add_done_callback(consume)
+        return True
+
     for method_name in ("save_config", "save", "save_conf"):
         save = getattr(config, method_name, None)
         if not callable(save):
@@ -1012,7 +1053,7 @@ def _save_config_after_schema_migration(config: Any, *, logger: Any | None = Non
             result = save()
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 try:
-                    asyncio.get_running_loop().create_task(result)
+                    schedule(result)
                 except RuntimeError:
                     close = getattr(result, "close", None)
                     if callable(close):
@@ -1028,7 +1069,7 @@ def _save_config_after_schema_migration(config: Any, *, logger: Any | None = Non
                     result = save()
                     if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                         try:
-                            asyncio.get_running_loop().create_task(result)
+                            schedule(result)
                         except RuntimeError:
                             close = getattr(result, "close", None)
                             if callable(close):

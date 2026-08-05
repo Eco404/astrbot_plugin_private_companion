@@ -109,6 +109,9 @@ from .companion_interaction_expression import (
     build_expression_decision,
     current_interaction_projection,
 )
+from .emotion_event_ledger import record_recent_emotion_event
+from .interaction_dynamics import project_interaction_dynamics, settle_interaction_dynamics
+from .emotion_targeting import classify_emotion_target
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -317,7 +320,13 @@ class UserMemoryMixin:
             if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
             else None
         )
-        stage = relationship_stage_for_score(score, policy)["phase"]
+        stage_projection = relationship_stage_for_score(
+            score,
+            policy,
+            previous_stage_key=user.get("relationship_phase_key", ""),
+        )
+        stage = stage_projection["phase"]
+        user["relationship_phase_key"] = stage.get("key", "acquaintance")
         stage_key = str(stage.get("key") or "acquaintance")
         if stage_key in {"deeply_distant", "strongly_distant", "distant"}:
             level = "陌生"
@@ -4653,9 +4662,33 @@ class UserMemoryMixin:
         if not user_id:
             return
         habit["memory_synced_at"] = now
+        operation = recorder(user=user, user_id=user_id, habit=dict(habit))
         try:
-            asyncio.create_task(recorder(user=user, user_id=user_id, habit=dict(habit)))
+            creator = getattr(self, "_create_lifecycle_background_task", None)
+            task = (
+                creator(operation, label="user_habit_memory_sync")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-user-habit-memory-sync")
+            )
+            if task is None:
+                raise RuntimeError("background task unavailable")
+            if not callable(creator):
+                def consume(done_task: asyncio.Task) -> None:
+                    try:
+                        done_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 用户习惯记忆同步后台任务失败: %s",
+                            _single_line(exc, 160),
+                        )
+
+                task.add_done_callback(consume)
         except Exception:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
             habit["memory_synced_at"] = 0
 
     def _format_user_habit_time(self, minute_value: Any) -> str:
@@ -5105,6 +5138,7 @@ class UserMemoryMixin:
             "emotion_target": emotion_event.get("target", "none"),
             "emotion_rule": emotion_event.get("rule", ""),
             "emotion_confidence": round(_safe_float(emotion_event.get("confidence"), 0.0), 2),
+            "emotion_attribution": dict(emotion_event.get("attribution")) if isinstance(emotion_event.get("attribution"), dict) else {},
             "boundary_durable": durable_boundary,
             "playful_or_ambiguous": playful_or_ambiguous,
             "text": cleaned,
@@ -5117,6 +5151,11 @@ class UserMemoryMixin:
             return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": "", "confidence": 1.0}
         if self._is_structured_or_diagnostic_text(cleaned):
             return {"event": "neutral", "intensity": 0, "reason": "结构化/日志/代码类文本不作为情绪依据", "target": "none", "rule": "diagnostic_skip", "confidence": 0.2}
+        attribution = classify_emotion_target(cleaned)
+        if attribution["target"] == "self":
+            return {"event": "comfort_need", "intensity": 62, "reason": "用户自我否定或低落", "target": "self", "rule": "self_low", "confidence": attribution["confidence"], "attribution": attribution}
+        if attribution["speech_act"] in {"quote", "third_party_report"}:
+            return {"event": "external_negative", "intensity": 54, "reason": "引用或第三方负面内容", "target": "other", "rule": attribution["reason_code"], "confidence": attribution["confidence"], "attribution": attribution}
         atrelay_checker = getattr(self, "_message_looks_like_atrelay_request", None)
         if callable(atrelay_checker):
             try:
@@ -5147,6 +5186,8 @@ class UserMemoryMixin:
             or "不想理你" in cleaned
             or re.search(r"(只是|不过|不就是).{0,6}(bot|机器人|工具|代码)", lower)
         )
+        if severe_hurt and not attribution["auto_settle"]:
+            return {"event": "neutral", "intensity": 0, "reason": "负面目标不明确，等待复核", "target": attribution["target"], "rule": attribution["reason_code"], "confidence": attribution["confidence"], "attribution": attribution}
         identity_hurt = bool(
             re.search(r"(玻璃心|假装|演的|装的|设定|工具人|没感情|别装|别演|虚拟的|假的)", cleaned)
             and target_hint
@@ -5173,6 +5214,7 @@ class UserMemoryMixin:
                 "target": "bot" if direct_bot_negative else "ambiguous",
                 "rule": "severe_hurt",
                 "confidence": confidence,
+                "attribution": attribution,
             }
         if identity_hurt:
             return {"event": "hurt", "intensity": 76 if boundary_durable else 60, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84 if boundary_durable else 0.68}
@@ -5199,6 +5241,9 @@ class UserMemoryMixin:
         if not bool(getattr(self, "enable_llm_emotion_judgement", False)):
             return False
         if self._is_structured_or_diagnostic_text(text):
+            return False
+        attribution = intent.get("emotion_attribution") if isinstance(intent.get("emotion_attribution"), dict) else {}
+        if attribution.get("auto_settle") is True and _safe_float(attribution.get("confidence"), 0.0) >= 0.85:
             return False
         source = str(intent.get("source") or "")
         if bool(intent.get("playful_or_ambiguous")) or source in {"weak_boundary_ignored", "soft_boundary_play_rule", "single_turn_boundary"}:
@@ -5385,6 +5430,13 @@ Local classifier result:
             elif pending_review_id or _single_line(pending.get("text"), 240) != cleaned:
                 return
             intent_to_apply = refined if isinstance(refined, dict) else dict(local_intent)
+            observed = pending.get("observed_event") if isinstance(pending.get("observed_event"), dict) else {}
+            if observed:
+                intent_to_apply["_emotion_revision_of"] = {
+                    "event_id": observed.get("event_id"),
+                    "trace_id": observed.get("trace_id"),
+                    "revision": _safe_int(observed.get("revision"), 1, 1) + 1,
+                }
             if self.enable_intent_emotion_analysis:
                 user["intent_profile"] = intent_to_apply
             self._update_relationship_state_from_intent(user, intent_to_apply)
@@ -5452,6 +5504,95 @@ Local classifier result:
         state["mood_score"] = score
         state["mood_updated_ts"] = now
         return score
+
+    def _record_interaction_emotion_event(
+        self,
+        user: dict[str, Any],
+        intent: dict[str, Any],
+        *,
+        band: str,
+        reason_code: str,
+        status: str = "applied",
+        expires_at: float = 0.0,
+    ) -> dict[str, Any] | None:
+        emotion_event = str(intent.get("emotion_event") or "neutral").strip().lower()
+        inbound_intent = str(intent.get("intent") or "chat").strip().lower()
+        attribution = intent.get("emotion_attribution") if isinstance(intent.get("emotion_attribution"), dict) else {}
+        needs_review = bool(
+            emotion_event == "neutral"
+            and attribution.get("target") == "ambiguous"
+            and attribution.get("auto_settle") is False
+        )
+        event_type = "neutral" if needs_review else emotion_event if emotion_event != "neutral" else inbound_intent
+        if event_type not in {
+            "neutral", "hurt", "apology", "comfort", "praise", "comfort_need", "external_negative",
+            "play", "intimacy", "boundary",
+        }:
+            return None
+        user_id = _single_line(user.get("user_id") or user.get("id"), 120)
+        session_id = _single_line(user.get("umo"), 220)
+        platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        target = _single_line(intent.get("emotion_target"), 24).lower() or "none"
+        target_ref = (
+            {"kind": "bot", "id": "self", "role": "bot_self"}
+            if target == "bot"
+            else {
+                "kind": "user" if target == "self" else "unknown" if target == "ambiguous" else "other",
+                "id": user_id if target == "self" else "",
+                "role": target,
+            }
+        )
+        message_fingerprint = hashlib.sha256(
+            _single_line(intent.get("text"), 500).encode("utf-8", errors="ignore")
+        ).hexdigest()
+        event, created = record_recent_emotion_event(
+            user,
+            {
+                "event_id": _single_line((intent.get("_emotion_revision_of") or {}).get("event_id"), 96) if isinstance(intent.get("_emotion_revision_of"), dict) else "",
+                "trace_id": _single_line((intent.get("_emotion_revision_of") or {}).get("trace_id"), 96) if isinstance(intent.get("_emotion_revision_of"), dict) else "",
+                "revision": _safe_int((intent.get("_emotion_revision_of") or {}).get("revision"), 1, 1) if isinstance(intent.get("_emotion_revision_of"), dict) else 1,
+                "producer_plugin": "private_companion",
+                "origin_kind": "interaction",
+                "platform": platform,
+                "bot_id": self._memory_companion_bridge_bot_id(),
+                "scope": "private",
+                "session_id": session_id,
+                "actor_ref": {"kind": "user", "id": user_id, "role": "speaker"},
+                "target_ref": target_ref,
+                "quoted_target_ref": {
+                    "kind": "quoted",
+                    "id": "",
+                    "role": _single_line(attribution.get("quoted_target"), 40),
+                } if attribution.get("quoted_target") not in {None, "", "none"} else {},
+                "event_type": event_type,
+                "intensity": _safe_int(intent.get("emotion_intensity"), 0, 0, 100),
+                "confidence": _safe_float(intent.get("emotion_confidence"), intent.get("confidence") or 0.0, 0.0),
+                "source_rule": _single_line(intent.get("emotion_rule") or intent.get("source"), 80),
+                "occurred_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "expires_at": datetime.fromtimestamp(expires_at).astimezone().isoformat(timespec="seconds") if expires_at else "",
+                "dedupe_key": f"{session_id}|{message_fingerprint}|{event_type}",
+                "message_fingerprint": message_fingerprint,
+                "applied_interaction": band,
+                "correction_of": _single_line((intent.get("_emotion_revision_of") or {}).get("event_id"), 96) if isinstance(intent.get("_emotion_revision_of"), dict) else "",
+                "status": "observed" if needs_review else status,
+                "reason_codes": [reason_code, _single_line(intent.get("emotion_rule"), 64)],
+            },
+        )
+        if not created:
+            return event
+        mirror = getattr(self, "_memory_companion_record_emotion_event", None)
+        if callable(mirror):
+            operation = mirror(event)
+            try:
+                creator = getattr(self, "_create_lifecycle_background_task", None)
+                task = creator(operation, label="emotion_event_mirror") if callable(creator) else asyncio.create_task(operation)
+                if task is None:
+                    raise RuntimeError("background task unavailable")
+            except Exception:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+        return event
 
     def _settle_current_interaction_from_intent(self, user: dict[str, Any], intent: dict[str, Any]) -> None:
         """Settle the short-term expression authority from one private-chat event.
@@ -5526,9 +5667,18 @@ Local classifier result:
                 "updated_at": now,
             }
 
-        if existing.get("manual_override") and (
+        if not contact_active and existing.get("manual_override") and (
             not existing.get("expires_at") or _safe_float(existing.get("expires_at"), 0) > now
         ):
+            event_recorder = getattr(self, "_record_interaction_emotion_event", None)
+            if callable(event_recorder):
+                event_recorder(
+                    user, intent,
+                    band=str(existing.get("expression_band") or "relaxed"),
+                    reason_code="manual_override_retained",
+                    status="ignored",
+                    expires_at=_safe_float(existing.get("expires_at"), 0),
+                )
             user["current_interaction"] = existing
             return
 
@@ -5571,18 +5721,69 @@ Local classifier result:
             and _safe_float(existing.get("expires_at"), 0) > now
             and str(existing.get("expression_band") or "relaxed") != "relaxed"
         ):
+            event_recorder = getattr(self, "_record_interaction_emotion_event", None)
+            if callable(event_recorder):
+                event_recorder(
+                    user, intent,
+                    band=str(existing.get("expression_band") or "relaxed"),
+                    reason_code="active_interaction_retained",
+                    status="ignored",
+                    expires_at=_safe_float(existing.get("expires_at"), 0),
+                )
             user["current_interaction"] = existing
             return
 
+        dynamics: dict[str, Any] = {}
+        dynamics_kind = emotion_event if emotion_event != "neutral" else inbound_intent
+        prior_expires_at = _safe_float(existing.get("expires_at"), 0)
+        if not contact_active and dynamics_kind in {"hurt", "apology", "comfort", "praise", "intimacy", "play"}:
+            dynamics = settle_interaction_dynamics(
+                existing,
+                requested_band=band,
+                event_kind=dynamics_kind,
+                intensity=intensity or pressure * 20,
+                now=now,
+            )
+            if dynamics:
+                band = str(dynamics.get("expression_band") or band)
+                hard_expires_at = expires_at
+                try:
+                    negative_dynamics = float(dynamics.get("polarity") or 0) < 0
+                except (TypeError, ValueError):
+                    negative_dynamics = False
+                if negative_dynamics and prior_expires_at > now:
+                    hard_expires_at = min(hard_expires_at, prior_expires_at) if hard_expires_at > 0 else prior_expires_at
+                dynamic_expires_at = _safe_float(dynamics.get("expires_at"), hard_expires_at)
+                if hard_expires_at > 0:
+                    dynamics["hard_expires_at"] = hard_expires_at
+                    dynamics["expires_at"] = min(dynamic_expires_at, hard_expires_at)
+                    expires_at = hard_expires_at
+                else:
+                    expires_at = dynamic_expires_at
+
+        event_recorder = getattr(self, "_record_interaction_emotion_event", None)
+        emotion_event_record = event_recorder(
+            user,
+            intent,
+            band=band,
+            reason_code=reason_code,
+            status="applied",
+            expires_at=expires_at,
+        ) if callable(event_recorder) else None
+        interaction_payload = {
+            "expression_band": band,
+            "source": "automatic",
+            "reason": reason_code,
+            "updated_at": now,
+            "expires_at": expires_at,
+            "manual_override": False,
+            "last_event_id": (emotion_event_record or {}).get("event_id", ""),
+            "trace_id": (emotion_event_record or {}).get("trace_id", ""),
+        }
+        if dynamics:
+            interaction_payload.update(dynamics)
         user["current_interaction"] = current_interaction_projection(
-            {
-                "expression_band": band,
-                "source": "automatic",
-                "reason": reason_code,
-                "updated_at": now,
-                "expires_at": expires_at,
-                "manual_override": False,
-            },
+            interaction_payload,
             relationship_role=role,
             relationship_mode=relationship_mode,
             relationship_score=user.get("relationship_score"),
@@ -5818,11 +6019,25 @@ Local classifier result:
                 emotion_regulation.get("reason") or "-",
             )
         vent_threshold = _safe_int(getattr(self, "qzone_emotional_vent_threshold", 90), 90, 40, 100)
-        if (
+        interaction_projection = user.get("current_interaction")
+        interaction_band = (
+            str(interaction_projection.get("expression_band") or "").strip().lower()
+            if isinstance(interaction_projection, dict)
+            else ""
+        )
+        intensity_vent_trigger = (
+            intensity >= vent_threshold
+            and interaction_band in {"avoidant", "hurt"}
+            and target in {"bot", "ambiguous"}
+        )
+        legacy_vent_trigger = (
             current == "refusing"
             and previous_mode != "refusing"
             and abs(mood_score) >= vent_threshold
-            and target in {"bot", "ambiguous"}
+        )
+        if (
+            target in {"bot", "ambiguous"}
+            and (intensity_vent_trigger or legacy_vent_trigger)
         ):
             role_getter = getattr(self, "_private_user_role", None)
             try:
@@ -5831,16 +6046,47 @@ Local classifier result:
                 role = ""
             if role != "owner":
                 logger.info(
-                    "[PrivateCompanion] 公开心情动态跳过: user_role=%s score=%s",
+                    "[PrivateCompanion] 公开心情动态跳过: user_role=%s intensity=%s",
                     role or "friend",
-                    abs(mood_score),
+                    intensity,
                 )
                 return
             vent = getattr(self, "_maybe_publish_qzone_emotional_vent", None)
             if callable(vent):
+                operation = vent(
+                    user_snapshot=deepcopy(user),
+                    interaction_state=deepcopy(user.get("current_interaction"))
+                    if isinstance(user.get("current_interaction"), dict)
+                    else {},
+                    relationship_state=deepcopy(state),
+                    intent=deepcopy(intent),
+                )
                 try:
-                    asyncio.create_task(vent(user_snapshot=deepcopy(user), relationship_state=deepcopy(state), intent=deepcopy(intent)))
+                    creator = getattr(self, "_create_lifecycle_background_task", None)
+                    task = (
+                        creator(operation, label="qzone_emotional_vent")
+                        if callable(creator)
+                        else asyncio.create_task(operation, name="private-companion-qzone-emotional-vent")
+                    )
+                    if task is None:
+                        raise RuntimeError("background task unavailable")
+                    if not callable(creator):
+                        def consume(done_task: asyncio.Task) -> None:
+                            try:
+                                done_task.result()
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as exc:
+                                logger.warning(
+                                    "[PrivateCompanion] QQ 空间情绪动态后台任务失败: %s",
+                                    _single_line(exc, 160),
+                                )
+
+                        task.add_done_callback(consume)
                 except Exception as exc:
+                    close = getattr(operation, "close", None)
+                    if callable(close):
+                        close()
                     logger.debug("[PrivateCompanion] 公开心情动态任务创建失败: %s", _single_line(exc, 120))
 
     def _remember_passive_reply_topic(self, user: dict[str, Any], text: str, inbound_text: str = "") -> None:
@@ -7382,7 +7628,13 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                 if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
                 else None
             )
-            stage = relationship_stage_for_score(user.get("relationship_score", 0), policy)["phase"]
+            stage_projection = relationship_stage_for_score(
+                user.get("relationship_score", 0),
+                policy,
+                previous_stage_key=user.get("relationship_phase_key", ""),
+            )
+            stage = stage_projection["phase"]
+            user["relationship_phase_key"] = stage.get("key", "acquaintance")
             relationship_baseline = {
                 "stage_key": stage.get("key"),
                 "tone": stage.get("tone"),
@@ -8350,12 +8602,13 @@ Bot 主动后用户回复次数：{reply_count}
                 preference,
             )
             if followup_user is not None:
-                asyncio.create_task(
+                self._create_lifecycle_background_task(
                     self._refresh_persona_relationship(
                         user_id,
                         followup_user,
                         trigger="pending_boundary",
-                    )
+                    ),
+                    label="refresh_persona_relationship_pending_boundary",
                 )
             return True
         except Exception as exc:

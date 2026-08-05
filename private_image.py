@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -29,8 +30,25 @@ from astrbot.core import file_token_service
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, _url_host_is_public
 from .segmented_message import component_kind, component_strategies_from_owner, plan_component_chunks
+
+
+PREPARED_IMAGE_MAX_AGE_SECONDS = 30 * 60
+
+
+class _PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-check redirects so a public image URL cannot pivot into local networks."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        if not _url_host_is_public(newurl):
+            logger.warning(
+                "[PrivateCompanion] remote image redirect rejected: url=%s",
+                _single_line(newurl, 160),
+            )
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
 
 class PrivateImageMixin:
     """Methods split from main.PrivateCompanionPlugin."""
@@ -177,6 +195,34 @@ class PrivateImageMixin:
             visit(raw)
         return [source for source in sources if source]
 
+    def _private_image_local_path_is_allowed(self, path: Path) -> bool:
+        """Allow image files only from plugin, AstrBot, or temporary storage roots."""
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return False
+        roots: list[Path] = []
+        for candidate in (getattr(self, "data_dir", ""), tempfile.gettempdir()):
+            if candidate:
+                try:
+                    roots.append(Path(candidate).resolve())
+                except Exception:
+                    continue
+        try:
+            astrbot_root = Path(get_astrbot_data_path()).resolve()
+        except Exception:
+            astrbot_root = None
+        if astrbot_root is not None:
+            roots.append(astrbot_root)
+        for root in roots:
+            try:
+                if resolved.is_relative_to(root):
+                    return True
+            except AttributeError:
+                if str(resolved) == str(root) or str(resolved).startswith(str(root) + os.sep):
+                    return True
+        return False
+
     async def _persist_private_inbound_images(self, event: AstrMessageEvent, user_id: str) -> list[str]:
         result: list[str] = []
         target_dir = Path(self.data_dir) / "private_inbound_images" / re.sub(r"[^0-9A-Za-z_.-]+", "_", str(user_id or "unknown"))
@@ -217,6 +263,12 @@ class PrivateImageMixin:
                 continue
             source_path = Path(source)
             if source_path.exists() and source_path.is_file():
+                if not self._private_image_local_path_is_allowed(source_path):
+                    logger.warning(
+                        "[PrivateCompanion] private image local path rejected: path=%s",
+                        _single_line(source, 200),
+                    )
+                    continue
                 suffix = source_path.suffix.lower() if source_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ".jpg"
                 target = target_dir / f"{now_ms}_{index}{suffix}"
                 try:
@@ -226,7 +278,12 @@ class PrivateImageMixin:
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 私聊图片暂存失败: %s", exc)
             if re.match(r"^https?://", source, flags=re.I):
-                persisted = await self._persist_private_remote_image_source(source, target_dir, f"{now_ms}_{index}")
+                persisted = await self._persist_private_remote_image_source(
+                    source,
+                    target_dir,
+                    f"{now_ms}_{index}",
+                    public_hosts_only=True,
+                )
                 if persisted:
                     result.append(persisted)
                     continue
@@ -236,17 +293,37 @@ class PrivateImageMixin:
             for source in self._raw_private_image_sources(event):
                 if not source or source in result:
                     continue
-                persisted = await self._persist_private_remote_image_source(source, target_dir, f"{now_ms}_raw_{len(result) + 1}")
+                persisted = await self._persist_private_remote_image_source(
+                    source,
+                    target_dir,
+                    f"{now_ms}_raw_{len(result) + 1}",
+                    public_hosts_only=True,
+                )
                 if persisted:
                     result.append(persisted)
+                    continue
+                if re.match(r"^https?://", source, flags=re.I):
                     continue
                 if self._private_image_source_to_model_url(source):
                     result.append(source)
         return result
 
-    async def _persist_private_remote_image_source(self, source: str, target_dir: Path, stem: str) -> str:
+    async def _persist_private_remote_image_source(
+        self,
+        source: str,
+        target_dir: Path,
+        stem: str,
+        *,
+        public_hosts_only: bool = False,
+    ) -> str:
         text = str(source or "").strip()
         if not re.match(r"^https?://", text, flags=re.I):
+            return ""
+        if public_hosts_only and not await asyncio.to_thread(_url_host_is_public, text):
+            logger.warning(
+                "[PrivateCompanion] remote image host rejected: url=%s",
+                _single_line(text, 160),
+            )
             return ""
 
         request_url = self._private_image_request_url(text)
@@ -262,7 +339,9 @@ class PrivateImageMixin:
                         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                     },
                 )
-                with urllib.request.urlopen(request, timeout=15) as response:
+                opener = urllib.request.build_opener(_PublicOnlyRedirectHandler()) if public_hosts_only else None
+                response_cm = opener.open(request, timeout=15) if opener is not None else urllib.request.urlopen(request, timeout=15)
+                with response_cm as response:
                     content_type = str(response.headers.get("Content-Type") or "").lower()
                     length = _safe_int(response.headers.get("Content-Length"), 0, 0)
                     max_bytes = 12 * 1024 * 1024
@@ -343,11 +422,17 @@ class PrivateImageMixin:
             target_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             return []
+        self._sweep_stale_prepared_image_files(target_dir)
         prepared: list[str] = []
         now_ms = int(_now_ts() * 1000)
         for index, source in enumerate([str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:12], 1):
             if re.match(r"^https?://", source, flags=re.I):
-                persisted = await self._persist_private_remote_image_source(source, target_dir, f"{now_ms}_{index}")
+                persisted = await self._persist_private_remote_image_source(
+                    source,
+                    target_dir,
+                    f"{now_ms}_{index}",
+                    public_hosts_only=True,
+                )
                 if persisted and persisted not in prepared:
                     prepared.append(persisted)
                 continue
@@ -361,6 +446,24 @@ class PrivateImageMixin:
             if source not in prepared:
                 prepared.append(source)
         return prepared
+
+    def _sweep_stale_prepared_image_files(self, target_dir: Path) -> int:
+        """Remove stale downloaded images left behind by cancellation or errors."""
+        removed = 0
+        try:
+            deadline = _now_ts() - PREPARED_IMAGE_MAX_AGE_SECONDS
+            for path in target_dir.iterdir():
+                try:
+                    if path.is_file() and path.stat().st_mtime < deadline:
+                        path.unlink(missing_ok=True)
+                        removed += 1
+                except Exception:
+                    continue
+        except Exception:
+            return removed
+        if removed:
+            logger.info("[PrivateCompanion] stale prepared images removed: dir=%s removed=%s", target_dir.name, removed)
+        return removed
 
     def _cleanup_prepared_image_sources(self, sources: list[str], *, namespace: str) -> None:
         """Remove only temporary files downloaded into this plugin's vision namespace."""
@@ -396,7 +499,7 @@ class PrivateImageMixin:
             if re.match(r"^https?://", text, flags=re.I):
                 continue
             path = Path(text)
-            if not path.exists() or not path.is_file():
+            if not path.exists() or not path.is_file() or not self._private_image_local_path_is_allowed(path):
                 continue
             ref = str(path.resolve())
             if ref not in refs:
@@ -415,6 +518,8 @@ class PrivateImageMixin:
             text = text[len("file://"):]
         path = Path(text)
         if not path.exists() or not path.is_file():
+            return ""
+        if not self._private_image_local_path_is_allowed(path):
             return ""
         suffix = path.suffix.lower()
         mime = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/gif" if suffix == ".gif" else "image/jpeg"
@@ -439,7 +544,7 @@ class PrivateImageMixin:
             if text.startswith("file://"):
                 text = text[len("file://"):]
             path = Path(text)
-            if path.exists() and path.is_file():
+            if path.exists() and path.is_file() and self._private_image_local_path_is_allowed(path):
                 return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
         except Exception as exc:
             logger.debug("[PrivateCompanion] 私聊图片缓存键生成失败: %s", exc)
@@ -519,7 +624,7 @@ class PrivateImageMixin:
             if re.match(r"^https?://", text, flags=re.I):
                 return b""
             path = Path(text)
-            if path.exists() and path.is_file():
+            if path.exists() and path.is_file() and self._private_image_local_path_is_allowed(path):
                 return path.read_bytes()
         except Exception as exc:
             logger.debug("[PrivateCompanion] 私聊图片缓存别名字节读取失败: %s", exc)
@@ -1764,7 +1869,7 @@ class PrivateImageMixin:
                 if text.startswith("file://"):
                     text = text[len("file://"):]
                 path = Path(text)
-                if not path.exists() or not path.is_file():
+                if not path.exists() or not path.is_file() or not self._private_image_local_path_is_allowed(path):
                     return b""
                 if path.suffix.lower() != ".gif":
                     head = path.read_bytes()[:6]
@@ -2977,17 +3082,32 @@ class PrivateImageMixin:
             except Exception:
                 pass
             return existing_task
-        task = asyncio.create_task(
-            self._run_group_image_understanding(
-                task_key=task_key,
-                group_id=group_id,
-                sender_id=sender_id,
-                text=text,
-                message_id=message_id,
-                umo=_single_line(getattr(event, "unified_msg_origin", ""), 160),
-                sources=sources,
-            )
+        operation = self._run_group_image_understanding(
+            task_key=task_key,
+            group_id=group_id,
+            sender_id=sender_id,
+            text=text,
+            message_id=message_id,
+            umo=_single_line(getattr(event, "unified_msg_origin", ""), 160),
+            sources=sources,
         )
+        creator = getattr(self, "_create_lifecycle_background_task", None)
+        try:
+            task = (
+                creator(operation, label="group_image_understanding")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-group-image-understanding")
+            )
+        except RuntimeError:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
+        if task is None:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
         store[task_key] = {
             "task": task,
             "created_ts": _now_ts(),
@@ -4221,9 +4341,33 @@ class PrivateImageMixin:
         )
         task_creator = getattr(self, "_create_lifecycle_background_task", None)
         if callable(task_creator):
-            task_creator(remainder, label="private_image_reply_remainder")
+            task = task_creator(remainder, label="private_image_reply_remainder")
+            if task is None:
+                close = getattr(remainder, "close", None)
+                if callable(close):
+                    close()
         else:
-            asyncio.create_task(remainder)
+            task = asyncio.create_task(remainder, name="private-companion-private-image-remainder")
+            tasks = getattr(self, "_private_image_background_tasks", None)
+            if not isinstance(tasks, set):
+                tasks = set()
+                self._private_image_background_tasks = tasks
+            tasks.add(task)
+
+            def consume(done_task: asyncio.Task) -> None:
+                try:
+                    done_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] private image remainder task failed: %s",
+                        _single_line(exc, 160),
+                    )
+                finally:
+                    tasks.discard(done_task)
+
+            task.add_done_callback(consume)
         return first_text or self._private_image_context_assistant_message(text)
 
     async def _private_image_reply_chain(self, text: str, event: AstrMessageEvent) -> list[Any]:

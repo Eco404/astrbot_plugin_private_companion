@@ -59,7 +59,7 @@ _DEFAULT_STAGES: tuple[dict[str, Any], ...] = (
         "description": "刚开始相处，友好回应并逐步观察偏好。",
         "tone": "友好、自然、不自来熟",
         "address_level": "优先固定称呼、姓名或“你”",
-        "proactive_care_limit": 1,
+        "proactive_care_limit": 0,
         "allow_playful_jokes": False,
         "allow_followup": True,
         "allow_memory_mention": False,
@@ -187,7 +187,13 @@ def normalize_relationship_stage_policy(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def relationship_stage_for_score(value: Any, policy: Any = None) -> dict[str, Any]:
+def relationship_stage_for_score(
+    value: Any,
+    policy: Any = None,
+    *,
+    previous_stage_key: Any = "",
+    hysteresis_margin: int = 20,
+) -> dict[str, Any]:
     try:
         score = int(value)
     except (TypeError, ValueError):
@@ -199,6 +205,21 @@ def relationship_stage_for_score(value: Any, policy: Any = None) -> dict[str, An
         if stage["min"] <= score <= stage["max"]:
             stage_index = index
             break
+    previous_key = str(previous_stage_key or "").strip()
+    previous_index = next((index for index, item in enumerate(stages) if item["key"] == previous_key), -1)
+    try:
+        margin = max(0, min(200, int(hysteresis_margin or 0)))
+    except (TypeError, ValueError):
+        margin = 20
+    if previous_index >= 0 and stage_index != previous_index:
+        if stage_index > previous_index:
+            enter_score = int(stages[previous_index + 1]["min"]) + margin
+            if score < enter_score:
+                stage_index = previous_index
+        else:
+            exit_score = int(stages[previous_index]["min"]) - margin
+            if score > exit_score:
+                stage_index = previous_index
     stage = deepcopy(stages[stage_index])
     span = max(0, int(stage["max"]) - int(stage["min"]))
     within = 1.0 if span == 0 else (score - int(stage["min"])) / span
@@ -218,8 +239,13 @@ def relationship_stage_for_score(value: Any, policy: Any = None) -> dict[str, An
     }
 
 
-def relationship_projection_for_bridge(value: Any, policy: Any = None) -> dict[str, Any]:
-    projection = relationship_stage_for_score(value, policy)
+def relationship_projection_for_bridge(
+    value: Any,
+    policy: Any = None,
+    *,
+    previous_stage_key: Any = "",
+) -> dict[str, Any]:
+    projection = relationship_stage_for_score(value, policy, previous_stage_key=previous_stage_key)
     phase = projection["phase"]
     return {
         "schema_version": projection["schema_version"],
@@ -250,7 +276,7 @@ def relationship_stage_prompt(value: Any, policy: Any = None) -> str:
         f"当前陪伴亲密阶段：{phase['label']}（固定分数范围 {phase['min']}..{phase['max']}）。"
         f"基础语气：{phase['tone']}；称呼尺度：{phase['address_level']}；"
         f"主动关心上限：{phase['proactive_care_limit']}；{'、'.join(behaviors)}。"
-        "这些只限制表达和软行为，不能授予主要用户、跨用户查询、平台动作或现实动作权限。"
+        "这些只限制表达和软行为，不能授予主要用户、跨用户查询、平台动作、现实动作或任何 P4 安全权限。"
     )
 
 

@@ -13,8 +13,17 @@ from enum import Enum
 import re
 from typing import Any, Mapping
 
+try:
+    from .interaction_dynamics import project_interaction_dynamics
+except ImportError:  # pragma: no cover - direct module import in lightweight tests
+    from interaction_dynamics import project_interaction_dynamics
+try:
+    from .affect_modulation_contract import normalize_affect_modulation
+except ImportError:  # pragma: no cover
+    from affect_modulation_contract import normalize_affect_modulation
 
-EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v1"
+
+EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v2"
 CONTENT_TIERS = ("normal", "flirt", "adult")
 CONTENT_TIER_LABELS = {"normal": "日常", "flirt": "含蓄暧昧", "adult": "成人私密"}
 _CONTENT_STAGE_INDEX = {
@@ -45,6 +54,12 @@ class ExpressionBand(str, Enum):
 _OWNER_ONLY_BANDS = frozenset({ExpressionBand.CLOSE, ExpressionBand.AFFECTIONATE})
 _ALL_BANDS = frozenset(ExpressionBand)
 _BAND_INDEX = {band: index for index, band in enumerate(ExpressionBand)}
+_P4_CAP_BANDS = {
+    "guarded": ExpressionBand.HURT,
+    "neutral": ExpressionBand.RELAXED,
+    "warm": ExpressionBand.WARM,
+    "close": ExpressionBand.AFFECTIONATE,
+}
 _DOWN_MOOD_WORDS = frozenset({
     "sad", "bad", "negative", "angry", "anxious", "tense", "tired", "sleepy",
     "难过", "低落", "生气", "焦虑", "紧张", "疲惫", "疲劳", "困", "烦", "受伤", "安静", "收声", "困倦",
@@ -87,6 +102,13 @@ class ExpressionDecision:
     proactive_target: int
     proactive_cooldown_until: float
     tts_style: str
+    affect_modulation: Mapping[str, Any]
+    pacing: str
+    directness: str
+    validation_style: str
+    self_disclosure: str
+    humor_mode: str
+    topic_initiative: str
     allowed_behaviors: tuple[str, ...]
     safety_mode: str
     blocker: str | None
@@ -241,6 +263,20 @@ def _override_band(value: Any) -> ExpressionBand | None:
     return _band(value)
 
 
+def _has_p4_block(safety: Mapping[str, Any]) -> bool:
+    if _flag(safety.get("p4_blocked")):
+        return True
+    if _text(safety.get("safety_mode")) in {"blocked", "deny", "p4_blocked", "confinement"}:
+        return True
+    for key in ("p4", "p4_state"):
+        state = _mapping(safety.get(key))
+        if _flag(state.get("blocked")):
+            return True
+        if _text(state.get("confinement_state")) in {"blocked", "active", "confinement"}:
+            return True
+    return False
+
+
 def _has_contact_boundary(safety: Mapping[str, Any]) -> bool:
     if _flag(safety.get("contact_boundary")) or _flag(safety.get("no_contact")):
         return True
@@ -310,7 +346,7 @@ def content_intent_from_text(value: Any) -> dict[str, Any]:
         or re.search(r"(?:回复|语气|对我)[^，。！？!?]{0,8}甜一点", compact)
     )
     consent = adult_requested and bool(
-        re.search(r"(?:我同意|我允许)[^，。！？!?]{0,20}(?:成人|nsfw|继续)", compact)
+        re.search(r"(?:我同意|我允许)[^\n]{0,20}(?:成人|nsfw|继续)", compact)
         or re.search(r"(?:成人|nsfw)[^，。！？!?]{0,20}(?:我同意|我允许|可以继续)", compact)
     )
     return {
@@ -386,8 +422,8 @@ def _resolve_content_tier(
 def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | None = None, **overrides: Any) -> ExpressionDecision:
     """Build one deterministic expression decision from bounded structured inputs.
 
-    Unknown values are ignored rather than echoed.  An administrator override
-    may choose a permitted band, but never bypasses contact boundaries.
+    Unknown values are ignored rather than echoed. An administrator override
+    may choose a permitted band, but never bypasses P4 or contact boundaries.
     """
 
     source = dict(_input_mapping(input_data))
@@ -399,6 +435,8 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     owner_account = role == "owner"
     owner_exclusive = owner_account and mode == "owner_exclusive"
 
+    if _has_p4_block(safety):
+        return _blocked_decision("p4_blocked", "p4_safety", reasons)
     contact_boundary = _has_contact_boundary(safety)
     passive_reengagement = _flag(safety.get("passive_reengagement"))
     if contact_boundary and not passive_reengagement:
@@ -435,6 +473,10 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     if contact_boundary:
         band = ExpressionBand.AVOIDANT
         reasons.append("contact_boundary_passive_reengagement")
+    p4_cap = _P4_CAP_BANDS.get(_text(safety.get("p4_warmth_cap")))
+    if p4_cap is not None and _BAND_INDEX[band] > _BAND_INDEX[p4_cap]:
+        band = p4_cap
+        reasons.append("p4_warmth_cap_applied")
     tone, warmth, distance, address_style, response_length, tts_style, behaviors = _BAND_DETAILS[band]
     baseline_tone = _bounded_text(relationship_baseline.get("tone"), 120)
     baseline_address = _bounded_text(
@@ -488,6 +530,24 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     elif up_mood and not low_energy:
         warmth = min(100, warmth + 5)
         reasons.append("up_mood_expression_lift")
+
+    modulation = normalize_affect_modulation(bot_state.get("affect_modulation"))
+    if modulation["confidence"] > 0:
+        if modulation["valence"] <= -0.35:
+            warmth = max(0, warmth - 3)
+            if tone not in {"reserved", "careful"}:
+                tone = "gentle"
+        elif modulation["valence"] >= 0.35 and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}:
+            warmth = min(100, warmth + 3)
+        if modulation["arousal"] <= 0.2:
+            tts_style = "soft"
+        elif modulation["arousal"] >= 0.7 and not low_energy and not down_mood and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}:
+            tts_style = "bright"
+        if modulation["vulnerability"] >= 0.65:
+            followup = False
+            if tone != "reserved":
+                tone = "careful"
+        reasons.append("affect_modulation_applied")
 
     schedule = _mapping(source.get("schedule"))
     candidate = _mapping(source.get("proactive_candidate"))
@@ -546,6 +606,49 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         owner_exclusive=owner_exclusive,
         reasons=reasons,
     )
+    pacing = (
+        "slow"
+        if low_energy or down_mood or modulation["arousal"] <= 0.2
+        else "bright"
+        if modulation["arousal"] >= 0.7 and band == ExpressionBand.LIVELY
+        else "steady"
+    )
+    directness = (
+        "indirect"
+        if band in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}
+        else "direct"
+        if band in {ExpressionBand.LIVELY, ExpressionBand.AFFECTIONATE}
+        else "natural"
+    )
+    validation_style = (
+        "acknowledge"
+        if band in {ExpressionBand.AVOIDANT, ExpressionBand.HURT, ExpressionBand.RELAXED}
+        else "support_first"
+    )
+    if modulation["vulnerability"] >= 0.65:
+        validation_style = "support_first"
+    self_disclosure = (
+        "allowed"
+        if owner_account and band in {ExpressionBand.CLOSE, ExpressionBand.AFFECTIONATE}
+        else "light"
+        if "shared_ritual" in behaviors
+        else "none"
+    )
+    humor_mode = "off"
+    if (
+        "light_humor" in behaviors
+        and not low_energy
+        and not down_mood
+        and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}
+    ):
+        humor_mode = "playful" if band == ExpressionBand.LIVELY else "light"
+    topic_initiative = (
+        "reply_only"
+        if not followup
+        else "shared_topic"
+        if "shared_ritual" in behaviors
+        else "followup"
+    )
     return ExpressionDecision(
         contract=EXPRESSION_CONTRACT_VERSION,
         expression_band=band.value,
@@ -562,6 +665,13 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         proactive_target=stage_target,
         proactive_cooldown_until=proactive_cooldown_until,
         tts_style=tts_style,
+        affect_modulation=modulation,
+        pacing=pacing,
+        directness=directness,
+        validation_style=validation_style,
+        self_disclosure=self_disclosure,
+        humor_mode=humor_mode,
+        topic_initiative=topic_initiative,
         allowed_behaviors=behaviors,
         safety_mode="contact_boundary_passive" if contact_boundary else "normal",
         blocker=None,
@@ -586,6 +696,16 @@ def current_interaction_projection(
 ) -> dict[str, Any]:
     """Normalize persisted and legacy interaction state for runtime/page use."""
     raw = dict(value) if isinstance(value, Mapping) else {}
+    current_ts = _bounded_timestamp(now)
+    hard_expires_at = _bounded_timestamp(raw.get("hard_expires_at") or raw.get("expires_at"))
+    dynamics = project_interaction_dynamics(raw, now=current_ts) if current_ts else {}
+    if dynamics:
+        if hard_expires_at:
+            dynamics["expires_at"] = min(
+                _bounded_timestamp(dynamics.get("expires_at")) or hard_expires_at,
+                hard_expires_at,
+            )
+        raw.update(dynamics)
     band = _band_from_interaction(raw) or ExpressionBand.RELAXED
     role = _text(relationship_role)
     score = _bounded_int(raw.get("relationship_score", relationship_score), 0, -1200, 1200)
@@ -602,15 +722,15 @@ def current_interaction_projection(
         band = normal_cap_band
         reason_codes.append("normal_interaction_band_cap_applied")
     expires_at = _bounded_timestamp(raw.get("expires_at"))
-    current_ts = _bounded_timestamp(now)
     manual = bool(raw.get("manual_override") or _text(raw.get("source")) == "manual")
-    if expires_at and current_ts and current_ts >= expires_at:
+    dynamics_hard_expired = bool(dynamics and hard_expires_at and current_ts and current_ts >= hard_expires_at)
+    if (not dynamics or dynamics_hard_expired) and expires_at and current_ts and current_ts >= expires_at:
         band = ExpressionBand.RELAXED
         manual = False
         reason_codes.append("interaction_expired")
     source = "manual" if manual else _text(raw.get("source")) or "automatic"
     reason = str(raw.get("reason") or raw.get("reason_code") or "").replace("\r", " ").replace("\n", " ")[:120]
-    return {
+    projection = {
         "expression_band": band.value,
         "label": EXPRESSION_BAND_LABELS[band.value],
         "source": source,
@@ -622,7 +742,22 @@ def current_interaction_projection(
         "normal_interaction_band_cap": normal_cap,
         "allowed_bands": list(allowed),
         "reason_codes": reason_codes,
+        "last_event_id": _bounded_text(raw.get("last_event_id"), 96),
+        "trace_id": _bounded_text(raw.get("trace_id"), 96),
     }
+    if dynamics:
+        projection.update({
+            "dynamics_version": dynamics["dynamics_version"],
+            "load": dynamics["load"],
+            "peak_intensity": dynamics["peak_intensity"],
+            "decay_started_at": dynamics["decay_started_at"],
+            "half_life": dynamics["half_life"],
+            "recovery_band": dynamics["recovery_band"],
+            "projection_revision": dynamics["projection_revision"],
+            "polarity": dynamics["polarity"],
+            "base_band": dynamics["base_band"],
+        })
+    return projection
 
 
 def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) -> str:
@@ -652,12 +787,20 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
         content_instruction = "内容尺度=含蓄暧昧；可以亲密和调情，但保持非露骨，不描写成人性行为"
     else:
         content_instruction = "内容尺度=日常；不要主动升级为暧昧或成人内容"
+    dimensions = (
+        f"节奏={str(decision.get('pacing') or 'steady')[:12]}，"
+        f"直接度={str(decision.get('directness') or 'natural')[:12]}，"
+        f"回应={str(decision.get('validation_style') or 'none')[:16]}，"
+        f"自述={str(decision.get('self_disclosure') or 'none')[:16]}，"
+        f"幽默={str(decision.get('humor_mode') or 'off')[:12]}，"
+        f"话题={str(decision.get('topic_initiative') or 'reply_only')[:16]}"
+    )
     return (
         f"当前互动表达：{EXPRESSION_BAND_LABELS[band.value]}；"
         f"语气={str(decision.get('tone') or 'steady')[:24]}，"
         f"称呼距离={str(decision.get('address_style') or 'neutral')[:24]}，"
         f"回复长度={str(decision.get('response_length') or 'balanced')[:24]}；"
-        f"{followup}；{initiative}；{proactive_rhythm}{f'；{content_instruction}' if content_instruction else ''}。"
+        f"{followup}；{initiative}；{proactive_rhythm}；{dimensions}{f'；{content_instruction}' if content_instruction else ''}。"
     )
 
 
@@ -685,6 +828,13 @@ def _blocked_decision(reason: str, blocker: str, inherited_reasons: list[str]) -
         proactive_target=0,
         proactive_cooldown_until=0.0,
         tts_style="none",
+        affect_modulation=normalize_affect_modulation({}),
+        pacing="slow",
+        directness="indirect",
+        validation_style="none",
+        self_disclosure="none",
+        humor_mode="off",
+        topic_initiative="reply_only",
         allowed_behaviors=(),
         safety_mode=reason,
         blocker=blocker,

@@ -19,6 +19,7 @@ _SECTION_SOURCES = frozenset(
         "fixed_prompt",
         "recent_continuity",
         "wardrobe_decision",
+        "managed_reference",
         "reference_fallback",
         "composition",
         "edit_contract",

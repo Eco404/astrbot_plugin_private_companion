@@ -262,10 +262,9 @@ window.PrivateCompanionProviderTree = (() => {
       const result = await postJson("/provider/test", { key, provider_id: providerId, timeout_seconds: timeoutSeconds });
       state.providerTestResults = { ...(state.providerTestResults || {}), [key]: result };
       if (result.ok) {
-        const suffix = result.sample ? ` · ${result.sample}` : "";
-        setProviderStatus(context, key, `正常 ${result.elapsed_ms}ms${suffix}`, "ok", true);
+        setProviderStatus(context, key, `正常 ${result.duration_ms || result.elapsed_ms || 0}ms`, "ok", true);
       } else {
-        setProviderStatus(context, key, result.error || "未返回内容", "warn", true);
+        setProviderStatus(context, key, result.next_step || result.error || "未返回内容", "warn", true);
       }
     } catch (error) {
       const result = { ok: false, error: error.message, test_status: "failed", error_category: "请求失败" };

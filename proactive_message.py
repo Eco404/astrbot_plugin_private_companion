@@ -112,6 +112,12 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
+from .reference_asset_gate import (
+    MAX_INPUT_ASSETS,
+    ReferenceAssetGate,
+    ReferenceAssetPlan,
+    ReferenceAssetTicket,
+)
 from .helpers import (
     _date_key,
     _format_history_media_marker,
@@ -988,17 +994,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "unable to submit request",
             "invalid_request",
             "invalid request error",
-            "functiondeclaration",
-            "function declaration",
-            "schema didn't specify",
-            "tool schema",
-            "tool has no return value",
-            "status disabled",
             "主动消息专用模式下",
             "普通被动回复不可使用 private companion 工具",
             "主动渲染阶段不可使用 private companion 工具",
             "has sent the result directly to the user",
-            "traceback",
             "error code: 400",
             "error code 400",
             "400 bad request",
@@ -1031,13 +1030,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "providerapierror",
             "unabletosubmitrequest",
             "invalid_request",
-            "invalidrequest",
             "invalidrequesterror",
-            "functiondeclaration",
-            "schemadidntspecify",
-            "toolschema",
-            "toolhasnoreturnvalue",
-            "statusdisabled",
             "主动消息专用模式下",
             "普通被动回复不可使用privatecompanion工具",
             "主动渲染阶段不可使用privatecompanion工具",
@@ -1055,6 +1048,21 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return True
         if any(marker in compact for marker in compact_markers):
             return True
+        provider_error_context = any(
+            token in compact
+            for token in (
+                "providerapierror",
+                "errorcode",
+                "statuscode",
+                "badrequest",
+                "invalidrequest",
+                "requestfailed",
+                "请求失败",
+                "调用失败",
+                "模型调用失败",
+                "工具调用失败",
+            )
+        )
         if "errorcode" in compact and any(
             token in compact
             for token in (
@@ -1066,9 +1074,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
         ):
             return True
-        if "functiondeclaration" in compact and any(
+        if "functiondeclaration" in compact and provider_error_context and any(
             token in compact for token in ("schema", "properties", "parameters", "tool", "tools", "badrequest", "invalidrequest")
         ):
+            return True
+        if any(token in compact for token in ("schemadidntspecify", "toolschema", "image_url", "invalidparameter")) and provider_error_context:
             return True
         if "aisearch" in cleaned and any(
             marker in cleaned
@@ -2062,6 +2072,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 f"长期阶段={_single_line(profile.get('stage_label'), 20) or '初识'}，"
                 f"档位={_single_line(expression.get('expression_band'), 20) or 'relaxed'}，"
                 f"语气={_single_line(expression.get('tone'), 20) or 'steady'}，"
+                f"节奏={_single_line(expression.get('pacing'), 16) or 'steady'}，"
+                f"直接度={_single_line(expression.get('directness'), 16) or 'natural'}，"
+                f"回应={_single_line(expression.get('validation_style'), 20) or 'none'}，"
+                f"自述={_single_line(expression.get('self_disclosure'), 16) or 'none'}，"
+                f"幽默={_single_line(expression.get('humor_mode'), 16) or 'off'}，"
+                f"话题={_single_line(expression.get('topic_initiative'), 20) or 'reply_only'}，"
                 f"追问={'允许' if expression.get('followup') else '关闭'}，"
                 f"当前硬额度={_safe_int(expression.get('proactive_budget'), 0, 0)}，"
                 f"阶段柔性目标={_safe_int(expression.get('proactive_target'), 0, 0)}；"
@@ -2815,6 +2831,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 f"档位={_single_line(expression_decision.get('expression_band'), 24) or 'relaxed'}；"
                 f"语气={_single_line(expression_decision.get('tone'), 24) or 'steady'}；"
                 f"距离={_single_line(expression_decision.get('address_style'), 24) or 'neutral'}；"
+                f"节奏={_single_line(expression_decision.get('pacing'), 16) or 'steady'}；"
+                f"直接度={_single_line(expression_decision.get('directness'), 16) or 'natural'}；"
+                f"回应={_single_line(expression_decision.get('validation_style'), 20) or 'none'}；"
+                f"自述={_single_line(expression_decision.get('self_disclosure'), 16) or 'none'}；"
+                f"幽默={_single_line(expression_decision.get('humor_mode'), 16) or 'off'}；"
+                f"话题={_single_line(expression_decision.get('topic_initiative'), 20) or 'reply_only'}；"
                 f"追问={'允许' if expression_decision.get('followup') else '关闭'}；"
                 f"当前硬额度={_safe_int(expression_decision.get('proactive_budget'), 0, 0)}；"
                 f"阶段柔性目标={_safe_int(expression_decision.get('proactive_target'), 0, 0)}；"
@@ -3217,8 +3239,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         cleaned = _single_line(text, 500).lower()
         if not cleaned:
             return False
-        if self._looks_like_internal_provider_error_text(text):
-            return True
         normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", cleaned).strip()
         compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", cleaned)
         if self._is_proactive_delivery_receipt_text(text):
@@ -3509,6 +3529,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         runner = getattr(result, "agent_runner", None) if result else None
         llm_resp = runner.get_final_llm_resp() if runner else None
         text = str(getattr(llm_resp, "completion_text", "") or "").strip()
+        response_role = str(getattr(llm_resp, "role", "") or "").strip().lower()
         captured_text = self._captured_send_plain_text(captured_tool_sends)
         if captured_text:
             if text and self._framework_agent_meta_summary_leak(text):
@@ -3519,7 +3540,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     _single_line(captured_text, 160),
                 )
             text = captured_text
-        elif text and self._framework_agent_meta_summary_leak(text):
+        elif response_role == "err" or (
+            text and self._framework_agent_meta_summary_leak(text)
+        ):
             logger.warning(
                 "[PrivateCompanion] 主动主链 final 疑似工具循环摘要或 Provider 失败且无可用捕获文本,已丢弃: label=%s text=%s",
                 label,
@@ -3540,11 +3563,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         umo = str(user.get("umo") or "").strip()
         if not umo:
             return ""
-        # Pull cross-session emotional drift before generating proactive message
-        try:
-            self._memory_companion_apply_emotional_drift(session_id="")
-        except Exception:
-            pass
         prompt = await self._build_framework_proactive_prompt(
             user=user,
             name=name,
@@ -10947,6 +10965,28 @@ Output:
                 part for part in (multi_reference_instruction, plan_text_fallback) if part
             )
 
+        structured_reference_gate, structured_reference_plan, structured_reference_status = (
+            self._q5_prepare_structured_reference_plan(
+                generation_id=trace_id,
+                workflow_kind=workflow_kind,
+                prompt_text=original_prompt_text or base_prompt,
+                reference_candidate=reference_candidate,
+                explicit_reference_supplied=explicit_reference_supplied,
+            )
+        )
+        if structured_reference_plan:
+            # Do not retain legacy paths in the prompt/trace route once the
+            # managed sink is selected. The gate alone holds usable file paths.
+            reference_candidate = self._q5_managed_reference_candidate(
+                structured_reference_plan
+            )
+            reference_image_path = ""
+            reference_image_paths = []
+            submitted_reference_entries = []
+            submitted_bindings = ()
+            plan_text_fallback = ""
+            reference_plan = build_photo_reference_plan(reference_intent, ())
+
         wardrobe = resolve_photo_wardrobe_decision(
             workflow_kind=workflow_kind,
             prompt_text=original_prompt_text or base_prompt,
@@ -11054,6 +11094,16 @@ Output:
                 negative=wardrobe_negative,
             ),
             PhotoPromptSection(
+                name="managed_reference_constraints",
+                source="managed_reference",
+                positive=(
+                    structured_reference_plan.prompt_constraint
+                    if structured_reference_plan
+                    else ""
+                ),
+                protected=True,
+            ),
+            PhotoPromptSection(
                 name="reference_plan_fallback",
                 source="reference_fallback",
                 positive=plan_text_fallback,
@@ -11116,18 +11166,29 @@ Output:
         prompt_text = resolved_context.final_prompt
         complete_prompt_text = resolved_context.complete_prompt
         reference_candidate = dict(resolved_context.reference or {})
-        reference_image_path = _path_text(reference_candidate.get("path"), 1000)
-        if not reference_candidate:
-            submitted_reference_entries = []
-            reference_image_paths = []
-            submitted_bindings = ()
-        elif submitted_reference_entries:
-            submitted_reference_entries[0] = (
-                submitted_reference_entries[0][0],
-                reference_candidate,
-                reference_image_path,
+        if structured_reference_plan:
+            # The public generation record retains only the managed asset ID and
+            # role projection. Its paths remain inside ReferenceAssetGate.
+            reference_candidate = self._q5_managed_reference_candidate(
+                structured_reference_plan
             )
-            reference_image_paths = [entry[2] for entry in submitted_reference_entries]
+            reference_image_path = ""
+            reference_image_paths = []
+            submitted_reference_entries = []
+            submitted_bindings = ()
+        else:
+            reference_image_path = _path_text(reference_candidate.get("path"), 1000)
+            if not reference_candidate:
+                submitted_reference_entries = []
+                reference_image_paths = []
+                submitted_bindings = ()
+            elif submitted_reference_entries:
+                submitted_reference_entries[0] = (
+                    submitted_reference_entries[0][0],
+                    reference_candidate,
+                    reference_image_path,
+                )
+                reference_image_paths = [entry[2] for entry in submitted_reference_entries]
         try:
             reference_exists = bool(reference_image_path and Path(reference_image_path).is_file())
         except (OSError, ValueError):
@@ -11151,6 +11212,8 @@ Output:
             reference_plan,
             submitted_reference_ids=submitted_reference_ids,
         )
+        if structured_reference_plan:
+            reference_fallback = ReferenceFallback((), (), (), "")
         def section_log_key(section: PhotoPromptSection, used: dict[str, int]) -> str:
             base = _single_line(section.name, 80) or section.source
             used[base] = used.get(base, 0) + 1
@@ -11265,6 +11328,20 @@ Output:
                 "preferred": preferred,
                 "prompt_format": prompt_format,
                 "reference_count": len(reference_image_paths),
+                "structured_reference_status": structured_reference_status,
+                "structured_reference_count": len(structured_reference_plan.assets)
+                if structured_reference_plan
+                else 0,
+                "structured_reference_asset_ids": [
+                    item.asset_id for item in structured_reference_plan.assets
+                ]
+                if structured_reference_plan
+                else [],
+                "structured_reference_roles": [
+                    item.role for item in structured_reference_plan.assets
+                ]
+                if structured_reference_plan
+                else [],
                 "image_size": image_size,
             },
         )
@@ -11317,11 +11394,17 @@ Output:
             note: str,
             *,
             reference_submitted: bool = False,
+            structured_reference_submitted: bool = False,
         ) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
             image_path = _path_text(image_path, 1000)
             effective_submitted_reference_ids: tuple[str, ...] = ()
-            if reference_submitted:
+            if structured_reference_submitted and structured_reference_plan:
+                effective_submitted_reference_ids = tuple(
+                    item.asset_id for item in structured_reference_plan.assets
+                )
+                effective_reference_fallback = ReferenceFallback((), (), (), "")
+            elif reference_submitted:
                 submitted_count = self._photo_reference_submitted_count_from_note(
                     note,
                     len(submitted_reference_ids),
@@ -11329,11 +11412,17 @@ Output:
                 effective_submitted_reference_ids = tuple(
                     submitted_reference_ids[:submitted_count]
                 )
-            effective_reference_fallback = evaluate_reference_fallback(
-                reference_intent,
-                reference_plan,
-                submitted_reference_ids=effective_submitted_reference_ids,
-            )
+                effective_reference_fallback = evaluate_reference_fallback(
+                    reference_intent,
+                    reference_plan,
+                    submitted_reference_ids=effective_submitted_reference_ids,
+                )
+            else:
+                effective_reference_fallback = evaluate_reference_fallback(
+                    reference_intent,
+                    reference_plan,
+                    submitted_reference_ids=effective_submitted_reference_ids,
+                )
             if (
                 effective_reference_fallback.message
                 and effective_reference_fallback.message not in str(note or "")
@@ -11361,9 +11450,11 @@ Output:
             ok = bool(image_path and output_exists)
             reference_used = bool(
                 ok
-                and reference_exists
-                and reference_submitted
                 and effective_submitted_reference_ids
+                and (
+                    structured_reference_submitted
+                    or (reference_exists and reference_submitted)
+                )
             )
             self._append_photo_generation_trace_event(
                 trace_id,
@@ -11459,6 +11550,49 @@ Output:
                 "上下文清理",
                 "",
                 "生图上下文仍存在未能安全清理的服装冲突，已停止调用后端",
+            )
+
+        if structured_reference_plan:
+            if not self._comfyui_photo_available():
+                return finish(
+                    "ComfyUI",
+                    "",
+                    "Q5 受管参考素材只能由 ComfyUI 工作流消费；ComfyUI 后端不可用或未配置",
+                )
+            busy_state = self._local_photo_generation_busy_state(force_refresh=True)
+            if busy_state:
+                return finish(
+                    "ComfyUI",
+                    "",
+                    f"Q5 受管参考素材未提交：电脑高负荷（{busy_state.get('reason') or '负载偏高'}）",
+                )
+            workflow_name = self._choose_photo_workflow_name(workflow_kind)
+            if not workflow_name:
+                return finish(
+                    "ComfyUI",
+                    "",
+                    f"Q5 受管参考素材未提交：未配置 {workflow_kind} 对应的 ComfyUI 工作流",
+                )
+            reference_asset_ticket = structured_reference_gate.issue(
+                structured_reference_plan,
+                backend="comfyui",
+            ) if structured_reference_gate else None
+            if reference_asset_ticket is None:
+                return finish("ComfyUI", "", "Q5 受管参考素材票据签发失败")
+            image_path, note = await self._run_comfyui_photo_workflow(
+                workflow_name,
+                prompt_text,
+                session_key=session_key,
+                reference_asset_gate=structured_reference_gate,
+                reference_asset_ticket=reference_asset_ticket,
+                generation_id=trace_id,
+                structured_reference_count=len(structured_reference_plan.assets),
+            )
+            return finish(
+                "ComfyUI",
+                image_path,
+                note,
+                structured_reference_submitted="已使用" in str(note or "") and "受管参考素材" in str(note or ""),
             )
 
         if "source" in reference_fallback.missing_roles:
@@ -11915,6 +12049,79 @@ Output:
                 return "其他", custom
             return "其他", "保持统一审美风格,自然生活感,避免默认写实照片风格"
         return "真实", "真实摄影风格,像手机随手拍到的生活照片,光线自然,细节可信"
+
+    def _q5_structured_reference_assets_enabled(self) -> bool:
+        return bool(getattr(self, "enable_p5_structured_reference_assets", False))
+
+    def _q5_structured_reference_generation_mode(
+        self,
+        workflow_kind: str,
+        prompt_text: str,
+        reference_candidate: dict[str, Any],
+    ) -> str:
+        kind = _single_line(workflow_kind, 40).lower()
+        if kind in {"edit", "改图", "修图", "重绘", "p图"}:
+            return "edit"
+        if _single_line(reference_candidate.get("kind"), 40).lower() == "recent_sent_photo" or re.search(
+            r"续拍|继续拍|接着拍|再来一张|换个姿势|换个表情|same scene|continue the photo",
+            str(prompt_text or ""),
+            flags=re.I,
+        ):
+            return "continuation"
+        return "new_topic"
+
+    def _q5_prepare_structured_reference_plan(
+        self,
+        *,
+        generation_id: str,
+        workflow_kind: str,
+        prompt_text: str,
+        reference_candidate: dict[str, Any],
+        explicit_reference_supplied: bool,
+    ) -> tuple[ReferenceAssetGate | None, ReferenceAssetPlan | None, str]:
+        if not self._q5_structured_reference_assets_enabled():
+            return None, None, "disabled"
+        # User-provided and quoted paths remain legacy single-image flows. They
+        # can never be promoted into the managed multi-image sink.
+        if explicit_reference_supplied:
+            return None, None, "legacy_explicit_reference"
+        gate = ReferenceAssetGate(getattr(self, "data_dir", ""))
+        mode = self._q5_structured_reference_generation_mode(
+            workflow_kind,
+            prompt_text,
+            reference_candidate,
+        )
+        plan, status = gate.plan(
+            getattr(self, "photo_structured_reference_assets", []),
+            generation_id=generation_id,
+            mode=mode,
+        )
+        if not plan:
+            logger.info(
+                "[PrivateCompanion] Q5 受管参考素材未进入图片输入汇: trace=%s status=%s",
+                _single_line(generation_id, 80),
+                status,
+            )
+            return gate, None, status
+        return gate, plan, "ok"
+
+    @staticmethod
+    def _q5_managed_reference_candidate(plan: ReferenceAssetPlan) -> dict[str, Any]:
+        primary = plan.primary_asset
+        if primary is None:
+            return {}
+        return {
+            "id": primary.asset_id,
+            "kind": "managed_asset",
+            "source": "q5_reference_asset_gate",
+            "note": "管理员登记并校验的受管身份参考素材",
+            "reference_roles": [item.role for item in plan.assets],
+            "outfit_lock_default": any(
+                item.role == "outfit" and item.outfit_lock_default
+                for item in plan.assets
+            ),
+            "metadata_source": "q5_reference_asset_gate",
+        }
 
     def _photo_persona_reference_image_path(self) -> str:
         catalog = getattr(self, "photo_reference_catalog", None)
@@ -13876,6 +14083,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_path: str = "",
         image_size: str = "",
         reference_image_paths: Any = (),
+        reference_asset_gate: ReferenceAssetGate | None = None,
+        reference_asset_ticket: ReferenceAssetTicket | None = None,
+        generation_id: str = "",
+        structured_reference_count: int = 0,
     ) -> tuple[str, str]:
         module = self._get_comfyui_module()
         if module is None:
@@ -13886,12 +14097,19 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         try:
             server_ip, client_id = module._get_server_config(config)
             workflow_dir = module._get_workflow_dir()
-            raw_reference_paths = reference_image_paths
+            use_structured_assets = bool(
+                reference_asset_gate is not None
+                and reference_asset_ticket is not None
+                and _single_line(generation_id, 120)
+                and _safe_int(structured_reference_count, 0, 0) > 0
+            )
+            raw_reference_paths = () if use_structured_assets else reference_image_paths
             if isinstance(raw_reference_paths, str):
                 raw_reference_paths = (raw_reference_paths,)
             requested_reference_paths: list[str] = []
             valid_reference_paths: list[str] = []
-            for raw_path in (reference_image_path, *(raw_reference_paths or ())):
+            raw_paths = () if use_structured_assets else (reference_image_path, *(raw_reference_paths or ()))
+            for raw_path in raw_paths:
                 path = _path_text(raw_path, 1000)
                 if not path or path in requested_reference_paths:
                     continue
@@ -13904,8 +14122,15 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             workflow_file = ""
             text_count = 1
             image_count = 0
-            planned_reference_count = len(valid_reference_paths)
-            if use_reference_image:
+            planned_reference_count = (
+                min(
+                    MAX_INPUT_ASSETS,
+                    max(1, _safe_int(structured_reference_count, 1, 1)),
+                )
+                if use_structured_assets
+                else len(valid_reference_paths)
+            )
+            if use_reference_image or use_structured_assets:
                 required_images = planned_reference_count
                 for candidate_count in range(required_images, 0, -1):
                     candidate_file = module.find_workflow_file(
@@ -13930,8 +14155,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                         image_count = min(candidate_count, max(1, matched_images))
                         break
                 if not workflow_file:
+                    reference_label = "Q5 受管参考素材" if use_structured_assets else f"已找到 {required_images} 张参考图"
                     return "", (
-                        f"已找到 {required_images} 张参考图，但 ComfyUI 工作流 {workflow_name} "
+                        f"{reference_label}，但 ComfyUI 工作流 {workflow_name} "
                         "没有匹配的 images>=1 输入。请至少配置单图自拍/改图工作流，"
                         "避免回退成不使用参考图的纯文生图。"
                     )
@@ -13959,7 +14185,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     image_count=0,
                 )
             if not workflow_file:
-                need = f"images={len(valid_reference_paths)}" if use_reference_image else "images=0"
+                need = f"images={planned_reference_count}" if (use_reference_image or use_structured_assets) else "images=0"
                 return "", f"未找到匹配工作流 {workflow_name}（需要 texts>=1、{need}、videos=0）"
             submitted_prompt_text = self._photo_reference_prompt_for_backend_capacity(
                 prompt_text,
@@ -13972,7 +14198,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 _single_line(workflow_file, 160),
                 text_count,
                 image_count,
-                use_reference_image,
+                use_reference_image or use_structured_assets,
                 self.comfyui_photo_wait_seconds,
                 _single_line(submitted_prompt_text, 180),
             )
@@ -13983,13 +14209,29 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             )
             workflow = module.ComfyUIWorkflow(server_ip, client_id)
             workflow.load_workflow_api(workflow_file)
-            input_images = list(valid_reference_paths[:image_count]) if image_count > 0 and use_reference_image else []
+            input_images: list[str] = []
             reference_note = ""
-            if input_images:
+            if use_structured_assets:
+                if image_count <= 0:
+                    return "", "Q5 受管参考素材工作流未声明有效图片输入容量"
+                input_images, ticket_status = reference_asset_gate.consume(
+                    reference_asset_ticket,
+                    generation_id=generation_id,
+                    backend="comfyui",
+                    capacity=image_count,
+                )
+                if ticket_status != "ok" or not input_images:
+                    return "", f"Q5 受管参考素材票据无效：{ticket_status}"
+                reference_note = f"；已使用 {len(input_images)} 张受管参考素材"
+                if len(input_images) < planned_reference_count:
+                    reference_note += f"；当前工作流仅支持 {len(input_images)}/{planned_reference_count} 张受管参考素材"
+            elif use_reference_image:
+                input_images = list(valid_reference_paths[:image_count]) if image_count > 0 else []
+            if input_images and not use_structured_assets:
                 reference_note = f"；已使用 {len(input_images)} 张本地参考图"
                 if len(input_images) < planned_reference_count:
                     reference_note += f"；当前工作流仅支持 {len(input_images)}/{planned_reference_count} 张参考图"
-            elif use_reference_image:
+            elif use_reference_image and not use_structured_assets:
                 return "", (
                     f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 实际没有接收图片输入。"
                     "请检查工作流 images 参数数量。"
@@ -17832,6 +18074,49 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 return False
             return self._onebot_forward_action_result_ok(result)
         return False
+
+    @staticmethod
+    def _looks_like_python_traceback_text(text: Any) -> bool:
+        """Only treat a complete Python stack trace as an outbound error leak.
+
+        Technical conversations commonly mention ``traceback`` or explain a
+        schema.  Those words alone are not an error.  A real Python traceback
+        has the header, at least one frame, and a terminating exception line.
+        """
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw:
+            return False
+        has_header = bool(re.search(r"(?im)^\s*traceback \(most recent call last\):\s*$", raw))
+        has_frame = bool(re.search(r"(?im)^\s*file \"[^\n\"]+\", line \d+(?:, in .+)?\s*$", raw))
+        has_exception = bool(
+            re.search(
+                r"(?im)^\s*(?:[a-z_][\w.]*(?:error|exception|warning)|assertionerror|keyboardinterrupt|systemexit)(?::|$)",
+                raw,
+            )
+        )
+        return has_header and has_frame and has_exception
+
+    def _framework_error_leak_kind(self, text: Any) -> str:
+        """Return a safe classifier code for a real framework leak, if any."""
+        if self._looks_like_python_traceback_text(text):
+            return "python_traceback"
+        if self._looks_like_internal_provider_error_text(text):
+            return "provider_error"
+        cleaned = _single_line(text, 1000).lower()
+        if any(
+            marker in cleaned
+            for marker in (
+                "error occurred while processing agent request",
+                "sqlite3.operationalerror",
+                "database is locked",
+                "sqlalche.me/e/20/e3q8",
+                "model do not support image input",
+            )
+        ):
+            return "framework_error"
+        if self._framework_agent_meta_summary_leak(str(text or "")):
+            return "tool_loop"
+        return ""
 
     async def _send_segmented_forward_message(
         self,

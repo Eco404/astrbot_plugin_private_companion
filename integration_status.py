@@ -104,6 +104,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .diagnostic_envelope import DIAGNOSTIC_ENVELOPE_VERSION, DIAGNOSTIC_PUBLIC_FIELDS
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -241,6 +242,15 @@ _PLATFORM_DISPLAY_NAMES = {
 
 class IntegrationStatusMixin:
     """外部插件状态、世界观适配与运行环境描述"""
+
+    @staticmethod
+    def _diagnostic_operations_contract() -> dict[str, Any]:
+        """Return the versioned public DTO contract used by operations."""
+        return {
+            "version": DIAGNOSTIC_ENVELOPE_VERSION,
+            "fields": list(DIAGNOSTIC_PUBLIC_FIELDS),
+            "history_projection": True,
+        }
 
     def _patch_astrbot_plugin_page_asset_token_compat(self) -> None:
         """Give AstrBot plugin Pages a wider refresh window for this panel.

@@ -57,6 +57,10 @@ class _RelayHarness(LlmToolActionsMixin, AtRelayMixin):
         return ""
 
     @staticmethod
+    def _atrelay_tool_authorization(_event) -> tuple[bool, str]:
+        return True, "owner"
+
+    @staticmethod
     def _atrelay_confirmation_guard(*_args, **_kwargs) -> str:
         return ""
 

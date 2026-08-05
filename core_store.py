@@ -125,6 +125,7 @@ from .relationship_ledger import (
     normalize_relationship_positive_stage_cap_key,
 )
 from .storage.store_manager import StoreManager
+from .person_context_contract import empty_person_store, ensure_person_store
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -374,6 +375,10 @@ class CoreStoreMixin:
             "groups": {},
             "daily_plan": {},
             "daily_plan_history": [],
+            "agenda_version": 1,
+            "observed_activities": [],
+            "window_snapshots": [],
+            "agenda_reconciliation_history": [],
             "daily_state": {},
             "state_conditions": [],
             "state_generated_day": "",
@@ -394,6 +399,7 @@ class CoreStoreMixin:
             "recent_photo_continuity": {},
             "daily_story_plan": {},
             "daily_story_plan_history": [],
+            "bot_personal_outbox": [],
             "skill_growth": {},
             "detail_enhanced_day": "",
             "detail_enhanced_segments": {},
@@ -442,6 +448,7 @@ class CoreStoreMixin:
             "daily_review_last_attempt": {},
             "daily_review_completed_day": "",
             "daily_review_case_audit": [],
+            "unified_person": empty_person_store(),
         }
 
     @staticmethod
@@ -452,6 +459,10 @@ class CoreStoreMixin:
         data.setdefault("groups", {})
         data.setdefault("daily_plan", {})
         data.setdefault("daily_plan_history", [])
+        data.setdefault("agenda_version", 1)
+        data.setdefault("observed_activities", [])
+        data.setdefault("window_snapshots", [])
+        data.setdefault("agenda_reconciliation_history", [])
         data.setdefault("daily_state", {})
         data.setdefault("state_conditions", [])
         data.setdefault("state_generated_day", "")
@@ -472,6 +483,7 @@ class CoreStoreMixin:
         data.setdefault("recent_photo_continuity", {})
         data.setdefault("daily_story_plan", {})
         data.setdefault("daily_story_plan_history", [])
+        data.setdefault("bot_personal_outbox", [])
         data.setdefault("skill_growth", {})
         data.setdefault("detail_enhanced_day", "")
         data.setdefault("detail_enhanced_segments", {})
@@ -522,6 +534,7 @@ class CoreStoreMixin:
         data.setdefault("daily_review_last_attempt", {})
         data.setdefault("daily_review_completed_day", "")
         data.setdefault("daily_review_case_audit", [])
+        ensure_person_store(data)
         return data
 
     @staticmethod
@@ -2120,6 +2133,12 @@ class CoreStoreMixin:
         event_id: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
+        if bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)):
+            return {
+                "changed": False,
+                "code": "p4_legacy_score_isolated",
+                "score": user.get("relationship_score"),
+            }
         score_migration = migrate_legacy_relationship_score(
             user,
             created=False,
@@ -2206,6 +2225,80 @@ class CoreStoreMixin:
             self._schedule_data_save()
         return user
 
+    def _auto_profile_platform_set(self) -> set[str]:
+        raw = getattr(self, "auto_profile_platforms", None)
+        if isinstance(raw, str):
+            items = re.split(r"[\s,，、;；]+", raw)
+        elif isinstance(raw, (list, tuple, set)):
+            items = list(raw)
+        else:
+            items = []
+        normalized = {
+            self._normalize_platform_kind(item)
+            for item in items
+            if str(item or "").strip()
+        }
+        return normalized or {"onebot", "qq_official", "telegram", "webchat", "generic"}
+
+    def _auto_profile_nickname(self, user_id: str, sender_display_name: str) -> str:
+        strategy = str(getattr(self, "default_nickname_strategy", "platform_display_name") or "").strip()
+        fixed = _single_line(getattr(self, "default_nickname", "你"), 24) or "你"
+        observed = _single_line(sender_display_name, 24)
+        generic = {"用户", "主人", "主要用户", "默认用户", "unknown", "未知"}
+        if strategy == "fixed":
+            return fixed
+        if strategy == "user_id":
+            return _single_line(user_id, 24) or fixed
+        if observed and observed.lower() not in generic:
+            return observed
+        return fixed or _single_line(user_id, 24)
+
+    def _ensure_auto_private_user_profile(
+        self,
+        event: Any,
+        *,
+        user_id: str,
+        sender_display_name: str = "",
+        now: float | None = None,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Create a minimal private profile without granting implicit authority."""
+        if not bool(getattr(self, "enable_auto_user_profile_creation", False)):
+            return None, False
+        canonical_user_id = self._canonical_private_user_id(str(user_id or "").strip())
+        if not canonical_user_id or self._is_bot_self_user_id(canonical_user_id):
+            return None, False
+        platform_kind = self._platform_kind_for_event(event)
+        if platform_kind not in self._auto_profile_platform_set():
+            return None, False
+        users = self.data.setdefault("users", {})
+        existing = users.get(canonical_user_id) if isinstance(users, dict) else None
+        if isinstance(existing, dict):
+            return existing, False
+
+        user = self._get_user(canonical_user_id)
+        created_at = float(now if now is not None else _now_ts())
+        user["auto_profile_created"] = True
+        user["auto_profile_created_at"] = created_at
+        user["profile_origin"] = "private_auto"
+        # `_get_user()` owns relationship initialization.  An automatic profile
+        # must not bypass the ledger or overwrite an explicitly configured role.
+        user["nickname"] = self._auto_profile_nickname(canonical_user_id, sender_display_name)
+        user["style"] = _single_line(getattr(self, "default_style", "温柔"), 24) or "温柔"
+        auto_enabled = bool(getattr(self, "auto_enable_companion_for_new_users", False))
+        user["auto_enabled"] = auto_enabled
+        user["manual_enabled"] = False
+        user["manual_disabled"] = False
+        user["enabled"] = bool(auto_enabled or canonical_user_id in set(self._configured_target_ids()))
+        proactive_enabled = bool(getattr(self, "default_proactive_enabled", False))
+        proactive_limit = _safe_int(getattr(self, "default_proactive_daily_limit", 0), 0, 0, 30)
+        user["proactive_daily_limit"] = proactive_limit if proactive_enabled and auto_enabled else 0
+        user["proactive_boundary_note"] = "" if auto_enabled else "自动建档默认不主动触达"
+        user["last_seen"] = max(_safe_float(user.get("last_seen"), 0), created_at)
+        user["last_activity_at"] = max(_safe_float(user.get("last_activity_at"), 0), created_at)
+        self._note_private_user_umo(canonical_user_id, user, getattr(event, "unified_msg_origin", ""))
+        self._schedule_data_save()
+        return user, True
+
     def _latest_user_activity_ts(self, user: dict[str, Any] | None) -> float:
         if not isinstance(user, dict):
             return 0.0
@@ -2238,8 +2331,11 @@ class CoreStoreMixin:
         user_id = self._canonical_private_user_id(str(user_id or "").strip())
         if self._is_bot_self_user_id(user_id):
             return False
-        if isinstance(user, dict) and user.get("manual_enabled"):
-            return True
+        if isinstance(user, dict):
+            if user.get("manual_disabled"):
+                return False
+            if user.get("manual_enabled") or user.get("auto_enabled"):
+                return True
         if not user_id:
             return False
         if user_id in set(self._configured_target_ids()):

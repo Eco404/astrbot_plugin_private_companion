@@ -35,10 +35,10 @@ class _ProactiveHarness(ProactiveMixin):
 
 
 class RelationshipProactiveSoftTargetTests(unittest.TestCase):
-    def test_acquaintance_starts_with_one_soft_target(self) -> None:
+    def test_acquaintance_starts_without_proactive_care_target(self) -> None:
         stages = default_relationship_stage_policy()
         acquaintance = next(item for item in stages if item["key"] == "acquaintance")
-        self.assertEqual(1, acquaintance["proactive_care_limit"])
+        self.assertEqual(0, acquaintance["proactive_care_limit"])
 
     def test_non_distant_stage_target_does_not_cut_the_hard_daily_allowance(self) -> None:
         harness = _ProactiveHarness()

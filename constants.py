@@ -220,6 +220,10 @@ _DATA_STORE_KEYS = (
     "users",
     "daily_plan",
     "daily_plan_history",
+    "agenda_version",
+    "observed_activities",
+    "window_snapshots",
+    "agenda_reconciliation_history",
     "daily_state",
     "state_conditions",
     "state_generated_day",
@@ -264,6 +268,7 @@ _DATA_STORE_KEYS = (
     "daily_review_last_attempt",
     "daily_review_completed_day",
     "daily_review_case_audit",
+    "bot_personal_outbox",
 )
 
 # 触发原因 - 真人化表达
@@ -397,6 +402,10 @@ _SIMULATION_FALLBACK_EVENTS = [
 # 默认用户模板（无文本，无需修改）
 _DEFAULT_USER_TEMPLATE = {
     "enabled": True,
+    "auto_enabled": False,
+    "auto_profile_created": False,
+    "auto_profile_created_at": 0,
+    "profile_origin": "",
     "relationship_role": "",
     "relationship_mode": "normal",
     "relationship_ledger": [],
@@ -405,6 +414,8 @@ _DEFAULT_USER_TEMPLATE = {
     "relationship_decay_settled_day": "",
     "relationship_last_decay_stage_drop_at": 0,
     "current_interaction": {},
+    "emotion_event_ledger": [],
+    "last_emotion_event": {},
     "proactive_daily_limit": -1,
     "proactive_idle_minutes": -1,
     "proactive_min_interval_minutes": -1,

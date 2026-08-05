@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import contextvars
 import functools
 import gc
@@ -137,6 +138,25 @@ from .helpers import (
     _resolve_timezone_setting,
 )
 from .config_migration import migrate_flat_config_into_schema_groups
+from .person_context_contract import (
+    CONTRACT_NAME as PERSON_CONTRACT_NAME,
+    CONTRACT_VERSION as PERSON_CONTRACT_VERSION,
+    P3_CONTRACT_NAME,
+    P3_CONTRACT_VERSION,
+    build_identity_key,
+    contract_self_check as person_contract_self_check,
+)
+from .context_orchestration import build_context, project_context
+from .p4_shadow import build_p4_shadow
+from .p4_affinity_confinement import apply_legacy_relationship_delta
+from .p4_live_runtime import decide_live_request
+from .p4_runtime_gate import SAFE_CONFINEMENT_REPLY
+from .p6_readonly_projection import build_p6_readonly_status
+from .reply_temperature import compose_reply_temperature
+from .plugin_identity import (
+    PLUGIN_ID,
+    is_module_path_for_package,
+)
 from .companion_interaction_expression import build_expression_decision, content_intent_from_text, expression_decision_prompt
 from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
@@ -196,7 +216,10 @@ def _multi_persona_event_context(function):
     return async_wrapper
 from .busy_reply_gate import BusyReplyGateMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
+from .p5_attestation import P5AttestationError, REASON_CODES as P5_ATTESTATION_REASON_CODES
+from .p5_source_observer import evaluate_source
 from .message_pipeline import handle_group_message, handle_private_message
+from .tool_history_sanitizer import sanitize_openai_tool_history
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
 from .prompt_surface import PromptSurface
@@ -219,6 +242,7 @@ from .creative import CreativeMixin
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
+from .group_cycle_boundary import build_group_cycle_boundary
 try:
     from .group_member_safety import GroupMemberSafetyMixin
 except ModuleNotFoundError as exc:
@@ -304,10 +328,13 @@ from .plugin_bootstrap import (
     DEFAULT_NEWS_SOURCES,
     LEGACY_DEFAULT_NEWS_SOURCES,
     PREVIOUS_TECH_DEFAULT_NEWS_SOURCES,
+    initialize_plugin_entrypoint_state,
     initialize_plugin_config,
+    initialize_plugin_post_runtime_state,
     initialize_plugin_runtime,
 )
 from .daily_state import DailyStateMixin
+from .agenda_runtime import AgendaRuntimeMixin
 from .daily_review import DailyReviewMixin
 from .scene_context import SceneContextMixin
 from .state_views import StateViewsMixin
@@ -441,6 +468,34 @@ class PrivateCompanionExtensionAPI:
                 "remote_url": f"https://q1.qlogo.cn/g?b=qq&nk={qq_id}&s=640" if qq_id else "",
             },
         }
+
+    def get_unified_person_contract(self) -> dict[str, Any]:
+        return self._plugin.unified_person_contract_status()
+
+    def resolve_unified_person(self, identity: dict[str, Any]) -> dict[str, Any]:
+        return self._plugin.resolve_unified_person_identity(identity)
+
+    def create_unified_person(
+        self,
+        identity: dict[str, Any],
+        *,
+        profile: dict[str, Any] | None = None,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        return self._plugin.create_unified_person(identity, profile=profile, operation_id=operation_id)
+
+    def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
+        return self._plugin.get_unified_person_projection(person_id)
+
+    def get_p6_readonly_status(self) -> dict[str, Any]:
+        """Expose bounded Unified Person counts without an authority surface."""
+        try:
+            return build_p6_readonly_status(self._plugin._unified_person_registry_status())
+        except Exception:
+            return build_p6_readonly_status(None)
+
+    def get_unified_person_context(self, event: Any | None = None) -> dict[str, Any]:
+        return self._plugin.build_unified_person_context(event)
 
     def get_scene_context(self, user_id: str = "") -> dict[str, Any]:
         """Return the current structured Bot-life context for plugin integrations."""
@@ -1282,6 +1337,7 @@ class PrivateCompanionPlugin(
     SceneContextMixin,
     ProactiveMessageMixin,
     DailyStateMixin,
+    AgendaRuntimeMixin,
     DailyReviewMixin,
     StateViewsMixin,
     InteractionUtilsMixin,
@@ -1344,6 +1400,153 @@ class PrivateCompanionPlugin(
         if value != original:
             _set_into_config(config, key, value)
         return value
+
+    @staticmethod
+    def _p5_hash(value: Any) -> str:
+        return hashlib.sha256(str(value).encode("utf-8", errors="ignore")).hexdigest()
+
+    @staticmethod
+    def _p5_event_reference(event: Any | None) -> str:
+        if event is None:
+            return "private_companion:background"
+        for value in (
+            getattr(event, "private_companion_p5_event_ref", ""),
+            getattr(event, "message_id", ""),
+            getattr(event, "unified_msg_origin", ""),
+        ):
+            text = _single_line(value, 120)
+            if text:
+                return text
+        return f"private_companion:event:{id(event)}"
+
+    @staticmethod
+    def _p5_detect_source_kind(event: Any | None, explicit: str = "") -> str:
+        candidate = _single_line(explicit, 60)
+        if not candidate and event is not None:
+            for attr in ("private_companion_p5_source_kind", "p5_source_kind"):
+                candidate = _single_line(getattr(event, attr, ""), 60)
+                if candidate:
+                    break
+        if not candidate and event is not None:
+            components: list[Any] = []
+            for attr in ("message_obj", "message_chain", "message", "message_components"):
+                value = getattr(event, attr, None)
+                if isinstance(value, (list, tuple)):
+                    components.extend(value[:24])
+                elif value is not None:
+                    components.append(value)
+            component_names = {type(item).__name__.lower() for item in components}
+            if any("forward" in name for name in component_names):
+                candidate = "forwarded_text"
+            elif any("reply" in name or "quote" in name for name in component_names):
+                candidate = "quoted_text"
+            elif any("image" in name or "visual" in name for name in component_names):
+                candidate = "vision_summary"
+        allowed = {
+            "policy_config", "verified_authorization", "current_user_intent", "forwarded_text",
+            "quoted_text", "vision_summary", "tool_output", "web_extract", "memory_recall",
+            "derived_summary", "legacy_memory", "unknown",
+        }
+        if candidate in allowed:
+            return candidate
+        return "current_user_intent" if event is not None else "policy_config"
+
+    def _p5_issue_attestation_for_event(
+        self,
+        *,
+        event: Any | None,
+        request: Any | None,
+        sink: str,
+        source_kind: str = "",
+    ) -> tuple[Any, Any] | None:
+        """Mint a one-shot handle and bound consumer for a local Bridge call."""
+        if not bool(getattr(self, "enable_p5_source_observer", False)):
+            return None
+
+        event_anchor = event if event is not None else object()
+        request_anchor = request if request is not None else event_anchor
+        p3_state = getattr(event_anchor, "private_companion_p5_p3_state", None)
+        if p3_state is None:
+            p3_state = object()
+            try:
+                setattr(event_anchor, "private_companion_p5_p3_state", p3_state)
+            except Exception:
+                pass
+        source_kind = self._p5_detect_source_kind(event_anchor, source_kind)
+        event_ref = self._p5_event_reference(event_anchor)
+        observation = evaluate_source(
+            {
+                "source_kind": source_kind,
+                "trust": {
+                    "policy_config": "T0",
+                    "verified_authorization": "T1",
+                    "current_user_intent": "T2",
+                    "forwarded_text": "T3",
+                    "quoted_text": "T3",
+                    "vision_summary": "T3",
+                    "tool_output": "T3",
+                    "web_extract": "T3",
+                    "memory_recall": "T4",
+                    "derived_summary": "T4",
+                    "legacy_memory": "T4",
+                    "unknown": "T4",
+                }[source_kind],
+                "sink": sink,
+                "event_id": event_ref,
+                "security_state": "allowed",
+            }
+        )
+        trust = str(observation.get("trust") or "T4")
+        source_event_ref_hash = _single_line(observation.get("safe_ref_hash"), 80) or self._p5_hash(event_ref)
+        reasons = [
+            code for code in observation.get("reason_codes", [])
+            if code in P5_ATTESTATION_REASON_CODES
+        ]
+        if not reasons:
+            reasons = ["invalid_segment"]
+        firewall_status = str(observation.get("security_state") or "unknown")
+        if firewall_status == "not_supplied":
+            firewall_status = "unknown"
+        try:
+            handle = self.p5_attestation_registry.mint(
+                request_anchor,
+                event_anchor,
+                p3_state,
+                request_hash=self._p5_hash(f"request:{id(request_anchor)}"),
+                session_hash=self._p5_hash(getattr(event_anchor, "unified_msg_origin", "background")),
+                source_kind=source_kind,
+                source_trust=trust,
+                firewall_status=firewall_status,
+                disposition=str(observation.get("disposition") or "shadow_quarantine"),
+                reason_codes=reasons,
+                source_event_ref_hash=source_event_ref_hash,
+                sinks=(sink,),
+            )
+        except (P5AttestationError, KeyError, TypeError, ValueError):
+            return None
+        if handle is None:
+            return None
+
+        def consume(candidate: Any, requested_sink: str = sink) -> Any:
+            return self.p5_attestation_registry.consume(
+                candidate,
+                request_anchor,
+                event_anchor,
+                p3_state,
+                requested_sink,
+            )
+
+        return handle, consume
+
+    def p5_source_observer_status(self) -> dict[str, Any]:
+        return {
+            "schema_version": "ops.p5.source_observer.v1",
+            "enabled": bool(getattr(self, "enable_p5_source_observer", False)),
+            "attestation": "available" if bool(getattr(self, "enable_p5_source_observer", False)) else "disabled",
+            "bridge_gate": bool(getattr(self, "enable_p5_b1_bridge_gate", False)),
+            "recall_gate": bool(getattr(self, "enable_p5_b1_recall_gate", False)),
+            "execution_authority": "none",
+        }
 
     @staticmethod
     def _normalize_weather_alert_min_severity(value: Any) -> str:
@@ -1860,12 +2063,15 @@ class PrivateCompanionPlugin(
         super().__init__(context)
         global _private_companion_plugin
         _private_companion_plugin = self
-        self.extension_api = PrivateCompanionExtensionAPI(self)
-        self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
-        self._external_realtime_activities: dict[str, dict[str, Any]] = {}
-        self.config = config
+        initialize_plugin_entrypoint_state(
+            self,
+            context,
+            config,
+            extension_api_factory=PrivateCompanionExtensionAPI,
+        )
         initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
+        initialize_plugin_post_runtime_state(self, config)
 
     async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
         integration = getattr(self, "_body_monitor_integration", None)
@@ -1888,6 +2094,329 @@ class PrivateCompanionPlugin(
         if integration is None:
             return ""
         return integration.format_health_prompt(user, reason=reason)
+
+    def plugin_identity_status(self) -> dict[str, Any]:
+        return dict(self.plugin_identity)
+
+    def runtime_compatibility_status(self) -> dict[str, Any]:
+        return self.runtime_capabilities.to_dict()
+
+    def bot_personal_capability_status(self) -> dict[str, Any]:
+        return dict(self.bot_personal_capabilities)
+
+    def unified_person_contract_status(self) -> dict[str, Any]:
+        issues = list(person_contract_self_check())
+        return {
+            "available": not issues,
+            "state": "ready" if not issues else "degraded",
+            "degraded": bool(issues),
+            "contract_name": PERSON_CONTRACT_NAME,
+            "contract_version": PERSON_CONTRACT_VERSION,
+            "p3_contract_name": P3_CONTRACT_NAME,
+            "p3_contract_version": P3_CONTRACT_VERSION,
+            "warnings": issues,
+            "registry": self.unified_person_registry.status(),
+        }
+
+    def _unified_person_registry_status(self) -> dict[str, Any]:
+        return self.unified_person_registry.status()
+
+    def _unified_person_event_identity(
+        self,
+        event: Any | None = None,
+        *,
+        subject_id: str = "",
+        subject_namespace: str = "",
+    ) -> dict[str, str]:
+        sender_id = _single_line(subject_id, 160)
+        if not sender_id and event is not None:
+            sender_getter = getattr(self, "_event_sender_id", None)
+            if callable(sender_getter):
+                try:
+                    sender_id = _single_line(sender_getter(event), 160)
+                except Exception:
+                    sender_id = ""
+            if not sender_id:
+                try:
+                    sender_id = _single_line(event.get_sender_id(), 160)
+                except Exception:
+                    sender_id = ""
+        platform = ""
+        if event is not None:
+            try:
+                platform = _single_line(event.get_platform_name(), 80)
+            except Exception:
+                platform = ""
+            if not platform:
+                platform = _single_line(str(getattr(event, "unified_msg_origin", "") or "").split(":", 1)[0], 80)
+        platform = platform or _single_line(getattr(self, "target_platform", ""), 80) or "unknown"
+        self_id = ""
+        if event is not None:
+            self_getter = getattr(self, "_event_self_id", None)
+            if callable(self_getter):
+                try:
+                    self_id = _single_line(self_getter(event), 160)
+                except Exception:
+                    self_id = ""
+        if not self_id:
+            ids = sorted(_single_line(item, 160) for item in self._known_bot_self_ids() if _single_line(item, 160))
+            if len(ids) == 1:
+                self_id = ids[0]
+        if not sender_id or not self_id:
+            return {}
+        namespace = _single_line(subject_namespace, 160).lower()
+        if not namespace:
+            namespace = f"{platform}:bot" if sender_id == self_id else f"{platform}:user"
+        adapter_instance = _single_line(
+            getattr(event, "adapter_instance_id", "") if event is not None else "",
+            160,
+        ) or f"{platform}:{_single_line(getattr(self, 'target_platform', ''), 80) or platform}"
+        return {
+            "companion_instance_id": PLUGIN_ID,
+            "bot_account_id": f"{platform}:{self_id}",
+            "adapter_instance_id": adapter_instance,
+            "subject_namespace": namespace,
+            "platform_subject_id": sender_id,
+        }
+
+    def resolve_unified_person_identity(self, identity: dict[str, Any]) -> dict[str, Any]:
+        return self.unified_person_registry.resolve(identity)
+
+    def create_unified_person(
+        self,
+        identity: dict[str, Any],
+        *,
+        profile: dict[str, Any] | None = None,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        return self.unified_person_registry.create_or_link(
+            identity,
+            profile=profile,
+            operation_id=operation_id,
+            actor_id="companion",
+        )
+
+    def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
+        return self.unified_person_registry.read_projection(person_id)
+
+    def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
+        return self.unified_person_registry.read_p4_effect_state(person_id)
+
+    def read_p4_live_state(self, person_id: str) -> dict[str, Any]:
+        return self.unified_person_registry.read_p4_live_state(person_id)
+
+    def _p4_b_apply_legacy_relationship_delta(
+        self,
+        user: dict[str, Any],
+        delta: int,
+        *,
+        reason_code: str = "",
+    ) -> bool:
+        del reason_code
+        return apply_legacy_relationship_delta(
+            user,
+            delta,
+            isolate=bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)),
+        )
+
+    def _p4_live_state_for_event(self, event: Any) -> dict[str, Any] | None:
+        try:
+            if not bool(event.is_private_chat()):
+                return None
+        except Exception:
+            return None
+        resolution = self.resolve_unified_person_for_event(event)
+        if resolution.get("state") != "resolved":
+            return None
+        person_id = _single_line(resolution.get("person_id"), 160)
+        if not person_id:
+            return None
+        result = self.read_p4_live_state(person_id)
+        if result.get("ok") is not True:
+            return {"_p4_live_invalid": True}
+        return result.get("state")
+
+    def _bounded_p4_reply_temperature_signals(self, event: Any) -> dict[str, Any]:
+        """Return transient, bounded advisory inputs for the P4 reply projection."""
+        data = getattr(self, "data", None)
+        daily_state = data.get("daily_state") if isinstance(data, dict) else None
+        energy = daily_state.get("energy") if isinstance(daily_state, dict) else None
+        if (
+            isinstance(energy, bool)
+            or not isinstance(energy, (int, float))
+            or not math.isfinite(float(energy))
+        ):
+            energy = None
+        else:
+            energy = max(0, min(100, energy))
+        mood = ""
+        if isinstance(daily_state, dict):
+            mood = _single_line(daily_state.get("mood_bias") or daily_state.get("mood"), 64)
+
+        schedule_parts: list[str] = []
+        segment_getter = getattr(self, "_current_detail_segment_for_update", None)
+        if callable(segment_getter):
+            try:
+                segment = segment_getter()
+            except Exception:
+                segment = None
+            if isinstance(segment, dict):
+                schedule_parts.extend(
+                    _single_line(segment.get(key), 80)
+                    for key in ("title", "name", "summary", "activity", "location")
+                    if _single_line(segment.get(key), 80)
+                )
+        if not schedule_parts and isinstance(data, dict):
+            try:
+                current_item = self._get_current_plan_item(data.get("daily_plan", {}))
+            except Exception:
+                current_item = None
+            if isinstance(current_item, dict):
+                schedule_parts.extend(
+                    _single_line(current_item.get(key), 80)
+                    for key in ("title", "name", "summary", "activity", "location")
+                    if _single_line(current_item.get(key), 80)
+                )
+
+        return {
+            "energy": energy,
+            "mood": mood or None,
+            "schedule": " ".join(schedule_parts)[:240] or None,
+            "context": _single_line(getattr(event, "message_str", ""), 280) or None,
+        }
+
+    def record_p4_effect_event(
+        self,
+        person_id: str,
+        event: dict[str, Any],
+        *,
+        operation_id: str,
+        actor_id: str = "system",
+    ) -> dict[str, Any]:
+        result = self.unified_person_registry.record_p4_effect_event(
+            person_id,
+            event,
+            operation_id=operation_id,
+            actor_id=actor_id,
+        )
+        if result.get("ok") and result.get("changed"):
+            saver = getattr(self, "_schedule_data_save", None)
+            if callable(saver):
+                saver()
+        return result
+
+    def resolve_unified_person_for_event(self, event: Any | None = None) -> dict[str, Any]:
+        identity = self._unified_person_event_identity(event)
+        if not identity:
+            return {"state": "pending", "identity_key": "", "person_id": "", "errors": ["event_identity_missing"]}
+        return self.resolve_unified_person_identity(identity)
+
+    def create_unified_person_for_event(
+        self,
+        event: Any | None = None,
+        *,
+        operation_id: str = "",
+        profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        identity = self._unified_person_event_identity(event)
+        if not identity:
+            return {"ok": False, "state": "pending", "code": "event_identity_missing", "person_id": ""}
+        try:
+            identity_key = build_identity_key(identity)
+        except (TypeError, ValueError):
+            return {"ok": False, "state": "invalid", "code": "identity_invalid", "person_id": ""}
+        user_profile = dict(profile) if isinstance(profile, dict) else {}
+        if event is not None and not user_profile.get("display_name"):
+            name_getter = getattr(self, "_sender_display_name", None)
+            if callable(name_getter):
+                try:
+                    user_profile["display_name"] = _single_line(name_getter(event), 80)
+                except Exception:
+                    pass
+        return self.create_unified_person(
+            identity,
+            profile=user_profile,
+            operation_id=operation_id or f"companion.person.create:{identity_key[-24:]}",
+        )
+
+    def build_unified_person_context(self, event: Any | None = None) -> dict[str, Any]:
+        identity = self._unified_person_event_identity(event)
+        resolution = self.resolve_unified_person_identity(identity) if identity else {
+            "state": "pending", "identity_key": "", "person_id": "", "errors": ["event_identity_missing"],
+        }
+        state = str(resolution.get("state") or "pending")
+        projection = resolution.get("projection") if isinstance(resolution.get("projection"), dict) else None
+        scope = "unknown"
+        if event is not None:
+            try:
+                scope = "private" if bool(event.is_private_chat()) else "group"
+            except Exception:
+                scope = "unknown"
+        platform = str(identity.get("subject_namespace") or "").split(":", 1)[0] if identity else ""
+        group_id = ""
+        if scope == "group":
+            group_getter = getattr(self, "_extract_group_id_from_event", None)
+            if callable(group_getter):
+                try:
+                    group_id = _single_line(group_getter(event), 160)
+                except Exception:
+                    group_id = ""
+        group_scope = f"{platform}:group:{group_id}" if platform and group_id else ""
+        group_overlay = None
+        if state == "resolved" and group_scope and resolution.get("person_id"):
+            group_overlay = self.unified_person_registry.read_group_overlay(
+                str(resolution.get("person_id") or ""), group_scope
+            )
+        person_payload = {
+            key: projection.get(key)
+            for key in (
+                "person_id", "identity_assurance", "profile_status", "relation_policy_id",
+                "relation_label", "owner_mode", "affinity_band", "projection_revision",
+                "group_overlay_ref",
+            )
+            if projection is not None and projection.get(key) not in (None, "", [], {})
+        }
+        p3 = build_context(
+            persona={"companion_instance_id": PLUGIN_ID},
+            runtime={"platform": platform, "scope": scope, "adapter_instance_id": identity.get("adapter_instance_id", "")},
+            person=person_payload,
+            scene={
+                "scope": scope,
+                "group_scope": group_scope,
+                "group_id_present": bool(group_id),
+                "group_overlay_revision": group_overlay.get("revision") if isinstance(group_overlay, dict) else 0,
+            },
+            bridge_available=True,
+        )
+        if state != "resolved":
+            p3["state"] = state if state in {"pending", "invalid", "degraded", "legacy_local"} else "degraded"
+            p3["warnings"] = list(p3.get("warnings") or []) + list(resolution.get("errors") or [f"person_{state}"])[:8]
+            person_slot = p3.get("slots", {}).get("person")
+            if isinstance(person_slot, dict):
+                person_slot["state"] = p3["state"]
+        p3 = project_context(p3)
+        p4 = build_p4_shadow(
+            source_kind="companion",
+            target_kind="memory_bridge",
+            authority="companion",
+            reason_code="projection_ready" if state == "resolved" else f"person_{state}",
+            safe_reference=str(resolution.get("person_id") or ""),
+            operation_id=f"person.context:{str(resolution.get('identity_key') or 'pending')[-24:]}",
+            status="shadow" if state == "resolved" else "degraded",
+        )
+        return {
+            "contract_name": PERSON_CONTRACT_NAME,
+            "contract_version": PERSON_CONTRACT_VERSION,
+            "p3_contract_name": P3_CONTRACT_NAME,
+            "p3_contract_version": P3_CONTRACT_VERSION,
+            "state": state,
+            "identity": {"identity_key": str(resolution.get("identity_key") or ""), "person_id": str(resolution.get("person_id") or "")},
+            "projection": projection,
+            "p3": p3,
+            "p4_shadow": p4,
+            "scope": scope,
+            "group_scope": group_scope,
+        }
 
     def _sqlite_wal_candidate_paths(self) -> list[Path]:
         data_root = Path(get_astrbot_data_path())
@@ -2042,7 +2571,7 @@ class PrivateCompanionPlugin(
             repaired = 0
             for handler in list(star_handlers_registry):
                 handler_module_path = str(getattr(handler, "handler_module_path", "") or "")
-                if not handler_module_path.startswith(package_prefix):
+                if not is_module_path_for_package(handler_module_path, package_prefix):
                     continue
                 handler_name = str(getattr(handler, "handler_name", "") or "")
                 if not handler_name:
@@ -2069,6 +2598,10 @@ class PrivateCompanionPlugin(
         self._schedule_default_persona_prompt_refresh()
         await self._body_monitor_integration.set_enabled(self.enable_body_monitor_integration)
         needs_startup_save = False
+        agenda_before = bool(getattr(self, "_agenda_migration_dirty", False))
+        self._agenda_prepare_store()
+        if getattr(self, "_agenda_migration_dirty", False) and not agenda_before:
+            needs_startup_save = True
         async with self._data_lock:
             changed = False
             raw_users = self.data.get("users") if isinstance(self.data, dict) else None
@@ -2130,9 +2663,43 @@ class PrivateCompanionPlugin(
         def discard_finished_task(finished: asyncio.Task) -> None:
             if self._startup_background_tasks.get(label) is finished:
                 self._startup_background_tasks.pop(label, None)
+            if finished.cancelled():
+                return
+            try:
+                error = finished.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                logger.warning(
+                    "[PrivateCompanion] startup background task failed: task=%s error=%s",
+                    _single_line(label, 100) or "startup",
+                    _single_line(error, 180),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
 
         task.add_done_callback(discard_finished_task)
         return task
+
+    @asynccontextmanager
+    async def _temporarily_release_data_lock(self):
+        """Release the data lock for an external await, then reacquire it safely."""
+        lock = getattr(self, "_data_lock", None)
+        if lock is None or not lock.locked():
+            yield
+            return
+        lock.release()
+        reacquire_cancelled = False
+        try:
+            yield
+        finally:
+            while True:
+                try:
+                    await lock.acquire()
+                    break
+                except asyncio.CancelledError:
+                    reacquire_cancelled = True
+            if reacquire_cancelled:
+                raise asyncio.CancelledError
 
     def _create_lifecycle_background_task(
         self,
@@ -3908,25 +4475,6 @@ class PrivateCompanionPlugin(
             return
         if not bool(getattr(self, "enable_framework_error_leak_guard", True)):
             return
-        error_markers = (
-            "error occurred while processing agent request",
-            "all chat models failed",
-            "badrequesterror",
-            "provider api error",
-            "unable to submit request",
-            "invalid_request",
-            "functiondeclaration",
-            "function declaration",
-            "schema didn't specify",
-            "tool schema",
-            "aisearch",
-            "sqlite3.operationalerror",
-            "database is locked",
-            "sqlalche.me/e/20/e3q8",
-            "model do not support image input",
-            "image_url",
-            "invalidparameter",
-        )
         tool_loop_markers = (
             "trying to send messages",
             "sent 20",
@@ -3944,35 +4492,22 @@ class PrivateCompanionPlugin(
             "发了差不多20条",
             "还没收到回复",
         )
-        marker_kind = "framework_error" if any(marker in compact for marker in error_markers) else ""
-        provider_error_checker = getattr(self, "_looks_like_internal_provider_error_text", None)
-        if not marker_kind and callable(provider_error_checker):
-            try:
-                if provider_error_checker(text):
-                    marker_kind = "provider_error"
-            except Exception as exc:
-                logger.debug(
-                    "[PrivateCompanion] Provider 错误正文检测失败，保留其他发送前检查: error_type=%s",
-                    type(exc).__name__,
-                )
-        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
-        if not marker_kind and callable(meta_leak_checker) and meta_leak_checker(text):
-            marker_kind = "tool_loop_summary"
+        error_kind_checker = getattr(self, "_framework_error_leak_kind", None)
+        marker_kind = error_kind_checker(text) if callable(error_kind_checker) else ""
         if not marker_kind and any(marker in compact for marker in tool_loop_markers):
-            marker_kind = "tool_loop_summary"
+            marker_kind = "tool_loop"
         if not marker_kind:
             return
         logger.warning(
-            "[PrivateCompanion] 已拦截框架异常文本外发: kind=%s session=%s preview=%s",
+            "[PrivateCompanion] 已拦截框架异常文本外发: kind=%s session=%s",
             marker_kind,
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-            _single_line(text, 180),
         )
         self._record_passive_no_reply(
             event,
             source="发送前拦截",
             reason=f"框架异常文本外发被拦截:{marker_kind}",
-            reply_preview=text,
+            reply_preview="",
             level="warn",
         )
         empty_result = self._build_result_from_chain([])
@@ -5711,6 +6246,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         intensity: int = 0,
         spontaneous: bool = False,
         candidate_queries: str = "",
+        **kwargs: Any,
     ) -> str:
         """从 Private Companion 自有表情包素材库检索并发送一张已有图片。
 
@@ -5748,6 +6284,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 },
                 ensure_ascii=False,
             )
+        # AstrBot may inject a host-owned ``context`` keyword. Keep the public
+        # schema on ``search_context`` so host context objects never become
+        # model-controlled search text; only a direct legacy string can fill an
+        # absent search_context value.
+        legacy_context = kwargs.get("context")
+        if not search_context and isinstance(legacy_context, str):
+            search_context = legacy_context
         inbound_text = str(getattr(event, "message_str", "") or "")
         if (
             self._reaction_expression_opt_out_requested(inbound_text)
@@ -5817,7 +6360,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return await self._pc_find_reaction_image_impl(
             event,
             query=query,
-            context=search_context,
+            search_context=search_context,
             meme_only=meme_only,
             send=send,
             caption=caption,
@@ -6879,9 +7422,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         *,
         priority: int = 50,
         source: str = "",
+        force_dynamic: bool = False,
     ) -> bool:
         position = self._normalize_passive_injection_position(getattr(self, "passive_injection_position", "prompt"))
-        if position == "system_prompt":
+        if position == "system_prompt" and not force_dynamic:
             return False
         content = str(text or "").strip()
         if not content:
@@ -10135,6 +10679,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
         return "deepseek" in identity
 
+    def _llm_request_uses_deepseek_openai_compatible_provider(
+        self,
+        event: AstrMessageEvent | None,
+        req: ProviderRequest | None,
+    ) -> bool:
+        """Limit history cleanup to DeepSeek's OpenAI-compatible endpoint."""
+        identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
+        return "deepseek" in identity
+
     def _append_deepseek_tool_protocol_guard(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
         if getattr(req, "func_tool", None) is None:
             return False
@@ -10229,6 +10782,59 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.on_llm_request(priority=-30000)
     @_multi_persona_event_context
+    async def enforce_p4_live_confinement_before_enrichment(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Block only an already-resolved private person with an invalid or active P4 state."""
+        if self is None or req is None or not bool(getattr(self, "enabled", False)):
+            return
+        state = self._p4_live_state_for_event(event)
+        decision = decide_live_request(state)
+        if decision.get("decision") == "skip":
+            return
+        if decision.get("decision") == "block":
+            # This runs before P5/Memory and the enrichment collectors. Leave
+            # no request route to original prompt, tool, bridge, or context data.
+            for attribute, value in (
+                ("system_prompt", SAFE_CONFINEMENT_REPLY),
+                ("prompt", ""),
+                ("contexts", []),
+                ("extra_user_content_parts", []),
+                ("func_tool", None),
+                ("tools", []),
+                ("images", []),
+                ("image_urls", []),
+            ):
+                try:
+                    setattr(req, attribute, value)
+                except Exception:
+                    pass
+            try:
+                setattr(event, "private_companion_p4_blocked", True)
+                setattr(event, "private_companion_p4_block_code", decision.get("code", "p4_state_invalid"))
+            except Exception:
+                pass
+            await self._reply(event, SAFE_CONFINEMENT_REPLY)
+            event.stop_event()
+            return
+        temperature = compose_reply_temperature(
+            decision.get("warmth_projection", {}).get("tier"),
+            **self._bounded_p4_reply_temperature_signals(event),
+        )
+        try:
+            setattr(req, "_private_companion_reply_temperature", temperature)
+        except Exception:
+            pass
+        instruction = _single_line(temperature.get("instruction"), 240)
+        if instruction and hasattr(req, "system_prompt"):
+            req.system_prompt = f"{str(getattr(req, 'system_prompt', '') or '').rstrip()}\n\n[Reply boundary]\n{instruction}"
+
+    @filter.on_llm_request(priority=-30000)
+    @_multi_persona_event_context
     async def inject_unified_relationship_expression(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
         """Inject one fail-closed relationship expression decision before Memory enrichment."""
         if self is None or req is None or not bool(getattr(self, "enabled", False)):
@@ -10276,9 +10882,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             pass
         instruction = expression_decision_prompt(projection)
-        if instruction and hasattr(req, "system_prompt"):
-            current_prompt = str(getattr(req, "system_prompt", "") or "").rstrip()
-            req.system_prompt = f"{current_prompt}\n\n[Companion expression]\n{instruction}".strip()
+        if instruction:
+            self._append_turn_prompt_fragment_by_position(
+                req,
+                "<!-- private_companion_expression_decision_v2 -->",
+                f"[Companion expression]\n{instruction}",
+                priority=5,
+                source="expression_decision",
+                force_dynamic=True,
+            )
 
     def _remove_sensitive_screen_tools_from_request(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
         tool_set = getattr(req, "func_tool", None)
@@ -10348,6 +10960,35 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             mode="private" if self._safe_event_is_private(event) else "group",
         )
 
+    @filter.on_llm_request(priority=-22000)
+    @_multi_persona_event_context
+    async def prepare_p5_memory_attestation(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
+        """Expose a per-request attestation issuer before MemoryCompanion runs."""
+        if self is None or event is None or not bool(getattr(self, "enable_p5_source_observer", False)):
+            return
+        request_carrier = req if req is not None else event
+        p3_state = getattr(event, "private_companion_p5_p3_state", None)
+        if p3_state is None:
+            p3_state = object()
+            try:
+                setattr(event, "private_companion_p5_p3_state", p3_state)
+            except Exception:
+                pass
+        try:
+            setattr(event, "private_companion_p5_request_carrier", request_carrier)
+            setattr(
+                event,
+                "private_companion_p5_issue_attestation",
+                lambda sink, _event=event, _request=request_carrier: self._p5_issue_attestation_for_event(
+                    event=_event,
+                    request=_request,
+                    sink=str(sink or "memory_recall"),
+                ),
+            )
+            setattr(event, "private_companion_p5_status", self.p5_source_observer_status())
+        except Exception:
+            logger.debug("[PrivateCompanion] P5 request carrier attach failed")
+
     @filter.on_llm_request(priority=-21000)
     @_multi_persona_event_context
     async def sanitize_sensitive_screen_tools(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
@@ -10357,6 +10998,84 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         removed = self._remove_sensitive_screen_tools_from_request(event, req)
         if removed:
             await self._append_sensitive_screen_tool_guard_to_request(event, req, removed)
+
+    @filter.on_llm_request(priority=-20500)
+    @_multi_persona_event_context
+    async def sanitize_deepseek_tool_call_history(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Drop only malformed tool-call groups before a DeepSeek provider request."""
+        if self is None or req is None:
+            return
+        if not self._llm_request_uses_deepseek_openai_compatible_provider(event, req):
+            return
+        contexts = getattr(req, "contexts", None)
+        cleaned, stats = sanitize_openai_tool_history(contexts)
+        if not stats.get("changed"):
+            return
+        try:
+            req.contexts = cleaned
+        except Exception:
+            return
+        logger.info(
+            "[PrivateCompanion] Cleaned malformed DeepSeek tool history: groups=%s assistants=%s tool_results=%s orphans=%s",
+            stats.get("removed_groups", 0),
+            stats.get("removed_assistants", 0),
+            stats.get("removed_tool_results", 0),
+            stats.get("removed_orphans", 0),
+        )
+
+    @filter.on_llm_request(priority=-20400)
+    @_multi_persona_event_context
+    async def append_group_cycle_privacy_boundary(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Add a default-off, request-only Bot cycle privacy boundary for allowed groups."""
+        if self is None or req is None or not bool(getattr(self, "enable_group_cycle_awareness", False)):
+            return
+        try:
+            if bool(getattr(event, "is_private_chat", lambda: False)()):
+                return
+        except Exception:
+            return
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id or not self._group_enabled_for_event(group_id):
+            return
+        daily_state = self.data.get("daily_state") if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(daily_state, dict):
+            return
+        inbound_text = getattr(event, "private_companion_group_text", "") or getattr(event, "message_str", "") or ""
+        boundary = build_group_cycle_boundary(
+            enabled=True,
+            group_allowed=True,
+            cycle_label=daily_state.get("body_cycle"),
+            inbound_text=inbound_text,
+        )
+        boundary_text = str(boundary.get("prompt") or "")
+        if not boundary.get("active") or not boundary_text:
+            return
+        marker = "<!-- private_companion_group_cycle_boundary_v1 -->"
+        current_prompt = str(getattr(req, "system_prompt", "") or "")
+        current_turn_prompt = str(getattr(req, "prompt", "") or "")
+        if marker in current_prompt or marker in current_turn_prompt:
+            return
+        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            req,
+            marker,
+            boundary_text,
+            priority=59,
+            source="safety",
+        ) else "system_prompt"
+        if placement == "system_prompt" and hasattr(req, "system_prompt"):
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary_text}".strip()
 
     @filter.on_llm_request(priority=-20000)
     @_multi_persona_event_context
@@ -11846,6 +12565,64 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         return await handle_private_message(self, event, *args, **kwargs)
 
+    def _record_c3_inbound_activity(
+        self,
+        event: AstrMessageEvent,
+        *,
+        text: str,
+        received_ts: float,
+        user_id: str = "",
+        group_id: str = "",
+        sender_id: str = "",
+        sender_name: str = "",
+    ) -> dict[str, Any] | None:
+        """Feed the local C3 activity aggregator without changing the reply path."""
+        if not _single_line(text, 400):
+            return None
+        capture = getattr(self, "_agenda_capture_inbound_message", None)
+        if not callable(capture):
+            return None
+        scope = "group" if _single_line(group_id, 80) else "private"
+        subject_id = _single_line(group_id or user_id, 120)
+        conversation_id = f"{scope}:{subject_id}" if subject_id else scope
+        source_ref = _single_line(self._event_message_id(event), 160)
+        if not source_ref:
+            source_ref = _single_line(getattr(event, "unified_msg_origin", ""), 180)
+        if not source_ref:
+            source_ref = f"{conversation_id}:{int(received_ts)}"
+        try:
+            event_time = self._environment_fromtimestamp(received_ts)
+        except Exception:
+            event_time = datetime.fromtimestamp(received_ts).astimezone()
+        try:
+            result = capture(
+                text=_single_line(text, 400),
+                event_time=event_time,
+                source_ref=source_ref,
+                conversation_id=conversation_id,
+                participant=_single_line(sender_name or sender_id or "user", 120),
+                message_count=1,
+                visibility="group" if scope == "group" else "private",
+            )
+            if isinstance(result, dict):
+                result["scope"] = scope
+            if result is not None and scope == "private":
+                recorder = getattr(self, "_memory_companion_record_observed_activity", None)
+                if callable(recorder):
+                    self._create_lifecycle_background_task(
+                        recorder(result),
+                        label="record_observed_activity",
+                    )
+            return result
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] C3 activity capture skipped: scope=%s id=%s error=%s",
+                scope,
+                subject_id or "-",
+                _single_line(exc, 160),
+            )
+            return None
+
     async def _capture_group_observation_event(
         self,
         event: AstrMessageEvent,
@@ -11878,6 +12655,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
             if captured:
                 self._schedule_data_save()
+        activity_recorder = getattr(self, "_record_c3_inbound_activity", None)
+        if callable(activity_recorder):
+            activity_recorder(
+                event,
+                text=text,
+                received_ts=_now_ts(),
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+            )
         if (
             self._group_role_context_requested(text)
             and not bool(getattr(event, "_private_companion_group_role_refreshed", False))

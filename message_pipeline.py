@@ -8,6 +8,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .companion_interaction_expression import current_interaction_projection
 from .helpers import (
     _group_link_message_context,
     _missing_optional_model_dependency,
@@ -38,6 +39,20 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         return
     if self._message_debounce_command_text(event, text):
         return
+    async with self._data_lock:
+        _, auto_profile_created = self._ensure_auto_private_user_profile(
+            event,
+            user_id=user_id,
+            sender_display_name=sender_display_name,
+            now=received_ts,
+        )
+    if auto_profile_created:
+        logger.info(
+            "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s auto_enabled=%s",
+            _single_line(self._canonical_private_user_id(user_id), 80),
+            _single_line(self._platform_kind_for_event(event), 40),
+            bool(getattr(self, "auto_enable_companion_for_new_users", False)),
+        )
     existing_reply_preview = self._event_existing_reply_result_preview(event)
     if existing_reply_preview:
         preview_user_id = self._canonical_private_user_id(user_id)
@@ -79,6 +94,14 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             "disabled" if existing_user_disabled else "not_target",
         )
         return
+    self._record_c3_inbound_activity(
+        event,
+        text=text,
+        received_ts=received_ts,
+        user_id=canonical_user_id or user_id,
+        sender_id=user_id,
+        sender_name=sender_display_name,
+    )
     await self._cancel_activity_followup_on_user_return(
         canonical_user_id or user_id,
         trigger_message_id=self._event_message_id(event),
@@ -262,7 +285,11 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(fast_user, now=received_ts)
         try:
-            self._memory_companion_apply_emotional_drift(session_id=event.unified_msg_origin or "")
+            await self._memory_companion_apply_emotional_drift(
+                event=event,
+                user_id=user_id,
+                user=fast_user,
+            )
             self._memory_companion_attach_private_context(
                 event,
                 user_id=user_id,
@@ -388,7 +415,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             and self._private_event_has_image_safe(event, label="private_text_image")
         ):
             try:
-                persisted_images = await self._persist_private_inbound_images(event, user_id)
+                async with self._temporarily_release_data_lock():
+                    persisted_images = await self._persist_private_inbound_images(event, user_id)
                 usable_images = [source for source in persisted_images if self._private_image_source_to_model_url(source)]
             except Exception as exc:
                 missing = _missing_optional_model_dependency(exc)
@@ -430,15 +458,16 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 setattr(event, "private_companion_delayed_image_mode", image_mode)
                 if image_mode == "caption":
                     try:
-                        vision_text = _single_line(
-                            await self._transcribe_private_inbound_images(
-                                usable_images[:5],
-                                umo=umo,
-                                user_text=text,
-                                force_contextual=self._private_image_user_mentions_combo_result(text) or self._private_image_user_has_specific_vision_request(text),
-                            ),
-                            self._private_image_vision_text_limit(len(usable_images)),
-                        )
+                        async with self._temporarily_release_data_lock():
+                            vision_text = _single_line(
+                                await self._transcribe_private_inbound_images(
+                                    usable_images[:5],
+                                    umo=umo,
+                                    user_text=text,
+                                    force_contextual=self._private_image_user_mentions_combo_result(text) or self._private_image_user_has_specific_vision_request(text),
+                                ),
+                                self._private_image_vision_text_limit(len(usable_images)),
+                            )
                     except Exception as exc:
                         missing = _missing_optional_model_dependency(exc)
                         if not missing:
@@ -493,7 +522,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             )
             buffers = getattr(self, "_semantic_message_buffers", None)
             if isinstance(buffers, dict) and isinstance(buffers.get(key), dict):
-                persisted_images = await self._persist_private_inbound_images(event, user_id)
+                async with self._temporarily_release_data_lock():
+                    persisted_images = await self._persist_private_inbound_images(event, user_id)
                 has_model_usable_image = any(self._private_image_source_to_model_url(source) for source in persisted_images)
                 if not persisted_images:
                     buffers.pop(key, None)
@@ -582,14 +612,15 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 )
             else:
                 try:
-                    smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
-                        event,
-                        key=key,
-                        text=text,
-                        sender_id=user_id,
-                        sender_name=sender_display_name,
-                        private_chat=True,
-                    )
+                    async with self._temporarily_release_data_lock():
+                        smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
+                            event,
+                            key=key,
+                            text=text,
+                            sender_id=user_id,
+                            sender_name=sender_display_name,
+                            private_chat=True,
+                        )
                 except Exception as exc:
                     missing = _missing_optional_model_dependency(exc)
                     if not missing:
@@ -737,20 +768,34 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     user["intent_profile"] = intent_profile
                 if self._should_use_llm_emotion_judgement(text, intent_profile):
                     # Model review does not block the current passive reply; it keeps using cached emotion state.
+                    observed_event = self._record_interaction_emotion_event(
+                        user,
+                        intent_profile,
+                        band=str(current_interaction_projection(
+                            user.get("current_interaction"),
+                            relationship_role=self._private_user_role(user, user_id),
+                            relationship_mode=user.get("relationship_mode", "normal"),
+                            now=_now_ts(),
+                        ).get("expression_band") or "relaxed"),
+                        reason_code="target_review_pending",
+                        status="observed",
+                    )
                     emotion_review_id = uuid.uuid4().hex
                     user["pending_emotion_judgement"] = {
                         "review_id": emotion_review_id,
                         "text": _single_line(text, 240),
                         "created_at": _now_ts(),
                         "local": deepcopy(intent_profile),
+                        "observed_event": observed_event or {},
                     }
-                    asyncio.create_task(
+                    self._create_lifecycle_background_task(
                         self._refine_inbound_emotion_with_model(
                             user_id,
                             text,
                             deepcopy(intent_profile),
                             review_id=emotion_review_id,
-                        )
+                        ),
+                        label="inbound_emotion_refine",
                     )
                 else:
                     self._update_relationship_state_from_intent(user, intent_profile)
@@ -866,18 +911,28 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         self._stop_private_reply_after_user_rest_signal(event, user_id, rest_silence_early_text or text)
         return
     if is_target_user and schedule_adjustment_applied:
-        asyncio.create_task(self._kick_proactive_loop_once())
+        self._create_lifecycle_background_task(
+            self._kick_proactive_loop_once(),
+            label="kick_proactive_loop_inbound",
+        )
     if response:
         await self._reply(event, response)
         event.stop_event()
     elif is_target_user:
         pass
     if is_target_user:
-        asyncio.create_task(
-            self._refresh_persona_relationship(user_id, user_snapshot, trigger="inbound")
+        self._create_lifecycle_background_task(
+            self._refresh_persona_relationship(user_id, user_snapshot, trigger="inbound"),
+            label="refresh_persona_relationship_inbound",
         )
-        asyncio.create_task(self._maybe_refresh_companion_memory(user_id, user_snapshot))
-        asyncio.create_task(self._maybe_refresh_dialogue_episode(user_id, user_snapshot))
+        self._create_lifecycle_background_task(
+            self._maybe_refresh_companion_memory(user_id, user_snapshot),
+            label="refresh_companion_memory_inbound",
+        )
+        self._create_lifecycle_background_task(
+            self._maybe_refresh_dialogue_episode(user_id, user_snapshot),
+            label="refresh_dialogue_episode_inbound",
+        )
 
 async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
     """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
@@ -992,8 +1047,14 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             _single_line(text, 80),
             _single_line(existing_reply_preview, 120),
         )
-        asyncio.create_task(self._maybe_refresh_group_episode(group_id, group_snapshot))
-        asyncio.create_task(self._maybe_refresh_group_slang_meanings(group_id, group_snapshot))
+        self._create_lifecycle_background_task(
+            self._maybe_refresh_group_episode(group_id, group_snapshot),
+            label="refresh_group_episode_existing_reply",
+        )
+        self._create_lifecycle_background_task(
+            self._maybe_refresh_group_slang_meanings(group_id, group_snapshot),
+            label="refresh_group_slang_existing_reply",
+        )
         return
     if self._group_llm_reply_blocked(group_id):
         logger.debug(
@@ -1120,14 +1181,15 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             )
         high_intensity_state = self._group_high_intensity_state(group)
         if not resting_mention_notice:
-            continuation = await self._group_message_is_bot_continuation(
-                group,
-                sender_id,
-                sender_name,
-                scene,
-                text,
-                allow_llm=False,
-            )
+            async with self._temporarily_release_data_lock():
+                continuation = await self._group_message_is_bot_continuation(
+                    group,
+                    sender_id,
+                    sender_name,
+                    scene,
+                    text,
+                    allow_llm=False,
+                )
         if continuation is None:
             if high_intensity_state.get("active"):
                 continuation = False
@@ -1412,7 +1474,8 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             setattr(event, "private_companion_group_wakeup_state_effect", dict(wakeup_state_effect))
         group_reference_media_with_text = False
         if talking_to_bot and text:
-            group_reference_media_with_text = await self._event_references_media_or_forward_with_text(event, text)
+            async with self._temporarily_release_data_lock():
+                group_reference_media_with_text = await self._event_references_media_or_forward_with_text(event, text)
             if group_reference_media_with_text:
                 logger.info(
                     "[PrivateCompanion] 群聊引用媒体/合并消息附带文字,跳过群聊收口等待: group=%s sender=%s text=%s",
@@ -1455,13 +1518,14 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 event.stop_event()
                 return
         if talking_to_bot and not high_intensity_merge_active and not group_reference_media_with_text:
-            air_guard = await self._group_air_reply_guard_decision(
-                group,
-                sender_id=sender_id,
-                sender_name=sender_name,
-                text=text,
-                scene=scene,
-            )
+            async with self._temporarily_release_data_lock():
+                air_guard = await self._group_air_reply_guard_decision(
+                    group,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    text=text,
+                    scene=scene,
+                )
             if isinstance(air_guard, dict) and air_guard.get("block"):
                 self._capture_group_observation_once(
                     group,
@@ -1502,14 +1566,15 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 text=text,
                 now=_now_ts(),
             )
-            group_smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
-                event,
-                key=group_buffer_key,
-                text=text,
-                sender_id=sender_id,
-                sender_name=sender_name,
-                private_chat=False,
-            )
+            async with self._temporarily_release_data_lock():
+                group_smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
+                    event,
+                    key=group_buffer_key,
+                    text=text,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    private_chat=False,
+                )
         group_smart_result = getattr(event, "private_companion_smart_message_debounce_result", None)
         group_smart_decision = str(group_smart_result.get("decision") or "") if isinstance(group_smart_result, dict) else ""
         group_smart_handled = group_smart_decision in {"complete", "incomplete"}
@@ -1570,12 +1635,24 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             event.stop_event()
             return
     if registration_payload and registration_payload.get("user_id"):
-        asyncio.create_task(self._refresh_worldbook_self_registration_impression(registration_payload))
+        self._create_lifecycle_background_task(
+            self._refresh_worldbook_self_registration_impression(registration_payload),
+            label="refresh_worldbook_self_registration_impression",
+        )
     if share_scheduled:
-        asyncio.create_task(self._kick_proactive_loop_once())
+        self._create_lifecycle_background_task(
+            self._kick_proactive_loop_once(),
+            label="kick_proactive_loop_group",
+        )
     if not group_snapshot_high_intensity.get("active"):
-        asyncio.create_task(self._maybe_refresh_group_episode(group_id, group_snapshot))
-        asyncio.create_task(self._maybe_refresh_group_slang_meanings(group_id, group_snapshot))
+        self._create_lifecycle_background_task(
+            self._maybe_refresh_group_episode(group_id, group_snapshot),
+            label="refresh_group_episode",
+        )
+        self._create_lifecycle_background_task(
+            self._maybe_refresh_group_slang_meanings(group_id, group_snapshot),
+            label="refresh_group_slang",
+        )
         await self._maybe_group_interject(event, group_snapshot, text)
     else:
         logger.info(

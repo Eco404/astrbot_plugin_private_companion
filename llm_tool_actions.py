@@ -34,6 +34,7 @@ from .helpers import (
     _strip_internal_message_blocks,
 )
 from .memo_notes import apply_memo_note_action, memo_note_sort_key, normalize_memo_note
+from .owned_reaction_asset_catalog import OwnedReactionAssetCatalog
 from .qzone_selection import (
     QzoneViewTarget,
     classify_qzone_view_owner,
@@ -368,9 +369,48 @@ class LlmToolActionsMixin:
     def _reaction_asset_library(self):
         return get_reaction_asset_library(self)
 
+    def _find_owned_reaction_asset(
+        self,
+        query: str,
+        *,
+        search_context: str = "",
+        meme_only: bool = True,
+    ) -> dict[str, Any] | None:
+        if not bool(getattr(self, "enable_owned_reaction_asset_workbench", False)):
+            return None
+        catalog = OwnedReactionAssetCatalog(getattr(self, "data_dir", ""))
+        asset, status, confidence = catalog.find(
+            getattr(self, "owned_reaction_assets", []),
+            query=query,
+            search_context=search_context,
+            meme_only=bool(meme_only),
+        )
+        if asset is None:
+            logger.debug(
+                "[PrivateCompanion] Q6 自有反应图未命中: status=%s",
+                status,
+            )
+            return None
+        return {
+            "success": True,
+            "status": "success",
+            "source": "owned_reaction_assets",
+            "path": str(asset.path),
+            "image_id": asset.asset_id,
+            "tags": list(asset.tags),
+            "need": _single_line(query, 220),
+            "reason": "管理员登记的受管自有反应图标签命中",
+            "confidence": confidence,
+        }
+
     def _reaction_image_provider_available(self) -> bool:
         library = self._reaction_asset_library()
-        return bool(library and library.has_enabled_assets())
+        return bool(
+            library and library.has_enabled_assets()
+        ) or bool(
+            getattr(self, "enable_owned_reaction_asset_workbench", False)
+            and getattr(self, "owned_reaction_assets", [])
+        )
 
     @staticmethod
     def _reaction_expression_opt_out_requested(text: Any) -> bool:
@@ -2827,18 +2867,38 @@ class LlmToolActionsMixin:
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
         resolved_reference_paths: list[str] = []
         for index, source in enumerate(reference_sources):
-            resolved = source
+            # Keep the mixin compatible with lightweight/legacy hosts that do
+            # not expose the optional reference normalizer. Full plugin hosts
+            # still pass model-controlled sources through the untrusted path
+            # guard below; Q5 managed assets use their separate ticketed sink.
+            stable = source if not callable(resolver) else ""
             if callable(resolver):
                 try:
-                    stable = await resolver(source, stem=f"tool_{index + 1}", event=event)
-                    if stable:
-                        resolved = stable
+                    stable = await resolver(source, stem=f"tool_{index + 1}", event=event, trusted=False)
                 except Exception as exc:
                     logger.info(
-                        "[PrivateCompanion] 第 %s 张工具参考图解析失败，交由参考计划记录缺失职责: %s",
+                        "[PrivateCompanion] tool reference %s rejected: %s",
                         index + 1,
                         _single_line(exc, 160),
                     )
+            if not stable:
+                logger.warning(
+                    "[PrivateCompanion] model-controlled image reference rejected: source=%s",
+                    _single_line(source, 200),
+                )
+                return public_receipt(
+                    {
+                        "status": "invalid_reference",
+                        "success": False,
+                        "generated": False,
+                        "sent": False,
+                        "message": "这张参考图不能使用。参考图只支持当前消息里的图片、插件数据目录内的图片，或公网图片链接。",
+                        "must_not_claim_sent": True,
+                        "retryable": False,
+                    },
+                    ensure_ascii=False,
+                )
+            resolved = stable
             if resolved and resolved not in resolved_reference_paths:
                 resolved_reference_paths.append(resolved)
         reference_path = resolved_reference_paths[0] if resolved_reference_paths else ""
@@ -4691,11 +4751,12 @@ class LlmToolActionsMixin:
         raw_lookup = await self._pc_find_reaction_image_impl(
             event,
             query=_single_line(intent.get("provider_query"), 500),
-            context=lookup_context,
+            search_context=lookup_context,
             meme_only=meme_only,
             send=False,
             caption="",
             low_latency=low_latency,
+            internal_attachment=True,
         )
         try:
             lookup = json.loads(raw_lookup)
@@ -5315,11 +5376,13 @@ class LlmToolActionsMixin:
         self,
         event: AstrMessageEvent,
         query: str = "",
-        context: str = "",
+        search_context: str = "",
         meme_only: bool = True,
         send: bool = True,
         caption: str = "",
         low_latency: bool = False,
+        internal_attachment: bool = False,
+        context: str = "",
     ) -> str:
         scope = self._reaction_expression_scope(event)
         query_text = _single_line(query, 500)
@@ -5382,7 +5445,9 @@ class LlmToolActionsMixin:
             )
         if send_image:
             caption = visible_caption
-        lookup_context = _single_line(context, 1000)
+        if not search_context and isinstance(context, str):
+            search_context = context
+        lookup_context = _single_line(search_context, 1000)
         snapshot_builder = getattr(self, "_build_companion_scene_snapshot", None)
         snapshot_formatter = getattr(self, "_format_companion_scene_snapshot", None)
         if callable(snapshot_builder) and callable(snapshot_formatter):
@@ -5417,8 +5482,21 @@ class LlmToolActionsMixin:
                     error_type=type(exc).__name__,
                 )
 
+        # Q6 is an optional, hash-locked local source. A hit wins before the
+        # editable reaction library, while every miss preserves its existing
+        # lookup, authorization, reservation and delivery behavior.
+        owned_lookup_finder = getattr(self, "_find_owned_reaction_asset", None)
+        owned_lookup = (
+            owned_lookup_finder(
+                query_text,
+                search_context=lookup_context,
+                meme_only=meme_filter,
+            )
+            if callable(owned_lookup_finder)
+            else None
+        )
         library = self._reaction_asset_library()
-        if library is None or not library.has_enabled_assets():
+        if owned_lookup is None and (library is None or not library.has_enabled_assets()):
             self._log_reaction_expression_event(
                 event,
                 stage="lookup",
@@ -5444,22 +5522,24 @@ class LlmToolActionsMixin:
         lookup_started = time.perf_counter()
         cache_hit = False
         lookup_error_type = ""
-        cache_key = self._reaction_expression_lookup_cache_key(
-            library,
-            query_text,
-            lookup_context,
-            meme_filter,
-            scope,
-            self._reaction_expression_lookup_cache_revision(library),
-        )
-        lookup = (
-            self._reaction_expression_lookup_cache_get(cache_key)
-            if low_latency
-            else None
-        )
-        if isinstance(lookup, dict):
-            cache_hit = True
-        else:
+        lookup = dict(owned_lookup) if isinstance(owned_lookup, dict) else None
+        if lookup is None:
+            cache_key = self._reaction_expression_lookup_cache_key(
+                library,
+                query_text,
+                lookup_context,
+                meme_filter,
+                scope,
+                self._reaction_expression_lookup_cache_revision(library),
+            )
+            lookup = (
+                self._reaction_expression_lookup_cache_get(cache_key)
+                if low_latency
+                else None
+            )
+            if isinstance(lookup, dict):
+                cache_hit = True
+        if lookup is None:
             try:
                 lookup = await asyncio.to_thread(
                     library.find,
@@ -5484,7 +5564,7 @@ class LlmToolActionsMixin:
                     "status": "error",
                     "message": f"图库检索失败：{_single_line(exc, 160)}",
                 }
-            if low_latency and isinstance(lookup, dict):
+            if low_latency and isinstance(lookup, dict) and owned_lookup is None:
                 self._reaction_expression_lookup_cache_put(cache_key, lookup)
         lookup_latency_ms = round(
             max(0.0, (time.perf_counter() - lookup_started) * 1000.0), 2
@@ -5683,43 +5763,45 @@ class LlmToolActionsMixin:
                 delivery=delivery.get("destination"),
                 match_basis=self._reaction_expression_match_basis(lookup),
             )
-        return json.dumps(
-            {
-                "status": (
-                    "success"
-                    if success
-                    else "delivery_uncertain"
-                    if delivery_uncertain
-                    else "delivery_failed"
-                ),
-                "success": success,
-                "found": True,
-                "send_requested": send_image,
-                "sent": sent,
-                "delivery_uncertain": delivery_uncertain,
-                "message": (
-                    _single_line(delivery.get("message"), 220)
-                    if send_image
-                    else "已找到图库图片，但按请求未发送"
-                ),
-                "path": image_path,
-                "image_id": _single_line(lookup.get("image_id"), 120),
-                "tags": tags,
-                "need": need,
-                "reason": match_reason,
-                "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
-                "delivery": _single_line(delivery.get("destination"), 40),
-                "cache_hit": cache_hit,
-                "lookup_latency_ms": lookup_latency_ms,
-                "must_not_claim_sent": not sent,
-                "final_response_instruction": (
-                    f"完整正文 caption 与图片已一并发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
-                    if sent
-                    else ""
-                ),
-            },
-            ensure_ascii=False,
-        )
+        result_payload = {
+            "status": (
+                "success"
+                if success
+                else "delivery_uncertain"
+                if delivery_uncertain
+                else "delivery_failed"
+            ),
+            "success": success,
+            "found": True,
+            "send_requested": send_image,
+            "sent": sent,
+            "delivery_uncertain": delivery_uncertain,
+            "message": (
+                _single_line(delivery.get("message"), 220)
+                if send_image
+                else "已找到图库图片，但按请求未发送"
+            ),
+            "image_id": _single_line(lookup.get("image_id"), 120),
+            "tags": tags,
+            "need": need,
+            "reason": match_reason,
+            "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
+            "delivery": _single_line(delivery.get("destination"), 40),
+            "cache_hit": cache_hit,
+            "lookup_latency_ms": lookup_latency_ms,
+            "must_not_claim_sent": not sent,
+            "final_response_instruction": (
+                f"完整正文 caption 与图片已一并发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                if sent
+                else ""
+            ),
+        }
+        if (
+            _single_line(lookup.get("source"), 60) != "owned_reaction_assets"
+            or internal_attachment
+        ):
+            result_payload["path"] = image_path
+        return json.dumps(result_payload, ensure_ascii=False)
 
     @staticmethod
     def _qzone_view_normalize_uin(value: Any) -> str:
@@ -7093,6 +7175,9 @@ class LlmToolActionsMixin:
     async def _pc_relay_message_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return json.dumps({"status": "disabled", "message": "跨会话转述工具未启用"}, ensure_ascii=False)
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return json.dumps({"status": "forbidden", "message": "跨会话转述仅允许主人使用"}, ensure_ascii=False)
         destination_raw = _single_line(
             kwargs.get("destination")
             or kwargs.get("target_scope")
@@ -7182,6 +7267,9 @@ class LlmToolActionsMixin:
             if group_result.get("status") != "success":
                 return json.dumps(group_result, ensure_ascii=False)
             group_id = _single_line(group_result.get("group_id"), 40)
+            group_guard = self._atrelay_target_group_allowed(group_id, event)
+            if group_guard:
+                return json.dumps({"status": "forbidden", "message": group_guard}, ensure_ascii=False)
             send_text = await self._rewrite_atrelay_message_with_llm(
                 event,
                 destination="group",
@@ -7329,6 +7417,9 @@ class LlmToolActionsMixin:
     async def _pc_send_to_group_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return "发送失败：跨群转述工具未启用"
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return "发送失败：跨会话转述仅允许主人使用"
         group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
         at_user = kwargs.get("at_user") or kwargs.get("at") or kwargs.get("target_user") or kwargs.get("user_id") or ""
@@ -7338,6 +7429,9 @@ class LlmToolActionsMixin:
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         target_group = self._normalize_atrelay_group_target_id(group_id)
+        group_guard = self._atrelay_target_group_allowed(target_group, event)
+        if group_guard:
+            return group_guard
         text = self._normalize_atrelay_text(message, limit=800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
         if not target_group:
@@ -7402,6 +7496,9 @@ class LlmToolActionsMixin:
     async def _pc_send_to_private_user_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return "发送失败：跨群转述工具未启用"
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return "发送失败：跨会话转述仅允许主人使用"
         user_id = kwargs.get("user_id") or kwargs.get("qq") or kwargs.get("target_user") or kwargs.get("target") or ""
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
@@ -7520,6 +7617,9 @@ class LlmToolActionsMixin:
     async def _pc_schedule_group_relay_impl(self, event: AstrMessageEvent, **kwargs) -> str:
         if not self.enable_atrelay_tools:
             return "挂起失败：跨群转述工具未启用"
+        authorized, _requester_id = self._atrelay_tool_authorization(event)
+        if not authorized:
+            return "挂起失败：跨会话转述仅允许主人使用"
         group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
         at_user = kwargs.get("at_user") or kwargs.get("target_user") or kwargs.get("user_id") or kwargs.get("name") or kwargs.get("nickname") or ""
         message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
@@ -7527,6 +7627,9 @@ class LlmToolActionsMixin:
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
         target_group = self._normalize_atrelay_group_target_id(group_id) or self._extract_group_id_from_event(event)
+        group_guard = self._atrelay_target_group_allowed(target_group, event)
+        if group_guard:
+            return group_guard.replace("发送失败", "挂起失败", 1)
         text = self._normalize_atrelay_text(message, limit=800)
         if not target_group:
             return "挂起失败：群 ID 格式不正确"

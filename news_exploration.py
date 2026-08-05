@@ -1274,10 +1274,34 @@ class NewsExplorationMixin:
                 )
             except Exception as e:
                 logger.debug(f"[PrivateCompanion] 写入 BiliBot 分享记忆失败: {e}")
+        operation = _record()
+        creator = getattr(self, "_create_lifecycle_background_task", None)
         try:
-            asyncio.create_task(_record())
+            if callable(creator):
+                task = creator(operation, label="bilibili_share_memory")
+                if task is None:
+                    close = getattr(operation, "close", None)
+                    if callable(close):
+                        close()
+            else:
+                task = asyncio.create_task(operation, name="private-companion-bilibili-share-memory")
+
+                def consume(done_task: asyncio.Task) -> None:
+                    try:
+                        done_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] B站分享记忆后台任务失败: %s",
+                            _single_line(exc, 160),
+                        )
+
+                task.add_done_callback(consume)
         except RuntimeError:
-            pass
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
 
 
     def _bot_currently_bored_enough_for_bilibili(self) -> bool:
@@ -1320,8 +1344,32 @@ class NewsExplorationMixin:
         task = getattr(bili, "_proactive_task", None)
         if task is not None and not task.done():
             return
+        operation = bili._run_proactive(max_watch=1)
         try:
-            bili._proactive_task = asyncio.create_task(bili._run_proactive(max_watch=1))
+            creator = getattr(self, "_create_lifecycle_background_task", None)
+            bili._proactive_task = (
+                creator(operation, label="bilibili_boredom_watch")
+                if callable(creator)
+                else asyncio.create_task(operation, name="private-companion-bilibili-boredom-watch")
+            )
+            if bili._proactive_task is None:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+                return False
+            if not callable(creator):
+                def consume(done_task: asyncio.Task) -> None:
+                    try:
+                        done_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] B站无聊刷视频后台任务失败: %s",
+                            _single_line(exc, 160),
+                        )
+
+                bili._proactive_task.add_done_callback(consume)
             state["last_boredom_watch_at"] = now
             state["last_boredom_watch_status"] = "triggered"
             self._save_data_sync()

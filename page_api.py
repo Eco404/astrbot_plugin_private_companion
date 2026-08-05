@@ -61,7 +61,10 @@ from .constants import (
     _REASON_TEXT,
 )
 from .config_migration import _ensure_config_parent_dir
+from .diagnostic_envelope import DIAGNOSTIC_ENVELOPE_VERSION, diagnostic_test_id, normalize_diagnostic_result
 from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
+from .reference_asset_gate import ReferenceAssetGate
+from .owned_reaction_asset_catalog import MAX_ASSET_BYTES, OwnedReactionAssetCatalog
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
 from .relationship_ledger import (
     migrate_legacy_relationship_score,
@@ -123,6 +126,18 @@ PHOTO_REFERENCE_ASSET_MIMES = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+
+
+class _PageApiError(dict[str, Any]):
+    """Dictionary-compatible API error with HTTP-only status metadata."""
+
+    __slots__ = ("http_status",)
+
+    def __init__(self, payload: dict[str, Any], http_status: int) -> None:
+        super().__init__(payload)
+        self.http_status = int(http_status)
+
+
 BOOKSHELF_ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60
 BOOKSHELF_ACCESS_TOKEN_MAX_PERSISTED = 8
 TTS_PROVIDER_SYSTEM_KEYS = {"id", "provider", "type", "provider_type", "enable", "hint", "provider_source_id"}
@@ -262,6 +277,19 @@ class PrivateCompanionPageApi(
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
 
+    @staticmethod
+    def _p4_page_status_projection() -> dict[str, Any]:
+        """Expose only fixed P4 boundaries; never resolve a user or ledger."""
+        return {
+            "schema_version": "chat.p4.page_status.v1",
+            "scope": "chat_event_only",
+            "reply_gate": "host_verified_event_only",
+            "warmth": "host_verified_event_only",
+            "confinement": "not_exposed_to_page",
+            "manual_review": "not_migrated",
+            "action_available": False,
+        }
+
     def _relationship_intimacy_projection(self, value: int) -> dict[str, Any]:
         policy = (
             getattr(self.plugin, "relationship_stage_policy", None)
@@ -270,7 +298,16 @@ class PrivateCompanionPageApi(
         )
         return relationship_stage_for_score(value, policy)
 
-    def _relationship_panel(self, user: dict[str, Any]) -> dict[str, Any]:
+    def _relationship_panel(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        relationship_stage: str,
+        worldbook_member: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return a user-scoped display DTO without authority or private content."""
+        del user_id
         role = self.plugin._private_user_role(user, str(user.get("user_id") or "")) if hasattr(self.plugin, "_private_user_role") else str(user.get("relationship_role") or "friend")
         mode = normalize_relationship_mode(user.get("relationship_mode"), role)
         intimacy = self._relationship_intimacy_projection(self._int(user.get("relationship_score")))
@@ -285,14 +322,91 @@ class PrivateCompanionPageApi(
             normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
             now=time.time(),
         )
-        expression: dict[str, Any] = {}
+        expression: dict[str, Any] = {
+            "contract": "companion_interaction_expression.v2",
+            "status": "configured_projection",
+            "expression_band": interaction.get("expression_band") or "relaxed",
+            "tone": "steady",
+            "response_length": "balanced",
+            "initiative": "passive_only",
+            "pacing": "steady",
+            "directness": "natural",
+            "validation_style": "none",
+            "self_disclosure": "none",
+            "humor_mode": "off",
+            "topic_initiative": "reply_only",
+            "safety_mode": "live_event_not_evaluated",
+            "blocker": "",
+            "reason_codes": [],
+        }
         builder = getattr(self.plugin, "_build_expression_decision_for_user", None)
         if callable(builder):
             try:
                 raw = builder(user, passive_reengagement=True)
-                expression = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
+                raw_projection = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
+                if isinstance(raw_projection, dict):
+                    expression.update(raw_projection)
             except Exception:
-                expression = {}
+                pass
+        dimension_defaults = {
+            "pacing": "steady",
+            "directness": "natural",
+            "validation_style": "none",
+            "self_disclosure": "none",
+            "humor_mode": "off",
+            "topic_initiative": "reply_only",
+        }
+        dimension_values = {
+            "pacing": {"slow", "steady", "bright"},
+            "directness": {"indirect", "natural", "direct"},
+            "validation_style": {"none", "acknowledge", "support_first"},
+            "self_disclosure": {"none", "light", "allowed"},
+            "humor_mode": {"off", "light", "playful"},
+            "topic_initiative": {"reply_only", "followup", "shared_topic"},
+        }
+        expression["contract"] = "companion_interaction_expression.v2"
+        for key, allowed in dimension_values.items():
+            value = self._single_line(expression.get(key), 20)
+            expression[key] = value if value in allowed else dimension_defaults[key]
+        inbound = max(0, self._int(user.get("inbound_count")))
+        proactive = max(0, self._int(user.get("proactive_sent_count")))
+        replies = max(0, self._int(user.get("reply_count")))
+        if not proactive:
+            reply_band = "no_proactive_sample"
+        elif replies / proactive >= 0.65:
+            reply_band = "steady"
+        elif replies / proactive >= 0.30:
+            reply_band = "some"
+        else:
+            reply_band = "low"
+
+        score = self._int(user.get("relationship_score"))
+        basis = "close" if score >= 55 else "familiar" if score >= 3 else "initial"
+        memory_phase = {"status": "unavailable", "phase": "unknown", "momentum_band": "unknown"}
+        getter = getattr(self.plugin, "_memory_companion_peek_relationship_phase", None)
+        session_id = self._single_line(user.get("umo"), 200)
+        if session_id and callable(getter):
+            try:
+                raw = getter(session_id=session_id)
+            except Exception:
+                raw = {}
+            if isinstance(raw, dict):
+                observed = raw.get("observed") is True and raw.get("status") == "observed"
+                phase = self._single_line(raw.get("phase"), 32)
+                memory_phase = {
+                    "status": "observed" if observed and phase else "not_observed",
+                    "phase": phase if observed and phase else "unknown",
+                    "momentum_band": self._single_line(raw.get("momentum_band"), 20) if observed else "unknown",
+                }
+
+        network = {
+            "status": "registered" if isinstance(worldbook_member, dict) else "not_registered",
+            "pending_observation_count": (
+                max(0, self._int(worldbook_member.get("pending_observation_count")))
+                if isinstance(worldbook_member, dict)
+                else 0
+            ),
+        }
         return {
             "relationship_mode": mode,
             "relationship_intimacy": intimacy,
@@ -301,6 +415,12 @@ class PrivateCompanionPageApi(
             "expression_decision": expression,
             "relationship_positive_stage_cap_key": getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded"),
             "normal_interaction_band_cap": getattr(self.plugin, "normal_interaction_band_cap", "warm"),
+            "relationship_basis": {"band": basis},
+            "relationship_stage": self._single_line(relationship_stage, 24) or "unclassified",
+            "interaction": {"inbound_count": inbound, "reply_count": replies, "reply_band": reply_band},
+            "memory_phase": memory_phase,
+            "network": network,
+            "reply_temperature": {"status": "live_chat_only"},
         }
 
     def _photo_reference_preset_names(self) -> tuple[str, ...]:
@@ -316,6 +436,38 @@ class PrivateCompanionPageApi(
             )
             return ()
         return tuple(str(name) for name in presets.keys()) if isinstance(presets, dict) else ()
+
+    def _create_page_background_task(self, operation: Any, *, label: str) -> asyncio.Task | None:
+        creator = getattr(self.plugin, "_create_lifecycle_background_task", None)
+        if callable(creator):
+            task = creator(operation, label=label)
+            if task is None:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+            return task
+        try:
+            task = asyncio.create_task(operation, name=f"private-companion-page-{label}")
+        except RuntimeError:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
+
+        def consume(done_task: asyncio.Task) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanionPage] background task failed: label=%s error=%s",
+                    label,
+                    self._single_line(exc, 160),
+                )
+
+        task.add_done_callback(consume)
+        return task
 
     def _troubleshooting_proactive_wakeup_tasks(self) -> dict[str, asyncio.Task[Any]]:
         tasks = getattr(self.plugin, "_troubleshooting_proactive_wakeup_tasks", None)
@@ -363,10 +515,12 @@ class PrivateCompanionPageApi(
                 if current is asyncio.current_task():
                     tasks.pop(user_key, None)
 
-        task = asyncio.create_task(
+        task = self._create_page_background_task(
             wake_when_due(),
-            name=f"private_companion_troubleshooting_proactive_{user_key[:40]}",
+            label=f"troubleshooting_proactive_{user_key[:40]}",
         )
+        if task is None:
+            return None
         tasks[user_key] = task
         return task
 
@@ -403,6 +557,15 @@ class PrivateCompanionPageApi(
                 deactivator = getattr(plugin, "_deactivate_persona_for_event", None)
                 if token is not None and callable(deactivator):
                     deactivator(token)
+
+        return wrapper
+
+    def _http_status_route_handler(self, handler):
+        """Apply transport status codes without changing direct-call results."""
+
+        @functools.wraps(handler)
+        async def wrapper(*args, **kwargs):
+            return self._as_http_response(await handler(*args, **kwargs))
 
         return wrapper
 
@@ -458,6 +621,8 @@ class PrivateCompanionPageApi(
             ("/reaction_library/update", self.update_reaction_library, ["POST"], "Private Companion Page reaction library update"),
             ("/reaction_library/delete", self.delete_reaction_library, ["POST"], "Private Companion Page reaction library delete"),
             ("/reaction_library/rescan", self.rescan_reaction_library, ["POST"], "Private Companion Page reaction library rescan"),
+            ("/reaction_assets/list", self.list_owned_reaction_assets, ["GET"], "Private Companion Page owned reaction assets"),
+            ("/reaction_assets/image_data", self.get_owned_reaction_asset_image_data, ["GET"], "Private Companion Page owned reaction asset image"),
             ("/photo_reference/list", self.list_photo_references, ["GET"], "Private Companion Page photo reference list"),
             ("/photo_reference/image_data", self.get_photo_reference_image_data, ["GET"], "Private Companion Page photo reference image data"),
             ("/reference_asset/list", self.list_reference_assets, ["GET"], "Private Companion Page scoped visual reference assets"),
@@ -568,11 +733,12 @@ class PrivateCompanionPageApi(
             "/persona/migrate",
         }
         for path, handler, methods, desc in routes:
-            registered_handler = (
+            scoped_handler = (
                 handler
                 if path in persona_control_routes
                 else self._persona_scoped_route_handler(handler)
             )
+            registered_handler = self._http_status_route_handler(scoped_handler)
             register(f"{PAGE_API_PREFIX}{path}", registered_handler, methods, desc)
 
     @_multi_persona_page_context
@@ -724,7 +890,7 @@ class PrivateCompanionPageApi(
             return self._ok(payload)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("获取总览失败")
 
     def _token_overview_payload(self, usage: Any, balance_state: Any = None) -> dict[str, Any]:
         if not isinstance(usage, dict):
@@ -1185,7 +1351,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 读取每日穿搭图片失败: %s", self._single_line(exc, 160))
-            return self._error("读取每日穿搭图片失败")
+            return self._exception_error("读取每日穿搭图片失败")
 
     def _cache_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         image_cache = data.get("private_image_vision_cache") if isinstance(data.get("private_image_vision_cache"), dict) else {}
@@ -1736,7 +1902,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取图片缓存失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def update_image_cache_item(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -1767,7 +1933,7 @@ class PrivateCompanionPageApi(
             return self._ok(self._image_cache_item_summary(key, updated))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新图片缓存失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     def _image_cache_preview_dir(self) -> Path:
         return (Path(getattr(self.plugin, "data_dir", "")) / "private_image_cache_previews").resolve()
@@ -1875,7 +2041,7 @@ class PrivateCompanionPageApi(
             changed = True
         return changed
 
-    async def _resolve_image_cache_preview_for_request(self) -> tuple[str, Path] | dict[str, Any]:
+    async def _resolve_image_cache_preview_for_request(self) -> tuple[str, Path] | tuple[dict[str, Any], int]:
         key = self._single_line(request.args.get("key"), 120)
         if not key:
             return self._error("缺少缓存 key")
@@ -1960,6 +2126,19 @@ class PrivateCompanionPageApi(
                 len(loaded.references),
             )
         return loaded.references
+
+    def _q5_structured_reference_asset_projection(self) -> dict[str, Any]:
+        enabled = bool(getattr(self.plugin, "enable_p5_structured_reference_assets", False))
+        backend = self._single_line(getattr(self.plugin, "photo_generation_backend", "auto"), 30).lower()
+        capacity = 4 if backend in {"auto", "comfyui"} else 0
+        gate = ReferenceAssetGate(getattr(self.plugin, "data_dir", ""))
+        projection = gate.public_projection(
+            getattr(self.plugin, "photo_structured_reference_assets", []),
+            backend_capacity=capacity,
+        )
+        projection["enabled"] = enabled
+        projection["backend"] = backend or "auto"
+        return projection
 
     def _photo_reference_page_items(self) -> list[dict[str, Any]]:
         catalog = self._photo_reference_catalog_snapshot(sync_runtime=True)
@@ -2089,6 +2268,7 @@ class PrivateCompanionPageApi(
                 "items": library,
                 "total": len(library),
                 "available": sum(1 for item in library if item.get("available")),
+                "structured_assets": self._q5_structured_reference_asset_projection(),
                 "options": {
                     "reference_roles": [
                         {"value": "identity", "label": "身份"},
@@ -2139,7 +2319,7 @@ class PrivateCompanionPageApi(
             })
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取参考图库失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_photo_reference_image_data(self) -> dict[str, Any]:
         item_id = self._single_line(request.args.get("id"), 80)
@@ -2163,7 +2343,7 @@ class PrivateCompanionPageApi(
             try:
                 file_size = path.stat().st_size
             except OSError:
-                return self._error("无法读取参考图文件大小")
+                return self._exception_error("无法读取参考图文件大小")
             if file_size > PHOTO_REFERENCE_PREVIEW_MAX_BYTES:
                 return self._error(
                     f"参考图预览文件过大（{file_size} bytes），上限为 {PHOTO_REFERENCE_PREVIEW_MAX_BYTES} bytes"
@@ -2180,7 +2360,61 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取参考图预览失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
+
+    def _owned_reaction_asset_catalog(self) -> OwnedReactionAssetCatalog:
+        return OwnedReactionAssetCatalog(getattr(self.plugin, "data_dir", ""))
+
+    def _owned_reaction_asset_entries(self) -> list[dict[str, Any]]:
+        entries = getattr(self.plugin, "owned_reaction_assets", [])
+        if not isinstance(entries, list):
+            return []
+        return [dict(entry) for entry in entries if isinstance(entry, dict)][:96]
+
+    async def list_owned_reaction_assets(self) -> dict[str, Any]:
+        try:
+            catalog = self._owned_reaction_asset_catalog()
+            projection = catalog.public_projection(self._owned_reaction_asset_entries())
+            return self._ok(
+                {
+                    "enabled": bool(
+                        getattr(
+                            self.plugin,
+                            "enable_owned_reaction_asset_workbench",
+                            False,
+                        )
+                    ),
+                    **projection,
+                }
+            )
+        except Exception:
+            logger.error("[PrivateCompanionPage] owned reaction asset status failed")
+            return self._exception_error("无法读取自有反应图素材状态")
+
+    async def get_owned_reaction_asset_image_data(self) -> dict[str, Any]:
+        asset_id = self._single_line(request.args.get("id"), 80)
+        if not asset_id:
+            return self._error("缺少素材 id")
+        try:
+            asset = self._owned_reaction_asset_catalog().resolve(
+                self._owned_reaction_asset_entries(),
+                asset_id,
+            )
+            if asset is None:
+                return self._error("素材不存在、未登记或校验失败")
+            mime = mimetypes.guess_type(str(asset.path))[0] or ""
+            if not mime.startswith("image/"):
+                return self._error("素材文件类型不受支持")
+            return self._ok(
+                await self._encode_image_cache_file_data_url(
+                    asset.path,
+                    mime,
+                    max_bytes=MAX_ASSET_BYTES,
+                )
+            )
+        except Exception:
+            logger.error("[PrivateCompanionPage] owned reaction asset preview failed")
+            return self._exception_error("无法读取自有反应图预览")
 
     def _reference_asset_records(self) -> list[dict[str, Any]]:
         data = getattr(self.plugin, "data", None)
@@ -2952,7 +3186,7 @@ class PrivateCompanionPageApi(
     async def get_image_cache_preview(self) -> Any:
         try:
             resolved = await self._resolve_image_cache_preview_for_request()
-            if isinstance(resolved, dict):
+            if self._is_http_error_response(resolved):
                 return resolved
             _key, path = resolved
             response = await send_file(str(path))
@@ -2960,23 +3194,23 @@ class PrivateCompanionPageApi(
             return response
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取图片缓存预览失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_image_cache_preview_data(self) -> dict[str, Any]:
         try:
             resolved = await self._resolve_image_cache_preview_for_request()
-            if isinstance(resolved, dict):
+            if self._is_http_error_response(resolved):
                 return resolved
             _key, path = resolved
             return self._ok(await self._encode_image_cache_file_data_url(path))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取图片缓存预览数据失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_image_cache_thumbnail_data(self) -> dict[str, Any]:
         try:
             resolved = await self._resolve_image_cache_preview_for_request()
-            if isinstance(resolved, dict):
+            if self._is_http_error_response(resolved):
                 return resolved
             key, source = resolved
             thumbnail = await self._get_or_create_image_cache_thumbnail(key, source)
@@ -2985,7 +3219,7 @@ class PrivateCompanionPageApi(
             return self._ok(await self._encode_image_cache_file_data_url(source))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取图片缓存缩略图失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def delete_image_cache_item(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3007,7 +3241,7 @@ class PrivateCompanionPageApi(
             return self._ok({"key": key, "remaining": remaining})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 删除图片缓存失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def bulk_delete_image_cache_items(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3058,7 +3292,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 批量删除图片缓存失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     def _remove_image_cache_preview_file(self, preview_path: str, key: str = "") -> None:
         path: Path | None = None
@@ -3255,6 +3489,8 @@ class PrivateCompanionPageApi(
                         raise RuntimeError("配置保存失败，关系配置及人格资料已回滚")
                     apply_overrides.pop("__relationship_profile_transaction", None)
             overview = await self.get_overview()
+            if self._is_http_error_response(overview):
+                return overview
             if overview.get("success"):
                 overview["data"]["changed"] = changed
                 overview["data"]["config_saved"] = config_saved
@@ -3287,7 +3523,7 @@ class PrivateCompanionPageApi(
             }
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新设置失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def swap_image_api_settings(self) -> dict[str, Any]:
         try:
@@ -3318,6 +3554,8 @@ class PrivateCompanionPageApi(
                     self._apply_config_value("external_image_api_endpoints", changed)
                     config_saved = await self._save_config_if_possible()
                 overview = await self.get_overview()
+                if self._is_http_error_response(overview):
+                    return overview
                 if overview.get("success"):
                     data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                     data["changed"] = {"external_image_api_endpoints": changed}
@@ -3372,6 +3610,8 @@ class PrivateCompanionPageApi(
                 self._sync_photo_generation_runtime_config()
                 config_saved = await self._save_config_if_possible()
             overview = await self.get_overview()
+            if self._is_http_error_response(overview):
+                return overview
             if overview.get("success"):
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                 data["changed"] = changed
@@ -3381,7 +3621,7 @@ class PrivateCompanionPageApi(
             return overview
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 切换在线生图 API 失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def export_migration_config(self) -> dict[str, Any]:
         try:
@@ -3389,14 +3629,14 @@ class PrivateCompanionPageApi(
             return self._ok(package)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 导出配置备份失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def list_migration_backups(self) -> dict[str, Any]:
         try:
             return self._ok({"items": self._list_migration_backup_items(limit=8)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 读取配置备份列表失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def restore_migration_backup(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3407,6 +3647,8 @@ class PrivateCompanionPageApi(
             package = self._extract_migration_package(package)
             normalized = self._normalize_migration_package(package)
             overview = await self._apply_migration_normalized(normalized, mode="replace", conflict="use_backup")
+            if self._is_http_error_response(overview):
+                return overview
             data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
             data["message"] = "已从自动备份恢复。"
             data["restored_from"] = path.name
@@ -3414,7 +3656,7 @@ class PrivateCompanionPageApi(
             return overview
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 恢复配置备份失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def preview_migration_config_import(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3429,7 +3671,7 @@ class PrivateCompanionPageApi(
             return self._ok(summary)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 预览配置导入失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def apply_migration_config_import(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3450,7 +3692,7 @@ class PrivateCompanionPageApi(
             return await self._apply_migration_normalized(normalized, mode=mode, conflict=conflict)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 应用配置导入失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def update_proactive_only_unlock(self) -> dict[str, Any]:
         try:
@@ -3475,7 +3717,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新主动专用临时放行失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def delete_proactive_candidate(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3532,7 +3774,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 删除主动候选失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def prune_proactive_candidates(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -3559,7 +3801,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 压缩主动候选失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     def _troubleshooting_warning_type(self, scope: str, *parts: Any) -> str:
         source = "\x1f".join(
@@ -3781,7 +4023,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 更新排障警告屏蔽失败: %s", self._single_line(exc, 160), exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_diagnostics(self) -> dict[str, Any]:
         try:
@@ -3809,7 +4051,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取诊断失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_troubleshooting(self) -> dict[str, Any]:
         try:
@@ -3925,7 +4167,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取排障信息失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_daily_review(self) -> dict[str, Any]:
         try:
@@ -4265,6 +4507,12 @@ class PrivateCompanionPageApi(
         result["ran_at_text"] = self.plugin._format_timestamp_elapsed(result["ran_at"])
         result.setdefault("request_id", request_id)
         result = self._finalize_test_diagnostics(test_type, result, start, finished_at=result["ran_at"])
+        result = self._diagnostic_envelope(
+            result,
+            test_type=test_type,
+            duration_ms=self._int(result.get("elapsed_ms")),
+            test_id=diagnostic_test_id(test_type),
+        )
         await self._remember_troubleshooting_test_result(result_key, result)
         logger.info(
             "[PrivateCompanionPage][test:%s][type:%s] 测试结束: status=%s elapsed_ms=%s",
@@ -4459,7 +4707,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 获取生图 API 状态失败: %s", self._single_line(exc, 160), exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def test_image_api_endpoint(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -4489,6 +4737,12 @@ class PrivateCompanionPageApi(
             started,
             title="在线图片 API 单独测试",
             finished_at=result["ran_at"],
+        )
+        result = self._diagnostic_envelope(
+            result,
+            test_type="image_api_endpoint",
+            duration_ms=self._int(result.get("elapsed_ms")),
+            test_id=diagnostic_test_id("image_api_endpoint"),
         )
         result_key = self._single_line(result.get("test_key"), 80) or "image_api_endpoint"
         await self._remember_troubleshooting_test_result(result_key, result)
@@ -7075,141 +7329,138 @@ class PrivateCompanionPageApi(
         )
         return result
 
+    def _diagnostic_envelope(
+        self,
+        result: dict[str, Any] | None,
+        *,
+        test_type: str = "",
+        duration_ms: int = 0,
+        test_id: str = "",
+    ) -> dict[str, Any]:
+        source = dict(result) if isinstance(result, dict) else {}
+        contract_version = DIAGNOSTIC_ENVELOPE_VERSION
+        plugin = getattr(self, "plugin", None)
+        getter = getattr(plugin, "_diagnostic_operations_contract", None)
+        if callable(getter):
+            try:
+                contract = getter()
+                if isinstance(contract, dict):
+                    contract_version = self._single_line(contract.get("version"), 60) or contract_version
+            except Exception:
+                pass
+        source_request_id = self._single_line(
+            source.get("request_id") or source.get("trace_id"),
+            32,
+        )
+        resolved_test_id = test_id or self._single_line(source.get("test_id"), 100)
+        if not resolved_test_id and re.fullmatch(r"[a-fA-F0-9]{12,32}", source_request_id):
+            resolved_test_id = diagnostic_test_id(
+                test_type or source.get("type"),
+                token=source_request_id.lower(),
+            )
+        envelope = normalize_diagnostic_result(
+            source,
+            test_type=test_type,
+            duration_ms=duration_ms,
+            test_id=resolved_test_id,
+            contract_version=contract_version,
+        )
+
+        # The public envelope intentionally strips arbitrary model output. The
+        # local operations page still needs bounded, redacted delivery details
+        # and the legacy request id to make a failed test actionable.
+        for key, limit in (
+            ("request_id", 32),
+            ("trace_id", 32),
+            ("test_status", 16),
+            ("error_code", 40),
+            ("exception_type", 120),
+            ("title", 80),
+            ("delivery_umo", 180),
+        ):
+            if source.get(key) not in (None, ""):
+                envelope[key] = self._single_line(source.get(key), limit)
+        for key, limit in (
+            ("error", 1600),
+            ("delivery_error", 1200),
+            ("detail", 1200),
+            ("diagnostic_detail", 4000),
+            ("suggestion", 600),
+        ):
+            if source.get(key) not in (None, ""):
+                envelope[key] = self._safe_test_diagnostic_text(source.get(key), limit)
+        for key in ("generated", "delivered"):
+            if key in source:
+                envelope[key] = bool(source.get(key))
+
+        warnings = source.get("warnings") if isinstance(source.get("warnings"), list) else []
+        envelope["warnings"] = [
+            text
+            for item in warnings[:8]
+            if (text := self._safe_test_diagnostic_text(item, 800))
+        ]
+        envelope["steps"] = [
+            {
+                "key": self._single_line(step.get("key"), 40),
+                "name": self._single_line(step.get("name"), 60) or "执行阶段",
+                "status": self._single_line(step.get("status"), 16) or "info",
+                "detail": self._safe_test_diagnostic_text(step.get("detail"), 800),
+                "elapsed_ms": self._int(step.get("elapsed_ms")),
+            }
+            for step in (source.get("steps") if isinstance(source.get("steps"), list) else [])[:24]
+            if isinstance(step, dict)
+        ]
+        envelope["diagnostic_entries"] = [
+            {
+                "elapsed_ms": self._int(entry.get("elapsed_ms")),
+                "level": self._single_line(entry.get("level"), 16),
+                "stage": self._single_line(entry.get("stage"), 60),
+                "message": self._safe_test_diagnostic_text(entry.get("message"), 1200),
+            }
+            for entry in (
+                source.get("diagnostic_entries")
+                if isinstance(source.get("diagnostic_entries"), list)
+                else []
+            )[:32]
+            if isinstance(entry, dict)
+        ]
+        envelope["suggestions"] = [
+            text
+            for item in (
+                source.get("suggestions")
+                if isinstance(source.get("suggestions"), list)
+                else []
+            )[:12]
+            if (text := self._safe_test_diagnostic_text(item, 220))
+        ]
+        envelope["sections"] = [
+            {
+                "key": self._single_line(section.get("key"), 40),
+                "title": self._single_line(section.get("title"), 60),
+                "local_count": self._int(section.get("local_count")),
+                "model_count": self._int(section.get("model_count")),
+                "suggestions": [
+                    text
+                    for item in (
+                        section.get("suggestions")
+                        if isinstance(section.get("suggestions"), list)
+                        else []
+                    )[:8]
+                    if (text := self._safe_test_diagnostic_text(item, 220))
+                ],
+            }
+            for section in (
+                source.get("sections") if isinstance(source.get("sections"), list) else []
+            )[:6]
+            if isinstance(section, dict)
+        ]
+        for key in ("started_at", "finished_at"):
+            if source.get(key) not in (None, ""):
+                envelope[key] = self._float(source.get(key))
+        return envelope
+
     def _sanitize_troubleshooting_test_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        safe = self._safe_test_diagnostic_text
-        return {
-            "type": self._single_line(result.get("type"), 40),
-            "test_key": self._single_line(result.get("test_key"), 80),
-            "diagnostic_version": self._int(result.get("diagnostic_version")),
-            "request_id": self._single_line(result.get("request_id") or result.get("trace_id"), 32),
-            "trace_id": self._single_line(result.get("trace_id") or result.get("request_id"), 32),
-            "test_status": self._single_line(result.get("test_status"), 16),
-            "error_code": self._single_line(result.get("error_code"), 40),
-            "error_category": self._single_line(result.get("error_category"), 60),
-            "retryable": bool(result.get("retryable")),
-            "suggestion": safe(result.get("suggestion"), 600),
-            "exception_type": self._single_line(result.get("exception_type"), 120),
-            "ok": bool(result.get("ok")),
-            "pending": bool(result.get("pending")),
-            "outcome_type": self._single_line(result.get("outcome_type"), 40),
-            "title": self._single_line(result.get("title"), 60),
-            "backend": self._single_line(result.get("backend"), 80),
-            "image_model": self._single_line(result.get("image_model"), 80),
-            "image_size": self._single_line(result.get("image_size"), 40),
-            "endpoint_index": self._int(result.get("endpoint_index"), -1),
-            "endpoint_name": self._single_line(result.get("endpoint_name"), 80),
-            "endpoint_platform": self._single_line(result.get("endpoint_platform"), 60),
-            "endpoint_url": self._single_line(result.get("endpoint_url"), 180),
-            "endpoint_status": self._single_line(result.get("endpoint_status"), 20),
-            "endpoint_timeout_seconds": self._int(result.get("endpoint_timeout_seconds")),
-            "queue_wait_ms": self._int(result.get("queue_wait_ms")),
-            "workflow_kind": self._single_line(result.get("workflow_kind"), 20),
-            "reference_image": self._single_line(result.get("reference_image"), 1000),
-            "used_reference": bool(result.get("used_reference")),
-            "reference_id": self._single_line(result.get("reference_id"), 60),
-            "reference_kind": self._single_line(result.get("reference_kind"), 40),
-            "reference_roles": [
-                self._single_line(value, 40)
-                for value in (result.get("reference_roles") if isinstance(result.get("reference_roles"), list) else [])
-                if self._single_line(value, 40)
-            ][:8],
-            "wardrobe_mode": self._single_line(result.get("wardrobe_mode"), 40),
-            "wardrobe_category": self._single_line(result.get("wardrobe_category"), 40),
-            "outfit_locked": bool(result.get("outfit_locked")),
-            "daily_outfit_removed": bool(result.get("daily_outfit_removed")),
-            "final_presets": [
-                self._single_line(value, 60)
-                for value in (result.get("final_presets") if isinstance(result.get("final_presets"), list) else [])
-                if self._single_line(value, 60)
-            ][:1],
-            "prompt_hash": self._single_line(result.get("prompt_hash"), 80),
-            "prompt_path": self._single_line(result.get("prompt_path"), 1000),
-            "provider": self._single_line(result.get("provider"), 100),
-            "umo": self._single_line(result.get("umo"), 180),
-            "path": self._single_line(result.get("path"), 1000),
-            "file_size": self._int(result.get("file_size")),
-            "generated": bool(result.get("generated")),
-            "delivered": bool(result.get("delivered")),
-            "delivery_umo": self._single_line(result.get("delivery_umo"), 180),
-            "delivery_error": safe(result.get("delivery_error"), 1200),
-            "detail": safe(result.get("detail"), 1200),
-            "error": safe(result.get("error"), 1600),
-            "diagnostic_detail": safe(result.get("diagnostic_detail"), 4000),
-            "prompt": self._single_line(result.get("prompt"), 500),
-            "text": self._single_line(result.get("text"), 600),
-            "timeout_seconds": self._int(result.get("timeout_seconds")),
-            "test_timeout_seconds": self._int(result.get("test_timeout_seconds")),
-            "estimated_timeout_seconds": self._int(result.get("estimated_timeout_seconds")),
-            "timeout_budget": self._single_line(result.get("timeout_budget"), 220),
-            "backend_preference": self._single_line(result.get("backend_preference"), 30),
-            "external_timeout_seconds": self._int(result.get("external_timeout_seconds")),
-            "backup_external_timeout_seconds": self._int(result.get("backup_external_timeout_seconds")),
-            "comfyui_wait_seconds": self._int(result.get("comfyui_wait_seconds")),
-            "backup_external": bool(result.get("backup_external")),
-            "external_queue_lock": bool(result.get("external_queue_lock")),
-            "tool_call_timeout_seconds": self._int(result.get("tool_call_timeout_seconds")),
-            "warnings": [
-                safe(item, 800)
-                for item in (result.get("warnings") if isinstance(result.get("warnings"), list) else [])[:8]
-                if safe(item, 800)
-            ],
-            "text_preview": self._single_line(result.get("text_preview"), 220),
-            "original_text_preview": self._single_line(result.get("original_text_preview"), 220),
-            "final_text_preview": self._single_line(result.get("final_text_preview"), 220),
-            "context_chars": self._int(result.get("context_chars")),
-            "action": self._single_line(result.get("action"), 60),
-            "reason": self._single_line(result.get("reason"), 40),
-            "extra_count": self._int(result.get("extra_count")),
-            "local_count": self._int(result.get("local_count")),
-            "model_count": self._int(result.get("model_count")),
-            "suggestion_count": self._int(result.get("suggestion_count")),
-            "suggestions": [
-                self._single_line(item, 220)
-                for item in (result.get("suggestions") if isinstance(result.get("suggestions"), list) else [])[:12]
-                if self._single_line(item, 220)
-            ],
-            "sections": [
-                {
-                    "key": self._single_line(section.get("key"), 40),
-                    "title": self._single_line(section.get("title"), 60),
-                    "local_count": self._int(section.get("local_count")),
-                    "model_count": self._int(section.get("model_count")),
-                    "suggestions": [
-                        self._single_line(item, 220)
-                        for item in (section.get("suggestions") if isinstance(section.get("suggestions"), list) else [])[:8]
-                        if self._single_line(item, 220)
-                    ],
-                }
-                for section in (result.get("sections") if isinstance(result.get("sections"), list) else [])[:6]
-                if isinstance(section, dict)
-            ],
-            "steps": [
-                {
-                    "key": self._single_line(step.get("key"), 40),
-                    "name": self._single_line(step.get("name"), 60),
-                    "status": self._single_line(step.get("status"), 16),
-                    "detail": safe(step.get("detail"), 800),
-                    "elapsed_ms": self._int(step.get("elapsed_ms")),
-                }
-                for step in (result.get("steps") if isinstance(result.get("steps"), list) else [])[:24]
-                if isinstance(step, dict)
-            ],
-            "diagnostic_entries": [
-                {
-                    "elapsed_ms": self._int(entry.get("elapsed_ms")),
-                    "level": self._single_line(entry.get("level"), 16),
-                    "stage": self._single_line(entry.get("stage"), 60),
-                    "message": safe(entry.get("message"), 1200),
-                }
-                for entry in (result.get("diagnostic_entries") if isinstance(result.get("diagnostic_entries"), list) else [])[:32]
-                if isinstance(entry, dict)
-            ],
-            "started_at": self._float(result.get("started_at")),
-            "finished_at": self._float(result.get("finished_at")),
-            "elapsed_ms": self._int(result.get("elapsed_ms")),
-            "ran_at": self._float(result.get("ran_at")),
-            "ran_at_text": self._single_line(result.get("ran_at_text"), 40),
-        }
+        return self._diagnostic_envelope(result)
 
     @staticmethod
     def _troubleshooting_test_title(test_type: str) -> str:
@@ -7906,7 +8157,7 @@ class PrivateCompanionPageApi(
             return self._ok(stats)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取 Token 统计失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     @_multi_persona_page_context
     async def reset_token_stats(self) -> dict[str, Any]:
@@ -7918,7 +8169,7 @@ class PrivateCompanionPageApi(
             return self._ok(self._token_stats_payload({}, balance_state))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 重置 Token 统计失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def unlock_bookshelf(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -7936,7 +8187,7 @@ class PrivateCompanionPageApi(
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 解锁书柜夹层失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_bookshelf_session(self) -> dict[str, Any]:
         """Restore a previously unlocked bookshelf session from the browser token.
@@ -8003,7 +8254,7 @@ class PrivateCompanionPageApi(
             return self._ok({"memo_notes": self._memo_notes_payload(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取备忘便签失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def update_memo_note(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -8021,10 +8272,10 @@ class PrivateCompanionPageApi(
                 result = self._memo_notes_payload(self.plugin.data)
             return self._ok({"memo_notes": result})
         except ValueError as exc:
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新备忘便签失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     @staticmethod
     def _normalize_bookshelf_password(value: Any) -> str:
@@ -8398,7 +8649,7 @@ class PrivateCompanionPageApi(
             return response
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 读取书柜图片失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_bookshelf_image_data(self) -> dict[str, Any]:
         if not self._bookshelf_access_token_valid(self._bookshelf_request_token()):
@@ -8420,7 +8671,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 读取书柜图片数据失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def _read_file_base64(self, path: Path) -> str:
         import asyncio
@@ -8679,7 +8930,7 @@ class PrivateCompanionPageApi(
             return self._ok({"changed": changed, "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 删除书柜项目失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     def _cleanup_bookshelf_page_files(self, pages: list[dict[str, Any]]) -> None:
         data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
@@ -8772,7 +9023,7 @@ class PrivateCompanionPageApi(
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新书柜阅读进度失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def rate_bookshelf_item(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -8821,7 +9072,7 @@ class PrivateCompanionPageApi(
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 保存私密阅读评分失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     def _normalize_bookshelf_tag_list(self, value: Any, *, limit: int = 8) -> list[str]:
         raw_items: list[Any]
@@ -8931,7 +9182,7 @@ class PrivateCompanionPageApi(
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 保存私密阅读标签失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     def _resolve_bookshelf_data_file(self, value: Any) -> Path | None:
         path_text = _path_text(value, 1000)
@@ -9076,7 +9327,7 @@ class PrivateCompanionPageApi(
             return self._ok({"message": "Bot 已重新读过并更新读后感", "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新私密阅读批注失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def import_worldbook(self) -> dict[str, Any]:
         try:
@@ -9087,7 +9338,7 @@ class PrivateCompanionPageApi(
             return self._ok({"changed": changed, "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 导入世界书失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def update_worldbook_member(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9227,7 +9478,7 @@ class PrivateCompanionPageApi(
             return self._ok(response)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新关系节点失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def get_worldbook_member_livingmemory(self) -> dict[str, Any]:
         user_id = self._normalize_worldbook_member_id(self._single_line(request.args.get("user_id"), 80))
@@ -9271,10 +9522,10 @@ class PrivateCompanionPageApi(
             )
         except sqlite3.OperationalError as exc:
             logger.warning(f"[PrivateCompanionPage] 查询 LivingMemory 失败: {exc}")
-            return self._error(f"LivingMemory 数据库暂时不可读：{exc}")
+            return self._exception_error("LivingMemory 数据库暂时不可读")
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 查询关系节点 LivingMemory 失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error(str(exc))
 
     async def clear_worldbook_pending_observations(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9308,7 +9559,7 @@ class PrivateCompanionPageApi(
             return self._ok({"message": message, "cleared": cleared, "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 清理待确认观察失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("清理待确认观察失败")
 
     async def update_worldbook_group(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9362,7 +9613,7 @@ class PrivateCompanionPageApi(
             return self._ok({"message": "已保存群资料", "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新群资料失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新群资料失败")
 
     async def apply_preset(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9390,7 +9641,7 @@ class PrivateCompanionPageApi(
             return overview
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 应用预设失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("应用预设失败")
 
     async def update_skill_growth(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9492,7 +9743,7 @@ class PrivateCompanionPageApi(
                 return self._ok({"message": "已保存技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新技能失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新技能失败")
 
     async def update_personal_goal(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9592,7 +9843,7 @@ class PrivateCompanionPageApi(
                 return self._ok({"message": "已保存个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新个人目标失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新个人目标失败")
 
     @staticmethod
     def _food_menu_parse_bool(value: Any, default: bool = False) -> bool:
@@ -9826,7 +10077,7 @@ class PrivateCompanionPageApi(
                 return self._ok({"message": "已保存候选", "food_menu": self._food_menu_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新吃什么候选失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新吃什么候选失败")
 
     async def bulk_update_food_menu(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9921,7 +10172,7 @@ class PrivateCompanionPageApi(
                 )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 批量更新吃什么候选失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("批量更新吃什么候选失败")
 
     async def bulk_delete_food_menu(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -9968,7 +10219,7 @@ class PrivateCompanionPageApi(
                 )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 批量删除吃什么候选失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("批量删除吃什么候选失败")
 
     async def update_external_ability(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -10006,7 +10257,7 @@ class PrivateCompanionPageApi(
             return self._ok({"message": "已保存外部主动能力", "external_abilities": self._external_ability_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新外部主动能力失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新外部主动能力失败")
 
     async def list_roleplay_personas(self) -> dict[str, Any]:
         try:
@@ -10383,7 +10634,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.warning(f"[PrivateCompanionPage] 根据主回复人格生成设定草稿失败: {exc}", exc_info=True)
-            return self._error(f"生成草稿失败: {self._single_line(exc, 160)}")
+            return self._exception_error("生成草稿失败")
 
     async def apply_setup_guide(self) -> dict[str, Any]:
         """Persist the first setup guide draft into plugin config and data."""
@@ -10579,6 +10830,8 @@ class PrivateCompanionPageApi(
             if changed:
                 config_saved = await self._save_config_if_possible()
             overview = await self.get_overview()
+            if self._is_http_error_response(overview):
+                return overview
             if overview.get("success"):
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                 data["setup_applied"] = True
@@ -10588,7 +10841,7 @@ class PrivateCompanionPageApi(
             return overview
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 首次配置落地失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("首次配置落地失败")
 
     def _setup_guide_fallback_daily_plan(self, reason: str = "timeout") -> dict[str, Any]:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -10643,7 +10896,9 @@ class PrivateCompanionPageApi(
             return plan
 
         if not isinstance(task, asyncio.Task) or task.done():
-            task = asyncio.create_task(_runner())
+            task = self._create_page_background_task(_runner(), label="setup_daily_plan")
+            if task is None:
+                return {}, "unavailable", False
             def _consume_setup_daily_task(done_task: asyncio.Task) -> None:
                 try:
                     done_task.result()
@@ -10728,7 +10983,14 @@ class PrivateCompanionPageApi(
                 detail_refiner = getattr(self.plugin, "_ensure_detail_enhancement", None)
                 if callable(detail_refiner):
                     detail_timeout = max(3, min(60, timeout_seconds))
-                    detail_task = asyncio.create_task(detail_refiner(force=bool(force_detail)))
+                    detail_task = self._create_page_background_task(
+                        detail_refiner(force=bool(force_detail)),
+                        label="setup_daily_detail",
+                    )
+                    if detail_task is None:
+                        detail_error = "后台细化任务无法启动"
+                        detail_pending = False
+                        detail_task = None
 
                     def _consume_setup_detail_task(done_task: asyncio.Task) -> None:
                         try:
@@ -10742,8 +11004,11 @@ class PrivateCompanionPageApi(
                                 exc_info=True,
                             )
 
-                    detail_task.add_done_callback(_consume_setup_detail_task)
+                    if detail_task is not None:
+                        detail_task.add_done_callback(_consume_setup_detail_task)
                     try:
+                        if detail_task is None:
+                            raise RuntimeError("setup detail task unavailable")
                         detail = await asyncio.wait_for(asyncio.shield(detail_task), timeout=detail_timeout)
                     except asyncio.TimeoutError:
                         detail_pending = True
@@ -10946,7 +11211,7 @@ class PrivateCompanionPageApi(
                             else:
                                 live_item.pop(field, None)
                     self.plugin._save_data_sync()
-            return self._error(self._single_line(exc, 180) or "局部重生成失败")
+            return self._exception_error("局部重生成失败")
 
     def _normalize_roleplay_draft_scopes(self, raw: Any) -> list[str]:
         allowed = {"persona", "world", "user"}
@@ -11215,7 +11480,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 人格标准化问卷生成失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("人格标准化问卷生成失败")
 
     async def generate_persona_style_scenarios(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -11406,7 +11671,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 人格风格试答生成失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("人格风格试答生成失败")
 
     async def retry_persona_style_scenario(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -11461,7 +11726,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 人格风格单情景重生成失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("人格风格单情景重生成失败")
 
     async def generate_persona_style_summary(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -11514,7 +11779,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 人格风格规则归纳失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("人格风格规则归纳失败")
 
     def _standardize_persona_provider_id(self) -> str:
         task_provider = getattr(self.plugin, "_task_provider", None)
@@ -12641,7 +12906,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取 Provider 列表失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("获取 Provider 列表失败")
 
     async def test_provider(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -12700,6 +12965,12 @@ class PrivateCompanionPageApi(
             start,
             title="模型 Provider 连接测试",
         )
+        result = self._diagnostic_envelope(
+            result,
+            test_type="provider",
+            duration_ms=self._int(result.get("elapsed_ms")),
+            test_id=diagnostic_test_id("provider"),
+        )
         logger.info(
             "[PrivateCompanionPage][test:%s][type:provider_connection] 测试结束: status=%s elapsed_ms=%s",
             request_id,
@@ -12757,7 +13028,12 @@ class PrivateCompanionPageApi(
         role_labeler = getattr(self.plugin, "_private_user_role_label", None)
         role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
         relationship_state = self._emotion_relationship_state_summary(rel_state)
-        relationship_panel = self._relationship_panel(user)
+        relationship_panel = self._relationship_panel(
+            user_id_text,
+            user,
+            relationship_stage=relationship_stage,
+            worldbook_member=None,
+        )
         relationship_mode = relationship_panel["relationship_mode"]
         relationship_intimacy = relationship_panel["relationship_intimacy"]
         current_interaction = relationship_panel["current_interaction"]
@@ -13663,7 +13939,7 @@ class PrivateCompanionPageApi(
             return self._ok(self._expression_library_summary(snapshot))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取统一表达学习库失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("获取统一表达学习库失败")
 
     async def update_expression_library(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -13772,7 +14048,7 @@ class PrivateCompanionPageApi(
                 return self._ok(result)
             except Exception as exc:
                 logger.error(f"[PrivateCompanionPage] 清空统一表达待审样本失败: {exc}", exc_info=True)
-                return self._error(str(exc))
+                return self._exception_error("清空统一表达待审样本失败")
         if source_type not in {"private", "group"} or not source_id:
             return self._error("缺少有效的表达样本来源")
         if action not in {
@@ -13810,7 +14086,7 @@ class PrivateCompanionPageApi(
             return self._error(str(exc))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新统一表达学习库失败: {exc}", exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新统一表达学习库失败")
 
     def _apply_expression_profile_action(self, user: dict[str, Any], payload: dict[str, Any]) -> str:
         profile = user.setdefault("expression_profile", {})
@@ -15323,6 +15599,8 @@ class PrivateCompanionPageApi(
             self._refresh_migration_runtime_caches(data_payload)
 
         overview = await self.get_overview()
+        if self._is_http_error_response(overview):
+            return overview
         data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
         checks = await self._migration_post_import_checks(config_saved=config_saved)
         data["message"] = "配置已导入。"
@@ -16903,6 +17181,12 @@ class PrivateCompanionPageApi(
             "enable_solar_term_perception",
             "enable_almanac_perception",
             "default_nickname",
+            "enable_auto_user_profile_creation",
+            "auto_enable_companion_for_new_users",
+            "auto_profile_platforms",
+            "default_nickname_strategy",
+            "default_proactive_enabled",
+            "default_proactive_daily_limit",
             "default_interaction_band",
             "enable_custom_relationship_stage_policy",
             "relationship_stage_policy",
@@ -19110,7 +19394,7 @@ class PrivateCompanionPageApi(
             kicker = getattr(self.plugin, "_kick_proactive_loop_once", None)
             if callable(kicker):
                 try:
-                    asyncio.create_task(kicker())
+                    self._create_page_background_task(kicker(), label="max_daily_messages_wakeup")
                 except RuntimeError:
                     pass
             return
@@ -19470,6 +19754,9 @@ class PrivateCompanionPageApi(
         reference_enabled = self._config_get("enable_photo_reference_image")
         if reference_enabled not in ("", None):
             self.plugin.enable_photo_reference_image = self._normalize_bool_value(reference_enabled)
+        structured_enabled = self._config_get("enable_p5_structured_reference_assets")
+        if structured_enabled not in ("", None):
+            self.plugin.enable_p5_structured_reference_assets = self._normalize_bool_value(structured_enabled)
         relationship_enabled = self._config_get("enable_bot_relationship_network")
         if relationship_enabled not in ("", None):
             self.plugin.enable_bot_relationship_network = self._normalize_bool_value(relationship_enabled)
@@ -19739,6 +20026,7 @@ class PrivateCompanionPageApi(
     def _allowed_feature_keys(self) -> set[str]:
         return {
             "enable_proactive_only_mode",
+            "enable_auto_user_profile_creation",
             "enable_mai_style_integration",
             "enable_companion_memory",
             "enable_expression_learning",
@@ -19955,6 +20243,12 @@ class PrivateCompanionPageApi(
             "enable_solar_term_perception",
             "enable_almanac_perception",
             "default_nickname",
+            "enable_auto_user_profile_creation",
+            "auto_enable_companion_for_new_users",
+            "auto_profile_platforms",
+            "default_nickname_strategy",
+            "default_proactive_enabled",
+            "default_proactive_daily_limit",
             "default_interaction_band",
             "enable_custom_relationship_stage_policy",
             "relationship_stage_policy",
@@ -20858,6 +21152,16 @@ class PrivateCompanionPageApi(
                     "linked_qq_user_id": self._single_line(item.get("linked_qq_user_id") or item.get("merged_into_user_id"), 40),
                     "linked_bili_profile_id": self._single_line(item.get("linked_bili_profile_id"), 80),
                     "auto_registration_pending": bool(item.get("auto_registration_pending", False)),
+                    "profile_origin": self._single_line(item.get("profile_origin"), 40),
+                    "observation_only": bool(item.get("observation_only", False)),
+                    "proactive_contact_enabled": bool(item.get("proactive_contact_enabled", False)),
+                    "relationship_state": self._single_line(item.get("relationship_state"), 24) or "neutral",
+                    "affinity_score": self._int(item.get("affinity_score")),
+                    "observed_group_count": len(
+                        item.get("group_observation_scope_ids")
+                        if isinstance(item.get("group_observation_scope_ids"), list)
+                        else []
+                    ),
                     "content": self._single_line(item.get("content"), 260),
                     "identity_note": self._single_line(item.get("identity_note") or item.get("note") or item.get("content"), 500),
                     "boundary_note": self._single_line(item.get("boundary_note"), 500),
@@ -23042,7 +23346,7 @@ class PrivateCompanionPageApi(
             )
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 读取创作封面数据失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("读取创作封面数据失败")
 
     async def get_creative_project(self) -> dict[str, Any]:
         project_id = str(request.args.get("id", "")).strip()
@@ -23058,7 +23362,7 @@ class PrivateCompanionPageApi(
             return self._ok(self._creative_project_payload(snapshot))
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 获取创作项目详情失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("获取创作项目详情失败")
 
     async def update_creative_project(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23141,7 +23445,7 @@ class PrivateCompanionPageApi(
             return self._ok({"project_id": project_id, "changed": bool(changed_notes), "message": "作品已更新"})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 更新创作项目失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新创作项目失败")
 
     async def update_creative_chunk(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23164,7 +23468,7 @@ class PrivateCompanionPageApi(
             return self._ok({"project_id": project_id, "chunk_index": chunk_index, "message": "片段已更新"})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 更新创作片段失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新创作片段失败")
 
     async def update_creative_outline(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23182,7 +23486,7 @@ class PrivateCompanionPageApi(
             return self._ok({"project_id": project_id, "message": "大纲已更新"})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 更新创作大纲失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新创作大纲失败")
 
     async def update_creative_characters(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23209,7 +23513,7 @@ class PrivateCompanionPageApi(
             return self._ok({"project_id": project_id, "message": "角色已更新"})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 更新创作角色失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("更新创作角色失败")
 
     async def reanalyze_creative_project(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23254,7 +23558,7 @@ class PrivateCompanionPageApi(
             return self._ok({"project_id": project_id, "review": review})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 创作项目质量分析失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("创作项目质量分析失败")
 
     async def rebuild_creative_memory(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23271,7 +23575,7 @@ class PrivateCompanionPageApi(
             return self._ok(result)
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 重建创作记忆失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("重建创作记忆失败")
 
     async def delete_creative_project(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -23290,7 +23594,7 @@ class PrivateCompanionPageApi(
             return self._ok({"project_id": project_id, "removed": removed})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 删除创作项目失败: %s", exc, exc_info=True)
-            return self._error(str(exc))
+            return self._exception_error("删除创作项目失败")
 
     def _creative_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
@@ -24683,5 +24987,59 @@ class PrivateCompanionPageApi(
         return {"success": True, "data": data, "ts": int(time.time())}
 
     @staticmethod
-    def _error(message: str) -> dict[str, Any]:
-        return {"success": False, "error": str(message), "ts": int(time.time())}
+    def _is_http_error_response(value: Any) -> bool:
+        return (
+            isinstance(value, _PageApiError)
+            or (isinstance(value, dict) and value.get("success") is False)
+            or (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and isinstance(value[0], dict)
+                and isinstance(value[1], int)
+            )
+        )
+
+    @staticmethod
+    def _as_http_response(value: Any) -> Any:
+        if isinstance(value, _PageApiError):
+            return dict(value), value.http_status
+        if isinstance(value, dict) and value.get("success") is False:
+            return value, 400
+        return value
+
+    @staticmethod
+    def _safe_error_message(message: Any) -> str:
+        text = PrivateCompanionPageApi._single_line(message, 220)
+        if not text:
+            return "请求失败"
+        lowered = text.lower()
+        sensitive_markers = (
+            "api_key",
+            "apikey",
+            "password",
+            "authorization",
+            "cookie",
+            "credential",
+            "secret",
+            "token",
+        )
+        if any(marker in lowered for marker in sensitive_markers):
+            return "内部操作失败"
+        if "\\\\" in text or re.search(r"(?:[A-Za-z]:[\\/]|(?:^|[\\s'\"=])/[^\s]+)", text):
+            return "内部操作失败"
+        return text
+
+    @staticmethod
+    def _error(message: str, *, status_code: int = 400) -> dict[str, Any]:
+        return _PageApiError(
+            {
+                "success": False,
+                "error": PrivateCompanionPageApi._safe_error_message(message),
+                "ts": int(time.time()),
+            },
+            status_code,
+        )
+
+    @staticmethod
+    def _exception_error(message: str = "内部操作失败") -> dict[str, Any]:
+        return PrivateCompanionPageApi._error(message, status_code=500)

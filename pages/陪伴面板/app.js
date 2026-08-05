@@ -144,6 +144,7 @@ const state = {
   imageCacheBatchMode: false,
   selectedImageCacheKeys: new Set(),
   imageCacheImageData: new Map(),
+  ownedReactionAssets: null,
   selectedImageCacheKey: "",
   reactionLibrary: null,
   reactionLibraryLoading: false,
@@ -5754,6 +5755,13 @@ async function loadImageCache({ clampPage = true } = {}) {
   return data;
 }
 
+async function loadOwnedReactionAssets() {
+  const data = await fetchJson("/reaction_assets/list");
+  state.ownedReactionAssets = data || { items: [] };
+  if (state.activeTab === "image-cache") renderOwnedReactionAssets();
+  return data;
+}
+
 async function goToImageCachePage(targetPage) {
   const pageSize = Math.max(1, Number(state.imageCachePageSize || 36));
   const pages = Math.max(1, Math.ceil(Number(state.imageCacheTotal || 0) / pageSize));
@@ -6223,7 +6231,7 @@ async function ensureTabData(tabName, force = false) {
     await Promise.all([loadConfigBackups(force), loadRoleplayPersonas(force)]);
   } else if (tabName === "image-cache") {
     renderImageCache();
-    await loadImageCache();
+    await Promise.all([loadImageCache(), loadOwnedReactionAssets()]);
   } else if (tabName === "troubleshooting") {
     renderTroubleshooting();
     loadDiagnostics(force).catch(() => {});
@@ -11359,7 +11367,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       result.timeout_seconds ? `等待上限 ${result.timeout_seconds}s` : "",
       result.timeout_budget ? `预算 ${result.timeout_budget}` : "",
       result.context_chars ? `摘要 ${result.context_chars} 字` : "",
-      result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
+      (result.duration_ms || result.elapsed_ms) ? `${result.duration_ms || result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
       result.error_category ? `错误 ${result.error_category}` : "",
       result.request_id || result.trace_id ? `编号 ${result.request_id || result.trace_id}` : "",
@@ -11368,6 +11376,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
     const stepsMarkup = troubleshootingChainStepsMarkup(result.steps);
     const previewMarkup = troubleshootingChainPreviewMarkup(test.type, result);
     const diagnosticMarkup = proactiveDiagnosticDetailsMarkup(result.diagnostic_detail);
+    const envelopeMarkup = troubleshootingDiagnosticEnvelopeMarkup(result);
     const detailText = troubleshootingChainDetailText(test, result, hasResult);
     return `
       <section class="troubleshooting-chain-test ${escapeHtml(status)}">
@@ -11375,11 +11384,9 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
           <b>${escapeHtml(test.title)}</b>
           <p>${escapeHtml(detailText)}</p>
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
-          ${result.path ? `<small class="path">${escapeHtml(result.path)}</small>` : ""}
-          ${result.prompt_path ? `<small class="path">完整调试文件：${escapeHtml(result.prompt_path)}</small>` : ""}
-          ${result.suggestion ? `<small class="test-result-suggestion">${escapeHtml(result.suggestion)}</small>` : ""}
           ${previewMarkup}
           ${diagnosticMarkup}
+          ${envelopeMarkup}
           ${stepsMarkup}
         </div>
         <div class="troubleshooting-chain-test-actions">
@@ -11424,6 +11431,25 @@ function troubleshootingChainDetailText(test, result, hasResult) {
     return result.detail || `本地发现 ${localCount} 条候选，模型给出 ${modelCount} 条建议`;
   }
   return result.detail || test.text;
+}
+
+function troubleshootingDiagnosticEnvelopeMarkup(result = {}) {
+  if (!result.test_id) return "";
+  const duration = Number(result.duration_ms || result.elapsed_ms || 0);
+  const retry = result.retryable ? "可重试" : "请先按建议处理";
+  const category = result.error_category && result.error_category !== "none"
+    ? troubleshootingDiagnosticCategoryLabel(result.error_category)
+    : "未发现诊断错误";
+  return `
+    <details class="chain-test-steps diagnostic-envelope">
+      <summary>查看安全诊断详情</summary>
+      <div class="chain-test-step info"><b>测试标识</b><span>${escapeHtml(result.test_id)}</span></div>
+      <div class="chain-test-step info"><b>执行阶段</b><span>${escapeHtml(result.phase || "unknown")}</span></div>
+      <div class="chain-test-step info"><b>错误分类</b><span>${escapeHtml(category)}</span></div>
+      <div class="chain-test-step info"><b>耗时 / 重试</b><span>${escapeHtml(`${duration}ms · ${retry}`)}</span></div>
+      ${result.next_step ? `<div class="chain-test-step info"><b>下一步</b><span>${escapeHtml(result.next_step)}</span></div>` : ""}
+    </details>
+  `;
 }
 
 function troubleshootingChainStepsMarkup(stepsRaw) {
@@ -11887,6 +11913,40 @@ function renderImageCache() {
   renderImageCachePager();
   void hydrateImageCacheImages(listEl);
   void hydrateImageCacheImages(detailEl);
+  renderOwnedReactionAssets();
+}
+
+function renderOwnedReactionAssets() {
+  const root = $("#ownedReactionAssets");
+  if (!root) return;
+  const catalog = state.ownedReactionAssets;
+  if (!catalog) {
+    root.innerHTML = `<div class="empty small">正在读取管理员登记的自有反应图素材…</div>`;
+    return;
+  }
+  const items = Array.isArray(catalog.items) ? catalog.items : [];
+  const enabled = Boolean(catalog.enabled);
+  root.innerHTML = `
+    <div class="owned-reaction-assets-summary">
+      <span class="badge ${enabled ? "ok" : "off"}">${enabled ? "检索已启用" : "检索关闭"}</span>
+      <small>受管目录：${escapeHtml(catalog.managed_directory || "owned_reaction_assets")} · ${escapeHtml(items.filter((item) => item.valid).length)}/${escapeHtml(items.length)} 校验通过</small>
+    </div>
+    ${items.length ? items.map((item) => {
+      const assetId = String(item?.id || "");
+      const previewEndpoint = item?.valid && assetId ? `/reaction_assets/image_data?id=${encodeURIComponent(assetId)}` : "";
+      return `
+        <article class="owned-reaction-asset ${item?.valid ? "is-valid" : "is-invalid"}">
+          ${previewEndpoint ? `<span class="owned-reaction-thumb"><img src="${TRANSPARENT_IMAGE}" data-image-cache-src="${escapeHtml(previewEndpoint)}" alt="${escapeHtml(assetId || "自有反应图")}" loading="lazy" /></span>` : `<span class="owned-reaction-thumb placeholder">!</span>`}
+          <div>
+            <header><b>${escapeHtml(assetId || "未命名素材")}</b><span class="badge ${item?.valid ? "ok" : "off"}">${item?.valid ? "校验通过" : "不可用"}</span></header>
+            <p>${Array.isArray(item?.tags) && item.tags.length ? item.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") : "不显示路径、哈希或来源"}</p>
+            <small>${item?.meme_only === false ? "允许普通图片检索" : "仅表情包检索"}${item?.valid ? "" : ` · ${escapeHtml(item?.status || "校验失败")}`}</small>
+          </div>
+        </article>
+      `;
+    }).join("") : `<div class="empty small">还没有登记素材。请在 Q6 配置清单中填写素材 ID、相对文件名、SHA-256 和标签；不会自动收集聊天图片。</div>`}
+  `;
+  void hydrateImageCacheImages(root);
 }
 
 function renderImageCacheBatchControls() {
@@ -13907,7 +13967,7 @@ function renderRelationshipStatus(detail) {
       <details class="companion-intimacy-advanced">
         <summary>精确调整亲密度</summary>
         <form id="relationshipScoreForm" class="inline-form companion-intimacy-form">
-          <label>亲密度数值 <input id="relationshipScoreNumber" name="relationship_score" type="number" min="-1200" max="1200" step="1" value="${escapeHtml(value)}" required ${exclusive ? "disabled" : ""}></label>
+          <label>亲密度数值 <input id="relationshipScoreNumber" name="companion_intimacy" type="number" min="-1200" max="1200" step="1" value="${escapeHtml(value)}" required ${exclusive ? "disabled" : ""}></label>
           <button type="submit" ${exclusive ? "disabled" : ""}>保存数值</button>
         </form>
       </details>
@@ -13985,10 +14045,13 @@ async function renderUserDetail(forceFetch = false) {
       ${miniStat("习惯", detail.habit_count || detail.behavior_habits?.items?.length || 0)}
     </div>
     <div class="detail-grid">
+      ${renderRelationshipPanel(detail.relationship_panel)}
       ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
+      ${renderEmotionDiagnostics(detail)}
+      ${renderUserP4RuntimeStatus(detail.p4_runtime)}
       ${userWorldbookBlock(detail.worldbook_member)}
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
       ${renderOpenLoopBlock(detail)}
@@ -13998,6 +14061,74 @@ async function renderUserDetail(forceFetch = false) {
     </div>
   `;
   bindUserActions(detail);
+}
+
+function renderEmotionDiagnostics(detail) {
+  const summary = Array.isArray(detail?.emotion_trace_summary) ? detail.emotion_trace_summary.slice(0, 12) : [];
+  const trace = detail?.emotion_trace && typeof detail.emotion_trace === "object" ? detail.emotion_trace : null;
+  const events = trace && Array.isArray(trace.events) ? trace.events : [];
+  const afterglow = trace && Array.isArray(trace.afterglow) ? trace.afterglow : [];
+  const eventRows = events.map((item) => `
+    <li>
+      <strong>r${escapeHtml(item.revision || 1)} · ${escapeHtml(item.event_type || "neutral")}</strong>
+      <span>${escapeHtml(item.status || "observed")} · ${escapeHtml(item.source_rule || "-")}</span>
+    </li>
+  `).join("");
+  const afterglowRows = afterglow.map((item) => `
+    <li>
+      <strong>余波 · ${escapeHtml(item.source_event_id || "-")}</strong>
+      <span>能量 ${escapeHtml(item.energy_delta ?? 0)} · 半衰 ${escapeHtml(item.half_life_seconds || 0)} 秒</span>
+    </li>
+  `).join("");
+  const memory = trace?.memory_diagnostic && typeof trace.memory_diagnostic === "object" ? trace.memory_diagnostic : {};
+  const memoryNote = memory.reason_code === "diagnostic_authority_unavailable"
+    ? "Memory 诊断：陪伴面板不可用，由 Memory 插件单独提供。"
+    : "Memory 诊断：陪伴面板不读取远端诊断。";
+  return `<section class="detail-block emotion-diagnostics" data-emotion-diagnostics>
+    <div class="emotion-diagnostic-head">
+      <div>
+        <h2>情绪链路诊断</h2>
+        <p>陪伴侧本地只读投影</p>
+      </div>
+      ${trace ? `<span class="badge ${trace.state === "ready" ? "ok" : "off"}">${escapeHtml(trace.state || "not_found")}</span>` : ""}
+    </div>
+    <p class="emotion-diagnostic-memory-note">${escapeHtml(memoryNote)}</p>
+    <div class="emotion-diagnostic-actions">
+      ${summary.map((item) => `<button type="button" data-emotion-trace-id="${escapeHtml(item.trace_id || "")}" title="查看本地情绪链路">${escapeHtml(item.event_type || "neutral")} · r${escapeHtml(item.revision || 1)}</button>`).join("") || '<span class="muted">暂无本地事件</span>'}
+    </div>
+    ${trace ? `<div class="emotion-trace-status"><span>本地链路</span><code>${escapeHtml(trace.trace_id || "-")}</code></div>
+      <ol class="emotion-trace-timeline">${eventRows || '<li><span>未找到对应本地事件</span></li>'}${afterglowRows}</ol>` : ""}
+  </section>`;
+}
+
+function renderRelationshipPanel(panel) {
+  const data = panel && typeof panel === "object" ? panel : {};
+  const basis = data.relationship_basis && typeof data.relationship_basis === "object" ? data.relationship_basis : {};
+  const interaction = data.interaction && typeof data.interaction === "object" ? data.interaction : {};
+  const memory = data.memory_phase && typeof data.memory_phase === "object" ? data.memory_phase : {};
+  const network = data.network && typeof data.network === "object" ? data.network : {};
+  return detailBlock("Relationship", "Read-only local projection", [
+    ["Basis", basis.band || "initial"],
+    ["Stage", data.relationship_stage || "unclassified"],
+    ["Interaction", `${interaction.inbound_count || 0} inbound, ${interaction.reply_count || 0} replies (${interaction.reply_band || "unknown"})`],
+    ["Memory phase", `${memory.phase || "unknown"} (${memory.status || "unavailable"})`],
+    ["Worldbook", `${network.status || "not_registered"}, ${network.pending_observation_count || 0} pending`],
+    ["Reply temperature", data.reply_temperature?.status || "live_chat_only"],
+  ]);
+}
+
+function renderUserP4RuntimeStatus(status) {
+  const p4 = status && typeof status === "object" ? status : {};
+  const gateLabel = p4.reply_gate === "host_verified_event_only" ? "真实聊天事件内生效" : "暂不可确认";
+  const warmthLabel = p4.warmth === "host_verified_event_only" ? "仅由已验证聊天事件决定" : "暂不可确认";
+  const confinementLabel = p4.confinement === "not_exposed_to_page" ? "页面不读取个人黑屋状态" : "暂不可确认";
+  const reviewLabel = p4.manual_review === "not_migrated" ? "候选生产尚未迁移，页面不能审核" : "暂不可确认";
+  return detailBlock("P4 安全回复保护", "黑屋和安全温度只在 AstrBot 已验证身份的真实聊天中判断；本页不提供审核、释放或结算操作。", [
+    ["回复防护", gateLabel],
+    ["安全温度", warmthLabel],
+    ["黑屋状态", confinementLabel],
+    ["人工审核", reviewLabel],
+  ]);
 }
 
 function renderPrivateDeliveryRoute(detail) {
@@ -15239,6 +15370,7 @@ function bindExpressionLibraryActions(library, root) {
 }
 
 function bindUserActions(detail) {
+  bindEmotionTraceButtons(detail);
   const refreshSelectedUserDetail = async () => {
     if (state.selectedUserId === detail.user_id) {
       await renderUserDetail(true);
@@ -15275,7 +15407,7 @@ function bindUserActions(detail) {
       return;
     }
     const saved = await runAction(
-      () => postJson("/user/update", { user_id: detail.user_id, relationship_score: value }),
+      () => postJson("/user/update", { user_id: detail.user_id, companion_intimacy: value }),
       "已保存亲密度",
       event.submitter,
       { reload: false },
@@ -15379,6 +15511,23 @@ function bindUserActions(detail) {
         button,
       );
       await refreshSelectedUserDetail();
+    });
+  });
+}
+
+function bindEmotionTraceButtons(detail) {
+  document.querySelectorAll("[data-emotion-trace-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const traceId = String(button.dataset.emotionTraceId || "");
+      if (!traceId || !detail?.user_id) return;
+      try {
+        const updated = await fetchJson(`/user?user_id=${encodeURIComponent(detail.user_id)}&trace_id=${encodeURIComponent(traceId)}`);
+        const target = document.querySelector("[data-emotion-diagnostics]");
+        if (target) target.outerHTML = renderEmotionDiagnostics(updated);
+        bindEmotionTraceButtons(updated);
+      } catch (error) {
+        showToast(`本地诊断读取失败：${error.message}`, "error");
+      }
     });
   });
 }
@@ -16294,6 +16443,7 @@ function worldbookMemberCard(item) {
   const detailId = `worldbook-editor-${String(item.user_id || "").replace(/[^A-Za-z0-9_-]/g, "_")}`;
   const previewItems = worldbookMemberPreviewItems(item, memories);
   const isExternal = item.identity_type === "external" || !/^\d+$/.test(String(item.user_id || ""));
+  const observationOnly = Boolean(item.observation_only);
   const identityLabel = isExternal ? "外部身份" : "身份 QQ";
   const genderText = String(item.gender || "").trim();
   const bindLine = item.linked_qq_user_id
@@ -16307,7 +16457,7 @@ function worldbookMemberCard(item) {
           <span>${identityLabel} ${escapeHtml(item.user_id || "-")} · 优先级 ${escapeHtml(item.priority ?? "-")}${bindLine}</span>
         </div>
         <div class="worldbook-card-actions">
-          <button type="button" data-worldbook-living-memory="${escapeHtml(item.user_id || "")}">长期记忆</button>
+          ${observationOnly ? "" : `<button type="button" data-worldbook-living-memory="${escapeHtml(item.user_id || "")}">长期记忆</button>`}
           <button type="button" data-worldbook-edit="${escapeHtml(detailId)}">编辑</button>
           <button type="button" data-worldbook-member="${escapeHtml(item.user_id || "")}" data-enabled="${item.enabled ? "0" : "1"}">
             ${escapeHtml(item.enabled ? "停用" : "启用")}
@@ -16323,6 +16473,7 @@ function worldbookMemberCard(item) {
         <span>${escapeHtml((item.important_memories || []).length)} 条记忆</span>
         ${pending.length ? `<span>${escapeHtml(pending.length)} 条待确认观察</span>` : ""}
         ${sourceEntries.length ? `<span>${escapeHtml(sourceEntries.slice(0, 2).join(" / "))}</span>` : ""}
+        ${observationOnly ? `<span>仅观察 · ${escapeHtml(item.observed_group_count || 0)} 个白名单群</span><span>亲密度：中性</span><span>不主动触达</span>` : ""}
       </div>
       ${previewItems.length ? `
         <div class="worldbook-member-preview-list">
@@ -23180,6 +23331,9 @@ function photoSettingVisibleForValues(settingKey, values = {}) {
     return onlineBackends.has(backend);
   }
   if (settingKey === "enable_photo_reference_image") return backend !== "sdgen";
+  if (settingKey === "enable_p5_structured_reference_assets") {
+    return backend !== "sdgen" && enabled("enable_photo_reference_image");
+  }
   if (settingKey === "photo_reference_catalog") {
     return backend !== "sdgen" && enabled("enable_photo_reference_image");
   }
@@ -25165,6 +25319,33 @@ function photoReferenceManagerCard(item, index) {
   `;
 }
 
+function structuredReferenceAssetStatusHtml() {
+  const structured = state.photoReferenceLibraryStatus?.structured_assets || {};
+  const items = Array.isArray(structured.items) ? structured.items : [];
+  const enabled = Boolean(structured.enabled);
+  const capacity = Number.isFinite(Number(structured.backend_capacity)) ? Number(structured.backend_capacity) : 0;
+  const backend = String(structured.backend || "auto");
+  const summary = enabled
+    ? `${items.filter((item) => item.valid).length} / ${items.length} 项通过校验 · 当前后端容量 ${capacity}`
+    : "功能关闭；不会向任何生图后端提交受管素材";
+  return `
+    <section class="structured-reference-status" aria-labelledby="structuredReferenceTitle">
+      <header>
+        <div>
+          <span>Q5 受管素材</span>
+          <h3 id="structuredReferenceTitle">结构化参考输入状态</h3>
+          <small>${escapeHtml(summary)}</small>
+        </div>
+        <span class="structured-reference-backend">${escapeHtml(backend)}</span>
+      </header>
+      ${items.length ? `<div class="structured-reference-assets">${items.map((item) => `
+        <div><b>${escapeHtml(String(item.id || "未命名素材"))}</b><span>${escapeHtml(String(item.role || "未知职责"))}</span><small class="${item.valid ? "is-ok" : "is-error"}">${escapeHtml(item.valid ? "校验通过" : String(item.status || "校验失败"))}</small></div>
+      `).join("")}</div>` : `<p class="structured-reference-empty">尚未登记受管素材。</p>`}
+      <p class="structured-reference-note">此处不会显示文件路径、URL、SHA-256 或一次性授权票据。</p>
+    </section>
+  `;
+}
+
 function photoReferenceManagerPageHtml(open) {
   const items = photoReferenceManagerItems();
   const personaSource = currentPhotoPersonaReferenceValue();
@@ -25189,6 +25370,8 @@ function photoReferenceManagerPageHtml(open) {
           <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
         </div>
       </header>
+
+      ${structuredReferenceAssetStatusHtml()}
 
       <section class="photo-reference-persona" aria-labelledby="photoReferencePersonaTitle">
         <div>
@@ -32526,6 +32709,16 @@ document.getElementById("appearanceThemeGrid")?.addEventListener("keydown", (eve
 $("#refreshImageCacheBtn")?.addEventListener("click", () => {
   state.imageCacheImageData.clear();
   loadImageCache().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
+});
+$("#refreshImageCacheBtn")?.addEventListener("click", () => {
+  state.imageCacheImageData.clear();
+  loadOwnedReactionAssets().catch((error) => showToast(`刷新失败：${error.message}`, "error"));
+});
+$("#refreshOwnedReactionAssetsBtn")?.addEventListener("click", () => {
+  state.imageCacheImageData.clear();
+  loadOwnedReactionAssets()
+    .then(() => showToast("自有反应图素材状态已刷新"))
+    .catch((error) => showToast(`刷新失败：${error.message}`, "error"));
 });
 $("#refreshTroubleshootingBtn")?.addEventListener("click", () => {
   Promise.all([loadTroubleshooting(), loadDiagnostics(true)])

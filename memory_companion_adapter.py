@@ -11,7 +11,21 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _missing_optional_model_dependency, _path_text, _safe_float, _safe_int, _single_line
+from .bot_personal_contract import (
+    BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
+    BOT_PERSONAL_MEMORY_DOMAIN,
+    BOT_PERSONAL_MEMORY_TYPES,
+    BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
+    CONTRACT_FINGERPRINT,
+    CONTRACT_REVISION,
+    WINDOW_SLUGS,
+    window_for_minutes,
+)
+from .bot_personal_outbox import BotPersonalOutbox
+from .helpers import _missing_optional_model_dependency, _now_ts, _path_text, _safe_float, _safe_int, _single_line
+from .companion_interaction_expression import current_interaction_projection
+from .relationship_ledger import normalize_relationship_mode
+from .relationship_policy import relationship_projection_for_bridge
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -33,6 +47,206 @@ class MemoryCompanionAdapterMixin:
     _BRIDGE_CACHE_TTL: float = 30.0
     _bridge_dependency_failure_until: float = 0.0
     _bridge_dependency_failure_module: str = ""
+    _bridge_last_status: dict[str, Any] = {}
+
+    @staticmethod
+    def _memory_companion_coerce_bool(value: Any, default: bool = True) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "enabled"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "disabled"}:
+                return False
+        if value is None:
+            return default
+        return bool(value)
+
+    def _memory_companion_bridge_enabled(self) -> bool:
+        """Read the Bridge switch without consulting the legacy LivingMemory switch."""
+        for attr in ("enable_memory_companion_bridge", "memory_companion_bridge_enabled"):
+            if hasattr(self, attr):
+                return self._memory_companion_coerce_bool(getattr(self, attr), True)
+        config = getattr(self, "config", None)
+        marker = object()
+        for key in (
+            "enable_memory_companion_bridge",
+            "memory_companion_bridge.enabled",
+            "private_companion_bridge.enabled",
+        ):
+            value: Any = marker
+            if isinstance(config, dict):
+                current: Any = config
+                for part in key.split("."):
+                    if not isinstance(current, dict) or part not in current:
+                        current = marker
+                        break
+                    current = current[part]
+                value = current
+            else:
+                getter = getattr(config, "get", None)
+                if callable(getter):
+                    try:
+                        value = getter(key, marker)
+                    except Exception:
+                        value = marker
+            if value is not marker:
+                return self._memory_companion_coerce_bool(value, True)
+        return True
+
+    def _memory_companion_emotion_producer_capability(self, bridge: Any) -> Any | None:
+        """Return the live, non-serializable capability issued by MemoryCompanion."""
+        if bridge is None:
+            return None
+        if (
+            getattr(self, "_memory_companion_emotion_capability_bridge", None) is bridge
+            and getattr(self, "_memory_companion_emotion_producer_capability_cache", None) is not None
+        ):
+            return getattr(self, "_memory_companion_emotion_producer_capability_cache")
+        register = getattr(bridge, "register_emotion_producer", None)
+        if not callable(register):
+            return None
+        try:
+            capability = register(type(self))
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="register_emotion_producer"):
+                return None
+            logger.debug("[PrivateCompanion] emotion producer registration failed: %s", _single_line(exc, 120))
+            return None
+        if capability is None:
+            return None
+        self._memory_companion_emotion_capability_bridge = bridge
+        self._memory_companion_emotion_producer_capability_cache = capability
+        return capability
+
+    def _memory_companion_emotion_producer_context(self, bridge: Any, event: Any) -> Any | None:
+        """Bind a mirror write to one authoritative private Companion domain."""
+        if not isinstance(event, dict):
+            return None
+        actor = event.get("actor_ref") if isinstance(event.get("actor_ref"), dict) else {}
+        bot_id = _single_line(event.get("bot_id"), 160)
+        platform = _single_line(event.get("platform"), 80)
+        scope = _single_line(event.get("scope"), 24).lower()
+        user_id = _single_line(actor.get("id"), 160)
+        session_id = _single_line(event.get("session_id"), 220)
+        if (
+            scope != "private"
+            or _single_line(actor.get("kind"), 24).lower() != "user"
+            or not all((bot_id, platform, user_id, session_id))
+            or not session_id.startswith(f"{platform}:")
+        ):
+            return None
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        creator = getattr(bridge, "create_emotion_producer_context", None) if bridge is not None else None
+        if capability is None or not callable(creator):
+            return None
+        try:
+            return creator(
+                capability,
+                bot_id=bot_id,
+                scope="private",
+                platform=platform,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="create_emotion_producer_context"):
+                return None
+            logger.debug("[PrivateCompanion] emotion producer context failed: %s", _single_line(exc, 120))
+            return None
+
+    def _memory_companion_emotion_delivery_context(
+        self,
+        bridge: Any,
+        *,
+        event: Any,
+        user_id: str,
+        user: dict[str, Any] | None,
+    ) -> Any | None:
+        """Bind afterglow delivery to the active, verified private message domain."""
+        private_checker = getattr(self, "_safe_event_is_private", None)
+        if callable(private_checker):
+            try:
+                if not bool(private_checker(event)):
+                    return None
+            except Exception:
+                return None
+        else:
+            is_private = getattr(event, "is_private_chat", None)
+            if not callable(is_private):
+                return None
+            try:
+                if not bool(is_private()):
+                    return None
+            except Exception:
+                return None
+        sender_getter = getattr(self, "_safe_event_sender_id", None)
+        try:
+            sender_id = _single_line(sender_getter(event), 160) if callable(sender_getter) else _single_line(event.get_sender_id(), 160)
+        except Exception:
+            return None
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        try:
+            canonical_sender_id = _single_line(canonicalizer(sender_id), 160) if callable(canonicalizer) else sender_id
+        except Exception:
+            return None
+        verified_user_id = _single_line(user_id, 160)
+        session_id = _single_line(getattr(event, "unified_msg_origin", ""), 220)
+        platform = session_id.split(":", 1)[0] if ":" in session_id else ""
+        profile_session = _single_line(user.get("umo"), 220) if isinstance(user, dict) else ""
+        bot_id = self._memory_companion_bridge_bot_id(event)
+        if (
+            not isinstance(user, dict)
+            or not all((bot_id, platform, session_id, canonical_sender_id, verified_user_id))
+            or canonical_sender_id != verified_user_id
+            or profile_session != session_id
+        ):
+            return None
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        creator = getattr(bridge, "create_emotion_delivery_context", None) if bridge is not None else None
+        if capability is None or not callable(creator):
+            return None
+        try:
+            return creator(
+                capability,
+                bot_id=bot_id,
+                scope="private",
+                platform=platform,
+                user_id=verified_user_id,
+                session_id=session_id,
+                allow_cross_window=self._memory_companion_coerce_bool(
+                    getattr(self, "enable_memory_companion_cross_window_emotion", True),
+                    True,
+                ),
+            )
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="create_emotion_delivery_context"):
+                return None
+            logger.debug("[PrivateCompanion] emotion delivery context failed: %s", _single_line(exc, 120))
+            return None
+
+    async def _memory_companion_record_emotion_event(self, event: dict[str, Any]) -> None:
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_emotion_event", None) if bridge is not None else None
+        producer_context = self._memory_companion_emotion_producer_context(bridge, event)
+        if not callable(recorder) or producer_context is None:
+            return
+        try:
+            await recorder(dict(event or {}), producer_context=producer_context)
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="record_emotion_event"):
+                return
+            logger.debug("[PrivateCompanion] emotion event mirror failed: %s", _single_line(exc, 120))
+
+    def _memory_companion_degraded_status(self, reason: str, **extra: Any) -> dict[str, Any]:
+        status = {
+            "available": False,
+            "state": "local_only" if reason == "bridge_disabled" else "degraded",
+            "degraded": reason != "bridge_disabled",
+            "reason": reason,
+        }
+        status.update({key: value for key, value in extra.items() if value is not None})
+        self._bridge_last_status = status
+        return status
 
     def _memory_companion_filter_internal_error_context(self, value: Any) -> str:
         """Keep recalled Provider failures out of downstream generation prompts."""
@@ -56,6 +270,11 @@ class MemoryCompanionAdapterMixin:
         self._bridge_cache_ts = 0.0
         self._bridge_dependency_failure_until = time.monotonic() + 300.0
         self._bridge_dependency_failure_module = module
+        self._memory_companion_degraded_status(
+            "optional_dependency_missing",
+            module=module,
+            where=_single_line(where, 80) or "-",
+        )
         logger.warning(
             "[PrivateCompanion] 记忆插件可选模型依赖缺失，已临时降级 MemoryCompanion 桥接: module=%s where=%s err=%s",
             module,
@@ -65,16 +284,38 @@ class MemoryCompanionAdapterMixin:
         return True
 
     def _memory_companion_bridge(self) -> Any | None:
-        if not getattr(self, "enable_livingmemory_integration", True):
+        if not self._memory_companion_bridge_enabled():
+            self._memory_companion_degraded_status("bridge_disabled")
             return None
         now = time.monotonic()
         if now < self._bridge_dependency_failure_until:
             return None
         if self._bridge_cache is not None and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL:
             return self._bridge_cache
+        if (
+            self._bridge_cache is None
+            and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL
+            and self._bridge_last_status.get("reason")
+            in {
+                "bridge_missing",
+                "capability_probe_missing",
+                "capability_probe_exception",
+                "capability_probe_invalid",
+                "capability_contract_mismatch",
+            }
+        ):
+            return None
+        self._bridge_last_status = {}
         bridge = self._memory_companion_bridge_uncached()
+        if bridge is not None:
+            capability_status = self._memory_companion_probe_capabilities(bridge)
+            self._bridge_last_status = capability_status
+            if not capability_status.get("available", False):
+                bridge = None
         self._bridge_cache = bridge
         self._bridge_cache_ts = now
+        if bridge is None and not self._bridge_last_status:
+            self._memory_companion_degraded_status("bridge_missing")
         return bridge
 
     def _memory_companion_bridge_uncached(self) -> Any | None:
@@ -88,16 +329,141 @@ class MemoryCompanionAdapterMixin:
             bridge = self._memory_companion_bridge_from_module(module)
             if bridge is not None:
                 return bridge
-        for module in list(sys.modules.values()):
-            module_vars = getattr(module, "__dict__", {}) if module is not None else {}
-            if not isinstance(module_vars, dict):
-                continue
-            if module_vars.get("PLUGIN_NAME", "") not in {"astrbot_plugin_memory_companion", "astrbot_plugin_remember_you", "我会牢牢记住你", "RememberYou"}:
-                continue
-            bridge = self._memory_companion_bridge_from_module(module)
-            if bridge is not None:
-                return bridge
         return None
+
+    def _memory_companion_outbox(self) -> BotPersonalOutbox | None:
+        current = getattr(self, "_bot_personal_outbox", None)
+        if isinstance(current, BotPersonalOutbox):
+            return current
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return None
+        try:
+            current = BotPersonalOutbox(
+                data,
+                save=lambda: self._schedule_data_save(delay=0.5),
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Bot Personal outbox 初始化失败: %s", _single_line(exc, 120))
+            return None
+        try:
+            setattr(self, "_bot_personal_outbox", current)
+        except Exception:
+            pass
+        return current
+
+    def _memory_companion_bot_personal_sender(self) -> Any | None:
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_bot_personal_archive", None) if bridge is not None else None
+        if not callable(recorder):
+            return None
+
+        async def _send(envelope: dict[str, Any]) -> dict[str, Any]:
+            result = recorder(envelope)
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+            return result if isinstance(result, dict) else {"ok": False, "state": "retry", "error_code": "invalid_bridge_response"}
+
+        return _send
+
+    async def _memory_companion_record_bot_personal(
+        self,
+        *,
+        memory_type: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        occurred_at: str = "",
+        version: int = 1,
+        source_refs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        outbox = self._memory_companion_outbox()
+        if outbox is None:
+            return {
+                "ok": False,
+                "state": "local_only",
+                "record_id": "",
+                "deduplicated": False,
+                "version": int(version or 1),
+                "error_code": "outbox_unavailable",
+            }
+        try:
+            result = await outbox.enqueue(
+                memory_type=memory_type,
+                payload=payload,
+                idempotency_key=idempotency_key,
+                occurred_at=occurred_at or self._memory_companion_now_iso(),
+                version=max(1, int(version or 1)),
+                source_refs=source_refs,
+                sender=self._memory_companion_bot_personal_sender(),
+            )
+            self._bridge_last_status = {
+                **getattr(self, "_bridge_last_status", {}),
+                "bot_personal_outbox": outbox.status(),
+            }
+            return result
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Bot Personal 本地归档失败: %s", _single_line(exc, 160))
+            return {
+                "ok": False,
+                "state": "local_only",
+                "record_id": "",
+                "deduplicated": False,
+                "version": int(version or 1),
+                "error_code": "outbox_enqueue_failed",
+            }
+
+    async def _memory_companion_flush_bot_personal_outbox(self, *, limit: int = 16) -> list[dict[str, Any]]:
+        outbox = self._memory_companion_outbox()
+        sender = self._memory_companion_bot_personal_sender()
+        if outbox is None or sender is None:
+            return []
+        try:
+            results = await outbox.drain(sender, limit=max(1, int(limit or 16)))
+            self._bridge_last_status = {
+                **getattr(self, "_bridge_last_status", {}),
+                "bot_personal_outbox": outbox.status(),
+            }
+            return results
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Bot Personal outbox 补投失败: %s", _single_line(exc, 160))
+            return []
+
+    async def _memory_companion_record_observed_activity(self, activity: dict[str, Any]) -> dict[str, Any]:
+        """Archive only private observed activity; group observations stay local/group-scoped."""
+        if not isinstance(activity, dict) or _single_line(activity.get("visibility"), 32) != "private":
+            return {"ok": False, "state": "local_only", "error_code": "non_private_activity"}
+        activity_id = _single_line(activity.get("activity_id"), 160)
+        title = _single_line(activity.get("title") or activity.get("summary"), 180)
+        if not activity_id or not title:
+            return {"ok": False, "state": "invalid", "error_code": "invalid_activity"}
+        payload = {
+            "date": _single_line(activity.get("start_at"), 10),
+            "window": window_for_minutes(0),
+            "summary": title,
+            "activity_id": activity_id,
+            "kind": _single_line(activity.get("kind"), 48),
+            "participants": [_single_line(item, 80) for item in (activity.get("participants") or []) if _single_line(item, 80)][:8],
+            "message_count": int(activity.get("message_count") or len(activity.get("source_refs") or []) or 1),
+        }
+        try:
+            occurred_at = _single_line(activity.get("start_at"), 80) or self._memory_companion_now_iso()
+            if "+" in occurred_at or occurred_at.endswith("Z"):
+                parsed = occurred_at.replace("Z", "+00:00")
+                from datetime import datetime
+
+                moment = datetime.fromisoformat(parsed)
+                payload["window"] = window_for_minutes(moment.hour * 60 + moment.minute)
+        except Exception:
+            occurred_at = self._memory_companion_now_iso()
+        source_refs = [_single_line(item, 160) for item in (activity.get("source_refs") or []) if _single_line(item, 160)]
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_observed_activity",
+            payload=payload,
+            idempotency_key=f"observed:{activity_id}",
+            occurred_at=occurred_at,
+            version=int(activity.get("version") or 1),
+            source_refs=source_refs or [f"companion:observed:{activity_id}"],
+        )
 
     def _memory_companion_bridge_from_module(self, module: Any | None) -> Any | None:
         module_vars = getattr(module, "__dict__", {}) if module is not None else {}
@@ -110,21 +476,164 @@ class MemoryCompanionAdapterMixin:
             self._memory_companion_optional_dependency_failed(exc, where="get_active_bridge")
             return None
 
+    def _memory_companion_probe_capabilities(self, bridge: Any) -> dict[str, Any]:
+        try:
+            getter = getattr(bridge, "probe_bot_personal_memory_capabilities", None)
+        except Exception:
+            return self._memory_companion_degraded_status("capability_probe_exception")
+        if not callable(getter):
+            return self._memory_companion_degraded_status("capability_probe_missing")
+        try:
+            result = getter()
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="capability_probe"):
+                return dict(self._bridge_last_status)
+            return self._memory_companion_degraded_status("capability_probe_exception")
+        if not isinstance(result, dict):
+            return self._memory_companion_degraded_status("capability_probe_invalid")
+
+        expected_windows = list(WINDOW_SLUGS)
+        expected_memory_types = list(BOT_PERSONAL_MEMORY_TYPES)
+        observed_windows = result.get("windows")
+        observed_memory_types = result.get("memory_types")
+        observed_domain = result.get("memory_domain", result.get("domain", ""))
+        mismatches: list[str] = []
+        if result.get("contract_fingerprint") != CONTRACT_FINGERPRINT:
+            mismatches.append("contract_fingerprint")
+        if result.get("contract_revision") != CONTRACT_REVISION:
+            mismatches.append("contract_revision")
+        if result.get("capability_schema_version") != BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION:
+            mismatches.append("capability_schema_version")
+        if result.get("payload_schema_version") != BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION:
+            mismatches.append("payload_schema_version")
+        if observed_domain != BOT_PERSONAL_MEMORY_DOMAIN:
+            mismatches.append("memory_domain")
+        if observed_windows != expected_windows:
+            mismatches.append("windows")
+        if observed_memory_types != expected_memory_types:
+            mismatches.append("memory_types")
+        if result.get("available") is not True:
+            mismatches.append("available")
+        if mismatches:
+            return self._memory_companion_degraded_status(
+                "capability_contract_mismatch",
+                mismatches=tuple(mismatches),
+            )
+
+        status = dict(result)
+        status.setdefault("state", "ready")
+        status.setdefault("degraded", False)
+        status.setdefault("available", True)
+        self._bridge_last_status = status
+        return status
+
+    async def _memory_companion_read_profile(
+        self,
+        profile: str,
+        *,
+        query: str = "",
+        limit: int = 10,
+        current_date: str = "",
+        current_window: str = "",
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Select one named Bot Profile without sending storage filters downstream."""
+
+        safe_profile = _single_line(profile, 80)
+        base = {
+            "ok": False,
+            "read_only": True,
+            "state": "degraded",
+            "degraded": True,
+            "pending": True,
+            "profile": safe_profile,
+            "items": [],
+            "warnings": [],
+        }
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            return {**base, "state": self._bridge_last_status.get("state", "degraded"), "error_code": "bridge_unavailable"}
+        getter = getattr(bridge, "read_bot_profile", None)
+        if not callable(getter):
+            return {**base, "error_code": "profile_method_missing"}
+        try:
+            result = getter(
+                safe_profile,
+                query=_single_line(query, 240),
+                limit=max(1, min(100, int(limit or 10))),
+                current_date=_single_line(current_date, 20),
+                current_window=_single_line(current_window, 40),
+                authorized=bool(authorized),
+            )
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+        except Exception as exc:
+            if self._memory_companion_optional_dependency_failed(exc, where="read_profile"):
+                return dict(self._bridge_last_status)
+            return {**base, "error_code": "profile_bridge_exception"}
+        if not isinstance(result, dict):
+            return {**base, "error_code": "invalid_profile_response"}
+        safe_item_keys = {
+            "record_id", "memory_domain", "memory_type", "subject", "date", "window",
+            "occurred_at", "source_kind", "source_refs", "evidence_level", "status",
+            "version", "summary", "reference",
+        }
+        safe_items: list[dict[str, Any]] = []
+        for item in result.get("items", []) if isinstance(result.get("items"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            safe_items.append({key: item[key] for key in safe_item_keys if key in item})
+        self._bridge_last_status = {
+            **getattr(self, "_bridge_last_status", {}),
+            "last_profile": safe_profile,
+        }
+        return {
+            "ok": bool(result.get("ok", True)),
+            "read_only": True,
+            "state": _single_line(result.get("state"), 40) or "ready",
+            "degraded": bool(result.get("degraded", False)),
+            "pending": bool(result.get("pending", False)),
+            "profile": _single_line(result.get("profile") or safe_profile, 80),
+            "items": safe_items,
+            "warnings": [
+                _single_line(item, 160)
+                for item in (result.get("warnings") or [])
+                if _single_line(item, 160)
+            ][:8],
+        }
+
     def _memory_companion_coordination_status(self) -> dict[str, Any]:
         bridge = self._memory_companion_bridge()
         if bridge is None:
-            return {"available": False}
-        getter = getattr(bridge, "coordination_status", None)
+            return dict(self._bridge_last_status or self._memory_companion_degraded_status("bridge_missing"))
+        if self._bridge_last_status.get("reason") in {
+            "capability_probe_missing",
+            "capability_probe_exception",
+            "capability_probe_invalid",
+            "capability_contract_mismatch",
+        }:
+            return dict(self._bridge_last_status)
+        try:
+            getter = getattr(bridge, "coordination_status", None)
+        except Exception:
+            return self._memory_companion_degraded_status("bridge_exception")
         if not callable(getter):
-            return {"available": True}
+            return self._memory_companion_degraded_status("method_missing", method="coordination_status")
         try:
             status = getter()
         except Exception as exc:
             if self._memory_companion_optional_dependency_failed(exc, where="coordination_status"):
-                return {"available": False, "error": f"missing optional dependency: {self._bridge_dependency_failure_module}"}
+                return dict(self._bridge_last_status)
             logger.debug("[PrivateCompanion] MemoryCompanion 协同状态读取失败: %s", _single_line(exc, 120))
-            return {"available": True, "error": _single_line(exc, 120)}
-        return status if isinstance(status, dict) else {"available": True}
+            return self._memory_companion_degraded_status("bridge_exception", error=_single_line(exc, 120))
+        if not isinstance(status, dict):
+            return self._memory_companion_degraded_status("invalid_status", status_type=type(status).__name__)
+        result = dict(status)
+        result.setdefault("available", True)
+        result.setdefault("state", "ready")
+        result.setdefault("degraded", False)
+        self._bridge_last_status = result
+        return result
 
     def _memory_companion_token_usage_summary(self) -> dict[str, Any]:
         bridge = self._memory_companion_bridge()
@@ -341,6 +850,39 @@ class MemoryCompanionAdapterMixin:
                 known_ids.add(value)
         return next(iter(known_ids)) if len(known_ids) == 1 else ""
 
+    def _memory_companion_p5_gate_kwargs(self, *, event: Any | None = None, sink: str) -> dict[str, Any]:
+        """Mint a fresh opaque handle for one Bridge call when P5 is enabled."""
+        if not bool(getattr(self, "enable_p5_source_observer", False)):
+            return {}
+        issuer = getattr(event, "private_companion_p5_issue_attestation", None) if event is not None else None
+        if not callable(issuer):
+            issuer = getattr(self, "_p5_issue_attestation_for_event", None)
+            if callable(issuer):
+                try:
+                    issued = issuer(
+                        event=event,
+                        request=getattr(event, "private_companion_p5_request_carrier", None) if event is not None else None,
+                        sink=sink,
+                    )
+                except Exception:
+                    issued = None
+            else:
+                issued = None
+        else:
+            try:
+                issued = issuer(sink)
+            except Exception:
+                issued = None
+        if not isinstance(issued, tuple) or len(issued) != 2:
+            return {}
+        handle, consumer = issued
+        if handle is None or not callable(consumer):
+            return {}
+        return {
+            "p5_attestation": handle,
+            "p5_attestation_consumer": consumer,
+        }
+
     def _memory_companion_schedule_session_context(self, *, message_text: str = "") -> dict[str, Any]:
         user_id, user = self._memory_companion_schedule_owner_context()
         umo = _single_line(user.get("umo"), 200) if isinstance(user, dict) else ""
@@ -420,6 +962,7 @@ class MemoryCompanionAdapterMixin:
                 "companion_bot_mood": bot_mood,
                 "companion_bot_energy": bot_energy,
             }
+            compose_kwargs.update(self._memory_companion_p5_gate_kwargs(event=None, sink="bridge_serialization"))
             if self._memory_companion_coordination_status().get("schedule_fast_context") is True:
                 compose_kwargs["retrieval_profile"] = "schedule_fast"
             text = await asyncio.wait_for(
@@ -569,6 +1112,7 @@ class MemoryCompanionAdapterMixin:
                 "companion_bot_mood": bot_mood,
                 "companion_bot_energy": bot_energy,
             }
+            compose_kwargs.update(self._memory_companion_p5_gate_kwargs(event=event, sink="bridge_serialization"))
             if (
                 kind == "daily_outfit_photo"
                 and self._memory_companion_coordination_status().get("outfit_fast_context") is True
@@ -698,12 +1242,107 @@ class MemoryCompanionAdapterMixin:
             "只在与本轮直接相关时自然接住；不要主动列举记忆、不要提及检索过程，也不要把它当作其他用户的信息。"
         )
 
+    async def _memory_companion_record_agenda_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(snapshot, dict):
+            return {"ok": False, "state": "invalid", "error_code": "invalid_snapshot"}
+        date_text = _single_line(snapshot.get("window_date") or snapshot.get("date"), 20)
+        window = _single_line(snapshot.get("window") or snapshot.get("slug"), 32)
+        snapshot_id = _single_line(snapshot.get("snapshot_id"), 160) or f"agenda_snapshot:{date_text}:{window}"
+
+        def _compact(items: Any, field: str) -> list[dict[str, Any]]:
+            result: list[dict[str, Any]] = []
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                value = _single_line(item.get("title") or item.get("summary") or item.get(field), 180)
+                if not value:
+                    continue
+                result.append({
+                    "id": _single_line(item.get("plan_id") or item.get("activity_id") or item.get("entry_id"), 120),
+                    "summary": value,
+                    "status": _single_line(item.get("status"), 32),
+                })
+            return result[:16]
+
+        payload = {
+            "date": date_text,
+            "window": window,
+            "summary": f"{date_text} {window} 窗口快照",
+            "planned": _compact(snapshot.get("planned"), "title"),
+            "observed": _compact(snapshot.get("observed"), "summary"),
+            "reconciled": _compact(snapshot.get("reconciled"), "reason"),
+            "open_items": [_single_line(item, 160) for item in (snapshot.get("open_items") or []) if _single_line(item, 160)][:12],
+        }
+        refs = [snapshot_id]
+        refs.extend(_single_line(item, 160) for item in (snapshot.get("source_refs") or []) if _single_line(item, 160))
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_window_snapshot",
+            payload=payload,
+            idempotency_key=snapshot_id,
+            occurred_at=_single_line(snapshot.get("generated_at"), 80) or self._memory_companion_now_iso(),
+            version=int(snapshot.get("version") or 1),
+            source_refs=list(dict.fromkeys(refs)),
+        )
+
+    async def _memory_companion_record_agenda_reconciliation(self, reconciliation: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(reconciliation, dict):
+            return {"ok": False, "state": "invalid", "error_code": "invalid_reconciliation"}
+        date_text = _single_line(reconciliation.get("window_date") or reconciliation.get("date"), 20)
+        window = _single_line(reconciliation.get("window") or reconciliation.get("slug"), 32)
+        record_id = _single_line(reconciliation.get("reconciliation_id"), 160) or f"reconciliation:{date_text}:{window}"
+        plans = []
+        for item in reconciliation.get("plans") if isinstance(reconciliation.get("plans"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            plans.append({
+                "plan_id": _single_line(item.get("plan_id"), 120),
+                "status": _single_line(item.get("status"), 32),
+                "reason": _single_line(item.get("reason") or item.get("reconciliation_reason"), 180),
+                "activity_ids": [_single_line(value, 120) for value in (item.get("activity_ids") or item.get("reconciled_activity_ids") or []) if _single_line(value, 120)][:12],
+            })
+        payload = {
+            "date": date_text,
+            "window": window,
+            "summary": f"{date_text} {window} 计划与实际对账",
+            "plans": plans[:16],
+            "observed_activity_ids": [_single_line(value, 120) for value in (reconciliation.get("observed_activity_ids") or []) if _single_line(value, 120)][:16],
+        }
+        refs = [record_id]
+        refs.extend(_single_line(item, 160) for item in (reconciliation.get("source_refs") or []) if _single_line(item, 160))
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_schedule_reconciliation",
+            payload=payload,
+            idempotency_key=record_id,
+            occurred_at=_single_line(reconciliation.get("generated_at"), 80) or self._memory_companion_now_iso(),
+            version=int(reconciliation.get("version") or 1),
+            source_refs=list(dict.fromkeys(refs)),
+        )
+
+    async def _memory_companion_record_daily_diary(self, diary: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(diary, dict):
+            return {"ok": False, "state": "invalid", "error_code": "invalid_diary"}
+        date_text = _single_line(diary.get("date"), 20)
+        summary = _single_line(diary.get("summary") or diary.get("share_seed") or diary.get("body"), 360)
+        if not date_text or not summary:
+            return {"ok": False, "state": "invalid", "error_code": "empty_diary"}
+        payload = {
+            "date": date_text,
+            "summary": summary,
+            "mood": _single_line(diary.get("mood") or diary.get("emotion"), 60),
+            "tags": [_single_line(item, 60) for item in (diary.get("tags") or []) if _single_line(item, 60)][:12],
+            "dream_summary": _single_line(diary.get("dream_summary") or diary.get("dream"), 160),
+        }
+        return await self._memory_companion_record_bot_personal(
+            memory_type="bot_daily_diary",
+            payload=payload,
+            idempotency_key=f"diary:{date_text}",
+            occurred_at=self._memory_companion_now_iso(),
+            version=int(diary.get("version") or 1),
+            source_refs=[f"companion:diary:{date_text}"],
+        )
+
     async def _memory_companion_record_daily_plan(self, plan: dict[str, Any]) -> None:
         if not isinstance(plan, dict):
-            return
-        bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
-        if not callable(recorder):
             return
         date_text = _single_line(plan.get("date"), 40)
         items = plan.get("items")
@@ -729,6 +1368,30 @@ class MemoryCompanionAdapterMixin:
             if line:
                 lines.append(line)
         if not lines:
+            return
+        try:
+            now = self._environment_now()
+            window = window_for_minutes(now.hour * 60 + now.minute)
+        except Exception:
+            window = ""
+        await self._memory_companion_record_bot_personal(
+            memory_type="bot_schedule_plan",
+            payload={
+                "date": date_text,
+                "window": window,
+                "summary": f"{date_text} 的 Bot 当日生活日程已生成",
+                "items": lines,
+                "source": _single_line(plan.get("source"), 40),
+                "item_count": len(lines),
+            },
+            idempotency_key=f"daily_plan:{date_text}",
+            occurred_at=_single_line(plan.get("generated_at"), 80) or self._memory_companion_now_iso(),
+            version=int(plan.get("version") or 1),
+            source_refs=[f"companion:daily_plan:{date_text}"],
+        )
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
+        if not callable(recorder):
             return
         content = f"{date_text} 的 Bot 当日生活日程已生成：\n" + "\n".join(f"- {line}" for line in lines)
         try:
@@ -761,10 +1424,6 @@ class MemoryCompanionAdapterMixin:
         detail: dict[str, Any],
     ) -> None:
         if not isinstance(segment, dict) or not isinstance(detail, dict):
-            return
-        bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
-        if not callable(recorder):
             return
         date_text = _single_line(plan.get("date") if isinstance(plan, dict) else "", 40)
         start = 0
@@ -799,6 +1458,25 @@ class MemoryCompanionAdapterMixin:
                 if text:
                     proactive.append(text)
         if not summary and not events and not proactive:
+            return
+        await self._memory_companion_record_bot_personal(
+            memory_type="bot_detail_fragment",
+            payload={
+                "date": date_text,
+                "window": window_for_minutes(start % (24 * 60)),
+                "summary": summary or "日程细化",
+                "events": events[:4],
+                "proactive_events": proactive[:3],
+                "start": start_text,
+                "end": end_text,
+            },
+            idempotency_key=f"detail:{date_text}:{start}:{end}",
+            occurred_at=self._memory_companion_now_iso(),
+            source_refs=[f"companion:detail:{date_text}:{start}:{end}"],
+        )
+        bridge = self._memory_companion_bridge()
+        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
+        if not callable(recorder):
             return
         parts = [f"{date_text} {start_text}-{end_text} 的 Bot 日程细化："]
         if summary:
@@ -957,7 +1635,42 @@ class MemoryCompanionAdapterMixin:
         text: str,
     ) -> None:
         payload = self._memory_companion_build_private_context(user_id=user_id, user=user, text=text, event=event)
+        policy = (
+            getattr(self, "relationship_stage_policy", None)
+            if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            else None
+        )
+        projection = relationship_projection_for_bridge(
+            user.get("relationship_score", 0),
+            policy,
+            previous_stage_key=user.get("relationship_phase_key", ""),
+        )
+        user["relationship_phase_key"] = projection.get("phase_key", "acquaintance")
+        role_getter = getattr(self, "_private_user_role", None)
+        try:
+            role = role_getter(user, user_id) if callable(role_getter) else str(user.get("relationship_role") or "friend")
+        except Exception:
+            role = str(user.get("relationship_role") or "friend")
+        relationship_mode = normalize_relationship_mode(user.get("relationship_mode"), role)
+        projection["relationship_mode"] = relationship_mode
+        projection["current_interaction"] = current_interaction_projection(
+            user.get("current_interaction"),
+            relationship_role=role,
+            relationship_mode=relationship_mode,
+            now=time.time(),
+        )
+        bridge = self._memory_companion_bridge()
+        consumer = getattr(bridge, "consume_relationship_projection", None) if bridge is not None else None
+        if callable(consumer):
+            try:
+                consumed = consumer(projection)
+            except Exception:
+                consumed = {}
+            if isinstance(consumed, dict) and isinstance(consumed.get("projection"), dict):
+                projection = consumed["projection"]
+        payload["relationship_projection"] = projection
         self._memory_companion_attach_context(event, payload)
+        self._memory_companion_attach_person_context(event)
 
     def _memory_companion_attach_group_context(
         self,
@@ -978,6 +1691,61 @@ class MemoryCompanionAdapterMixin:
             event=event,
         )
         self._memory_companion_attach_context(event, payload)
+        self._memory_companion_attach_person_context(event)
+
+    def _memory_companion_attach_person_context(self, event: Any | None) -> None:
+        """Attach only validated person/P3 references to the event carrier."""
+        if event is None:
+            return
+        builder = getattr(self, "build_unified_person_context", None)
+        if not callable(builder):
+            return
+        try:
+            context = builder(event)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] Unified Person 上下文生成失败: %s", _single_line(exc, 160))
+            return
+        if not isinstance(context, dict):
+            return
+        identity = context.get("identity") if isinstance(context.get("identity"), dict) else {}
+        projection = context.get("projection") if isinstance(context.get("projection"), dict) else None
+        p3 = dict(context.get("p3")) if isinstance(context.get("p3"), dict) else None
+        if p3 is not None:
+            p3["person_id"] = _single_line(identity.get("person_id"), 120)
+            p3["scope"] = _single_line(context.get("scope"), 40)
+        bridge = self._memory_companion_bridge()
+        person_result: dict[str, Any] = {"state": context.get("state", "pending"), "read_only": True}
+        context_result: dict[str, Any] = {"state": "legacy_local", "read_only": True}
+        if bridge is not None:
+            consumer = getattr(bridge, "consume_person_projection", None)
+            if callable(consumer) and projection is not None:
+                person_result = consumer(
+                    projection,
+                    expected_identity_key=_single_line(identity.get("identity_key"), 180),
+                    expected_person_id=_single_line(identity.get("person_id"), 120),
+                )
+            context_consumer = getattr(bridge, "consume_context_projection", None)
+            if callable(context_consumer) and p3 is not None:
+                context_result = context_consumer(
+                    p3,
+                    expected_person_id=_single_line(identity.get("person_id"), 120),
+                    expected_scope=_single_line(context.get("scope"), 40),
+                )
+        safe_payload = {
+            "state": _single_line(context.get("state"), 40) or "pending",
+            "identity": {
+                "identity_key": _single_line(identity.get("identity_key"), 180),
+                "person_id": _single_line(identity.get("person_id"), 120),
+            },
+            "projection": person_result.get("projection_ref") if isinstance(person_result, dict) else None,
+            "context": context_result.get("context_ref") if isinstance(context_result, dict) else None,
+            "p4_shadow": context.get("p4_shadow") if isinstance(context.get("p4_shadow"), dict) else {},
+        }
+        try:
+            setattr(event, "person_context_projection", safe_payload)
+        except Exception:
+            pass
+        self._memory_companion_attach_context(event, {"unified_person": safe_payload})
 
     async def _memory_companion_record_proactive_message(
         self,
@@ -1573,100 +2341,146 @@ class MemoryCompanionAdapterMixin:
                 return
             logger.debug("[PrivateCompanion] MemoryCompanion QQ 空间发布写入失败: %s", _single_line(exc, 120))
 
-    def _memory_companion_apply_emotional_drift(self, *, session_id: str = "") -> None:
-        """Pull pending emotional drift events from the memory plugin and apply to daily_state.
-
-        This now includes cross-window emotional continuity: if the bot recently
-        touched emotional memories in other sessions, a dampened residue is also
-        applied to the current daily_state, creating a sense of emotional carryover.
-        """
+    async def _memory_companion_apply_emotional_drift(
+        self,
+        *,
+        event: Any,
+        user_id: str,
+        user: dict[str, Any] | None,
+    ) -> None:
+        """Durably project pending memory events into Daily State conditions."""
         if not getattr(self, "enable_memory_companion_emotional_drift", True):
             return
         bridge = self._memory_companion_bridge()
         if bridge is None:
             return
-        getter = getattr(bridge, "get_emotional_events", None)
-        if not callable(getter):
+        lister = getattr(bridge, "list_emotion_events", None)
+        acker = getattr(bridge, "ack_emotion_events", None)
+        if not callable(lister) or not callable(acker):
+            return
+        delivery_context = self._memory_companion_emotion_delivery_context(
+            bridge,
+            event=event,
+            user_id=user_id,
+            user=user,
+        )
+        if delivery_context is None:
             return
         try:
-            events = getter(session_id=session_id, limit=3)
+            delivery = await lister(
+                delivery_context=delivery_context,
+                cursor="",
+                limit=6,
+            )
         except Exception as exc:
-            if self._memory_companion_optional_dependency_failed(exc, where="get_emotional_events"):
+            if self._memory_companion_optional_dependency_failed(exc, where="list_emotion_events"):
                 return
-            logger.debug("[PrivateCompanion] 情绪漂移拉取失败: %s", _single_line(exc, 120))
+            logger.debug("[PrivateCompanion] 情绪余波拉取失败: %s", _single_line(exc, 120))
             return
-        # Cross-window emotional residue: check if there are recent emotional events
-        # from OTHER sessions that should subtly influence the current state
-        cross_window_delta = 0.0
-        cross_window_hints: list[str] = []
-        cross_state_getter = getattr(bridge, "get_recent_emotional_state", None)
-        if callable(cross_state_getter) and getattr(self, "enable_memory_companion_cross_window_emotion", True):
-            try:
-                cross_state = cross_state_getter()
-                if isinstance(cross_state, dict) and cross_state.get("total", 0) > 0:
-                    # Apply a dampened cross-window effect (30% strength)
-                    scar_count = cross_state.get("scar_count", 0)
-                    warm_count = cross_state.get("warm_count", 0)
-                    if scar_count > 0:
-                        cross_window_delta = -min(2.0, scar_count * 0.8)
-                        cross_window_hints.append("低落")
-                    if warm_count > 0:
-                        cross_window_delta += min(1.5, warm_count * 0.5)
-                        cross_window_hints.append("微暖")
-            except Exception as exc:
-                self._memory_companion_optional_dependency_failed(exc, where="get_recent_emotional_state")
-        if not events and not cross_window_hints:
+        events = delivery.get("events", []) if isinstance(delivery, dict) else []
+        if not isinstance(events, list) or not events:
             return
         data = getattr(self, "data", None)
         if not isinstance(data, dict):
             return
-        state = data.get("daily_state")
-        if not isinstance(state, dict):
-            state = {}
-            data["daily_state"] = state
-        try:
-            current_energy = float(state.get("energy") or 0.0)
-        except Exception:
-            current_energy = 0.0
-        total_delta = 0.0
-        mood_hints: list[str] = []
+        conditions = data.setdefault("state_conditions", [])
+        if not isinstance(conditions, list):
+            conditions = []
+            data["state_conditions"] = conditions
+        now = _now_ts()
+        applied_refs: list[dict[str, Any]] = []
+        applied_keys: set[tuple[str, int]] = set()
         for event in events:
-            delta = float(event.get("energy_delta") or 0.0)
-            total_delta += delta
-            hint = _single_line(event.get("mood_hint"), 40)
-            if hint:
-                mood_hints.append(hint)
-        # Add cross-window residue (already dampened)
-        total_delta += cross_window_delta
-        mood_hints.extend(cross_window_hints)
-        # Safety valve: clamp total drift per cycle
-        total_delta = max(-10.0, min(6.0, total_delta))
-        new_energy = max(0.0, min(100.0, current_energy + total_delta))
-        state["energy"] = round(new_energy, 1)
-        # Apply mood drift with safety valve: only shift if hint is significant
-        if mood_hints:
-            current_mood = _single_line(state.get("mood_bias"), 80)
-            dominant_hint = mood_hints[0]
-            if current_mood and dominant_hint not in current_mood:
-                state["mood_bias"] = _single_line(f"{current_mood}，偏{dominant_hint}", 80)
-            elif not current_mood:
-                state["mood_bias"] = dominant_hint
-        drift_log = state.get("mood_drift_log")
-        if not isinstance(drift_log, list):
-            drift_log = []
-            state["mood_drift_log"] = drift_log
-        drift_log.append({
-            "ts": self._memory_companion_now_iso(),
-            "events": [{"type": e.get("event_type"), "delta": e.get("energy_delta"), "hint": _single_line(e.get("mood_hint"), 40)} for e in events],
-            "cross_window_delta": round(cross_window_delta, 2),
-            "total_delta": round(total_delta, 2),
-        })
-        if len(drift_log) > 20:
-            drift_log[:] = drift_log[-20:]
-        logger.debug(
-            "[PrivateCompanion] 情绪漂移已应用: energy=%.1f->%.1f delta=%.1f cross_delta=%.1f hints=%s",
-            current_energy, new_energy, total_delta, cross_window_delta, mood_hints,
-        )
+            if not isinstance(event, dict):
+                continue
+            condition = self._memory_companion_afterglow_condition(event, now=now)
+            if not condition:
+                continue
+            event_id = condition["source_event_id"]
+            replaced = False
+            for index, existing in enumerate(conditions):
+                if isinstance(existing, dict) and existing.get("kind") == "memory_afterglow" and existing.get("source_event_id") == event_id:
+                    conditions[index] = condition
+                    replaced = True
+                    break
+            if not replaced:
+                conditions.append(condition)
+            ref_key = (event_id, condition["source_revision"])
+            if ref_key not in applied_keys:
+                applied_keys.add(ref_key)
+                applied_refs.append({"event_id": event_id, "revision": condition["source_revision"]})
+        if not applied_refs:
+            return
+        composer = getattr(self, "_compose_state_from_conditions", None)
+        saver = getattr(self, "_save_data_sync", None)
+        if not callable(composer) or not callable(saver):
+            return
+        data["daily_state"] = composer(data.get("daily_weather", {}))
+        saver()
+        try:
+            await acker(applied_refs, delivery_context=delivery_context)
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="ack_emotion_events")
+            return
+        logger.debug("[PrivateCompanion] 已应用并确认记忆情绪余波: count=%s", len(applied_refs))
+
+    def _memory_companion_afterglow_condition(self, event: dict[str, Any], *, now: float) -> dict[str, Any] | None:
+        event_id = _single_line(event.get("event_id"), 96)
+        if not event_id:
+            return None
+        try:
+            revision = max(1, min(1000000, int(event.get("revision") or 1)))
+            delta = max(-8.0, min(5.0, float(event.get("energy_delta") or 0.0)))
+            intensity = max(0, min(100, round(float(event.get("intensity") or 0.0))))
+        except (TypeError, ValueError):
+            return None
+        event_type = _single_line(event.get("event_type"), 48)
+        mood_by_type = {
+            "scar_touched": "低落",
+            "warm_memory": "微暖",
+            "vulnerable_resonance": "柔软",
+        }
+        mood = mood_by_type.get(event_type, "平稳")
+        half_life = 1800.0
+        return {
+            "id": f"memory-afterglow-{event_id}",
+            "kind": "memory_afterglow",
+            "title": "记忆余波",
+            "label": "记忆被触动后留下的短暂情绪余波",
+            "mood": mood,
+            "energy_delta": round(delta, 2),
+            "intensity": intensity,
+            "start_ts": now,
+            "end_ts": now + 4 * half_life,
+            "duration_hours": 2,
+            "half_life_seconds": half_life,
+            "cause": "memory_recall_resonance",
+            "phase": "afterglow",
+            "source_event_id": event_id,
+            "source_revision": revision,
+            "trace_id": _single_line(event.get("trace_id"), 96),
+            "modulation": {
+                "valence": max(-1.0, min(1.0, _safe_float(event.get("valence"), 0.0))),
+                "arousal": max(0.0, min(1.0, _safe_float(event.get("arousal"), 0.0))),
+                "vulnerability": max(0.0, min(1.0, _safe_float(event.get("vulnerability"), 0.0))),
+                "confidence": max(0.0, min(1.0, _safe_float(event.get("confidence"), 0.0))),
+            },
+        }
+
+    async def _memory_companion_get_emotion_trace(
+        self,
+        trace_id: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Keep remote trace diagnostics owned by the Memory plugin."""
+        del trace_id, session_id
+        return {
+            "state": "degraded",
+            "read_only": True,
+            "items": [],
+            "error_code": "diagnostic_authority_unavailable",
+        }
 
     async def _memory_companion_search_open_loops(self, *, session_id: str = "", limit: int = 3) -> list[dict[str, Any]]:
         """Search for unresolved open-loop / promise memories for proactive companionship."""
@@ -1746,3 +2560,157 @@ class MemoryCompanionAdapterMixin:
         except Exception as exc:
             self._memory_companion_optional_dependency_failed(exc, where="get_relationship_phase")
             return {"phase": "unknown", "momentum": 0.0}
+
+    async def _memory_companion_read_user_memory_summary(
+        self,
+        user_id: str,
+        *,
+        session_id: str = "",
+        limit: int = 3,
+    ) -> dict[str, Any]:
+        """Read a bounded, redacted Memory summary without affecting the chat path."""
+        raw_identity = _single_line(user_id, 120)
+        if not raw_identity:
+            return {"available": False, "state": "invalid", "reason_code": "missing_user_identity"}
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        try:
+            identity = canonicalizer(raw_identity) if callable(canonicalizer) else raw_identity
+        except Exception:
+            return {"available": False, "state": "invalid", "reason_code": "private_identity_invalid"}
+        identity = _single_line(identity, 120)
+        users = getattr(self, "data", {}).get("users") if isinstance(getattr(self, "data", None), dict) else None
+        user = users.get(identity) if isinstance(users, dict) else None
+        if not isinstance(user, dict):
+            return {"available": False, "state": "forbidden", "reason_code": "private_identity_untrusted"}
+        if bool(user.get("observation_only")) or user.get("profile_origin") == "group_observation":
+            return {"available": False, "state": "forbidden", "reason_code": "group_observation_forbidden"}
+        if user.get("private_memory_enabled") is False:
+            return {"available": False, "state": "forbidden", "reason_code": "private_memory_disabled"}
+        footprint_getter = getattr(self, "_private_user_has_private_footprint", None)
+        try:
+            trusted_identity = (
+                bool(footprint_getter(identity, user))
+                if callable(footprint_getter)
+                else bool(user.get("enabled") or user.get("manual_enabled") or user.get("umo"))
+            )
+        except Exception:
+            trusted_identity = False
+        if not trusted_identity:
+            return {"available": False, "state": "forbidden", "reason_code": "private_identity_untrusted"}
+        stored_session = _single_line(
+            user.get("umo") or user.get("bound_delivery_umo") or user.get("preferred_delivery_umo"),
+            200,
+        )
+        requested_session = _single_line(session_id, 200)
+        if requested_session and stored_session and requested_session != stored_session:
+            return {"available": False, "state": "forbidden", "reason_code": "private_session_mismatch"}
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            reason = _single_line(getattr(self, "_bridge_last_status", {}).get("reason"), 80)
+            return {"available": False, "state": "degraded", "reason_code": reason or "bridge_unavailable"}
+        reader = getattr(bridge, "read_user_memory_summary", None)
+        if not callable(reader):
+            return {"available": False, "state": "unsupported", "reason_code": "summary_method_unavailable"}
+        try:
+            result = reader(
+                user_id=identity,
+                session_id=stored_session or requested_session,
+                limit=max(1, min(5, int(limit or 3))),
+            )
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                result = await result
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="read_user_memory_summary")
+            return {"available": False, "state": "degraded", "reason_code": "summary_read_failed"}
+        if (
+            not isinstance(result, dict)
+            or result.get("contract") != "memory.user_memory_summary.v1"
+            or result.get("ok") is not True
+            or result.get("state") != "ready"
+        ):
+            state = _single_line(result.get("state"), 32) if isinstance(result, dict) else "invalid"
+            return {"available": False, "state": state or "degraded", "reason_code": "summary_unavailable"}
+
+        raw_counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+        counts: dict[str, int] = {}
+        for key in ("profile", "preference", "relationship"):
+            value = raw_counts.get(key, result.get(f"{key}_count", 0))
+            counts[key] = _safe_int(value, 0, 0, 1_000_000)
+        counts["private_chat"] = _safe_int(
+            raw_counts.get("private_conversation", raw_counts.get("private_chat", 0)),
+            0,
+            0,
+            1_000_000,
+        )
+
+        summaries: dict[str, str] = {}
+        category_alias = {"private_conversation": "private_chat"}
+        for item in result.get("summaries", []) if isinstance(result.get("summaries"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            key = category_alias.get(_single_line(item.get("category"), 40), _single_line(item.get("category"), 40))
+            if key not in {"profile", "preference", "relationship", "private_chat"} or key in summaries:
+                continue
+            text = _single_line(item.get("summary"), 160)
+            if text:
+                summaries[key] = text
+        return {
+            "schema_version": "memory.user_memory_summary.v1",
+            "available": True,
+            "state": "ready",
+            "counts": counts,
+            "summaries": summaries,
+            "workspace_path": "",
+        }
+
+    def _memory_companion_peek_relationship_phase(self, *, session_id: str = "") -> dict[str, Any]:
+        """Read an existing Memory relationship phase without creating state."""
+        bridge = self._memory_companion_bridge()
+        if bridge is None:
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unavailable"}
+        try:
+            getter = getattr(bridge, "peek_relationship_phase", None)
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="peek_relationship_phase")
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unavailable"}
+        if not callable(getter):
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unsupported"}
+        try:
+            result = getter(session_id=session_id, scope="private")
+        except Exception as exc:
+            self._memory_companion_optional_dependency_failed(exc, where="peek_relationship_phase")
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "unavailable"}
+        if type(result) is not dict:
+            return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "invalid"}
+        for key in result:
+            if type(key) is not str:
+                return {"observed": False, "phase": "unknown", "momentum_band": "unknown", "status": "invalid"}
+        phase = result.get("phase")
+        momentum_band = result.get("momentum_band")
+        observed = result.get("observed")
+        phase_allowlist = {"acquaintance", "familiar", "close", "intimate", "deeply_bonded"}
+        momentum_allowlist = {"rising", "cooling", "steady"}
+        if (
+            type(observed) is not bool
+            or observed is not True
+            or type(phase) is not str
+            or phase not in phase_allowlist
+            or type(momentum_band) is not str
+            or momentum_band not in momentum_allowlist
+        ):
+            return {
+                "observed": False,
+                "phase": "unknown",
+                "momentum_band": "unknown",
+                "touch_count": 0,
+                "status": "not_observed",
+            }
+        touch_value = result.get("touch_count", 0)
+        touch_count = touch_value if type(touch_value) is int else 0
+        return {
+            "observed": True,
+            "phase": phase,
+            "momentum_band": momentum_band,
+            "touch_count": max(0, min(256, touch_count)),
+            "status": "observed",
+        }

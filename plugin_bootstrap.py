@@ -12,6 +12,8 @@ from astrbot.api import logger
 from astrbot.api.star import StarTools
 
 from .body_monitor_integration import BodyMonitorIntegration
+from .bot_personal_contract import capability_descriptor, contract_self_check
+from .bot_personal_outbox import BotPersonalOutbox
 from .config_migration import migrate_flat_config_into_schema_groups
 from .constants import (
     DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT,
@@ -27,11 +29,15 @@ from .helpers import (
     _set_today_key_timezone,
     _single_line,
 )
+from .p5_attestation import P5AttestationRegistry
+from .plugin_identity import PLUGIN_ID, PLUGIN_VERSION, plugin_identity_snapshot
 from .photo_reference_catalog import load_catalog, validate_and_serialize
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
 from .relationship_policy import normalize_relationship_stage_policy
+from .runtime_compat import probe_runtime_capabilities
 from .segmented_message import normalize_component_strategy
+from .unified_person_registry import UnifiedPersonRegistry
 
 DEFAULT_AI_DAILY_MORNING_UID = "3706929260006322"
 DEFAULT_AI_DAILY_JUYA_UID = "285286947"
@@ -72,6 +78,36 @@ PREVIOUS_TECH_DEFAULT_NEWS_SOURCES = "\n".join(
     ]
 )
 
+def initialize_plugin_entrypoint_state(
+    self: Any,
+    context: Any,
+    config: Any,
+    *,
+    extension_api_factory: Any,
+) -> None:
+    self.extension_api = extension_api_factory(self)
+    self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
+    self._external_realtime_activities: dict[str, dict[str, Any]] = {}
+    self.config = config
+    self.plugin_identity = plugin_identity_snapshot()
+    self.runtime_capabilities = probe_runtime_capabilities(
+        context=context,
+        plugin_name=PLUGIN_ID,
+        plugin_version=PLUGIN_VERSION,
+    )
+    contract_issues = tuple(contract_self_check())
+    self.bot_personal_capabilities = capability_descriptor(available=not contract_issues, read_only=False)
+    self.bot_personal_capabilities.update(
+        {
+            "state": "ready" if not contract_issues else "degraded",
+            "degraded": bool(contract_issues),
+            "warnings": list(contract_issues),
+        }
+    )
+    if contract_issues:
+        logger.warning("[PrivateCompanion] Bot Personal contract self-check degraded: %s", ";".join(contract_issues))
+
+
 def initialize_plugin_config(self: Any, config: Any) -> None:
     c = config
     _initialize_core_and_relationship_config(self, c)
@@ -80,6 +116,11 @@ def initialize_plugin_config(self: Any, config: Any) -> None:
     _initialize_photo_and_expression_config(self, c)
     _initialize_review_and_group_config(self, c)
     _initialize_group_and_provider_config(self, c)
+    self.enable_p4_b_legacy_score_isolation = self._cfg_bool(
+        c,
+        "enable_p4_b_legacy_score_isolation",
+        False,
+    )
 
 def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
@@ -264,6 +305,22 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.worldview_adaptation_mode = "auto"
     self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
     self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
+    self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", False)
+    self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", False)
+    self.auto_profile_platforms = self._cfg_raw(
+        c,
+        "auto_profile_platforms",
+        ["onebot", "qq_official", "telegram", "webchat", "generic"],
+    )
+    self.default_nickname_strategy = self._cfg_str(
+        c,
+        "default_nickname_strategy",
+        "platform_display_name",
+    )
+    if self.default_nickname_strategy not in {"platform_display_name", "fixed", "user_id"}:
+        self.default_nickname_strategy = "platform_display_name"
+    self.default_proactive_enabled = self._cfg_bool(c, "default_proactive_enabled", False)
+    self.default_proactive_daily_limit = self._cfg_int(c, "default_proactive_daily_limit", 0, 0, 30)
     self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
     self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
@@ -379,6 +436,7 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.enable_health_state = self._cfg_bool(c, "enable_health_state", True)
     self.enable_hunger_state = self._cfg_bool(c, "enable_hunger_state", True)
     self.enable_cycle_state = self._cfg_bool(c, "enable_cycle_state", True)
+    self.enable_group_cycle_awareness = self._cfg_bool(c, "enable_group_cycle_awareness", False)
     self.humanized_state_intensity = self._cfg_int(c, "humanized_state_intensity", 50, 0, 100)
     self.enable_advanced_cycle_strategy = self._cfg_bool(c, "enable_advanced_cycle_strategy", False)
     self.advanced_cycle_link_intensity = self._cfg_bool(c, "advanced_cycle_link_intensity", False)
@@ -722,6 +780,28 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         self.photo_reference_library = [
             line.strip() for line in str(raw_reference_library or "").splitlines() if line.strip()
         ][:24]
+    self.enable_p5_structured_reference_assets = self._cfg_bool(
+        c,
+        "enable_p5_structured_reference_assets",
+        False,
+    )
+    raw_structured_assets = self._cfg_raw(c, "photo_structured_reference_assets", [])
+    self.photo_structured_reference_assets = (
+        [dict(item) for item in raw_structured_assets if isinstance(item, dict)][:16]
+        if isinstance(raw_structured_assets, list)
+        else []
+    )
+    self.enable_owned_reaction_asset_workbench = self._cfg_bool(
+        c,
+        "enable_owned_reaction_asset_workbench",
+        False,
+    )
+    raw_owned_reaction_assets = self._cfg_raw(c, "owned_reaction_assets", [])
+    self.owned_reaction_assets = (
+        [dict(item) for item in raw_owned_reaction_assets if isinstance(item, dict)][:96]
+        if isinstance(raw_owned_reaction_assets, list)
+        else []
+    )
     self.comfyui_photo_wait_seconds = self._cfg_int(c, "comfyui_photo_wait_seconds", 90, 5, 600)
     self.photo_generation_backend = self._cfg_str(c, "photo_generation_backend", "auto", "auto").strip().lower()
     if self.photo_generation_backend not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
@@ -1488,3 +1568,19 @@ def initialize_plugin_runtime(self: Any) -> None:
     self.page_api = None
     self._patch_astrbot_plugin_page_asset_token_compat()
     self._register_page_api_if_available()
+
+
+def initialize_plugin_post_runtime_state(self: Any, config: Any) -> None:
+    self.enable_p5_source_observer = self._cfg_bool(config, "enable_p5_source_observer", False)
+    self.enable_p5_b1_recall_gate = self._cfg_bool(config, "enable_p5_b1_recall_gate", False)
+    self.enable_p5_b1_bridge_gate = self._cfg_bool(config, "enable_p5_b1_bridge_gate", False)
+    self.p5_attestation_registry = P5AttestationRegistry()
+    self._bot_personal_outbox = BotPersonalOutbox(
+        self.data,
+        save=lambda: self._schedule_data_save(delay=0.5),
+        background_task=lambda operation, label: self._create_lifecycle_background_task(
+            operation,
+            label=label,
+        ),
+    )
+    self.unified_person_registry = UnifiedPersonRegistry(self.data)
