@@ -14037,6 +14037,7 @@ async function renderUserDetail(forceFetch = false) {
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
+      ${renderEmotionDiagnostics(detail)}
       ${renderUserP4RuntimeStatus(detail.p4_runtime)}
       ${userWorldbookBlock(detail.worldbook_member)}
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
@@ -14047,6 +14048,44 @@ async function renderUserDetail(forceFetch = false) {
     </div>
   `;
   bindUserActions(detail);
+}
+
+function renderEmotionDiagnostics(detail) {
+  const summary = Array.isArray(detail?.emotion_trace_summary) ? detail.emotion_trace_summary.slice(0, 12) : [];
+  const trace = detail?.emotion_trace && typeof detail.emotion_trace === "object" ? detail.emotion_trace : null;
+  const events = trace && Array.isArray(trace.events) ? trace.events : [];
+  const afterglow = trace && Array.isArray(trace.afterglow) ? trace.afterglow : [];
+  const eventRows = events.map((item) => `
+    <li>
+      <strong>r${escapeHtml(item.revision || 1)} · ${escapeHtml(item.event_type || "neutral")}</strong>
+      <span>${escapeHtml(item.status || "observed")} · ${escapeHtml(item.source_rule || "-")}</span>
+    </li>
+  `).join("");
+  const afterglowRows = afterglow.map((item) => `
+    <li>
+      <strong>余波 · ${escapeHtml(item.source_event_id || "-")}</strong>
+      <span>能量 ${escapeHtml(item.energy_delta ?? 0)} · 半衰 ${escapeHtml(item.half_life_seconds || 0)} 秒</span>
+    </li>
+  `).join("");
+  const memory = trace?.memory_diagnostic && typeof trace.memory_diagnostic === "object" ? trace.memory_diagnostic : {};
+  const memoryNote = memory.reason_code === "diagnostic_authority_unavailable"
+    ? "Memory 诊断：陪伴面板不可用，由 Memory 插件单独提供。"
+    : "Memory 诊断：陪伴面板不读取远端诊断。";
+  return `<section class="detail-block emotion-diagnostics" data-emotion-diagnostics>
+    <div class="emotion-diagnostic-head">
+      <div>
+        <h2>情绪链路诊断</h2>
+        <p>陪伴侧本地只读投影</p>
+      </div>
+      ${trace ? `<span class="badge ${trace.state === "ready" ? "ok" : "off"}">${escapeHtml(trace.state || "not_found")}</span>` : ""}
+    </div>
+    <p class="emotion-diagnostic-memory-note">${escapeHtml(memoryNote)}</p>
+    <div class="emotion-diagnostic-actions">
+      ${summary.map((item) => `<button type="button" data-emotion-trace-id="${escapeHtml(item.trace_id || "")}" title="查看本地情绪链路">${escapeHtml(item.event_type || "neutral")} · r${escapeHtml(item.revision || 1)}</button>`).join("") || '<span class="muted">暂无本地事件</span>'}
+    </div>
+    ${trace ? `<div class="emotion-trace-status"><span>本地链路</span><code>${escapeHtml(trace.trace_id || "-")}</code></div>
+      <ol class="emotion-trace-timeline">${eventRows || '<li><span>未找到对应本地事件</span></li>'}${afterglowRows}</ol>` : ""}
+  </section>`;
 }
 
 function renderRelationshipPanel(panel) {
@@ -15318,6 +15357,7 @@ function bindExpressionLibraryActions(library, root) {
 }
 
 function bindUserActions(detail) {
+  bindEmotionTraceButtons(detail);
   const refreshSelectedUserDetail = async () => {
     if (state.selectedUserId === detail.user_id) {
       await renderUserDetail(true);
@@ -15458,6 +15498,23 @@ function bindUserActions(detail) {
         button,
       );
       await refreshSelectedUserDetail();
+    });
+  });
+}
+
+function bindEmotionTraceButtons(detail) {
+  document.querySelectorAll("[data-emotion-trace-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const traceId = String(button.dataset.emotionTraceId || "");
+      if (!traceId || !detail?.user_id) return;
+      try {
+        const updated = await fetchJson(`/user?user_id=${encodeURIComponent(detail.user_id)}&trace_id=${encodeURIComponent(traceId)}`);
+        const target = document.querySelector("[data-emotion-diagnostics]");
+        if (target) target.outerHTML = renderEmotionDiagnostics(updated);
+        bindEmotionTraceButtons(updated);
+      } catch (error) {
+        showToast(`本地诊断读取失败：${error.message}`, "error");
+      }
     });
   });
 }

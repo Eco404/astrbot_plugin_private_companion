@@ -24213,6 +24213,82 @@ tbody tr.is-selected {
   }
 }
 
+.emotion-diagnostics {
+  min-width: 0;
+}
+
+.emotion-diagnostic-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.emotion-diagnostic-head h2,
+.emotion-diagnostic-head p,
+.emotion-diagnostic-memory-note {
+  margin: 0;
+}
+
+.emotion-diagnostic-head p,
+.emotion-diagnostic-memory-note,
+.emotion-trace-status,
+.emotion-trace-timeline span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.emotion-diagnostic-memory-note {
+  margin-top: 8px;
+}
+
+.emotion-diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.emotion-diagnostic-actions button {
+  min-height: 32px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.emotion-trace-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 10px;
+}
+
+.emotion-trace-status code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.emotion-trace-timeline {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding-left: 20px;
+}
+
+.emotion-trace-timeline li {
+  min-width: 0;
+  padding-left: 4px;
+}
+
+.emotion-trace-timeline li strong,
+.emotion-trace-timeline li span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .config-common-settings-body,
   .config-runtime-details-body {

@@ -2467,6 +2467,21 @@ class MemoryCompanionAdapterMixin:
             },
         }
 
+    async def _memory_companion_get_emotion_trace(
+        self,
+        trace_id: str,
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Keep remote trace diagnostics owned by the Memory plugin."""
+        del trace_id, session_id
+        return {
+            "state": "degraded",
+            "read_only": True,
+            "items": [],
+            "error_code": "diagnostic_authority_unavailable",
+        }
+
     async def _memory_companion_search_open_loops(self, *, session_id: str = "", limit: int = 3) -> list[dict[str, Any]]:
         """Search for unresolved open-loop / promise memories for proactive companionship."""
         if not getattr(self, "enable_memory_companion_open_loop_search", True):

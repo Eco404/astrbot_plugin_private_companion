@@ -12,6 +12,7 @@ from quart import request
 
 from .helpers import _safe_int
 from .companion_interaction_expression import allowed_expression_bands, current_interaction_projection
+from .emotion_diagnostics import build_emotion_trace_projection, emotion_trace_summary
 from .relationship_ledger import (
     is_owner_exclusive,
     normalize_relationship_mode,
@@ -71,6 +72,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             async with self.plugin._data_lock:
                 user = deepcopy((self.plugin.data.get("users") or {}).get(user_id))
                 worldbook_member = self._worldbook_member_for_private_user_locked(self.plugin.data, user_id, user if isinstance(user, dict) else {})
+                daily_state = deepcopy(self.plugin.data.get("daily_state"))
+                state_conditions = deepcopy(self.plugin.data.get("state_conditions"))
             if not isinstance(user, dict):
                 return self._error("用户不存在")
             detail = self._user_summary(user_id, user)
@@ -84,6 +87,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             detail["current_interaction"] = relationship_panel["current_interaction"]
             detail["expression_decision"] = relationship_panel["expression_decision"]
             detail["p4_runtime"] = self._p4_page_status_projection()
+            detail["emotion_trace_summary"] = emotion_trace_summary(user, limit=20)
+            trace_id = self._single_line(request.args.get("trace_id", ""), 96)
+            if trace_id:
+                detail["emotion_trace"] = build_emotion_trace_projection(
+                    user,
+                    trace_id,
+                    daily_state=daily_state,
+                    state_conditions=state_conditions,
+                    expression_decision=detail.get("expression_decision"),
+                )
             route_status_getter = getattr(self.plugin, "_private_delivery_route_status", None)
             delivery_route = route_status_getter(user_id, user) if callable(route_status_getter) else {}
             detail.update(
