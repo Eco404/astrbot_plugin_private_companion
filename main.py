@@ -130,8 +130,6 @@ from .helpers import (
     _resolve_timezone_setting,
 )
 from .config_migration import migrate_flat_config_into_schema_groups
-from .bot_personal_contract import capability_descriptor, contract_self_check
-from .bot_personal_outbox import BotPersonalOutbox
 from .person_context_contract import (
     CONTRACT_NAME as PERSON_CONTRACT_NAME,
     CONTRACT_VERSION as PERSON_CONTRACT_VERSION,
@@ -140,7 +138,6 @@ from .person_context_contract import (
     build_identity_key,
     contract_self_check as person_contract_self_check,
 )
-from .unified_person_registry import UnifiedPersonRegistry
 from .context_orchestration import build_context, project_context
 from .p4_shadow import build_p4_shadow
 from .p4_affinity_confinement import apply_legacy_relationship_delta
@@ -150,11 +147,8 @@ from .p6_readonly_projection import build_p6_readonly_status
 from .reply_temperature import compose_reply_temperature
 from .plugin_identity import (
     PLUGIN_ID,
-    PLUGIN_VERSION,
     is_module_path_for_package,
-    plugin_identity_snapshot,
 )
-from .runtime_compat import probe_runtime_capabilities
 from .companion_interaction_expression import build_expression_decision, content_intent_from_text, expression_decision_prompt
 from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
@@ -214,7 +208,7 @@ def _multi_persona_event_context(function):
     return async_wrapper
 from .busy_reply_gate import BusyReplyGateMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
-from .p5_attestation import P5AttestationError, P5AttestationRegistry, REASON_CODES as P5_ATTESTATION_REASON_CODES
+from .p5_attestation import P5AttestationError, REASON_CODES as P5_ATTESTATION_REASON_CODES
 from .p5_source_observer import evaluate_source
 from .message_pipeline import handle_group_message, handle_private_message
 from .tool_history_sanitizer import sanitize_openai_tool_history
@@ -326,7 +320,9 @@ from .plugin_bootstrap import (
     DEFAULT_NEWS_SOURCES,
     LEGACY_DEFAULT_NEWS_SOURCES,
     PREVIOUS_TECH_DEFAULT_NEWS_SOURCES,
+    initialize_plugin_entrypoint_state,
     initialize_plugin_config,
+    initialize_plugin_post_runtime_state,
     initialize_plugin_runtime,
 )
 from .daily_state import DailyStateMixin
@@ -1980,47 +1976,15 @@ class PrivateCompanionPlugin(
         super().__init__(context)
         global _private_companion_plugin
         _private_companion_plugin = self
-        self.extension_api = PrivateCompanionExtensionAPI(self)
-        self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
-        self._external_realtime_activities: dict[str, dict[str, Any]] = {}
-        self.config = config
-        self.plugin_identity = plugin_identity_snapshot()
-        self.runtime_capabilities = probe_runtime_capabilities(
-            context=context,
-            plugin_name=PLUGIN_ID,
-            plugin_version=PLUGIN_VERSION,
-        )
-        contract_issues = tuple(contract_self_check())
-        self.bot_personal_capabilities = capability_descriptor(available=not contract_issues, read_only=False)
-        self.bot_personal_capabilities.update(
-            {
-                "state": "ready" if not contract_issues else "degraded",
-                "degraded": bool(contract_issues),
-                "warnings": list(contract_issues),
-            }
-        )
-        if contract_issues:
-            logger.warning("[PrivateCompanion] Bot Personal contract self-check degraded: %s", ";".join(contract_issues))
-        initialize_plugin_config(self, config)
-        self.enable_p4_b_legacy_score_isolation = self._cfg_bool(
+        initialize_plugin_entrypoint_state(
+            self,
+            context,
             config,
-            "enable_p4_b_legacy_score_isolation",
-            False,
+            extension_api_factory=PrivateCompanionExtensionAPI,
         )
+        initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
-        self.enable_p5_source_observer = self._cfg_bool(config, "enable_p5_source_observer", False)
-        self.enable_p5_b1_recall_gate = self._cfg_bool(config, "enable_p5_b1_recall_gate", False)
-        self.enable_p5_b1_bridge_gate = self._cfg_bool(config, "enable_p5_b1_bridge_gate", False)
-        self.p5_attestation_registry = P5AttestationRegistry()
-        self._bot_personal_outbox = BotPersonalOutbox(
-            self.data,
-            save=lambda: self._schedule_data_save(delay=0.5),
-            background_task=lambda operation, label: self._create_lifecycle_background_task(
-                operation,
-                label=label,
-            ),
-        )
-        self.unified_person_registry = UnifiedPersonRegistry(self.data)
+        initialize_plugin_post_runtime_state(self, config)
 
     async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
         integration = getattr(self, "_body_monitor_integration", None)
