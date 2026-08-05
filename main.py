@@ -2155,6 +2155,15 @@ class PrivateCompanionPlugin(
             base = f"{base[:prefix_length]}:{base_hash}"
         return f"{base}:{persona_domain}"
 
+    @staticmethod
+    def _unified_wire_group_scope(platform: Any, group_id: Any) -> str:
+        """Match Memory's persona-neutral group scope wire contract."""
+        platform_name = _single_line(platform, 40).lower()
+        group_key = _single_line(group_id, 120)
+        if not platform_name or not group_key:
+            return ""
+        return _single_line(f"group:{platform_name}:{group_key}", 80)
+
     def _req036_source_event_anchor(self, event: Any) -> str:
         """Build an event-local, content-free anchor when an adapter omits message IDs."""
         cached = _single_line(
@@ -2439,10 +2448,7 @@ class PrivateCompanionPlugin(
         group_scope = ""
         if group_id and person_id:
             platform = _single_line(identity.get("subject_namespace"), 80).split(":", 1)[0]
-            group_scope = self._unified_persona_scoped_value(
-                f"group:{platform}:{_single_line(group_id, 80)}" if platform else "",
-                limit=80,
-            )
+            group_scope = self._unified_wire_group_scope(platform, group_id)
             if group_scope:
                 self._active_unified_person_registry().upsert_group_overlay(
                     person_id,
@@ -2779,9 +2785,7 @@ class PrivateCompanionPlugin(
                     group_id = _single_line(group_getter(event), 160)
                 except Exception:
                     group_id = ""
-        group_scope = self._unified_persona_scoped_value(
-            f"{platform}:group:{group_id}" if platform and group_id else ""
-        )
+        group_scope = self._unified_wire_group_scope(platform, group_id)
         group_overlay = None
         if state == "resolved" and group_scope and resolution.get("person_id"):
             group_overlay = self._active_unified_person_registry().read_group_overlay(
@@ -6589,7 +6593,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         Args:
             prompt(string): 画面描述、自拍要求或改图要求。若用户在前几轮文字剧情中已经明确换装，而本轮只说继续/再拍一张，必须把仍生效的具体服装展开写进 prompt（例如“角色当前仍穿 JK 校服，继续拍摄”），不能只写“继续”让下游猜测。
             kind(string): text2img/selfie/sticker/edit。角色本人以自拍、背影、侧脸或环境人像等任何形式出镜时用 selfie；角色表情包/贴纸用 sticker；不含角色本人的普通场景、物件、风景用 text2img；改图用 edit。
-            reference_image_path(string): 可选，本地图片路径或图片 URL；edit 必填，selfie 可留空自动使用人设参考图/当天基础穿搭图。合影必须同时能从本轮用户消息或引用消息中解析到其他人物参考图，单独填写此参数不能授权合影。当天基础穿搭只是默认基线，近期对话已发生的换装优先。
+            reference_image_path(string): 可选，本地图片路径或图片 URL；edit 必填，selfie 可留空自动使用人设参考图/当天基础穿搭图。本轮引用图片会由工具自动解析，无需猜测路径；没有引用图片时不会自动复用上一张成图。合影必须同时能从本轮用户消息或引用消息中解析到其他人物参考图，单独填写此参数不能授权合影。当天基础穿搭只是默认基线，近期对话已发生的换装优先。
             image_size(string): 可选，在线图片 API 尺寸，如 1024x1024。
             send(boolean): 是否生成后直接发送到当前会话，默认 true。
             caption(string): 发送图片时附带的短文字。

@@ -101,7 +101,7 @@ class _ConversationManager:
 
 
 class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_unified_identity_group_scope_and_p3_are_persona_scoped(self):
+    async def test_unified_identity_is_persona_scoped_but_wire_group_scope_is_shared(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)
             plugin.target_platform = "onebot"
@@ -146,12 +146,15 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
                 ("main", main_instance),
                 ("alt", alt_instance),
             ):
-                persona_domain = instance_id.removeprefix(f"{PLUGIN_ID}:")
                 attached = snapshots[persona_id]["attached"]
                 context = snapshots[persona_id]["context"]
                 dto_scope = attached["dto"]["context_overlays"]["group_scope"]
-                self.assertTrue(dto_scope.endswith(f":{persona_domain}"))
-                self.assertTrue(context["group_scope"].endswith(f":{persona_domain}"))
+                self.assertEqual("group:onebot:group-1", dto_scope)
+                self.assertEqual(dto_scope, context["group_scope"])
+                self.assertEqual(
+                    dto_scope,
+                    context["p3"]["slots"]["scene"]["payload"]["group_scope"],
+                )
                 self.assertEqual(
                     instance_id,
                     context["p3"]["slots"]["persona"]["payload"]["companion_instance_id"],

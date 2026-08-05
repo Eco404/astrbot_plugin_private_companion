@@ -25423,7 +25423,8 @@ function renderGuidedPhotoReferenceEditor() {
   });
   host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.photoGuidedTab)));
   host.querySelector("[data-photo-guided-compile]")?.addEventListener("click", async (event) => {
-    setActionBusy(event.currentTarget, true);
+    const actionButton = event.currentTarget;
+    setActionBusy(actionButton, true);
     try {
       const result = await reviewGuidedPhotoReference(root);
       host.querySelector("[data-photo-guided-result]").textContent = JSON.stringify(result, null, 2);
@@ -25431,11 +25432,12 @@ function renderGuidedPhotoReferenceEditor() {
     } catch (error) {
       showToast(`审批失败：${error.message}`, "error");
     } finally {
-      setActionBusy(event.currentTarget, false);
+      setActionBusy(actionButton, false);
     }
   });
   host.querySelector("[data-photo-guided-trial]")?.addEventListener("click", async (event) => {
-    setActionBusy(event.currentTarget, true);
+    const actionButton = event.currentTarget;
+    setActionBusy(actionButton, true);
     try {
       const text = host.querySelector('[name="trial_text"]')?.value || "";
       const compiled = await reviewGuidedPhotoReference(root);
@@ -25457,7 +25459,7 @@ function renderGuidedPhotoReferenceEditor() {
     } catch (error) {
       showToast(`试跑失败：${error.message}`, "error");
     } finally {
-      setActionBusy(event.currentTarget, false);
+      setActionBusy(actionButton, false);
     }
   });
   updateGuidedPhotoReferenceQuestionVisibility(root);
@@ -26818,6 +26820,7 @@ function bindPhotoReferenceManagerActions() {
   manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    const submitButton = event.submitter || form.querySelector('button[type="submit"]');
     const source = String(form.elements.source?.value || "").trim();
     const note = String(form.elements.note?.value || "").trim();
     const items = photoReferenceManagerItems();
@@ -26845,7 +26848,7 @@ function bindPhotoReferenceManagerActions() {
       showToast("请选择图中的穿搭类型，或选择“不参考这张图里的穿搭”", "error");
       return;
     }
-    setActionBusy(event.submitter, true);
+    setActionBusy(submitButton, true);
     try {
       const compiled = await reviewGuidedPhotoReference(
         form.querySelector("[data-photo-reference-guided-editor]"),
@@ -26878,7 +26881,7 @@ function bindPhotoReferenceManagerActions() {
     } catch (error) {
       showToast(`配置失败：${error.message}`, "error");
     } finally {
-      setActionBusy(event.submitter, false);
+      setActionBusy(submitButton, false);
     }
   });
   manager.querySelectorAll("[data-photo-reference-move]").forEach((button) => {
