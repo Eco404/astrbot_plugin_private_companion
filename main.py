@@ -302,6 +302,7 @@ from .plugin_bootstrap import (
 from .daily_state import DailyStateMixin
 from .daily_review import DailyReviewMixin
 from .scene_context import SceneContextMixin
+from .game_integration import GameIntegrationMixin
 from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
 from .llm_tool_actions import LlmToolActionsMixin, PHOTO_TOOL_SILENT_SENTINEL
@@ -346,6 +347,10 @@ class PrivateCompanionExtensionAPI:
 
     def list_proactive_abilities(self) -> list[dict[str, Any]]:
         return self._plugin.external_proactive_abilities()
+
+    async def record_game_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply one idempotent, per-user game event to companion afterglow."""
+        return await self._plugin._record_external_game_event(payload)
 
     def get_realtime_voice_config(self) -> dict[str, Any]:
         """Expose the active companion voice language to realtime plugins."""
@@ -1236,6 +1241,7 @@ class PrivateCompanionPlugin(
     CreativeMixin,
     ProactiveMixin,
     ProactiveEngineMixin,
+    GameIntegrationMixin,
     SceneContextMixin,
     ProactiveMessageMixin,
     DailyStateMixin,

@@ -652,6 +652,7 @@ API 提供：
 - 登记通话、共同观影等外部活动，临时协调普通主动消息。
 - 为 Proactive Chat 执行预检、复核、发送结算和取消。
 - 为历史聊天导入解析稳定身份，并暂存/回滚关系观察。
+- 接收幂等的结构化游戏事件，让人格决定胜负余韵、连胜连败上限与持续时间。
 
 注册外部主动能力示例：
 
@@ -686,6 +687,26 @@ if api:
         "executor": my_executor,
     })
 ~~~
+
+外部主动能力还可提供同步 `availability(ctx)` 回调；返回 false 时，该能力不会进入当前用户的主动动作候选。`ctx` 包含 `user/config/plugin`，回调只适合做快速、无副作用的本地检查。能力冷却按用户分别记录；缺少用户上下文时才回退到全局执行时间。
+
+游戏插件可以在每局结束或用户申请再来一局时上报事件：
+
+~~~python
+if api:
+    result = await api.record_game_event({
+        "event_id": "room-1:gomoku:3:10001",
+        "event_type": "round_finished",
+        "user_id": "10001",
+        "game": "gomoku",
+        "game_label": "五子棋",
+        "bot_result": "bot_loss",
+        "round_number": 3,
+        "source_plugin": "astrbot_plugin_game_companion",
+    })
+~~~
+
+游戏余韵独立于用户伤害、拒绝和关系分数；它只影响后续语气、相关话题承接和是否想再次邀请游戏。
 
 执行器可以返回字符串，也可以返回字典。字典可使用 <code>ok/success</code>、<code>context</code>、<code>summary</code>、<code>text</code>、<code>image_path</code>、<code>extra_components</code>、<code>memory</code> 和 <code>status</code>。
 

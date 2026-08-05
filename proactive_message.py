@@ -6377,7 +6377,12 @@ Output:
                 result = await result
         except Exception as exc:
             logger.warning("[PrivateCompanion] 外部主动能力执行失败: %s: %s", name, exc, exc_info=True)
-            self._note_external_ability_execution(name, success=False, status=f"执行失败: {exc}")
+            self._note_external_ability_execution(
+                name,
+                user=user,
+                success=False,
+                status=f"执行失败: {exc}",
+            )
             return {"success": False, "context": f"external:{name}：执行失败", "extra_components": [], "summary": "外部能力失败", "effective_action": f"external:{name}"}
         payload = result if isinstance(result, dict) else {"text": str(result or "")}
         success = bool(payload.get("ok", payload.get("success", True)))
@@ -6408,7 +6413,13 @@ Output:
                 user["external_proactive_memory"] = memories
             memories.append({"name": name, "ts": _now_ts(), "memory": memory})
             del memories[:-12]
-        self._note_external_ability_execution(name, success=success, status=_single_line(payload.get("status") or context, 120), summary=_single_line(payload.get("summary") or text, 120))
+        self._note_external_ability_execution(
+            name,
+            user=user,
+            success=success,
+            status=_single_line(payload.get("status") or context, 120),
+            summary=_single_line(payload.get("summary") or text, 120),
+        )
         return {
             "success": success,
             "context": f"external:{name}：{context or '外部能力已执行'}",
@@ -6417,16 +6428,31 @@ Output:
             "effective_action": f"external:{name}",
         }
 
-    def _note_external_ability_execution(self, name: str, *, success: bool, status: str = "", summary: str = "") -> None:
+    def _note_external_ability_execution(
+        self,
+        name: str,
+        *,
+        user: dict[str, Any] | None = None,
+        success: bool,
+        status: str = "",
+        summary: str = "",
+    ) -> None:
         try:
             store = self._external_ability_store()
             item = store.get(name) if isinstance(store.get(name), dict) else {"name": name}
-            item["last_executed_ts"] = _now_ts()
+            executed_at = _now_ts()
+            item["last_executed_ts"] = executed_at
             item["last_status"] = status
             item["last_summary"] = summary
             item["success_count"] = _safe_int(item.get("success_count"), 0, 0) + (1 if success else 0)
             item["failure_count"] = _safe_int(item.get("failure_count"), 0, 0) + (0 if success else 1)
             store[name] = item
+            if isinstance(user, dict):
+                user_last = user.setdefault("external_proactive_ability_last", {})
+                if not isinstance(user_last, dict):
+                    user_last = {}
+                    user["external_proactive_ability_last"] = user_last
+                user_last[name] = executed_at
             self._save_data_sync()
         except Exception:
             pass
