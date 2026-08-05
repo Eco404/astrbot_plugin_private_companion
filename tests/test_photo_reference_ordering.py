@@ -165,6 +165,7 @@ class _ToolPhotoHarness(LlmToolActionsMixin):
     def __init__(self, image_path: str):
         self.image_path = image_path
         self.generation_kwargs: dict[str, object] = {}
+        self.generation_calls = 0
         self.reference_fallback_message = ""
         self.delivered_caption = ""
         self.context_reference_images: list[tuple[str, str]] = []
@@ -178,6 +179,7 @@ class _ToolPhotoHarness(LlmToolActionsMixin):
         return str(kwargs.get("prompt") or "")
 
     async def _generate_photo_image_result(self, **kwargs):
+        self.generation_calls += 1
         self.generation_kwargs = dict(kwargs)
         return types.SimpleNamespace(
             backend="test",
@@ -791,7 +793,12 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
                 path.write_bytes(b"png")
             harness = _ToolPhotoHarness(str(output))
 
-            await harness._pc_generate_photo_impl(
+            async def resolve(source, **_kwargs):
+                return str(source) if source in {str(first), str(second)} else ""
+
+            harness._photo_reference_source_to_stable_path = resolve
+
+            payload = await harness._pc_generate_photo_impl(
                 _ToolEvent(),
                 prompt="用第一张的脸，第二张的衣服",
                 kind="selfie",
@@ -799,13 +806,16 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
                 send=False,
             )
 
+        result = __import__("json").loads(payload)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(harness.generation_calls, 1)
         self.assertEqual(harness.generation_kwargs["reference_image_path"], str(first))
         self.assertEqual(
             harness.generation_kwargs["reference_image_paths"],
             [str(first), str(second)],
         )
 
-    async def test_tool_does_not_reject_all_references_when_one_path_is_missing(self) -> None:
+    async def test_tool_rejects_all_references_when_one_path_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             output = root / "output.png"
@@ -814,6 +824,11 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
             output.write_bytes(b"png")
             outfit.write_bytes(b"png")
             harness = _ToolPhotoHarness(str(output))
+
+            async def resolve(source, **_kwargs):
+                return str(outfit) if source == str(outfit) else ""
+
+            harness._photo_reference_source_to_stable_path = resolve
 
             payload = await harness._pc_generate_photo_impl(
                 _ToolEvent(),
@@ -824,13 +839,18 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         result = __import__("json").loads(payload)
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(
-            harness.generation_kwargs["reference_image_paths"],
-            [str(missing), str(outfit)],
-        )
+        self.assertEqual(result["status"], "invalid_reference")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["generated"])
+        self.assertFalse(result["sent"])
+        self.assertTrue(result["must_not_claim_sent"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(harness.generation_calls, 0)
+        self.assertEqual(harness.generation_kwargs, {})
+        self.assertNotIn(str(missing), payload)
+        self.assertNotIn(str(outfit), payload)
 
-    async def test_tool_continues_after_one_reference_resolver_raises(self) -> None:
+    async def test_tool_rejects_all_references_when_one_resolver_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             output = root / "output.png"
@@ -855,11 +875,16 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         result = __import__("json").loads(payload)
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(
-            harness.generation_kwargs["reference_image_paths"],
-            [str(broken), str(outfit)],
-        )
+        self.assertEqual(result["status"], "invalid_reference")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["generated"])
+        self.assertFalse(result["sent"])
+        self.assertTrue(result["must_not_claim_sent"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(harness.generation_calls, 0)
+        self.assertEqual(harness.generation_kwargs, {})
+        self.assertNotIn(str(broken), payload)
+        self.assertNotIn(str(outfit), payload)
 
     async def test_tool_collects_multiple_context_images_for_indexed_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
