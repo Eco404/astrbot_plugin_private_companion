@@ -26729,8 +26729,8 @@ function bindPhotoReferenceManagerActions() {
   });
   manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const submitButton = event.submitter;
     const form = event.currentTarget;
+    const submitButton = event.submitter || form.querySelector('button[type="submit"]');
     const source = String(form.elements.source?.value || "").trim();
     const note = String(form.elements.note?.value || "").trim();
     const items = photoReferenceManagerItems();

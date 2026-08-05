@@ -248,7 +248,10 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         add_start = APP_JS.index('data-photo-reference-add-form]')
         add_end = APP_JS.index('data-photo-reference-move]', add_start)
         add_handler = APP_JS[add_start:add_end]
-        self.assertIn("const submitButton = event.submitter;", add_handler)
+        self.assertIn(
+            'const submitButton = event.submitter || form.querySelector(\'button[type="submit"]\');',
+            add_handler,
+        )
         self.assertIn("setActionBusy(submitButton, true);", add_handler)
         self.assertIn("setActionBusy(submitButton, false);", add_handler)
 
@@ -359,7 +362,7 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('app.css?v=20260804-reference-guided-dialog-v6', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
         self.assertIn(
-            'app.js?v=20260805-reference-guided-busy-release-v1',
+            'app.js?v=20260806-reference-guided-busy-release-v2',
             INDEX_HTML,
         )
 

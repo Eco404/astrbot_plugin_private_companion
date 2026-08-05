@@ -815,6 +815,7 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
         selected = await harness._select_photo_reference_candidate_async(
             "selfie",
             request_text="重新拍一张",
+            continuity_key="legacy-session-key",
         )
 
         self.assertEqual(selected["id"], "persona")

@@ -13053,6 +13053,7 @@ Output:
         schedule_history_context: str = "",
         selection_context: str = "",
         suggested_scene_preset: str = "",
+        continuity_key: str = "",
         wardrobe_intent: PhotoWardrobeIntent | None = None,
         trace_id: str = "",
         candidate_overrides: Any = None,
@@ -14193,6 +14194,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         ambient_context: str = "",
         selection_context: str = "",
         suggested_scene_preset: str = "",
+        continuity_key: str = "",
     ) -> str:
         selected = await self._select_photo_reference_candidate_async(
             workflow_kind,
@@ -14201,6 +14203,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             ambient_context=ambient_context,
             selection_context=selection_context,
             suggested_scene_preset=suggested_scene_preset,
+            continuity_key=continuity_key,
         )
         return str(selected.get("path") or "") if selected else ""
 
@@ -14263,6 +14266,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         ambient_context: str = "",
         selection_context: str = "",
         suggested_scene_preset: str = "",
+        continuity_key: str = "",
     ) -> str:
         return await self._select_photo_reference_image_async(
             workflow_kind,
@@ -14271,6 +14275,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             ambient_context=ambient_context,
             selection_context=selection_context,
             suggested_scene_preset=suggested_scene_preset,
+            continuity_key=continuity_key,
         )
 
     async def _run_comfyui_photo_workflow(
