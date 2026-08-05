@@ -6380,10 +6380,69 @@ Output:
         display_name: str,
         reason: str,
     ) -> dict[str, Any]:
+        user = user if isinstance(user, dict) else {}
         name = self._normalize_external_ability_name(ability_name)
         runtime = self._external_proactive_abilities.get(name)
         if not isinstance(runtime, dict) or not callable(runtime.get("executor")):
             return {"success": False, "context": "external：外部主动能力未注册或不可用", "extra_components": [], "summary": "外部能力不可用", "effective_action": "message"}
+        user_key = _single_line(
+            user.get("user_id") or user.get("id") or user.get("umo"),
+            180,
+        ) or "global"
+        lock_key = f"{name}:{user_key}"
+        locks = getattr(self, "_external_ability_execution_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._external_ability_execution_locks = locks
+        lock = locks.get(lock_key)
+        if not isinstance(lock, asyncio.Lock):
+            if len(locks) >= 512:
+                for old_key, old_lock in list(locks.items()):
+                    if isinstance(old_lock, asyncio.Lock) and not old_lock.locked():
+                        locks.pop(old_key, None)
+                    if len(locks) < 384:
+                        break
+            lock = asyncio.Lock()
+            locks[lock_key] = lock
+        async with lock:
+            runtime = self._external_proactive_abilities.get(name)
+            if not isinstance(runtime, dict) or not callable(runtime.get("executor")):
+                return {
+                    "success": False,
+                    "context": "external：外部主动能力未注册或不可用",
+                    "extra_components": [],
+                    "summary": "外部能力不可用",
+                    "effective_action": "message",
+                }
+            return await self._execute_external_proactive_ability_locked(
+                name,
+                runtime,
+                user,
+                display_name,
+                reason,
+            )
+
+    async def _execute_external_proactive_ability_locked(
+        self,
+        name: str,
+        runtime: dict[str, Any],
+        user: dict[str, Any],
+        display_name: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        available = {
+            self._normalize_external_ability_name(item.get("name"))
+            for item in self._available_external_proactive_abilities(user)
+            if isinstance(item, dict)
+        }
+        if name not in available:
+            return {
+                "success": False,
+                "context": f"external:{name}：当前不可用或仍在冷却",
+                "extra_components": [],
+                "summary": "外部能力暂不可用",
+                "effective_action": "message",
+            }
         config = self._external_ability_config(name)
         call_context = {
             "user": dict(user or {}),
@@ -6401,7 +6460,12 @@ Output:
                 result = await result
         except Exception as exc:
             logger.warning("[PrivateCompanion] 外部主动能力执行失败: %s: %s", name, exc, exc_info=True)
-            self._note_external_ability_execution(name, success=False, status=f"执行失败: {exc}")
+            self._note_external_ability_execution(
+                name,
+                user=user,
+                success=False,
+                status=f"执行失败: {exc}",
+            )
             return {"success": False, "context": f"external:{name}：执行失败", "extra_components": [], "summary": "外部能力失败", "effective_action": f"external:{name}"}
         payload = result if isinstance(result, dict) else {"text": str(result or "")}
         success = bool(payload.get("ok", payload.get("success", True)))
@@ -6432,7 +6496,13 @@ Output:
                 user["external_proactive_memory"] = memories
             memories.append({"name": name, "ts": _now_ts(), "memory": memory})
             del memories[:-12]
-        self._note_external_ability_execution(name, success=success, status=_single_line(payload.get("status") or context, 120), summary=_single_line(payload.get("summary") or text, 120))
+        self._note_external_ability_execution(
+            name,
+            user=user,
+            success=success,
+            status=_single_line(payload.get("status") or context, 120),
+            summary=_single_line(payload.get("summary") or text, 120),
+        )
         return {
             "success": success,
             "context": f"external:{name}：{context or '外部能力已执行'}",
@@ -6441,16 +6511,31 @@ Output:
             "effective_action": f"external:{name}",
         }
 
-    def _note_external_ability_execution(self, name: str, *, success: bool, status: str = "", summary: str = "") -> None:
+    def _note_external_ability_execution(
+        self,
+        name: str,
+        *,
+        user: dict[str, Any] | None = None,
+        success: bool,
+        status: str = "",
+        summary: str = "",
+    ) -> None:
         try:
             store = self._external_ability_store()
             item = store.get(name) if isinstance(store.get(name), dict) else {"name": name}
-            item["last_executed_ts"] = _now_ts()
+            executed_at = _now_ts()
+            item["last_executed_ts"] = executed_at
             item["last_status"] = status
             item["last_summary"] = summary
             item["success_count"] = _safe_int(item.get("success_count"), 0, 0) + (1 if success else 0)
             item["failure_count"] = _safe_int(item.get("failure_count"), 0, 0) + (0 if success else 1)
             store[name] = item
+            if isinstance(user, dict):
+                user_last = user.setdefault("external_proactive_ability_last", {})
+                if not isinstance(user_last, dict):
+                    user_last = {}
+                    user["external_proactive_ability_last"] = user_last
+                user_last[name] = executed_at
             self._save_data_sync()
         except Exception:
             pass

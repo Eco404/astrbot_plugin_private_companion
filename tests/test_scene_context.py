@@ -158,7 +158,7 @@ class SceneContextTests(unittest.IsolatedAsyncioTestCase):
             now=datetime(2026, 7, 19, 16, 20, tzinfo=timezone.utc),
         )
 
-        self.assertEqual(1, snapshot["version"])
+        self.assertEqual(2, snapshot["version"])
         self.assertEqual("下午", snapshot["daypart"])
         self.assertIn("整理今天的笔记", snapshot["schedule"]["text"])
         self.assertEqual("学校", snapshot["location"]["text"])

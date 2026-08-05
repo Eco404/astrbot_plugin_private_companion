@@ -8097,6 +8097,11 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         recent = self._format_recent_passive_topics_hint(user)
         if recent:
             lines.append("刚用过的切口：\n" + recent)
+        afterglow_formatter = getattr(self, "_format_game_afterglow_prompt", None)
+        if callable(afterglow_formatter):
+            afterglow = _single_line(afterglow_formatter(user), 520)
+            if afterglow:
+                lines.append(afterglow)
         return "\n".join(lines)
 
     def _cleanup_recent_passive_topics(self, user: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:

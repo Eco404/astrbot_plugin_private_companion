@@ -10,6 +10,7 @@ import gc
 import hashlib
 import html
 import importlib
+import inspect
 import json
 import math
 import os
@@ -5021,6 +5022,7 @@ class ProactiveEngineMixin:
             return False
         name = self._normalize_external_ability_name(spec.get("name"))
         executor = spec.get("executor")
+        availability = spec.get("availability")
         if not name or not callable(executor):
             logger.warning("[PrivateCompanion] 外部主动能力注册失败: name/executor 无效")
             return False
@@ -5040,7 +5042,11 @@ class ProactiveEngineMixin:
             "config_schema": deepcopy(config_schema),
             "default_config": deepcopy(default_config),
         }
-        self._external_proactive_abilities[name] = {**meta, "executor": executor}
+        self._external_proactive_abilities[name] = {
+            **meta,
+            "executor": executor,
+            "availability": availability if callable(availability) else None,
+        }
         try:
             store = self._external_ability_store()
             item = store.get(name) if isinstance(store.get(name), dict) else {}
@@ -5092,7 +5098,14 @@ class ProactiveEngineMixin:
         for name in names:
             runtime = self._external_proactive_abilities.get(name, {})
             stored = store.get(name) if isinstance(store.get(name), dict) else {}
-            merged = {**{k: v for k, v in runtime.items() if k != "executor"}, **stored}
+            merged = {
+                **{
+                    k: v
+                    for k, v in runtime.items()
+                    if k not in {"executor", "availability"}
+                },
+                **stored,
+            }
             merged["name"] = name
             merged["available"] = callable(runtime.get("executor"))
             merged["registered"] = bool(runtime)
@@ -5117,14 +5130,57 @@ class ProactiveEngineMixin:
     def _available_external_proactive_abilities(self, user: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         now = _now_ts()
         items: list[dict[str, Any]] = []
+        has_user_context = bool(
+            isinstance(user, dict)
+            and _single_line(
+                user.get("user_id") or user.get("id") or user.get("umo"),
+                180,
+            )
+        )
         for item in self.external_proactive_abilities():
             name = str(item.get("name") or "")
             if not name or not item.get("enabled") or not item.get("available"):
                 continue
-            last = _safe_float(item.get("last_executed_ts"), 0)
+            user_last = (
+                user.get("external_proactive_ability_last")
+                if isinstance(user, dict)
+                and isinstance(user.get("external_proactive_ability_last"), dict)
+                else {}
+            )
+            last = _safe_float(
+                user_last.get(name, 0)
+                if has_user_context and isinstance(user_last, dict)
+                else item.get("last_executed_ts"),
+                0,
+            )
             cooldown = _safe_float(item.get("min_interval_hours"), 0) * 3600
             if cooldown > 0 and last > 0 and now - last < cooldown:
                 continue
+            runtime = self._external_proactive_abilities.get(name, {})
+            availability = runtime.get("availability") if isinstance(runtime, dict) else None
+            if callable(availability):
+                try:
+                    allowed = availability(
+                        {
+                            "user": dict(user or {}),
+                            "config": self._external_ability_config(name),
+                            "plugin": self,
+                        }
+                    )
+                    if inspect.isawaitable(allowed):
+                        closer = getattr(allowed, "close", None)
+                        if callable(closer):
+                            closer()
+                        continue
+                    if not bool(allowed):
+                        continue
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 外部主动能力可用性检查失败: %s: %s",
+                        name,
+                        _single_line(exc, 120),
+                    )
+                    continue
             items.append(item)
         return items
 
@@ -7811,8 +7867,15 @@ class ProactiveEngineMixin:
                 return False
             if part == "jm_cosmos_read" and not self._jm_cosmos_read_available(user):
                 return False
-            if part.startswith("external:") and not self._external_ability_enabled(part.split(":", 1)[1]):
-                return False
+            if part.startswith("external:"):
+                external_name = self._normalize_external_ability_name(part.split(":", 1)[1])
+                available_external = {
+                    self._normalize_external_ability_name(item.get("name"))
+                    for item in self._available_external_proactive_abilities(user)
+                    if isinstance(item, dict)
+                }
+                if external_name not in available_external:
+                    return False
         return True
 
     def _fallback_action_for_unavailable(self, action: str, user: dict[str, Any] | None = None) -> str:

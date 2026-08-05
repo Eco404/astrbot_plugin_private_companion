@@ -714,6 +714,7 @@ class TokenBudgetMixin:
             "voice_repair",
             "yesterday_summary",
             "worldbook_registration",
+            "game_emotional_afterglow",
         }
         return task_key in low_priority_tasks
 

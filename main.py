@@ -337,6 +337,7 @@ from .daily_state import DailyStateMixin
 from .agenda_runtime import AgendaRuntimeMixin
 from .daily_review import DailyReviewMixin
 from .scene_context import SceneContextMixin
+from .game_integration import GameIntegrationMixin
 from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
 from .llm_tool_actions import LlmToolActionsMixin, PHOTO_TOOL_SILENT_SENTINEL
@@ -416,6 +417,10 @@ class PrivateCompanionExtensionAPI:
 
     def list_proactive_abilities(self) -> list[dict[str, Any]]:
         return self._plugin.external_proactive_abilities()
+
+    async def record_game_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply one idempotent, per-user game event to companion afterglow."""
+        return await self._plugin._record_external_game_event(payload)
 
     def get_realtime_voice_config(self) -> dict[str, Any]:
         """Expose the active companion voice language to realtime plugins."""
@@ -1334,6 +1339,7 @@ class PrivateCompanionPlugin(
     CreativeMixin,
     ProactiveMixin,
     ProactiveEngineMixin,
+    GameIntegrationMixin,
     SceneContextMixin,
     ProactiveMessageMixin,
     DailyStateMixin,
@@ -7980,6 +7986,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current_user_id = _single_line(current_user.get("user_id") or event.get_sender_id(), 80)
             except Exception:
                 current_user_id = _single_line(current_user.get("user_id"), 80)
+        prompt_user = current_user
+        current_umo = _single_line(getattr(event, "unified_msg_origin", ""), 220)
+        if current_umo:
+            prompt_user = dict(current_user)
+            prompt_user["_game_current_umo"] = current_umo
 
         current_state_memory_needed = bool(
             re.search(
@@ -8071,7 +8082,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 timeout=min(1.4, max(0.3, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2))),
                 metadata={"范围": "当前私聊会话", "触发": "记忆线索"},
             )
-        add_spec("companion.planner", "companion", 80, lambda: self._format_companion_planner_injection(current_user))
+        add_spec("companion.planner", "companion", 80, lambda: self._format_companion_planner_injection(prompt_user))
         if not self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
             add_spec("livingmemory.guidance", "livingmemory", 90, lambda: self._format_livingmemory_guidance(scope="private" if is_private_chat else "group"))
         add_spec("detail.injection", "daily_detail", 40, self._format_detail_injection)

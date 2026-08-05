@@ -652,6 +652,7 @@ API 提供：
 - 登记通话、共同观影等外部活动，临时协调普通主动消息。
 - 为 Proactive Chat 执行预检、复核、发送结算和取消。
 - 为历史聊天导入解析稳定身份，并暂存/回滚关系观察。
+- 接收幂等的结构化游戏事件，让人格决定胜负余韵、连胜连败上限与持续时间。
 
 注册外部主动能力示例：
 
@@ -686,6 +687,32 @@ if api:
         "executor": my_executor,
     })
 ~~~
+
+外部主动能力还可提供同步 `availability(ctx)` 回调；返回 false 时，该能力不会进入当前用户的主动动作候选。`ctx` 包含 `user/config/plugin`，回调只适合做快速、无副作用的本地检查。能力冷却按用户分别记录；上下文缺少稳定的 `user_id`、`id` 或 `umo` 时回退到全局执行时间。
+
+游戏插件可以在每局结束或用户申请再来一局时上报事件：
+
+~~~python
+if api:
+    result = await api.record_game_event({
+        "event_id": "room-1:gomoku:3:10001",
+        "event_type": "round_finished",
+        "user_id": "10001",
+        "game": "gomoku",
+        "game_label": "五子棋",
+        "bot_result": "bot_loss",
+        "scope": "group",
+        "room_id": "123456789",
+        "session_id": "default:GroupMessage:123456789",
+        "match_id": "room-1:gomoku:match-7",
+        "round_number": 3,
+        "source_plugin": "astrbot_plugin_game_companion",
+    })
+~~~
+
+`event_id` 应对每个真实事件保持唯一，重复上报同一 ID 不会再次结算；未提供时会根据稳定事件字段生成，但连续轮次仍建议由游戏插件显式传入。若提供 `round_number`，建议同时提供一局内稳定、换局后变化的 `match_id`，插件只会在同一 `match_id` 内判断回合乱序；不提供时仍按事件 ID 和发生时间去重、排序。群聊事件需要提供 `room_id` 或群聊 `session_id`，私聊建议提供 `session_id`；插件会按人格、私聊/群聊、会话和游戏分别保存，避免余韵串到其它窗口。多人格模式还可传入已启用的 `persona_id`，省略时优先使用会话绑定人格。
+
+游戏余韵独立于用户伤害、拒绝和关系分数；它只影响后续语气、相关话题承接和是否想再次邀请游戏。过期状态会停止注入，长期未使用的 scope 会在宽松保留期后自动清理。
 
 执行器可以返回字符串，也可以返回字典。字典可使用 <code>ok/success</code>、<code>context</code>、<code>summary</code>、<code>text</code>、<code>image_path</code>、<code>extra_components</code>、<code>memory</code> 和 <code>status</code>。
 
