@@ -5364,16 +5364,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         self,
         event: AstrMessageEvent,
         user_id: str = "",
+        target_scope: str = "",
+        target_uin: str = "",
         pos: int = 0,
         like: bool = False,
         reply: bool = False,
         selector: str = "",
         fid: str = "",
     ) -> str:
-        """查看某位用户 QQ 空间说说,可按需点赞或评论。
+        """查看指定归属的 QQ 空间说说,可按需点赞或评论。
 
         Args:
-            user_id(string): 可选,要查看的 QQ 号；留空时默认查看当前配置账号。
+            user_id(string): 兼容旧调用的明确 QQ 号；不能再作为省略目标时的默认值。
+            target_scope(string): 归属之一：bot_self、current_user、explicit_uin。除兼容旧调用的明确 user_id 外，必须提供；无法确认时不要调用工具。
+            target_uin(string): target_scope=explicit_uin 时要查看的 QQ 号；可用 user_id 兼容旧调用。
             pos(number): 可选,说说位置,0 表示最新一条。
             like(boolean): 可选,是否给该条说说点赞。
             reply(boolean): 可选,是否按工具内部规则尝试评论。
@@ -5382,7 +5386,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """
         if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
-        return await self._pc_qzone_view_feed_impl(event, user_id=user_id, pos=pos, like=like, reply=reply, selector=selector, fid=fid)
+        return await self._pc_qzone_view_feed_impl(
+            event,
+            user_id=user_id,
+            target_scope=target_scope,
+            target_uin=target_uin,
+            pos=pos,
+            like=like,
+            reply=reply,
+            selector=selector,
+            fid=fid,
+        )
 
     @filter.llm_tool(name="pc_qzone_publish_feed")
     @_multi_persona_event_context
