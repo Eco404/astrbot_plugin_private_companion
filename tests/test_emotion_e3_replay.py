@@ -28,9 +28,9 @@ EVENT_BANDS = {
 
 
 class EmotionE3ReplayTests(unittest.TestCase):
-    def test_sixty_case_matrix_is_deterministic_and_safe(self) -> None:
+    def test_120_case_matrix_is_deterministic_and_safe(self) -> None:
         cases = build_emotion_eval_cases()
-        self.assertEqual(60, len(cases))
+        self.assertEqual(120, len(cases))
         self.assertEqual(emotion_eval_fingerprint(), emotion_eval_fingerprint())
         for case in cases:
             event_data = case["event"]

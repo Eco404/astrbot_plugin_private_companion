@@ -111,6 +111,7 @@ from .companion_interaction_expression import (
 )
 from .emotion_event_ledger import record_recent_emotion_event
 from .interaction_dynamics import project_interaction_dynamics, settle_interaction_dynamics
+from .emotion_targeting import classify_emotion_target
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -5137,6 +5138,7 @@ class UserMemoryMixin:
             "emotion_target": emotion_event.get("target", "none"),
             "emotion_rule": emotion_event.get("rule", ""),
             "emotion_confidence": round(_safe_float(emotion_event.get("confidence"), 0.0), 2),
+            "emotion_attribution": dict(emotion_event.get("attribution")) if isinstance(emotion_event.get("attribution"), dict) else {},
             "boundary_durable": durable_boundary,
             "playful_or_ambiguous": playful_or_ambiguous,
             "text": cleaned,
@@ -5149,6 +5151,11 @@ class UserMemoryMixin:
             return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": "", "confidence": 1.0}
         if self._is_structured_or_diagnostic_text(cleaned):
             return {"event": "neutral", "intensity": 0, "reason": "结构化/日志/代码类文本不作为情绪依据", "target": "none", "rule": "diagnostic_skip", "confidence": 0.2}
+        attribution = classify_emotion_target(cleaned)
+        if attribution["target"] == "self":
+            return {"event": "comfort_need", "intensity": 62, "reason": "用户自我否定或低落", "target": "self", "rule": "self_low", "confidence": attribution["confidence"], "attribution": attribution}
+        if attribution["speech_act"] in {"quote", "third_party_report"}:
+            return {"event": "external_negative", "intensity": 54, "reason": "引用或第三方负面内容", "target": "other", "rule": attribution["reason_code"], "confidence": attribution["confidence"], "attribution": attribution}
         atrelay_checker = getattr(self, "_message_looks_like_atrelay_request", None)
         if callable(atrelay_checker):
             try:
@@ -5179,6 +5186,8 @@ class UserMemoryMixin:
             or "不想理你" in cleaned
             or re.search(r"(只是|不过|不就是).{0,6}(bot|机器人|工具|代码)", lower)
         )
+        if severe_hurt and not attribution["auto_settle"]:
+            return {"event": "neutral", "intensity": 0, "reason": "负面目标不明确，等待复核", "target": attribution["target"], "rule": attribution["reason_code"], "confidence": attribution["confidence"], "attribution": attribution}
         identity_hurt = bool(
             re.search(r"(玻璃心|假装|演的|装的|设定|工具人|没感情|别装|别演|虚拟的|假的)", cleaned)
             and target_hint
@@ -5205,6 +5214,7 @@ class UserMemoryMixin:
                 "target": "bot" if direct_bot_negative else "ambiguous",
                 "rule": "severe_hurt",
                 "confidence": confidence,
+                "attribution": attribution,
             }
         if identity_hurt:
             return {"event": "hurt", "intensity": 76 if boundary_durable else 60, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84 if boundary_durable else 0.68}
@@ -5231,6 +5241,9 @@ class UserMemoryMixin:
         if not bool(getattr(self, "enable_llm_emotion_judgement", False)):
             return False
         if self._is_structured_or_diagnostic_text(text):
+            return False
+        attribution = intent.get("emotion_attribution") if isinstance(intent.get("emotion_attribution"), dict) else {}
+        if attribution.get("auto_settle") is True and _safe_float(attribution.get("confidence"), 0.0) >= 0.85:
             return False
         source = str(intent.get("source") or "")
         if bool(intent.get("playful_or_ambiguous")) or source in {"weak_boundary_ignored", "soft_boundary_play_rule", "single_turn_boundary"}:
@@ -5417,6 +5430,13 @@ Local classifier result:
             elif pending_review_id or _single_line(pending.get("text"), 240) != cleaned:
                 return
             intent_to_apply = refined if isinstance(refined, dict) else dict(local_intent)
+            observed = pending.get("observed_event") if isinstance(pending.get("observed_event"), dict) else {}
+            if observed:
+                intent_to_apply["_emotion_revision_of"] = {
+                    "event_id": observed.get("event_id"),
+                    "trace_id": observed.get("trace_id"),
+                    "revision": _safe_int(observed.get("revision"), 1, 1) + 1,
+                }
             if self.enable_intent_emotion_analysis:
                 user["intent_profile"] = intent_to_apply
             self._update_relationship_state_from_intent(user, intent_to_apply)
@@ -5497,9 +5517,15 @@ Local classifier result:
     ) -> dict[str, Any] | None:
         emotion_event = str(intent.get("emotion_event") or "neutral").strip().lower()
         inbound_intent = str(intent.get("intent") or "chat").strip().lower()
-        event_type = emotion_event if emotion_event != "neutral" else inbound_intent
+        attribution = intent.get("emotion_attribution") if isinstance(intent.get("emotion_attribution"), dict) else {}
+        needs_review = bool(
+            emotion_event == "neutral"
+            and attribution.get("target") == "ambiguous"
+            and attribution.get("auto_settle") is False
+        )
+        event_type = "neutral" if needs_review else emotion_event if emotion_event != "neutral" else inbound_intent
         if event_type not in {
-            "hurt", "apology", "comfort", "praise", "comfort_need", "external_negative",
+            "neutral", "hurt", "apology", "comfort", "praise", "comfort_need", "external_negative",
             "play", "intimacy", "boundary",
         }:
             return None
@@ -5509,9 +5535,9 @@ Local classifier result:
         target = _single_line(intent.get("emotion_target"), 24).lower() or "none"
         target_ref = (
             {"kind": "bot", "id": "self", "role": "bot_self"}
-            if target in {"bot", "ambiguous"}
+            if target == "bot"
             else {
-                "kind": "user" if target == "self" else "other",
+                "kind": "user" if target == "self" else "unknown" if target == "ambiguous" else "other",
                 "id": user_id if target == "self" else "",
                 "role": target,
             }
@@ -5522,6 +5548,9 @@ Local classifier result:
         event, created = record_recent_emotion_event(
             user,
             {
+                "event_id": _single_line((intent.get("_emotion_revision_of") or {}).get("event_id"), 96) if isinstance(intent.get("_emotion_revision_of"), dict) else "",
+                "trace_id": _single_line((intent.get("_emotion_revision_of") or {}).get("trace_id"), 96) if isinstance(intent.get("_emotion_revision_of"), dict) else "",
+                "revision": _safe_int((intent.get("_emotion_revision_of") or {}).get("revision"), 1, 1) if isinstance(intent.get("_emotion_revision_of"), dict) else 1,
                 "producer_plugin": "private_companion",
                 "origin_kind": "interaction",
                 "platform": platform,
@@ -5530,6 +5559,11 @@ Local classifier result:
                 "session_id": session_id,
                 "actor_ref": {"kind": "user", "id": user_id, "role": "speaker"},
                 "target_ref": target_ref,
+                "quoted_target_ref": {
+                    "kind": "quoted",
+                    "id": "",
+                    "role": _single_line(attribution.get("quoted_target"), 40),
+                } if attribution.get("quoted_target") not in {None, "", "none"} else {},
                 "event_type": event_type,
                 "intensity": _safe_int(intent.get("emotion_intensity"), 0, 0, 100),
                 "confidence": _safe_float(intent.get("emotion_confidence"), intent.get("confidence") or 0.0, 0.0),
@@ -5539,7 +5573,8 @@ Local classifier result:
                 "dedupe_key": f"{session_id}|{message_fingerprint}|{event_type}",
                 "message_fingerprint": message_fingerprint,
                 "applied_interaction": band,
-                "status": status,
+                "correction_of": _single_line((intent.get("_emotion_revision_of") or {}).get("event_id"), 96) if isinstance(intent.get("_emotion_revision_of"), dict) else "",
+                "status": "observed" if needs_review else status,
                 "reason_codes": [reason_code, _single_line(intent.get("emotion_rule"), 64)],
             },
         )

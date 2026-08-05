@@ -18,6 +18,16 @@ EVENT_TEMPLATES = (
     {"key": "intimacy", "event_type": "intimacy", "intensity": 55, "confidence": 0.80, "target": "bot"},
     {"key": "boundary", "event_type": "boundary", "intensity": 80, "confidence": 0.90, "target": "bot"},
     {"key": "neutral", "event_type": "neutral", "intensity": 0, "confidence": 0.95, "target": "none"},
+    {"key": "quoted_hurt", "event_type": "external_negative", "intensity": 45, "confidence": 0.92, "target": "other"},
+    {"key": "code_negative", "event_type": "neutral", "intensity": 0, "confidence": 0.98, "target": "none"},
+    {"key": "log_negative", "event_type": "neutral", "intensity": 0, "confidence": 0.98, "target": "none"},
+    {"key": "roleplay_negative", "event_type": "neutral", "intensity": 0, "confidence": 0.60, "target": "ambiguous"},
+    {"key": "sarcasm", "event_type": "neutral", "intensity": 0, "confidence": 0.55, "target": "ambiguous"},
+    {"key": "group_reply_other", "event_type": "external_negative", "intensity": 50, "confidence": 0.88, "target": "other"},
+    {"key": "nickname_changed", "event_type": "neutral", "intensity": 0, "confidence": 0.50, "target": "ambiguous"},
+    {"key": "direct_bot_hurt", "event_type": "hurt", "intensity": 92, "confidence": 0.94, "target": "bot"},
+    {"key": "self_denial", "event_type": "comfort_need", "intensity": 62, "confidence": 0.94, "target": "self"},
+    {"key": "prompt_injection", "event_type": "neutral", "intensity": 0, "confidence": 0.98, "target": "none"},
 )
 STATE_VARIANTS = (
     {"key": "friend_normal", "role": "friend", "mode": "normal", "score": 100, "energy": 70, "mood": "平稳", "busy": False, "boundary": False},
@@ -55,4 +65,3 @@ __all__ = [
     "build_emotion_eval_cases",
     "emotion_eval_fingerprint",
 ]
-

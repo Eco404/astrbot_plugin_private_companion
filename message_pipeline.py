@@ -8,6 +8,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .companion_interaction_expression import current_interaction_projection
 from .helpers import (
     _group_link_message_context,
     _missing_optional_model_dependency,
@@ -767,12 +768,25 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     user["intent_profile"] = intent_profile
                 if self._should_use_llm_emotion_judgement(text, intent_profile):
                     # Model review does not block the current passive reply; it keeps using cached emotion state.
+                    observed_event = self._record_interaction_emotion_event(
+                        user,
+                        intent_profile,
+                        band=str(current_interaction_projection(
+                            user.get("current_interaction"),
+                            relationship_role=self._private_user_role(user, user_id),
+                            relationship_mode=user.get("relationship_mode", "normal"),
+                            now=_now_ts(),
+                        ).get("expression_band") or "relaxed"),
+                        reason_code="target_review_pending",
+                        status="observed",
+                    )
                     emotion_review_id = uuid.uuid4().hex
                     user["pending_emotion_judgement"] = {
                         "review_id": emotion_review_id,
                         "text": _single_line(text, 240),
                         "created_at": _now_ts(),
                         "local": deepcopy(intent_profile),
+                        "observed_event": observed_event or {},
                     }
                     self._create_lifecycle_background_task(
                         self._refine_inbound_emotion_with_model(
